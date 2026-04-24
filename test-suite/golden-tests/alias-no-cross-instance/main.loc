@@ -1,20 +1,35 @@
--- Negative test: aliases do NOT inherit typeclass instances from
--- the underlying type. Vector has no Stack instance (no cons),
--- Array has no Queue instance (no snoc), Deque has no Indexed (no at).
--- Each subcommand tests one such case; all should fail at build time.
+-- Negative test: sibling aliases must NOT inherit each other's instances.
+--
+-- Alias family:
+--   Str (root) -- no Qux instance
+--   +-- A      -- has Qux instance
+--   |   +-- B
+--   +-- A'     -- no Qux instance
+--       +-- B'
+--
+-- Qux is defined ONLY for A (and B inherits it). There is NO Qux Str.
+-- Attempting to use doqux at type A' should fail because:
+--   1. No instance Qux A'
+--   2. A' reduces to Str: no instance Qux Str
+--   3. Sibling A's instance must NOT be used
 
-module main (consVector, snocArray, indexDeque)
+module main (shouldFail)
 
 import root-py
 
--- Vector has Functor, Foldable, Indexed, Queue -- but NOT Stack
-consVector :: Vector Int -> Vector Int
-consVector xs = cons 0 xs
+type A = Str
+type B = A
 
--- Array has Functor, Foldable, Indexed -- but NOT Queue
-snocArray :: Array Int -> Array Int
-snocArray xs = snoc xs 99
+type A' = Str
+type B' = A'
 
--- Deque has Functor, Foldable, Stack, Queue -- but NOT Indexed
-indexDeque :: Deque Int -> Int
-indexDeque xs = at 0 xs
+class Qux a where
+  doqux :: a -> Str
+
+instance Qux A where
+  doqux x = "#{x} : A"
+
+-- No instance Qux Str
+-- No instance Qux A'
+
+shouldFail = doqux ("x" :: A')

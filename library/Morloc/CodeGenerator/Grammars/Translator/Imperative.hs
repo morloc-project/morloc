@@ -103,7 +103,7 @@ data IExpr
   | IBoolLit Bool
   | IIntLit (Maybe Text) Integer  -- concrete type name (e.g. "int64_t"), Nothing for default
   | IRealLit (Maybe Text) Scientific  -- concrete type name (e.g. "float"), Nothing for default
-  | IStrLit Text
+  | IStrLit (Maybe Text) Text  -- concrete type name (e.g. "bytes"), Nothing for default
   | INullLit (Maybe IType)
   | IListLit [IExpr]
   | ITupleLit [IExpr]
@@ -465,7 +465,9 @@ lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
 lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
 lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
 lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
-lowerNativeExpr cfg _ (StrN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit v)}
+lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
+  let hint = if cv == CV "" then Nothing else Just (unCVar cv)
+  in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
 lowerNativeExpr cfg _ (NullN_ fv) = do
   mayT <- lcTypeOf cfg (VarF fv)
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
@@ -515,9 +517,9 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = 
 -- string literal and discard the data expression; the type of the
 -- argument is all that matters.
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit s)}
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit s)}
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 

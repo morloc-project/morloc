@@ -21,6 +21,7 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
+import qualified Data.Set as Set
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -117,7 +118,13 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
           emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
-          rssSubtypes = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
+          rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
+          -- Filter by alias-chain reachability: only keep instances whose
+          -- type is reachable from gt by walking the alias chain. This
+          -- prevents sibling aliases from inheriting each other's instances
+          -- (e.g., instance Qux A should not match call site type A' even
+          -- though both A and A' evaluate to the same root type).
+          rssSubtypes = filterByAliasChain scope gt rssCompat
 
 
       -- find the most specific instance at the general level, this does not
@@ -224,6 +231,61 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
         (Right g1)
           | singleGroup -> connectInstance singleGroup g1 es
           | otherwise   -> connectInstance singleGroup g0 es
+
+-- | Filter typeclass instances to only those reachable from gt by walking
+-- the alias chain. This prevents sibling aliases from inheriting each
+-- other's instances: walking A' -> Str never reaches A (a sibling),
+-- but walking B -> A does reach A (a parent).
+filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
+filterByAliasChain scope gt0 candidates = go gt0
+  where
+    go currentGt =
+      case [x | x@(EType t _ _ _, _) <- candidates, compatibleTypeU currentGt t] of
+        [] -> case TE.reduceType scope currentGt of
+          Just gt' | gt' /= currentGt -> go gt'
+          _ -> case TE.reduceTypeLeaves scope currentGt of
+            Just gt' | gt' /= currentGt -> go gt'
+            _ -> case currentGt of
+              -- Strip coercion wrappers: a -> ?a, a -> <E> a
+              OptionalU t -> go t
+              EffectU _ t -> go t
+              _ -> []  -- nothing reachable
+        matches -> matches
+
+-- | Structural type compatibility for TypeU. ForallU-bound variables and
+-- ExistU act as wildcards (match anything). Other VarU nodes require exact
+-- name match. This checks if an instance type matches the call-site type
+-- at a specific alias level without evaluating aliases.
+compatibleTypeU :: TypeU -> TypeU -> Bool
+compatibleTypeU = go Set.empty Set.empty
+  where
+    go b1 b2 (ForallU v t1) t2 = go (Set.insert v b1) b2 t1 t2
+    go b1 b2 t1 (ForallU v t2) = go b1 (Set.insert v b2) t1 t2
+    go _  _  (ExistU _ _ _) _ = True
+    go _  _  _ (ExistU _ _ _) = True
+    go b1 b2 (VarU v1) (VarU v2)
+      | Set.member v1 b1 || Set.member v2 b2 = True
+      | otherwise = v1 == v2
+    go b1 _  (VarU v1) _ = Set.member v1 b1
+    go _  b2 _ (VarU v2) = Set.member v2 b2
+    go b1 b2 (FunU as1 r1) (FunU as2 r2) =
+      length as1 == length as2
+        && all (uncurry (go b1 b2)) (zip as1 as2)
+        && go b1 b2 r1 r2
+    go b1 b2 (AppU h1 ps1) (AppU h2 ps2) =
+      go b1 b2 h1 h2
+        && length ps1 == length ps2
+        && all (uncurry (go b1 b2)) (zip ps1 ps2)
+    go b1 b2 (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2) =
+      o1 == o2 && n1 == n2
+        && length ps1 == length ps2
+        && all (uncurry (go b1 b2)) (zip ps1 ps2)
+        && length rs1 == length rs2
+        && all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2) (zip rs1 rs2)
+    go b1 b2 (OptionalU t1) (OptionalU t2) = go b1 b2 t1 t2
+    go b1 b2 (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && go b1 b2 t1 t2
+    go _  _  (NatLitU n1) (NatLitU n2) = n1 == n2
+    go _  _  _ _ = False
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a

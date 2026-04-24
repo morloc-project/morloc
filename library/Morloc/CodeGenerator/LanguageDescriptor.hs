@@ -28,6 +28,7 @@ module Morloc.CodeGenerator.LanguageDescriptor
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -155,6 +156,9 @@ data LangDescriptor = LangDescriptor
   , ldGenericListFn :: !Text -- For FunctionCallList/TypeDependentList: "list"
   , -- Map iteration style (kept as enum - needs different code structure)
     ldMapStyle :: !MapStyle
+  , -- String literal type map: concrete type -> literal prefix
+    -- e.g. {"bytes": "b"} for Python (b"hello"), empty for C++/R
+    ldStrLiteralMap :: !(Map.Map Text Text)
   , -- Dispatch table templates
     ldDispatchLocalHeader :: !Text -- e.g. "dispatch = {"
   , ldDispatchLocalEntry :: !Text -- e.g. "    {{mid}}: {{name}},"
@@ -253,6 +257,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldAtomicTypes" (Y.Array mempty)
             . ins "ldAtomicListFn" (Y.String "")
             . ins "ldGenericListFn" (Y.String "list")
+            . ins "ldStrLiteralMap" (Y.Object mempty)
             . ins "ldMapStyle" (Y.String "loop_append")
             . ins "ldDispatchLocalHeader" (Y.String "")
             . ins "ldDispatchLocalEntry" (Y.String "")
@@ -333,6 +338,7 @@ defaultLangDescriptor name ext =
     , ldAtomicTypes = []
     , ldAtomicListFn = ""
     , ldGenericListFn = "list"
+    , ldStrLiteralMap = Map.empty
     , ldMapStyle = LoopAppend
     , ldDispatchLocalHeader = ""
     , ldDispatchLocalEntry = ""

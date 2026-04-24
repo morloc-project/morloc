@@ -73,6 +73,8 @@ ldQuoteTerminatorEsc: '\"'
 ldAtomicTypes: ["integer", "numeric", "double", "logical", "character"]
 ldAtomicListFn: "c"
 ldGenericListFn: "list"
+ldStrLiteralMap:
+  character: ""
 ldMapStyle: apply_callback
 ldDispatchLocalHeader: ".dispatch <- list()"
 ldDispatchLocalEntry: ".dispatch[[{{mid}}L]] <- {{name}}"
