@@ -15,6 +15,9 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include "morloc.h"
 
@@ -1149,6 +1152,14 @@ SEXP morloc_install_sigterm_handler(void) {
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGTERM, &sa, NULL);
+
+    /* Request SIGTERM when the parent (nexus) dies. Without this,
+       SIGKILL on the nexus leaves pool processes orphaned with
+       leaked SHM segments in /dev/shm. */
+#ifdef __linux__
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
+
     return R_NilValue;
 }
 

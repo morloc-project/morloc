@@ -68,6 +68,10 @@ pub unsafe extern "C" fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
         libc::free((*daemon).shm_basename as *mut c_void);
     }
 
+    // Unlink SHM segments owned by this process.
+    // Safe to call even if another process already unlinked (ENOENT is ignored).
+    let _ = crate::shm::shclose();
+
     libc::free(daemon as *mut c_void);
     *daemon_ptr = ptr::null_mut();
 }

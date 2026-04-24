@@ -10,9 +10,11 @@ import System.Exit (ExitCode (..))
 import System.FilePath (takeExtension, (</>))
 import System.IO (IOMode (..), hClose, openFile)
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
+import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process
   ( StdStream (..)
   , createProcess
+  , getPid
   , proc
   , terminateProcess
   , waitForProcess
@@ -52,6 +54,7 @@ shmTests env = withResource (compileStressProgram env) removeDirectoryRecursive 
       [ normalConcurrentCleanup getWorkDir
       , rapidFireCleanup getWorkDir
       , sigtermBehavior getWorkDir
+      , sigkillBehavior getWorkDir
       ]
 
 -- ======================================================================
@@ -220,6 +223,62 @@ sigtermBehavior getWorkDir = testCase "sigtermBehavior" $ do
         ]
 
   -- Clean up leaked segments so they don't affect other tests
+  cleanupMorlocResources
+
+-- ======================================================================
+-- Test 4: SIGKILL leaves SHM behind (expected to fail before fix)
+-- ======================================================================
+
+sigkillBehavior :: IO FilePath -> TestTree
+sigkillBehavior getWorkDir = testCase "sigkillBehavior" $ do
+  workDir <- getWorkDir
+  cleanupMorlocResources
+  threadDelay 100000 -- 100ms settle
+  before <- countShm
+
+  -- Launch nexus with a long-running command (5s sleep)
+  devNull <- openFile "/dev/null" WriteMode
+  let cp =
+        (proc (workDir </> "nexus") ["stress", "1000", "5.0"])
+          { P.cwd = Just workDir
+          , P.std_out = UseHandle devNull
+          , P.std_err = UseHandle devNull
+          }
+  (_, _, _, ph) <- createProcess cp
+
+  -- Wait 1s for the process to start and create SHM segments
+  threadDelay 1000000
+
+  -- Send SIGKILL (cannot be caught -- no signal handler runs)
+  maybePid <- getPid ph
+  case maybePid of
+    Nothing -> assertFailure "sigkillBehavior: could not get nexus PID"
+    Just pid -> signalProcess sigKILL (fromIntegral pid)
+
+  -- Wait for the process to be reaped
+  _ec <- waitForProcess ph
+  hClose devNull
+
+  -- 2s settle (pools may take time to notice nexus death)
+  threadDelay 2000000
+
+  after <- countShm
+  afterSegs <- listShmWithAge
+  let shmDelta = after - before
+
+  when (shmDelta > 0) $
+    assertFailure $
+      unlines $
+        [ "sigkillBehavior: SHM leak after SIGKILL"
+        , "  workDir: " ++ workDir
+        , "  before: " ++ show before ++ " segments"
+        , "  after:  " ++ show after ++ " segments (after 2s settle)"
+        , "  leaked: "
+            ++ intercalate
+              "\n          "
+              [seg ++ " (" ++ show age ++ "s old)" | (seg, age) <- afterSegs]
+        ]
+
   cleanupMorlocResources
 
 -- ======================================================================

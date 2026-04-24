@@ -10,6 +10,10 @@
 #include <unordered_map>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <csignal>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 // needed for foreign interface
 #include <cstdlib>
@@ -465,6 +469,13 @@ int main(int argc, char* argv[]) {
     // stdout is left fully buffered for performance (genome-scale piping)
     // and flushed after each job by pool.c.
     setvbuf(stderr, NULL, _IOLBF, 0);
+
+    // Request SIGTERM when the parent (nexus) dies. Without this,
+    // SIGKILL on the nexus leaves pool processes orphaned with
+    // leaked SHM segments in /dev/shm.
+#ifdef __linux__
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
 
     // Health check: confirm binary links and print version
     if (argc == 2 && std::string(argv[1]) == "--health") {
