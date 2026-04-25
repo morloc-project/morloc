@@ -344,6 +344,16 @@ pub fn calc_voidstar_size_inner(
     // We only read Array/Tensor headers and follow relptrs to compute total size.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {
+                // Inline BigInt: 16 bytes for size ≤ 1, extra limbs for overflow
+                let size = *(data as *const usize);
+                if size <= 1 {
+                    Ok(16) // inline: [size, value]
+                } else {
+                    Ok(16 + std::mem::align_of::<u64>().saturating_sub(1)
+                       + size * std::mem::size_of::<u64>())
+                }
+            }
             SerialType::String => {
                 let arr = &*(data as *const Array);
                 Ok(std::mem::size_of::<Array>() + arr.size)

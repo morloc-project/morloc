@@ -110,6 +110,115 @@ pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
 // The Rust hybrid build does not call them (only morloc_eval and the
 // non-varargs constructors are needed).
 
+// ── BigInt helpers ───────────────────────────────────────────────────────────
+
+/// Convert a decimal string (possibly with leading '-') to a Vec of uint64
+/// limbs in little-endian order using two's complement for negative values.
+/// For values that fit in i64 (the common case), produces exactly 1 limb.
+pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
+    let s = s.trim();
+    if s.is_empty() || s == "0" {
+        return vec![0u64];
+    }
+
+    let (negative, digits) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, s)
+    };
+
+    // Parse magnitude into limbs (base 2^64, little-endian)
+    let mut limbs: Vec<u64> = vec![0];
+    for &b in digits.as_bytes() {
+        if !b.is_ascii_digit() { continue; }
+        let d = (b - b'0') as u64;
+        let mut carry = d;
+        for limb in limbs.iter_mut() {
+            let wide = (*limb as u128) * 10 + carry as u128;
+            *limb = wide as u64;
+            carry = (wide >> 64) as u64;
+        }
+        if carry > 0 {
+            limbs.push(carry);
+        }
+    }
+
+    if negative {
+        // Two's complement: invert all bits, then add 1
+        let mut carry: u64 = 1;
+        for limb in limbs.iter_mut() {
+            *limb = !*limb;
+            let (sum, c) = limb.overflowing_add(carry);
+            *limb = sum;
+            carry = if c { 1 } else { 0 };
+        }
+        // For negative numbers, extend with 0xFFFF... if high bit is not set
+        if limbs.last().map_or(false, |&l| l >> 63 == 0) {
+            limbs.push(u64::MAX);
+        }
+    } else {
+        // For positive numbers, extend with 0 if high bit is set (would look negative)
+        if limbs.last().map_or(false, |&l| l >> 63 != 0) {
+            limbs.push(0);
+        }
+    }
+
+    limbs
+}
+
+/// Convert BigInt limbs (little-endian, two's complement) back to decimal string.
+pub fn limbs_to_decimal(limbs: &[u64]) -> String {
+    if limbs.is_empty() {
+        return "0".to_string();
+    }
+
+    // Check sign via high bit of most significant limb
+    let negative = limbs.last().map_or(false, |&l| l >> 63 != 0);
+
+    // Get magnitude limbs
+    let mag = if negative {
+        // Negate: invert + add 1
+        let mut m: Vec<u64> = limbs.iter().map(|&l| !l).collect();
+        let mut carry: u64 = 1;
+        for limb in m.iter_mut() {
+            let (sum, c) = limb.overflowing_add(carry);
+            *limb = sum;
+            carry = if c { 1 } else { 0 };
+        }
+        m
+    } else {
+        limbs.to_vec()
+    };
+
+    // Convert to decimal by repeated division by 10
+    let mut digits: Vec<u8> = Vec::new();
+    let mut work = mag;
+    loop {
+        // Strip leading zero limbs
+        while work.len() > 1 && *work.last().unwrap() == 0 {
+            work.pop();
+        }
+        if work.len() == 1 && work[0] == 0 {
+            break;
+        }
+        // Divide work by 10, collect remainder
+        let mut remainder: u128 = 0;
+        for limb in work.iter_mut().rev() {
+            let val = (remainder << 64) | (*limb as u128);
+            *limb = (val / 10) as u64;
+            remainder = val % 10;
+        }
+        digits.push(remainder as u8 + b'0');
+    }
+
+    if digits.is_empty() {
+        return "0".to_string();
+    }
+    digits.reverse();
+    let s = String::from_utf8(digits).unwrap_or_else(|_| "0".to_string());
+    if negative { format!("-{}", s) } else { s }
+}
+
 // ── Core evaluator ───────────────────────────────────────────────────────────
 
 type BndVars<'a> = HashMap<&'a str, AbsPtr>;
@@ -370,6 +479,28 @@ unsafe fn morloc_eval_r(
                     let elem_dest = dest.add(*(*schema).offsets.add(i));
                     let element = *(*data).data.tuple_val.add(i);
                     morloc_eval_r(element, elem_dest, elem_width, bndvars)?;
+                }
+            } else if stype == crate::schema::SerialType::Int as u32 {
+                // Variable-width integer: parse decimal string into inline BigInt
+                let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
+                let decimal = if s.is_null() { "0" } else {
+                    std::ffi::CStr::from_ptr(s).to_str().unwrap_or("0")
+                };
+                let limbs = decimal_to_limbs(decimal);
+                let nlimbs = limbs.len();
+                let fields = dest as *mut i64;
+                if nlimbs <= 1 {
+                    // Inline: [size=nlimbs, value]
+                    *fields = nlimbs as i64;
+                    *fields.add(1) = if nlimbs == 1 { limbs[0] as i64 } else { 0 };
+                } else {
+                    // Overflow: [size=nlimbs, relptr to limb array]
+                    let abs = shm::shmemcpy(
+                        limbs.as_ptr() as *const u8,
+                        nlimbs * std::mem::size_of::<u64>(),
+                    )?;
+                    *(dest as *mut usize) = nlimbs;
+                    *(dest.add(std::mem::size_of::<usize>()) as *mut RelPtr) = shm::abs2rel(abs)?;
                 }
             } else {
                 // All primitives: just copy width bytes from the union

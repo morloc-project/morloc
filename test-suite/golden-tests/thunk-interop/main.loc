@@ -12,10 +12,6 @@ source Cpp from "foo.hpp" ("sideEffectCpp", "addCpp")
 source Py from "foo.py" ("sideEffectPy", "addPy")
 source R from "foo.R" ("sideEffectR", "addR")
 
-type Cpp => Int = "int"
-type Py => Int = "int"
-type R => Int = "integer"
-
 sideEffectCpp :: Int -> <IO> Int
 sideEffectPy :: Int -> <IO> Int
 sideEffectR :: Int -> <IO> Int

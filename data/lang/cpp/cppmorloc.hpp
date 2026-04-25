@@ -14,6 +14,8 @@
 #include <stdexcept>
 #include <cstring>
 #include <string>
+#include <sstream>
+#include <limits>
 #include <type_traits>
 
 #include "morloc.h"
@@ -125,7 +127,8 @@ inline size_t schema_alignment_cpp(const Schema* schema) {
         case MORLOC_SINT16: case MORLOC_UINT16: return 2;
         case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
         case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64:
-        case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TENSOR: return alignof(size_t);
+        case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TENSOR:
+        case MORLOC_INT: return alignof(size_t);
         case MORLOC_TUPLE: case MORLOC_MAP: {
             size_t max_align = 1;
             for (size_t i = 0; i < schema->size; i++) {
@@ -155,6 +158,10 @@ size_t get_shm_size(const Schema* schema, const std::nullptr_t&) {
 // Primitives
 template<typename Primitive>
 size_t get_shm_size(const Schema* schema, const Primitive& data) {
+    if (schema->type == MORLOC_INT) {
+        // Inline BigInt: [size, value] = 16 bytes (C++ values always fit inline)
+        return 16;
+    }
     return schema->width;
 }
 
@@ -178,6 +185,7 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
         case MORLOC_FLOAT64:
             total_size += data.size() * schema->parameters[0]->width;
             break;
+        case MORLOC_INT:
         case MORLOC_STRING:
         case MORLOC_ARRAY:
         case MORLOC_TUPLE:
@@ -344,10 +352,35 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::nul
     return dest;
 }
 
-// Primitives
+// Primitives — always write at schema width so the wire format matches
+// the morloc type regardless of the C++ concrete type width.
+// Also instantiated for record types (which fall through to default).
 template<typename Primitive>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
-    *((Primitive*)dest) = data;
+    if constexpr (std::is_arithmetic_v<Primitive>) {
+        switch(schema->type) {
+            case MORLOC_SINT8:   *(int8_t*)dest   = static_cast<int8_t>(data);   break;
+            case MORLOC_SINT16:  *(int16_t*)dest  = static_cast<int16_t>(data);  break;
+            case MORLOC_SINT32:  *(int32_t*)dest  = static_cast<int32_t>(data);  break;
+            case MORLOC_SINT64:  *(int64_t*)dest  = static_cast<int64_t>(data);  break;
+            case MORLOC_UINT8:   *(uint8_t*)dest  = static_cast<uint8_t>(data);  break;
+            case MORLOC_UINT16:  *(uint16_t*)dest = static_cast<uint16_t>(data); break;
+            case MORLOC_UINT32:  *(uint32_t*)dest = static_cast<uint32_t>(data); break;
+            case MORLOC_UINT64:  *(uint64_t*)dest = static_cast<uint64_t>(data); break;
+            case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
+            case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
+            case MORLOC_INT: {
+                // Inline BigInt: [size=1, value] — no allocation, no relptr
+                int64_t* fields = static_cast<int64_t*>(dest);
+                fields[0] = 1;
+                fields[1] = static_cast<int64_t>(data);
+                break;
+            }
+            default: *(Primitive*)dest = data; break;
+        }
+    } else {
+        *(Primitive*)dest = data;
+    }
     return dest;
 }
 
@@ -544,7 +577,10 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         Array* array = (Array*)data;
         if(array->size == 0) return result;
 
-        // Fast path for primitive arrays
+        // Fast path for primitive arrays — only when C++ type width
+        // matches schema width (e.g. both 8 bytes). When they differ
+        // (e.g. int=4 bytes vs i8 schema=8 bytes), fall through to
+        // the element-by-element slow path which converts per element.
         switch(schema->parameters[0]->type){
             case MORLOC_NIL:
             case MORLOC_BOOL:
@@ -557,11 +593,13 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
             case MORLOC_UINT32:
             case MORLOC_UINT64:
             case MORLOC_FLOAT32:
-            case MORLOC_FLOAT64: {
-                ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
-                std::vector<ElemT> pv(arr_start, arr_start + array->size);
-                return pv;
-            }
+            case MORLOC_FLOAT64:
+                if (sizeof(ElemT) == schema->parameters[0]->width) {
+                    ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
+                    std::vector<ElemT> pv(arr_start, arr_start + array->size);
+                    return pv;
+                }
+                break;
         }
 
         // Complex element types
@@ -638,10 +676,59 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         StorageT* tdata = (StorageT*)resolve_relptr_cpp(tensor->data, base_ptr);
         return T(tdata, shape, tensor->total_elements);
     }
+    else if constexpr (std::is_arithmetic_v<T>) {
+        // Primitives (int, double, float, etc.) — read at schema width and
+        // convert to the C++ type so narrow concrete types (e.g. int for Int)
+        // work correctly with wider morloc schemas (e.g. i8).
+        switch(schema->type) {
+            case MORLOC_SINT8:   return static_cast<T>(*(int8_t*)data);
+            case MORLOC_SINT16:  return static_cast<T>(*(int16_t*)data);
+            case MORLOC_SINT32:  return static_cast<T>(*(int32_t*)data);
+            case MORLOC_SINT64:  return static_cast<T>(*(int64_t*)data);
+            case MORLOC_UINT8:   return static_cast<T>(*(uint8_t*)data);
+            case MORLOC_UINT16:  return static_cast<T>(*(uint16_t*)data);
+            case MORLOC_UINT32:  return static_cast<T>(*(uint32_t*)data);
+            case MORLOC_UINT64:  return static_cast<T>(*(uint64_t*)data);
+            case MORLOC_FLOAT32: return static_cast<T>(*(float*)data);
+            case MORLOC_FLOAT64: return static_cast<T>(*(double*)data);
+            case MORLOC_INT: {
+                // Inline BigInt: [size, value_or_relptr]
+                const int64_t* fields = (const int64_t*)data;
+                int64_t size = fields[0];
+                if (size <= 1) {
+                    // Inline: second field is the value directly
+                    int64_t val = (size == 0) ? 0 : fields[1];
+                    // Check if the value fits in the target C++ type
+                    if (sizeof(T) < 8) {
+                        int64_t tmin = std::numeric_limits<T>::min();
+                        int64_t tmax = std::numeric_limits<T>::max();
+                        if (val < tmin || val > tmax) {
+                            std::ostringstream oss;
+                            oss << "Integer overflow: value " << val
+                                << " does not fit in " << (sizeof(T) * 8) << "-bit type"
+                                << " (range " << tmin << " to " << tmax << ")";
+                            throw std::overflow_error(oss.str());
+                        }
+                    }
+                    return static_cast<T>(val);
+                } else {
+                    // Overflow: multi-limb integer, cannot fit in any C++ primitive
+                    std::ostringstream oss;
+                    oss << "Integer overflow: " << size << "-limb integer"
+                        << " (" << (size * 64) << " bits)"
+                        << " does not fit in " << (sizeof(T) * 8) << "-bit type"
+                        << " (range " << static_cast<int64_t>(std::numeric_limits<T>::min())
+                        << " to " << static_cast<int64_t>(std::numeric_limits<T>::max()) << ")";
+                    throw std::overflow_error(oss.str());
+                }
+            }
+            default: return *(T*)data;
+        }
+    }
     else {
-        // Primitives (int, double, float, etc.)
-        // Record types are handled by generated overloads which are preferred
-        // by overload resolution over this template.
+        // Non-arithmetic types (records, etc.) — generated overloads are
+        // preferred by overload resolution, but if we reach here, just
+        // reinterpret the bytes directly.
         return *(T*)data;
     }
 }

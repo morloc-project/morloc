@@ -60,6 +60,9 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
             return schema->width;
+        case MORLOC_INT:
+            // Inline BigInt: R values always fit inline (16 bytes)
+            return 16;
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             {
@@ -97,7 +100,10 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                     case INTSXP:
                     case REALSXP:
                     case RAWSXP:
-                        size += length * schema->parameters[0]->width;
+                        {
+                            // Inline BigInt and fixed-width types: width covers the full element
+                            size += length * schema->parameters[0]->width;
+                        }
                         break;
                     default:
                         MORLOC_ERROR("Unsupported type in get_shm_size array: %s", type2char(TYPEOF(obj)));
@@ -265,6 +271,23 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
         case MORLOC_UINT64:
             HANDLE_UINT_TYPE(uint64_t, UINT64_MAX);
             break;
+        case MORLOC_INT: {
+            // Inline BigInt: [size=1, value] — no allocation needed
+            if (!(isInteger(obj) || isReal(obj))) {
+                MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
+            }
+            double value = asReal(obj);
+            if (value != trunc(value)) {
+                MORLOC_ERROR("Expected integer value for MORLOC_INT, got non-integer double");
+            }
+            if (value < (double)INT64_MIN || value > (double)INT64_MAX) {
+                MORLOC_ERROR("Integer value too large for single-limb BigInt from R");
+            }
+            int64_t* fields = (int64_t*)dest;
+            fields[0] = 1;
+            fields[1] = (int64_t)value;
+            break;
+        }
         case MORLOC_FLOAT32:
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
@@ -514,7 +537,16 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                     if (isReal(coerced)) {
                         memcpy(*cursor, REAL(coerced), total * elem_width);
                     } else if (isInteger(coerced)) {
-                        memcpy(*cursor, INTEGER(coerced), total * elem_width);
+                        // R integer is always 32-bit; widen to schema width
+                        int* src = INTEGER(coerced);
+                        char* dst = (char*)*cursor;
+                        for (size_t i = 0; i < total; i++) {
+                            switch(etype) {
+                                case MORLOC_SINT64: *(int64_t*)(dst + i * elem_width) = (int64_t)src[i]; break;
+                                case MORLOC_UINT64: *(uint64_t*)(dst + i * elem_width) = (uint64_t)(unsigned int)src[i]; break;
+                                default: *(int32_t*)(dst + i * elem_width) = (int32_t)src[i]; break;
+                            }
+                        }
                     } else if (isLogical(coerced)) {
                         int* src = LOGICAL(coerced);
                         uint8_t* dst = (uint8_t*)*cursor;
@@ -530,11 +562,19 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                             for (size_t c = 0; c < ncols; c++)
                                 dst[r * ncols + c] = src[c * nrows + r];
                     } else if (isInteger(coerced)) {
+                        // R integer is always 32-bit; transpose with widening
                         int* src = INTEGER(coerced);
-                        int* dst = (int*)*cursor;
+                        char* dst = (char*)*cursor;
                         for (size_t r = 0; r < nrows; r++)
-                            for (size_t c = 0; c < ncols; c++)
-                                dst[r * ncols + c] = src[c * nrows + r];
+                            for (size_t c = 0; c < ncols; c++) {
+                                size_t dst_idx = r * ncols + c;
+                                size_t src_idx = c * nrows + r;
+                                switch(etype) {
+                                    case MORLOC_SINT64: *(int64_t*)(dst + dst_idx * elem_width) = (int64_t)src[src_idx]; break;
+                                    case MORLOC_UINT64: *(uint64_t*)(dst + dst_idx * elem_width) = (uint64_t)(unsigned int)src[src_idx]; break;
+                                    default: *(int32_t*)(dst + dst_idx * elem_width) = (int32_t)src[src_idx]; break;
+                                }
+                            }
                     }
                 } else {
                     size_t col_strides[5];
@@ -561,7 +601,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                         }
                     } else if (isInteger(coerced)) {
                         int* src = INTEGER(coerced);
-                        int* dst = (int*)*cursor;
+                        char* dst = (char*)*cursor;
                         for (size_t i = 0; i < total; i++) {
                             size_t rem = i;
                             size_t col_idx = 0;
@@ -570,7 +610,11 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                                 rem %= row_strides[d];
                                 col_idx += coord * col_strides[d];
                             }
-                            dst[i] = src[col_idx];
+                            switch(etype) {
+                                case MORLOC_SINT64: *(int64_t*)(dst + i * elem_width) = (int64_t)src[col_idx]; break;
+                                case MORLOC_UINT64: *(uint64_t*)(dst + i * elem_width) = (uint64_t)(unsigned int)src[col_idx]; break;
+                                default: *(int32_t*)(dst + i * elem_width) = (int32_t)src[col_idx]; break;
+                            }
                         }
                     }
                 }
@@ -656,6 +700,36 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
         case MORLOC_FLOAT64:
             obj = ScalarReal(*(double*)data);
             break;
+        case MORLOC_INT: {
+            // Inline BigInt: [size:i64, value_or_relptr:i64]
+            const int64_t* fields = (const int64_t*)data;
+            int64_t bigint_size = fields[0];
+            if (bigint_size <= 1) {
+                int64_t val = (bigint_size == 0) ? 0 : fields[1];
+                if (val >= INT32_MIN && val <= INT32_MAX) {
+                    obj = ScalarInteger((int)val);
+                } else {
+                    obj = ScalarReal((double)val);
+                }
+            } else {
+                // Overflow: multi-limb integer
+                MORLOC_ERROR(
+                    "Integer overflow: %lld-limb integer (%lld bits)"
+                    " does not fit in R's numeric type (max 2^53 for integer precision)."
+                    " Use a fixed-width type (Int32, Int64) or keep computation in Python.",
+                    (long long)bigint_size, (long long)(bigint_size * 64));
+                // unreachable, but satisfy compiler
+                const uint64_t* limbs = (const uint64_t*)resolve_relptr(
+                    *(const relptr_t*)&fields[1], base_ptr, NULL);
+                int64_t val = (int64_t)limbs[0];
+                if (val >= INT32_MIN && val <= INT32_MAX) {
+                    obj = ScalarInteger((int)val);
+                } else {
+                    obj = ScalarReal((double)val);
+                }
+            }
+            break;
+        }
         case MORLOC_STRING: {
                 if (schema->hint != NULL && strcmp(schema->hint, "raw") == 0){
                     Array* raw_array = (Array*)data;
@@ -842,6 +916,40 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                             UNPROTECT(1);
                         }
                         break;
+                    case MORLOC_INT:
+                        {
+                            // Inline BigInt array: each element is [size:i64, value_or_relptr:i64]
+                            int all_fit_int32 = 1;
+                            size_t elem_w = element_schema->width; // 16
+                            if (array->size > 0) {
+                                start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                                for (size_t i = 0; i < array->size; i++) {
+                                    const int64_t* f = (const int64_t*)(start + i * elem_w);
+                                    if (f[0] > 1) { all_fit_int32 = 0; break; }
+                                    int64_t val = (f[0] == 0) ? 0 : f[1];
+                                    if (val < INT32_MIN || val > INT32_MAX) { all_fit_int32 = 0; break; }
+                                }
+                            }
+                            if (all_fit_int32) {
+                                obj = PROTECT(allocVector(INTSXP, array->size));
+                                if (array->size > 0) {
+                                    for (size_t i = 0; i < array->size; i++) {
+                                        const int64_t* f = (const int64_t*)(start + i * elem_w);
+                                        INTEGER(obj)[i] = (int)((f[0] == 0) ? 0 : f[1]);
+                                    }
+                                }
+                            } else {
+                                obj = PROTECT(allocVector(REALSXP, array->size));
+                                if (array->size > 0) {
+                                    for (size_t i = 0; i < array->size; i++) {
+                                        const int64_t* f = (const int64_t*)(start + i * elem_w);
+                                        REAL(obj)[i] = (double)((f[0] == 0) ? 0 : f[1]);
+                                    }
+                                }
+                            }
+                            UNPROTECT(1);
+                        }
+                        break;
                     default:
                         {
                             obj = PROTECT(allocVector(VECSXP, array->size));
@@ -976,11 +1084,16 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         for (size_t c = 0; c < ncols; c++)
                             dst[c * nrows + r] = src[r * ncols + c];
                 } else if (sexptype == INTSXP) {
-                    const int* src = (const int*)tdata;
+                    // Read at schema width, narrow to R int
+                    size_t elem_w = schema->parameters[0]->width;
+                    const char* src = (const char*)tdata;
                     int* dst = INTEGER(obj);
                     for (size_t r = 0; r < nrows; r++)
-                        for (size_t c = 0; c < ncols; c++)
-                            dst[c * nrows + r] = src[r * ncols + c];
+                        for (size_t c = 0; c < ncols; c++) {
+                            int64_t v = 0;
+                            memcpy(&v, src + (r * ncols + c) * elem_w, elem_w);
+                            dst[c * nrows + r] = (int)v;
+                        }
                 }
             } else {
                 // General N-D: row-major to col-major
@@ -1008,7 +1121,9 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         dst[col_idx] = src[i];
                     }
                 } else if (sexptype == INTSXP) {
-                    const int* src = (const int*)tdata;
+                    // Read at schema width, narrow to R int
+                    size_t elem_w = schema->parameters[0]->width;
+                    const char* src = (const char*)tdata;
                     int* dst = INTEGER(obj);
                     for (size_t i = 0; i < total; i++) {
                         size_t rem = i;
@@ -1018,7 +1133,9 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                             rem %= row_strides[d];
                             col_idx += coord * col_strides[d];
                         }
-                        dst[col_idx] = src[i];
+                        int64_t v = 0;
+                        memcpy(&v, src + i * elem_w, elem_w);
+                        dst[col_idx] = (int)v;
                     }
                 }
             }

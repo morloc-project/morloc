@@ -45,7 +45,7 @@ makeSingle :: Tensor1 1 Real
 makeOneByOne :: Tensor2 1 1 Real
 
 -- Element type variety
-makeIntVec :: Tensor1 4 Int
+makeIntVec :: Tensor1 4 Int32
 makeF32Vec :: Tensor1 3 Float32
 
 -- Extraction: tensor -> scalar

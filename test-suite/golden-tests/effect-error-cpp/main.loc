@@ -8,8 +8,6 @@ import root-cpp
 
 source Cpp from "foo.hpp" ("riskyAdd", "safeAdd")
 
-type Cpp => Int = "int"
-
 riskyAdd :: Int -> Int -> <Error> Int
 safeAdd :: Int -> Int -> <IO> Int
 

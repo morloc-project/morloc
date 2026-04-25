@@ -135,6 +135,7 @@ fn shfree_by_schema_inner(
     // We recursively visit sub-structures and zero metadata before the parent shfree.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {} // flat limb data, no nested structures
             SerialType::String | SerialType::Array => {
                 let arr = &*(ptr as *const shm::Array);
                 if arr.data > 0 {
@@ -200,6 +201,14 @@ fn adjust_relptrs_inner(
     // all pointer arithmetic stays within the blob's bounds as defined by schema.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {
+                // Inline BigInt: only adjust relptr when size > 1
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut shm::RelPtr);
+                    *relptr += base_rel;
+                }
+            }
             SerialType::String | SerialType::Array => {
                 let arr = &mut *(data as *mut shm::Array);
                 arr.data += base_rel;

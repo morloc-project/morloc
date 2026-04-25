@@ -510,6 +510,7 @@ fn render_schema_type(s: &morloc_runtime::schema::Schema) -> String {
                 .map(render_schema_type)
                 .unwrap_or_else(|| "?".into())
         ),
+        Int => "Int".into(),
     }
 }
 

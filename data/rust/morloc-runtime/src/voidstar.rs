@@ -21,6 +21,14 @@ pub fn adjust_relptrs(
     // all pointer arithmetic stays within the blob's bounds as defined by schema.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {
+                // Inline BigInt: [size, value_or_relptr]. Only adjust when size > 1.
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
+                    *relptr += base_rel;
+                }
+            }
             SerialType::String | SerialType::Array => {
                 let arr = &mut *(data as *mut Array);
                 arr.data += base_rel;
@@ -78,6 +86,7 @@ pub fn free_by_schema(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     // We zero metadata at schema.width offsets within the structure.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {} // flat limb data, no nested structures
             SerialType::String | SerialType::Array => {
                 let arr = &*(ptr as *const Array);
                 if arr.data > 0 && !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
@@ -130,6 +139,27 @@ fn flatten_fixup(
     // data points to corresponding SHM data. cursor tracks write position within buf.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {
+                // Inline BigInt: [size, value_or_relptr]
+                // size ≤ 1: value is inline, nothing to fixup (already copied by parent)
+                // size > 1: second field is relptr to limb data, need to copy limbs
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let relptr = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
+                    let orig_data = shm::rel2abs(relptr)?;
+                    let align = std::mem::align_of::<u64>();
+                    *cursor = shm::align_up(*cursor, align);
+                    // Write new relptr into buffer
+                    let buf_relptr = &mut *(buf.as_mut_ptr().add(buf_offset + std::mem::size_of::<usize>()) as *mut RelPtr);
+                    *buf_relptr = *cursor as RelPtr;
+                    let total_bytes = size * std::mem::size_of::<u64>();
+                    buf[*cursor..*cursor + total_bytes].copy_from_slice(
+                        std::slice::from_raw_parts(orig_data, total_bytes)
+                    );
+                    *cursor += total_bytes;
+                }
+                // size ≤ 1: inline value, no fixup needed
+            }
             SerialType::String | SerialType::Array => {
                 let orig_arr = &*(data as *const Array);
                 let buf_arr = &mut *(buf.as_mut_ptr().add(buf_offset) as *mut Array);

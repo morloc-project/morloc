@@ -396,8 +396,6 @@ main = do
       , golden "scoping-13" "scoping-13"
       , -- type alias transitive resolution
         golden "type-alias-transitive" "type-alias-transitive"
-      , -- type identities
-        golden "type-identities-c" "type-identities-c"
       , -- testing packet transmission
         golden "packets-large (wait ~10s)" "packets-large"
       , golden "packets-interop (wait ~10s)" "packets-interop"
@@ -514,4 +512,9 @@ main = do
       , golden "tensor-dimensions" "tensor-dimensions"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
+      , -- big integer tests
+        golden "numeric-literals" "numeric-literals"
+      , golden "bigint-factorial-py" "bigint-factorial-py"
+      , golden "bigint-overflow-cpp" "bigint-overflow-cpp"
+      , golden "bigint-overflow-r" "bigint-overflow-r"
       ]

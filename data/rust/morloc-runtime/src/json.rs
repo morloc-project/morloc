@@ -130,6 +130,38 @@ fn json_to_voidstar(
         SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, as_f64(value)? as f32); Ok(w.as_ptr()) }
         SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, as_f64(value)?);        Ok(w.as_ptr()) }
 
+        SerialType::Int => {
+            // Variable-width integer: parse JSON number → BigInt limbs
+            let decimal = match value {
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => {
+                    let t = s.trim();
+                    let digits = if t.starts_with('-') { &t[1..] } else { t };
+                    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err(err(&format!("invalid integer string: {:?}", s)));
+                    }
+                    s.clone()
+                }
+                _ => return Err(err("expected integer for MORLOC_INT")),
+            };
+            let limbs = crate::eval_ffi::decimal_to_limbs(&decimal);
+            let nlimbs = limbs.len();
+            // Inline layout: [size:i64, value_or_relptr:i64] = 16 bytes
+            let w = alloc(dest, 16)?;
+            if nlimbs <= 1 {
+                // Inline: value stored directly in second field
+                w.write_val::<i64>(0, nlimbs as i64);
+                w.write_val::<i64>(8, if nlimbs == 1 { limbs[0] as i64 } else { 0 });
+            } else {
+                // Overflow: second field is relptr to limb array
+                let limb_bytes = nlimbs * 8;
+                let abs = shm::shmemcpy(limbs.as_ptr() as *const u8, limb_bytes)?;
+                w.write_val::<usize>(0, nlimbs);
+                w.write_val::<shm::RelPtr>(8, shm::abs2rel(abs)?);
+            }
+            Ok(w.as_ptr())
+        }
+
         SerialType::String => {
             let s = value.as_str().ok_or_else(|| err("expected string"))?;
             let bytes = s.as_bytes();
@@ -266,6 +298,26 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
         SerialType::Uint64 => buf.push_str(&(r.read_val::<u64>(0)).to_string()),
         SerialType::Float32 => write_float(buf, r.read_val::<f32>(0) as f64, b"%.7g\0"),
         SerialType::Float64 => write_float(buf, r.read_val::<f64>(0), b"%.15g\0"),
+
+        SerialType::Int => {
+            // Inline layout: [size:i64, value_or_relptr:i64]
+            let size = r.read_val::<usize>(0);
+            if size == 0 {
+                buf.push('0');
+            } else if size == 1 {
+                // Inline: second field is the value directly
+                let val = r.read_val::<i64>(8);
+                buf.push_str(&val.to_string());
+            } else {
+                // Overflow: second field is relptr to limb array
+                let relptr = r.read_val::<shm::RelPtr>(8);
+                let data_ptr = shm::rel2abs(relptr)?;
+                let limbs: Vec<u64> = (0..size)
+                    .map(|i| unsafe { *((data_ptr as *const u64).add(i)) })
+                    .collect();
+                buf.push_str(&crate::eval_ffi::limbs_to_decimal(&limbs));
+            }
+        }
 
         SerialType::String => {
             let arr = r.read_array(0);

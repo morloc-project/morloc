@@ -457,6 +457,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 "u2" => prim.u2 = val.parse::<u16>().unwrap_or(0),
                 "u4" => prim.u4 = val.parse::<u32>().unwrap_or(0),
                 "u8" => prim.u8_ = val.parse::<u64>().unwrap_or(0),
+                "j" => prim.s = CString::new(val).unwrap_or_default().into_raw(),
                 "b" => prim.b = val != "0",
                 "z" => prim.z = 0,
                 _ => return Err(MorlocError::Other(format!("Unknown lit_type: {}", lt))),

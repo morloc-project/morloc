@@ -5,5 +5,5 @@ type R => List a = "list" a
 type Cpp => List a = "std::vector<$1>" a
 
 type Py => Int = "int"
-type R => Int = "int"
+type R => Int = "integer"
 type Cpp => Int = "int"

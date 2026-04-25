@@ -8,9 +8,6 @@ import root-py
 source Py from "foo.py" ("py_double")
 source Cpp from "foo.hpp" ("add")
 
-type Cpp => Int = "int"
-type Py => Int = "int"
-
 py_double :: Int -> <IO> Int
 add :: Int -> Int -> Int
 

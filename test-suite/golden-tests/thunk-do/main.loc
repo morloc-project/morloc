@@ -14,8 +14,6 @@ import root-cpp
 
 source Cpp from "foo.hpp" ("sideEffect", "add")
 
-type Cpp => Int = "int"
-
 sideEffect :: Int -> <IO> Int
 add :: Int -> Int -> Int
 

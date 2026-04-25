@@ -6,8 +6,6 @@ import root-cpp
 
 source Cpp from "foo.hpp" ("sideEffect")
 
-type Cpp => Int = "int"
-
 sideEffect :: Int -> <IO> Int
 
 guardThunk :: Int -> <IO> Int

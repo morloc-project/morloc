@@ -72,6 +72,22 @@ fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), Morl
                 rmp::encode::write_f64(buf, f)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack float: {}", e)))?;
             }
+            SerialType::Int => {
+                // Inline BigInt: [size, value_or_relptr]
+                let size = *(ptr as *const usize);
+                if size <= 1 {
+                    let val = *(ptr.add(8) as *const i64);
+                    rmp::encode::write_sint(buf, if size == 0 { 0 } else { val })
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
+                } else {
+                    let relptr = *(ptr.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
+                    let data = shm::rel2abs(relptr)?;
+                    let bytes = std::slice::from_raw_parts(data, size * 8);
+                    rmp::encode::write_bin_len(buf, bytes.len() as u32)
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
+                    buf.extend_from_slice(bytes);
+                }
+            }
             SerialType::String => {
                 let arr = &*(ptr as *const Array);
                 let data = shm::rel2abs(arr.data)?;
@@ -181,6 +197,30 @@ fn unpack_obj(
             SerialType::Float64 => {
                 let f = read_float(reader)?;
                 *(ptr as *mut f64) = f;
+            }
+            SerialType::Int => {
+                // Inline BigInt: [size, value_or_relptr]
+                let fields = ptr as *mut i64;
+                let saved = *reader;
+                if let Ok(len) = rmp::decode::read_bin_len(reader) {
+                    // Overflow: multi-limb
+                    let len = len as usize;
+                    let nlimbs = len / 8;
+                    *fields = nlimbs as i64;
+                    *(fields.add(1)) = shm::abs2rel(*cursor)? as i64;
+                    if nlimbs > 0 && reader.len() >= len {
+                        std::ptr::copy_nonoverlapping(reader.as_ptr(), *cursor, len);
+                        *reader = &(*reader)[len..];
+                    }
+                    *cursor = cursor.add(nlimbs * 8);
+                } else {
+                    // Inline: single integer value
+                    *reader = saved;
+                    let val: i64 = rmp::decode::read_int(reader)
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
+                    *fields = 1;
+                    *(fields.add(1)) = val;
+                }
             }
             SerialType::String => {
                 let len = decode::read_str_len(reader)
@@ -371,6 +411,20 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
         SerialType::Sint16 | SerialType::Uint16 => { skip_int(reader)?; Ok(2) }
         SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => { skip_int(reader)?; Ok(4) }
         SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => { skip_int(reader)?; Ok(8) }
+        SerialType::Int => {
+            // Inline BigInt: 16 bytes for common case, more for overflow
+            let saved = *reader;
+            if let Ok(len) = rmp::decode::read_bin_len(reader) {
+                let len = len as usize;
+                if reader.len() >= len { *reader = &reader[len..]; }
+                // Overflow: 16-byte header + alignment + limb data
+                Ok(16 + std::mem::align_of::<u64>() - 1 + len)
+            } else {
+                *reader = saved;
+                skip_int(reader)?;
+                Ok(16) // Inline: just the [size, value] pair
+            }
+        }
         SerialType::String => {
             let len = rmp::decode::read_str_len(reader)
                 .map_err(|e| MorlocError::Serialization(format!("size calc str: {}", e)))?

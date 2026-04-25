@@ -5,10 +5,6 @@ module main (test)
 
 import root-py
 
-type Py => Real = "float"
-type Py => Int = "int"
-type Py => Unit = "None"
-
 class Random a where
   random :: <Random> a
 

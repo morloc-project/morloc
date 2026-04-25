@@ -7,8 +7,6 @@ module main (foo, bar)
 
 import root-py
 
-type Py => Int = "int"
-
 type SizedList n a = [a]
 type Py => (SizedList n a) = "list" a
 

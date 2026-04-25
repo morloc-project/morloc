@@ -1,0 +1,17 @@
+-- Test that passing a big integer from Python to R produces a clear error.
+-- fact(100) is a 525-bit integer that cannot fit in R's integer or double.
+module main (factR)
+
+import root-py
+import root-r
+
+fact :: Int -> Int
+fact n
+  ? n == 0 = 1
+  : n * fact (n - 1)
+
+factPy :: Int -> Int
+factPy n = idpy (fact n)
+
+factR :: Int -> Int
+factR x = idr (factPy x)
