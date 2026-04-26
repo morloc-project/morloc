@@ -63,7 +63,7 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
 
     serialASTsources :: SerialAST -> [Source]
     serialASTsources (SerialPack _ (p, s)) = [typePackerForward p, typePackerReverse p] <> serialASTsources s
-    serialASTsources (SerialList _ s) = serialASTsources s
+    serialASTsources (SerialList _ _ s) = serialASTsources s
     serialASTsources (SerialTuple _ ss) = concatMap serialASTsources ss
     serialASTsources (SerialObject _ _ _ (map snd -> ss)) = concatMap serialASTsources ss
     serialASTsources _ = []

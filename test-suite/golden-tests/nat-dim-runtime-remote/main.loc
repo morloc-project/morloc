@@ -1,0 +1,11 @@
+-- Test runtime dimension validation for remote (pool-dispatched) commands.
+-- idMatrix expects a 2x3 matrix. Passing correct and incorrect dimensions
+-- should succeed and fail respectively.
+module main (idMatrix)
+
+import root
+import root-py
+
+source Py from "src.py" ("id_matrix" as idMatrix)
+
+idMatrix :: Matrix 2 3 Int -> Matrix 2 3 Int

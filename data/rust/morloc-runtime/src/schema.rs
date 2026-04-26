@@ -160,7 +160,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
     }
 
     let c = bytes[pos];
-    let cur = pos + 1;
+    let mut cur = pos + 1;
 
     match c {
         b'<' => {
@@ -189,9 +189,17 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
         SCHEMA_UINT => parse_sized_int(bytes, cur, false),
         SCHEMA_FLOAT => parse_sized_float(bytes, cur),
         SCHEMA_ARRAY => {
-            // Array: one child schema follows immediately
+            // Array: optional dimension constraint (:N in decimal), then child schema
+            let expected_len = if cur < bytes.len() && bytes[cur] == b':' {
+                cur += 1;
+                let (n, after) = parse_decimal(bytes, cur)?;
+                cur = after;
+                n
+            } else {
+                0 // unconstrained
+            };
             let (child, end) = parse_schema_r(bytes, cur)?;
-            Ok((make_array_schema(child), end))
+            Ok((make_array_schema_with_dim(expected_len, child), end))
         }
         SCHEMA_INT => {
             // Variable-width integer: no parameters, uses Array layout
@@ -249,13 +257,28 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
             Ok((make_map_schema(params, keys), p))
         }
         SCHEMA_TENSOR => {
-            // Tensor: base-62 ndim char, then element schema
+            // Tensor: base-62 ndim char, then ndim dimension constraints
+            // (each prefixed by ':'), then element schema.
+            // Dimension 0 means unconstrained.
             if cur >= bytes.len() {
                 return Err(MorlocError::Schema("expected tensor ndim".into()));
             }
             let ndim = decode_base62(bytes[cur])?;
-            let (child, end) = parse_schema_r(bytes, cur + 1)?;
-            Ok((make_tensor_schema(ndim, child), end))
+            cur += 1;
+            let mut dims = Vec::with_capacity(ndim);
+            for _ in 0..ndim {
+                if cur < bytes.len() && bytes[cur] == b':' {
+                    cur += 1;
+                    let (n, after) = parse_decimal(bytes, cur)?;
+                    cur = after;
+                    dims.push(n);
+                } else {
+                    // No dimension constraint (backwards compatibility)
+                    dims.push(0);
+                }
+            }
+            let (child, end) = parse_schema_r(bytes, cur)?;
+            Ok((make_tensor_schema(ndim, dims, child), end))
         }
         _ => Err(MorlocError::Schema(format!(
             "unknown schema character '{}' at position {pos}",
@@ -355,14 +378,28 @@ fn encode_base62(n: usize) -> char {
     }
 }
 
+/// Parse a decimal integer from the byte stream. Returns (value, position after last digit).
+fn parse_decimal(bytes: &[u8], pos: usize) -> Result<(usize, usize), MorlocError> {
+    let mut cur = pos;
+    let mut n: usize = 0;
+    if cur >= bytes.len() || !bytes[cur].is_ascii_digit() {
+        return Err(MorlocError::Schema("expected decimal digit".into()));
+    }
+    while cur < bytes.len() && bytes[cur].is_ascii_digit() {
+        n = n * 10 + (bytes[cur] - b'0') as usize;
+        cur += 1;
+    }
+    Ok((n, cur))
+}
+
 // ── Schema constructors ────────────────────────────────────────────────────
 
-fn make_array_schema(child: Schema) -> Schema {
+fn make_array_schema_with_dim(expected_len: usize, child: Schema) -> Schema {
     Schema {
         serial_type: SerialType::Array,
         size: 1,
         width: std::mem::size_of::<crate::shm::Array>(),
-        offsets: Vec::new(),
+        offsets: vec![expected_len],
         hint: None,
         parameters: vec![child],
         keys: Vec::new(),
@@ -411,12 +448,15 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     }
 }
 
-fn make_tensor_schema(ndim: usize, child: Schema) -> Schema {
+fn make_tensor_schema(ndim: usize, dims: Vec<usize>, child: Schema) -> Schema {
+    let mut offsets = Vec::with_capacity(1 + ndim);
+    offsets.push(ndim);
+    offsets.extend_from_slice(&dims);
     Schema {
         serial_type: SerialType::Tensor,
         size: 1,
         width: std::mem::size_of::<crate::shm::Tensor>(),
-        offsets: vec![ndim],
+        offsets,
         hint: None,
         parameters: vec![child],
         keys: Vec::new(),
@@ -474,6 +514,11 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::String => buf.push('s'),
         SerialType::Array => {
             buf.push('a');
+            let expected = schema.offsets.first().copied().unwrap_or(0);
+            if expected > 0 {
+                buf.push(':');
+                buf.push_str(&expected.to_string());
+            }
             schema_to_string_inner(&schema.parameters[0], buf);
         }
         SerialType::Tuple => {
@@ -506,6 +551,11 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             let ndim = schema.offsets.first().copied().unwrap_or(0);
             buf.push('T');
             buf.push(encode_base62(ndim));
+            for d in 0..ndim {
+                let dim = schema.offsets.get(1 + d).copied().unwrap_or(0);
+                buf.push(':');
+                buf.push_str(&dim.to_string());
+            }
             schema_to_string_inner(&schema.parameters[0], buf);
         }
     }
@@ -569,7 +619,19 @@ mod tests {
         let s = parse_schema("T2f8").unwrap();
         assert_eq!(s.serial_type, SerialType::Tensor);
         assert_eq!(s.offsets[0], 2); // ndim
+        assert_eq!(s.offsets[1], 0); // dim 0 unconstrained
+        assert_eq!(s.offsets[2], 0); // dim 1 unconstrained
         assert_eq!(s.parameters[0].serial_type, SerialType::Float64);
+    }
+
+    #[test]
+    fn test_parse_tensor_with_dims() {
+        let s = parse_schema("T2:2:4j").unwrap();
+        assert_eq!(s.serial_type, SerialType::Tensor);
+        assert_eq!(s.offsets[0], 2); // ndim
+        assert_eq!(s.offsets[1], 2); // dim 0 = 2
+        assert_eq!(s.offsets[2], 4); // dim 1 = 4
+        assert_eq!(s.parameters[0].serial_type, SerialType::Int);
     }
 
     #[test]
@@ -586,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        let cases = ["z", "b", "i4", "u8", "f8", "s", "ai4", "t2i4s", "?i4", "T2f8"];
+        let cases = ["z", "b", "i4", "u8", "f8", "s", "ai4", "t2i4s", "?i4", "T2:0:0f8"];
         for case in cases {
             let schema = parse_schema(case).unwrap();
             let rendered = schema_to_string(&schema);

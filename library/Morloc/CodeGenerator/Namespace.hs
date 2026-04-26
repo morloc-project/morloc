@@ -182,10 +182,11 @@ data TypeS
 data SerialAST
   = -- | use an (un)pack function to simplify an object
     SerialPack FVar (TypePacker, SerialAST)
-  | SerialList FVar SerialAST
-  | -- | Dense N-dimensional tensor. ndim is the rank (1=vector, 2=matrix, etc.)
+  | SerialList FVar (Maybe Integer) SerialAST
+  | -- | Dense N-dimensional tensor. ndim is the rank (1=vector, 2=matrix, etc.),
+    -- dims are expected dimension sizes (Just n = constrained, Nothing = free),
     -- and the inner SerialAST is the element type (must be a numeric primitive).
-    SerialTensor FVar Int SerialAST
+    SerialTensor FVar Int [Maybe Integer] SerialAST
   | SerialTuple FVar [SerialAST]
   | -- | Make a record, table, or object. The parameters indicate
     --   1) NamType - record/table/object
@@ -222,8 +223,8 @@ instance Pretty SerialAST where
       "SerialPack"
         <+> pretty v
         <+> braces (vsep [pretty packer, pretty s])
-  pretty (SerialList _ ef) = parens $ "SerialList" <+> pretty ef
-  pretty (SerialTensor v ndim s) = parens ("SerialTensor" <+> pretty v <+> pretty ndim <+> pretty s)
+  pretty (SerialList _ dim ef) = parens $ "SerialList" <+> viaShow dim <+> pretty ef
+  pretty (SerialTensor v ndim dims s) = parens ("SerialTensor" <+> pretty v <+> pretty ndim <+> viaShow dims <+> pretty s)
   pretty (SerialTuple _ efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
   pretty (SerialObject o _ vs rs) =
     parens $

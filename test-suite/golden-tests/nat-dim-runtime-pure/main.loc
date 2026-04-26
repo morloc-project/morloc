@@ -1,0 +1,9 @@
+-- Test runtime dimension validation for pure (nexus-evaluated) commands.
+-- foo expects a 2x3 matrix. Passing correct and incorrect dimensions
+-- should succeed and fail respectively.
+module main (foo)
+
+import root
+
+foo :: Matrix 2 3 Int -> Matrix 2 3 Int
+foo x = x

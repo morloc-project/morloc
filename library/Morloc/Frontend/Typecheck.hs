@@ -1032,7 +1032,8 @@ checkE i g1 e1@(LstS _) b = do
   case subtype scope a' b' g2 of
     Right g3 -> do
       let natArgs = getNatArgs scope b'
-      g4 <- checkListNatDims i g3 natArgs e2
+          anno2 = AnnoS (Idx i a') i e2
+      g4 <- checkListNatDims g3 natArgs anno2
       return (g4, apply g4 b', e2)
     Left err ->
       case tryCoerce scope a' b' g2 of
@@ -1045,7 +1046,8 @@ checkE i g1 e1@(LstS _) b = do
             (e2, apply g3 a')
             coercions
           let natArgs = getNatArgs scope b'
-          g4 <- checkListNatDims i g3 natArgs finalExpr
+              anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
+          g4 <- checkListNatDims g3 natArgs anno3
           return (g4, apply g4 b', finalExpr)
         Nothing -> MM.throwSourcedError i $
           "Type mismatch:"
@@ -1105,12 +1107,12 @@ getNatArgs _ _ = []
 -- At each nesting level, checks length(xs) ~ natArg.
 -- For checking (NatLitU): error on mismatch.
 -- For inference (NatVarU): solves the variable via NatSolver.
-checkListNatDims :: Int -> Gamma -> [TypeU] -> ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad Gamma
-checkListNatDims _ g [] _ = return g
-checkListNatDims i g (nat:nats) (LstS xs) = do
-  g' <- subtype' i (NatLitU (fromIntegral (length xs))) nat g
-  foldlM (\g'' (AnnoS _ _ x) -> checkListNatDims i g'' nats x) g' xs
-checkListNatDims _ g _ _ = return g
+checkListNatDims :: Gamma -> [TypeU] -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad Gamma
+checkListNatDims g [] _ = return g
+checkListNatDims g (nat:nats) (AnnoS _ idx (LstS xs)) = do
+  g' <- subtype' idx (NatLitU (fromIntegral (length xs))) nat g
+  foldlM (\g'' x -> checkListNatDims g'' nats x) g' xs
+checkListNatDims g _ _ = return g
 
 -- | Try to find a coercion chain from type a to type b.
 -- Returns a list of coercions (inside-out) and the resulting gamma.

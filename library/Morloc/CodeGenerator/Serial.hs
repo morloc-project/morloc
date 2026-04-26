@@ -43,8 +43,8 @@ import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify
 -- | recurse all the way to a serializable type
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
-serialAstToType (SerialList v s) = AppF (VarF v) [serialAstToType s]
-serialAstToType (SerialTensor v _ s) = AppF (VarF v) [serialAstToType s]
+serialAstToType (SerialList v _ s) = AppF (VarF v) [serialAstToType s]
+serialAstToType (SerialTensor v _ _ s) = AppF (VarF v) [serialAstToType s]
 serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
@@ -95,8 +95,15 @@ encode64D i = pretty (encode64 i)
 
 serialAstToMsgpackSchema :: SerialAST -> MDoc
 serialAstToMsgpackSchema (SerialPack v (_, s)) = addHint v <> serialAstToMsgpackSchema s
-serialAstToMsgpackSchema (SerialList v s) = addHint v <> "a" <> serialAstToMsgpackSchema s
-serialAstToMsgpackSchema (SerialTensor v ndim s) = addHint v <> "T" <> encode64D ndim <> serialAstToMsgpackSchema s
+serialAstToMsgpackSchema (SerialList v dim s) =
+  addHint v <> "a" <> encodeDim dim <> serialAstToMsgpackSchema s
+  where
+    encodeDim Nothing = ""
+    encodeDim (Just n) = ":" <> pretty n
+serialAstToMsgpackSchema (SerialTensor v ndim dims s) =
+  addHint v <> "T" <> encode64D ndim <> encodeDims dims <> serialAstToMsgpackSchema s
+  where
+    encodeDims ds = foldMap (\d -> ":" <> pretty (maybe (0 :: Integer) id d)) ds
 serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
 serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
   where
@@ -129,7 +136,7 @@ addHint (FV _ (CV v)) = "<" <> pretty v <> ">"
 -- | get only the toplevel type
 shallowType :: SerialAST -> TypeF
 shallowType (SerialPack _ (p, _)) = typePackerPacked p
-shallowType (SerialList v s) = AppF (VarF v) [shallowType s]
+shallowType (SerialList v _ s) = AppF (VarF v) [shallowType s]
 shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
 shallowType (SerialObject o n ps rs) =
   let ts = map (shallowType . snd) rs
@@ -151,7 +158,7 @@ shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
-shallowType (SerialTensor v _ s) = AppF (VarF v) [shallowType s]
+shallowType (SerialTensor v _ _ s) = AppF (VarF v) [shallowType s]
 shallowType (SerialUnknown v) = UnkF v
 
 findPackers ::
@@ -302,15 +309,17 @@ makeSerialAST m lang t0 = do
     makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
       | null runtimeTs = MM.throwSourcedError m $ "No runtime type args for" <+> pretty ft
       -- When alias expansion changed the root type, re-infer the concrete
-      -- type for the expanded general form and recurse.
+      -- type for the expanded general form and recurse, threading nat dims
+      -- through SerialList nesting levels.
       | Just fv' <- finalVar, fv' /= generalTypeName, Just expanded <- evaluatedType = do
           expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
-          makeSerialAST' gscope typepackers expandedTf
-      | finalVar == Just BT.list = SerialList fv <$> makeSerialAST' gscope typepackers (head runtimeTs)
+          ast <- makeSerialAST' gscope typepackers expandedTf
+          return $ applyDimsToList dims ast
+      | finalVar == Just BT.list = SerialList fv Nothing <$> makeSerialAST' gscope typepackers (head runtimeTs)
       | finalVar == Just (BT.tuple (length runtimeTs)) =
           SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
       | Just ndim <- tensorNDim finalVar =
-          SerialTensor fv ndim <$> makeSerialAST' gscope typepackers (last runtimeTs)
+          SerialTensor fv ndim dims <$> makeSerialAST' gscope typepackers (last runtimeTs)
       | otherwise = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
@@ -331,6 +340,17 @@ makeSerialAST m lang t0 = do
         isNatTypeF :: TypeF -> Bool
         isNatTypeF (NatLitF _) = True
         isNatTypeF _ = False
+
+        -- Extract dimension constraints from nat-kinded type args
+        dims :: [Maybe Integer]
+        dims = [case t of NatLitF n | n > 0 -> Just n; _ -> Nothing
+               | t <- ts0, isNatTypeF t]
+
+        -- Apply dimension constraints to nested SerialList nodes.
+        -- Each dim in the list is consumed by one nesting level.
+        applyDimsToList :: [Maybe Integer] -> SerialAST -> SerialAST
+        applyDimsToList (d:ds) (SerialList v _ inner) = SerialList v d (applyDimsToList ds inner)
+        applyDimsToList _ ast = ast
 
         runtimeTs = filter (not . isNatTypeF) ts0
 
@@ -563,7 +583,7 @@ will need to be further reduced.
 -}
 isSerializable :: SerialAST -> Bool
 isSerializable (SerialPack _ _) = False
-isSerializable (SerialList _ x) = isSerializable x
+isSerializable (SerialList _ _ x) = isSerializable x
 isSerializable (SerialTuple _ xs) = all isSerializable xs
 isSerializable (SerialObject _ _ _ rs) = all (isSerializable . snd) rs
 isSerializable (SerialReal _) = True
@@ -583,12 +603,12 @@ isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
-isSerializable (SerialTensor _ _ x) = isSerializable x
+isSerializable (SerialTensor _ _ _ x) = isSerializable x
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
 prettySerialOne (SerialPack _ _) = "SerialPack"
-prettySerialOne (SerialList v x) = "SerialList" <> angles (pretty v) <> parens (prettySerialOne x)
+prettySerialOne (SerialList v _ x) = "SerialList" <> angles (pretty v) <> parens (prettySerialOne x)
 prettySerialOne (SerialTuple v xs) = "SerialTuple" <> angles (pretty v) <> tupled (map prettySerialOne xs)
 prettySerialOne (SerialObject r _ _ rs) =
   block 4 ("SerialObject@" <> viaShow r) $
@@ -610,5 +630,5 @@ prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
-prettySerialOne (SerialTensor _ ndim x) = "SerialTensor" <> pretty ndim <> parens (prettySerialOne x)
+prettySerialOne (SerialTensor _ ndim _ x) = "SerialTensor" <> pretty ndim <> parens (prettySerialOne x)
 prettySerialOne (SerialUnknown _) = "SerialUnknown"

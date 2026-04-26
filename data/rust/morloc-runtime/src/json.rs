@@ -188,6 +188,13 @@ fn json_to_voidstar(
             let arr_val = value.as_array().ok_or_else(|| err("expected array"))?;
             let es = schema.parameters.first().ok_or_else(|| err("array has no element type"))?;
             let n = arr_val.len();
+            // Validate array length against schema constraint (offsets[0], 0 = unconstrained)
+            let expected = schema.offsets.first().copied().unwrap_or(0);
+            if expected > 0 && n != expected {
+                return Err(MorlocError::Other(format!(
+                    "Array length mismatch: expected {}, got {}", expected, n
+                )));
+            }
             let ew = es.width;
             let hdr = std::mem::size_of::<Array>();
 

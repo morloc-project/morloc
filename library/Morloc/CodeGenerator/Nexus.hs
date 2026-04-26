@@ -156,16 +156,33 @@ makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
 makeSchema mid lang t = do
   ft <- Infer.inferConcreteTypeUniversal lang t
   ast <- Serial.makeSerialAST mid lang ft
-  return $ Serial.serialAstToMsgpackSchema ast
+  -- Apply nat dimension constraints from the original type to the SerialAST.
+  -- The TypeF may have lost nat params during alias expansion, but the
+  -- original Type still has them.
+  let ast' = applyNatDimsFromType t ast
+  return $ Serial.serialAstToMsgpackSchema ast'
+
+-- | Extract nat dimension constraints from a Type and apply them to a SerialAST.
+-- For example, Matrix 2 3 Int has NatLitT args [2, 3]. After alias expansion,
+-- the SerialAST is SerialList(SerialList(SerialInt)). This function annotates
+-- each nesting level with the corresponding dimension constraint.
+applyNatDimsFromType :: Type -> SerialAST -> SerialAST
+applyNatDimsFromType (AppT _ args) ast =
+  let dims = [Just n | NatLitT n <- args, n > 0]
+  in applyDims dims ast
+  where
+    applyDims (d:ds) (SerialList v _ inner) = SerialList v d (applyDims ds inner)
+    applyDims _ s = s
+applyNatDimsFromType _ ast = ast
 
 makeGastSchemas :: Type -> MorlocMonad (MDoc, [MDoc])
 makeGastSchemas (FunT ts t) = do
-  serialAsts <- mapM generalTypeToSerialAST (t : ts)
+  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM generalTypeToSerialAST (t : ts)
   case map Serial.serialAstToMsgpackSchema serialAsts of
     (s : ss) -> return (s, ss)
     [] -> error "makeGastSchemas: FunT produced empty serial AST list"
 makeGastSchemas t = do
-  s <- Serial.serialAstToMsgpackSchema <$> generalTypeToSerialAST t
+  s <- Serial.serialAstToMsgpackSchema . applyNatDimsFromType t <$> generalTypeToSerialAST t
   return (s, [])
 
 generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
@@ -194,7 +211,7 @@ generalTypeToSerialAST (VarT v)
         Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
         x -> error $ "Unexpected scope: " <> show x
 generalTypeToSerialAST (AppT (VarT v) [t])
-  | v == MBT.list = SerialList (FV v (CV "")) <$> generalTypeToSerialAST t
+  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST t
   | otherwise = resolveAliasApp v [t]
 generalTypeToSerialAST (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) = SerialTuple (FV v (CV "")) <$> mapM generalTypeToSerialAST ts

@@ -513,6 +513,8 @@ main = do
       , golden "tensor-dimensions" "tensor-dimensions"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
+      , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
+      , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
       , -- big integer tests
         golden "numeric-literals" "numeric-literals"
       , golden "bigint-factorial-py" "bigint-factorial-py"

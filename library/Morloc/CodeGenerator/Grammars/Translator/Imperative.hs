@@ -294,7 +294,7 @@ expandSerialize cfg v0 s0 = do
     construct v (SerialPack _ (p, s)) =
       let unpacker = lcUnpackerName cfg (typePackerReverse p)
        in go (unpacker <> parens v) s
-    construct v lst@(SerialList _ s) = do
+    construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst
       let v' = render $ helperNamer idx
@@ -346,7 +346,7 @@ expandDeserialize cfg v0 s0
       (x, before) <- check v s'
       let packer = render $ lcPackerName cfg (typePackerForward p)
       return (IPack packer x, before)
-    construct v lst@(SerialList _ s) = do
+    construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg lst
       let v' = render $ helperNamer idx
