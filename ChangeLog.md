@@ -1,4 +1,19 @@
-0.81.0 [2026-94-22]
+0.82.0 [2026-04-26]
+-------------------
+ * remove parenthesis requirement in binops 
+   - can write (< 2) rather than ((<) 2)
+ * allow left and right operator sections
+   - filter (< 2) [1,2,3] --> [1]
+   - filter (2 <) [1,2,3] --> [3]
+ * make `Int` variable length
+   - represents the default int in any language
+   - supports arbitrary sized ints
+ * remove holes syntax
+ * pretty type printing in `morloc list`
+ * fix shared memory leak
+ * fix typeclass resolution no respects type hierarchies
+
+0.81.0 [2026-04-22]
 -------------------
  * fix type inference for type families
  * extend intrinsic support for language-agnostic code
