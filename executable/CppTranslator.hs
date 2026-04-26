@@ -27,6 +27,7 @@ import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified CppPrinter as CP
 import qualified Data.Char as DC
+import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -153,6 +154,7 @@ data CppTranslatorState = CppTranslatorState
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
+  , translatorSchemas :: Map.Map Text Int
   }
 
 instance Defaultable CppTranslatorState where
@@ -165,6 +167,7 @@ instance Defaultable CppTranslatorState where
       , translatorRemoteManifoldSet = Set.empty
       , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
       , translatorEffectLabels = Map.empty
+      , translatorSchemas = Map.empty
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -181,6 +184,21 @@ resetCounter :: CppTranslator ()
 resetCounter = do
   s <- CMS.get
   CMS.put $ s {translatorCounter = 0}
+
+cppRegisterSchema :: Text -> CppTranslator Int
+cppRegisterSchema schema = do
+  s <- CMS.get
+  case Map.lookup schema (translatorSchemas s) of
+    Just sid -> return sid
+    Nothing -> do
+      let sid = Map.size (translatorSchemas s)
+      CMS.put $ s {translatorSchemas = Map.insert schema sid (translatorSchemas s)}
+      return sid
+
+getCppSchemaTable :: CppTranslator [Text]
+getCppSchemaTable = do
+  m <- CMS.gets translatorSchemas
+  return $ map fst $ sortBy (comparing snd) $ Map.toList m
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
@@ -234,7 +252,7 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
   -- build the program (translates each manifold tree)
-  program <- buildProgramM includeDocs es translateSegment
+  program <- buildProgramM includeDocs es translateSegment getCppSchemaTable
 
   -- create and return complete pool script
   return $ CP.printProgram serializationCode signatures program
@@ -471,6 +489,7 @@ PROPAGATE_ERROR(errmsg)|]
     , lcMakeLambda = \mname contextArgs boundArgs ->
         let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
          in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
+    , lcRegisterSchema = cppRegisterSchema
     }
   where
     -- For serialization, records become tuples (that's what _put_value/toAnything expects)

@@ -81,6 +81,8 @@ module Morloc.Monad
   , newIndex
   , getIndex
   , setIndex
+  , registerSchemaIndex
+  , getSchemaTable
   ) where
 
 import Control.Monad.Except
@@ -89,6 +91,8 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
+import Data.List (sortBy)
+import Data.Ord (comparing)
 import Data.Text (Text)
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -516,11 +520,14 @@ getOutfileName = do
     Just name -> return name
     Nothing -> getModuleName
 
-newtype IndexState = IndexState {index :: Int}
+data IndexState = IndexState
+  { index :: !Int
+  , indexSchemas :: !(Map.Map Text Int)  -- schema string -> ID
+  }
 type Index a = StateT IndexState Identity a
 
 runIndex :: Int -> Index a -> a
-runIndex i x = evalState x (IndexState i)
+runIndex i x = evalState x (IndexState i Map.empty)
 
 newIndex :: Index Int
 newIndex = do
@@ -537,3 +544,18 @@ setIndex i = do
   s <- get
   put $ s {index = i}
   return ()
+
+registerSchemaIndex :: Text -> Index Int
+registerSchemaIndex schema = do
+  s <- get
+  case Map.lookup schema (indexSchemas s) of
+    Just sid -> return sid
+    Nothing -> do
+      let sid = Map.size (indexSchemas s)
+      put $ s {indexSchemas = Map.insert schema sid (indexSchemas s)}
+      return sid
+
+getSchemaTable :: Index [Text]
+getSchemaTable = do
+  m <- gets indexSchemas
+  return $ map fst $ sortBy (comparing snd) $ Map.toList m

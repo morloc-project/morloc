@@ -51,7 +51,7 @@ import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Version as MV
-import Morloc.Monad (asks, gets, newIndex, runIndex)
+import Morloc.Monad (asks, gets, newIndex, runIndex, getSchemaTable, registerSchemaIndex)
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.Directory as Dir
@@ -103,8 +103,11 @@ translateBuiltin lang desc srcs es = do
   let preambleDocs = map (substitutePreamble home lib opt homeDir) preambleTemplates
 
   let allSources = preambleDocs ++ includeDocs
-      mDocs = map (translateSegment desc srcNamer) es
-      program = buildProgram allSources mDocs es
+      (mDocs, schemas) = runIndex 0 $ do
+        docs <- mapM (translateSegment desc srcNamer) es
+        tbl <- getSchemaTable
+        return (docs, tbl)
+      program = buildProgram allSources mDocs es schemas
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -147,8 +150,11 @@ translateExternal cmd lang desc srcs es = do
           then qualifiedSrcName lib
           else \src -> pretty (srcName src)
 
-  let mDocs = map (translateSegment desc srcNamer) es
-      program = buildProgram includeDocs mDocs es
+  let (mDocs, schemas) = runIndex 0 $ do
+        docs <- mapM (translateSegment desc srcNamer) es
+        tbl <- getSchemaTable
+        return (docs, tbl)
+      program = buildProgram includeDocs mDocs es schemas
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -343,10 +349,10 @@ makeImportPath lib =
     toLower' c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
     dropExtensions = reverse . drop 1 . dropWhile (/= '.') . reverse
 
-translateSegment :: LangDescriptor -> (Source -> MDoc) -> SerialManifold -> MDoc
+translateSegment :: LangDescriptor -> (Source -> MDoc) -> SerialManifold -> IndexM MDoc
 translateSegment desc srcNamer m0 =
   let cfg = genericLowerConfig desc srcNamer
-   in renderPoolDocs $ runIndex 0 (foldWithSerialManifoldM (defaultFoldRules cfg) m0)
+   in renderPoolDocs <$> foldWithSerialManifoldM (defaultFoldRules cfg) m0
 
 -- | Build a LowerConfig from a LangDescriptor and a source name function
 genericLowerConfig :: LangDescriptor -> (Source -> MDoc) -> LowerConfig IndexM
@@ -469,6 +475,7 @@ genericLowerConfig desc srcNamer = cfg
                     , ("all_args", allArgs)
                     , ("bound_args", boundArgsText)
                     ]
+        , lcRegisterSchema = registerSchemaIndex
         }
 
 {- | Record access: for languages with ldDictStyleRecords=True,
@@ -605,10 +612,10 @@ genericPrintExpr desc = go
     go (IAccess e (IField f)) = case ldFieldAccess desc of
       DotAccess -> go e <> "." <> pretty f
       DollarAccess -> go e <> "$" <> pretty f
-    go (ISerCall schema e) =
-      pretty (ldSerializeFn desc) <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
-    go (IDesCall schema _ e) =
-      pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
+    go (ISerCall sid e) =
+      pretty (ldSerializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> ")"
+    go (IDesCall sid _ e) =
+      pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> ")"
     go (IPack packer e) = pretty packer <> parens (go e)
     go (ICall f Nothing argGroups) =
       pretty f <> hsep (map (tupled . map go) argGroups)
@@ -629,26 +636,31 @@ genericPrintExpr desc = go
     go (IDoBlock e) =
       pretty $ substituteT (ldDoBlockExpr desc) [("expr", render (go e))]
     go (IEval e) = go e <> "()"
-    go (IIntrinsicHash schema e) =
+    go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_hash(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
-    go (IIntrinsicSave fmt schema e path) =
+       in pretty prefix <> "mlc_hash(" <> go e <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicSave fmt sid e path) =
       let prefix = ldIntrinsicPrefix desc
           saveFn :: Text
           saveFn = case fmt of
             "json"     -> "mlc_save_json"
             "voidstar" -> "mlc_save_voidstar"
             _          -> "mlc_save"
-       in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> dquotes (pretty schema) <> ", " <> go path <> ")"
-    go (IIntrinsicLoad schema _ path) =
+       in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicLoad sid _ path) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_load(" <> dquotes (pretty schema) <> ", " <> go path <> ")"
-    go (IIntrinsicShow schema e) =
+       in pretty prefix <> "mlc_load(" <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicShow sid e) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_show(" <> go e <> ", " <> dquotes (pretty schema) <> ")"
-    go (IIntrinsicRead schema _ e) =
+       in pretty prefix <> "mlc_show(" <> go e <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicRead sid _ e) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_read(" <> dquotes (pretty schema) <> ", " <> go e <> ")"
+       in pretty prefix <> "mlc_read(" <> schemaRef sid <> ", " <> go e <> ")"
+
+    schemaRef sid = case ldIndexStyle desc of
+      ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
+      OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
+      OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc
@@ -731,10 +743,19 @@ printProgram desc prog =
     sections
   where
     sections =
-      [ vsep (map pretty (ipSources prog))
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit])
       , vsep (map pretty (ipManifolds prog))
       , templateDispatch
       ]
+
+    schemaTableInit
+      | null (ipSchemaTable prog) = mempty
+      | otherwise =
+          let entries = [dquotes (pretty s) | s <- ipSchemaTable prog]
+              listExpr = case ldListStyle desc of
+                BracketList -> list entries
+                _ -> pretty (ldGenericListFn desc) <> tupled entries
+           in "mlc_schema_table = " <> listExpr
 
     templateDispatch = vsep [localD, remoteD]
       where
