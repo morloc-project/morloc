@@ -594,8 +594,14 @@ paren_expr :: { Loc CstExpr }
   | '(' '-' ')'               { at $1 (CVarE (EV "-")) }
   | '(' '.' ')'               { at $1 (CVarE (EV ".")) }
   | '(' operator_name expr ')'
-      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
+      { Loc ($1 <-> $4) (CRightSecE $2 $3) }
   | '(' '.' expr ')'
+      { Loc ($1 <-> $4) (CRightSecE $2 $3) }
+  | '(' operand operator_name ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
+  | '(' operand '-' ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
+  | '(' operand '.' ')'
       { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
   | '(' expr ')'              { Loc ($1 <-> $3) (CParenE $2) }
   | '(' expr ',' expr_list1 ')' { Loc ($1 <-> $5) (CTupE ($2 : $4)) }

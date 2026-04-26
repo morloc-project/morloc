@@ -724,7 +724,15 @@ desugarExpr (Loc sp (CParenE inner@(Loc _ CBopE{}))) = do
   inner' <- desugarExpr inner
   freshExprSpan sp (ParenE inner')
 desugarExpr (Loc _ (CParenE inner)) = desugarExpr inner
-desugarExpr (Loc sp (CLeftSecE opTok rhs)) = do
+desugarExpr (Loc sp (CLeftSecE lhs opTok)) = do
+  idx <- freshIdSpan sp
+  let v = EV ("_sect_" <> T.pack (show idx))
+  lhs' <- desugarExpr lhs
+  vExpr <- freshExprSpan sp (VarE defaultValue v)
+  opI <- freshIdSpan (Span (locPos opTok) (locPos opTok))
+  bopExpr <- freshExprSpan sp (BopE lhs' opI (tokToEVar opTok) vExpr)
+  freshExprSpan sp (LamE [v] bopExpr)
+desugarExpr (Loc sp (CRightSecE opTok rhs)) = do
   idx <- freshIdSpan sp
   let v = EV ("_sect_" <> T.pack (show idx))
   rhs' <- desugarExpr rhs
