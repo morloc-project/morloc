@@ -70,6 +70,9 @@ ldErrorWrapClose:
 ldPatternStyle: fstring
 ldQuoteTerminator: '"""'
 ldQuoteTerminatorEsc: '\"\"\"'
+ldStrLiteralMap:
+  str: ""
+  bytes: "b"
 ldMapStyle: loop_append
 ldDispatchLocalHeader: "dispatch = {"
 ldDispatchLocalEntry: "    {{mid}}: {{name}},"

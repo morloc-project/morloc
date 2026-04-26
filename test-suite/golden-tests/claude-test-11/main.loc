@@ -12,15 +12,6 @@ source Cpp from "sysinfo.hpp" ("clockResNs", "cpuCount", "hashStr")
 source Py from "sysinfo.py" ("procId", "envHome", "calMonth")
 source R from "sysinfo.R" ("uptimeSec", "fmtReport")
 
-type Cpp => Int = "int"
-type Cpp => Str = "std::string"
-
-type Py => Int = "int"
-type Py => Str = "str"
-
-type R => Int = "integer"
-type R => Str = "character"
-
 clockResNs :: <IO> Int
 cpuCount :: <IO> Int
 hashStr :: Str -> Int

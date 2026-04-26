@@ -172,12 +172,12 @@ rMake4d :: Tensor4 2 3 2 2 Real
 rSum4d :: Tensor4 2 3 2 2 Real -> Real
 
 -- 1D Int (8 elements, values 10..17, sum=108)
-cppMakeIntVec :: Tensor1 8 Int
-cppSumIntVec :: Tensor1 8 Int -> Int
-pyMakeIntVec :: Tensor1 8 Int
-pySumIntVec :: Tensor1 8 Int -> Int
-rMakeIntVec :: Tensor1 8 Int
-rSumIntVec :: Tensor1 8 Int -> Int
+cppMakeIntVec :: Tensor1 8 Int32
+cppSumIntVec :: Tensor1 8 Int32 -> Int
+pyMakeIntVec :: Tensor1 8 Int32
+pySumIntVec :: Tensor1 8 Int32 -> Int
+rMakeIntVec :: Tensor1 8 Int32
+rSumIntVec :: Tensor1 8 Int32 -> Int
 
 -- 1D Bool (6 elements: T,F,T,T,F,T -> count=4)
 cppMakeBoolVec :: Tensor1 6 Bool

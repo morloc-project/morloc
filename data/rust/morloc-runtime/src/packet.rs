@@ -600,6 +600,14 @@ fn adjust_voidstar_relptrs(
 
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {
+                // Inline BigInt: only adjust relptr when size > 1 (overflow case)
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut shm::RelPtr);
+                    *relptr += base_rel;
+                }
+            }
             SerialType::String | SerialType::Array => {
                 let arr = &mut *(data as *mut Array);
                 arr.data += base_rel;

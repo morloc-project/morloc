@@ -240,6 +240,16 @@ if __name__ == "__main__":
     # flushed explicitly after each job and during shutdown.
     sys.stderr.reconfigure(line_buffering=True)
 
+    # Request SIGTERM when the parent process (nexus) dies.
+    # Without this, SIGKILL on the nexus leaves pool processes orphaned
+    # and their SHM segments leak in /dev/shm.
+    try:
+        import ctypes
+        _PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass  # non-Linux: skip (macOS uses kqueue for this)
+
     shutdown_flag = Value('b', False)  # Shared flag
 
     signal.signal(signal.SIGINT, signal_handler)

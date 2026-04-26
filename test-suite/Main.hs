@@ -80,6 +80,7 @@ main = do
       , golden "infix-typeclass-import" "infix-typeclass-import"
       , golden "infix-typeclass-polyglot" "infix-typeclass-polyglot"
       , golden "infix-typeclass-simple" "infix-typeclass-simple"
+      , golden "operator-sections" "operator-sections"
       , golden "claude-test-1" "claude-test-1"
       , golden "claude-test-2" "claude-test-2"
       , golden "claude-test-3" "claude-test-3"
@@ -118,9 +119,6 @@ main = do
       , golden "functional-data-5" "functional-data-5"
       , golden "pattern-getters" "pattern-getters"
       , golden "pattern-setters" "pattern-setters"
-      , golden "holes-func" "holes-func"
-      , golden "holes-record" "holes-record"
-      , golden "holes-simple" "holes-simple"
       , golden "type-annotations-1" "type-annotations-1"
       , golden "native-morloc-1" "native-morloc-1"
       , golden "native-morloc-2" "native-morloc-2"
@@ -148,10 +146,12 @@ main = do
       , golden "typeclasses-9" "typeclasses-9"
       , golden "typeclass-stress" "typeclass-stress"
       , golden "alias-dedup-1" "alias-dedup-1"
-      , golden "alias-no-cross-instance" "alias-no-cross-instance"
       , golden "alias-concrete-bugs" "alias-concrete-bugs"
       , golden "alias-constructor-equiv" "alias-constructor-equiv"
       , golden "alias-array-monoid" "alias-array-monoid"
+      , golden "alias-typeclass-specificity" "alias-typeclass-specificity"
+      , golden "alias-no-cross-instance" "alias-no-cross-instance"
+      , golden "alias-string-hierarchy" "alias-string-hierarchy"
       , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
@@ -396,8 +396,6 @@ main = do
       , golden "scoping-13" "scoping-13"
       , -- type alias transitive resolution
         golden "type-alias-transitive" "type-alias-transitive"
-      , -- type identities
-        golden "type-identities-c" "type-identities-c"
       , -- testing packet transmission
         golden "packets-large (wait ~10s)" "packets-large"
       , golden "packets-interop (wait ~10s)" "packets-interop"
@@ -514,4 +512,9 @@ main = do
       , golden "tensor-dimensions" "tensor-dimensions"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
+      , -- big integer tests
+        golden "numeric-literals" "numeric-literals"
+      , golden "bigint-factorial-py" "bigint-factorial-py"
+      , golden "bigint-overflow-cpp" "bigint-overflow-cpp"
+      , golden "bigint-overflow-r" "bigint-overflow-r"
       ]

@@ -266,7 +266,6 @@ data Expr
   | UniE
   | NullE
   | VarE ManifoldConfig EVar
-  | HolE
   | LstE [ExprI]
   | TupE [ExprI]
   | NamE [(Key, ExprI)]
@@ -617,7 +616,6 @@ instance Pretty Selector where
   pretty (SelectorIdx r rs) = "." <> tupled ["." <> pretty i <> pretty s | (i, s) <- (r : rs)]
 
 instance Pretty Expr where
-  pretty HolE = "_"
   pretty (PatE pat) = "pattern:" <+> pretty pat
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es

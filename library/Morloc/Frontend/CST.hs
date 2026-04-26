@@ -106,7 +106,6 @@ data CstExpr
   | CLogE Bool
   | CUniE
   | CNullE
-  | CHolE
   | CLstE [Loc CstExpr]
   | CTupE [Loc CstExpr]
   | CNamE [(Key, Loc CstExpr)]
@@ -118,6 +117,9 @@ data CstExpr
   | CForceE (Loc CstExpr)  -- ^ !expr force operator (only valid inside do-blocks)
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
+  -- Operator sections (Haskell naming: left = left operand given, right = right operand given)
+  | CLeftSecE !(Loc CstExpr) !Located  -- ^ (expr op) left section: \x -> expr op x
+  | CRightSecE !Located !(Loc CstExpr)  -- ^ (op expr) right section: \x -> x op expr
   | CInlineE (Loc CstExpr) -- ^ %inline wrapper for source declarations
   deriving (Show, Eq)
 

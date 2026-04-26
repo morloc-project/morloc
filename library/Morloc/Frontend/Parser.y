@@ -49,7 +49,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 84
+%expect 82
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -578,7 +578,6 @@ atom_expr :: { Loc CstExpr }
   | list_expr                 { $1 }
   | record_expr               { $1 }
   | var_expr                  { $1 }
-  | hole_expr                 { $1 }
   | do_expr                   { $1 }
   | null_expr                 { $1 }
   | intrinsic_expr            { $1 }
@@ -594,6 +593,16 @@ paren_expr :: { Loc CstExpr }
   | '(' operator_name ')'     { at $1 (CVarE (EV (getOp $2))) }
   | '(' '-' ')'               { at $1 (CVarE (EV "-")) }
   | '(' '.' ')'               { at $1 (CVarE (EV ".")) }
+  | '(' operator_name expr ')'
+      { Loc ($1 <-> $4) (CRightSecE $2 $3) }
+  | '(' '.' expr ')'
+      { Loc ($1 <-> $4) (CRightSecE $2 $3) }
+  | '(' operand operator_name ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
+  | '(' operand '-' ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
+  | '(' operand '.' ')'
+      { Loc ($1 <-> $4) (CLeftSecE $2 $3) }
   | '(' expr ')'              { Loc ($1 <-> $3) (CParenE $2) }
   | '(' expr ',' expr_list1 ')' { Loc ($1 <-> $5) (CTupE ($2 : $4)) }
 
@@ -659,9 +668,6 @@ var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
   | LOWER LABELCOLON LOWER    { Loc ($1 <-> $3) (CLabeledVarE (getName $1) (EV (getName $3))) }
   | LOWER                     { at $1 (CVarE (EV (getName $1))) }
-
-hole_expr :: { Loc CstExpr }
-  : '_'                        { at $1 CHolE }
 
 bool_expr :: { Loc CstExpr }
   : 'True'                     { at $1 (CLogE True) }

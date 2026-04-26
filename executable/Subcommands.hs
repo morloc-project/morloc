@@ -137,7 +137,7 @@ typecheckModuleFn mainFile = do
           xs <- M.typecheckFrontend (Just mainFile) (Code code)
           st <- MM.get
           return
-            [ (render (pretty v), render (pretty t))
+            [ (render (pretty v), render (prettyTypeU t))
             | AnnoS (Idx i t) _ _ <- xs
             , Just v <- [Map.lookup i (stateName st)]
             ]

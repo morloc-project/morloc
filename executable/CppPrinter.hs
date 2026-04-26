@@ -51,7 +51,7 @@ printExpr (IRealLit Nothing r) = viaShow r
 printExpr (IRealLit (Just t) r)
   | t == "double" = viaShow r
   | otherwise = "static_cast<" <> pretty t <> ">(" <> viaShow r <> ")"
-printExpr (IStrLit s) = [idoc|std::string(#{textEsc' s})|]
+printExpr (IStrLit _ s) = [idoc|std::string(#{textEsc' s})|]
 printExpr (IListLit es) = encloseSep "{" "}" "," (map printExpr es)
 printExpr (ITupleLit es) = "std::make_tuple" <> tupled (map printExpr es)
 printExpr (IRecordLit _ _ entries) =

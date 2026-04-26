@@ -114,7 +114,8 @@ typedef enum {
     MORLOC_ARRAY,
     MORLOC_TUPLE,
     MORLOC_MAP,
-    MORLOC_OPTIONAL
+    MORLOC_OPTIONAL,
+    MORLOC_INT          // variable-width integer (Array of uint64_t limbs, two's complement)
 } morloc_serial_type;
 
 // Single-character schema encoding tokens.
@@ -129,6 +130,7 @@ typedef enum {
 #define SCHEMA_TUPLE    't'
 #define SCHEMA_MAP      'm'
 #define SCHEMA_OPTIONAL '?'
+#define SCHEMA_INT      'j'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 struct Schema;

@@ -8,11 +8,6 @@ import root-py
 source Py from "foo.py" ("get_name", "get_value")
 source Cpp from "foo.hpp" ("combine", "add")
 
-type Cpp => Int = "int"
-type Py => Int = "int"
-type Cpp => Str = "std::string"
-type Py => Str = "str"
-
 get_name :: <IO> Str
 get_value :: <IO> Int
 combine :: Str -> Int -> Str

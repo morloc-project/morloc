@@ -42,14 +42,6 @@ source Py from "bigdata.py"
   , "idNestedVec" as pyIdNestedVec
   )
 
-type Cpp => Int = "int"
-type Cpp => Str = "std::string"
-type Cpp => List a = "std::vector<$1>" a
-
-type Py => Int = "int"
-type Py => Str = "str"
-type Py => List a = "list" a
-
 cppBigStr :: Int -> Str
 cppBigStrLen :: Str -> Int
 cppBigVec :: Int -> [Int]

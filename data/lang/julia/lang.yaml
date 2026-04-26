@@ -62,6 +62,8 @@ ldPatternStyle: concat_call
 ldConcatFn: "string"
 ldQuoteTerminator: '"'
 ldQuoteTerminatorEsc: '\"'
+ldStrLiteralMap:
+  String: ""
 ldMapStyle: list_comprehension
 ldDispatchLocalHeader: "dispatch = Dict("
 ldDispatchLocalEntry: "    {{mid}} => {{name}},"

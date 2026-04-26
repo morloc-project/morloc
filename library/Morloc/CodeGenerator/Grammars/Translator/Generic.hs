@@ -43,6 +43,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.LanguageDescriptor
 import Morloc.CodeGenerator.Namespace
+import qualified Data.Map.Strict as Map
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
@@ -578,7 +579,12 @@ genericPrintExpr desc = go
     go (INullLit _) = pretty (ldNullLiteral desc)
     go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
     go (IRealLit _ r) = viaShow r
-    go (IStrLit s) = textEsc' s
+    go (IStrLit Nothing s) = textEsc' s
+    go (IStrLit (Just t) s) = case Map.lookup t (ldStrLiteralMap desc) of
+      Just prefix -> pretty prefix <> textEsc' s
+      Nothing -> error $ "Cannot render string literal with concrete type "
+        ++ show t ++ " in language " ++ show (ldName desc)
+        ++ ". Add an entry to ldStrLiteralMap in lang.yaml."
     go (IListLit es) = case ldListStyle desc of
       BracketList -> list (map go es)
       FunctionCallList -> pretty (ldGenericListFn desc) <> tupled (map go es)

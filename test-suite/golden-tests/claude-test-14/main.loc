@@ -39,14 +39,6 @@ source Py from "edge.py"
   , "incVec" as pyIncVec
   )
 
-type Cpp => Int = "int"
-type Cpp => Str = "std::string"
-type Cpp => List a = "std::vector<$1>" a
-
-type Py => Int = "int"
-type Py => Str = "str"
-type Py => List a = "list" a
-
 cppCounter :: <IO> Int
 cppAdd :: Int -> Int -> Int
 cppDouble :: Int -> Int

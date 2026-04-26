@@ -4,7 +4,7 @@
 //! instead of pthread_rwlock_t, providing crash-safety and portability.
 
 use crate::error::MorlocError;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 /// Cross-platform file pre-allocation.
@@ -133,6 +133,40 @@ static COMMON_BASENAME: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FI
 
 static FALLBACK_DIR: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
 
+/// Whether atexit handler has been registered (once per process).
+static ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// atexit callback: unlink SHM segments on process exit.
+/// Catches normal exit() calls that bypass explicit clean_exit().
+/// Uses try_lock to avoid panic if mutexes are poisoned (e.g., during panic unwind).
+extern "C" fn shclose_atexit() {
+    // Best-effort: if locks are poisoned or held, skip cleanup
+    // rather than panic inside atexit.
+    let vols_guard = match VOLUMES.try_lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    for i in 0..MAX_VOLUME_NUMBER {
+        if vols_guard[i].is_null() {
+            continue;
+        }
+        let shm = vols_guard[i].ptr();
+        unsafe {
+            let name = get_cstr(&(*shm).volume_name).to_string();
+            let full_size = (*shm).volume_size + std::mem::size_of::<ShmHeader>();
+            libc::munmap(shm as *mut libc::c_void, full_size);
+            if name.starts_with('/') {
+                let cstr = std::ffi::CString::new(name.as_str()).unwrap_or_default();
+                libc::unlink(cstr.as_ptr());
+            } else {
+                let cstr = std::ffi::CString::new(name.as_str()).unwrap_or_default();
+                libc::shm_unlink(cstr.as_ptr());
+            }
+        }
+    }
+    drop(vols_guard);
+}
+
 fn set_cstr(buf: &mut [u8], s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len().min(buf.len() - 1);
@@ -159,6 +193,13 @@ pub fn shinit(
     volume_index: usize,
     shm_size: usize,
 ) -> Result<*mut ShmHeader, MorlocError> {
+    // Register atexit handler on first call (once per process).
+    // This ensures SHM is unlinked on any normal exit path, even if
+    // clean_exit() is not called (e.g., pool processes calling sys.exit()).
+    if !ATEXIT_REGISTERED.swap(true, Ordering::SeqCst) {
+        unsafe { libc::atexit(shclose_atexit) };
+    }
+
     let full_size = shm_size + std::mem::size_of::<ShmHeader>();
     let shm_name = format!("{}_{}", shm_basename, volume_index);
 

@@ -1008,7 +1008,7 @@ newvarRich ps rs prefix g =
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
 rename g0 (ForallU v@(TV s) t0) =
-  let (g1, v') = tvarname g0 (s <> "___q")
+  let (g1, v') = tvarname g0 (s <> "@q")
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
    in (g2, ForallU v' t2)
@@ -1017,7 +1017,7 @@ rename g0 t0 =
   let nvs = nub (collectNatVarNames t0)
    in if null nvs then (g0, t0)
       else
-        let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "___n")) g0 nvs
+        let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@n")) g0 nvs
             renameMap = Map.fromList (zip nvs nvs')
          in (g1, renameNatVars renameMap t0)
 
@@ -1171,8 +1171,53 @@ applyVarRenaming m = go
     go (NatDivU a b) = NatDivU (go a) (go b)
     go (LabeledU n t) = LabeledU n (go t)
 
+-- | User-facing type display: clean variable names, no forall, no angle brackets.
 prettyTypeU :: TypeU -> MDoc
-prettyTypeU = pretty . cleanTypeName
+prettyTypeU = renderClean . cleanTypeName
+  where
+    renderClean t0 =
+      let (_, body) = unqualify t0
+      in f True body
+
+    tv (TV v) = pretty (MT.takeWhile (/= '@') v)
+
+    f _ (VarU v) = tv v
+    f _ (NatVarU v) = tv v
+    f _ (ExistU v ([], _) ([], _)) = tv v
+    f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
+    f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV "Tuple4")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV "Tuple5")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (EffectU effs t) =
+      let labels = resolveEffectSet effs
+       in if Set.null labels
+            then "{" <> f True t <> "}"
+            else "<" <> hcat (punctuate "," (map pretty (Set.toList labels))) <> ">" <+> f False t
+    f _ (OptionalU t) = "?" <> f False t
+    f _ (NatLitU n) = pretty n
+    f _ (NatAddU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
+    f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
+    f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
+    f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
+    f False t = parens (f True t)
+    f _ (ExistU v (ts, _) (rs, _)) =
+      tv v
+        <+> list (map (f False) ts)
+        <+> list [tupled [pretty k, f True t] | (k, t) <- rs]
+    f _ (FunU [] t) = "() -> " <> f False t
+    f _ (FunU ts t) = hsep $ punctuate " ->" (map (f False) (ts <> [t]))
+    f _ (ForallU _ t) = f True t
+    f _ (AppU t ts) = hsep $ map (f False) (t : ts)
+    f _ (NamU _ n ps _) =
+      let params = if null ps
+                   then mempty
+                   else space <> hsep (map (f False) ps)
+      in pretty n <> params
 
 tvarname :: Gamma -> Text -> (Gamma, TVar)
 tvarname g prefix =

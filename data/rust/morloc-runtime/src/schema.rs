@@ -22,6 +22,7 @@ pub enum SerialType {
     Tuple = 15,
     Map = 16,
     Optional = 17,
+    Int = 18,       // variable-width integer (Array of uint64_t limbs, two's complement)
 }
 
 /// Schema character codes for parsing schema strings.
@@ -36,6 +37,7 @@ const SCHEMA_TENSOR: u8 = b'T';
 const SCHEMA_TUPLE: u8 = b't';
 const SCHEMA_MAP: u8 = b'm';
 const SCHEMA_OPTIONAL: u8 = b'?';
+const SCHEMA_INT: u8 = b'j';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -64,7 +66,7 @@ impl Schema {
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
-            SerialType::String => std::mem::size_of::<shm::Array>(),
+            SerialType::String | SerialType::Int => std::mem::size_of::<shm::Array>(),
             _ => 0,
         };
         Schema {
@@ -107,7 +109,8 @@ impl Schema {
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
-            SerialType::String | SerialType::Array | SerialType::Map | SerialType::Tensor => {
+            SerialType::String | SerialType::Array | SerialType::Map | SerialType::Tensor
+            | SerialType::Int => {
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
             SerialType::Tuple => {
@@ -189,6 +192,10 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
             // Array: one child schema follows immediately
             let (child, end) = parse_schema_r(bytes, cur)?;
             Ok((make_array_schema(child), end))
+        }
+        SCHEMA_INT => {
+            // Variable-width integer: no parameters, uses Array layout
+            Ok((Schema::primitive(SerialType::Int), cur))
         }
         SCHEMA_OPTIONAL => {
             // Optional: one child schema follows immediately
@@ -487,6 +494,9 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
                 }
                 schema_to_string_inner(p, buf);
             }
+        }
+        SerialType::Int => {
+            buf.push('j');
         }
         SerialType::Optional => {
             buf.push('?');

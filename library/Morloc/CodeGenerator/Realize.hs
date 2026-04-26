@@ -353,34 +353,62 @@ realizeWithRegistry registry s0 = do
           [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)] ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
         handleMany gt' xs' =
-          -- Match candidates by head type constructor, then fall back to
-          -- alias reduction. This handles type aliases (e.g. Deque = List)
-          -- by first looking for an exact head match, then reducing the
-          -- expected type one level and searching again.
-          case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', sameTypeHead gt' t] of
+          -- Compatible match: structural equality with UnkT as wildcard.
+          -- Preserves alias specificity (Array Int matches Array (UnkT a)
+          -- but not List (UnkT a)) while handling unsolved generics.
+          case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', compatibleType gt' t] of
+            (x' : _) -> return x'
             [] -> do
               gscope <- MM.getGeneralScope i
+              -- Reduce gt' one step toward the root type and retry.
+              -- This walks the alias chain: C -> B -> A -> Str,
+              -- preferring the most specific matching instance.
               case TE.reduceType gscope (type2typeu gt') of
-                (Just gt'') -> handleMany (typeOf gt'') xs'
+                Just gt'' -> handleMany (typeOf gt'') xs'
                 Nothing ->
-                  case xs' of
-                    -- All candidates have the same head: they're duplicates from
-                    -- different imports (e.g., mempty = [] from both root-py and root-cpp).
-                    (x'@(AnnoS (Idx _ t0) _ _, _) : rest)
-                      | all (\(AnnoS (Idx _ t) _ _, _) -> sameTypeHead t0 t) rest -> return x'
-                    _ ->
-                      MM.throwSourcedError i $
-                        "I couldn't find implementation for" <+> squotes (pretty v) <+> "gt' = " <+> pretty gt'
-            [x'] -> return x'
-            (x' : _) -> return x'
+                  -- reduceType only reduces the top-level constructor. When
+                  -- aliases appear inside compound types (e.g., Celsius -> Celsius
+                  -- where type Celsius = Int), reduce leaf aliases one step.
+                  case TE.reduceTypeLeaves gscope (type2typeu gt') of
+                    Just gt'' -> handleMany (typeOf gt'') xs'
+                    Nothing ->
+                      case xs' of
+                        -- All candidates have identical types: duplicates from
+                        -- different imports (e.g., mempty from root-py and root-cpp).
+                        (x'@(AnnoS (Idx _ t0) _ _, _) : rest)
+                          | compatibleType gt' t0
+                          , all (\(AnnoS (Idx _ t) _ _, _) -> compatibleType t0 t) rest -> return x'
+                        _ ->
+                          MM.throwSourcedError i $
+                            "No matching implementation found for" <+> squotes (pretty v)
+                              <+> "at type" <+> pretty gt'
 
-        -- Compare types by their head constructor, ignoring parameters.
-        -- This handles candidates with unresolved type variables (UnkT).
-        sameTypeHead :: Type -> Type -> Bool
-        sameTypeHead (AppT (VarT v1) _) (AppT (VarT v2) _) = v1 == v2
-        sameTypeHead (VarT v1) (VarT v2) = v1 == v2
-        sameTypeHead (FunT _ r1) (FunT _ r2) = sameTypeHead r1 r2
-        sameTypeHead t1 t2 = t1 == t2
+        -- Structural type equality with UnkT as wildcard.
+        -- UnkT arises from unsolved generics (e.g., mempty :: List (UnkT a)).
+        -- This allows List Int to match List (UnkT a) without matching
+        -- Deque (UnkT a) or accepting sibling aliases in function types.
+        compatibleType :: Type -> Type -> Bool
+        compatibleType (UnkT _) _ = True
+        compatibleType _ (UnkT _) = True
+        compatibleType (VarT v1) (VarT v2) = v1 == v2
+        compatibleType (FunT as1 r1) (FunT as2 r2) =
+          length as1 == length as2
+            && all (uncurry compatibleType) (zip as1 as2)
+            && compatibleType r1 r2
+        compatibleType (AppT h1 ps1) (AppT h2 ps2) =
+          compatibleType h1 h2
+            && length ps1 == length ps2
+            && all (uncurry compatibleType) (zip ps1 ps2)
+        compatibleType (NamT o1 n1 ps1 rs1) (NamT o2 n2 ps2 rs2) =
+          o1 == o2 && n1 == n2
+            && length ps1 == length ps2
+            && all (uncurry compatibleType) (zip ps1 ps2)
+            && length rs1 == length rs2
+            && all (\((k1,v1),(k2,v2)) -> k1 == k2 && compatibleType v1 v2) (zip rs1 rs2)
+        compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
+        compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
+        compatibleType (NatLitT n1) (NatLitT n2) = n1 == n2
+        compatibleType t1 t2 = t1 == t2
 
     ----- NOTE: Some cases are inseperable, the code above does not
     ----- account for this, which may allow incorrect code to be

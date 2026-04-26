@@ -700,7 +700,6 @@ desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
 desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
-desugarExpr (Loc sp CHolE) = freshExprSpan sp HolE
 -- Intrinsics: eta-expand when under-applied so they behave as first-class functions
 desugarExpr (Loc sp (CIntrinsicE name)) = do
   intr <- resolveIntrinsic (startPos sp) name
@@ -725,6 +724,22 @@ desugarExpr (Loc sp (CParenE inner@(Loc _ CBopE{}))) = do
   inner' <- desugarExpr inner
   freshExprSpan sp (ParenE inner')
 desugarExpr (Loc _ (CParenE inner)) = desugarExpr inner
+desugarExpr (Loc sp (CLeftSecE lhs opTok)) = do
+  idx <- freshIdSpan sp
+  let v = EV ("_sect_" <> T.pack (show idx))
+  lhs' <- desugarExpr lhs
+  vExpr <- freshExprSpan sp (VarE defaultValue v)
+  opI <- freshIdSpan (Span (locPos opTok) (locPos opTok))
+  bopExpr <- freshExprSpan sp (BopE lhs' opI (tokToEVar opTok) vExpr)
+  freshExprSpan sp (LamE [v] bopExpr)
+desugarExpr (Loc sp (CRightSecE opTok rhs)) = do
+  idx <- freshIdSpan sp
+  let v = EV ("_sect_" <> T.pack (show idx))
+  rhs' <- desugarExpr rhs
+  vExpr <- freshExprSpan sp (VarE defaultValue v)
+  opI <- freshIdSpan (Span (locPos opTok) (locPos opTok))
+  bopExpr <- freshExprSpan sp (BopE vExpr opI (tokToEVar opTok) rhs')
+  freshExprSpan sp (LamE [v] bopExpr)
 desugarExpr (Loc _ (CBopE lhs opTok rhs)) = do
   lhs' <- desugarExpr lhs
   rhs' <- desugarExpr rhs

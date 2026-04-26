@@ -1,0 +1,12 @@
+-- Test that typeclass operators work with nullary type aliases.
+-- Celsius is an alias for Int, so it should inherit the Integral
+-- instance and support (+).
+
+module main (bar)
+
+import root-py
+
+type Celsius = Int
+
+bar :: Celsius -> Celsius
+bar x = x + 42

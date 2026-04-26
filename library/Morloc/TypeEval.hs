@@ -19,6 +19,7 @@ module Morloc.TypeEval
   , evaluateStep
   , pairEval
   , reduceType
+  , reduceTypeLeaves
   ) where
 
 import qualified Data.Set as Set
@@ -70,6 +71,37 @@ reduceType scope t0 =
   case evaluateStep scope t0 of
     (Just t1) -> if t1 == t0 then Nothing else Just t1
     Nothing -> Nothing
+
+-- | Reduce aliases one step inside compound types. When the top-level
+-- constructor is not an alias (e.g., FunU), reduceType returns Nothing.
+-- This function descends into compound types and reduces each leaf alias
+-- one step via reduceType. Returns Nothing if no leaf changed.
+reduceTypeLeaves :: Scope -> TypeU -> Maybe TypeU
+reduceTypeLeaves scope t0 =
+  let (t1, changed) = go t0
+  in if changed then Just t1 else Nothing
+  where
+    go t = case reduceType scope t of
+      Just t' -> (t', True)
+      Nothing -> descend t
+
+    descend (FunU ts t) =
+      let (ts', cs1) = unzip (map go ts)
+          (t', c2) = go t
+      in (FunU ts' t', or (c2 : cs1))
+    descend (AppU f ts) =
+      let (f', c1) = go f
+          (ts', cs) = unzip (map go ts)
+      in (AppU f' ts', or (c1 : cs))
+    descend (NamU o n ps rs) =
+      let (ps', cs1) = unzip (map go ps)
+          (vs', cs2) = unzip (map (go . snd) rs)
+      in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
+    descend (EffectU effs t) =
+      let (t', c) = go t in (EffectU effs t', c)
+    descend (OptionalU t) =
+      let (t', c) = go t in (OptionalU t', c)
+    descend t = (t, False)
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
 transformType :: Scope -> TypeU -> Either MorlocError TypeU

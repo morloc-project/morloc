@@ -1,0 +1,29 @@
+-- Test that typeclass instance inheritance is blocked when the concrete
+-- type is overridden in the target language.
+--
+-- type Bytes = Str           (general: Bytes = Str)
+-- type Py => Bytes = "bytes" (Python: Bytes maps to "bytes", not "str")
+--
+-- A Python function expecting Bytes ("bytes") should NOT accept Str ("str")
+-- because the concrete types differ, even though the general types are
+-- alias-equivalent.
+
+module main (shouldFail)
+
+type Py => Str = "str"
+type Py => Int = "int"
+
+type Bytes = Str
+type Py => Bytes = "bytes"
+
+class Encode a where
+  encode :: a -> Bytes
+
+instance Encode Str where
+  source Py from "test.py" ("encode_str" as encode)
+
+-- This should fail: encode returns Bytes, but the Encode Str instance
+-- operates on "str" in Python, while Bytes is "bytes" in Python.
+-- The concrete types are incompatible.
+shouldFail :: Str -> Bytes
+shouldFail x = encode x

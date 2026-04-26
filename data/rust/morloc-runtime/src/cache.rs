@@ -40,6 +40,19 @@ fn hash_voidstar_inner(
     // All reads (Array headers, element data) are within schema-defined bounds.
     unsafe {
         match schema.serial_type {
+            SerialType::Int => {
+                // Inline BigInt: hash the value directly for size ≤ 1
+                let size = *(data as *const usize);
+                if size <= 1 {
+                    let bytes = std::slice::from_raw_parts(data.add(8), 8);
+                    Ok(hash::xxh64_with_seed(bytes, seed))
+                } else {
+                    let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
+                    let limb_data = shm::rel2abs(relptr)?;
+                    let bytes = std::slice::from_raw_parts(limb_data, size * 8);
+                    Ok(hash::xxh64_with_seed(bytes, seed))
+                }
+            }
             SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const shm::Array);
                 let elem_width = if schema.parameters.is_empty() {

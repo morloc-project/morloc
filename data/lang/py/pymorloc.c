@@ -191,6 +191,25 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
         case MORLOC_FLOAT64:
             obj = PyFloat_FromDouble(*(double*)data);
             break;
+        case MORLOC_INT: {
+            // Inline BigInt: [size:i64, value_or_relptr:i64]
+            int64_t* fields = (int64_t*)data;
+            int64_t bigint_size = fields[0];
+            if (bigint_size <= 1) {
+                // Inline: second field is the value directly
+                int64_t val = (bigint_size == 0) ? 0 : fields[1];
+                obj = PyLong_FromLongLong(val);
+            } else {
+                // Overflow: second field is relptr to limb array
+                void* limb_ptr = resolve_relptr(*(relptr_t*)&fields[1], base_ptr, NULL);
+                obj = _PyLong_FromByteArray(
+                    (const unsigned char*)limb_ptr,
+                    bigint_size * sizeof(uint64_t),
+                    1, 1  // little-endian, signed
+                );
+            }
+            break;
+        }
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
             void* tmp_ptr = NULL;
@@ -444,6 +463,18 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
             return schema->width;
+        case MORLOC_INT: {
+            // Inline BigInt: 16 bytes for common case, more for overflow
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
+            }
+            size_t nbits = _PyLong_NumBits(obj);
+            if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
+            size_t nbytes = (nbits + 8) / 8;
+            size_t nlimbs = (nbytes + 7) / 8;
+            if (nlimbs <= 1) return 16;  // inline
+            return 16 + _Alignof(uint64_t) - 1 + nlimbs * sizeof(uint64_t);
+        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
@@ -476,6 +507,7 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                         case MORLOC_FLOAT64:
                             required_size += list_size * element_width;
                             break;
+                        case MORLOC_INT:
                         case MORLOC_STRING:
                         case MORLOC_ARRAY:
                         case MORLOC_TUPLE:
@@ -661,6 +693,51 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                 PyRAISE("Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
             }
             break;
+
+        case MORLOC_INT: {
+            // Inline BigInt: [size:i64, value_or_relptr:i64]
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
+            }
+            size_t nbits = _PyLong_NumBits(obj);
+            if (nbits == (size_t)-1 && PyErr_Occurred()) { goto error; }
+            size_t nbytes = (nbits + 8) / 8;
+            size_t nlimbs = (nbytes + 7) / 8;
+            if (nlimbs == 0) nlimbs = 1;
+
+            int64_t* fields = (int64_t*)dest;
+            if (nlimbs <= 1) {
+                // Inline: write value directly
+                fields[0] = 1;
+                int overflow = 0;
+                long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
+                if (overflow || PyErr_Occurred()) {
+                    PyErr_Clear();
+                    // Shouldn't happen for nlimbs<=1, but fallback
+                    fields[1] = 0;
+                } else {
+                    fields[1] = (int64_t)val;
+                }
+            } else {
+                // Overflow: allocate limb array, store relptr
+                fields[0] = (int64_t)nlimbs;
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(uint64_t));
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)&fields[1] = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); goto error; }
+                }
+                memset(*cursor, 0, nlimbs * sizeof(uint64_t));
+                if (_PyLong_AsByteArray((PyLongObject*)obj,
+                                        (unsigned char*)*cursor,
+                                        nlimbs * sizeof(uint64_t),
+                                        1, 1) < 0) {
+                    goto error;
+                }
+                *cursor = (char*)*cursor + nlimbs * sizeof(uint64_t);
+            }
+            break;
+        }
 
         case MORLOC_STRING:
         case MORLOC_ARRAY:

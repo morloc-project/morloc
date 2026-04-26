@@ -81,7 +81,7 @@ data NexusExpr
   | SaveX Text Text NexusExpr NexusExpr  -- format + schema + value + path -> ()
   | LoadX Text NexusExpr  -- schema + path -> ?a
 
-data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX
+data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
 -- ======================================================================
 -- Data extraction
@@ -261,17 +261,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       return $ case s of
         (SerialFloat32 _) -> LitX F32X (MT.pack (show v))
         _ -> LitX F64X (MT.pack (show v))
-    toNexusExpr (AnnoS (Idx _ t) _ (IntS v)) = do
+    toNexusExpr (AnnoS (Idx i t) _ (IntS v)) = do
       s <- generalTypeToSerialAST t
+      checkIntBounds i v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
         (SerialInt16 _) -> LitX I16X (MT.pack (show v))
-        (SerialInt _) -> LitX I32X (MT.pack (show v))
+        (SerialInt _) -> LitX IntX (MT.pack (show v))
         (SerialInt32 _) -> LitX I32X (MT.pack (show v))
         (SerialInt64 _) -> LitX I64X (MT.pack (show v))
         (SerialUInt8 _) -> LitX U8X (MT.pack (show v))
         (SerialUInt16 _) -> LitX U16X (MT.pack (show v))
-        (SerialUInt _) -> LitX U32X (MT.pack (show v))
+        (SerialUInt _) -> LitX U64X (MT.pack (show v))
         (SerialUInt32 _) -> LitX U32X (MT.pack (show v))
         (SerialUInt64 _) -> LitX U64X (MT.pack (show v))
         _ -> LitX I64X (MT.pack (show v))
@@ -309,6 +310,26 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       StrX <$> type2schema t <*> pure v
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
+
+checkIntBounds :: Int -> Integer -> SerialAST -> MorlocMonad ()
+checkIntBounds i v s =
+  let (name, lo, hi) = case s of
+        SerialInt8 _  -> ("Int8", -128, 127)
+        SerialInt16 _ -> ("Int16", -32768, 32767)
+        SerialInt32 _ -> ("Int32", -2147483648, 2147483647)
+        SerialInt _   -> ("", v, v) -- variable-width, no overflow possible
+        SerialInt64 _ -> ("Int64", -9223372036854775808, 9223372036854775807)
+        SerialUInt8 _  -> ("UInt8", 0, 255)
+        SerialUInt16 _ -> ("UInt16", 0, 65535)
+        SerialUInt32 _ -> ("UInt32", 0, 4294967295)
+        SerialUInt _   -> ("UInt", 0, 18446744073709551615)
+        SerialUInt64 _ -> ("UInt64", 0, 18446744073709551615)
+        _ -> ("", v, v) -- no check for non-integer types
+  in CM.when (v < lo || v > hi) $
+       MM.throwSourcedError i $
+         "Integer literal " <> pretty v
+         <> " overflows " <> (name :: MDoc)
+         <> " (range " <> pretty lo <> " to " <> pretty hi <> ")"
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
@@ -601,6 +622,7 @@ litSchemaStr U32X = "u4"
 litSchemaStr U64X = "u8"
 litSchemaStr BoolX = "b"
 litSchemaStr NullX = "z"
+litSchemaStr IntX = "j"
 
 -- ======================================================================
 -- Manifest builder
