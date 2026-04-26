@@ -1,4 +1,4 @@
-module main (s1, s2, s3, s4)
+module main (s1, s2, s3, s4, s5, s6, s7, s8)
 
 s1 =
   """
@@ -15,3 +15,15 @@ s3 = '''single quotes are also OK'''
 s4 =
   """
   """
+
+-- quote right before closing: """bar - "foo"""" has content bar - "foo"
+s5 = """bar - "foo""""
+
+-- seven quotes total: """ + " + """ -> content is "
+s6 = """""""
+
+-- single-quote variant: content is bar - 'foo'
+s7 = '''bar - 'foo''''
+
+-- seven single quotes: ''' + ' + ''' -> content is '
+s8 = '''''''

@@ -503,9 +503,12 @@ lexMultilineString :: Pos -> String -> String -> LexState -> Either LexError Lex
 lexMultilineString start delim input st = go (advanceCol start 3) input []
   where
     delimLen = length delim
+    delimChar = head delim
 
     go pos s acc
-      | take delimLen s == delim =
+      | take delimLen s == delim
+      , let rest = drop delimLen s
+      , null rest || head rest /= delimChar =
           let rawTxt = T.pack (reverse acc)
               txt = processMultilineString rawTxt
               fullTxt = T.pack delim <> rawTxt <> T.pack delim
@@ -560,9 +563,12 @@ lexMultilineAfterInterp :: Pos -> String -> LexState -> Pos -> String -> Either 
 lexMultilineAfterInterp pos input st _ delim = go pos input []
   where
     delimLen = length delim
+    delimChar = if null delim then '\0' else head delim
 
     go p s acc
-      | delimLen > 0 && take delimLen s == delim =
+      | delimLen > 0 && take delimLen s == delim
+      , let rest' = drop delimLen s
+      , null rest' || head rest' /= delimChar =
           let txt = T.pack (reverse acc)
            in Right
                 st
@@ -766,7 +772,7 @@ processMultilineString txt =
         let nonEmpty = filter (not . T.null . T.strip) ls
             spaces = map (T.length . T.takeWhile (== ' ')) nonEmpty
             minSpaces = if null spaces then 0 else minimum spaces
-         in T.unlines (map (T.drop minSpaces) ls)
+         in T.intercalate "\n" (map (T.drop minSpaces) ls)
 
 -- Position helpers
 advanceCol :: Pos -> Int -> Pos
