@@ -29,6 +29,7 @@ module UnitTypeTests
   , natArithTests
   , natLabelTests
   , natKindPromotionTests
+  , natDimTests
   , letBindingTests
   , aliasConstructorTests
   ) where
@@ -3024,6 +3025,43 @@ natErrorTests =
       x :: SizedList 4 Int
       x = append a b
         |]
+    ]
+
+natDimTests :: TestTree
+natDimTests =
+  testGroup
+    "nat dimension checking on list literals"
+    [ expectError
+        "list literal dimension mismatch (3 != 4)"
+        [r|
+      module main (foo)
+      type Matrix (m :: Nat) (n :: Nat) a = [[a]]
+      foo = [[1,2,3],[4,5,6]] :: Matrix 2 4 Int
+        |]
+    , testCase "list literal dimensions match" $ do
+        result <- runFront [r|
+          module main (foo)
+          type Matrix (m :: Nat) (n :: Nat) a = [[a]]
+          foo = [[1,2,3],[4,5,6]] :: Matrix 2 3 Int
+            |]
+        case result of
+          Right _ -> return ()
+          Left e -> assertFailure $ "Expected success, got: " <> show e
+    , testCase "infer nat dimensions from list literal" $ do
+        result <- runFrontRaw [r|
+          module main (foo)
+          type Matrix (m :: Nat) (n :: Nat) a = [[a]]
+          foo :: Matrix m n Int
+          foo = [[1,2,3],[4,5,6]]
+            |]
+        case result of
+          Right [x] ->
+            let t = gtypeof x
+            in case t of
+              AppU (VarU (TV "Matrix")) [NatLitU 2, NatLitU 3, _] -> return ()
+              _ -> assertFailure $ "Expected Matrix 2 3 Int, got: " <> show t
+          Right _ -> assertFailure "Expected exactly one export"
+          Left e -> assertFailure $ "Expected success, got: " <> show e
     ]
 
 natArithTests :: TestTree

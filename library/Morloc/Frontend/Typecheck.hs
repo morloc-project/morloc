@@ -1023,6 +1023,35 @@ checkE i g (EvalS e) t = do
 checkE i g e t@(ExistU v _ _)
   | Just _ <- lookupU v g
   = checkE' i g e (apply g t)
+-- Nat dimension checking for list literals against nat-parameterized aliases
+checkE i g1 e1@(LstS _) b = do
+  (g2, a, e2) <- synthE' i g1 e1
+  let a' = apply g2 a
+      b' = apply g2 b
+  scope <- MM.getGeneralScope i
+  case subtype scope a' b' g2 of
+    Right g3 -> do
+      let natArgs = getNatArgs scope b'
+      g4 <- checkListNatDims i g3 natArgs e2
+      return (g4, apply g4 b', e2)
+    Left err ->
+      case tryCoerce scope a' b' g2 of
+        Just (coercions, g3) -> do
+          (finalExpr, _) <- foldlM
+            (\(expr, currentType) coercion -> do
+              idx <- MM.getCounterWithPos i
+              let wrappedAnno = AnnoS (Idx idx currentType) i expr
+              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+            (e2, apply g3 a')
+            coercions
+          let natArgs = getNatArgs scope b'
+          g4 <- checkListNatDims i g3 natArgs finalExpr
+          return (g4, apply g4 b', finalExpr)
+        Nothing -> MM.throwSourcedError i $
+          "Type mismatch:"
+          <> line <> "  expected: " <> prettyTypeU b'
+          <> line <> "  inferred: " <> prettyTypeU a'
+          <> line <> err
 --   Sub (with coercion fallback)
 checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
@@ -1060,6 +1089,28 @@ subtype' i a b g = do
         MM.sayV $ "Warning: deferred Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
         ) newDeferred
       return g'
+
+-- | Extract nat-kinded argument values from a type, given the Scope.
+-- For Matrix 2 4 Int with alias params [(m, KindNat), (n, KindNat), (a, KindType)]
+-- and args [NatLitU 2, NatLitU 4, VarU Int], returns [NatLitU 2, NatLitU 4].
+getNatArgs :: Scope -> TypeU -> [TypeU]
+getNatArgs scope (AppU (VarU v) args) =
+  case Map.lookup v scope of
+    Just ((params, _, _, _) : _) ->
+      [arg | (Left (_, KindNat), arg) <- zip params args]
+    _ -> []
+getNatArgs _ _ = []
+
+-- | Recursively check nat dimension constraints on list literals.
+-- At each nesting level, checks length(xs) ~ natArg.
+-- For checking (NatLitU): error on mismatch.
+-- For inference (NatVarU): solves the variable via NatSolver.
+checkListNatDims :: Int -> Gamma -> [TypeU] -> ExprS (Indexed TypeU) ManyPoly Int -> MorlocMonad Gamma
+checkListNatDims _ g [] _ = return g
+checkListNatDims i g (nat:nats) (LstS xs) = do
+  g' <- subtype' i (NatLitU (fromIntegral (length xs))) nat g
+  foldlM (\g'' (AnnoS _ _ x) -> checkListNatDims i g'' nats x) g' xs
+checkListNatDims _ g _ _ = return g
 
 -- | Try to find a coercion chain from type a to type b.
 -- Returns a list of coercions (inside-out) and the resulting gamma.

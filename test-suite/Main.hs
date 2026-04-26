@@ -36,6 +36,7 @@ main = do
       , natArithTests
       , natLabelTests
       , natKindPromotionTests
+      , natDimTests
       , letBindingTests
       , aliasConstructorTests
 
