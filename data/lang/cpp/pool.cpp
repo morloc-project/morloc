@@ -24,9 +24,6 @@
 #include <limits>
 #include <utility>
 
-
-using namespace std;
-
 char* g_tmpdir;
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));

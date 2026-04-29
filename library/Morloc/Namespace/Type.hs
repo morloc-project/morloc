@@ -149,6 +149,9 @@ data Type
   | NatMulT Type Type
   | NatSubT Type Type
   | NatDivT Type Type
+  | NatVoidT  -- ^ Erased phantom Nat slot. Distinct from NatLitT 0
+              -- (which is a real empty-dim measurement). See note on
+              -- NatVoidU in TypeU below.
   deriving (Show, Ord, Eq)
 
 data OpenOrClosed = Open | Closed
@@ -176,6 +179,13 @@ data TypeU
   | NatMulU TypeU TypeU
   | NatSubU TypeU TypeU
   | NatDivU TypeU TypeU
+  | NatVoidU  -- ^ Erased phantom Nat slot. Substituted in for missing
+              -- Nat-kinded args (kind realignment in expandHeadOnly), or
+              -- when a NatVar / NatAdd / unresolved variable is reduced
+              -- to ground form during weaving. Distinct from `NatLitU 0`
+              -- (a real empty-dim measurement) so downstream consumers
+              -- (pretty printer, dim reification in Serial.hs, equality)
+              -- can tell phantoms apart from real measurements.
   | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
@@ -285,6 +295,7 @@ instance Typelike Type where
       sub (NatMulT a b) = NatMulT (sub a) (sub b)
       sub (NatSubT a b) = NatSubT (sub a) (sub b)
       sub (NatDivT a b) = NatDivT (sub a) (sub b)
+      sub t@NatVoidT = t
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
@@ -298,6 +309,7 @@ instance Typelike Type where
   free (NatMulT a b) = Set.union (free a) (free b)
   free (NatSubT a b) = Set.union (free a) (free b)
   free (NatDivT a b) = Set.union (free a) (free b)
+  free NatVoidT = Set.empty
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
@@ -312,7 +324,7 @@ instance Typelike Type where
 
 instance Typelike TypeU where
   typeOf (VarU v) = VarT v
-  typeOf (NatVarU _) = NatLitT 0
+  typeOf (NatVarU _) = NatVoidT
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
@@ -326,6 +338,7 @@ instance Typelike TypeU where
   typeOf (NatMulU a b) = NatMulT (typeOf a) (typeOf b)
   typeOf (NatSubU a b) = NatSubT (typeOf a) (typeOf b)
   typeOf (NatDivU a b) = NatDivT (typeOf a) (typeOf b)
+  typeOf NatVoidU = NatVoidT
   typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
@@ -343,6 +356,7 @@ instance Typelike TypeU where
   free (NatMulU a b) = Set.union (free a) (free b)
   free (NatSubU a b) = Set.union (free a) (free b)
   free (NatDivU a b) = Set.union (free a) (free b)
+  free NatVoidU = Set.empty
   free (LabeledU _ t) = free t
 
   substituteTVar v (ForallU q r) t =
@@ -374,6 +388,7 @@ instance Typelike TypeU where
       sub (NatMulU a b) = NatMulU (sub a) (sub b)
       sub (NatSubU a b) = NatSubU (sub a) (sub b)
       sub (NatDivU a b) = NatDivU (sub a) (sub b)
+      sub t@NatVoidU = t
       sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
@@ -421,6 +436,23 @@ instance P.PartialOrd TypeU where
   (<=) (NatMulU a1 b1) (NatMulU a2 b2) = a1 P.<= a2 && b1 P.<= b2
   (<=) (NatSubU a1 b1) (NatSubU a2 b2) = a1 P.<= a2 && b1 P.<= b2
   (<=) (NatDivU a1 b1) (NatDivU a2 b2) = a1 P.<= a2 && b1 P.<= b2
+  -- NatVoid is wildcard-compatible with any Nat: erased phantoms compare
+  -- as equal to any real (or other erased) Nat slot. This preserves the
+  -- pre-existing behavior where NatLitU 0 was used as an "any Nat"
+  -- placeholder.
+  (<=) NatVoidU (NatLitU _) = True
+  (<=) (NatLitU _) NatVoidU = True
+  (<=) NatVoidU (NatAddU _ _) = True
+  (<=) (NatAddU _ _) NatVoidU = True
+  (<=) NatVoidU (NatMulU _ _) = True
+  (<=) (NatMulU _ _) NatVoidU = True
+  (<=) NatVoidU (NatSubU _ _) = True
+  (<=) (NatSubU _ _) NatVoidU = True
+  (<=) NatVoidU (NatDivU _ _) = True
+  (<=) (NatDivU _ _) NatVoidU = True
+  (<=) NatVoidU (NatVarU _) = True
+  (<=) (NatVarU _) NatVoidU = True
+  (<=) NatVoidU NatVoidU = True
   (<=) (LabeledU _ t1) t2 = t1 P.<= t2
   (<=) t1 (LabeledU _ t2) = t1 P.<= t2
   (<=) _ _ = False
@@ -511,6 +543,7 @@ extractKey (NatAddU _ _) = TV "Nat"
 extractKey (NatMulU _ _) = TV "Nat"
 extractKey (NatSubU _ _) = TV "Nat"
 extractKey (NatDivU _ _) = TV "Nat"
+extractKey NatVoidU = TV "Nat"
 extractKey (LabeledU _ t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
@@ -527,10 +560,11 @@ type2typeu (NatAddT a b) = NatAddU (type2typeu a) (type2typeu b)
 type2typeu (NatMulT a b) = NatMulU (type2typeu a) (type2typeu b)
 type2typeu (NatSubT a b) = NatSubU (type2typeu a) (type2typeu b)
 type2typeu (NatDivT a b) = NatDivU (type2typeu a) (type2typeu b)
+type2typeu NatVoidT = NatVoidU
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (NatVarU _) = NatLitT 0
+unresolvedType2type (NatVarU _) = NatVoidT
 unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
@@ -543,6 +577,7 @@ unresolvedType2type (NatAddU a b) = NatAddT (unresolvedType2type a) (unresolvedT
 unresolvedType2type (NatMulU a b) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (NatSubU a b) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (NatDivU a b) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type NatVoidU = NatVoidT
 unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | get a fresh variable name that is not used in t1 or t2
@@ -587,6 +622,7 @@ containsUnk (NatAddT a b) = containsUnk a || containsUnk b
 containsUnk (NatMulT a b) = containsUnk a || containsUnk b
 containsUnk (NatSubT a b) = containsUnk a || containsUnk b
 containsUnk (NatDivT a b) = containsUnk a || containsUnk b
+containsUnk NatVoidT = False
 
 ----- Pretty instances -------------------------------------------------------
 
@@ -620,6 +656,7 @@ instance Pretty Type where
       f _ (NatMulT a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f _ (NatSubT a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivT a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
+      f _ NatVoidT = "_"
       f False t = parens (f True t)
       f _ (FunT [] t) = "() -> " <> f False t
       f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
@@ -659,6 +696,7 @@ instance Pretty TypeU where
       f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
+      f _ NatVoidU = "_"
       f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =

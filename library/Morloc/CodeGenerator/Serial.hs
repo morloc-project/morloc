@@ -40,11 +40,26 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify)
 
+-- | Classification of how an aliased outer type maps onto the wire form.
+-- Computed by 'makeSerialAST'' from the gscope alias body's outer head.
+-- The outer fv (runtime identity) is preserved separately on List/Tuple
+-- shapes so the user's concrete mapping survives onto the schema hint.
+data AliasShape
+  = AliasIsList TypeU      -- ^ body is `List elemT`; element type carried
+  | AliasIsTuple [TypeU]   -- ^ body is `Tuple_n a b ...`; field types carried
+  | AliasIsOther TypeU     -- ^ body is some other AppU; route via Packable
+  | AliasIsNone            -- ^ outer is its own head (no aliasing)
+
 -- | recurse all the way to a serializable type
+--
+-- For SerialList, the optional dim is reified as a leading NatLitF arg when
+-- present. This keeps macro indices (`$N`) in concrete-type bodies (e.g.
+-- `"std::vector<$2>" n a`) aligned positionally with the AppF args. List
+-- nodes without a dim emit a single-arg AppF, matching `"std::vector<$1>" a`.
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
-serialAstToType (SerialList v _ s) = AppF (VarF v) [serialAstToType s]
-serialAstToType (SerialTensor v _ _ s) = AppF (VarF v) [serialAstToType s]
+serialAstToType (SerialList v (Just d) s) = AppF (VarF v) [NatLitF d, serialAstToType s]
+serialAstToType (SerialList v Nothing s) = AppF (VarF v) [serialAstToType s]
 serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
@@ -100,10 +115,6 @@ serialAstToMsgpackSchema (SerialList v dim s) =
   where
     encodeDim Nothing = ""
     encodeDim (Just n) = ":" <> pretty n
-serialAstToMsgpackSchema (SerialTensor v ndim dims s) =
-  addHint v <> "T" <> encode64D ndim <> encodeDims dims <> serialAstToMsgpackSchema s
-  where
-    encodeDims ds = foldMap (\d -> ":" <> pretty (maybe (0 :: Integer) id d)) ds
 serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
 serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
   where
@@ -134,9 +145,13 @@ addHint (FV _ (CV "")) = "" -- no hint if no concrete type is defined
 addHint (FV _ (CV v)) = "<" <> pretty v <> ">"
 
 -- | get only the toplevel type
+--
+-- See 'serialAstToType' for the dim-as-NatLitF convention used to keep macro
+-- indices aligned with concrete-type bodies.
 shallowType :: SerialAST -> TypeF
 shallowType (SerialPack _ (p, _)) = typePackerPacked p
-shallowType (SerialList v _ s) = AppF (VarF v) [shallowType s]
+shallowType (SerialList v (Just d) s) = AppF (VarF v) [NatLitF d, shallowType s]
+shallowType (SerialList v Nothing s) = AppF (VarF v) [shallowType s]
 shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
 shallowType (SerialObject o n ps rs) =
   let ts = map (shallowType . snd) rs
@@ -158,7 +173,6 @@ shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
-shallowType (SerialTensor v _ _ s) = AppF (VarF v) [shallowType s]
 shallowType (SerialUnknown v) = UnkF v
 
 findPackers ::
@@ -306,45 +320,111 @@ makeSerialAST m lang t0 = do
         selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
     makeSerialAST' _ _ t@(FunF _ _) =
       MM.throwSourcedError m $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
+    -- Wire-form construction for an applied type `Foo a b ...`.
+    --
+    -- Two pieces of information drive dispatch here:
+    --   * fv -- the OUTER (general, concrete) name pair from the woven TypeF.
+    --     Carries the user's concrete mapping (e.g. std::deque, numpy.ndarray)
+    --     and is the runtime identity that survives onto the wire schema hint.
+    --   * The gscope alias body of the outer type (one-step expansion). This
+    --     tells us the WIRE STRUCTURE -- list-shaped, tuple-shaped, or
+    --     opaque-and-Packable-routed -- independent of the concrete mapping.
+    --
+    -- These are two different facts about the same type and must come from
+    -- different scopes: cscope is authoritative for runtime identity (already
+    -- resolved by inferConcreteType via pairEval); gscope is authoritative for
+    -- wire structure (only the alias body says "Deque is list-shaped").
     makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
       | null runtimeTs = MM.throwSourcedError m $ "No runtime type args for" <+> pretty ft
-      -- When alias expansion changed the root type, re-infer the concrete
-      -- type for the expanded general form and recurse, threading nat dims
-      -- through SerialList nesting levels.
-      | Just fv' <- finalVar, fv' /= generalTypeName, Just expanded <- evaluatedType = do
-          expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
-          ast <- makeSerialAST' gscope typepackers expandedTf
-          return $ applyDimsToList dims ast
-      | finalVar == Just BT.list = SerialList fv Nothing <$> makeSerialAST' gscope typepackers (head runtimeTs)
-      | finalVar == Just (BT.tuple (length runtimeTs)) =
-          SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
-      | Just ndim <- tensorNDim finalVar =
-          SerialTensor fv ndim dims <$> makeSerialAST' gscope typepackers (last runtimeTs)
-      | otherwise = case Map.lookup generalTypeName typepackers of
+      | otherwise = case aliasShape of
+          -- Outer alias body is list-shaped (`type Deque a = List a`,
+          -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
+          -- Emit SerialList carrying the outer fv; recurse on the body's
+          -- element. Inner element types are passed through unmodified so
+          -- specialized variants (Int32, Float32) keep their schema width.
+          AliasIsList elemU -> do
+            elemTf <- inferConcreteType lang (Idx m (typeOf elemU))
+            elemAST <- makeSerialAST' gscope typepackers elemTf
+            return $ applyDimsToList dims (SerialList fv Nothing elemAST)
+
+          -- Outer alias body is tuple-shaped (`type Pair a b = (a, b)`).
+          -- Same pattern as list: outer fv on the SerialTuple, recurse on
+          -- each body arg.
+          AliasIsTuple bodyArgs -> do
+            elemTfs <- mapM (inferConcreteType lang . Idx m . typeOf) bodyArgs
+            elemASTs <- mapM (makeSerialAST' gscope typepackers) elemTfs
+            return $ SerialTuple fv elemASTs
+
+          -- Outer alias body is something else (`type Foo a = SomePackedT a`).
+          -- The user wants serialization to route through SomePackedT's
+          -- Packable instance, so we deliberately drop the outer fv: recurse
+          -- on the expanded form and let it find the Packable below.
+          AliasIsOther expanded -> do
+            expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
+            ast <- makeSerialAST' gscope typepackers expandedTf
+            return $ applyDimsToList dims ast
+
+          -- No outer aliasing: the type is its own head. Dispatch on it
+          -- directly: list / tuple / Packable lookup.
+          AliasIsNone
+            | finalVar == Just BT.list ->
+                SerialList fv Nothing <$> makeSerialAST' gscope typepackers (head runtimeTs)
+            | finalVar == Just (BT.tuple (length runtimeTs)) ->
+                SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
+            | otherwise -> packableFallback
+      where
+        -- TypeU-level Nat predicate for filtering alias-body args.
+        -- (TypeF version lives in CodeGenerator.Namespace as 'isNatTypeF'.)
+        isNatLikeU :: TypeU -> Bool
+        isNatLikeU (NatLitU _) = True
+        isNatLikeU (NatVarU _) = True
+        isNatLikeU (NatAddU _ _) = True
+        isNatLikeU (NatMulU _ _) = True
+        isNatLikeU (NatSubU _ _) = True
+        isNatLikeU (NatDivU _ _) = True
+        isNatLikeU NatVoidU = True
+        isNatLikeU _ = False
+
+        -- Classify the outer alias body's wire shape. Empty when the type
+        -- is its own head (no aliasing); otherwise tagged by the body's
+        -- structural head (List, Tuple, or anything else).
+        aliasShape = case evaluatedType of
+          Just expanded@(AppU (VarU h) bodyArgs)
+            | h == generalTypeName -> AliasIsNone   -- alias reduced to itself
+            | h == BT.list
+            , [elemU] <- filter (not . isNatLikeU) bodyArgs ->
+                AliasIsList elemU
+            | let bodyRT = filter (not . isNatLikeU) bodyArgs
+            , h == BT.tuple (length bodyRT) ->
+                AliasIsTuple bodyRT
+            | otherwise -> AliasIsOther expanded
+          _ -> AliasIsNone
+
+        -- Look up a Packable instance for the outer type and emit a
+        -- SerialPack, or raise a helpful error if no instance is registered.
+        packableFallback = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
             packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
             unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
             selection <- selectPacker (zip packers unpacked)
             return $ SerialPack fv selection
           Nothing ->
-            MM.throwSourcedError m $
-              "Cannot find" <+> pretty generalTypeName <+> "from" <+> dquotes (pretty fv)
-                <> "\n  ft:" <+> pretty ft
-                <> "\n  finalVar:" <+> pretty finalVar
-                <> "\n  gscope:" <+> viaShow gscope
-                <> "\n  general t:" <+> (viaShow . fst $ unweaveTypeF ft)
-                <> "\n  concrete t:" <+> (viaShow . snd $ unweaveTypeF ft)
-                <> "\n  typepackers:" <+> viaShow typepackers
-      where
-        -- Filter out Nat-kinded type params (phantom, not serialized)
-        isNatTypeF :: TypeF -> Bool
-        isNatTypeF (NatLitF _) = True
-        isNatTypeF _ = False
+            let (gt, ct) = unweaveTypeF ft
+            in MM.throwSourcedError m $
+                 "No Packable instance for type" <+> squotes (pretty gt)
+                   <> " (concrete:" <+> pretty ct <> ")."
+                   <> "\nDefine an instance, e.g.:"
+                   <> "\n  instance Packable <wire> (" <> pretty generalTypeName <+> "...) where ..."
+                   <> "\nor map" <+> pretty generalTypeName
+                   <+> "to a primitive list / tuple / sourced type."
 
-        -- Extract dimension constraints from nat-kinded type args
+        -- Extract dimension constraints from nat-kinded type args.
+        -- Every NatLitF position is reified, including 0 (a valid empty
+        -- dimension). Preserving the dim slot is what keeps positional
+        -- macros in concrete-type bodies aligned at the shallowType /
+        -- serialAstToType layer.
         dims :: [Maybe Integer]
-        dims = [case t of NatLitF n | n > 0 -> Just n; _ -> Nothing
-               | t <- ts0, isNatTypeF t]
+        dims = [Just n | NatLitF n <- ts0]
 
         -- Apply dimension constraints to nested SerialList nodes.
         -- Each dim in the list is consumed by one nesting level.
@@ -369,20 +449,19 @@ makeSerialAST m lang t0 = do
         basevar (NatMulU _ _) = Nothing
         basevar (NatSubU _ _) = Nothing
         basevar (NatDivU _ _) = Nothing
+        basevar NatVoidU = Nothing
         basevar (LabeledU _ t) = basevar t
 
         generalType = fst $ unweaveTypeF ft
 
-        evaluatedType =
-          case TE.evaluateType gscope generalType of
-            Right et | et /= generalType -> Just et
-            _ -> Nothing
+        -- Expand only the outer alias, preserving inner type args. Full
+        -- evaluation (TE.evaluateType) would chase inner aliases too,
+        -- collapsing element types like Int32 into Int and producing the
+        -- wrong serialization width. The downstream inferConcreteType call
+        -- will resolve concrete types through both scopes correctly.
+        evaluatedType = TE.expandHeadOnly gscope generalType
 
         finalVar = basevar $ maybe generalType id evaluatedType
-
-        tensorNDim :: Maybe TVar -> Maybe Int
-        tensorNDim (Just v) = lookup v [(BT.tensor k, k) | k <- [1..5]]
-        tensorNDim Nothing = Nothing
 
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
         selectPacker [] =
@@ -538,6 +617,7 @@ unweaveTypeF (OptionalF t) =
 
 -- Nat types have no concrete/general distinction; duplicate as-is
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
+unweaveTypeF NatVoidF = (NatVoidU, NatVoidU)
 
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
@@ -557,10 +637,33 @@ weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
 weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
-weaveTypeF (NatVarU _) _ = NatLitF 0  -- Nat vars erased in concrete type
+weaveTypeF NatVoidU _ = NatVoidF
+weaveTypeF (NatVarU _) _ = NatVoidF  -- Nat vars erased in concrete type
+-- Nat arithmetic: try to reduce to a ground Integer. If every leaf is a
+-- NatLit, produce a NatLitF; otherwise produce the NatVoidF sentinel
+-- (the dimension is symbolic / unresolvable at this site, not 0).
+weaveTypeF nat@(NatAddU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
+weaveTypeF nat@(NatMulU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
+weaveTypeF nat@(NatSubU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
+weaveTypeF nat@(NatDivU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
 weaveTypeF (LabeledU _ gt) ct = weaveTypeF gt ct
 weaveTypeF gt (LabeledU _ ct) = weaveTypeF gt ct
 weaveTypeF gt ct = error . show $ (gt, ct)
+
+-- Recursively evaluate a Nat expression to an Integer. Returns Nothing if
+-- the expression contains an unresolvable leaf (NatVar / NatVoid / non-Nat
+-- shape). Callers turn Nothing into the NatVoidF sentinel rather than
+-- collapsing to a fake 0 value.
+reduceNat :: TypeU -> Maybe Integer
+reduceNat (NatLitU n) = Just n
+reduceNat (NatAddU a b) = (+) <$> reduceNat a <*> reduceNat b
+reduceNat (NatMulU a b) = (*) <$> reduceNat a <*> reduceNat b
+reduceNat (NatSubU a b) = (-) <$> reduceNat a <*> reduceNat b
+reduceNat (NatDivU a b) = do
+  x <- reduceNat a
+  y <- reduceNat b
+  if y == 0 then Nothing else Just (x `div` y)
+reduceNat _ = Nothing
 
 -- | Check if a SerialAST's root has the "arrow" concrete type hint
 hasArrowHint :: SerialAST -> Bool
@@ -603,7 +706,6 @@ isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
-isSerializable (SerialTensor _ _ _ x) = isSerializable x
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -630,5 +732,4 @@ prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
-prettySerialOne (SerialTensor _ ndim _ x) = "SerialTensor" <> pretty ndim <> parens (prettySerialOne x)
 prettySerialOne (SerialUnknown _) = "SerialUnknown"

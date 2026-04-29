@@ -236,6 +236,13 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
 -- the alias chain. This prevents sibling aliases from inheriting each
 -- other's instances: walking A' -> Str never reaches A (a sibling),
 -- but walking B -> A does reach A (a parent).
+--
+-- This walks gt's chain only. Walking the instance's chain too (so that
+-- e.g. an instance with head `Vector (d1*d2) a` matches a call site with
+-- head `List a`) was tried and reverted: it broke nominal-distinct
+-- aliases like Deque a / Array a / Vector n a -- all alias to List a,
+-- but each has its own typeclass instances that should NOT be applied
+-- to List call sites. Bidirectional walking conflates them.
 filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
 filterByAliasChain scope gt0 candidates = go gt0
   where
@@ -256,6 +263,16 @@ filterByAliasChain scope gt0 candidates = go gt0
 -- ExistU act as wildcards (match anything). Other VarU nodes require exact
 -- name match. This checks if an instance type matches the call-site type
 -- at a specific alias level without evaluating aliases.
+--
+-- Nat positions are treated permissively: if both positions are Nat-kinded
+-- expressions (literal, variable, or arithmetic), they are considered
+-- compatible at this filtering stage. Strict equivalence is enforced later
+-- by `isSubtypeOf2` / `subtype`, which run the Nat SOP solver and can
+-- reduce expressions like `2*2` to `4`. Without this leniency, an instance
+-- whose head carries a Nat-arithmetic constraint (e.g. Vector (d1*d2) a)
+-- would be filtered out before subtyping can prove the constraint, with
+-- the call site's literal Nat (e.g. Vector 4 Real) treated as structurally
+-- distinct from the instance's expression.
 compatibleTypeU :: TypeU -> TypeU -> Bool
 compatibleTypeU = go Set.empty Set.empty
   where
@@ -284,8 +301,20 @@ compatibleTypeU = go Set.empty Set.empty
         && all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2) (zip rs1 rs2)
     go b1 b2 (OptionalU t1) (OptionalU t2) = go b1 b2 t1 t2
     go b1 b2 (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && go b1 b2 t1 t2
-    go _  _  (NatLitU n1) (NatLitU n2) = n1 == n2
+    -- Nat-kinded positions: any Nat expression matches any other. The
+    -- isSubtypeOf2 / subtype pipeline does proper Nat solving downstream.
+    go _  _  t1 t2 | isNatExprT t1 && isNatExprT t2 = True
     go _  _  _ _ = False
+
+    isNatExprT :: TypeU -> Bool
+    isNatExprT (NatLitU _) = True
+    isNatExprT (NatVarU _) = True
+    isNatExprT (NatAddU _ _) = True
+    isNatExprT (NatMulU _ _) = True
+    isNatExprT (NatSubU _ _) = True
+    isNatExprT (NatDivU _ _) = True
+    isNatExprT NatVoidU = True
+    isNatExprT _ = False
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a
@@ -1055,6 +1084,16 @@ checkE i g1 e1@(LstS _) b = do
           <> line <> "  inferred: " <> prettyTypeU a'
           <> line <> err
 --   Sub (with coercion fallback)
+-- Numeric literal defaulting: an `IntS` checked against any integer base
+-- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
+-- type directly. Same for `RealS` against Real / Float32 / Float64. This
+-- mirrors Haskell's polymorphic numeric literals: the literal `3` writes
+-- the value into whichever integer-family slot the context supplies.
+-- Without this, `3 :: Int8` would synthesize as Int and fail the
+-- Int <: Int8 check now that the fixed-width integer types are
+-- standalone base types rather than aliases of Int.
+checkE _ g (IntS x) t  | BT.isIntegerBaseType t = return (g, t, IntS x)
+checkE _ g (RealS x) t | BT.isRealBaseType t    = return (g, t, RealS x)
 checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
   let a' = apply g2 a

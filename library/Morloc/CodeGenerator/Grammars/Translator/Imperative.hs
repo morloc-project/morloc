@@ -249,8 +249,10 @@ data LowerConfig m = LowerConfig
   , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
   -- ^ Pattern evaluation (language-specific because patterns use
   -- language-specific constructors for tuples/records)
-  , lcListConstructor :: FVar -> TypeF -> [MDoc] -> MDoc
+  , lcListConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
+  -- The [TypeF] is the FULL applied-type arg list (Nat positions included).
+  -- Use 'listElemTypeF' if you only want the runtime element type.
   , lcTupleConstructor :: FVar -> [MDoc] -> MDoc
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.

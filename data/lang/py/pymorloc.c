@@ -253,43 +253,61 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
         }
         case MORLOC_ARRAY: {
             Array* array = (Array*)data;
+            // numpy fast-path: only when the element schema has a direct
+            // NumPy dtype counterpart (fixed-width primitives). For other
+            // element types (MORLOC_INT BigInt, MORLOC_STRING, nested
+            // tuples/arrays/records, MORLOC_NIL), fall through to the
+            // general list path so the user gets a working Python list
+            // rather than a hard error.
+            int numpy_type_num = -1;
             if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
-                import_numpy();
                 Schema* element_schema = schema->parameters[0];
-                npy_intp dims[] = {array->size};
-                void* absptr = NULL;
-                int nd = 1; // number of dimensions
-                int type_num;
-                // Determine the NumPy type number based on the element schema
                 switch (element_schema->type) {
-                    case MORLOC_BOOL:    type_num = NPY_BOOL; break;
-                    case MORLOC_SINT8:   type_num = NPY_INT8; break;
-                    case MORLOC_SINT16:  type_num = NPY_INT16; break;
-                    case MORLOC_SINT32:  type_num = NPY_INT32; break;
-                    case MORLOC_SINT64:  type_num = NPY_INT64; break;
-                    case MORLOC_UINT8:   type_num = NPY_UINT8; break;
-                    case MORLOC_UINT16:  type_num = NPY_UINT16; break;
-                    case MORLOC_UINT32:  type_num = NPY_UINT32; break;
-                    case MORLOC_UINT64:  type_num = NPY_UINT64; break;
-                    case MORLOC_FLOAT32: type_num = NPY_FLOAT32; break;
-                    case MORLOC_FLOAT64: type_num = NPY_FLOAT64; break;
-                    default:
-                        PyRAISE("Unsupported element type for NumPy array");
+                    case MORLOC_BOOL:    numpy_type_num = NPY_BOOL; break;
+                    case MORLOC_SINT8:   numpy_type_num = NPY_INT8; break;
+                    case MORLOC_SINT16:  numpy_type_num = NPY_INT16; break;
+                    case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
+                    case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
+                    case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
+                    case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
+                    case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
+                    case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
+                    case MORLOC_FLOAT32: numpy_type_num = NPY_FLOAT32; break;
+                    case MORLOC_FLOAT64: numpy_type_num = NPY_FLOAT64; break;
+                    default: numpy_type_num = -1; break;  // fall through
                 }
-
-                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
-
-                // Create the NumPy array
-                obj = PyArray_SimpleNewFromData(nd, dims, type_num, absptr);
-
-                if(obj == NULL) {
-                    PyRAISE("Failed to parse data");
+            }
+            if (numpy_type_num >= 0) {
+                import_numpy();
+                npy_intp dims[] = {array->size};
+                void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
+                if (base_ptr != NULL) {
+                    // Inline packet: `absptr` points into a libc-malloc'd
+                    // packet buffer that is freed shortly after get_value
+                    // returns. We must own the data, not view it -- otherwise
+                    // any later read (e.g. inside a Python comparator like
+                    // numpy.allclose) would see stale or recycled memory.
+                    obj = PyArray_SimpleNew(1, dims, numpy_type_num);
+                    if (obj == NULL) {
+                        PyRAISE("Failed to allocate numpy array");
+                    }
+                    if (array->size > 0) {
+                        size_t nbytes = (size_t)array->size *
+                                        (size_t)PyArray_ITEMSIZE((PyArrayObject*)obj);
+                        memcpy(PyArray_DATA((PyArrayObject*)obj), absptr, nbytes);
+                    }
+                } else {
+                    // SHM-backed packet: the caller has bumped the SHM refcount
+                    // and registered a deferred decref in shm_tracker. The
+                    // backing memory outlives this numpy array, so a view is
+                    // safe and avoids a copy of potentially-large arrays.
+                    obj = PyArray_SimpleNewFromData(1, dims, numpy_type_num, absptr);
+                    if(obj == NULL) {
+                        PyRAISE("Failed to parse data");
+                    }
                 }
-
-                // Note that we do not want to give ownership to Python
-                // This is shared memory, which means, python should not mutate
-                // it.
-
+                // Note that we do not want to give ownership to Python.
+                // This is shared memory, which means python should not mutate it.
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
                 // Create a Python bytearray object
                 void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
@@ -375,39 +393,8 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             break;
         }
-        case MORLOC_TENSOR: {
-            import_numpy();
-            const Tensor* tensor = (const Tensor*)data;
-            size_t ndim = schema_tensor_ndim(schema);
-
-            int type_num = schema_to_npy_type(schema->parameters[0]->type);
-            if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
-
-            if (tensor->total_elements == 0) {
-                npy_intp zero_dims[1] = {0};
-                obj = PyArray_SimpleNew(1, zero_dims, type_num);
-                break;
-            }
-
-            const int64_t* shape = (const int64_t*)resolve_relptr(tensor->shape, base_ptr, NULL);
-            const void* tdata = resolve_relptr(tensor->data, base_ptr, NULL);
-
-            npy_intp np_dims[5];
-            for (size_t i = 0; i < ndim; i++) np_dims[i] = (npy_intp)shape[i];
-
-            // Create numpy array as a copy (R/W) from the data
-            obj = PyArray_SimpleNewFromData((int)ndim, np_dims, type_num, (void*)tdata);
-            if (!obj) { PyRAISE("Failed to create numpy array from tensor"); }
-
-            // Make a copy so the array owns its data (SHM may be freed)
-            PyObject* owned = PyArray_NewCopy((PyArrayObject*)obj, NPY_CORDER);
-            Py_DECREF(obj);
-            obj = owned;
-            if (!obj) { PyRAISE("Failed to copy tensor data"); }
-            break;
-        }
         default:
-            PyRAISE("Unsupported schema type");
+            PyRAISE("Unsupported schema type %d in fromAnything", (int)schema->type);
     }
 
     return obj;
@@ -486,8 +473,13 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
         
             {
                 ssize_t required_size = 0;
-                // worst-case cursor alignment padding for element data
-                required_size += (ssize_t)(schema_alignment(schema->parameters[0]) - 1);
+                // worst-case cursor alignment padding for element data.
+                // String stays at natural element alignment (1 byte for chars);
+                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
+                size_t buf_align = (schema->type == MORLOC_STRING)
+                    ? schema_alignment(schema->parameters[0])
+                    : array_data_alignment(schema->parameters[0]);
+                required_size += (ssize_t)(buf_align - 1);
 
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
@@ -605,26 +597,8 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
                 return (ssize_t)schema->width + extra;
             }
 
-        case MORLOC_TENSOR:
-            {
-                import_numpy();
-                int type_num = schema_to_npy_type(schema->parameters[0]->type);
-                if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
-                PyArrayObject* arr = (PyArrayObject*)PyArray_FROM_OTF(obj, type_num, NPY_ARRAY_C_CONTIGUOUS);
-                if (!arr) { PyRAISE("Expected numpy array for MORLOC_TENSOR"); }
-                size_t total = (size_t)PyArray_SIZE(arr);
-                size_t elem_width = schema->parameters[0]->width;
-                ssize_t required = (ssize_t)sizeof(Tensor);
-                required += (ssize_t)(_Alignof(int64_t) - 1);
-                required += (ssize_t)(schema_tensor_ndim(schema) * sizeof(int64_t));
-                required += (ssize_t)(schema_alignment(schema->parameters[0]) - 1);
-                required += (ssize_t)(total * elem_width);
-                Py_DECREF(arr);
-                return required;
-            }
-
         default:
-            PyRAISE("Unsupported schema type");
+            PyRAISE("Unsupported schema type %d in calc_required_size", (int)schema->type);
     }
 
     PyRAISE("Reached the unreachable");
@@ -789,8 +763,15 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
                     break;
                 }
 
-                // align cursor for element data placement
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
+                // align cursor for element data placement.
+                // String stays at natural element alignment (1 byte for chars);
+                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
+                {
+                    size_t buf_align = (schema->type == MORLOC_STRING)
+                        ? schema_alignment(schema->parameters[0])
+                        : array_data_alignment(schema->parameters[0]);
+                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, buf_align);
+                }
 
                 result->data = PyTRY(abs2rel, *cursor);
 
@@ -882,59 +863,8 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             }
             break;
 
-        case MORLOC_TENSOR:
-            {
-                import_numpy();
-                int type_num = schema_to_npy_type(schema->parameters[0]->type);
-                if (type_num < 0) { PyRAISE("Unsupported tensor element type"); }
-                PyArrayObject* arr = (PyArrayObject*)PyArray_FROM_OTF(obj, type_num, NPY_ARRAY_C_CONTIGUOUS);
-                if (!arr) { PyRAISE("Expected numpy array for MORLOC_TENSOR"); }
-
-                int ndim = PyArray_NDIM(arr);
-                npy_intp* np_shape = PyArray_DIMS(arr);
-                size_t total = (size_t)PyArray_SIZE(arr);
-                size_t elem_width = schema->parameters[0]->width;
-
-                Tensor* tensor = (Tensor*)dest;
-                tensor->total_elements = total;
-                tensor->device_type = 0;
-                tensor->device_id = 0;
-
-                if (total == 0) {
-                    tensor->shape = RELNULL;
-                    tensor->data = RELNULL;
-                    Py_DECREF(arr);
-                    break;
-                }
-
-                // Write shape array
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(int64_t));
-                {
-                    char* rel_err = NULL;
-                    tensor->shape = abs2rel((absptr_t)*cursor, &rel_err);
-                    if (rel_err) { free(rel_err); Py_DECREF(arr); PyRAISE("abs2rel failed for tensor shape"); }
-                }
-                int64_t* shape_dst = (int64_t*)*cursor;
-                for (int i = 0; i < ndim; i++) shape_dst[i] = (int64_t)np_shape[i];
-                *cursor = (char*)*cursor + ndim * sizeof(int64_t);
-
-                // Write data buffer
-                size_t elem_align = schema_alignment(schema->parameters[0]);
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, elem_align);
-                {
-                    char* rel_err = NULL;
-                    tensor->data = abs2rel((absptr_t)*cursor, &rel_err);
-                    if (rel_err) { free(rel_err); Py_DECREF(arr); PyRAISE("abs2rel failed for tensor data"); }
-                }
-                memcpy(*cursor, PyArray_DATA(arr), total * elem_width);
-                *cursor = (char*)*cursor + total * elem_width;
-
-                Py_DECREF(arr);
-            }
-            break;
-
         default:
-            PyRAISE("Unsupported schema type");
+            PyRAISE("Unsupported schema type %d in to_voidstar_r", (int)schema->type);
     }
 
     return 0;

@@ -246,8 +246,6 @@ fn json_to_voidstar(
             }
             Ok(w.as_ptr())
         }
-
-        SerialType::Tensor => Err(err("Tensor JSON parsing not yet implemented")),
     }
 }
 
@@ -376,44 +374,7 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
                 to_json(&r.at(shm::align_up(1, inner.alignment().max(1))), inner, buf)?;
             }
         }
-        SerialType::Tensor => {
-            // SAFETY: reading Tensor struct from SHM
-            let tensor = unsafe { &*(r.ptr as *const shm::Tensor) };
-            if tensor.total_elements == 0 {
-                buf.push_str("[]");
-            } else {
-                let ndim = schema.offsets.first().copied().unwrap_or(1);
-                let sp = shm::rel2abs(tensor.shape)?;
-                // SAFETY: sp points to ndim i64 values in SHM
-                let shape: Vec<usize> = (0..ndim).map(|i| unsafe { *((sp as *const i64).add(i)) } as usize).collect();
-                let dp = shm::rel2abs(tensor.data)?;
-                let es = &schema.parameters[0];
-                tensor_to_json(buf, dp, &shape, tensor.total_elements, es)?;
-            }
-        }
     }
-    Ok(())
-}
-
-fn tensor_to_json(
-    buf: &mut String, data: *const u8, shape: &[usize], stride: usize, es: &Schema,
-) -> Result<(), MorlocError> {
-    buf.push('[');
-    if shape.len() == 1 {
-        for i in 0..shape[0] {
-            if i > 0 { buf.push(','); }
-            // SAFETY: data + i * es.width within tensor data
-            let r = unsafe { ShmReader::new(data.add(i * es.width)) };
-            to_json(&r, es, buf)?;
-        }
-    } else {
-        let inner = stride / shape[0];
-        for i in 0..shape[0] {
-            if i > 0 { buf.push(','); }
-            tensor_to_json(buf, data.wrapping_add(i * inner * es.width), &shape[1..], inner, es)?;
-        }
-    }
-    buf.push(']');
     Ok(())
 }
 

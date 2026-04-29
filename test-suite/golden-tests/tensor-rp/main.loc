@@ -2,13 +2,16 @@ module main (result)
 
 import root
 import root-py
+import tensor
+import tensor-py
+import tensor-r
 import root-r (Real)
 
 source R from "src.R" ("makeMatrix")
 source Py from "src.py" ("sumAll")
 
-makeMatrix :: Tensor2 3 4 Real
-sumAll :: Tensor2 3 4 Real -> Real
+makeMatrix :: Matrix 3 4 Real
+sumAll :: Matrix 3 4 Real -> Real
 
 result :: Real
 result = sumAll makeMatrix

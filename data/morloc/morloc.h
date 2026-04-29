@@ -96,26 +96,30 @@ typedef struct block_header_s {
 // Section 3: Schema types
 // ========================================================================
 
+// Explicit values pin the wire-format ABI. Slot 12 is reserved (formerly
+// MORLOC_TENSOR; tensors now serialize as Packable tuples of (dims, data)).
+// Subsequent slots keep their original values so the wire format is
+// backward-compatible at the byte level.
 typedef enum {
-    MORLOC_NIL,
-    MORLOC_BOOL,
-    MORLOC_SINT8,
-    MORLOC_SINT16,
-    MORLOC_SINT32,
-    MORLOC_SINT64,
-    MORLOC_UINT8,
-    MORLOC_UINT16,
-    MORLOC_UINT32,
-    MORLOC_UINT64,
-    MORLOC_FLOAT32,
-    MORLOC_FLOAT64,
-    MORLOC_TENSOR,
-    MORLOC_STRING,
-    MORLOC_ARRAY,
-    MORLOC_TUPLE,
-    MORLOC_MAP,
-    MORLOC_OPTIONAL,
-    MORLOC_INT          // variable-width integer (Array of uint64_t limbs, two's complement)
+    MORLOC_NIL      = 0,
+    MORLOC_BOOL     = 1,
+    MORLOC_SINT8    = 2,
+    MORLOC_SINT16   = 3,
+    MORLOC_SINT32   = 4,
+    MORLOC_SINT64   = 5,
+    MORLOC_UINT8    = 6,
+    MORLOC_UINT16   = 7,
+    MORLOC_UINT32   = 8,
+    MORLOC_UINT64   = 9,
+    MORLOC_FLOAT32  = 10,
+    MORLOC_FLOAT64  = 11,
+    /* slot 12 reserved (formerly tensor) */
+    MORLOC_STRING   = 13,
+    MORLOC_ARRAY    = 14,
+    MORLOC_TUPLE    = 15,
+    MORLOC_MAP      = 16,
+    MORLOC_OPTIONAL = 17,
+    MORLOC_INT      = 18  // variable-width integer (Array of uint64_t limbs, two's complement)
 } morloc_serial_type;
 
 // Single-character schema encoding tokens.
@@ -126,7 +130,6 @@ typedef enum {
 #define SCHEMA_FLOAT    'f'
 #define SCHEMA_STRING   's'
 #define SCHEMA_ARRAY    'a'
-#define SCHEMA_TENSOR   'T'
 #define SCHEMA_TUPLE    't'
 #define SCHEMA_MAP      'm'
 #define SCHEMA_OPTIONAL '?'
@@ -138,7 +141,7 @@ typedef struct Schema {
     morloc_serial_type type;
     size_t size;       // number of parameters
     size_t width;      // bytes per element when stored in a fixed-width array
-    size_t* offsets;   // field offsets (tuples) or ndim (tensors, in offsets[0])
+    size_t* offsets;   // field offsets (tuples)
     char* hint;
     struct Schema** parameters;
     char** keys;       // field names (records only)
@@ -149,15 +152,6 @@ typedef struct Array {
     size_t size;
     relptr_t data;
 } Array;
-
-// Dense N-dimensional tensor in voidstar representation (row-major / C order).
-typedef struct Tensor {
-    size_t total_elements;
-    uint32_t device_type;   // reserved: 0 = CPU
-    uint32_t device_id;     // reserved: 0
-    relptr_t data;          // relptr to contiguous element data
-    relptr_t shape;         // relptr to int64_t[ndim]
-} Tensor;
 
 // ========================================================================
 // Section 4: Packet types
@@ -715,10 +709,33 @@ size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG);
 // Inline helpers used by language extensions (pymorloc.c, rmorloc.c)
 #define ALIGN_UP(x, align) (((x) + (align) - 1) & ~((size_t)(align) - 1))
 
-static inline size_t schema_tensor_ndim(const Schema* schema) {
-    if (schema == NULL || schema->size == 0) return 0;
-    // ndim is stored in offsets[0] for tensor schemas
-    return schema->offsets ? schema->offsets[0] : 0;
+// SIMD/BLAS-friendly alignment for Array data buffers when the element type is
+// a primitive numeric. Fixed 64-byte constant in the wire format spec --
+// covers SSE/AVX/AVX-512 + cache lines on every common architecture, and the
+// per-array slack overhead (<= 63 bytes) is negligible for large arrays.
+#define MORLOC_ARRAY_DATA_ALIGN 64
+
+static inline bool is_primitive_numeric(const Schema* schema) {
+    if (schema == NULL) return false;
+    switch (schema->type) {
+        case MORLOC_SINT8: case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
+        case MORLOC_UINT8: case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
+        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Alignment for an Array's element data buffer in SHM. For primitive numerics
+// we bump to MORLOC_ARRAY_DATA_ALIGN (SIMD/BLAS); otherwise the element's
+// natural alignment.
+static inline size_t array_data_alignment(const Schema* elem) {
+    size_t natural = schema_alignment(elem);
+    if (is_primitive_numeric(elem)) {
+        return MORLOC_ARRAY_DATA_ALIGN > natural ? MORLOC_ARRAY_DATA_ALIGN : natural;
+    }
+    return natural;
 }
 
 // ========================================================================

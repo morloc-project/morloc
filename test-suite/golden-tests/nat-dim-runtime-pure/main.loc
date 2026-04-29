@@ -4,6 +4,7 @@
 module main (foo)
 
 import root
+import tensor
 
 foo :: Matrix 2 3 Int -> Matrix 2 3 Int
 foo x = x

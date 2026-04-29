@@ -18,8 +18,8 @@ module main
   , testSliceAdd
   )
 
-import root
 import root-cpp
+import tensor-cpp
 
 source Cpp from "src.hpp"
   ( "ones34"
@@ -52,42 +52,42 @@ source Cpp from "src.hpp"
   )
 
 -- -- This is what `ones` SHOULD be, but this would require dependent types:
--- ones :: i:Int -> j:Int -> Tensor2 i j Real
+-- ones :: i:Int -> j:Int -> Matrix i j Real
 
 -- Tensor constructors with specific dimensions
-ones34 :: Tensor2 3 4 Real
-ones23 :: Tensor2 2 3 Real
-ones32 :: Tensor2 3 2 Real
-ones22 :: Tensor2 2 2 Real
-ones43 :: Tensor2 4 3 Real
-ones56 :: Tensor2 5 6 Real
-onesV3 :: Tensor1 3 Real
-onesV4 :: Tensor1 4 Real
-onesV5 :: Tensor1 5 Real
-onesV10 :: Tensor1 10 Real
-eye33 :: Tensor2 3 3 Real
-eye55 :: Tensor2 5 5 Real
+ones34 :: Matrix 3 4 Real
+ones23 :: Matrix 2 3 Real
+ones32 :: Matrix 3 2 Real
+ones22 :: Matrix 2 2 Real
+ones43 :: Matrix 4 3 Real
+ones56 :: Matrix 5 6 Real
+onesV3 :: Vector 3 Real
+onesV4 :: Vector 4 Real
+onesV5 :: Vector 5 Real
+onesV10 :: Vector 10 Real
+eye33 :: Matrix 3 3 Real
+eye55 :: Matrix 5 5 Real
 
 -- Category 1: Fully checked operations (explicit forall via var list)
-add2d :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
-transpose2d :: Tensor2 m n Real -> Tensor2 n m Real
-matmul2d :: Tensor2 m k Real -> Tensor2 k n Real -> Tensor2 m n Real
-dot1d :: Tensor1 n Real -> Tensor1 n Real -> Real
-tsum1d :: Tensor1 n Real -> Real
-trace2d :: Tensor2 n n Real -> Real
-diag2d :: Tensor2 n n Real -> Tensor1 n Real
-diagMat1d :: Tensor1 n Real -> Tensor2 n n Real
-outer1d :: Tensor1 m Real -> Tensor1 n Real -> Tensor2 m n Real
+add2d :: Matrix m n Real -> Matrix m n Real -> Matrix m n Real
+transpose2d :: Matrix m n Real -> Matrix n m Real
+matmul2d :: Matrix m k Real -> Matrix k n Real -> Matrix m n Real
+dot1d :: Vector n Real -> Vector n Real -> Real
+tsum1d :: Vector n Real -> Real
+trace2d :: Matrix n n Real -> Real
+diag2d :: Matrix n n Real -> Vector n Real
+diagMat1d :: Vector n Real -> Matrix n n Real
+outer1d :: Vector m Real -> Vector n Real -> Matrix m n Real
 
 -- Category 2: Nat arithmetic (deferred with variables, checked at ground)
-flatten2d :: Tensor2 m n Real -> Tensor1 (m * n) Real
-vstack2d :: Tensor2 m n Real -> Tensor2 p n Real -> Tensor2 (m + p) n Real
-hstack2d :: Tensor2 m n Real -> Tensor2 m p Real -> Tensor2 m (n + p) Real
-kron2d :: Tensor2 m n Real -> Tensor2 p q Real -> Tensor2 (m * p) (n * q) Real
+flatten2d :: Matrix m n Real -> Vector (m * n) Real
+vstack2d :: Matrix m n Real -> Matrix p n Real -> Matrix (m + p) n Real
+hstack2d :: Matrix m n Real -> Matrix m p Real -> Matrix m (n + p) Real
+kron2d :: Matrix m n Real -> Matrix p q Real -> Matrix (m * p) (n * q) Real
 
 -- Category 3: Opaque output dimensions
-slice2d :: Int -> Int -> Tensor2 m n Real -> Tensor2 i j Real
-ttake1d :: Int -> Tensor1 n Real -> Tensor1 i Real
+slice2d :: Int -> Int -> Matrix m n Real -> Matrix i j Real
+ttake1d :: Int -> Vector n Real -> Vector i Real
 
 -- === Category 1 tests ===
 

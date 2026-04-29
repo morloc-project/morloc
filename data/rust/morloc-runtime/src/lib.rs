@@ -48,4 +48,4 @@ pub(crate) fn init_test_shm() {
 pub use error::MorlocError;
 pub use schema::{Schema, SerialType};
 pub use packet::{PacketHeader, PACKET_MAGIC};
-pub use shm::{RelPtr, VolPtr, AbsPtr, Array, Tensor};
+pub use shm::{RelPtr, VolPtr, AbsPtr, Array};

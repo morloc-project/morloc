@@ -127,7 +127,7 @@ inline size_t schema_alignment_cpp(const Schema* schema) {
         case MORLOC_SINT16: case MORLOC_UINT16: return 2;
         case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
         case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64:
-        case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TENSOR:
+        case MORLOC_STRING: case MORLOC_ARRAY:
         case MORLOC_INT: return alignof(size_t);
         case MORLOC_TUPLE: case MORLOC_MAP: {
             size_t max_align = 1;
@@ -140,6 +140,33 @@ inline size_t schema_alignment_cpp(const Schema* schema) {
         case MORLOC_OPTIONAL: return schema_alignment_cpp(schema->parameters[0]);
         default: return alignof(size_t);
     }
+}
+
+// SIMD/BLAS-friendly alignment for Array data buffers when the element type
+// is a primitive numeric. Fixed 64-byte constant in the wire format spec --
+// covers SSE/AVX/AVX-512 + cache lines on every common architecture, and the
+// per-array slack overhead (<= 63 bytes) is negligible for large arrays.
+#define MORLOC_ARRAY_DATA_ALIGN 64
+
+inline bool is_primitive_numeric_cpp(const Schema* schema) {
+    switch (schema->type) {
+        case MORLOC_SINT8:  case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
+        case MORLOC_UINT8:  case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
+        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Alignment for an Array's element data buffer in SHM. For primitive numerics
+// we bump to MORLOC_ARRAY_DATA_ALIGN (SIMD/BLAS); otherwise use the element's
+// natural alignment.
+inline size_t array_data_alignment_cpp(const Schema* elem) {
+    size_t natural = schema_alignment_cpp(elem);
+    return is_primitive_numeric_cpp(elem)
+        ? (MORLOC_ARRAY_DATA_ALIGN > natural ? MORLOC_ARRAY_DATA_ALIGN : natural)
+        : natural;
 }
 
 
@@ -169,7 +196,7 @@ template<typename T>
 size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
     size_t total_size = schema->width;
     // worst-case cursor alignment padding for element data
-    total_size += schema_alignment_cpp(schema->parameters[0]) - 1;
+    total_size += array_data_alignment_cpp(schema->parameters[0]) - 1;
     switch(schema->parameters[0]->type){
         case MORLOC_NIL:
         case MORLOC_BOOL:
@@ -262,20 +289,6 @@ size_t get_shm_size(const Schema* schema, const std::stack<T>& data) {
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::queue<T>& data) {
     return get_shm_size(schema, to_vector(data));
-}
-
-// Tensor: header + shape array + contiguous data
-template<typename T, int NDim>
-size_t get_shm_size(const Schema* schema, const mlc::Tensor<T, NDim>& data) {
-    using S = mlc::tensor_storage_t<T>;
-    size_t total = sizeof(Tensor);
-    // alignment padding for shape array
-    total += alignof(int64_t) - 1;
-    total += NDim * sizeof(int64_t);
-    // alignment padding for element data
-    total += schema_alignment_cpp(schema->parameters[0]) - 1;
-    total += data.size() * sizeof(S);
-    return total;
 }
 
 
@@ -393,8 +406,8 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
         result->data = RELNULL;
         return dest;
     }
-    // align cursor for element data placement
-    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), schema_alignment_cpp(schema->parameters[0])));
+    // align cursor for element data placement (bumps to 64 for primitive numerics)
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(schema->parameters[0])));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
     *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
     char* start = (char*)cpp_rel2abs(result->data);
@@ -414,8 +427,8 @@ void* toAnything_seq(void* dest, void** cursor, const Schema* schema, const Cont
         result->data = RELNULL;
         return dest;
     }
-    // align cursor for element data placement
-    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), schema_alignment_cpp(schema->parameters[0])));
+    // align cursor for element data placement (bumps to 64 for primitive numerics)
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(schema->parameters[0])));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
     *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
     char* start = (char*)cpp_rel2abs(result->data);
@@ -494,39 +507,6 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::opt
         *((uint8_t*)dest) = 1;
         toAnything((char*)dest + schema->offsets[0], cursor, schema->parameters[0], *data);
     }
-    return dest;
-}
-
-// Tensor: write Tensor header + shape array + contiguous data
-template<typename T, int NDim>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const mlc::Tensor<T, NDim>& data) {
-    Tensor* result = static_cast<Tensor*>(dest);
-    result->total_elements = data.size();
-    result->device_type = 0;
-    result->device_id = 0;
-
-    if (data.size() == 0) {
-        result->shape = RELNULL;
-        result->data = RELNULL;
-        return dest;
-    }
-
-    // Write shape array
-    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), alignof(int64_t)));
-    result->shape = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-    int64_t* shape_dst = (int64_t*)*cursor;
-    for (int i = 0; i < NDim; i++) shape_dst[i] = data.shape()[i];
-    *cursor = (char*)*cursor + NDim * sizeof(int64_t);
-
-    // Write data buffer (contiguous row-major)
-    using S = mlc::tensor_storage_t<T>;
-    size_t elem_align = schema_alignment_cpp(schema->parameters[0]);
-    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), elem_align));
-    result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-    size_t data_bytes = data.size() * sizeof(S);
-    memcpy(*cursor, data.data(), data_bytes);
-    *cursor = (char*)*cursor + data_bytes;
-
     return dest;
 }
 
@@ -660,21 +640,6 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
             return std::nullopt;
         }
         return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr), base_ptr));
-    }
-    else if constexpr (mlc::is_mlc_tensor_v<T>) {
-        using ElemT = mlc::tensor_element_t<T>;
-        using StorageT = mlc::tensor_storage_t<ElemT>;
-        constexpr int NDim = mlc::tensor_ndim_v<T>;
-        const Tensor* tensor = (const Tensor*)data;
-
-        if (tensor->total_elements == 0) {
-            int64_t zero_shape[NDim] = {};
-            return T(zero_shape);
-        }
-
-        const int64_t* shape = (const int64_t*)resolve_relptr_cpp(tensor->shape, base_ptr);
-        StorageT* tdata = (StorageT*)resolve_relptr_cpp(tensor->data, base_ptr);
-        return T(tdata, shape, tensor->total_elements);
     }
     else if constexpr (std::is_arithmetic_v<T>) {
         // Primitives (int, double, float, etc.) — read at schema width and

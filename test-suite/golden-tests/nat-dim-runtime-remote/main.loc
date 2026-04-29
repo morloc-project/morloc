@@ -3,9 +3,9 @@
 -- should succeed and fail respectively.
 module main (idMatrix)
 
-import root
 import root-py
+import tensor-py
 
 source Py from "src.py" ("id_matrix" as idMatrix)
 
-idMatrix :: Matrix 2 3 Int -> Matrix 2 3 Int
+idMatrix :: Matrix 2 3 Int32 -> Matrix 2 3 Int32

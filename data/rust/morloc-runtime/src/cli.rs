@@ -157,9 +157,6 @@ fn shfree_by_schema_inner(
                     shfree_by_schema_inner(child, &schema.parameters[i])?;
                 }
             }
-            SerialType::Tensor => {
-                // shape and data are inline, freed by parent shfree
-            }
             _ => {
                 // fixed-size: no sub-data
             }
@@ -244,13 +241,6 @@ fn adjust_relptrs_inner(
                         &schema.parameters[0],
                         base_rel,
                     )?;
-                }
-            }
-            SerialType::Tensor => {
-                let tensor = &mut *(data as *mut shm::Tensor);
-                if tensor.total_elements > 0 {
-                    tensor.shape += base_rel;
-                    tensor.data += base_rel;
                 }
             }
             _ => {}

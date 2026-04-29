@@ -278,9 +278,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       return $ case s of
         (SerialFloat32 _) -> LitX F32X (MT.pack (show v))
         _ -> LitX F64X (MT.pack (show v))
-    toNexusExpr (AnnoS (Idx i t) _ (IntS v)) = do
+    toNexusExpr (AnnoS (Idx ix t) _ (IntS v)) = do
       s <- generalTypeToSerialAST t
-      checkIntBounds i v s
+      checkIntBounds ix v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
         (SerialInt16 _) -> LitX I16X (MT.pack (show v))

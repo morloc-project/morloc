@@ -116,10 +116,13 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         ts' <- mapM f ts
         return $ "std::function<" <> t' <> tupled ts' <> ">"
       f (NatLitF _) = return mempty
+      f NatVoidF = return mempty
       f (AppF t ts) = do
+        -- Macro $N is positional in the body args (Nat positions included).
+        -- Both NatLitF and NatVoidF render to mempty, preserving alignment
+        -- without contributing to template instantiations.
         t' <- f t
-        let runtimeTs = [x | x <- ts, not (isNatLitF x)]
-        ts' <- mapM f runtimeTs
+        ts' <- mapM f ts
         return . pretty $ expandMacro (render t') (map render ts')
       f t@(NamF _ (FV gc (CV "struct")) _ rs) = do
         recmap <- CMS.gets translatorRecmap
@@ -139,8 +142,6 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (OptionalF t) = do
         t' <- f t
         return $ "std::optional<" <> t' <> ">"
-      isNatLitF (NatLitF _) = True
-      isNatLitF _ = False
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -316,7 +317,7 @@ makeTheMaker srcs = do
 
   let cmd =
         SysRun . Code . render $
-          [idoc|g++ -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+          [idoc|${CXX:-g++} -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 
@@ -706,8 +707,8 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
     showDefType _ (NamT _ v _ _) = pretty v
     showDefType _ (NatLitT _) = mempty
-    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) runtimeTs)
-      where runtimeTs = [t | t <- ts, not (isNatLitT t)]
+    showDefType _ NatVoidT = mempty
+    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (EffectT _ _) = error "Cannot show EffectT"
     showDefType _ (NatAddT _ _) = mempty
@@ -715,8 +716,6 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType _ (NatSubT _ _) = mempty
     showDefType _ (NatDivT _ _) = mempty
     showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
-    isNatLitT (NatLitT _) = True
-    isNatLitT _ = False
 
 -- C++ specific source handling (flags, headers, libraries)
 
@@ -744,7 +743,7 @@ handleFlagsAndPaths srcs = do
 
 gccVersionFlag :: Int -> Text
 gccVersionFlag i
-  | i <= 17 = "-std=c++17"
+  | i <= 20 = "-std=c++20"
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)

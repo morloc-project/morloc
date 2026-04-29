@@ -1,0 +1,192 @@
+-- Phantom-Nat alias regression test.
+--
+-- A phantom-Nat alias is a type alias whose declaration mentions
+-- one or more Nat-kinded params that do not appear in the body:
+--   type Vector (n :: Nat) a   = List a
+--   type FixedPair (n :: Nat) a = (a, a)
+--
+-- These aliases serve a real purpose: they let the typechecker
+-- enforce dimension constraints (`Vector n a` vs `Vector m a`) at
+-- compile time, while erasing them at runtime. The wire form must
+-- match the body: `Vector 6 Real` is byte-identical to `List Real`.
+--
+-- Every operation valid on the body should be valid on the alias.
+-- This test enumerates the surface area:
+--
+--   1. List-literal construction:   `[...] :: Vector N a`
+--   2. Empty literal:               `[] :: Vector 0 a`
+--   3. Various element types:       Real, Int, Bool, Str
+--   4. Direct top-level export of a Vector value
+--   5. Round-trip through idcpp (forces wire+codegen path)
+--   6. Vector as function argument (foreign function takes Vector)
+--   7. Vector as function return value (foreign function returns Vector)
+--   8. Alias-to-alias chain: `type MyVec (n :: Nat) a = Vector n a`
+--      used both as annotation and as exported type
+--   9. Tuple-shaped phantom-Nat alias: `type FixedPair (n :: Nat) a = (a, a)`
+--      with tuple literal annotated as the alias
+--
+-- Each case below reflects a usage that should be supported
+-- regardless of which language(s) are imported. Failures here
+-- represent gaps that need fixing -- they are bugs, not invalid
+-- usage.
+module main
+  ( vecReal4
+  , vecReal0
+  , vecInt3
+  , vecBool2
+  , vecStr3
+  , chainVecReal3
+  , chainVecReal0
+  , fixedPairInt
+  , fixedPairStr
+  , rtVecReal4
+  , rtVecReal0
+  , rtVecInt3
+  , rtVecInt0
+  , rtVecBool2
+  , rtChainVec
+  , rtFixedPair
+  , sumVecArg
+  , sumVecZeroArg
+  , makeVecResult
+  , mat2x3
+  , mat0x3
+  , mat3x0
+  , mat0x0
+  , rtMat2x3
+  , rtMat0x3
+  )
+
+import root
+import root-cpp
+import tensor
+import tensor-cpp
+
+source Cpp from "ops.hpp"
+  ( "sumVec_cpp"  as sumVecCpp
+  , "makeVec_cpp" as makeVecCpp
+  )
+
+sumVecCpp  :: Vector n Real -> Real
+makeVecCpp :: Vector 4 Real
+
+-- A phantom-Nat alias chain: MyVec is itself an alias to Vector.
+-- The body uses the same phantom Nat, so chasing the alias one
+-- step yields `Vector n a`, then a second step yields `List a`.
+type MyVec (n :: Nat) a = Vector n a
+
+-- Tuple-shaped phantom-Nat alias. The body is a 2-tuple over `a`
+-- and the Nat is purely phantom. Wire form is identical to (a, a).
+type FixedPair (n :: Nat) a = (a, a)
+
+-- 1) List literals annotated as Vector N a, exported directly. -----
+
+vecReal4 :: Vector 4 Real
+vecReal4 = [1.0, 2.0, 3.0, 4.0]
+
+vecReal0 :: Vector 0 Real
+vecReal0 = []
+
+vecInt3 :: Vector 3 Int
+vecInt3 = [10, 20, 30]
+
+vecBool2 :: Vector 2 Bool
+vecBool2 = [True, False]
+
+vecStr3 :: Vector 3 Str
+vecStr3 = ["a", "b", "c"]
+
+-- 2) Alias-to-alias chain over a phantom-Nat alias. ----------------
+
+chainVecReal3 :: MyVec 3 Real
+chainVecReal3 = [7.0, 8.0, 9.0]
+
+-- 3) Tuple-shaped phantom-Nat alias. -------------------------------
+
+fixedPairInt :: FixedPair 2 Int
+fixedPairInt = (42, 99)
+
+fixedPairStr :: FixedPair 2 Str
+fixedPairStr = ("hello", "world")
+
+-- 4) Round-trip through idcpp to force serialization both ways. ----
+
+rtVecReal4 :: Vector 4 Real
+rtVecReal4 = idcpp ([1.0, 2.0, 3.0, 4.0] :: Vector 4 Real)
+
+rtVecInt3 :: Vector 3 Int
+rtVecInt3 = idcpp ([10, 20, 30] :: Vector 3 Int)
+
+rtVecBool2 :: Vector 2 Bool
+rtVecBool2 = idcpp ([True, False] :: Vector 2 Bool)
+
+rtChainVec :: MyVec 3 Real
+rtChainVec = idcpp ([7.0, 8.0, 9.0] :: MyVec 3 Real)
+
+rtFixedPair :: FixedPair 2 Int
+rtFixedPair = idcpp ((42, 99) :: FixedPair 2 Int)
+
+-- 5) Vector as function argument: literal directly to foreign fn. --
+
+sumVecArg :: Real
+sumVecArg = sumVecCpp ([1.5, 2.5, 3.0] :: Vector 3 Real)
+
+-- 6) Empty Vector as function argument. ----------------------------
+
+sumVecZeroArg :: Real
+sumVecZeroArg = sumVecCpp ([] :: Vector 0 Real)
+
+-- 7) Vector as function return value: foreign fn returns Vector,
+--    morloc carries it forward as an exported value.
+makeVecResult :: Vector 4 Real
+makeVecResult = makeVecCpp
+
+-- ===================================================================
+-- NatLit 0 vs NatVoid: regression coverage
+--
+-- Now that the IR distinguishes erased phantoms (`NatVoid*`) from real
+-- empty-dim measurements (`NatLit* 0`), we need test cases that exercise
+-- the real-zero path end-to-end. Codegen, idcpp round-trips, and Packable
+-- wire forms (which contain Nat arithmetic like `Vector (d1 * d2) a`) all
+-- need to preserve actual zeros without collapsing them into the void
+-- sentinel.
+-- ===================================================================
+
+-- 8) Empty Vector through idcpp round-trip. `vecReal0` only exits the
+--    nexus once (single serialization); idcpp forces wire->morloc->wire,
+--    which is where a NatLit 0 / NatVoid mix-up would surface.
+rtVecReal0 :: Vector 0 Real
+rtVecReal0 = idcpp ([] :: Vector 0 Real)
+
+rtVecInt0 :: Vector 0 Int
+rtVecInt0 = idcpp ([] :: Vector 0 Int)
+
+-- 9) Matrix with NatLit 0 dimensions. The Packable wire form for Matrix
+--    is `((Int, Int), Vector (d1 * d2) a)`, so any zero dim drives a
+--    NatMul that must reduce to a real `NatLitF 0` (not collapse to
+--    `NatVoidF`). Three sub-cases cover first/second/both dims being 0,
+--    plus a non-zero sanity case.
+mat2x3 :: Matrix 2 3 Real
+mat2x3 = pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector 6 Real))
+
+mat0x3 :: Matrix 0 3 Real
+mat0x3 = pack (((0, 3), []) :: ((Int,Int), Vector 0 Real))
+
+mat3x0 :: Matrix 3 0 Real
+mat3x0 = pack (((3, 0), []) :: ((Int,Int), Vector 0 Real))
+
+mat0x0 :: Matrix 0 0 Real
+mat0x0 = pack (((0, 0), []) :: ((Int,Int), Vector 0 Real))
+
+-- 10) Matrix round-trip through idcpp. Confirms the dim values come back
+--     identical after pack -> wire -> unpack -> pack -> wire.
+rtMat2x3 :: Matrix 2 3 Real
+rtMat2x3 = idcpp mat2x3
+
+rtMat0x3 :: Matrix 0 3 Real
+rtMat0x3 = idcpp mat0x3
+
+-- 11) NatLit 0 through a phantom-Nat alias chain. Confirms the alias
+--     `MyVec n a = Vector n a` resolves correctly when n is a real 0.
+chainVecReal0 :: MyVec 0 Real
+chainVecReal0 = []

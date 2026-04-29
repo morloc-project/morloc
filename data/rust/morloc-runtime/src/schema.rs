@@ -16,7 +16,6 @@ pub enum SerialType {
     Uint64 = 9,
     Float32 = 10,
     Float64 = 11,
-    Tensor = 12,
     String = 13,
     Array = 14,
     Tuple = 15,
@@ -33,7 +32,6 @@ const SCHEMA_UINT: u8 = b'u';
 const SCHEMA_FLOAT: u8 = b'f';
 const SCHEMA_STRING: u8 = b's';
 const SCHEMA_ARRAY: u8 = b'a';
-const SCHEMA_TENSOR: u8 = b'T';
 const SCHEMA_TUPLE: u8 = b't';
 const SCHEMA_MAP: u8 = b'm';
 const SCHEMA_OPTIONAL: u8 = b'?';
@@ -47,7 +45,7 @@ pub struct Schema {
     pub size: usize,
     /// Byte width when stored in a fixed-width array.
     pub width: usize,
-    /// Field offsets for tuples/records, or ndim storage for tensors.
+    /// Field offsets for tuples/records.
     pub offsets: Vec<usize>,
     /// Optional type hint string.
     pub hint: Option<String>,
@@ -109,7 +107,7 @@ impl Schema {
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
-            SerialType::String | SerialType::Array | SerialType::Map | SerialType::Tensor
+            SerialType::String | SerialType::Array | SerialType::Map
             | SerialType::Int => {
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
@@ -129,6 +127,31 @@ impl Schema {
             }
         }
     }
+
+    /// True if this schema is a primitive numeric type. Used to decide whether
+    /// Array data buffers should be SIMD/BLAS-aligned.
+    pub fn is_primitive_numeric(&self) -> bool {
+        matches!(
+            self.serial_type,
+            SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64
+                | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+                | SerialType::Float32 | SerialType::Float64
+        )
+    }
+
+    /// Alignment for an Array's element data buffer in SHM. For primitive
+    /// numerics, bumped to MORLOC_ARRAY_DATA_ALIGN (64 bytes -- SIMD/BLAS); for
+    /// other element types, the natural alignment. Fixed constant in the wire
+    /// format spec, architecture-independent.
+    pub fn array_data_alignment(&self) -> usize {
+        const MORLOC_ARRAY_DATA_ALIGN: usize = 64;
+        let natural = self.alignment();
+        if self.is_primitive_numeric() {
+            std::cmp::max(MORLOC_ARRAY_DATA_ALIGN, natural)
+        } else {
+            natural
+        }
+    }
 }
 
 /// Parse a schema string into a Schema tree.
@@ -140,7 +163,6 @@ impl Schema {
 /// - `t2i4s` -> Tuple of (Sint32, String)
 /// - `m24namesi4` -> Map with keys "name"->String, "i4"  (base-62 field count, then key-len + key + value for each)
 /// - `?i4` -> Optional Sint32
-/// - `T2f8` -> 2D Tensor of Float64
 /// - `<hint>i4` -> Sint32 with hint annotation
 pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
     let bytes = input.as_bytes();
@@ -255,30 +277,6 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
                 p = end;
             }
             Ok((make_map_schema(params, keys), p))
-        }
-        SCHEMA_TENSOR => {
-            // Tensor: base-62 ndim char, then ndim dimension constraints
-            // (each prefixed by ':'), then element schema.
-            // Dimension 0 means unconstrained.
-            if cur >= bytes.len() {
-                return Err(MorlocError::Schema("expected tensor ndim".into()));
-            }
-            let ndim = decode_base62(bytes[cur])?;
-            cur += 1;
-            let mut dims = Vec::with_capacity(ndim);
-            for _ in 0..ndim {
-                if cur < bytes.len() && bytes[cur] == b':' {
-                    cur += 1;
-                    let (n, after) = parse_decimal(bytes, cur)?;
-                    cur = after;
-                    dims.push(n);
-                } else {
-                    // No dimension constraint (backwards compatibility)
-                    dims.push(0);
-                }
-            }
-            let (child, end) = parse_schema_r(bytes, cur)?;
-            Ok((make_tensor_schema(ndim, dims, child), end))
         }
         _ => Err(MorlocError::Schema(format!(
             "unknown schema character '{}' at position {pos}",
@@ -448,21 +446,6 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     }
 }
 
-fn make_tensor_schema(ndim: usize, dims: Vec<usize>, child: Schema) -> Schema {
-    let mut offsets = Vec::with_capacity(1 + ndim);
-    offsets.push(ndim);
-    offsets.extend_from_slice(&dims);
-    Schema {
-        serial_type: SerialType::Tensor,
-        size: 1,
-        width: std::mem::size_of::<crate::shm::Tensor>(),
-        offsets,
-        hint: None,
-        parameters: vec![child],
-        keys: Vec::new(),
-    }
-}
-
 /// Calculate byte offsets for tuple fields (C struct layout with natural alignment).
 fn calculate_tuple_layout(params: &[Schema]) -> (usize, Vec<usize>) {
     let mut offsets = Vec::with_capacity(params.len());
@@ -547,17 +530,6 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             buf.push('?');
             schema_to_string_inner(&schema.parameters[0], buf);
         }
-        SerialType::Tensor => {
-            let ndim = schema.offsets.first().copied().unwrap_or(0);
-            buf.push('T');
-            buf.push(encode_base62(ndim));
-            for d in 0..ndim {
-                let dim = schema.offsets.get(1 + d).copied().unwrap_or(0);
-                buf.push(':');
-                buf.push_str(&dim.to_string());
-            }
-            schema_to_string_inner(&schema.parameters[0], buf);
-        }
     }
 }
 
@@ -615,26 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tensor() {
-        let s = parse_schema("T2f8").unwrap();
-        assert_eq!(s.serial_type, SerialType::Tensor);
-        assert_eq!(s.offsets[0], 2); // ndim
-        assert_eq!(s.offsets[1], 0); // dim 0 unconstrained
-        assert_eq!(s.offsets[2], 0); // dim 1 unconstrained
-        assert_eq!(s.parameters[0].serial_type, SerialType::Float64);
-    }
-
-    #[test]
-    fn test_parse_tensor_with_dims() {
-        let s = parse_schema("T2:2:4j").unwrap();
-        assert_eq!(s.serial_type, SerialType::Tensor);
-        assert_eq!(s.offsets[0], 2); // ndim
-        assert_eq!(s.offsets[1], 2); // dim 0 = 2
-        assert_eq!(s.offsets[2], 4); // dim 1 = 4
-        assert_eq!(s.parameters[0].serial_type, SerialType::Int);
-    }
-
-    #[test]
     fn test_parse_with_hints() {
         let s = parse_schema("<float>f8").unwrap();
         assert_eq!(s.serial_type, SerialType::Float64);
@@ -648,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        let cases = ["z", "b", "i4", "u8", "f8", "s", "ai4", "t2i4s", "?i4", "T2:0:0f8"];
+        let cases = ["z", "b", "i4", "u8", "f8", "s", "ai4", "t2i4s", "?i4"];
         for case in cases {
             let schema = parse_schema(case).unwrap();
             let rendered = schema_to_string(&schema);
@@ -694,7 +646,6 @@ mod compat_tests {
             ("t2i4s", "type=15 size=2 width=24"),
             ("?i4", "type=17 size=1 width=8"),
             ("?s", "type=17 size=1 width=24"),
-            ("T2f8", "type=12 size=1 width=32"),
         ];
         for (input, expected_root) in &cases {
             let s = parse_schema(input).unwrap();
@@ -717,10 +668,5 @@ mod compat_tests {
         assert_eq!(s.parameters.len(), 1);
         assert_eq!(s.parameters[0].serial_type, SerialType::Uint8);
         assert_eq!(s.parameters[0].width, 1);
-
-        // Verify tensor
-        let t = parse_schema("T2f8").unwrap();
-        assert_eq!(t.offsets, vec![2]); // ndim
-        assert_eq!(t.width, 32); // sizeof(Tensor)
     }
 }

@@ -138,11 +138,14 @@ expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicat
   MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   setManifoldConfig midx e
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
-expressCore (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
-  MM.sayVVV $ "express LstS"
-  xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
-  let x = PolyList (Idx cidx v) (Idx cidx t) xs'
-  return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
+expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
+  | [t] <- filter (not . isNatTypeT) ts = do
+      MM.sayVVV $ "express LstS"
+      xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
+      -- Preserve the FULL applied type args (Nat positions included) so
+      -- downstream language code generators can see phantom dims.
+      let x = PolyList (Idx cidx v) (map (Idx cidx) ts) xs'
+      return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 expressCore (AnnoS (Idx _ t) _ (LstS _)) = error $ "Invalid list form: " <> show t
 expressCore (AnnoS t@(Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
   MM.sayVVV $ "express TupS:" <+> pretty t
@@ -520,10 +523,16 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x)) = return
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx v)
 expressPolyExpr _ _ _ (AnnoS (Idx _ (OptionalT (VarT v))) (Idx cidx _, _) NullS) = return $ PolyNull (Idx cidx v)
 expressPolyExpr _ _ _ (AnnoS _ (Idx cidx _, _) NullS) = return $ PolyNull (Idx cidx (TV "Unit"))
-expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) [t])) (Idx cidx lang, args) (LstS xs)) = do
-  xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
-  let e = PolyList (Idx cidx v) (Idx cidx t) xs'
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+-- A list literal at type `Foo a1 ... an` has exactly one element-type arg
+-- (the rest, if any, are Nat-kinded phantom dims, e.g. for Vector n a).
+-- Extract the single non-Nat arg for typing children, but PRESERVE the
+-- full args list in PolyList so phantom dims survive into language code
+-- generators (Nat positions render as mempty in macro expansion).
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
+  | [t] <- filter (not . isNatTypeT) ts = do
+      xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
+      let e = PolyList (Idx cidx v) (map (Idx cidx) ts) xs'
+      return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ _ _ (AnnoS _ _ (LstS _)) = error "LstS can only be (AppP (VarP _) [_]) type"
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
   let idxTs = zipWith mkIdx xs ts
@@ -665,7 +674,34 @@ expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
       return . PolyReturn $ PolyApp (PolyExe (Idx i t) (RecCallP mid crossLang)) xs
 expressPolyApp _ (AnnoS _ _ (LamS _ _)) _ = error "unexpected LamS - should have been handled"
 expressPolyApp _ (AnnoS _ _ (VarS _ _)) _ = error "unexpected VarS - should have been substituted"
-expressPolyApp _ _ _ = error "Unreachable? This does not seem to be applicable"
+expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
+  MM.throwSourcedError i $
+    "expressPolyApp: function position has unexpected expression form:"
+      <+> tagExpr e <+> "of type" <+> pretty t
+  where
+    tagExpr :: ExprS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MDoc
+    tagExpr (UniS) = "UniS"
+    tagExpr (NullS) = "NullS"
+    tagExpr (BndS v) = "BndS" <+> pretty v
+    tagExpr (LetBndS v) = "LetBndS" <+> pretty v
+    tagExpr (CallS v) = "CallS" <+> pretty v
+    tagExpr (ExeS _) = "ExeS"
+    tagExpr (LamS _ _) = "LamS"
+    tagExpr (AppS _ _) = "AppS"
+    tagExpr (LstS _) = "LstS"
+    tagExpr (TupS _) = "TupS"
+    tagExpr (NamS _) = "NamS"
+    tagExpr (RealS _) = "RealS"
+    tagExpr (IntS _) = "IntS"
+    tagExpr (LogS _) = "LogS"
+    tagExpr (StrS _) = "StrS"
+    tagExpr (DoBlockS _) = "DoBlockS"
+    tagExpr (EvalS _) = "EvalS"
+    tagExpr (CoerceS _ _) = "CoerceS"
+    tagExpr (IfS _ _ _) = "IfS"
+    tagExpr (LetS v _ _) = "LetS" <+> pretty v
+    tagExpr (VarS v _) = "VarS" <+> pretty v
+    tagExpr (IntrinsicS _ _) = "IntrinsicS"
 
 expressContainer ::
   Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> PolyExpr

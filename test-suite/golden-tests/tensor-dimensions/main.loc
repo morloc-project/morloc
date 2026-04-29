@@ -15,6 +15,9 @@ module main
 import root
 import root-py
 import root-cpp
+import tensor
+import tensor-cpp
+import tensor-py
 
 source Py from "src.py"
   ( "make1d" as pyMake1d
@@ -32,14 +35,14 @@ source Cpp from "src.hpp"
   , "cppSum5d"
   )
 
-pyMake1d :: Tensor1 6 Int32
-pyMake2d :: Tensor2 2 3 Int32
+pyMake1d :: Vector 6 Int32
+pyMake2d :: Matrix 2 3 Int32
 pyMake3d :: Tensor3 2 3 4 Int32
 pyMake4d :: Tensor4 2 3 2 2 Int32
 pyMake5d :: Tensor5 2 2 2 3 2 Int32
 
-cppSum1d :: Tensor1 6 Int32 -> Int32
-cppSum2d :: Tensor2 2 3 Int32 -> Int32
+cppSum1d :: Vector 6 Int32 -> Int32
+cppSum2d :: Matrix 2 3 Int32 -> Int32
 cppSum3d :: Tensor3 2 3 4 Int32 -> Int32
 cppSum4d :: Tensor4 2 3 2 2 Int32 -> Int32
 cppSum5d :: Tensor5 2 2 2 3 2 Int32 -> Int32

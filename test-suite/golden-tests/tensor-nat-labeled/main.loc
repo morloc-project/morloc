@@ -10,8 +10,8 @@ module main
   , testDense
   )
 
-import root
 import root-cpp
+import tensor-cpp
 
 source Cpp from "cnn.hpp"
   ( "makeImage"
@@ -27,22 +27,22 @@ source Cpp from "cnn.hpp"
   )
 
 -- Labeled params: Int args determine tensor dimensions
-makeImage :: h:Int -> w:Int -> Tensor2 h w Real
+makeImage :: h:Int -> w:Int -> Matrix h w Real
 makeKernels :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
-makeBias :: k:Int -> Tensor1 k Real
+makeBias :: k:Int -> Vector k Real
 
 -- Generic dimensions: ops work for any tensor sizes
-conv2d :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
+conv2d :: Matrix h w Real -> Tensor3 k fh fw Real -> Vector k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
 reluMap :: Tensor3 a b c Real -> Tensor3 a b c Real
-flatten3d :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
+flatten3d :: Tensor3 a b c Real -> Vector (a * b * c) Real
 
 -- Dense layer with generic dimensions
-makeWeights :: nout:Int -> nin:Int -> Tensor2 nout nin Real
-makeDenseBias :: n:Int -> Tensor1 n Real
-dense :: Tensor2 m n Real -> Tensor1 m Real -> Tensor1 n Real -> Tensor1 m Real
+makeWeights :: nout:Int -> nin:Int -> Matrix nout nin Real
+makeDenseBias :: n:Int -> Vector n Real
+dense :: Matrix m n Real -> Vector m Real -> Vector n Real -> Vector m Real
 
 -- Argmax: find index of maximum value
-argmax :: Tensor1 n Real -> Int
+argmax :: Vector n Real -> Int
 
 -- Full pipeline: image -> predicted class
 predictDigit :: Int
@@ -65,10 +65,10 @@ testConv = conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2)
 -- testRelu :: Tensor3 2 3 3 Real
 testRelu = reluMap (conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2))
 
--- testFlatten :: Tensor1 18 Real
+-- testFlatten :: Vector 18 Real
 testFlatten = flatten3d (reluMap (conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2)))
 
--- testDense :: Tensor1 3 Real
+-- testDense :: Vector 3 Real
 testDense =
   let flat = flatten3d (reluMap (conv2d (makeImage 5 5) (makeKernels 2 3 3) (makeBias 2)))
   in dense (makeWeights 3 18) (makeDenseBias 3) flat

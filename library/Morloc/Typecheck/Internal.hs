@@ -138,6 +138,7 @@ instance Applicable TypeU where
   apply g (NatMulU a b) = NatMulU (apply g a) (apply g b)
   apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
+  apply _ t@NatVoidU = t
   apply g (LabeledU n t) = LabeledU n (apply g t)
 
 instance Applicable EType where
@@ -299,6 +300,7 @@ isNatExpr (NatAddU _ _) = True
 isNatExpr (NatMulU _ _) = True
 isNatExpr (NatSubU _ _) = True
 isNatExpr (NatDivU _ _) = True
+isNatExpr NatVoidU = True
 isNatExpr _ = False
 
 typeUToNatExpr :: TypeU -> Maybe NS.NatExpr
@@ -420,6 +422,16 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2@(ExistU _ _ _) vs2) g
   | otherwise = subtypeEvaluated scope t1 t2 g
 subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | v1 == v2 && length vs1 == length vs2 = zipSubtype t1 t2 scope vs1 vs2 g
+  -- Concrete-side type aliases for nat-parameterised types (e.g.
+  -- `type Cpp => Vector (n :: Nat) a = "mlc::Tensor1<$1>" a`) drop Nat
+  -- args from the C++ template -- the morloc-side has [n, a] but the
+  -- concrete head only takes [a]. When comparing AppUs with the same
+  -- head, retry after filtering Nat args from both sides.
+  | v1 == v2
+  , let vs1' = filter (not . isNatExpr) vs1
+        vs2' = filter (not . isNatExpr) vs2
+  , length vs1' == length vs2' && length vs1' /= length vs1
+  = zipSubtype t1 t2 scope vs1' vs2' g
   | otherwise = subtypeEvaluated scope t1 t2 g
 -- subtype unordered records
 subtype scope (NamU _ v1 _ []) (NamU _ v2 _ []) g
@@ -478,6 +490,14 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
+-- NatVoidU is the erased-phantom-Nat sentinel; it is wildcard-compatible
+-- with any Nat expression. This mirrors the PartialOrd instance and is
+-- needed for subtyping at the codegen boundary, where unweaved TypeFs
+-- carry NatVoidU on positions that were erased during weaving (e.g.
+-- unresolved opaque output dims). Match before the generic Nat-expression
+-- branch so we short-circuit without sending NatVoidU to typeUToNatExpr.
+subtype _ NatVoidU t g | isNatExpr t = return g
+subtype _ t NatVoidU g | isNatExpr t = return g
 -- Nat expressions: compare via SOP normalization (handles commutativity,
 -- associativity, and cross-form equality like 2+3 ~ 5)
 subtype _ t1 t2 g
@@ -730,6 +750,7 @@ solve v t
     occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
+    occursIn _ NatVoidU = False
     occursIn v' (LabeledU _ t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache
@@ -1040,6 +1061,7 @@ renameNatVars m = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go t@NatVoidU = t
     go (LabeledU n t) = LabeledU n (go t)
 
 {- | Rename all generic type variables (ForallU-bound and ExistU) to clean
@@ -1106,6 +1128,7 @@ collectExistVars = go
     go (NatMulU a b) = go a ++ go b
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
     go (LabeledU _ t) = go t
 
 -- | Collect NatVarU variable names from a type (for renaming)
@@ -1126,6 +1149,7 @@ collectNatVarNames = go
     go (NatMulU a b) = go a ++ go b
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
     go (LabeledU _ t) = go t
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
@@ -1148,6 +1172,7 @@ collectFixedNames generics = go
     go (NatMulU a b) = Set.union (go a) (go b)
     go (NatSubU a b) = Set.union (go a) (go b)
     go (NatDivU a b) = Set.union (go a) (go b)
+    go NatVoidU = Set.empty
     go (LabeledU _ t) = go t
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
@@ -1169,6 +1194,7 @@ applyVarRenaming m = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go t@NatVoidU = t
     go (LabeledU n t) = LabeledU n (go t)
 
 -- | User-facing type display: clean variable names, no forall, no angle brackets.
@@ -1203,6 +1229,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
     f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
     f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
+    f _ NatVoidU = "_"
     f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =

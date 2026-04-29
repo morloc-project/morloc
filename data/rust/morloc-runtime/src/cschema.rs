@@ -83,11 +83,6 @@ impl CSchema {
             let n = match serial_type {
                 SerialType::Tuple | SerialType::Map => cs.size,
                 SerialType::Optional | SerialType::Array => 1,
-                SerialType::Tensor => {
-                    // offsets[0] = ndim, offsets[1..=ndim] = expected dims
-                    let ndim = *cs.offsets;
-                    1 + ndim
-                }
                 _ => 0,
             };
             if n > 0 {
@@ -147,10 +142,6 @@ impl CSchema {
             let n = match st {
                 SerialType::Tuple | SerialType::Map => cs.size,
                 SerialType::Optional | SerialType::Array => 1,
-                SerialType::Tensor => {
-                    let ndim = *cs.offsets;
-                    1 + ndim
-                }
                 _ => 0,
             };
             if n > 0 { let _ = Vec::from_raw_parts(cs.offsets, n, n); }

@@ -596,7 +596,7 @@ fn adjust_voidstar_relptrs(
     base_rel: crate::shm::RelPtr,
 ) -> Result<(), MorlocError> {
     use crate::schema::SerialType;
-    use crate::shm::{self, Array, Tensor};
+    use crate::shm::{self, Array};
 
     unsafe {
         match schema.serial_type {
@@ -635,13 +635,6 @@ fn adjust_voidstar_relptrs(
                     );
                     let child = data.add(inner_offset);
                     adjust_voidstar_relptrs(child, &schema.parameters[0], base_rel)?;
-                }
-            }
-            SerialType::Tensor => {
-                let tensor = &mut *(data as *mut Tensor);
-                if tensor.total_elements > 0 {
-                    tensor.shape += base_rel;
-                    tensor.data += base_rel;
                 }
             }
             _ => {} // Fixed-width primitives: no relptrs to adjust

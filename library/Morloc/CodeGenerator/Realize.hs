@@ -408,6 +408,10 @@ realizeWithRegistry registry s0 = do
         compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
         compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
         compatibleType (NatLitT n1) (NatLitT n2) = n1 == n2
+        -- NatVoidT is wildcard-compatible with any Nat-shaped value
+        compatibleType NatVoidT (NatLitT _) = True
+        compatibleType (NatLitT _) NatVoidT = True
+        compatibleType NatVoidT NatVoidT = True
         compatibleType t1 t2 = t1 == t2
 
     ----- NOTE: Some cases are inseperable, the code above does not

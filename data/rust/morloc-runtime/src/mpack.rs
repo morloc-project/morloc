@@ -134,11 +134,6 @@ fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), Morl
                     pack_data(inner_ptr, inner_schema, buf)?;
                 }
             }
-            SerialType::Tensor => {
-                return Err(MorlocError::Serialization(
-                    "MessagePack serialization of tensors not yet supported".into(),
-                ));
-            }
         }
     }
     Ok(())
@@ -251,7 +246,8 @@ fn unpack_obj(
                 arr.size = n;
 
                 // Align cursor for element data
-                let align = elem_schema.alignment();
+                // (bumps to 64 for primitive numerics for SIMD/BLAS)
+                let align = elem_schema.array_data_alignment();
                 let aligned = shm::align_up(*cursor as usize, align);
                 *cursor = aligned as AbsPtr;
 
@@ -289,11 +285,6 @@ fn unpack_obj(
                     let inner_ptr = ptr.add(inner_offset);
                     unpack_obj(inner_ptr, inner_schema, cursor, reader)?;
                 }
-            }
-            SerialType::Tensor => {
-                return Err(MorlocError::Serialization(
-                    "MessagePack tensor deserialization not yet supported".into(),
-                ));
             }
         }
     }
@@ -438,8 +429,8 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
                 as usize;
             let elem_schema = &schema.parameters[0];
             let mut total = std::mem::size_of::<Array>();
-            // Alignment padding
-            total = shm::align_up(total, elem_schema.alignment());
+            // Alignment padding (bumps to 64 for primitive numerics for SIMD/BLAS)
+            total = shm::align_up(total, elem_schema.array_data_alignment());
             for _ in 0..n {
                 total += calc_size_r(elem_schema, reader)?;
             }
@@ -469,7 +460,6 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
                 Ok(offset + inner_size)
             }
         }
-        SerialType::Tensor => Ok(0),
     }
 }
 

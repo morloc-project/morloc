@@ -20,6 +20,8 @@ module Morloc.TypeEval
   , pairEval
   , reduceType
   , reduceTypeLeaves
+  , expandHeadOnly
+  , expandLeavesOnce
   ) where
 
 import qualified Data.Set as Set
@@ -232,6 +234,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
     f bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
     f bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
+    f _ t@NatVoidU = return t
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
@@ -252,6 +255,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
     terminate bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
     terminate bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@NatVoidU = return t
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     renameTypedefs ::
@@ -361,4 +365,85 @@ parsub pair (NatAddU a b) = NatAddU (parsub pair a) (parsub pair b)
 parsub pair (NatMulU a b) = NatMulU (parsub pair a) (parsub pair b)
 parsub pair (NatSubU a b) = NatSubU (parsub pair a) (parsub pair b)
 parsub pair (NatDivU a b) = NatDivU (parsub pair a) (parsub pair b)
+parsub _ t@NatVoidU = t
 parsub pair (LabeledU n t) = LabeledU n (parsub pair t)
+
+-- | Expand the outermost type alias one step. Substitutes the alias body's
+-- parameters with the actual args, but does NOT recurse into the args. This
+-- preserves inner-element types when the outer alias changes the root type
+-- (e.g. expanding Vector -> List without reducing Int32 -> Int).
+--
+-- When the call-site has fewer args than the alias has params, we attempt
+-- a kind-based realignment: drop Nat-kinded params (filling them with the
+-- 'NatVoidU' phantom-Nat sentinel) so the remaining type-kinded params line
+-- up with the supplied args. This matters for list-literal lowering, which
+-- strips Nat phantom args before we get here -- e.g.
+-- `[1.0,2.0,3.0,4.0] :: Vector 4 Real` arrives as `AppU Vector [Real]`
+-- (1 arg) while the alias is `Vector n a = List a` (2 params). Substituting
+-- only `a -> Real` still produces `List Real`.
+expandHeadOnly :: Scope -> TypeU -> Maybe TypeU
+expandHeadOnly scope (AppU (VarU v) args) =
+  case Map.lookup v scope of
+    (Just ((paramKinds, body, _, _) : _))
+      | length paramKinds == length args ->
+          let params = [p | Left (p, _) <- paramKinds]
+          in if length params == length args
+             then Just $ foldr parsub body (zip params args)
+             else Nothing
+      | length args < length paramKinds ->
+          -- Kind-based realignment: bind type-kinded params from `args`
+          -- in order, fill Nat-kinded params with NatVoidU sentinels.
+          let typeParams = [p | Left (p, KindType) <- paramKinds]
+              natParams  = [p | Left (p, KindNat)  <- paramKinds]
+          in if length typeParams == length args
+             then Just $ foldr parsub body
+                    (zip typeParams args
+                      ++ [(p, NatVoidU) | p <- natParams])
+             else Nothing
+      | otherwise -> Nothing
+    _ -> Nothing
+expandHeadOnly scope (VarU v) =
+  case Map.lookup v scope of
+    (Just (([], body, _, _) : _)) -> Just body
+    _ -> Nothing
+expandHeadOnly _ _ = Nothing
+
+-- | Like reduceTypeLeaves, but uses one-step head substitution
+-- (expandHeadOnly) at each position rather than full evaluateStep. This is
+-- crucial when an alias body's outer head is itself abstract (e.g.
+-- `type Vector n a = List a` where List is abstract): full evaluation
+-- recurses into the substituted body and `resolveFail`s on the abstract
+-- head, returning Nothing -- masking the fact that ONE step of
+-- substitution succeeded. expandLeavesOnce performs the substitution
+-- and stops, returning the partially-reduced type.
+--
+-- Descends through ForallU/EffectU/OptionalU wrappers so that quantified
+-- instance method types reduce too.
+expandLeavesOnce :: Scope -> TypeU -> Maybe TypeU
+expandLeavesOnce scope t0 =
+  let (t1, changed) = go t0
+  in if changed then Just t1 else Nothing
+  where
+    go t = case expandHeadOnly scope t of
+      Just t' -> (t', True)
+      Nothing -> descend t
+
+    descend (ForallU v t) =
+      let (t', c) = go t in (ForallU v t', c)
+    descend (FunU ts t) =
+      let (ts', cs1) = unzip (map go ts)
+          (t', c2) = go t
+      in (FunU ts' t', or (c2 : cs1))
+    descend (AppU f ts) =
+      let (f', c1) = go f
+          (ts', cs) = unzip (map go ts)
+      in (AppU f' ts', or (c1 : cs))
+    descend (NamU o n ps rs) =
+      let (ps', cs1) = unzip (map go ps)
+          (vs', cs2) = unzip (map (go . snd) rs)
+      in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
+    descend (EffectU effs t) =
+      let (t', c) = go t in (EffectU effs t', c)
+    descend (OptionalU t) =
+      let (t', c) = go t in (OptionalU t', c)
+    descend t = (t, False)

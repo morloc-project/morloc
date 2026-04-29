@@ -55,6 +55,8 @@ module Morloc.BaseTypes
   , listU
   , effectU
   , optionalU
+  , isIntegerBaseType
+  , isRealBaseType
   ) where
 
 import Morloc.Data.Text (pretty)
@@ -187,3 +189,19 @@ effectU = EffectU emptyEffectSet
 
 optionalU :: TypeU -> TypeU
 optionalU = OptionalU
+
+-- | True if `t` names one of the integer base types: Int / Int8..Int64 /
+-- UInt / UInt8..UInt64. Used by the typechecker to allow integer literals
+-- to inhabit any integer-family type when annotated (Haskell-style numeric
+-- literal defaulting). Int8..Int64 and the unsigned variants are now
+-- standalone base types (no longer aliases of Int/UInt) because their
+-- wire representations differ; this predicate keeps them treated as a
+-- coherent family for literal type-checking.
+isIntegerBaseType :: TypeU -> Bool
+isIntegerBaseType t = t `elem`
+  [intU, i8U, i16U, i32U, i64U, uintU, u8U, u16U, u32U, u64U]
+
+-- | True if `t` names one of the real-valued base types: Real / Float32 /
+-- Float64. Counterpart to isIntegerBaseType for real literal defaulting.
+isRealBaseType :: TypeU -> Bool
+isRealBaseType t = t `elem` [realU, f32U, f64U]

@@ -113,6 +113,7 @@ checkForSelfRecursion d = do
     hasTerm v (NatMulU a b) = hasTerm v a || hasTerm v b
     hasTerm v (NatSubU a b) = hasTerm v a || hasTerm v b
     hasTerm v (NatDivU a b) = hasTerm v a || hasTerm v b
+    hasTerm _ NatVoidU = False
     hasTerm v (LabeledU _ t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
@@ -720,6 +721,7 @@ refineKinds dag = do
         go (NatMulU a b) = NatMulU (go a) (go b)
         go (NatSubU a b) = NatSubU (go a) (go b)
         go (NatDivU a b) = NatDivU (go a) (go b)
+        go t@NatVoidU = t
         go (LabeledU n t) = LabeledU n (go t)
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
@@ -765,4 +767,5 @@ rename sourceName localAlias = f
     f (NatMulU a b) = NatMulU (f a) (f b)
     f (NatSubU a b) = NatSubU (f a) (f b)
     f (NatDivU a b) = NatDivU (f a) (f b)
+    f t@NatVoidU = t
     f (LabeledU n t) = LabeledU n (f t)

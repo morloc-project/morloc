@@ -116,6 +116,22 @@ applyLambdas ::
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) = applyLambdas $ AnnoS g1 c2 e
 -- eliminate empty applications
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) = applyLambdas $ AnnoS g1 c2 e
+-- Push an application through a let in function position. A let-expression
+-- whose body evaluates to a function (e.g. a top-level binding written as
+-- `f = let v = ... in <function>`) ends up in function position when f is
+-- applied. Without this rewrite, a LamS hidden inside the let body never
+-- meets its arguments at the AppS-of-LamS pattern below, so beta-reduction
+-- is skipped and code generation later errors with "unexpected LamS".
+--
+--   (let v = e1 in body) args  =>  let v = e1 in (body args)
+--
+-- The new inner AppS keeps the outer application's index and contextual
+-- annotation (g1, c1) since it computes the same value as the original.
+-- The outer let keeps its own annotations.
+applyLambdas (AnnoS g1 c1 (AppS (AnnoS gLet cLet (LetS v e1 body)) es)) =
+  applyLambdas $
+    AnnoS gLet cLet $
+      LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- substitute applied lambdas
 applyLambdas
   ( AnnoS

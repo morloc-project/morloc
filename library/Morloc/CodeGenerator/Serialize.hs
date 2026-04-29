@@ -240,10 +240,10 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         (Just (Right t)) -> BndVarN <$> inferType t <*> pure i
         _ -> error "No type found"
     nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
-    nativeExpr m (MonoList v t es) =
+    nativeExpr m (MonoList v args es) =
       ListN
         <$> inferVar v
-        <*> inferType t
+        <*> mapM inferType args
         <*> mapM (nativeExpr m) es
     nativeExpr m (MonoTuple v rs) =
       TupleN
@@ -335,6 +335,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         go (EffectF _ t) = go t
         go (OptionalF t) = "?" <> go t
         go (NatLitF n) = pretty n
+        go NatVoidF = "_"
 
     typeArg ::
       SerializationState ->

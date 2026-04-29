@@ -92,16 +92,6 @@ pub struct Array {
     pub data: RelPtr,
 }
 
-/// N-dimensional dense tensor in SHM.
-#[repr(C)]
-pub struct Tensor {
-    pub total_elements: usize,
-    pub device_type: u32,
-    pub device_id: u32,
-    pub data: RelPtr,
-    pub shape: RelPtr,
-}
-
 // ── Send wrapper for raw pointers ──────────────────────────────────────────
 
 #[derive(Clone, Copy)]

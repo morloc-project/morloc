@@ -28,6 +28,14 @@ module Morloc.CodeGenerator.Namespace
   , TypeS (..)
   , FVar (..)
 
+    -- ** Nat-kinded type helpers
+  , isNatTypeF
+  , isNatTypeT
+  , nullifyNatKindsF
+  , nullifyNatKindsT
+  , listElemTypeF
+  , listElemTypeT
+
     -- ** Typeclasses
   , HasTypeF (..)
   , MayHaveTypeF (..)
@@ -158,7 +166,67 @@ data TypeF
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
+  -- | Erased phantom Nat slot. See NatVoidU in 'Morloc.Namespace.Type'
+  -- for the rationale.
+  | NatVoidF
   deriving (Show, Ord, Eq)
+
+-- | True iff a TypeF is a Nat-kinded entry: a real Nat literal, or the
+-- erased-phantom sentinel 'NatVoidF'.
+isNatTypeF :: TypeF -> Bool
+isNatTypeF (NatLitF _) = True
+isNatTypeF NatVoidF = True
+isNatTypeF _ = False
+
+-- | True iff a Type is a Nat-kinded entry. Mirrors 'isNatTypeF'.
+isNatTypeT :: Type -> Bool
+isNatTypeT (NatLitT _) = True
+isNatTypeT (NatAddT _ _) = True
+isNatTypeT (NatMulT _ _) = True
+isNatTypeT (NatSubT _ _) = True
+isNatTypeT (NatDivT _ _) = True
+isNatTypeT NatVoidT = True
+isNatTypeT _ = False
+
+-- | Drop Nat-kinded positional args from compound types. The walk goes
+-- one application deep at every layer so phantom dims at any nesting
+-- level disappear. Use this when a downstream consumer only cares about
+-- the runtime arg shape (e.g. wire schemas, dispatch on List/Tuple).
+nullifyNatKindsF :: TypeF -> TypeF
+nullifyNatKindsF (AppF t ts) =
+  AppF (nullifyNatKindsF t) (filter (not . isNatTypeF) (map nullifyNatKindsF ts))
+nullifyNatKindsF (FunF ts t) = FunF (map nullifyNatKindsF ts) (nullifyNatKindsF t)
+nullifyNatKindsF (NamF o n ps rs) =
+  NamF o n (map nullifyNatKindsF ps) [(k, nullifyNatKindsF v) | (k, v) <- rs]
+nullifyNatKindsF (EffectF effs t) = EffectF effs (nullifyNatKindsF t)
+nullifyNatKindsF (OptionalF t) = OptionalF (nullifyNatKindsF t)
+nullifyNatKindsF t = t
+
+-- | Companion to 'nullifyNatKindsF' for the Type level.
+nullifyNatKindsT :: Type -> Type
+nullifyNatKindsT (AppT t ts) =
+  AppT (nullifyNatKindsT t) (filter (not . isNatTypeT) (map nullifyNatKindsT ts))
+nullifyNatKindsT (FunT ts t) = FunT (map nullifyNatKindsT ts) (nullifyNatKindsT t)
+nullifyNatKindsT (NamT o n ps rs) =
+  NamT o n (map nullifyNatKindsT ps) [(k, nullifyNatKindsT v) | (k, v) <- rs]
+nullifyNatKindsT (EffectT effs t) = EffectT effs (nullifyNatKindsT t)
+nullifyNatKindsT (OptionalT t) = OptionalT (nullifyNatKindsT t)
+nullifyNatKindsT t = t
+
+-- | Extract the runtime element type of a list-shaped type's full arg
+-- list (the only non-Nat positional arg). Used by consumers that
+-- previously took the element type directly and now receive the full
+-- args list.
+listElemTypeF :: [TypeF] -> TypeF
+listElemTypeF args = case filter (not . isNatTypeF) args of
+  [t] -> t
+  ts  -> error $ "listElemTypeF: expected exactly one runtime arg, got " <> show (length ts)
+
+-- | Type-level companion to 'listElemTypeF'.
+listElemTypeT :: [Type] -> Type
+listElemTypeT args = case filter (not . isNatTypeT) args of
+  [t] -> t
+  ts  -> error $ "listElemTypeT: expected exactly one runtime arg, got " <> show (length ts)
 
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
@@ -183,10 +251,6 @@ data SerialAST
   = -- | use an (un)pack function to simplify an object
     SerialPack FVar (TypePacker, SerialAST)
   | SerialList FVar (Maybe Integer) SerialAST
-  | -- | Dense N-dimensional tensor. ndim is the rank (1=vector, 2=matrix, etc.),
-    -- dims are expected dimension sizes (Just n = constrained, Nothing = free),
-    -- and the inner SerialAST is the element type (must be a numeric primitive).
-    SerialTensor FVar Int [Maybe Integer] SerialAST
   | SerialTuple FVar [SerialAST]
   | -- | Make a record, table, or object. The parameters indicate
     --   1) NamType - record/table/object
@@ -224,7 +288,6 @@ instance Pretty SerialAST where
         <+> pretty v
         <+> braces (vsep [pretty packer, pretty s])
   pretty (SerialList _ dim ef) = parens $ "SerialList" <+> viaShow dim <+> pretty ef
-  pretty (SerialTensor v ndim dims s) = parens ("SerialTensor" <+> pretty v <+> pretty ndim <+> viaShow dims <+> pretty s)
   pretty (SerialTuple _ efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
   pretty (SerialObject o _ vs rs) =
     parens $
@@ -448,7 +511,12 @@ data PolyExpr
   | -- terms that map 1:1 versus SAnno; have defined types in one language
     PolyExe (Indexed Type) ExecutableExpressionPool
   | -- data types
-    PolyList (Indexed TVar) (Indexed Type) [PolyExpr]
+    -- The [Indexed Type] is the FULL list of positional type args of
+    -- the list head (Vector / List / Deque / etc.), preserving Nat-kinded
+    -- entries as NatLitT so phantom dimensions survive into language
+    -- code generators. Use 'listElemTypeT' to extract the runtime element
+    -- type; use 'nullifyNatKindsT' to strip Nat positions when needed.
+    PolyList (Indexed TVar) [Indexed Type] [PolyExpr]
   | PolyTuple (Indexed TVar) [(Indexed Type, PolyExpr)]
   | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]
   | PolyLog (Indexed TVar) Bool
@@ -482,7 +550,8 @@ data MonoExpr
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
   -- data types
   | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
-  | MonoList (Indexed TVar) (Indexed Type) [MonoExpr]
+  -- See PolyList above for the meaning of the [Indexed Type] arg list.
+  | MonoList (Indexed TVar) [Indexed Type] [MonoExpr]
   | MonoTuple (Indexed TVar) [(Indexed Type, MonoExpr)]
   | MonoLog (Indexed TVar) Bool
   | MonoReal (Indexed TVar) Scientific
@@ -553,7 +622,10 @@ data NativeExpr
   | DeserializeN TypeF SerialAST SerialExpr
   | ExeN TypeF ExecutableExpressionPool
   | -- data types
-    ListN FVar TypeF [NativeExpr]
+    -- See PolyList in PolyExpr above. The [TypeF] is the FULL applied
+    -- type args (including NatLitF for phantom Nat dims). 'typeFof'
+    -- reconstructs `AppF (VarF v) args` from these.
+    ListN FVar [TypeF] [NativeExpr]
   | TupleN FVar [NativeExpr]
   | RecordN NamType FVar [TypeF] [(Key, NativeExpr)]
   | LogN FVar Bool
@@ -824,7 +896,7 @@ data NativeExpr_ nm se ne sr nr
   | DeserializeN_ TypeF SerialAST se
   | ExeN_ TypeF ExecutableExpressionPool
   | -- data types
-    ListN_ FVar TypeF [ne]
+    ListN_ FVar [TypeF] [ne]
   | TupleN_ FVar [ne]
   | RecordN_ NamType FVar [TypeF] [(Key, ne)]
   | LogN_ FVar Bool
@@ -1060,7 +1132,7 @@ instance HasTypeF NativeExpr where
   typeFof (BndVarN t _) = t
   typeFof (DeserializeN t _ _) = t
   typeFof (ExeN t _) = t
-  typeFof (ListN v p _) = AppF (VarF v) [p]
+  typeFof (ListN v args _) = AppF (VarF v) args
   typeFof (TupleN v (map typeFof -> ps)) = AppF (VarF v) ps
   typeFof (RecordN o n ps (map (second typeFof) -> rs)) = NamF o n ps rs
   typeFof (LogN v _) = VarF v

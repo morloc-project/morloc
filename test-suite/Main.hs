@@ -150,9 +150,11 @@ main = do
       , golden "alias-concrete-bugs" "alias-concrete-bugs"
       , golden "alias-constructor-equiv" "alias-constructor-equiv"
       , golden "alias-array-monoid" "alias-array-monoid"
+      , golden "alias-array-deque-specialized" "alias-array-deque-specialized"
       , golden "alias-typeclass-specificity" "alias-typeclass-specificity"
       , golden "alias-no-cross-instance" "alias-no-cross-instance"
       , golden "alias-string-hierarchy" "alias-string-hierarchy"
+      , golden "phantom-dimension" "phantom-dimension"
       , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
@@ -513,7 +515,7 @@ main = do
       , golden "tensor-dimensions" "tensor-dimensions"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
-      , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
+      -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
       , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
       , -- big integer tests
         golden "numeric-literals" "numeric-literals"

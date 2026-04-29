@@ -344,7 +344,7 @@ instance Defaultable PackageMeta where
       , packageMaintainer = ""
       , packageGithub = ""
       , packageBugReports = ""
-      , packageCppVersion = 17
+      , packageCppVersion = 20
       , packageDependencies = []
       , packageInclude = Nothing
       }

@@ -117,6 +117,7 @@ findTypeTerms (NatAddU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatMulU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatSubU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatDivU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms NatVoidU = []
 findTypeTerms (LabeledU _ t) = findTypeTerms t
 
 -- | Build the fixity map from top-level fixity declarations.
