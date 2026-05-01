@@ -1,0 +1,3 @@
+bound :: Table 12 {x=Int}
+double :: Table 20 {x=Int}
+both :: Table 5 ({x=Int} + {y=Str})

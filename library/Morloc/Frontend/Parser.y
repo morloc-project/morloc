@@ -49,7 +49,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 82
+%expect 86
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -92,7 +92,6 @@ import qualified Morloc.BaseTypes as BT
   'type'     { Located _ TokType _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
-  'table'    { Located _ TokTable _ }
   'class'    { Located _ TokClass _ }
   'instance' { Located _ TokInstance _ }
   'infixl'   { Located _ TokInfixl _ }
@@ -294,7 +293,6 @@ typedef_decl :: { Loc CstExpr }
 nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
   | 'object'   { ($1, NamObject) }
-  | 'table'    { ($1, NamTable) }
 
 nam_constructor :: { (Text, Bool) }
   : STRING                    { (getString $1, True) }
@@ -727,11 +725,20 @@ atom_type :: { TypeU }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
   | '?' atom_type             { OptionalU $2 }
+  | '{' '}'                   { RecEmptyU }
+  | '{' rec_entries '}'       { foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
-  | STRING                    { VarU (TV (getString $1)) }
+  | STRING                    { StrLitU (getString $1) }
   | INTEGER                   { NatLitU (getInt $1) }
+
+rec_entries :: { [(Text, TypeU)] }
+  : rec_entry                              { [$1] }
+  | rec_entries ',' rec_entry              { $1 ++ [$3] }
+
+rec_entry :: { (Text, TypeU) }
+  : LOWER '=' non_fun_type                 { (getName $1, $3) }
 
 type_list1 :: { [TypeU] }
   : type                      { [$1] }
@@ -784,10 +791,12 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
+  | '{' '}'                      { (locPos $1, RecEmptyU) }
+  | '{' rec_entries '}'          { (locPos $1, foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
-  | STRING                      { (locPos $1, VarU (TV (getString $1))) }
+  | STRING                      { (locPos $1, StrLitU (getString $1)) }
   | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }
 
 single_constraint :: { Constraint }
@@ -892,6 +901,8 @@ getIntrinsicName _ = ""
 
 parseKind :: Text -> Kind
 parseKind "Nat" = KindNat
+parseKind "Str" = KindStr
+parseKind "Rec" = KindRec
 parseKind _ = KindType
 
 getOp :: Located -> Text

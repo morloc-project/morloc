@@ -336,6 +336,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         go (OptionalF t) = "?" <> go t
         go (NatLitF n) = pretty n
         go NatVoidF = "_"
+        go (StrLitF s) = dquotes (pretty s)
+        go StrVoidF = "_"
 
     typeArg ::
       SerializationState ->

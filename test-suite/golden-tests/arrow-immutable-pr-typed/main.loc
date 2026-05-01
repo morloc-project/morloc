@@ -1,0 +1,34 @@
+module main (result)
+
+import root
+import root-py
+import root-r (Int, Real)
+import tables-py
+import tables-r
+
+-- Migrated from arrow-immutable-pr: was `table Stats = Stats {idx :: Int,
+-- value :: Real}` plus per-language `"arrow"` mappings. The new typed
+-- Table form expresses the same schema via the Rec literal {idx=Int,
+-- value=Real}, parameterised over the row count n.
+
+source Py from "src.py" ("makeLargeTable", "makeIndices", "sumReals")
+source R from "src.R" ("lookupValue")
+
+makeLargeTable :: Int -> Table n {idx=Int, value=Real}
+lookupValue :: Table n {idx=Int, value=Real} -> Int -> Real
+makeIndices :: Int -> [Int]
+sumReals :: [Real] -> Real
+
+result ::
+  --' number of rows in table
+  --' arg: --nrows
+  --' default: 100000
+  Int ->
+  --' number of foreign calls
+  --' arg: --ncalls
+  --' default: 1000
+  Int ->
+  Real
+result nrows ncalls =
+  let tbl = makeLargeTable nrows
+  in sumReals (map (lookupValue tbl) (makeIndices ncalls))

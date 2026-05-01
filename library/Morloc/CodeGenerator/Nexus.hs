@@ -215,6 +215,16 @@ generalTypeToSerialAST (AppT (VarT v) [t])
   | otherwise = resolveAliasApp v [t]
 generalTypeToSerialAST (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) = SerialTuple (FV v (CV "")) <$> mapM generalTypeToSerialAST ts
+  -- A Table lowers to a record-shaped serial AST tagged with the language
+  -- variable BT.table. Downstream serializer (Serial.hasArrowHint) routes
+  -- it through the Arrow SHM wire format. The column schema is taken from
+  -- the Rec arg if it survived kind erasure as a NamT.
+  | v == MBT.table =
+      let cols = case ts of
+            [_, NamT _ _ _ rs] -> rs
+            _                  -> []
+      in SerialObject NamTable (FV MBT.table (CV "arrow")) []
+           <$> mapM (secondM generalTypeToSerialAST) cols
   | otherwise = resolveAliasApp v ts
 generalTypeToSerialAST (EffectT _ t) = generalTypeToSerialAST t
 generalTypeToSerialAST (OptionalT t) = do

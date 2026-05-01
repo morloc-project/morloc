@@ -169,6 +169,8 @@ data TypeF
   -- | Erased phantom Nat slot. See NatVoidU in 'Morloc.Namespace.Type'
   -- for the rationale.
   | NatVoidF
+  | StrLitF Text -- ^ Type-level Str literal at the codegen level (kind-Str ground form)
+  | StrVoidF -- ^ Erased phantom Str slot. Mirrors NatVoidF.
   deriving (Show, Ord, Eq)
 
 -- | True iff a TypeF is a Nat-kinded entry: a real Nat literal, or the

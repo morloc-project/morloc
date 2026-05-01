@@ -1,0 +1,15 @@
+module main (makePeople)
+
+import root
+import root-py
+import tables-py
+
+-- Migrated from arrow-nexus-py using Stage 4 typed Table syntax. The
+-- legacy `table Person = Person { ... }` + `table Py => Person = "arrow"`
+-- declarations are replaced by an inline `Table n {name=Str, age=Int}`
+-- schema. Same Python source (returns pa.RecordBatch), same nexus
+-- output (row-oriented JSON via print_arrow_as_json).
+
+source Py from "src.py" ("makePeople")
+
+makePeople :: Table n {name=Str, age=Int}

@@ -59,6 +59,8 @@ module Morloc.Typecheck.Internal
 
     -- * nat label helpers
   , collectNatVarNames
+  , collectStrVarNames
+  , collectRecVarNames
 
     -- * debugging
   , seeGamma
@@ -84,6 +86,8 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 import qualified Morloc.Typecheck.NatSolver as NS
+import qualified Morloc.Typecheck.StrSolver as SS
+import qualified Morloc.Typecheck.RecSolver as RS
 import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
@@ -139,6 +143,21 @@ instance Applicable TypeU where
   apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
   apply _ t@NatVoidU = t
+  apply g (StrVarU v) = case Map.lookup v (gammaStrSubs g) of
+    Just t -> t
+    Nothing -> StrVarU v
+  apply _ t@(StrLitU _) = t
+  apply g (StrConcatU a b) = StrConcatU (apply g a) (apply g b)
+  apply _ t@StrVoidU = t
+  apply g (RecVarU v) = case Map.lookup v (gammaRecSubs g) of
+    Just t -> t
+    Nothing -> RecVarU v
+  apply _ t@RecEmptyU = t
+  apply g (RecExtendU k a b) = RecExtendU k (apply g a) (apply g b)
+  apply g (RecUnionU a b) = RecUnionU (apply g a) (apply g b)
+  apply g (RecDiffU a ks) = RecDiffU (apply g a) ks
+  apply g (RecIntersectU a b) = RecIntersectU (apply g a) (apply g b)
+  apply _ t@RecVoidU = t
   apply g (LabeledU n t) = LabeledU n (apply g t)
 
 instance Applicable EType where
@@ -156,6 +175,8 @@ instance Applicable Gamma where
       { gammaContext = IntMap.map f (gammaContext g2)
       , gammaSolved = Map.map (apply g1) (gammaSolved g2)
       , gammaNatSubs = Map.map (apply g1) (gammaNatSubs g2)
+      , gammaStrSubs = Map.map (apply g1) (gammaStrSubs g2)
+      , gammaRecSubs = Map.map (apply g1) (gammaRecSubs g2)
       }
     where
       f :: GammaIndex -> GammaIndex
@@ -199,7 +220,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -322,6 +343,70 @@ natExprToTypeU (NS.NatMul a b) = NatMulU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatSub a b) = NatSubU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatDiv a b) = NatDivU (natExprToTypeU a) (natExprToTypeU b)
 
+-- | True iff the TypeU is a Str-kinded expression (literal, variable, or
+-- concat of those). Used to gate which deferred constraints are sent to the
+-- StrSolver. See plans/tables/04-str-solver-scope.md.
+isStrExpr :: TypeU -> Bool
+isStrExpr (StrVarU _) = True
+isStrExpr (StrLitU _) = True
+isStrExpr (StrConcatU _ _) = True
+isStrExpr StrVoidU = True
+isStrExpr _ = False
+
+typeUToStrExpr :: TypeU -> Maybe SS.StrExpr
+typeUToStrExpr (StrVarU v) = Just (SS.StrVar v)
+typeUToStrExpr (StrLitU s) = Just (SS.StrLit s)
+typeUToStrExpr (StrConcatU a b) = SS.StrConcat <$> typeUToStrExpr a <*> typeUToStrExpr b
+typeUToStrExpr _ = Nothing
+
+strExprToTypeU :: SS.StrExpr -> TypeU
+strExprToTypeU (SS.StrLit s) = StrLitU s
+strExprToTypeU (SS.StrVar v) = StrVarU v
+strExprToTypeU (SS.StrConcat a b) = StrConcatU (strExprToTypeU a) (strExprToTypeU b)
+
+-- | Insert solved Str-variable assignments into the gamma's gammaStrSubs.
+-- Mirrors applyNatSolutions but the StrSolver only ever produces ground
+-- assignments (per memo 04), so there is no existential-vs-StrVar dispatch.
+applyStrSolutions :: Map.Map TVar SS.StrExpr -> Gamma -> Gamma
+applyStrSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
+  where
+    insertSub g (v, se) = g { gammaStrSubs = Map.insert v (strExprToTypeU se) (gammaStrSubs g) }
+
+-- | True iff the TypeU is a Rec-kinded expression (variable, empty,
+-- extension, union, difference, intersection). Mirrors isNatExpr/isStrExpr.
+isRecExpr :: TypeU -> Bool
+isRecExpr (RecVarU _) = True
+isRecExpr RecEmptyU = True
+isRecExpr (RecExtendU _ _ _) = True
+isRecExpr (RecUnionU _ _) = True
+isRecExpr (RecDiffU _ _) = True
+isRecExpr (RecIntersectU _ _) = True
+isRecExpr RecVoidU = True
+isRecExpr _ = False
+
+typeUToRecExpr :: TypeU -> Maybe RS.RecExpr
+typeUToRecExpr (RecVarU v) = Just (RS.RecVar v)
+typeUToRecExpr RecEmptyU = Just RS.RecEmpty
+typeUToRecExpr (RecExtendU k t rest) = RS.RecExtend k t <$> typeUToRecExpr rest
+typeUToRecExpr (RecUnionU a b) = RS.RecUnion <$> typeUToRecExpr a <*> typeUToRecExpr b
+typeUToRecExpr (RecDiffU a ks) = (\a' -> RS.RecDiff a' ks) <$> typeUToRecExpr a
+typeUToRecExpr (RecIntersectU a b) = RS.RecIntersect <$> typeUToRecExpr a <*> typeUToRecExpr b
+typeUToRecExpr _ = Nothing
+
+recExprToTypeU :: RS.RecExpr -> TypeU
+recExprToTypeU (RS.RecVar v) = RecVarU v
+recExprToTypeU RS.RecEmpty = RecEmptyU
+recExprToTypeU (RS.RecExtend k t rest) = RecExtendU k t (recExprToTypeU rest)
+recExprToTypeU (RS.RecUnion a b) = RecUnionU (recExprToTypeU a) (recExprToTypeU b)
+recExprToTypeU (RS.RecDiff a ks) = RecDiffU (recExprToTypeU a) ks
+recExprToTypeU (RS.RecIntersect a b) = RecIntersectU (recExprToTypeU a) (recExprToTypeU b)
+
+-- | Insert solved Rec-tail variable assignments into the gamma's gammaRecSubs.
+applyRecSolutions :: Map.Map TVar RS.RecExpr -> Gamma -> Gamma
+applyRecSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
+  where
+    insertSub g (v, re) = g { gammaRecSubs = Map.insert v (recExprToTypeU re) (gammaRecSubs g) }
+
 applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
 applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
   where
@@ -336,10 +421,11 @@ applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
              Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
            Left err -> Left err
 
--- | Re-check deferred Nat constraints after all existentials are solved.
--- Applies the final gamma to each deferred pair, converts to NatExpr,
--- and re-solves. Returns Left on contradiction, Right with remaining
--- still-deferred constraints (now truly unsolvable).
+-- | Re-check deferred Nat / Str constraints after all existentials are
+-- solved. Applies the final gamma to each deferred pair, converts to the
+-- appropriate kind-specific expression, and re-solves. Returns Left on
+-- contradiction, Right with remaining still-deferred constraints (now
+-- truly unsolvable).
 recheckDeferred :: Gamma -> Either MDoc [(TypeU, TypeU)]
 recheckDeferred g = foldM check [] (gammaDeferred g)
   where
@@ -354,7 +440,24 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
                  Left $ "Nat constraint mismatch (deferred):"
                    <+> prettyTypeU t1' <+> "~" <+> prettyTypeU t2'
                Left (NS.Deferred _) -> Right ((t1', t2') : acc)
-           _ -> Right acc  -- not nat exprs after apply, skip
+           _ -> case (typeUToStrExpr t1', typeUToStrExpr t2') of
+             (Just se1, Just se2) ->
+               case SS.solveStr se1 se2 of
+                 Right _ -> Right acc
+                 Left (SS.StrContradiction s1 s2) ->
+                   Left $ "Str constraint mismatch (deferred):"
+                     <+> dquotes (pretty s1) <+> "vs" <+> dquotes (pretty s2)
+                 Left SS.StrDeferred -> Right ((t1', t2') : acc)
+             _ -> case (typeUToRecExpr t1', typeUToRecExpr t2') of
+               (Just re1, Just re2) ->
+                 case RS.solveRec re1 re2 of
+                   Right _ -> Right acc
+                   Left (RS.RecContradiction msg) ->
+                     Left $ "Rec constraint mismatch (deferred):" <+> pretty msg
+                   Left (RS.RecMalformed msg) ->
+                     Left $ "Rec malformed (deferred):" <+> pretty msg
+                   Left RS.RecDeferred -> Right ((t1', t2') : acc)
+               _ -> Right acc  -- not a kind we can solve, skip
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
@@ -513,6 +616,51 @@ subtype _ t1 t2 g
                Left NS.Contradiction -> subtypeError t1 t2 "Nat constraint mismatch"
                Left (NS.Deferred _) -> return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Nat expressions"
+-- StrVoidU is the erased phantom Str slot; it is compatible with any Str
+-- expression. Mirrors the NatVoidU rule above.
+subtype _ StrVoidU t g | isStrExpr t = return g
+subtype _ t StrVoidU g | isStrExpr t = return g
+-- Str expressions: compare via literal equality after normalization
+-- (handles concat-of-literals folding). Variables defer per memo 04.
+subtype _ t1 t2 g
+  | isStrExpr t1 && isStrExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToStrExpr t1', typeUToStrExpr t2') of
+           (Just se1, Just se2) ->
+             case SS.solveStr se1 se2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> return (applyStrSolutions subs g)
+               Left (SS.StrContradiction _ _) ->
+                 subtypeError t1 t2 "Str constraint mismatch"
+               Left SS.StrDeferred ->
+                 return g { gammaDeferred = (t1', t2') : gammaDeferred g }
+           _ -> subtypeError t1 t2 "Cannot compare Str expressions"
+-- RecVoidU is the erased phantom Rec slot; compatible with any Rec
+-- expression. Mirrors the NatVoidU and StrVoidU rules above.
+subtype _ RecVoidU t g | isRecExpr t = return g
+subtype _ t RecVoidU g | isRecExpr t = return g
+-- Rec expressions: compare via the Rec solver, which canonicalizes
+-- structural ops (extend, union, diff, intersect) and aligns ground
+-- field maps. See plans/tables/10-rec-solver-decidability.md.
+subtype _ t1 t2 g
+  | isRecExpr t1 && isRecExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToRecExpr t1', typeUToRecExpr t2') of
+           (Just re1, Just re2) ->
+             case RS.solveRec re1 re2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> return (applyRecSolutions subs g)
+               Left (RS.RecContradiction msg) ->
+                 subtypeError t1 t2 ("Rec constraint mismatch: " <> pretty msg)
+               Left (RS.RecMalformed msg) ->
+                 subtypeError t1 t2 ("Rec malformed: " <> pretty msg)
+               Left RS.RecDeferred ->
+                 return g { gammaDeferred = (t1', t2') : gammaDeferred g }
+           _ -> subtypeError t1 t2 "Cannot compare Rec expressions"
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
@@ -751,6 +899,17 @@ solve v t
     occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
     occursIn _ NatVoidU = False
+    occursIn _ (StrVarU _) = False
+    occursIn _ (StrLitU _) = False
+    occursIn v' (StrConcatU a b) = occursIn v' a || occursIn v' b
+    occursIn _ StrVoidU = False
+    occursIn _ (RecVarU _) = False
+    occursIn _ RecEmptyU = False
+    occursIn v' (RecExtendU _ a b) = occursIn v' a || occursIn v' b
+    occursIn v' (RecUnionU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (RecDiffU a _) = occursIn v' a
+    occursIn v' (RecIntersectU a b) = occursIn v' a || occursIn v' b
+    occursIn _ RecVoidU = False
     occursIn v' (LabeledU _ t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache
@@ -1033,21 +1192,40 @@ rename g0 (ForallU v@(TV s) t0) =
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
    in (g2, ForallU v' t2)
--- After stripping ForallU, rename NatVarU variables to fresh names
+-- After stripping ForallU, rename NatVarU / StrVarU / RecVarU variables to
+-- fresh names. All three kinds are implicitly forall-quantified and need
+-- per-instantiation freshening so multiple uses of a polymorphic function
+-- don't accidentally share a kind-variable name across call sites.
 rename g0 t0 =
   let nvs = nub (collectNatVarNames t0)
-   in if null nvs then (g0, t0)
+      svs = nub (collectStrVarNames t0)
+      rvs = nub (collectRecVarNames t0)
+   in if null nvs && null svs && null rvs then (g0, t0)
       else
         let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@n")) g0 nvs
-            renameMap = Map.fromList (zip nvs nvs')
-         in (g1, renameNatVars renameMap t0)
+            (g2, svs') = statefulMap (\g (TV s) -> tvarname g (s <> "@s")) g1 svs
+            (g3, rvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@r")) g2 rvs
+            natMap = Map.fromList (zip nvs nvs')
+            strMap = Map.fromList (zip svs svs')
+            recMap = Map.fromList (zip rvs rvs')
+         in (g3, renameKindedVars natMap strMap recMap t0)
 
--- | Rename NatVarU variables according to a mapping
-renameNatVars :: Map.Map TVar TVar -> TypeU -> TypeU
-renameNatVars m = go
+-- | Rename kind-variable occurrences according to per-kind name maps.
+-- Mirrors the old renameNatVars but additionally renames StrVarU and
+-- RecVarU. Each kind has its own map so name spaces stay disjoint.
+renameKindedVars ::
+  Map.Map TVar TVar ->  -- Nat-var renames
+  Map.Map TVar TVar ->  -- Str-var renames
+  Map.Map TVar TVar ->  -- Rec-var renames
+  TypeU -> TypeU
+renameKindedVars natM strM recM = go
   where
-    ren v = Map.findWithDefault v v m
-    go (NatVarU v) = NatVarU (ren v)
+    renN v = Map.findWithDefault v v natM
+    renS v = Map.findWithDefault v v strM
+    renR v = Map.findWithDefault v v recM
+    go (NatVarU v) = NatVarU (renN v)
+    go (StrVarU v) = StrVarU (renS v)
+    go (RecVarU v) = RecVarU (renR v)
     go (VarU v) = VarU v
     go (ExistU v (ts, tc) (rs, rc)) = ExistU v (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
     go (ForallU v t) = ForallU v (go t)
@@ -1062,6 +1240,15 @@ renameNatVars m = go
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
     go t@NatVoidU = t
+    go t@(StrLitU _) = t
+    go (StrConcatU a b) = StrConcatU (go a) (go b)
+    go t@StrVoidU = t
+    go t@RecEmptyU = t
+    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
+    go (RecUnionU a b) = RecUnionU (go a) (go b)
+    go (RecDiffU a ks) = RecDiffU (go a) ks
+    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go t@RecVoidU = t
     go (LabeledU n t) = LabeledU n (go t)
 
 {- | Rename all generic type variables (ForallU-bound and ExistU) to clean
@@ -1073,7 +1260,9 @@ cleanTypeName t0 =
   let (vs, body) = unqualify t0
       evs = collectExistVars body
       nvs = collectNatVarNames body
-      allGeneric = nub (vs ++ evs ++ nvs)
+      svs = collectStrVarNames body
+      rvs = collectRecVarNames body
+      allGeneric = nub (vs ++ evs ++ nvs ++ svs ++ rvs)
       fixed = collectFixedNames (Set.fromList allGeneric) body
       pool = filter (\(TV n) -> Set.notMember n fixed) letterPool
       renameMap = Map.fromList (zip allGeneric pool)
@@ -1129,6 +1318,17 @@ collectExistVars = go
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
     go NatVoidU = []
+    go (StrVarU _) = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go (RecVarU _) = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go RecVoidU = []
     go (LabeledU _ t) = go t
 
 -- | Collect NatVarU variable names from a type (for renaming)
@@ -1150,6 +1350,83 @@ collectNatVarNames = go
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
     go NatVoidU = []
+    go (StrVarU _) = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go (RecVarU _) = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go RecVoidU = []
+    go (LabeledU _ t) = go t
+
+-- | Collect StrVarU variable names from a type. Mirrors collectNatVarNames.
+-- Used by the resolveStrLabels bridge that turns runtime Str-literal args
+-- into type-level Str solutions when the function uses f:Str labels.
+collectStrVarNames :: TypeU -> [TVar]
+collectStrVarNames = go
+  where
+    go (StrVarU v) = [v]
+    go (VarU _) = []
+    go (NatVarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go (RecVarU _) = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go RecVoidU = []
+    go (LabeledU _ t) = go t
+
+-- | Collect RecVarU variable names from a type. Mirrors collectNatVarNames.
+collectRecVarNames :: TypeU -> [TVar]
+collectRecVarNames = go
+  where
+    go (RecVarU v) = [v]
+    go (VarU _) = []
+    go (NatVarU _) = []
+    go (StrVarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go RecVoidU = []
     go (LabeledU _ t) = go t
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
@@ -1173,6 +1450,17 @@ collectFixedNames generics = go
     go (NatSubU a b) = Set.union (go a) (go b)
     go (NatDivU a b) = Set.union (go a) (go b)
     go NatVoidU = Set.empty
+    go (StrVarU _) = Set.empty
+    go (StrLitU _) = Set.empty
+    go (StrConcatU a b) = Set.union (go a) (go b)
+    go StrVoidU = Set.empty
+    go (RecVarU _) = Set.empty
+    go RecEmptyU = Set.empty
+    go (RecExtendU _ a b) = Set.union (go a) (go b)
+    go (RecUnionU a b) = Set.union (go a) (go b)
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = Set.union (go a) (go b)
+    go RecVoidU = Set.empty
     go (LabeledU _ t) = go t
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
@@ -1195,6 +1483,22 @@ applyVarRenaming m = go
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
     go t@NatVoidU = t
+    -- StrVarU and RecVarU must be renamed by the same map as VarU so
+    -- references to a kinded type-level variable stay in sync after
+    -- renaming. Treating them as inert was a bug that caused
+    -- Holder (r + {x=Int}) signatures to lose the connection between
+    -- the input r and the output r after cleanTypeName.
+    go (StrVarU v) = StrVarU (ren v)
+    go t@(StrLitU _) = t
+    go (StrConcatU a b) = StrConcatU (go a) (go b)
+    go t@StrVoidU = t
+    go (RecVarU v) = RecVarU (ren v)
+    go t@RecEmptyU = t
+    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
+    go (RecUnionU a b) = RecUnionU (go a) (go b)
+    go (RecDiffU a ks) = RecDiffU (go a) ks
+    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go t@RecVoidU = t
     go (LabeledU n t) = LabeledU n (go t)
 
 -- | User-facing type display: clean variable names, no forall, no angle brackets.
@@ -1230,6 +1534,21 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
     f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
     f _ NatVoidU = "_"
+    f _ (StrVarU v) = tv v
+    f _ (StrLitU s) = dquotes (pretty s)
+    f _ (StrConcatU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ StrVoidU = "_"
+    f _ (RecVarU v) = tv v
+    f _ RecEmptyU = "{}"
+    f _ rec@(RecExtendU _ _ _)
+      | (fields, RecEmptyU) <- collectExtends rec =
+          braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fields]))
+      | (fields, tl) <- collectExtends rec =
+          "(" <> f True tl <+> hsep ["+" <+> pretty k <> "=" <> f False t | (k, t) <- fields] <> ")"
+    f _ (RecUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ (RecDiffU a ks) = "(" <> f True a <+> "-" <+> braces (hcat (punctuate "," (map pretty ks))) <> ")"
+    f _ (RecIntersectU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
+    f _ RecVoidU = "_"
     f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =

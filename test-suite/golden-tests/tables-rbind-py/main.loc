@@ -1,0 +1,14 @@
+module main (twice)
+
+import tables-py
+
+source Py from "src.py" ("makeT")
+
+-- Stage 4 stdlib operation: rbind composes row counts via Nat addition
+-- and preserves the Rec schema.
+makeT :: Int -> Table n {x=Int, y=Str}
+
+twice :: Int -> Table m {x=Int, y=Str}
+twice n =
+  let t = makeT n
+  in rbind t t

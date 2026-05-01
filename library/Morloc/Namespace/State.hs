@@ -247,15 +247,22 @@ data Gamma = Gamma
   , gammaDeferred :: [(TypeU, TypeU)]
   -- | Solutions for NatVarU variables from nat constraint solving
   , gammaNatSubs :: Map TVar TypeU
+  -- | Solutions for StrVarU variables from str constraint solving (Stage 2 of
+  -- the tables refactor; literals-only per plans/tables/04-str-solver-scope.md).
+  , gammaStrSubs :: Map TVar TypeU
+  -- | Solutions for RecVarU row variables from rec constraint solving (Stage 3
+  -- of the tables refactor; see plans/tables/10-rec-solver-decidability.md).
+  , gammaRecSubs :: Map TVar TypeU
   -- | Known constant values for let-bound variables (for nat label resolution).
   -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
   , gammaIntVals :: Map EVar ConstVal
   }
 
--- | Compile-time constant values tracked during typechecking for nat label
--- resolution. Only pure literal expressions are tracked.
+-- | Compile-time constant values tracked during typechecking for nat / str
+-- label resolution. Only pure literal expressions are tracked.
 data ConstVal
   = ConstInt Integer
+  | ConstStr Text
   | ConstTup [ConstVal]
   deriving (Show, Eq, Ord)
 

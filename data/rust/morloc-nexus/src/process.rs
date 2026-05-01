@@ -449,6 +449,120 @@ pub fn make_job_hash(seed: u64) -> u64 {
     xxh64(data.as_bytes())
 }
 
+/// Sweep /dev/shm for orphaned morloc segments. Two detection strategies:
+///
+/// 1. New-format basenames `morloc-<pid>-<...>`: parse the PID, check
+///    /proc/<pid>; if absent, the creator is gone -- unlink.
+/// 2. Old-format basenames `morloc-<hash>` (no embedded PID, predates
+///    PR-21) and any segment whose PID parse fails: scan /proc/*/maps
+///    once and check whether any live process has the segment mapped.
+///    If not mapped anywhere, unlink.
+///
+/// Called once at nexus startup. Concurrency: the sweep is safe even if
+/// other morloc processes are running -- a live PID's segments are
+/// skipped, and a segment mapped by any live process is skipped. Live
+/// segments owned by other users are skipped silently because shm_unlink
+/// returns EACCES; we ignore unlink failures.
+pub fn cleanup_stale_shm() {
+    let dir = match std::fs::read_dir("/dev/shm") {
+        Ok(d) => d,
+        Err(_) => return, // /dev/shm not present (e.g. macOS); nothing to do
+    };
+
+    // Collect candidate morloc-* names first so we don't read /proc twice.
+    let mut candidates: Vec<String> = Vec::new();
+    for entry in dir.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if name.starts_with("morloc-") {
+            candidates.push(name);
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+
+    // First pass: PID-in-name strategy. Move fallback candidates to a
+    // bucket for the /proc/maps strategy.
+    let mut needs_map_scan: Vec<String> = Vec::new();
+    for name in candidates {
+        let body = name.strip_prefix("morloc-").unwrap();
+        let pid_str = body.split(['-', '_']).next().unwrap_or("");
+        let pid_parsed: Option<u32> = pid_str.parse().ok();
+        match pid_parsed {
+            Some(pid) if std::path::Path::new(&format!("/proc/{}", pid)).exists() => {
+                continue; // creator alive; leave alone
+            }
+            Some(_) => unlink_shm(&name), // PID dead -> orphan
+            None => needs_map_scan.push(name), // old format; verify via /proc/*/maps
+        }
+    }
+
+    if needs_map_scan.is_empty() {
+        return;
+    }
+
+    // Second pass: build a set of every /dev/shm path mentioned in any
+    // live process's memory map, then unlink any candidate not in it.
+    let mapped: std::collections::HashSet<String> = collect_mapped_shm_paths();
+    for name in needs_map_scan {
+        let full = format!("/dev/shm/{}", name);
+        if !mapped.contains(&full) {
+            unlink_shm(&name);
+        }
+    }
+}
+
+/// Collect every `/dev/shm/...` path mentioned in any live process's
+/// `/proc/<pid>/maps`. Used as a fallback liveness check for SHM segments
+/// whose names don't embed a PID.
+fn collect_mapped_shm_paths() -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let proc = match std::fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(_) => return out,
+    };
+    for entry in proc.flatten() {
+        let pid_name = match entry.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !pid_name.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let maps_path = format!("/proc/{}/maps", pid_name);
+        let contents = match std::fs::read_to_string(&maps_path) {
+            Ok(s) => s,
+            Err(_) => continue, // process gone or no permission
+        };
+        for line in contents.lines() {
+            // /proc/<pid>/maps lines: "<addr> <perms> <off> <dev> <ino> <path>"
+            // We only care about the trailing path field.
+            if let Some(idx) = line.find("/dev/shm/") {
+                let path: String = line[idx..]
+                    .trim_end_matches([' ', '\t', '\n'])
+                    .to_string();
+                out.insert(path);
+            }
+        }
+    }
+    out
+}
+
+fn unlink_shm(name: &str) {
+    // Best-effort: failures (EACCES from foreign user, ENOENT from race,
+    // etc.) are silent.
+    unsafe {
+        let cstr = match std::ffi::CString::new(format!("/{}", name)) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        libc::shm_unlink(cstr.as_ptr());
+    }
+}
+
 /// Become a subreaper so orphaned grandchildren get reparented to us.
 /// Only available on Linux; no-op on other platforms.
 pub fn set_child_subreaper() {

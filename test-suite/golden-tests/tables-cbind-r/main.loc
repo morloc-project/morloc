@@ -1,0 +1,14 @@
+module main (combo)
+
+import tables-r
+
+source R from "src.R" ("makeXR", "makeYR")
+
+-- Stage 4 stdlib operation in R: cbind unions Rec schemas via the
+-- polymorphic `+` and requires both inputs to share a row count n.
+-- R impl uses data.frame round-trip for columnar concatenation.
+makeXR :: Int -> Table n {x=Int}
+makeYR :: Int -> Table n {y=Str}
+
+combo :: Int -> Table n ({x=Int} + {y=Str})
+combo n = cbind (makeXR n) (makeYR n)

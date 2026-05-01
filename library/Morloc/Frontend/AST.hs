@@ -118,6 +118,17 @@ findTypeTerms (NatMulU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatSubU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatDivU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms NatVoidU = []
+findTypeTerms (StrVarU _) = []
+findTypeTerms (StrLitU _) = []
+findTypeTerms (StrConcatU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms StrVoidU = []
+findTypeTerms (RecVarU _) = []
+findTypeTerms RecEmptyU = []
+findTypeTerms (RecExtendU _ a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (RecUnionU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (RecDiffU a _) = findTypeTerms a
+findTypeTerms (RecIntersectU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms RecVoidU = []
 findTypeTerms (LabeledU _ t) = findTypeTerms t
 
 -- | Build the fixity map from top-level fixity declarations.

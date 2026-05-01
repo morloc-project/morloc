@@ -332,7 +332,6 @@ classifyWord "False" = TokFalse
 classifyWord "type" = TokType
 classifyWord "record" = TokRecord
 classifyWord "object" = TokObject
-classifyWord "table" = TokTable
 classifyWord "class" = TokClass
 classifyWord "instance" = TokInstance
 classifyWord "infixl" = TokInfixl

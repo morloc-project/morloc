@@ -1,0 +1,13 @@
+module main (echo)
+
+import tables-py
+
+source Py from "src.py" ("py_identity")
+
+-- The python identity function forces an actual pool dispatch so the
+-- JSON-loaded Arrow SHM has to round-trip through pyarrow. Without it the
+-- nexus would shortcut the call locally and never exercise the wire path.
+py_identity :: Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+
+echo :: Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+echo t = py_identity t

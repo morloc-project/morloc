@@ -1,0 +1,45 @@
+module main (g, use, useUnion, useDiff, useRowPoly)
+
+import root
+
+-- Holder carries a Rec-kinded compile-time row schema and a value type.
+-- This exercises the Stage 3 Rec kind machinery on six fronts:
+--   - row polymorphism: g preserves the row variable r unchanged
+--   - ground Rec literals: use binds a literal {x=Int, y=Str} schema
+--   - parser + RecSolver round-trip: literal syntax parses to RecExtendU
+--     chains, normalizes through the solver, and pretty-prints back to
+--     {x=Int, y=Str} form
+--   - + reclassification: r1 + r2 between Rec terms becomes RecUnionU
+--     (the parser emits NatAddU; refineKinds reclassifies)
+--   - - reclassification: r - "k" becomes RecDiffU and normalizes
+--   - row-polymorphic operator: addX takes any Holder and adds {x=Int}
+--     to its row schema; the row variable is solved per-call site
+type Holder (r :: Rec) a
+
+g :: Holder r a -> Holder r a
+g x = x
+
+mk :: Holder {x=Int, y=Str} Int
+
+use :: Holder {x=Int, y=Str} Int
+use = mk
+
+-- + between Rec terms produces a union; solver normalizes to a literal.
+mkU :: Holder ({x=Int} + {y=Str}) Int
+
+useUnion :: Holder {x=Int, y=Str} Int
+useUnion = mkU
+
+-- - removes a key; solver normalizes to a literal.
+mkD :: Holder ({x=Int, y=Str} - "y") Int
+
+useDiff :: Holder {x=Int} Int
+useDiff = mkD
+
+-- Row-polymorphic operator: row variable r flows through the union with
+-- a literal, getting solved at the call site.
+addX :: Holder r a -> Holder (r + {x=Int}) a
+mkY :: Holder {y=Str} Int
+
+useRowPoly :: Holder ({y=Str} + {x=Int}) Int
+useRowPoly = addX mkY

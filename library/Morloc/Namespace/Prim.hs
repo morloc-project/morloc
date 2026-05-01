@@ -84,8 +84,15 @@ import Text.Read (readMaybe)
 
 ---- Kinds
 
--- | Kind of a type variable: either a proper type or a natural number (for dimensions)
-data Kind = KindType | KindNat
+-- | Kind of a type variable.
+--
+-- - 'KindType' — proper type variable (the default)
+-- - 'KindNat' — natural number (for dimensions, e.g. Vector n a)
+-- - 'KindStr' — string literal at the type level (for column names, e.g. f:Str
+--               in the Stage 2 tables refactor). See plans/tables/04-str-solver-scope.md.
+-- - 'KindRec' — row-polymorphic record schema (for column maps, e.g. r:Rec in
+--               Table n r). See plans/tables/10-rec-solver-decidability.md.
+data Kind = KindType | KindNat | KindStr | KindRec
   deriving (Show, Ord, Eq)
 
 ---- Typeclasses
@@ -276,6 +283,8 @@ parseHMS hms = case splitOn ":" hms of
 instance Pretty Kind where
   pretty KindType = "Type"
   pretty KindNat = "Nat"
+  pretty KindStr = "Str"
+  pretty KindRec = "Rec"
 
 instance Pretty SrcLoc where
   pretty (SrcLoc path ln col endLn endCol)

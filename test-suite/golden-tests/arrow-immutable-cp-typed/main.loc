@@ -1,0 +1,31 @@
+module main (result)
+
+import root
+import root-cpp
+import root-py
+import tables-py
+import tables-cpp
+
+-- Migrated from arrow-immutable-cp using Stage 4 typed Table syntax.
+
+source Cpp from "src.hpp" ("makeLargeTable", "makeIndices", "sumReals")
+source Py from "src.py" ("lookupValue")
+
+makeLargeTable :: Int -> Table n {idx=Int, value=Real}
+lookupValue :: Table n {idx=Int, value=Real} -> Int -> Real
+makeIndices :: Int -> [Int]
+sumReals :: [Real] -> Real
+
+result ::
+  --' number of rows in table
+  --' arg: --nrows
+  --' default: 100000
+  Int ->
+  --' number of foreign calls
+  --' arg: --ncalls
+  --' default: 1000
+  Int ->
+  Real
+result nrows ncalls =
+  let tbl = makeLargeTable nrows
+  in sumReals (map (lookupValue tbl) (makeIndices ncalls))

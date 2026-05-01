@@ -23,6 +23,7 @@ module Morloc.Namespace.Type
   , TypeU (..)
   , OpenOrClosed (..)
   , extractKey
+  , collectExtends
   , type2typeu
   , EType (..)
   , unresolvedType2type
@@ -152,6 +153,9 @@ data Type
   | NatVoidT  -- ^ Erased phantom Nat slot. Distinct from NatLitT 0
               -- (which is a real empty-dim measurement). See note on
               -- NatVoidU in TypeU below.
+  | StrLitT Text -- ^ Type-level Str literal at the ground level
+  | StrConcatT Type Type -- ^ Type-level Str concatenation at the ground level
+  | StrVoidT -- ^ Erased phantom Str slot. Mirrors NatVoidT.
   deriving (Show, Ord, Eq)
 
 data OpenOrClosed = Open | Closed
@@ -186,6 +190,22 @@ data TypeU
               -- (a real empty-dim measurement) so downstream consumers
               -- (pretty printer, dim reification in Serial.hs, equality)
               -- can tell phantoms apart from real measurements.
+  | StrVarU TVar -- ^ Str-kinded variable, never quantified by ForallU.
+                 -- Mirrors NatVarU. See plans/tables/04-str-solver-scope.md.
+  | StrLitU Text -- ^ Type-level Str literal (column name etc).
+  | StrConcatU TypeU TypeU  -- ^ Type-level Str concatenation.
+  | StrVoidU -- ^ Erased phantom Str slot. Mirrors NatVoidU.
+  -- Rec-kinded constructs (Stage 3 of the tables refactor). See
+  -- plans/tables/10-rec-solver-decidability.md.
+  | RecVarU TVar -- ^ Rec-kinded row variable, never quantified by ForallU.
+  | RecEmptyU -- ^ Type-level empty record `{}`.
+  | RecExtendU Text TypeU TypeU
+                 -- ^ Single-field row extension: name, field type, rest. The
+                 -- internal canonical form for `r + f=a` is iterated extension.
+  | RecUnionU TypeU TypeU -- ^ Disjoint union of two Recs (the surface `+`).
+  | RecDiffU TypeU [Text] -- ^ Drop these keys from a Rec (no-op if absent).
+  | RecIntersectU TypeU TypeU -- ^ Intersection of two Recs (surface `&`).
+  | RecVoidU -- ^ Erased phantom Rec slot. Mirrors NatVoidU / StrVoidU.
   | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
@@ -296,6 +316,9 @@ instance Typelike Type where
       sub (NatSubT a b) = NatSubT (sub a) (sub b)
       sub (NatDivT a b) = NatDivT (sub a) (sub b)
       sub t@NatVoidT = t
+      sub t@(StrLitT _) = t
+      sub (StrConcatT a b) = StrConcatT (sub a) (sub b)
+      sub t@StrVoidT = t
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
@@ -310,6 +333,9 @@ instance Typelike Type where
   free (NatSubT a b) = Set.union (free a) (free b)
   free (NatDivT a b) = Set.union (free a) (free b)
   free NatVoidT = Set.empty
+  free (StrLitT _) = Set.empty
+  free (StrConcatT a b) = Set.union (free a) (free b)
+  free StrVoidT = Set.empty
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
@@ -320,6 +346,7 @@ instance Typelike Type where
   normalizeType (NatMulT a b) = NatMulT (normalizeType a) (normalizeType b)
   normalizeType (NatSubT a b) = NatSubT (normalizeType a) (normalizeType b)
   normalizeType (NatDivT a b) = NatDivT (normalizeType a) (normalizeType b)
+  normalizeType (StrConcatT a b) = StrConcatT (normalizeType a) (normalizeType b)
   normalizeType t = t
 
 instance Typelike TypeU where
@@ -339,6 +366,24 @@ instance Typelike TypeU where
   typeOf (NatSubU a b) = NatSubT (typeOf a) (typeOf b)
   typeOf (NatDivU a b) = NatDivT (typeOf a) (typeOf b)
   typeOf NatVoidU = NatVoidT
+  typeOf (StrVarU _) = StrVoidT  -- free Str var erases to StrVoidT at ground level
+  typeOf (StrLitU s) = StrLitT s
+  typeOf (StrConcatU a b) = StrConcatT (typeOf a) (typeOf b)
+  typeOf StrVoidU = StrVoidT
+  -- Rec-kinded constructs collapse to NatVoidT when polymorphic (free row
+  -- variable somewhere in the chain). A fully ground RecExtend chain
+  -- terminating in RecEmptyU lowers to a NamT NamRecord so the runtime
+  -- layer can read the column schema (used for Arrow Tables in
+  -- nexus IO). See plans/tables/10-rec-solver-decidability.md.
+  typeOf (RecVarU _) = NatVoidT
+  typeOf RecEmptyU = NamT NamRecord (TV "Rec") [] []
+  typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
+    Just fs -> NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
+    Nothing -> NatVoidT
+  typeOf (RecUnionU _ _) = NatVoidT
+  typeOf (RecDiffU _ _) = NatVoidT
+  typeOf (RecIntersectU _ _) = NatVoidT
+  typeOf RecVoidU = NatVoidT
   typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
@@ -357,6 +402,19 @@ instance Typelike TypeU where
   free (NatSubU a b) = Set.union (free a) (free b)
   free (NatDivU a b) = Set.union (free a) (free b)
   free NatVoidU = Set.empty
+  -- Str-kinded constructs are implicitly forall-quantified (like NatVarU);
+  -- they contribute no free type variables. See plans/tables/04-str-solver-scope.md.
+  free (StrVarU _) = Set.empty
+  free (StrLitU _) = Set.empty
+  free (StrConcatU a b) = Set.union (free a) (free b)
+  free StrVoidU = Set.empty
+  free (RecVarU _) = Set.empty
+  free RecEmptyU = Set.empty
+  free (RecExtendU _ a b) = Set.union (free a) (free b)
+  free (RecUnionU a b) = Set.union (free a) (free b)
+  free (RecDiffU a _) = free a
+  free (RecIntersectU a b) = Set.union (free a) (free b)
+  free RecVoidU = Set.empty
   free (LabeledU _ t) = free t
 
   substituteTVar v (ForallU q r) t =
@@ -389,6 +447,22 @@ instance Typelike TypeU where
       sub (NatSubU a b) = NatSubU (sub a) (sub b)
       sub (NatDivU a b) = NatDivU (sub a) (sub b)
       sub t@NatVoidU = t
+      -- Str-kinded constructs: substitution does not touch them (parallel to
+      -- NatVarU). Concat recurses to substitute inside its operands.
+      sub t@(StrVarU _) = t
+      sub t@(StrLitU _) = t
+      sub (StrConcatU a b) = StrConcatU (sub a) (sub b)
+      sub t@StrVoidU = t
+      -- Rec-kinded constructs: same pattern. Variables and the empty record
+      -- are inert; operators recurse into their operands so type-level vars
+      -- inside Rec field-types still see substitutions.
+      sub t@(RecVarU _) = t
+      sub t@RecEmptyU = t
+      sub (RecExtendU k a b) = RecExtendU k (sub a) (sub b)
+      sub (RecUnionU a b) = RecUnionU (sub a) (sub b)
+      sub (RecDiffU a ks) = RecDiffU (sub a) ks
+      sub (RecIntersectU a b) = RecIntersectU (sub a) (sub b)
+      sub t@RecVoidU = t
       sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
@@ -529,6 +603,15 @@ mostSpecific = P.maxima
 
 ---- Utility functions
 
+-- | Walk a Rec extension chain, collecting (key, value) fields. Returns
+-- Nothing if the chain does not terminate cleanly in RecEmptyU (e.g. ends
+-- in a free RecVarU or contains an unsolved Rec operator). Used by the
+-- TypeU -> Type lowering to preserve the column schema of ground Tables.
+groundRecFields :: TypeU -> Maybe [(Text, TypeU)]
+groundRecFields RecEmptyU = Just []
+groundRecFields (RecExtendU k t rest) = ((k, t):) <$> groundRecFields rest
+groundRecFields _ = Nothing
+
 extractKey :: TypeU -> TVar
 extractKey (VarU v) = v
 extractKey (NatVarU v) = v
@@ -544,6 +627,17 @@ extractKey (NatMulU _ _) = TV "Nat"
 extractKey (NatSubU _ _) = TV "Nat"
 extractKey (NatDivU _ _) = TV "Nat"
 extractKey NatVoidU = TV "Nat"
+extractKey (StrVarU _) = TV "Str"
+extractKey (StrLitU _) = TV "Str"
+extractKey (StrConcatU _ _) = TV "Str"
+extractKey StrVoidU = TV "Str"
+extractKey (RecVarU _) = TV "Rec"
+extractKey RecEmptyU = TV "Rec"
+extractKey (RecExtendU _ _ _) = TV "Rec"
+extractKey (RecUnionU _ _) = TV "Rec"
+extractKey (RecDiffU _ _) = TV "Rec"
+extractKey (RecIntersectU _ _) = TV "Rec"
+extractKey RecVoidU = TV "Rec"
 extractKey (LabeledU _ t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
@@ -561,6 +655,9 @@ type2typeu (NatMulT a b) = NatMulU (type2typeu a) (type2typeu b)
 type2typeu (NatSubT a b) = NatSubU (type2typeu a) (type2typeu b)
 type2typeu (NatDivT a b) = NatDivU (type2typeu a) (type2typeu b)
 type2typeu NatVoidT = NatVoidU
+type2typeu (StrLitT s) = StrLitU s
+type2typeu (StrConcatT a b) = StrConcatU (type2typeu a) (type2typeu b)
+type2typeu StrVoidT = StrVoidU
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
@@ -578,6 +675,19 @@ unresolvedType2type (NatMulU a b) = NatMulT (unresolvedType2type a) (unresolvedT
 unresolvedType2type (NatSubU a b) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (NatDivU a b) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type NatVoidU = NatVoidT
+unresolvedType2type (StrVarU _) = StrVoidT
+unresolvedType2type (StrLitU s) = StrLitT s
+unresolvedType2type (StrConcatU a b) = StrConcatT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type StrVoidU = StrVoidT
+-- Rec-kinded constructs: erase to NatVoidT at the ground type level. The
+-- Type ADT does not represent Rec separately. See Stage 3 design memos.
+unresolvedType2type (RecVarU _) = NatVoidT
+unresolvedType2type RecEmptyU = NatVoidT
+unresolvedType2type (RecExtendU _ _ _) = NatVoidT
+unresolvedType2type (RecUnionU _ _) = NatVoidT
+unresolvedType2type (RecDiffU _ _) = NatVoidT
+unresolvedType2type (RecIntersectU _ _) = NatVoidT
+unresolvedType2type RecVoidU = NatVoidT
 unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | get a fresh variable name that is not used in t1 or t2
@@ -623,6 +733,9 @@ containsUnk (NatMulT a b) = containsUnk a || containsUnk b
 containsUnk (NatSubT a b) = containsUnk a || containsUnk b
 containsUnk (NatDivT a b) = containsUnk a || containsUnk b
 containsUnk NatVoidT = False
+containsUnk (StrLitT _) = False
+containsUnk (StrConcatT a b) = containsUnk a || containsUnk b
+containsUnk StrVoidT = False
 
 ----- Pretty instances -------------------------------------------------------
 
@@ -657,6 +770,9 @@ instance Pretty Type where
       f _ (NatSubT a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivT a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
       f _ NatVoidT = "_"
+      f _ (StrLitT s) = dquotes (pretty s)
+      f _ (StrConcatT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ StrVoidT = "_"
       f False t = parens (f True t)
       f _ (FunT [] t) = "() -> " <> f False t
       f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
@@ -670,6 +786,16 @@ instance Pretty Type where
                      then mempty
                      else space <> hsep (map (f False) ps)
         in pretty n <> params
+
+-- | Walk a chain of nested 'RecExtendU' nodes and return its leaf fields
+-- in source order plus the eventual tail expression (typically
+-- 'RecEmptyU' for ground records, 'RecVarU' for row-polymorphic ones).
+-- Used by the pretty printer to render iterated extensions as @{k=v,...}@.
+collectExtends :: TypeU -> ([(Text, TypeU)], TypeU)
+collectExtends = go []
+  where
+    go acc (RecExtendU k t rest) = go ((k, t) : acc) rest
+    go acc t = (reverse acc, t)
 
 instance Pretty TypeU where
   pretty t0 = f True t0
@@ -697,6 +823,24 @@ instance Pretty TypeU where
       f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
       f _ NatVoidU = "_"
+      f _ (StrVarU v) = pretty v
+      f _ (StrLitU s) = dquotes (pretty s)
+      f _ (StrConcatU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ StrVoidU = "_"
+      f _ (RecVarU v) = pretty v
+      f _ RecEmptyU = "{}"
+      f _ rec@(RecExtendU _ _ _)
+        -- Render iterated extensions ending in RecEmptyU as `{k1=t1, k2=t2}`.
+        -- A non-empty tail (RecVarU or another operator) renders as
+        -- `(tail + k1=t1 + k2=t2)` to keep the tail visible.
+        | (fields, RecEmptyU) <- collectExtends rec =
+            braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fields]))
+        | (fields, tl) <- collectExtends rec =
+            "(" <> f True tl <+> hsep ["+" <+> pretty k <> "=" <> f False t | (k, t) <- fields] <> ")"
+      f _ (RecUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (RecDiffU a ks) = "(" <> f True a <+> "-" <+> braces (hcat (punctuate "," (map pretty ks))) <> ")"
+      f _ (RecIntersectU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
+      f _ RecVoidU = "_"
       f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =

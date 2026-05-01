@@ -250,6 +250,12 @@ makeSerialAST m lang t0 = do
         (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
       return $ SerialUnknown (FV gv serialType)
     makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv))
+      -- Kindless `Table` (Stage 1 of the tables refactor): synthesize a
+      -- SerialObject NamTable so the existing arrow wire path engages.
+      -- The empty fields/params reflect the absence of compile-time
+      -- column info; pool consumers handle the runtime Arrow value via
+      -- arrow_to_shm / arrow_from_shm. See plans/tables/15-next-session-table-codegen.md.
+      | finalType == BT.tableU = return $ SerialObject NamTable v [] []
       | finalType == BT.unitU = return $ SerialNull v
       | finalType == BT.boolU = return $ SerialBool v
       | finalType == BT.strU = return $ SerialString v
@@ -335,7 +341,22 @@ makeSerialAST m lang t0 = do
     -- resolved by inferConcreteType via pairEval); gscope is authoritative for
     -- wire structure (only the alias body says "Deque is list-shaped").
     makeSerialAST' gscope typepackers ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
-      | null runtimeTs = MM.throwSourcedError m $ "No runtime type args for" <+> pretty ft
+      -- All args are phantom-kinded (Nat / Str / Rec); no runtime element
+      -- type to recurse on. Treat as a bare VarF and dispatch to the
+      -- regular VarF path (Packable lookup, primitive-type recognition,
+      -- or kindless arrow-hint route). This matches how kindless `Table`
+      -- worked in Stage 1: an opaque type with no element type.
+      | null runtimeTs = makeSerialAST' gscope typepackers (VarF fv)
+      -- Typed `Table n r`: when the Rec arg lowered to a ground record
+      -- (NamF NamRecord ...), surface it as a SerialObject NamTable
+      -- carrying the column schema. The Arrow wire path uses the column
+      -- types to validate / serialize the SHM-resident table.
+      | generalTypeName == BT.table = case runtimeTs of
+          [NamF _ _ _ recRs] -> do
+            colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers tf) recRs
+            return $ SerialObject NamTable (FV BT.table (CV "arrow")) [] colASTs
+          _ ->
+            return $ SerialObject NamTable (FV BT.table (CV "arrow")) [] []
       | otherwise = case aliasShape of
           -- Outer alias body is list-shaped (`type Deque a = List a`,
           -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
@@ -450,6 +471,17 @@ makeSerialAST m lang t0 = do
         basevar (NatSubU _ _) = Nothing
         basevar (NatDivU _ _) = Nothing
         basevar NatVoidU = Nothing
+        basevar (StrVarU _) = Nothing
+        basevar (StrLitU _) = Nothing
+        basevar (StrConcatU _ _) = Nothing
+        basevar StrVoidU = Nothing
+        basevar (RecVarU _) = Nothing
+        basevar RecEmptyU = Nothing
+        basevar (RecExtendU _ _ _) = Nothing
+        basevar (RecUnionU _ _) = Nothing
+        basevar (RecDiffU _ _) = Nothing
+        basevar (RecIntersectU _ _) = Nothing
+        basevar RecVoidU = Nothing
         basevar (LabeledU _ t) = basevar t
 
         generalType = fst $ unweaveTypeF ft
@@ -545,7 +577,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -571,7 +603,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -615,9 +647,11 @@ unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
 
--- Nat types have no concrete/general distinction; duplicate as-is
+-- Nat / Str types have no concrete/general distinction; duplicate as-is
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
 unweaveTypeF NatVoidF = (NatVoidU, NatVoidU)
+unweaveTypeF (StrLitF s) = (StrLitU s, StrLitU s)
+unweaveTypeF StrVoidF = (StrVoidU, StrVoidU)
 
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
@@ -665,9 +699,13 @@ reduceNat (NatDivU a b) = do
   if y == 0 then Nothing else Just (x `div` y)
 reduceNat _ = Nothing
 
--- | Check if a SerialAST's root has the "arrow" concrete type hint
+-- | Check if a SerialAST's root represents an Apache Arrow value. The
+-- Table builtin synthesizes a SerialObject NamTable with general var
+-- BT.table and concrete var "arrow" (via Nexus.hs / Serial.hs); both
+-- conditions identify the same node, but the FV-tag check is cheaper.
 hasArrowHint :: SerialAST -> Bool
 hasArrowHint (SerialObject _ (FV _ (CV "arrow")) _ _) = True
+hasArrowHint (SerialObject _ (FV gv _) _ _) | gv == BT.table = True
 hasArrowHint _ = False
 
 {- | Given a list of possible ways to (de)serialize data between two languages,

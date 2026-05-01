@@ -22,6 +22,15 @@ rmp-serde = { workspace = true }
 twox-hash = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }
+arrow-array = "58"
+arrow-buffer = "58"
+arrow-data = "58"
+arrow-schema = "58"
+arrow-ipc = "58"
+arrow-select = "58"
+parquet = { version = "58", default-features = false, features = ["arrow"] }
+arrow-csv = "58"
+bytes = "1"
 
 [build-dependencies]
 cbindgen = "0.28"

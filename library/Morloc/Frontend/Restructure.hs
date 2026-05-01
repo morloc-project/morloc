@@ -114,6 +114,17 @@ checkForSelfRecursion d = do
     hasTerm v (NatSubU a b) = hasTerm v a || hasTerm v b
     hasTerm v (NatDivU a b) = hasTerm v a || hasTerm v b
     hasTerm _ NatVoidU = False
+    hasTerm _ (StrVarU _) = False
+    hasTerm _ (StrLitU _) = False
+    hasTerm v (StrConcatU a b) = hasTerm v a || hasTerm v b
+    hasTerm _ StrVoidU = False
+    hasTerm _ (RecVarU _) = False
+    hasTerm _ RecEmptyU = False
+    hasTerm v (RecExtendU _ a b) = hasTerm v a || hasTerm v b
+    hasTerm v (RecUnionU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (RecDiffU a _) = hasTerm v a
+    hasTerm v (RecIntersectU a b) = hasTerm v a || hasTerm v b
+    hasTerm _ RecVoidU = False
     hasTerm v (LabeledU _ t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
@@ -639,16 +650,20 @@ filterAndSubstitute links typemap =
             (Map.delete sourceName typedefs)
         Nothing -> typedefs
 
--- | Promote VarU to NatVarU based on typedef param kinds in all signatures.
--- For each typedef like `type Tensor2 (d1 :: Nat) (d2 :: Nat) a`, build a map
--- from type name to param kinds, then walk all types and upgrade KindType to
--- KindNat for variables that appear in nat-kinded positions.
+-- | Promote VarU to NatVarU, StrVarU, or RecVarU based on typedef param
+-- kinds in all signatures. For each typedef like
+-- `type Tensor2 (d1 :: Nat) (d2 :: Nat) a` or
+-- `type Tagged (s :: Str) a` or `type Table n (r :: Rec)`, build a map
+-- from type name to param kinds, then walk all types and upgrade KindType
+-- to the corresponding kinded form for variables that appear in the
+-- relevant positions. See plans/tables/04, 05, and 10.
 refineKinds ::
   DAG MVar [AliasedSymbol] ExprI ->
   MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 refineKinds dag = do
   let allParams = concat [collectAllTypeDefParams e | e <- DAG.nodes dag]
-      kindMap = Map.fromList [(v, map (either snd (const KindType)) ps) | (v, ps) <- allParams, any (\p -> either (\(_, k) -> k == KindNat) (const False) p) ps]
+      hasKindedParam = any (\p -> either (\(_, k) -> k == KindNat || k == KindStr || k == KindRec) (const False) p)
+      kindMap = Map.fromList [(v, map (either snd (const KindType)) ps) | (v, ps) <- allParams, hasKindedParam ps]
   if Map.null kindMap
     then return dag
     else DAG.mapNodeM (refineExprKinds kindMap) dag
@@ -665,50 +680,143 @@ refineKinds dag = do
 
     refineTypeKinds :: Map TVar [Kind] -> TypeU -> TypeU
     refineTypeKinds km t0 =
-      let natVars = collectNatVarsFromScope km t0
-       in promoteNatVarsR natVars t0
+      let kindedVars = collectKindedVarsFromScope km t0
+       in promoteKindedVarsR kindedVars t0
 
-    -- Collect variables that appear in nat-kinded positions according to typedef param kinds
-    collectNatVarsFromScope :: Map TVar [Kind] -> TypeU -> Set TVar
-    collectNatVarsFromScope km = go
+    -- Collect variables that appear in kinded positions according to typedef
+    -- param kinds. Returns a map from var name to its required kind. In
+    -- conflicts (same var used in multiple kinded positions), the first
+    -- encountered kind wins; this is consistent with how the typechecker
+    -- discovers kinds.
+    collectKindedVarsFromScope :: Map TVar [Kind] -> TypeU -> Map TVar Kind
+    collectKindedVarsFromScope km = go
       where
         go (AppU (VarU v) args) = case Map.lookup v km of
-          Just kinds -> Set.unions $
+          Just kinds -> Map.unions $
             [case (k, a) of
-               (KindNat, VarU tv) -> Set.singleton tv
+               (KindNat, _) -> goSlot KindNat a
+               (KindStr, _) -> goSlot KindStr a
+               (KindRec, _) -> goSlot KindRec a
                _ -> go a
             | (k, a) <- zip kinds args]
             ++ [go a | a <- drop (length kinds) args]
-          Nothing -> Set.unions (map go args)
-        go (NatVarU v) = Set.singleton v
+          Nothing -> Map.unions (map go args)
+        go (NatVarU v) = Map.singleton v KindNat
+        go (StrVarU v) = Map.singleton v KindStr
+        go (RecVarU v) = Map.singleton v KindRec
         go (ForallU _ inner) = go inner
-        go (FunU args ret) = Set.unions (go ret : map go args)
-        go (NamU _ _ ps rs) = Set.unions (map go ps ++ map (go . snd) rs)
+        go (FunU args ret) = Map.unions (go ret : map go args)
+        go (NamU _ _ ps rs) = Map.unions (map go ps ++ map (go . snd) rs)
         go (EffectU _ inner) = go inner
         go (OptionalU inner) = go inner
-        go (NatAddU a b) = Set.union (goNat a) (goNat b)
-        go (NatMulU a b) = Set.union (goNat a) (goNat b)
-        go (NatSubU a b) = Set.union (goNat a) (goNat b)
-        go (NatDivU a b) = Set.union (goNat a) (goNat b)
+        go (NatAddU a b) = Map.union (goNat a) (goNat b)
+        go (NatMulU a b) = Map.union (goNat a) (goNat b)
+        go (NatSubU a b) = Map.union (goNat a) (goNat b)
+        go (NatDivU a b) = Map.union (goNat a) (goNat b)
+        go (StrConcatU a b) = Map.union (goStr a) (goStr b)
+        go (RecExtendU _ a b) = Map.union (go a) (goRec b)
+        go (RecUnionU a b) = Map.union (goRec a) (goRec b)
+        go (RecDiffU a _) = goRec a
+        go (RecIntersectU a b) = Map.union (goRec a) (goRec b)
         go (LabeledU _ inner) = go inner
-        go _ = Set.empty
+        go _ = Map.empty
 
+        -- A type sitting in a known-kind slot. Variables get promoted to
+        -- that kind; operator results inherit kindedness from their
+        -- operands. Mixed kinds (e.g. RecExtendU's field-type slot is Type-
+        -- kinded; the key is Str-kinded) are dispatched recursively.
+        goSlot :: Kind -> TypeU -> Map TVar Kind
+        goSlot KindNat = goNat
+        goSlot KindStr = goStr
+        goSlot KindRec = goRec
+        goSlot KindType = go
+
+        -- In a Nat-kinded slot, any lowercase-named variable is Nat-kinded,
+        -- regardless of an earlier (Desugar-pass) classification. This
+        -- override is essential because Desugar's collectNatVars / etc are
+        -- syntactic heuristics that don't see typedef-context info.
         goNat (VarU v@(TV name))
-          | not (T.null name), isLower (T.head name) = Set.singleton v
-          | otherwise = Set.empty
+          | not (T.null name), isLower (T.head name) = Map.singleton v KindNat
+          | otherwise = Map.empty
+        goNat (NatVarU v) = Map.singleton v KindNat
+        goNat (StrVarU v) = Map.singleton v KindNat
+        goNat (RecVarU v) = Map.singleton v KindNat
+        goNat (NatAddU a b) = Map.union (goNat a) (goNat b)
+        goNat (NatMulU a b) = Map.union (goNat a) (goNat b)
+        goNat (NatSubU a b) = Map.union (goNat a) (goNat b)
+        goNat (NatDivU a b) = Map.union (goNat a) (goNat b)
         goNat t = go t
 
-    -- Promote VarU to NatVarU for variables identified as nat-kinded,
-    -- and strip ForallU wrappers for those variables (they're implicitly quantified)
-    promoteNatVarsR :: Set TVar -> TypeU -> TypeU
-    promoteNatVarsR natVars = go
+        goStr (VarU v@(TV name))
+          | not (T.null name), isLower (T.head name) = Map.singleton v KindStr
+          | otherwise = Map.empty
+        goStr (NatVarU v) = Map.singleton v KindStr
+        goStr (StrVarU v) = Map.singleton v KindStr
+        goStr (RecVarU v) = Map.singleton v KindStr
+        goStr (StrConcatU a b) = Map.union (goStr a) (goStr b)
+        goStr t = go t
+
+        goRec (VarU v@(TV name))
+          | not (T.null name), isLower (T.head name) = Map.singleton v KindRec
+          | otherwise = Map.empty
+        goRec (NatVarU v) = Map.singleton v KindRec
+        goRec (StrVarU v) = Map.singleton v KindRec
+        goRec (RecVarU v) = Map.singleton v KindRec
+        -- NatAddU between Rec-shaped operands is the polymorphic `+` for
+        -- record union (gets reclassified to RecUnionU after promotion).
+        -- NatSubU between a Rec-shaped operand and a Str literal is the
+        -- polymorphic `-` for record difference (gets reclassified to
+        -- RecDiffU after promotion). See plans/tables/10-rec-solver-decidability.md.
+        goRec (NatAddU a b) = Map.union (goRec a) (goRec b)
+        goRec (NatSubU a b) = Map.union (goRec a) (goStr b)
+        goRec (RecExtendU _ a b) = Map.union (go a) (goRec b)
+        goRec (RecUnionU a b) = Map.union (goRec a) (goRec b)
+        goRec (RecDiffU a _) = goRec a
+        goRec (RecIntersectU a b) = Map.union (goRec a) (goRec b)
+        goRec t = go t
+
+    -- True iff a TypeU is structurally a Rec-kinded value (variable, empty,
+    -- extension, union, difference, intersection, or erased phantom). Used
+    -- to reclassify polymorphic `+`/`-` operators after variable promotion.
+    isRecLike :: TypeU -> Bool
+    isRecLike (RecVarU _) = True
+    isRecLike RecEmptyU = True
+    isRecLike (RecExtendU _ _ _) = True
+    isRecLike (RecUnionU _ _) = True
+    isRecLike (RecDiffU _ _) = True
+    isRecLike (RecIntersectU _ _) = True
+    isRecLike RecVoidU = True
+    isRecLike _ = False
+
+    -- Promote VarU to NatVarU, StrVarU, or RecVarU per the kind map. Also
+    -- override any incorrect Desugar-pass classification: Desugar's
+    -- collectNatVars may have overeagerly promoted a variable to NatVarU
+    -- because it appeared inside a NatAddU/NatSubU/etc, but the surrounding
+    -- typedef context might say it should be Rec or Str. refineKinds is the
+    -- authoritative pass; it overrides Desugar's heuristic. Strips ForallU
+    -- wrappers for those variables (they're implicitly quantified).
+    promoteKindedVarsR :: Map TVar Kind -> TypeU -> TypeU
+    promoteKindedVarsR kindedVars = go
       where
-        go (VarU v)
-          | Set.member v natVars = NatVarU v
-          | otherwise = VarU v
-        go t@(NatVarU _) = t
+        go (VarU v) = case Map.lookup v kindedVars of
+          Just KindNat -> NatVarU v
+          Just KindStr -> StrVarU v
+          Just KindRec -> RecVarU v
+          _ -> VarU v
+        go (NatVarU v) = case Map.lookup v kindedVars of
+          Just KindStr -> StrVarU v
+          Just KindRec -> RecVarU v
+          _ -> NatVarU v
+        go (StrVarU v) = case Map.lookup v kindedVars of
+          Just KindNat -> NatVarU v
+          Just KindRec -> RecVarU v
+          _ -> StrVarU v
+        go (RecVarU v) = case Map.lookup v kindedVars of
+          Just KindNat -> NatVarU v
+          Just KindStr -> StrVarU v
+          _ -> RecVarU v
         go (ForallU v t)
-          | Set.member v natVars = go t  -- strip ForallU for nat vars
+          | Map.member v kindedVars = go t  -- strip ForallU for kinded vars
         go (ForallU v t) = ForallU v (go t)
         go (FunU ts t) = FunU (map go ts) (go t)
         go (AppU t ts) = AppU (go t) (map go ts)
@@ -717,11 +825,34 @@ refineKinds dag = do
         go (OptionalU t) = OptionalU (go t)
         go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
         go t@(NatLitU _) = t
-        go (NatAddU a b) = NatAddU (go a) (go b)
+        -- Reclassify Nat-kinded operators that operate on Rec-kinded
+        -- operands (after variable promotion). This enables surface
+        -- syntax like `r + {f=a}` (parsed as NatAddU) to mean the Rec
+        -- union RecUnionU. See plans/tables/10-rec-solver-decidability.md.
+        go (NatAddU a b) =
+          let a' = go a; b' = go b
+           in if isRecLike a' || isRecLike b'
+              then RecUnionU a' b'
+              else NatAddU a' b'
         go (NatMulU a b) = NatMulU (go a) (go b)
-        go (NatSubU a b) = NatSubU (go a) (go b)
+        go (NatSubU a b) =
+          let a' = go a; b' = go b
+           in case b' of
+                StrLitU f | isRecLike a' -> RecDiffU a' [f]
+                _ -> NatSubU a' b'
         go (NatDivU a b) = NatDivU (go a) (go b)
         go t@NatVoidU = t
+        go t@(StrVarU _) = t
+        go t@(StrLitU _) = t
+        go (StrConcatU a b) = StrConcatU (go a) (go b)
+        go t@StrVoidU = t
+        go t@(RecVarU _) = t
+        go t@RecEmptyU = t
+        go (RecExtendU k a b) = RecExtendU k (go a) (go b)
+        go (RecUnionU a b) = RecUnionU (go a) (go b)
+        go (RecDiffU a ks) = RecDiffU (go a) ks
+        go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+        go t@RecVoidU = t
         go (LabeledU n t) = LabeledU n (go t)
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
@@ -768,4 +899,15 @@ rename sourceName localAlias = f
     f (NatSubU a b) = NatSubU (f a) (f b)
     f (NatDivU a b) = NatDivU (f a) (f b)
     f t@NatVoidU = t
+    f t@(StrVarU _) = t
+    f t@(StrLitU _) = t
+    f (StrConcatU a b) = StrConcatU (f a) (f b)
+    f t@StrVoidU = t
+    f t@(RecVarU _) = t
+    f t@RecEmptyU = t
+    f (RecExtendU k a b) = RecExtendU k (f a) (f b)
+    f (RecUnionU a b) = RecUnionU (f a) (f b)
+    f (RecDiffU a ks) = RecDiffU (f a) ks
+    f (RecIntersectU a b) = RecIntersectU (f a) (f b)
+    f t@RecVoidU = t
     f (LabeledU n t) = LabeledU n (f t)

@@ -123,7 +123,6 @@ data Token
   | TokType
   | TokRecord
   | TokObject
-  | TokTable
   | TokClass
   | TokInstance
   | TokInfixl
@@ -216,7 +215,6 @@ showToken TokFalse = "'False'"
 showToken TokType = "'type'"
 showToken TokRecord = "'record'"
 showToken TokObject = "'object'"
-showToken TokTable = "'table'"
 showToken TokClass = "'class'"
 showToken TokInstance = "'instance'"
 showToken TokInfixl = "'infixl'"

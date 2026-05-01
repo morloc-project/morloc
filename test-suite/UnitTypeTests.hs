@@ -159,6 +159,17 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (NatSubU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatSubU a' b')
     f s (NatDivU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', NatDivU a' b')
     f s t@NatVoidU = (s, t)
+    f s t@(StrVarU _) = (s, t)
+    f s t@(StrLitU _) = (s, t)
+    f s (StrConcatU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', StrConcatU a' b')
+    f s t@StrVoidU = (s, t)
+    f s t@(RecVarU _) = (s, t)
+    f s t@RecEmptyU = (s, t)
+    f s (RecExtendU k a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecExtendU k a' b')
+    f s (RecUnionU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecUnionU a' b')
+    f s (RecDiffU a ks) = let (s', a') = f s a in (s', RecDiffU a' ks)
+    f s (RecIntersectU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecIntersectU a' b')
+    f s t@RecVoidU = (s, t)
     f s (LabeledU n t) = let (s', t') = f s t in (s', LabeledU n t')
 
 closeExistentials :: TypeU -> TypeU
@@ -179,6 +190,17 @@ closeExistentials = f
     f (NatSubU a b) = NatSubU (f a) (f b)
     f (NatDivU a b) = NatDivU (f a) (f b)
     f t@NatVoidU = t
+    f t@(StrVarU _) = t
+    f t@(StrLitU _) = t
+    f (StrConcatU a b) = StrConcatU (f a) (f b)
+    f t@StrVoidU = t
+    f t@(RecVarU _) = t
+    f t@RecEmptyU = t
+    f (RecExtendU k a b) = RecExtendU k (f a) (f b)
+    f (RecUnionU a b) = RecUnionU (f a) (f b)
+    f (RecDiffU a ks) = RecDiffU (f a) ks
+    f (RecIntersectU a b) = RecIntersectU (f a) (f b)
+    f t@RecVoidU = t
     f (LabeledU n t) = LabeledU n (f t)
 
 -- | Assert the general type before alias evaluation (preserves nat dimensions).

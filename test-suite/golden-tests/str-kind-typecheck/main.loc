@@ -1,0 +1,16 @@
+module main (use)
+
+import root
+
+-- Tagged carries a Str-kinded compile-time tag along with a value.
+-- This exercises the Stage 2 Str kind machinery: the (s :: Str) param
+-- in the typedef tells refineKinds that Tagged's first slot is Str-kinded,
+-- and `f:Str -> ... -> Tagged f a` binds f as both a runtime String arg
+-- and a Str-kinded type-level variable.
+type Tagged (s :: Str) a
+
+tag :: f:Str -> a -> Tagged f a
+
+-- At the call site `tag "hello" x`, the StrSolver unifies the polymorphic
+-- f with the literal "hello", producing the expected typed result.
+use x = tag "hello" x

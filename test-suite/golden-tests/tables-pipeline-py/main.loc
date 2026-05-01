@@ -1,0 +1,30 @@
+module main (pipeline)
+
+import root
+import tables-py
+
+source Py from "src.py" ("readData", "lookupRow")
+
+-- A comprehensive demo pipeline exercising multiple Stage 4 typed Table
+-- operations in series. Type-checking guarantees that:
+--   - the column schema {id=Int, value=Real} is preserved through head,
+--     rbind, and the lookupRow query;
+--   - row-count Nat arithmetic composes correctly (head 5 + rbind doubles
+--     the slice);
+--   - cross-stage data flow is type-safe even though the result is finally
+--     a Real (via lookupRow).
+-- The pipeline:
+--   readData n     ->  Table n {id=Int, value=Real}     -- input
+--   head 5         ->  Table m {id=Int, value=Real}     -- truncate
+--   rbind self      ->  Table (m+m) {id=Int, value=Real} -- duplicate
+--   lookupRow 0    ->  Real                              -- query
+
+readData :: Int -> Table n {id=Int, value=Real}
+lookupRow :: Int -> Table n {id=Int, value=Real} -> Real
+
+pipeline :: Int -> Int -> Real
+pipeline n i =
+  let raw     = readData n
+      first5  = head 5 raw
+      doubled = rbind first5 first5
+  in lookupRow i doubled

@@ -235,6 +235,17 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
     f bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
     f _ t@NatVoidU = return t
+    f _ t@(StrVarU _) = return t
+    f _ t@(StrLitU _) = return t
+    f bnd (StrConcatU a b) = StrConcatU <$> recurse bnd a <*> recurse bnd b
+    f _ t@StrVoidU = return t
+    f _ t@(RecVarU _) = return t
+    f _ t@RecEmptyU = return t
+    f bnd (RecExtendU k a b) = RecExtendU k <$> recurse bnd a <*> recurse bnd b
+    f bnd (RecUnionU a b) = RecUnionU <$> recurse bnd a <*> recurse bnd b
+    f bnd (RecDiffU a ks) = RecDiffU <$> recurse bnd a <*> pure ks
+    f bnd (RecIntersectU a b) = RecIntersectU <$> recurse bnd a <*> recurse bnd b
+    f _ t@RecVoidU = return t
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
@@ -256,6 +267,17 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
     terminate bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
     terminate _ t@NatVoidU = return t
+    terminate _ t@(StrVarU _) = return t
+    terminate _ t@(StrLitU _) = return t
+    terminate bnd (StrConcatU a b) = StrConcatU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@StrVoidU = return t
+    terminate _ t@(RecVarU _) = return t
+    terminate _ t@RecEmptyU = return t
+    terminate bnd (RecExtendU k a b) = RecExtendU k <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (RecUnionU a b) = RecUnionU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (RecDiffU a ks) = RecDiffU <$> recurse bnd a <*> pure ks
+    terminate bnd (RecIntersectU a b) = RecIntersectU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@RecVoidU = return t
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     renameTypedefs ::
@@ -366,6 +388,17 @@ parsub pair (NatMulU a b) = NatMulU (parsub pair a) (parsub pair b)
 parsub pair (NatSubU a b) = NatSubU (parsub pair a) (parsub pair b)
 parsub pair (NatDivU a b) = NatDivU (parsub pair a) (parsub pair b)
 parsub _ t@NatVoidU = t
+parsub _ t@(StrVarU _) = t
+parsub _ t@(StrLitU _) = t
+parsub pair (StrConcatU a b) = StrConcatU (parsub pair a) (parsub pair b)
+parsub _ t@StrVoidU = t
+parsub _ t@(RecVarU _) = t
+parsub _ t@RecEmptyU = t
+parsub pair (RecExtendU k a b) = RecExtendU k (parsub pair a) (parsub pair b)
+parsub pair (RecUnionU a b) = RecUnionU (parsub pair a) (parsub pair b)
+parsub pair (RecDiffU a ks) = RecDiffU (parsub pair a) ks
+parsub pair (RecIntersectU a b) = RecIntersectU (parsub pair a) (parsub pair b)
+parsub _ t@RecVoidU = t
 parsub pair (LabeledU n t) = LabeledU n (parsub pair t)
 
 -- | Expand the outermost type alias one step. Substitutes the alias body's

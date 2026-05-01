@@ -372,13 +372,6 @@ main = do
       , golden "R(R) serial-form-12-c" "serial-form-12-c"
       , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r" "serial-form-12-r"
-      , -- table handling
-        golden "table-1-c" "table-1-c"
-      , golden "table-1-py" "table-1-py"
-      , golden "table-1-r" "table-1-r"
-      , golden "table-2-c" "table-2-c"
-      , golden "table-2-py" "table-2-py"
-      , golden "table-2-r" "table-2-r"
       , -- object handling
         golden "object-1-c" "object-1-c"
       , golden "object-1-py" "object-1-py"
@@ -504,11 +497,99 @@ main = do
       , golden "memory-nested-misalign-cpp" "memory-nested-misalign-cpp"
       , golden "memory-nested-misalign-py" "memory-nested-misalign-py"
       , golden "memory-split-block-cpp" "memory-split-block-cpp"
-      , -- arrow immutable table tests (large table passed by reference into map)
-        golden "arrow-immutable-pr" "arrow-immutable-pr"
-      , golden "arrow-immutable-rp" "arrow-immutable-rp"
-      , golden "arrow-immutable-cp" "arrow-immutable-cp"
-      , golden "arrow-immutable-pc" "arrow-immutable-pc"
+      , -- kindless `Table` builtin (Stage 1 of the tables refactor)
+        --   Each MVP test exercises one pool: produce a RecordBatch, slice via
+        --   `head` (Py), or identity-return (cross-pool variant), output as
+        --   JSON via the nexus's print_arrow_as_json. Validates the new
+        --   `tables` stdlib module plus codegen routing of BT.table through
+        --   the existing arrow path.
+        golden "tables-mvp-py" "tables-mvp-py"
+      , golden "tables-mvp-r" "tables-mvp-r"
+      , golden "tables-mvp-pc" "tables-mvp-pc"
+      , -- Stage 4: Table is now parameterised as `type Table (n :: Nat) (r :: Rec)`.
+        --   This test exercises the typed form with a concrete Rec schema.
+        --   {x=Int, y=Str} is preserved through the head application; the
+        --   row-count Nat is independent input vs output.
+        golden "tables-mvp-typed" "tables-mvp-typed"
+      , -- Stage 4: typed table operations. rbind composes row counts via
+        --   Nat arithmetic; cbind composes column schemas via Rec union.
+        --   Solver normalises ground arithmetic so the inferred types are
+        --   concrete (e.g. 5 + 7 = 12, {x=Int} + {y=Str} = {x=Int, y=Str}).
+        golden "tables-typed-ops" "tables-typed-ops"
+      , -- Stage 4: rbind end-to-end. Python pool concatenates two
+        --   RecordBatches via pa.concat_arrays per column; result has
+        --   doubled row count.
+        golden "tables-rbind-py" "tables-rbind-py"
+      , -- Stage 4: cbind end-to-end. Python pool unions columns of two
+        --   RecordBatches into a single batch with the union schema.
+        golden "tables-cbind-py" "tables-cbind-py"
+      , -- Stage 4: rbind end-to-end in the R pool. R impl uses data.frame
+        --   round-trip for columnar concatenation; verifies cross-language
+        --   parity for the typed Table operations.
+        golden "tables-rbind-r" "tables-rbind-r"
+      , -- Stage 4: cbind end-to-end in the R pool. Cross-language parity
+        --   with tables-cbind-py.
+        golden "tables-cbind-r" "tables-cbind-r"
+      , -- Stage 4: legacy `table Stats = Stats { ... }` migrated to typed
+        --   `Table n {idx=Int, value=Real}`. Same Python/R/C++ sources,
+        --   same runtime behaviour as arrow-immutable-{pr,rp,pc,cp},
+        --   but using the new stage-3 Rec kind syntax. Proves users can
+        --   migrate cleanly across all language combinations.
+        golden "arrow-immutable-pr-typed" "arrow-immutable-pr-typed"
+      , golden "arrow-immutable-rp-typed" "arrow-immutable-rp-typed"
+      , golden "arrow-immutable-pc-typed" "arrow-immutable-pc-typed"
+      , golden "arrow-immutable-cp-typed" "arrow-immutable-cp-typed"
+      , -- Stage 4: arrow-nexus migrations. Single-pool table generators
+        --   exposed through the nexus; output is row-oriented JSON via
+        --   print_arrow_as_json. Typed Table form is a 1-line declaration
+        --   instead of the 3-line legacy table syntax.
+        golden "arrow-nexus-py-typed" "arrow-nexus-py-typed"
+      , golden "arrow-nexus-cpp-typed" "arrow-nexus-cpp-typed"
+      , -- Stage 4: end-to-end pipeline demo. Chains readData -> head 5 ->
+        --   rbind self -> lookupRow i. Demonstrates schema preservation
+        --   through multiple ops and runtime correctness for the doubled
+        --   row count (lookupRow 7 of doubled-from-head-5 -> value at
+        --   original index 2 = 1.0).
+        golden "tables-pipeline-py" "tables-pipeline-py"
+      , -- Stage 5: JSON CLI input parsed directly into Arrow SHM and
+        --   round-tripped through a python pool. Verifies the new
+        --   read_json_to_arrow_shm path against a typed Table {x=Int, y=Str}.
+        golden "tables-json-input-py" "tables-json-input-py"
+      , -- Stage 5: Arrow IPC file input. The fixture is generated by
+        --   pyarrow (file format with ARROW1 magic). The IPC reader
+        --   validates against the typed Table schema and lands the
+        --   columns directly into the Arrow SHM region the python pool
+        --   consumes via the Arrow C Data Interface.
+        golden "tables-arrow-ipc-input-py" "tables-arrow-ipc-input-py"
+      , -- Stage 5: Parquet file input. The fixture is generated by
+        --   pyarrow.parquet (PAR1 magic at head and tail). The reader
+        --   uses the same RecordBatch -> SHM path as the Arrow IPC reader.
+        golden "tables-parquet-input-py" "tables-parquet-input-py"
+      , -- Stage 5: CSV file input. Extension-driven (.csv -> comma,
+        --   .tsv -> tab); the schema's column types drive arrow-csv's
+        --   parsing, header row required.
+        golden "tables-csv-input-py" "tables-csv-input-py"
+      , -- Stage 6: stdlib table operations -- sliceRows, arrange /
+        --   arrangeDesc, select (kindless r), reverseRows. The Python and
+        --   R variants run the same shape of test against pyarrow and
+        --   arrow R respectively.
+        golden "tables-ops-py" "tables-ops-py"
+      , golden "tables-ops-r" "tables-ops-r"
+      , -- Stage 5: CSV output via --output-form csv. Confirms the
+        --   write_csv_to_buffer path engages on a Table return type.
+        golden "tables-csv-output-py" "tables-csv-output-py"
+      , -- Stage 2 Str kind. A typedef parameter declared (s :: Str) marks
+        --   its slot as Str-kinded; refineKinds promotes corresponding
+        --   variables to StrVarU; the StrSolver unifies them with literal
+        --   StrLitU values at call sites. End-to-end check that the
+        --   parser-promotion-solver path is wired correctly.
+        golden "str-kind-typecheck" "str-kind-typecheck"
+      , -- Stage 3 Rec kind. A typedef parameter declared (r :: Rec) marks
+        --   its slot as Rec-kinded; refineKinds promotes corresponding
+        --   variables to RecVarU; the RecSolver leaves free row variables
+        --   in place (row polymorphism). End-to-end check that the
+        --   parser-promotion-solver path is wired for Rec.
+        golden "rec-kind-typecheck" "rec-kind-typecheck"
       , -- dense tensor tests
         golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"

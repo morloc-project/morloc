@@ -540,6 +540,8 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs m (OptionalF t) = seekRecs m t
     seekRecs _ (NatLitF _) = []
     seekRecs _ NatVoidF = []
+    seekRecs _ (StrLitF _) = []
+    seekRecs _ StrVoidF = []
 
 unifyRecords ::
   [ ( FVar

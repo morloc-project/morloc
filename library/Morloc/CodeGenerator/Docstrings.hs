@@ -308,6 +308,9 @@ makeOptMeta (NatMulT _ _) = "NAT"
 makeOptMeta (NatSubT _ _) = "NAT"
 makeOptMeta (NatDivT _ _) = "NAT"
 makeOptMeta NatVoidT = "NAT"
+makeOptMeta (StrLitT _) = "STR"
+makeOptMeta (StrConcatT _ _) = "STR"
+makeOptMeta StrVoidT = "STR"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do

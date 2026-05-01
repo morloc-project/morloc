@@ -17,6 +17,7 @@ segregation in the code generator.
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import qualified Data.IntMap.Strict as IntMap
+import Data.Text (Text)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -42,7 +43,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaIntVals = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -115,7 +116,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -1334,6 +1335,7 @@ application' i g es t = do
 -- non-constant variables, or unsupported expression forms.
 tryEvalConst :: Gamma -> ExprS g f c -> Maybe ConstVal
 tryEvalConst _ (IntS n) = Just (ConstInt n)
+tryEvalConst _ (StrS s) = Just (ConstStr s)
 tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (TupS es) = ConstTup <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
@@ -1363,10 +1365,22 @@ tryEvalInt g e = case tryEvalConst g e of
 tryExtractIntPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Integer
 tryExtractIntPre g (AnnoS _ _ e) = tryEvalInt g e
 
--- | Resolve nat labels from int literal arguments.
+-- | Try to reduce an expression to a string constant.
+tryEvalStr :: Gamma -> ExprS g f c -> Maybe Text
+tryEvalStr g e = case tryEvalConst g e of
+  Just (ConstStr s) -> Just s
+  _ -> Nothing
+
+tryExtractStrPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Text
+tryExtractStrPre g (AnnoS _ _ e) = tryEvalStr g e
+
+-- | Resolve nat / str labels from literal arguments.
 -- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
 -- and the corresponding arguments are int literals or let-bound ints,
--- inject NatVarU solutions into gamma so the return type gets concrete dimensions.
+-- inject NatVarU solutions into gamma so the return type gets concrete
+-- dimensions. Same for Str labels (e.g., f:Str -> Tagged f a) — extract
+-- string literals from the corresponding args and inject StrVarU solutions
+-- into gammaStrSubs. See plans/tables/05-labels-as-type-vars.md.
 resolveNatLabels ::
   AnnoS Int ManyPoly Int ->  -- the function expression (pre-synthesis)
   TypeU ->                    -- the synthesized (renamed) function type
@@ -1374,17 +1388,31 @@ resolveNatLabels ::
   Gamma -> Gamma
 resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args g
   | not (Map.null labels) =
-    let origNvs = nub (collectNatVarNames (etype et))
+    let -- Nat labels: match each original NatVarU name to its renamed counterpart
+        origNvs = nub (collectNatVarNames (etype et))
         renamedNvs = nub (collectNatVarNames funType)
-        renMap = Map.fromList (zip origNvs renamedNvs)
-        solutions = Map.fromList
+        natRenMap = Map.fromList (zip origNvs renamedNvs)
+        natSolutions = Map.fromList
           [ (renamedVar, NatLitU n)
           | (origVar, argIdx) <- Map.toList labels
-          , Just renamedVar <- [Map.lookup origVar renMap]
+          , Just renamedVar <- [Map.lookup origVar natRenMap]
           , argIdx < length args
           , Just n <- [tryExtractIntPre g (args !! argIdx)]
           ]
-    in g { gammaNatSubs = Map.union solutions (gammaNatSubs g) }
+        -- Str labels: same pattern, but for StrVarU vars and string literals
+        origSvs = nub (collectStrVarNames (etype et))
+        renamedSvs = nub (collectStrVarNames funType)
+        strRenMap = Map.fromList (zip origSvs renamedSvs)
+        strSolutions = Map.fromList
+          [ (renamedVar, StrLitU s)
+          | (origVar, argIdx) <- Map.toList labels
+          , Just renamedVar <- [Map.lookup origVar strRenMap]
+          , argIdx < length args
+          , Just s <- [tryExtractStrPre g (args !! argIdx)]
+          ]
+    in g { gammaNatSubs = Map.union natSolutions (gammaNatSubs g)
+         , gammaStrSubs = Map.union strSolutions (gammaStrSubs g)
+         }
   where
     labels = enatLabels et
 resolveNatLabels _ _ _ g = g

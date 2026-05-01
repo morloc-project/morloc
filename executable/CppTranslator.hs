@@ -110,6 +110,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
   cppTypeOf = f . typeFof
     where
       f (UnkF (FV _ x)) = return $ pretty x
+      -- The kindless `Table` builtin (Stage 1 of the tables refactor) is
+      -- carried as a VarF with CV "arrow"; emit mlc::ArrowTable to match
+      -- the legacy NamF-based path. See plans/tables/15-...md.
+      f (VarF (FV _ (CV "arrow"))) = return "mlc::ArrowTable"
       f (VarF (FV _ x)) = return $ pretty x
       f (FunF ts t) = do
         t' <- f t
@@ -117,6 +121,8 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         return $ "std::function<" <> t' <> tupled ts' <> ">"
       f (NatLitF _) = return mempty
       f NatVoidF = return mempty
+      f (StrLitF _) = return mempty
+      f StrVoidF = return mempty
       f (AppF t ts) = do
         -- Macro $N is positional in the body args (Nat positions included).
         -- Both NatLitF and NatVoidF render to mempty, preserving alignment
@@ -715,6 +721,9 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType _ (NatMulT _ _) = mempty
     showDefType _ (NatSubT _ _) = mempty
     showDefType _ (NatDivT _ _) = mempty
+    showDefType _ (StrLitT _) = mempty
+    showDefType _ (StrConcatT _ _) = mempty
+    showDefType _ StrVoidT = mempty
     showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
 
 -- C++ specific source handling (flags, headers, libraries)

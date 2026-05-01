@@ -1,17 +1,18 @@
 //! Arrow C Data Interface implementation.
-//! Replaces arrow.c. Provides SHM ↔ Arrow conversion.
+//! Replaces arrow.c. Provides SHM <-> Arrow conversion.
 
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::schema::SerialType;
 use crate::shm::{self, RelPtr};
 
-const ARROW_SHM_MAGIC: u32 = 0xA770DA7A;
-const ARROW_BUFFER_ALIGN: usize = 64;
+pub const ARROW_SHM_MAGIC: u32 = 0xA770DA7A;
+pub const ARROW_BUFFER_ALIGN: usize = 64;
 
-fn arrow_align_up(x: usize) -> usize {
+pub fn arrow_align_up(x: usize) -> usize {
     (x + ARROW_BUFFER_ALIGN - 1) & !(ARROW_BUFFER_ALIGN - 1)
 }
 
@@ -68,19 +69,19 @@ pub struct ArrowShmHeader {
 // ── Type mapping ─────────────────────────────────────────────────────────────
 
 // Serial type constants matching C enum
-const MORLOC_NIL: u32 = 0;
-const MORLOC_BOOL: u32 = 1;
-const MORLOC_SINT8: u32 = 2;
-const MORLOC_SINT16: u32 = 3;
-const MORLOC_SINT32: u32 = 4;
-const MORLOC_SINT64: u32 = 5;
-const MORLOC_UINT8: u32 = 6;
-const MORLOC_UINT16: u32 = 7;
-const MORLOC_UINT32: u32 = 8;
-const MORLOC_UINT64: u32 = 9;
-const MORLOC_FLOAT32: u32 = 10;
-const MORLOC_FLOAT64: u32 = 11;
-const MORLOC_STRING: u32 = 12;
+pub const MORLOC_NIL: u32 = 0;
+pub const MORLOC_BOOL: u32 = 1;
+pub const MORLOC_SINT8: u32 = 2;
+pub const MORLOC_SINT16: u32 = 3;
+pub const MORLOC_SINT32: u32 = 4;
+pub const MORLOC_SINT64: u32 = 5;
+pub const MORLOC_UINT8: u32 = 6;
+pub const MORLOC_UINT16: u32 = 7;
+pub const MORLOC_UINT32: u32 = 8;
+pub const MORLOC_UINT64: u32 = 9;
+pub const MORLOC_FLOAT32: u32 = 10;
+pub const MORLOC_FLOAT64: u32 = 11;
+pub const MORLOC_STRING: u32 = 12;
 
 #[no_mangle]
 pub extern "C" fn arrow_element_size(serial_type: u32) -> usize {
@@ -604,4 +605,416 @@ pub unsafe extern "C" fn print_arrow_as_table(
         libc::putchar(b'\n' as i32);
     }
     true
+}
+
+// ── Arrow detection / JSON -> Arrow SHM ──────────────────────────────────────
+
+/// True iff the schema represents an Arrow table: a Map serial-type whose
+/// hint is "arrow". Arrow tables route through SHM-resident column buffers
+/// rather than the voidstar record layout.
+pub fn is_arrow_table_schema(s: &crate::schema::Schema) -> bool {
+    s.serial_type == SerialType::Map && s.hint.as_deref() == Some("arrow")
+}
+
+/// Map a morloc primitive serial type to the matching MORLOC_* arrow column
+/// type. Variable-width Int and Float collapse to Sint64 / Float64 in the
+/// columnar wire format -- pyarrow / arrow-cpp / arrow-r all resolve their
+/// native numeric types to those widths anyway. Returns MORLOC_NIL for
+/// non-primitive / unsupported types.
+fn serial_type_to_arrow(st: SerialType) -> u32 {
+    match st {
+        SerialType::Bool => MORLOC_BOOL,
+        SerialType::Sint8 => MORLOC_SINT8,
+        SerialType::Sint16 => MORLOC_SINT16,
+        SerialType::Sint32 => MORLOC_SINT32,
+        SerialType::Sint64 | SerialType::Int => MORLOC_SINT64,
+        SerialType::Uint8 => MORLOC_UINT8,
+        SerialType::Uint16 => MORLOC_UINT16,
+        SerialType::Uint32 => MORLOC_UINT32,
+        SerialType::Uint64 => MORLOC_UINT64,
+        SerialType::Float32 => MORLOC_FLOAT32,
+        SerialType::Float64 => MORLOC_FLOAT64,
+        SerialType::String => MORLOC_STRING,
+        _ => MORLOC_NIL,
+    }
+}
+
+/// Parse JSON text into a fresh Arrow SHM table according to the given Map
+/// schema (with hint="arrow"). Accepts both row-oriented form
+/// (`[{"col": v, ...}, ...]`) and column-oriented form
+/// (`{"col": [v, ...], ...}`). Returns a RelPtr to the new ArrowShm region or
+/// shm::RELNULL on error.
+///
+/// # Safety
+/// `json` must be a valid null-terminated UTF-8 string.
+/// `schema` must be a valid CSchema pointer (or null).
+#[no_mangle]
+pub unsafe extern "C" fn read_json_to_arrow_shm(
+    json: *const c_char,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    clear_errmsg(errmsg);
+    if json.is_null() || schema.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("NULL json or schema".into()));
+        return shm::RELNULL;
+    }
+
+    let rs = CSchema::to_rust(schema);
+    if !is_arrow_table_schema(&rs) {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "Arrow table requires Map schema with hint='arrow'".into(),
+        ));
+        return shm::RELNULL;
+    }
+
+    let json_str = match CStr::from_ptr(json).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other("Invalid UTF-8 in JSON".into()));
+            return shm::RELNULL;
+        }
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(format!("JSON parse error: {}", e)));
+            return shm::RELNULL;
+        }
+    };
+
+    json_value_to_arrow_shm(&value, &rs, errmsg)
+}
+
+/// Internal helper used by both the literal-JSON CLI path and the file
+/// loader. Takes an already-parsed serde_json::Value plus a validated arrow
+/// schema and lays out the corresponding ArrowShm in SHM.
+unsafe fn json_value_to_arrow_shm(
+    value: &serde_json::Value,
+    rs: &crate::schema::Schema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    use serde_json::Value;
+    let n_cols = rs.size;
+
+    // Pivot to columnar Vec<Vec<&Value>>. Both row- and column-oriented forms
+    // produce the same internal representation.
+    let mut columns: Vec<Vec<&Value>> = (0..n_cols)
+        .map(|_| Vec::new())
+        .collect();
+
+    match value {
+        Value::Array(rows) => {
+            for col in columns.iter_mut() {
+                col.reserve(rows.len());
+            }
+            for (row_idx, row) in rows.iter().enumerate() {
+                let obj = match row.as_object() {
+                    Some(o) => o,
+                    None => {
+                        set_errmsg(errmsg, &MorlocError::Other(
+                            format!("Row {} is not a JSON object", row_idx),
+                        ));
+                        return shm::RELNULL;
+                    }
+                };
+                for (col_idx, key) in rs.keys.iter().enumerate() {
+                    match obj.get(key) {
+                        Some(v) => columns[col_idx].push(v),
+                        None => {
+                            set_errmsg(errmsg, &MorlocError::Other(
+                                format!("Row {} missing column '{}'", row_idx, key),
+                            ));
+                            return shm::RELNULL;
+                        }
+                    }
+                }
+            }
+        }
+        Value::Object(obj) => {
+            let mut row_count: Option<usize> = None;
+            for (col_idx, key) in rs.keys.iter().enumerate() {
+                match obj.get(key) {
+                    Some(Value::Array(arr)) => {
+                        match row_count {
+                            None => row_count = Some(arr.len()),
+                            Some(n) if n == arr.len() => {}
+                            Some(n) => {
+                                set_errmsg(errmsg, &MorlocError::Other(format!(
+                                    "Column '{}' has {} rows, expected {}",
+                                    key, arr.len(), n,
+                                )));
+                                return shm::RELNULL;
+                            }
+                        }
+                        columns[col_idx] = arr.iter().collect();
+                    }
+                    _ => {
+                        set_errmsg(errmsg, &MorlocError::Other(
+                            format!("Column '{}' must be a JSON array", key),
+                        ));
+                        return shm::RELNULL;
+                    }
+                }
+            }
+        }
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "Top-level JSON for an Arrow table must be array (row-oriented) or object (column-oriented)".into(),
+            ));
+            return shm::RELNULL;
+        }
+    }
+
+    let n_rows = columns.first().map(|c| c.len()).unwrap_or(0);
+
+    // Resolve the morloc serial type per column. Strip a single Optional
+    // wrapper if present -- nullable columns parse as either the inner type
+    // or JSON null.
+    let mut col_types: Vec<u32> = Vec::with_capacity(n_cols);
+    let mut col_nullable: Vec<bool> = Vec::with_capacity(n_cols);
+    for (i, p) in rs.parameters.iter().enumerate() {
+        let (inner, nullable) = if p.serial_type == SerialType::Optional {
+            (p.parameters.first()
+                .map(|c| c.serial_type)
+                .unwrap_or(SerialType::Nil),
+             true)
+        } else {
+            (p.serial_type, false)
+        };
+        let at = serial_type_to_arrow(inner);
+        if at == MORLOC_NIL {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "Unsupported Arrow column type for '{}' (serial type {:?})",
+                rs.keys[i], inner,
+            )));
+            return shm::RELNULL;
+        }
+        col_types.push(at);
+        col_nullable.push(nullable);
+    }
+
+    // Pre-compute string column data sizes.
+    let mut str_data_sizes = vec![0usize; n_cols];
+    for c in 0..n_cols {
+        if col_types[c] == MORLOC_STRING {
+            for v in &columns[c] {
+                if let Some(s) = v.as_str() {
+                    str_data_sizes[c] += s.len();
+                }
+            }
+        }
+    }
+
+    // Layout: header | descs | names | aligned column buffers...
+    let header_size = std::mem::size_of::<ArrowShmHeader>();
+    let descs_size = n_cols * std::mem::size_of::<ArrowColumnDesc>();
+    let names_size: usize = rs.keys.iter().map(|k| k.len()).sum();
+    let data_start = arrow_align_up(header_size + descs_size + names_size);
+
+    let mut total_size = data_start;
+    for c in 0..n_cols {
+        total_size = arrow_align_up(total_size);
+        if col_types[c] == MORLOC_STRING {
+            total_size += (n_rows + 1) * std::mem::size_of::<i32>() + str_data_sizes[c];
+        } else {
+            total_size += arrow_element_size(col_types[c]) * n_rows;
+        }
+    }
+
+    let shm_ptr = match shm::shmalloc(total_size) {
+        Ok(p) => p,
+        Err(e) => { set_errmsg(errmsg, &e); return shm::RELNULL; }
+    };
+    ptr::write_bytes(shm_ptr, 0, total_size);
+
+    let header = &mut *(shm_ptr as *mut ArrowShmHeader);
+    header.magic = ARROW_SHM_MAGIC;
+    header.n_columns = n_cols as u32;
+    header.n_rows = n_rows as u64;
+    header.total_size = total_size as u64;
+
+    let descs = shm_ptr.add(header_size) as *mut ArrowColumnDesc;
+    let mut name_cursor = header_size + descs_size;
+    let mut data_cursor = data_start;
+
+    for c in 0..n_cols {
+        data_cursor = arrow_align_up(data_cursor);
+        let key = &rs.keys[c];
+        let key_len = key.len();
+        let desc = &mut *descs.add(c);
+        desc.col_type = col_types[c];
+        desc.length = n_rows as u64;
+        desc.null_count = 0;
+        desc.name_offset = name_cursor as u32;
+        desc.name_length = key_len as u16;
+        desc.data_offset = data_cursor as u64;
+
+        if key_len > 0 {
+            ptr::copy_nonoverlapping(key.as_ptr(), shm_ptr.add(name_cursor), key_len);
+        }
+        name_cursor += key_len;
+
+        let buf_ok = write_arrow_column(
+            shm_ptr.add(data_cursor),
+            col_types[c],
+            col_nullable[c],
+            &columns[c],
+            key,
+            errmsg,
+        );
+        let buf_size = match buf_ok {
+            Some(sz) => sz,
+            None => { let _ = shm::shfree(shm_ptr); return shm::RELNULL; }
+        };
+        desc.data_size = buf_size as u64;
+        data_cursor += buf_size;
+    }
+
+    match shm::abs2rel(shm_ptr) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shm::shfree(shm_ptr);
+            set_errmsg(errmsg, &e);
+            shm::RELNULL
+        }
+    }
+}
+
+/// Write one column's contents into the buffer at `dst`. Returns the number
+/// of bytes written, or None on error (errmsg populated).
+unsafe fn write_arrow_column(
+    dst: *mut u8,
+    col_type: u32,
+    nullable: bool,
+    values: &[&serde_json::Value],
+    col_name: &str,
+    errmsg: *mut *mut c_char,
+) -> Option<usize> {
+    let n = values.len();
+
+    // For now, null values are accepted only in nullable columns and are
+    // written as zero -- we don't yet emit a validity bitmap. This matches
+    // existing pool behaviour for arrow tables produced from morloc code.
+    let null_to_zero = |v: &serde_json::Value| -> bool { v.is_null() };
+
+    macro_rules! err_typ {
+        ($row:expr, $exp:expr) => {{
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "Expected {} in column '{}' row {}", $exp, col_name, $row,
+            )));
+            return None;
+        }};
+    }
+
+    match col_type {
+        MORLOC_BOOL => {
+            for (i, v) in values.iter().enumerate() {
+                let b = if null_to_zero(v) {
+                    if !nullable { err_typ!(i, "bool"); }
+                    false
+                } else {
+                    match v.as_bool() {
+                        Some(b) => b,
+                        None => err_typ!(i, "bool"),
+                    }
+                };
+                *dst.add(i) = if b { 1 } else { 0 };
+            }
+            Some(n)
+        }
+        MORLOC_SINT8 | MORLOC_SINT16 | MORLOC_SINT32 | MORLOC_SINT64
+        | MORLOC_UINT8 | MORLOC_UINT16 | MORLOC_UINT32 | MORLOC_UINT64 => {
+            let elem = arrow_element_size(col_type);
+            for (i, v) in values.iter().enumerate() {
+                if null_to_zero(v) {
+                    if !nullable { err_typ!(i, "integer"); }
+                    continue; // already zero from write_bytes
+                }
+                let n_i64 = match v.as_i64() {
+                    Some(x) => x,
+                    None => match v.as_u64() {
+                        Some(x) => x as i64,
+                        None => err_typ!(i, "integer"),
+                    },
+                };
+                let off = i * elem;
+                match col_type {
+                    MORLOC_SINT8  => *(dst.add(off) as *mut i8)  = n_i64 as i8,
+                    MORLOC_SINT16 => *(dst.add(off) as *mut i16) = n_i64 as i16,
+                    MORLOC_SINT32 => *(dst.add(off) as *mut i32) = n_i64 as i32,
+                    MORLOC_SINT64 => *(dst.add(off) as *mut i64) = n_i64,
+                    MORLOC_UINT8  => *(dst.add(off) as *mut u8)  = n_i64 as u8,
+                    MORLOC_UINT16 => *(dst.add(off) as *mut u16) = n_i64 as u16,
+                    MORLOC_UINT32 => *(dst.add(off) as *mut u32) = n_i64 as u32,
+                    MORLOC_UINT64 => *(dst.add(off) as *mut u64) = n_i64 as u64,
+                    _ => unreachable!(),
+                }
+            }
+            Some(n * elem)
+        }
+        MORLOC_FLOAT32 | MORLOC_FLOAT64 => {
+            let elem = arrow_element_size(col_type);
+            for (i, v) in values.iter().enumerate() {
+                if null_to_zero(v) {
+                    if !nullable { err_typ!(i, "number"); }
+                    continue;
+                }
+                let f = match v.as_f64() {
+                    Some(f) => f,
+                    None => match v.as_i64() {
+                        Some(x) => x as f64,
+                        None => err_typ!(i, "number"),
+                    },
+                };
+                let off = i * elem;
+                if col_type == MORLOC_FLOAT32 {
+                    *(dst.add(off) as *mut f32) = f as f32;
+                } else {
+                    *(dst.add(off) as *mut f64) = f;
+                }
+            }
+            Some(n * elem)
+        }
+        MORLOC_STRING => {
+            // Layout: (n+1) i32 offsets, then concatenated UTF-8 bytes.
+            let offsets = dst as *mut i32;
+            let mut total: i32 = 0;
+            *offsets.add(0) = 0;
+            // First pass: write offsets.
+            for (i, v) in values.iter().enumerate() {
+                if null_to_zero(v) {
+                    if !nullable { err_typ!(i, "string"); }
+                    *offsets.add(i + 1) = total;
+                    continue;
+                }
+                let s = match v.as_str() {
+                    Some(s) => s,
+                    None => err_typ!(i, "string"),
+                };
+                total = total.saturating_add(s.len() as i32);
+                *offsets.add(i + 1) = total;
+            }
+            // Second pass: copy bytes.
+            let str_data = (offsets.add(n + 1)) as *mut u8;
+            let mut cursor: usize = 0;
+            for v in values.iter() {
+                if null_to_zero(v) { continue; }
+                if let Some(s) = v.as_str() {
+                    if !s.is_empty() {
+                        ptr::copy_nonoverlapping(s.as_ptr(), str_data.add(cursor), s.len());
+                        cursor += s.len();
+                    }
+                }
+            }
+            Some((n + 1) * std::mem::size_of::<i32>() + cursor)
+        }
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                format!("Unsupported Arrow column type 0x{:02x} for '{}'", col_type, col_name),
+            ));
+            None
+        }
+    }
 }

@@ -1,3 +1,8 @@
+0.83.0 [2026-04-28]
+-------------------
+ * add tensor support through Packable class
+ * many fixes to the phantom types
+
 0.82.0 [2026-04-26]
 -------------------
  * remove parenthesis requirement in binops 

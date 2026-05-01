@@ -34,6 +34,7 @@ module Morloc.BaseTypes
   , vector
   , matrix
   , tensor
+  , table
   , record
   , unitU
   , realU
@@ -51,6 +52,7 @@ module Morloc.BaseTypes
   , u64U
   , boolU
   , strU
+  , tableU
   , tupleU
   , listU
   , effectU
@@ -127,6 +129,9 @@ matrix = TV "Matrix"
 tensor :: Int -> TVar
 tensor k = TV $ "Tensor" <> pretty k
 
+table :: TVar
+table = TV "Table"
+
 record :: TVar
 record = TV "Record"
 
@@ -177,6 +182,9 @@ boolU = VarU $ TV "Bool"
 
 strU :: TypeU
 strU = VarU $ TV "Str"
+
+tableU :: TypeU
+tableU = VarU $ TV "Table"
 
 listU :: TypeU -> TypeU
 listU t = AppU (VarU list) [t]

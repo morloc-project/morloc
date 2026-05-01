@@ -24,6 +24,7 @@ pub mod slurm_ffi;
 pub mod manifest_ffi;
 pub mod eval_ffi;
 pub mod arrow_ffi;
+pub mod arrow_ipc_reader;
 pub mod pool_ffi;
 pub mod daemon_ffi;
 pub mod router_ffi;

@@ -479,13 +479,12 @@ genericLowerConfig desc srcNamer = cfg
         }
 
 {- | Record access: for languages with ldDictStyleRecords=True,
-use bracket access for dict/NamRecord and dot access for others.
+use bracket access for NamRecord and dot access for others.
 -}
 genericRecordAccessor :: LangDescriptor -> NamType -> CVar -> MDoc -> MDoc -> MDoc
-genericRecordAccessor desc namType constructor record field
-  | ldDictStyleRecords desc = case (namType, constructor) of
-      (NamTable, CV "dict") -> record <> "[" <> dquotes field <> "]"
-      (NamRecord, _) -> record <> "[" <> dquotes field <> "]"
+genericRecordAccessor desc namType _constructor record field
+  | ldDictStyleRecords desc = case namType of
+      NamRecord -> record <> "[" <> dquotes field <> "]"
       _ -> record <> "." <> field
   | otherwise = case ldFieldAccess desc of
       DotAccess -> record <> "." <> field

@@ -1,0 +1,13 @@
+module main (cross)
+
+import tables-py
+import tables-cpp
+
+source Py from "src.py" ("makeT")
+source Cpp from "src.hpp" ("idCpp")
+
+makeT :: Int -> Table n r
+idCpp :: Table n r -> Table n r
+
+cross :: Int -> Table n r
+cross n = idCpp (makeT n)

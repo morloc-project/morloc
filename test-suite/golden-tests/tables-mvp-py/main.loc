@@ -1,0 +1,10 @@
+module main (small)
+
+import tables-py
+
+source Py from "src.py" ("makeT")
+
+makeT :: Int -> Table n r
+
+small :: Int -> Int -> Table m r
+small total take = head take (makeT total)
