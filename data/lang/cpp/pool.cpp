@@ -126,9 +126,10 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr, nullptr}); }
         return packet;
     } else {
-        // Arrow dispatch: if schema hint is "arrow", the C++ type must be mlc::ArrowTable
-        if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
-            throw std::runtime_error("Arrow schema but C++ type is not mlc::ArrowTable");
+        // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through
+        // mlc::ArrowTable. The legacy `<arrow>` hint has been retired.
+        if (schema->type == MORLOC_TABLE) {
+            throw std::runtime_error("Table schema but C++ type is not mlc::ArrowTable");
         }
 
         void* voidstar = nullptr;

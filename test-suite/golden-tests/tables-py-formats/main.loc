@@ -1,0 +1,22 @@
+module main (echo)
+
+import table-py
+
+source Py from "src.py" ("py_identity")
+
+-- Round-trip a typed Table through the python pool. The Makefile drives
+-- this single export with five different argument shapes, exercising
+-- each input/output format wired into the nexus:
+--
+--   CSV file input         (.csv -> arrow-csv parser)
+--   JSON CLI input         (read_json_to_arrow_shm)
+--   Parquet file input     (PAR1 magic -> arrow-parquet)
+--   Arrow IPC file input   (ARROW1 magic -> arrow-ipc)
+--   --output-form csv      (write_csv_to_buffer engages on Table return)
+--
+-- The python identity call forces an actual pool dispatch so each path
+-- has to land the table in the python-side Arrow C Data Interface.
+py_identity :: Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+
+echo :: Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+echo t = py_identity t

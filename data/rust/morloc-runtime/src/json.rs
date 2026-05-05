@@ -246,6 +246,16 @@ fn json_to_voidstar(
             }
             Ok(w.as_ptr())
         }
+        SerialType::Table => {
+            // JSON-to-Table is conceptually meaningful (read records from
+            // a JSON array and build an Arrow buffer) but is not the
+            // standard JSON-load path; CSV/JSON-to-Arrow lives in the
+            // dedicated arrow_ipc_reader module. Hitting this branch
+            // means a Table value was routed through the generic JSON
+            // loader, which has no Arrow construction logic. Surface a
+            // clear error rather than silently corrupt.
+            Err(err("Cannot load a Table from generic JSON; use the Arrow CSV/JSON reader path"))
+        }
     }
 }
 
@@ -373,6 +383,14 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
                 let inner = &schema.parameters[0];
                 to_json(&r.at(shm::align_up(1, inner.alignment().max(1))), inner, buf)?;
             }
+        }
+        SerialType::Table => {
+            // Reverse of the json_to_voidstar Table branch: rendering a
+            // Table to JSON requires walking the Arrow buffer's records,
+            // which lives in a dedicated path (arrow-to-json), not the
+            // generic JSON serialiser. Surface a clear error rather than
+            // emit malformed JSON.
+            return Err(err("Cannot render a Table to generic JSON; use the Arrow-to-JSON path"));
         }
     }
     Ok(())

@@ -3,8 +3,8 @@ module main (result)
 import root
 import root-cpp
 import root-py
-import tables-py
-import tables-cpp
+import table-py
+import table-cpp
 
 -- Migrated from arrow-immutable-cp using Stage 4 typed Table syntax.
 

@@ -1,0 +1,3 @@
+added :: TBox {x=Int, y=Str, z=Real}
+replaced :: TBox {y=Str, x=Real}
+dropped :: TBox {y=Str}

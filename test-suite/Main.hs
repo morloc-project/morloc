@@ -497,39 +497,36 @@ main = do
       , golden "memory-nested-misalign-cpp" "memory-nested-misalign-cpp"
       , golden "memory-nested-misalign-py" "memory-nested-misalign-py"
       , golden "memory-split-block-cpp" "memory-split-block-cpp"
-      , -- kindless `Table` builtin (Stage 1 of the tables refactor)
-        --   Each MVP test exercises one pool: produce a RecordBatch, slice via
-        --   `head` (Py), or identity-return (cross-pool variant), output as
-        --   JSON via the nexus's print_arrow_as_json. Validates the new
-        --   `tables` stdlib module plus codegen routing of BT.table through
-        --   the existing arrow path.
-        golden "tables-mvp-py" "tables-mvp-py"
-      , golden "tables-mvp-r" "tables-mvp-r"
+      , -- Consolidated `tables-*` suite. The 25 original directories were
+        --   merged into 8 by import set / coverage axis (see commit log).
+        --   Each merged module exports one function per original test and
+        --   is driven by a Makefile that invokes them in sequence with
+        --   banner separators in obs.txt.
+        --
+        -- tables-typecheck:    typecheck-only typed Table algebra
+        --                      (Nat+Rec arithmetic, add/drop f:Str lifting).
+        -- tables-py-build:     basic Table construction + head under three
+        --                      row-type shapes (kindless r, typed Rec,
+        --                      bare-T polymorphic).
+        -- tables-py-ops:       runtime stdlib ops through the python pool
+        --                      -- sliceRows, arrange, select, reverseRows,
+        --                      rbind, cbind, add/drop, selectLit/dropMany.
+        -- tables-py-formats:   CSV/JSON/Parquet/Arrow-IPC input round-trip
+        --                      and CSV output via --output-form csv.
+        -- tables-py-schema-inference:
+        --                      open-table CSV/JSON merge, CSV sniff-window
+        --                      promotion, bare-T JSON schema inference.
+        -- tables-r:            R-pool parity for the python ops coverage.
+        -- tables-pipeline-py:  end-to-end chained integration test
+        --                      (read CSV -> head -> rbind -> lookupRow).
+        -- tables-mvp-pc:       cross-pool py->cpp Table identity wire path.
+        golden "tables-typecheck" "tables-typecheck"
+      , golden "tables-py-build" "tables-py-build"
+      , golden "tables-py-ops" "tables-py-ops"
+      , golden "tables-py-formats" "tables-py-formats"
+      , golden "tables-py-schema-inference" "tables-py-schema-inference"
+      , golden "tables-r" "tables-r"
       , golden "tables-mvp-pc" "tables-mvp-pc"
-      , -- Stage 4: Table is now parameterised as `type Table (n :: Nat) (r :: Rec)`.
-        --   This test exercises the typed form with a concrete Rec schema.
-        --   {x=Int, y=Str} is preserved through the head application; the
-        --   row-count Nat is independent input vs output.
-        golden "tables-mvp-typed" "tables-mvp-typed"
-      , -- Stage 4: typed table operations. rbind composes row counts via
-        --   Nat arithmetic; cbind composes column schemas via Rec union.
-        --   Solver normalises ground arithmetic so the inferred types are
-        --   concrete (e.g. 5 + 7 = 12, {x=Int} + {y=Str} = {x=Int, y=Str}).
-        golden "tables-typed-ops" "tables-typed-ops"
-      , -- Stage 4: rbind end-to-end. Python pool concatenates two
-        --   RecordBatches via pa.concat_arrays per column; result has
-        --   doubled row count.
-        golden "tables-rbind-py" "tables-rbind-py"
-      , -- Stage 4: cbind end-to-end. Python pool unions columns of two
-        --   RecordBatches into a single batch with the union schema.
-        golden "tables-cbind-py" "tables-cbind-py"
-      , -- Stage 4: rbind end-to-end in the R pool. R impl uses data.frame
-        --   round-trip for columnar concatenation; verifies cross-language
-        --   parity for the typed Table operations.
-        golden "tables-rbind-r" "tables-rbind-r"
-      , -- Stage 4: cbind end-to-end in the R pool. Cross-language parity
-        --   with tables-cbind-py.
-        golden "tables-cbind-r" "tables-cbind-r"
       , -- Stage 4: legacy `table Stats = Stats { ... }` migrated to typed
         --   `Table n {idx=Int, value=Real}`. Same Python/R/C++ sources,
         --   same runtime behaviour as arrow-immutable-{pr,rp,pc,cp},
@@ -551,33 +548,6 @@ main = do
         --   row count (lookupRow 7 of doubled-from-head-5 -> value at
         --   original index 2 = 1.0).
         golden "tables-pipeline-py" "tables-pipeline-py"
-      , -- Stage 5: JSON CLI input parsed directly into Arrow SHM and
-        --   round-tripped through a python pool. Verifies the new
-        --   read_json_to_arrow_shm path against a typed Table {x=Int, y=Str}.
-        golden "tables-json-input-py" "tables-json-input-py"
-      , -- Stage 5: Arrow IPC file input. The fixture is generated by
-        --   pyarrow (file format with ARROW1 magic). The IPC reader
-        --   validates against the typed Table schema and lands the
-        --   columns directly into the Arrow SHM region the python pool
-        --   consumes via the Arrow C Data Interface.
-        golden "tables-arrow-ipc-input-py" "tables-arrow-ipc-input-py"
-      , -- Stage 5: Parquet file input. The fixture is generated by
-        --   pyarrow.parquet (PAR1 magic at head and tail). The reader
-        --   uses the same RecordBatch -> SHM path as the Arrow IPC reader.
-        golden "tables-parquet-input-py" "tables-parquet-input-py"
-      , -- Stage 5: CSV file input. Extension-driven (.csv -> comma,
-        --   .tsv -> tab); the schema's column types drive arrow-csv's
-        --   parsing, header row required.
-        golden "tables-csv-input-py" "tables-csv-input-py"
-      , -- Stage 6: stdlib table operations -- sliceRows, arrange /
-        --   arrangeDesc, select (kindless r), reverseRows. The Python and
-        --   R variants run the same shape of test against pyarrow and
-        --   arrow R respectively.
-        golden "tables-ops-py" "tables-ops-py"
-      , golden "tables-ops-r" "tables-ops-r"
-      , -- Stage 5: CSV output via --output-form csv. Confirms the
-        --   write_csv_to_buffer path engages on a Table return type.
-        golden "tables-csv-output-py" "tables-csv-output-py"
       , -- Stage 2 Str kind. A typedef parameter declared (s :: Str) marks
         --   its slot as Str-kinded; refineKinds promotes corresponding
         --   variables to StrVarU; the StrSolver unifies them with literal
@@ -590,6 +560,37 @@ main = do
         --   in place (row polymorphism). End-to-end check that the
         --   parser-promotion-solver path is wired for Rec.
         golden "rec-kind-typecheck" "rec-kind-typecheck"
+      , -- Stage 10 instantiation-time constraint discharge. An explicit
+        --   `=>` clause carrying primitive constraints (Disjoint, Subset)
+        --   over the cross-kind algebra (Keys, ListToSet) gets renamed,
+        --   queued at the call site, reduced under the call-site row
+        --   substitution, and discharged. Verifies the success paths;
+        --   the contradiction path is locked in by RecSolver overlap.
+        golden "constraint-primitive-typecheck" "constraint-primitive-typecheck"
+      , -- Stage 10 constraint propagation. A function whose body uses
+        --   another function carrying a primitive constraint over a
+        --   row variable cannot discharge that obligation locally
+        --   (the row variable belongs to the *caller's* signature).
+        --   Propagation: the caller declares the same constraint, the
+        --   RecSolver unifies the inner-call's renamed row variable
+        --   with the caller's renamed row variable, and the
+        --   subsumption check in @dischargeConstraints@ recognises
+        --   the obligation as satisfied by the caller's promise.
+        golden "constraint-propagation" "constraint-propagation"
+      , -- Negative path of constraint propagation. A caller invokes a
+        --   function with a primitive constraint over a row variable
+        --   but does NOT re-declare the constraint; the typechecker
+        --   reports it as unsolved with a copy-pasteable form
+        --   naming the offending function.
+        golden "constraint-missing-error" "constraint-missing-error"
+      , -- Stage 9.5 singleton-Str lifting. An f:Str signature label
+        --   introduces `f` as a Str-kinded type-level variable. At the
+        --   call site a Str literal gets lifted into the type, driving
+        --   reduction of (r - f), Singleton f a, etc. End-to-end check
+        --   that the parser-promotion-substitution-reduction chain
+        --   delivers a flat ground Rec for the canonical "set or
+        --   replace" extension pattern.
+        golden "singleton-str-lifting" "singleton-str-lifting"
       , -- dense tensor tests
         golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"

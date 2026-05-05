@@ -1,7 +1,7 @@
 module main (cross)
 
-import tables-py
-import tables-cpp
+import table-py
+import table-cpp
 
 source Py from "src.py" ("makeT")
 source Cpp from "src.hpp" ("idCpp")

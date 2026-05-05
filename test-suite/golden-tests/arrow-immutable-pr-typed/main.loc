@@ -3,8 +3,8 @@ module main (result)
 import root
 import root-py
 import root-r (Int, Real)
-import tables-py
-import tables-r
+import table-py
+import table-r
 
 -- Migrated from arrow-immutable-pr: was `table Stats = Stats {idx :: Int,
 -- value :: Real}` plus per-language `"arrow"` mappings. The new typed

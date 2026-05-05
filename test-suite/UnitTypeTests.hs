@@ -239,7 +239,13 @@ listToGamma gs =
     , gammaSolved = Map.empty
     , gammaDeferred = []
     , gammaNatSubs = Map.empty
+    , gammaStrSubs = Map.empty
+    , gammaRecSubs = Map.empty
+    , gammaListSubs = Map.empty
+    , gammaSetSubs = Map.empty
     , gammaIntVals = Map.empty
+    , gammaConstraints = []
+    , gammaAssumedConstraints = Nothing
     }
 
 exprTestBad :: String -> MT.Text -> TestTree

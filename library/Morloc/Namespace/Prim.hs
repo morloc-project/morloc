@@ -92,7 +92,17 @@ import Text.Read (readMaybe)
 --               in the Stage 2 tables refactor). See plans/tables/04-str-solver-scope.md.
 -- - 'KindRec' — row-polymorphic record schema (for column maps, e.g. r:Rec in
 --               Table n r). See plans/tables/10-rec-solver-decidability.md.
-data Kind = KindType | KindNat | KindStr | KindRec
+-- - 'KindList' — ordered, position-preserving sequence parameterised by an
+--               element kind (e.g. List Str for column-name lists).
+-- - 'KindSet' — unordered, duplicate-free collection parameterised by an
+--               element kind (e.g. Set Str for the keys of a Rec).
+data Kind
+  = KindType
+  | KindNat
+  | KindStr
+  | KindRec
+  | KindList Kind
+  | KindSet Kind
   deriving (Show, Ord, Eq)
 
 ---- Typeclasses
@@ -285,6 +295,8 @@ instance Pretty Kind where
   pretty KindNat = "Nat"
   pretty KindStr = "Str"
   pretty KindRec = "Rec"
+  pretty (KindList k) = "List " <> pretty k
+  pretty (KindSet k) = "Set " <> pretty k
 
 instance Pretty SrcLoc where
   pretty (SrcLoc path ln col endLn endCol)

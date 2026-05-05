@@ -1,0 +1,37 @@
+module main (open_csv, open_json, sniff_promote, polymorphic_json)
+
+import table-py
+import root-py
+
+-- Schema-inference / open-table semantics on file inputs.
+--
+-- open_csv / open_json:
+--   Declared {x=Int} merged with a file carrying {x, y, z}. The merge in
+--   merge_table_schema_with_csv_header (CSV) and the corresponding JSON
+--   path must coerce x to Int and pass y, z through with arrow-rs-inferred
+--   types, surfacing all three columns downstream.
+--
+-- sniff_promote:
+--   No explicit signature -> kindless polymorphic row. The CSV has five
+--   int-looking rows in column y followed by float rows. A too-small sniff
+--   window mis-infers y as Int and fails at the float boundary; the 100-row
+--   default catches the Int->Float64 promotion and is locked in here.
+--
+-- polymorphic_json:
+--   Bare `T` wire schema (no declared columns). Pre-refactor failed with
+--   "Arrow struct must have at least one column"; with the new `T` primitive
+--   infer_schema_from_json (arrow_ffi.rs) discovers names/types from the
+--   file itself.
+--
+-- All four exports use `sliceRows 0 k` as the "take first k rows" idiom;
+-- the `head` primitive was removed in the table-module redesign.
+
+open_csv :: Table n {x=Int} -> Table n {x=Int}
+open_csv = sliceRows 0 3
+
+open_json :: Table n {x=Int} -> Table n {x=Int}
+open_json = sliceRows 0 3
+
+sniff_promote = sliceRows 0 7
+
+polymorphic_json = sliceRows 0 3

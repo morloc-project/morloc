@@ -253,6 +253,32 @@ data Gamma = Gamma
   -- | Solutions for RecVarU row variables from rec constraint solving (Stage 3
   -- of the tables refactor; see plans/tables/10-rec-solver-decidability.md).
   , gammaRecSubs :: Map TVar TypeU
+  -- | Solutions for ListVarU variables from list constraint solving (Stage 8
+  -- of the tables refactor — foundational kind layer).
+  , gammaListSubs :: Map TVar TypeU
+  -- | Solutions for SetVarU variables from set constraint solving (Stage 8).
+  , gammaSetSubs :: Map TVar TypeU
+  -- | Generic primitive constraints (Member / Subset / Disjoint) waiting for
+  -- enough information to discharge. Stage 9 of the tables refactor. The
+  -- 'Constraint' values carried here are the same as the ones the
+  -- typeclass mechanism uses; primitive forms have CMember / CSubset /
+  -- CDisjoint constructors.
+  , gammaConstraints :: [Constraint]
+  -- | Constraints declared on the *current* function's signature, taken as
+  -- assumptions during this function's body typecheck. A deferred
+  -- obligation in @gammaConstraints@ that cannot be decided at end-of-
+  -- typecheck is allowed to discharge if it is alpha-equivalent (after
+  -- applying gamma) to one of these assumptions; otherwise it is an
+  -- unsolved-constraint error.
+  --
+  -- @Nothing@ means "no signature has been claimed yet"; the next
+  -- @VarS (MonomorphicExpr (Just _) _)@ handled by 'synthE' will lock
+  -- in its declared @econs@ as the assumption set. @Just@ (even @Just
+  -- []@) means the slot is taken — subsequent inner VarS calls add
+  -- only to @gammaConstraints@, never to assumptions. The Maybe
+  -- distinguishes "outermost-not-seen-yet" from "outermost-seen-with-
+  -- empty-econs", which a plain list cannot.
+  , gammaAssumedConstraints :: Maybe [Constraint]
   -- | Known constant values for let-bound variables (for nat label resolution).
   -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
   , gammaIntVals :: Map EVar ConstVal
@@ -264,6 +290,7 @@ data ConstVal
   = ConstInt Integer
   | ConstStr Text
   | ConstTup [ConstVal]
+  | ConstList [ConstVal]
   deriving (Show, Eq, Ord)
 
 ---- Data files and system

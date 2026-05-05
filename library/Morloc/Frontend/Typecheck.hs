@@ -35,6 +35,16 @@ Check the general types, do nothing to the concrete types which may only be
 solved after segregation. Later the concrete types will need to be checked
 for type consistency and correctness of packers.
 -}
+-- | True for primitive set-theoretic constraints (Member / Subset /
+-- Disjoint), which 'dischargeConstraints' is responsible for resolving.
+-- Typeclass-form constraints (@Constraint cls ts@) are handled by the
+-- class-resolution pass and pass through this filter unchanged.
+isPrimitiveConstraint :: Constraint -> Bool
+isPrimitiveConstraint (Constraint _ _) = False
+isPrimitiveConstraint (CMember _ _) = True
+isPrimitiveConstraint (CSubset _ _) = True
+isPrimitiveConstraint (CDisjoint _ _) = True
+
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
@@ -43,7 +53,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaIntVals = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -61,6 +71,50 @@ typecheck = mapM run
           mapM_ (\(t1, t2) ->
             MM.sayV $ "Warning: unresolved Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
             ) remaining
+
+      -- discharge primitive set-theoretic constraints (Member / Subset /
+      -- Disjoint) accumulated through subtype calls. Each constraint
+      -- runs through reduceConstraint after the final substitution.
+      --
+      -- Three failure modes for *primitive* constraints (CMember /
+      -- CSubset / CDisjoint):
+      --   1. Contradiction: the constraint cannot ever be satisfied
+      --      under any further substitution. Hard error.
+      --   2. Undecidable AND not subsumed by the function's declared
+      --      assumptions: the function body needs a constraint the
+      --      signature did not declare. Hard error pointing at the
+      --      missing constraint.
+      --   3. Undecidable but subsumed by an assumption: silently
+      --      discharged inside dischargeConstraints.
+      --
+      -- Typeclass-form constraints (@Constraint cls _@) are handled by
+      -- the separate class-resolution machinery; we leave any leftover
+      -- of that form in place rather than error.
+      case dischargeConstraints g3 of
+        Left err -> MM.throwSystemError ("Constraint violation: " <> err)
+        Right g3' ->
+          case filter isPrimitiveConstraint (gammaConstraints g3') of
+            [] -> return ()
+            cs ->
+              -- Apply gamma so the displayed form reflects what was
+              -- actually unsolved (the queue still carries pre-substitution
+              -- variable names; the user wants to see post-substitution
+              -- structure with internal @\@nN@ rename suffixes stripped).
+              -- prettyConstraint also parenthesises compound args so the
+              -- output reads as something that could be pasted into the
+              -- signature's @=>@ clause.
+              let displayed = map (prettyConstraint . apply g3') cs
+                  -- The outermost VarS in the AnnoS names the function
+                  -- being typechecked; surface it in the error so the
+                  -- user knows which signature to amend.
+                  fnName = case e0 of
+                    AnnoS _ _ (VarS (EV n) _) -> Just n
+                    _ -> Nothing
+                  prefix = case fnName of
+                    Just n -> "Unsolved constraint(s) on " <> dquotes (pretty n) <> "; add to its signature: "
+                    Nothing -> "Unsolved constraint(s); add to the function signature: "
+              in MM.throwSystemError $
+                prefix <> hcat (punctuate ", " displayed)
 
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
@@ -116,7 +170,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -565,8 +619,39 @@ synthE _ g0 (NamS rs) = do
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
-  let (g1, t1) = rename g0 (etype t0)
-      g1' = g1 ++> [AnnG v t1]
+  -- Rename type AND constraints together so primitive constraints
+  -- (CMember / CSubset / CDisjoint) reference the same fresh-name
+  -- variables that the type uses. The renamed constraints are queued
+  -- onto gammaConstraints so they discharge against call-site
+  -- substitutions at end-of-typecheck.
+  --
+  -- Constraint propagation: the *outermost* VarS encountered during a
+  -- top-level typecheck represents the function being defined. Its
+  -- declared @econs@ are taken as assumptions for the body and parked
+  -- in @gammaAssumedConstraints@. A deferred obligation that cannot
+  -- be decided at end-of-typecheck is allowed to discharge if it
+  -- matches one of these assumptions: that is exactly the semantics
+  -- of "the body may use the constraints the signature declared."
+  -- Subsequent (inner) VarS calls just enqueue obligations on
+  -- @gammaConstraints@ and do not touch the assumptions list.
+  --
+  -- Outermost-vs-inner is detected by @gammaAssumedConstraints ==
+  -- Nothing@: 'run' initialises it to @Nothing@ and only the
+  -- outermost VarS finds it so. Once any signature has been claimed,
+  -- the slot is @Just _@ (possibly @Just []@ if the signature had no
+  -- declared constraints) and stays that way. This Maybe sentinel is
+  -- necessary because a signature with no constraints would otherwise
+  -- be indistinguishable from "not yet seen" if we used a plain list.
+  let (g1, t0') = renameEType g0 t0
+      t1 = etype t0'
+      newCs = Set.toList (econs t0')
+      g1Cs = g1
+        { gammaConstraints = gammaConstraints g1 ++ newCs
+        , gammaAssumedConstraints = case gammaAssumedConstraints g1 of
+            Nothing -> Just newCs
+            Just _  -> gammaAssumedConstraints g1
+        }
+      g1' = g1Cs ++> [AnnG v t1]
   (g2, t2, xs1) <- foldCheck g1' xs0 t1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
@@ -1339,6 +1424,7 @@ tryEvalConst _ (StrS s) = Just (ConstStr s)
 tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (TupS es) = ConstTup <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
+tryEvalConst g (LstS es) = ConstList <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
 tryEvalConst g (LetS v (AnnoS _ _ e1) (AnnoS _ _ e2)) = do
   val' <- tryEvalConst g e1
   tryEvalConst (g { gammaIntVals = Map.insert v val' (gammaIntVals g) }) e2
@@ -1373,6 +1459,20 @@ tryEvalStr g e = case tryEvalConst g e of
 
 tryExtractStrPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Text
 tryExtractStrPre g (AnnoS _ _ e) = tryEvalStr g e
+
+-- | Try to reduce an expression to a list of string constants. Used to
+-- lift @l:[Str]@ label arguments into ListLitU [StrLitU ...] at the call
+-- site so subsequent @r - l@, @r # l@, etc. reduce.
+tryEvalStrList :: Gamma -> ExprS g f c -> Maybe [Text]
+tryEvalStrList g e = case tryEvalConst g e of
+  Just (ConstList vs) -> mapM asStr vs
+  _ -> Nothing
+  where
+    asStr (ConstStr s) = Just s
+    asStr _ = Nothing
+
+tryExtractStrListPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe [Text]
+tryExtractStrListPre g (AnnoS _ _ e) = tryEvalStrList g e
 
 -- | Resolve nat / str labels from literal arguments.
 -- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
@@ -1410,8 +1510,23 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
           , argIdx < length args
           , Just s <- [tryExtractStrPre g (args !! argIdx)]
           ]
+        -- List labels: l:[Str] params bind l as a List Str-kinded type
+        -- variable. Lift a literal [Str] argument into a ListLitU of
+        -- StrLitU at the call site so subsequent r - l, r # l, etc.
+        -- reduce.
+        origLvs = nub (collectListVarNames (etype et))
+        renamedLvs = nub (collectListVarNames funType)
+        listRenMap = Map.fromList (zip origLvs renamedLvs)
+        listSolutions = Map.fromList
+          [ (renamedVar, ListLitU (map StrLitU ss))
+          | (origVar, argIdx) <- Map.toList labels
+          , Just renamedVar <- [Map.lookup origVar listRenMap]
+          , argIdx < length args
+          , Just ss <- [tryExtractStrListPre g (args !! argIdx)]
+          ]
     in g { gammaNatSubs = Map.union natSolutions (gammaNatSubs g)
          , gammaStrSubs = Map.union strSolutions (gammaStrSubs g)
+         , gammaListSubs = Map.union listSolutions (gammaListSubs g)
          }
   where
     labels = enatLabels et

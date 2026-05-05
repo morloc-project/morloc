@@ -30,6 +30,7 @@ arrow-ipc = "58"
 arrow-select = "58"
 parquet = { version = "58", default-features = false, features = ["arrow"] }
 arrow-csv = "58"
+arrow-cast = "58"
 bytes = "1"
 
 [build-dependencies]

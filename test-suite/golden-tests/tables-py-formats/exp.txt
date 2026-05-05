@@ -1,0 +1,12 @@
+--- csv_input ---
+[{"x":42,"y":"alpha"},{"x":17,"y":"beta"},{"x":99,"y":"gamma"}]
+--- json_input ---
+[{"x":0,"y":"a"},{"x":1,"y":"b"},{"x":2,"y":"c"}]
+--- parquet_input ---
+[{"x":42,"y":"alpha"},{"x":17,"y":"beta"},{"x":99,"y":"gamma"}]
+--- arrow_input ---
+[{"x":42,"y":"alpha"},{"x":17,"y":"beta"},{"x":99,"y":"gamma"}]
+--- csv_output ---
+x,y
+42,alpha
+17,beta

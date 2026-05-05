@@ -42,6 +42,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , expandSerialize
   , toIType
   )
+import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -110,10 +111,13 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
   cppTypeOf = f . typeFof
     where
       f (UnkF (FV _ x)) = return $ pretty x
-      -- The kindless `Table` builtin (Stage 1 of the tables refactor) is
-      -- carried as a VarF with CV "arrow"; emit mlc::ArrowTable to match
-      -- the legacy NamF-based path. See plans/tables/15-...md.
-      f (VarF (FV _ (CV "arrow"))) = return "mlc::ArrowTable"
+      -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
+      -- the general type variable @BT.table@. The wire schema marker is
+      -- @T@ on the encoder side; here on the C++ side it must lower to
+      -- @mlc::ArrowTable@ regardless of any concrete-type hint (the
+      -- legacy @<arrow>@ hint has been retired -- recognition is now
+      -- by general-type identity, not by the concrete-name slot).
+      f (VarF (FV gv _)) | gv == BT.table = return "mlc::ArrowTable"
       f (VarF (FV _ x)) = return $ pretty x
       f (FunF ts t) = do
         t' <- f t
@@ -138,7 +142,11 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
             return $ recName rec <> params
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
-      f (NamF _ (FV _ (CV "arrow")) _ _) = return "mlc::ArrowTable"
+      -- Typed `Table n r` (NamF tagged NamTable) lowers to mlc::ArrowTable
+      -- the same way as the kindless form. The concrete-name slot is
+      -- empty post-refactor; the structural NamTable identifier carries
+      -- the dispatch.
+      f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
         return $ pretty s <> CP.printRecordTemplate ps'

@@ -3,8 +3,8 @@ module main (result)
 import root
 import root-py
 import root-r (Int, Real)
-import tables-py
-import tables-r
+import table-py
+import table-r
 
 -- Migrated from arrow-immutable-rp using Stage 4 typed Table syntax.
 

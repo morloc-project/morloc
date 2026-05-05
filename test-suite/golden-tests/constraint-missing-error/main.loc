@@ -1,0 +1,19 @@
+module main (callerOmits)
+
+import root
+
+-- Negative-path companion to constraint-propagation: when a caller
+-- invokes a function with a primitive constraint over a row variable
+-- but does NOT re-declare that constraint on its own signature, the
+-- typechecker fails with a "missing constraint" diagnostic naming the
+-- offending signature and the constraint to add. This locks in the
+-- error path of the propagation algorithm.
+type TBox (r :: Rec)
+
+hasZ :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+
+-- callerOmits has no => clause; the body's obligation has nothing to
+-- subsume against and no ground evidence will ever land. The
+-- typechecker reports it as unsolved.
+callerOmits :: TBox r -> TBox r
+callerOmits t = hasZ t

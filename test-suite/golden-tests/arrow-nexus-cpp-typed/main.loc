@@ -2,7 +2,7 @@ module main (makePeople)
 
 import root
 import root-cpp
-import tables-cpp
+import table-cpp
 
 -- Migrated from arrow-nexus-cpp using Stage 4 typed Table syntax.
 

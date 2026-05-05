@@ -1,0 +1,56 @@
+module main (bound, double, both, added, replaced, dropped, chained)
+
+import table-py
+
+-- Typecheck-only coverage of typed Table algebra. No pool, no nexus build.
+--
+-- Section 1 (typed-ops): rbind composes row counts via Nat arithmetic;
+--   cbind composes column schemas via Rec union. Solver normalises ground
+--   arithmetic so the inferred types are concrete (e.g. 5 + 7 = 12,
+--   {x=Int} + {y=Str} = {x=Int, y=Str}).
+--
+-- Section 2 (setCol-dropCols): each call lifts a Str literal into the
+--   type-level row schema via the f:Str / l:[Str] label mechanism,
+--   exercising the full parser-promotion-substitution-reduction chain
+--   on a real stdlib signature. The implicit Disjoint constraint on the
+--   `(r - f) + Singleton f a` form discharges trivially since (r - f)
+--   is by construction f-free.
+
+----------------------------------------------------------------------------
+-- Section 1: rbind / cbind type-level arithmetic
+----------------------------------------------------------------------------
+
+mkLeft :: Table 5 {x=Int}
+mkRight :: Table 7 {x=Int}
+mkY :: Table 5 {y=Str}
+
+-- bound :: Table 12 {x=Int}
+bound = rbind mkLeft mkRight
+
+mk10 :: Table 10 {x=Int}
+
+-- double :: Table 20 {x=Int}
+double = rbind mk10 mk10
+
+-- both :: Table 5 ({x=Int} + {y=Str})
+both = cbind mkLeft mkY
+
+----------------------------------------------------------------------------
+-- Section 2: typed setCol / dropCols
+----------------------------------------------------------------------------
+
+mkXY :: Table 5 {x=Int, y=Str}
+mkZVec :: Vector 5 Real
+mkXReal :: Vector 5 Real
+
+-- added :: Table 5 {x=Int, y=Str, z=Real}
+added = setCol "z" mkZVec mkXY
+
+-- replaced :: Table 5 {y=Str, x=Real}
+replaced = setCol "x" mkXReal mkXY
+
+-- dropped :: Table 5 {y=Str}
+dropped = dropCols ["x"] mkXY
+
+-- chained :: Table 5 {y=Str, z=Real}
+chained = setCol "z" mkZVec (dropCols ["x"] mkXY)

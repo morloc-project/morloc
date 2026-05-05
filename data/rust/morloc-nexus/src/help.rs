@@ -504,6 +504,26 @@ fn render_schema_type(s: &morloc_runtime::schema::Schema) -> String {
                 .unwrap_or_else(|| "?".into())
         ),
         Int => "Int".into(),
+        Table => {
+            // Table primitive: bare `T` renders as `Table` (any schema);
+            // `T:K<entries>` renders as `Table {k1=t1, k2=t2, ...}` so
+            // help text shows the declared columns the same way the
+            // user wrote them.
+            if s.parameters.is_empty() {
+                "Table".into()
+            } else {
+                let cols: Vec<std::string::String> = s
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let key = s.keys.get(i).cloned().unwrap_or_default();
+                        format!("{}={}", key, render_schema_type(p))
+                    })
+                    .collect();
+                format!("Table {{{}}}", cols.join(", "))
+            }
+        }
     }
 }
 

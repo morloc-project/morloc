@@ -1,0 +1,22 @@
+module main (callerDeclares)
+
+import root
+
+-- Constraint propagation: a function whose body invokes another
+-- function with a primitive constraint must either (a) discharge that
+-- constraint with ground evidence, or (b) re-declare it on its own
+-- signature. Re-declaration lets the obligation be subsumed by the
+-- caller's assumption set in @dischargeConstraints@. Without this
+-- subsumption an inner @hasZ@ would leave a residual obligation
+-- @Subset {"z"} (Keys r)@ that no further substitution will ever
+-- ground, since @r@ is the caller's polymorphic row variable.
+type TBox (r :: Rec)
+
+hasZ :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+
+-- Caller re-declares the inner constraint. The body's residual
+-- obligation matches the caller's renamed assumption (the row
+-- variable unifies via the RecSolver's row-var-vs-row-var equation),
+-- so propagation discharges silently.
+callerDeclares :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+callerDeclares t = hasZ t

@@ -116,6 +116,20 @@ serialAstToMsgpackSchema (SerialList v dim s) =
     encodeDim Nothing = ""
     encodeDim (Just n) = ":" <> pretty n
 serialAstToMsgpackSchema (SerialTuple v ss) = addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map serialAstToMsgpackSchema ss)
+-- Table primitive (Arrow IPC buffer). Open semantics: declared columns
+-- are a *lower bound*; the runtime accepts any Arrow buffer whose schema
+-- contains at least these columns of at least these types. The wire form
+-- carries no concrete-type hint -- the @T@ marker is itself the dispatch
+-- signal -- and uses @T:K@ for K declared columns or bare @T@ when the
+-- row variable is polymorphic. The entry grammar @<klen><keytext><schema>@
+-- is shared with @m@ but the interpretation differs: for @T@, entries are
+-- runtime constraints on the buffer, not a layout descriptor.
+serialAstToMsgpackSchema (SerialObject NamTable _ _ []) = "T"
+serialAstToMsgpackSchema (SerialObject NamTable _ _ rs) =
+  "T:" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
+  where
+    keypair :: (Key, SerialAST) -> MDoc
+    keypair (k, s) = (encode64D . DT.length . unKey $ k) <> pretty (unKey k) <> serialAstToMsgpackSchema s
 serialAstToMsgpackSchema (SerialObject _ v _ rs) = addHint v <> "m" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
   where
     keypair :: (Key, SerialAST) -> MDoc
@@ -349,14 +363,16 @@ makeSerialAST m lang t0 = do
       | null runtimeTs = makeSerialAST' gscope typepackers (VarF fv)
       -- Typed `Table n r`: when the Rec arg lowered to a ground record
       -- (NamF NamRecord ...), surface it as a SerialObject NamTable
-      -- carrying the column schema. The Arrow wire path uses the column
-      -- types to validate / serialize the SHM-resident table.
+      -- carrying the column schema. The wire encoder emits @T:K<entries>@
+      -- (or bare @T@ for empty / polymorphic-row); no concrete-type hint
+      -- is needed because @T@ is itself the dispatch token to the Arrow
+      -- C Data Interface path.
       | generalTypeName == BT.table = case runtimeTs of
           [NamF _ _ _ recRs] -> do
             colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers tf) recRs
-            return $ SerialObject NamTable (FV BT.table (CV "arrow")) [] colASTs
+            return $ SerialObject NamTable (FV BT.table (CV "")) [] colASTs
           _ ->
-            return $ SerialObject NamTable (FV BT.table (CV "arrow")) [] []
+            return $ SerialObject NamTable (FV BT.table (CV "")) [] []
       | otherwise = case aliasShape of
           -- Outer alias body is list-shaped (`type Deque a = List a`,
           -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
@@ -481,7 +497,25 @@ makeSerialAST m lang t0 = do
         basevar (RecUnionU _ _) = Nothing
         basevar (RecDiffU _ _) = Nothing
         basevar (RecIntersectU _ _) = Nothing
+        basevar (RecRestrictU _ _) = Nothing
+        basevar (RecDiffListU _ _) = Nothing
         basevar RecVoidU = Nothing
+        basevar (ListVarU _) = Nothing
+        basevar (ListLitU _) = Nothing
+        basevar (ListAppU _ _) = Nothing
+        basevar ListVoidU = Nothing
+        basevar (SetVarU _) = Nothing
+        basevar SetEmptyU = Nothing
+        basevar (SetLitU _) = Nothing
+        basevar (SetUnionU _ _) = Nothing
+        basevar (SetInterU _ _) = Nothing
+        basevar (SetDiffU _ _) = Nothing
+        basevar SetVoidU = Nothing
+        basevar (KeysU _) = Nothing
+        basevar (ListToSetU _) = Nothing
+        basevar (SizeU _) = Nothing
+        basevar (ProjectFieldU _ _) = Nothing
+        basevar (RecSingletonU _ _) = Nothing
         basevar (LabeledU _ t) = basevar t
 
         generalType = fst $ unweaveTypeF ft
@@ -577,7 +611,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -603,7 +637,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -699,13 +733,13 @@ reduceNat (NatDivU a b) = do
   if y == 0 then Nothing else Just (x `div` y)
 reduceNat _ = Nothing
 
--- | Check if a SerialAST's root represents an Apache Arrow value. The
--- Table builtin synthesizes a SerialObject NamTable with general var
--- BT.table and concrete var "arrow" (via Nexus.hs / Serial.hs); both
--- conditions identify the same node, but the FV-tag check is cheaper.
+-- | True iff this SerialAST root is a Table (Arrow IPC primitive).
+-- Used at codegen sites that need to route through the Arrow C Data
+-- Interface rather than the general msgpack path. Identity is the
+-- structural NamTable tag; the old @<arrow>@ concrete-type hint has
+-- been retired (the wire-form @T@ marker now carries the dispatch).
 hasArrowHint :: SerialAST -> Bool
-hasArrowHint (SerialObject _ (FV _ (CV "arrow")) _ _) = True
-hasArrowHint (SerialObject _ (FV gv _) _ _) | gv == BT.table = True
+hasArrowHint (SerialObject NamTable _ _ _) = True
 hasArrowHint _ = False
 
 {- | Given a list of possible ways to (de)serialize data between two languages,

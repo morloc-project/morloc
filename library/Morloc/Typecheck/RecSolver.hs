@@ -194,7 +194,23 @@ solveCanon ca@(RecCanon _ Nothing) cb@(RecCanon _ (Just _)) =
   case solveCanon cb ca of
     Right subs -> Right subs
     Left e -> Left e
-solveCanon (RecCanon _ (Just _)) (RecCanon _ (Just _)) = Left RecDeferred
+-- Both sides are pure row variables (no fixed fields). Unify them by
+-- binding the RHS variable to the LHS variable (or no-op if same).
+-- Without this, two distinct fresh row variables introduced at
+-- different call sites would never get linked even when subtype tries
+-- to equate them, breaking constraint propagation: an obligation
+-- carrying r2 stays separate from an assumption carrying r1 even
+-- after the function call links them.
+solveCanon (RecCanon fa (Just va)) (RecCanon fb (Just vb))
+  | Map.null fa && Map.null fb =
+      if va == vb
+      then Right Map.empty
+      else Right (Map.singleton vb (RecVar va))
+  | fa == fb =
+      if va == vb
+      then Right Map.empty
+      else Right (Map.singleton vb (RecVar va))
+  | otherwise = Left RecDeferred
 
 -- | Lift a canonical Rec back to a RecExpr (for substitution into TypeU).
 canonToRecExpr :: RecCanon -> RecExpr

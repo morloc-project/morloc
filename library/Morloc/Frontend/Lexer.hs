@@ -142,6 +142,17 @@ lexOne st@(LexState input pos toks) = case input of
   -- Triple-quoted strings
   '\'' : '\'' : '\'' : rest -> lexMultilineString pos "'''" rest st
   '"' : '"' : '"' : rest -> lexMultilineString pos "\"\"\"" rest st
+  -- Tick-prefix type-level Str literal: 'identifier (e.g. 'x, 'col_name).
+  -- Must come AFTER triple-quote check so that '''abc''' lexes as a
+  -- multiline string rather than a tick-name followed by operators.
+  -- The identifier follows the same character set as regular morloc
+  -- identifiers (alpha/digit/underscore/prime).
+  '\'' : c : rest | isAlpha c || c == '_' ->
+    let (word, rest') = span (\x -> isAlphaNum x || x == '\'' || x == '_') (c : rest)
+        name = T.pack word
+        len = 1 + length word
+     in Right st { lsInput = rest', lsPos = advanceCol pos len
+                 , lsTokens = Located pos (TokTickName name) (T.cons '\'' name) : toks }
   -- Double-quoted strings (with interpolation support)
   '"' : rest -> lexDoubleString pos rest st
   -- Numbers: try hex, octal, binary first, then decimal/float

@@ -329,24 +329,51 @@ pub unsafe extern "C" fn arrow_validate(
     if header.is_null() { set_errmsg(errmsg, &MorlocError::Other("NULL arrow header".into())); return 1; }
     if (*header).magic != ARROW_SHM_MAGIC { set_errmsg(errmsg, &MorlocError::Other("Invalid arrow SHM magic".into())); return 1; }
     if schema.is_null() { set_errmsg(errmsg, &MorlocError::Other("NULL schema for arrow validation".into())); return 1; }
-    // MORLOC_MAP = 16
-    if (*schema).serial_type != crate::schema::SerialType::Map as u32 { set_errmsg(errmsg, &MorlocError::Other("Expected MORLOC_MAP schema for arrow table".into())); return 1; }
-
-    let n_cols = (*header).n_columns as usize;
-    if n_cols != (*schema).size {
-        set_errmsg(errmsg, &MorlocError::Other(format!("Column count mismatch: arrow has {}, schema has {}", n_cols, (*schema).size)));
+    // Tables now use the dedicated SerialType::Table marker. The legacy
+    // SerialType::Map + "<arrow>" hint form has been retired.
+    if (*schema).serial_type != crate::schema::SerialType::Table as u32 {
+        set_errmsg(errmsg, &MorlocError::Other("Expected MORLOC_TABLE schema for arrow validation".into()));
         return 1;
     }
 
-    for i in 0..n_cols {
-        let desc = arrow_column_desc(header, i as u32);
-        if desc.is_null() {
-            set_errmsg(errmsg, &MorlocError::Other(format!("NULL column descriptor at index {}", i)));
+    // Open-semantics validation: the morloc-side declared columns are a
+    // *lower bound* on the Arrow buffer's actual schema. The buffer is
+    // allowed to carry additional columns; for each declared column we
+    // require that some Arrow column has the same name and a compatible
+    // physical type. Columns are matched by NAME (the morloc Rec is
+    // unordered; Arrow columns are ordered but order is not part of the
+    // type contract). Type mismatches that Arrow's cast machinery cannot
+    // resolve are surfaced at the actual import call, not here.
+    let n_cols = (*header).n_columns as usize;
+    let n_decl = (*schema).size;
+    if n_cols < n_decl {
+        set_errmsg(errmsg, &MorlocError::Other(format!(
+            "Arrow buffer has {} column(s); morloc type declares at least {}", n_cols, n_decl
+        )));
+        return 1;
+    }
+
+    for i in 0..n_decl {
+        let key_ptr = *(*schema).keys.add(i);
+        if key_ptr.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(format!("NULL column key at index {}", i)));
             return 1;
         }
-        let param_schema = *(*schema).parameters.add(i);
-        if (*desc).col_type != (*param_schema).serial_type as u32 {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Column {} type mismatch", i)));
+        let want_name = std::ffi::CStr::from_ptr(key_ptr).to_string_lossy().into_owned();
+        let mut found = false;
+        for j in 0..n_cols {
+            let cname_ptr = arrow_column_name(header, j as u32);
+            if cname_ptr.is_null() { continue; }
+            let cname = std::ffi::CStr::from_ptr(cname_ptr).to_string_lossy();
+            if cname == want_name {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "Declared column '{}' missing from arrow buffer", want_name
+            )));
             return 1;
         }
     }
@@ -609,11 +636,13 @@ pub unsafe extern "C" fn print_arrow_as_table(
 
 // ── Arrow detection / JSON -> Arrow SHM ──────────────────────────────────────
 
-/// True iff the schema represents an Arrow table: a Map serial-type whose
-/// hint is "arrow". Arrow tables route through SHM-resident column buffers
-/// rather than the voidstar record layout.
+/// True iff the schema represents an Arrow table.
+///
+/// As of the table-wire-format refactor, Tables have their own dedicated
+/// schema marker `T` (`SerialType::Table`); the legacy `<arrow>` hint on
+/// a Map is no longer emitted and this check is now structural.
 pub fn is_arrow_table_schema(s: &crate::schema::Schema) -> bool {
-    s.serial_type == SerialType::Map && s.hint.as_deref() == Some("arrow")
+    s.serial_type == SerialType::Table
 }
 
 /// Map a morloc primitive serial type to the matching MORLOC_* arrow column
@@ -637,6 +666,198 @@ fn serial_type_to_arrow(st: SerialType) -> u32 {
         SerialType::String => MORLOC_STRING,
         _ => MORLOC_NIL,
     }
+}
+
+/// One column's worth of inference state collected from JSON: the first
+/// non-null sample (if any) and whether any null was seen. Consumed by
+/// 'sample_to_serial_type' to choose a 'SerialType', and by the
+/// "wrap in Optional iff any null" rule.
+struct JsonColInfo<'a> {
+    sample: Option<&'a serde_json::Value>,
+    has_null: bool,
+}
+
+/// Walk a JSON value (either row-oriented `[{...}, ...]` or column-
+/// oriented `{"col": [...], ...}`) and collect the union of column
+/// names in first-seen order, along with a sample value and a null
+/// indicator per column. Pure data extraction; no schema decisions
+/// yet (those happen in 'merge_table_schema_with_json').
+unsafe fn discover_json_columns<'a>(
+    value: &'a serde_json::Value,
+) -> Result<(Vec<String>, std::collections::HashMap<String, JsonColInfo<'a>>), MorlocError> {
+    use serde_json::Value;
+
+    let mut order: Vec<String> = Vec::new();
+    let mut info: std::collections::HashMap<String, JsonColInfo<'a>> = std::collections::HashMap::new();
+
+    let see = |k: &str, v: &'a Value,
+                   order: &mut Vec<String>,
+                   info: &mut std::collections::HashMap<String, JsonColInfo<'a>>| {
+        let entry = info.entry(k.to_string()).or_insert_with(|| {
+            order.push(k.to_string());
+            JsonColInfo { sample: None, has_null: false }
+        });
+        if v.is_null() {
+            entry.has_null = true;
+        } else if entry.sample.is_none() {
+            entry.sample = Some(v);
+        }
+    };
+
+    match value {
+        Value::Array(rows) => {
+            for (row_idx, row) in rows.iter().enumerate() {
+                let obj = row.as_object().ok_or_else(|| MorlocError::Other(
+                    format!("Row {} is not a JSON object", row_idx),
+                ))?;
+                for (k, v) in obj.iter() {
+                    see(k, v, &mut order, &mut info);
+                }
+            }
+        }
+        Value::Object(obj) => {
+            for (k, v) in obj.iter() {
+                if let Value::Array(arr) = v {
+                    for item in arr.iter() {
+                        see(k, item, &mut order, &mut info);
+                    }
+                } else {
+                    return Err(MorlocError::Other(format!(
+                        "Column '{}' must be a JSON array (column-oriented form)", k,
+                    )));
+                }
+            }
+        }
+        _ => {
+            return Err(MorlocError::Other(
+                "Top-level JSON for an Arrow table must be array (row-oriented) or object (column-oriented)".into(),
+            ));
+        }
+    }
+
+    Ok((order, info))
+}
+
+/// Pick a morloc 'SerialType' for a column from its first non-null
+/// sample. An entirely-null column (no sample) falls back to
+/// 'SerialType::String', the most permissive choice that round-trips
+/// JSON values without lossy coercion. Integer JSON numbers become
+/// 'Sint64' and floats become 'Float64'; this mirrors the de-facto
+/// JSON number representation. Booleans and strings map to themselves.
+fn sample_to_serial_type(sample: Option<&serde_json::Value>) -> crate::schema::SerialType {
+    use serde_json::Value;
+    use crate::schema::SerialType;
+    match sample {
+        Some(Value::Bool(_)) => SerialType::Bool,
+        Some(Value::Number(n)) if n.is_i64() || n.is_u64() => SerialType::Sint64,
+        Some(Value::Number(_)) => SerialType::Float64,
+        Some(Value::String(_)) => SerialType::String,
+        Some(_) | None => SerialType::String,
+    }
+}
+
+/// Wrap a primitive 'Schema' in 'SerialType::Optional' if @nullable@.
+fn maybe_optional(inner: crate::schema::Schema, nullable: bool) -> crate::schema::Schema {
+    use crate::schema::{Schema, SerialType};
+    if !nullable { return inner; }
+    let inner_align = inner.alignment().max(1);
+    let inner_off = crate::shm::align_up(1, inner_align);
+    Schema {
+        serial_type: SerialType::Optional,
+        size: 1,
+        width: inner_off + inner.width,
+        offsets: vec![inner_off],
+        hint: None,
+        parameters: vec![inner],
+        keys: Vec::new(),
+    }
+}
+
+/// Merge the declared morloc Table schema @rs@ with the columns
+/// discovered in a JSON value, producing a single 'Schema' that the
+/// downstream Arrow build path consumes.
+///
+/// The merge rule implements morloc's *open* Table semantics:
+///
+///   * **Declared columns are authoritative for their type.** If
+///     @rs.keys[i] = "x"@ and @rs.parameters[i] = Int64@, the resulting
+///     column "x" has type 'Int64' regardless of what the JSON sample
+///     suggests. The JSON-side discovery still has to *find* the
+///     column (otherwise we error: a declared column missing from the
+///     buffer is a contract violation).
+///   * **Undeclared columns flow through with inferred types.** Keys
+///     present in the JSON but not in @rs.keys@ are appended to the
+///     column list, with types chosen by 'sample_to_serial_type'.
+///   * **Order: declared first, discovered extras after.** This keeps
+///     the morloc-named columns in a stable position and groups
+///     extras together for predictable downstream consumption.
+///   * **Nullability: any null in the JSON column wraps the type in
+///     'Optional'.** This applies to both declared and discovered
+///     columns; for declared columns, if the morloc type already had
+///     'Optional' wrapping, that takes precedence (we don't double-
+///     wrap).
+///
+/// The resulting 'Schema' is tagged 'SerialType::Table' and plumbed
+/// straight back into 'json_value_to_arrow_shm' for the strict-typed
+/// build path; from that point on, the merged schema is treated as
+/// fully-declared (no further inference happens downstream).
+unsafe fn merge_table_schema_with_json(
+    rs: &crate::schema::Schema,
+    value: &serde_json::Value,
+) -> Result<crate::schema::Schema, MorlocError> {
+    use crate::schema::{Schema, SerialType};
+
+    let (discovered_order, info) = discover_json_columns(value)?;
+
+    // Index declared columns by name for O(1) "is this declared?" lookup.
+    let mut declared_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, k) in rs.keys.iter().enumerate() {
+        declared_idx.insert(k.as_str(), i);
+    }
+
+    // Validate that every declared column actually appeared in the JSON.
+    // Open semantics still requires the *declared* columns to be present;
+    // it just allows additional ones beyond.
+    for k in &rs.keys {
+        if !info.contains_key(k) {
+            return Err(MorlocError::Other(format!(
+                "Declared column '{}' missing from JSON input", k
+            )));
+        }
+    }
+
+    let mut keys: Vec<String> = Vec::with_capacity(rs.keys.len() + discovered_order.len());
+    let mut params: Vec<Schema> = Vec::with_capacity(rs.keys.len() + discovered_order.len());
+
+    // 1. Declared columns first, in declared order. Type comes from
+    //    rs.parameters[i] verbatim (already carries Optional wrapping
+    //    where the morloc type spelled it out). We do *not* re-wrap
+    //    based on JSON nulls -- the morloc type is authoritative.
+    for (i, k) in rs.keys.iter().enumerate() {
+        keys.push(k.clone());
+        params.push(rs.parameters[i].clone());
+    }
+
+    // 2. Discovered extras, in first-seen order. Type from sample;
+    //    Optional wrap iff the JSON had any null in this column.
+    for k in discovered_order.iter() {
+        if declared_idx.contains_key(k.as_str()) { continue; }
+        let col_info = info.get(k).expect("discovered key must be in info");
+        let inner_st = sample_to_serial_type(col_info.sample);
+        let inner = Schema::primitive(inner_st);
+        keys.push(k.clone());
+        params.push(maybe_optional(inner, col_info.has_null));
+    }
+
+    Ok(Schema {
+        serial_type: SerialType::Table,
+        size: keys.len(),
+        width: std::mem::size_of::<crate::shm::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: params,
+        keys,
+    })
 }
 
 /// Parse JSON text into a fresh Arrow SHM table according to the given Map
@@ -688,14 +909,44 @@ pub unsafe extern "C" fn read_json_to_arrow_shm(
 }
 
 /// Internal helper used by both the literal-JSON CLI path and the file
-/// loader. Takes an already-parsed serde_json::Value plus a validated arrow
+/// loader. Takes an already-parsed serde_json::Value plus a morloc Table
 /// schema and lays out the corresponding ArrowShm in SHM.
+///
+/// Implements morloc's *open* Table semantics for JSON input:
+///
+///   * Bare `T` (`rs.size == 0`) -- all columns and types are inferred
+///     from the JSON itself.
+///   * Concrete `T:K<entries>` -- declared columns are authoritative
+///     for their types and ordering; any *additional* keys present in
+///     the JSON flow through with inferred types appended after the
+///     declared columns.
+///   * Mixed -- both rules above compose: declared columns force their
+///     types, undeclared keys add typed-by-inference extras.
+///
+/// The merge happens up front in 'merge_table_schema_with_json', which
+/// returns a single fully-declared 'Schema' covering both declared and
+/// discovered columns. The remainder of this function is the strict-
+/// typed Arrow build path: it walks every column in the merged schema
+/// in order, extracting values from the JSON by name.
+///
+/// A declared column that the JSON does not carry is a contract
+/// violation (errors with "Declared column 'k' missing"). Extras have
+/// no contract to violate.
 unsafe fn json_value_to_arrow_shm(
     value: &serde_json::Value,
     rs: &crate::schema::Schema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
     use serde_json::Value;
+
+    // Merge declared (rs) with discovered-from-JSON to produce the
+    // effective schema we'll lay out. The remainder of the function
+    // treats the merged schema as fully-declared.
+    let merged = match merge_table_schema_with_json(rs, value) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return shm::RELNULL; }
+    };
+    let rs = &merged;
     let n_cols = rs.size;
 
     // Pivot to columnar Vec<Vec<&Value>>. Both row- and column-oriented forms

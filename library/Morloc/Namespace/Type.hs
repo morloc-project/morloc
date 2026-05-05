@@ -206,6 +206,50 @@ data TypeU
   | RecDiffU TypeU [Text] -- ^ Drop these keys from a Rec (no-op if absent).
   | RecIntersectU TypeU TypeU -- ^ Intersection of two Recs (surface `&`).
   | RecVoidU -- ^ Erased phantom Rec slot. Mirrors NatVoidU / StrVoidU.
+  -- List-kinded constructs (Stage 8 of the tables refactor). Lists are
+  -- ordered, position-preserving sequences; equality is element-wise.
+  -- Element kind is fixed at the carrier (e.g. KindList KindStr); the
+  -- TypeU level does not track it.
+  | ListVarU TVar -- ^ List-kinded variable, never quantified by ForallU.
+                  -- Mirrors NatVarU / StrVarU / RecVarU.
+  | ListLitU [TypeU] -- ^ Type-level list literal `[a, b, c]`. Empty list is `ListLitU []`.
+  | ListAppU TypeU TypeU -- ^ Type-level list append (surface `+` for List).
+  | ListVoidU -- ^ Erased phantom List slot. Mirrors NatVoidU / RecVoidU.
+  -- Set-kinded constructs (Stage 8 of the tables refactor). Sets are
+  -- order/duplicate-insensitive; canonical form is sorted dedup.
+  | SetVarU TVar -- ^ Set-kinded variable, never quantified by ForallU.
+  | SetEmptyU -- ^ Type-level empty set `{}` (kind-dispatched away from empty Rec).
+  | SetLitU [TypeU] -- ^ Internal canonical form for a ground set. Not parser-
+                    -- produced -- emerges from ListToSet of a ground list,
+                    -- Keys of a ground Rec, etc. Element order is the
+                    -- canonical-sort order from SetSolver.
+  | SetUnionU TypeU TypeU -- ^ Set union (surface `+` for Set).
+  | SetInterU TypeU TypeU -- ^ Set intersection (surface `&`).
+  | SetDiffU TypeU TypeU -- ^ Set difference (surface `-` between two Sets).
+  | SetVoidU -- ^ Erased phantom Set slot. Distinct from SetEmptyU.
+  -- Cross-kind functions (Stage 9 of the tables refactor). Each has a
+  -- reduction rule keyed on the operand's kind: when the operand is
+  -- ground, the function reduces to a value of the result kind.
+  | KeysU TypeU                 -- ^ Rec -> Set Str. Extract field names of a Rec.
+  | ListToSetU TypeU            -- ^ List k -> Set k. Drop order and duplicates.
+  | SizeU TypeU                 -- ^ List k / Set k / Rec -> Nat. Kind-dispatched
+                                -- size: list length, set cardinality, Rec field count.
+  | ProjectFieldU TypeU TypeU   -- ^ Rec -> Str -> Type. Lookup a field type.
+                                -- Partial; absent key contradicts at the constraint level.
+  | RecSingletonU TypeU TypeU   -- ^ Str -> Type -> Rec. Build a one-field Rec from a
+                                -- Str-kinded key (literal or variable) and a Type-kinded
+                                -- value. Reduces to RecExtendU when the key is ground.
+                                -- Lets `f:Str` parameters appear as record keys at the
+                                -- type level, e.g. @r + Singleton f a@.
+  -- Rec ⊕ List operators (Stage 10 of the tables refactor). Surface
+  -- syntax `r # l` (restrict) and `r - l` for ground or polymorphic
+  -- list-keyed Rec algebra.
+  | RecRestrictU TypeU TypeU    -- ^ Rec -> List Str -> Rec. Project the Rec to fields
+                                -- whose names are in the list. Generates an implicit
+                                -- KeysSubset constraint.
+  | RecDiffListU TypeU TypeU    -- ^ Rec -> List Str -> Rec. Drop fields whose names
+                                -- are in the list. Drop-of-absent is benign (no
+                                -- constraint required).
   | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
@@ -221,7 +265,17 @@ data EType
   }
   deriving (Show, Eq, Ord)
 
-data Constraint = Constraint ClassName [TypeU]
+-- | Type-level constraints attached to a signature via @=>@.
+--
+-- - 'Constraint' is the existing typeclass form, e.g. @(Eq a) =>@.
+-- - 'CMember' / 'CSubset' / 'CDisjoint' are Stage-9 generic primitives
+--   over the new kinds. They are written with the same @=>@ syntax but
+--   carry a fixed positional shape rather than a free class name.
+data Constraint
+  = Constraint ClassName [TypeU]
+  | CMember TypeU TypeU       -- ^ Member a s :: a is an element of set s
+  | CSubset TypeU TypeU       -- ^ Subset s1 s2 :: every element of s1 is in s2
+  | CDisjoint TypeU TypeU     -- ^ Disjoint s1 s2 :: s1 and s2 share no elements
   deriving (Show, Eq, Ord)
 
 -- a CLI option that takes an argument
@@ -383,7 +437,34 @@ instance Typelike TypeU where
   typeOf (RecUnionU _ _) = NatVoidT
   typeOf (RecDiffU _ _) = NatVoidT
   typeOf (RecIntersectU _ _) = NatVoidT
+  typeOf (RecRestrictU _ _) = NatVoidT
+  typeOf (RecDiffListU _ _) = NatVoidT
   typeOf RecVoidU = NatVoidT
+  -- List- and Set-kinded constructs are entirely phantom at the ground
+  -- level; they contribute no runtime type information. They erase to
+  -- NatVoidT for the same reason Rec polymorphic forms do: the codegen
+  -- layer doesn't have a List/Set ground type to map to.
+  typeOf (ListVarU _) = NatVoidT
+  typeOf (ListLitU _) = NatVoidT
+  typeOf (ListAppU _ _) = NatVoidT
+  typeOf ListVoidU = NatVoidT
+  typeOf (SetVarU _) = NatVoidT
+  typeOf SetEmptyU = NatVoidT
+  typeOf (SetLitU _) = NatVoidT
+  typeOf (SetUnionU _ _) = NatVoidT
+  typeOf (SetInterU _ _) = NatVoidT
+  typeOf (SetDiffU _ _) = NatVoidT
+  typeOf SetVoidU = NatVoidT
+  -- Cross-kind functions: most reduce to ground forms only after solver
+  -- normalisation. At the Type ADT level they all erase to NatVoidT
+  -- (phantom). The exception is ProjectFieldU which, when ground, names
+  -- a real Type-kinded result; we still erase here because typeOf is
+  -- the runtime-erasure path. Solver-level reduction returns a TypeU.
+  typeOf (KeysU _) = NatVoidT
+  typeOf (ListToSetU _) = NatVoidT
+  typeOf (SizeU _) = NatVoidT
+  typeOf (ProjectFieldU _ _) = NatVoidT
+  typeOf (RecSingletonU _ _) = NatVoidT
   typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
@@ -414,7 +495,29 @@ instance Typelike TypeU where
   free (RecUnionU a b) = Set.union (free a) (free b)
   free (RecDiffU a _) = free a
   free (RecIntersectU a b) = Set.union (free a) (free b)
+  free (RecRestrictU a b) = Set.union (free a) (free b)
+  free (RecDiffListU a b) = Set.union (free a) (free b)
   free RecVoidU = Set.empty
+  -- List- and Set-kinded vars are implicitly forall-quantified (like Nat,
+  -- Str, Rec vars); they contribute no free Type-kinded variables.
+  free (ListVarU _) = Set.empty
+  free (ListLitU es) = Set.unions (map free es)
+  free (ListAppU a b) = Set.union (free a) (free b)
+  free ListVoidU = Set.empty
+  free (SetVarU _) = Set.empty
+  free SetEmptyU = Set.empty
+  free (SetLitU es) = Set.unions (map free es)
+  free (SetUnionU a b) = Set.union (free a) (free b)
+  free (SetInterU a b) = Set.union (free a) (free b)
+  free (SetDiffU a b) = Set.union (free a) (free b)
+  free SetVoidU = Set.empty
+  -- Cross-kind functions: recurse into operands so any nested
+  -- Type-kinded variables are still tracked.
+  free (KeysU r) = free r
+  free (ListToSetU l) = free l
+  free (SizeU c) = free c
+  free (ProjectFieldU r f) = Set.union (free r) (free f)
+  free (RecSingletonU k v) = Set.union (free k) (free v)
   free (LabeledU _ t) = free t
 
   substituteTVar v (ForallU q r) t =
@@ -462,7 +565,29 @@ instance Typelike TypeU where
       sub (RecUnionU a b) = RecUnionU (sub a) (sub b)
       sub (RecDiffU a ks) = RecDiffU (sub a) ks
       sub (RecIntersectU a b) = RecIntersectU (sub a) (sub b)
+      sub (RecRestrictU a b) = RecRestrictU (sub a) (sub b)
+      sub (RecDiffListU a b) = RecDiffListU (sub a) (sub b)
       sub t@RecVoidU = t
+      -- List- and Set-kinded constructs: variables and empty/void are
+      -- inert; operators recurse into their operands.
+      sub t@(ListVarU _) = t
+      sub (ListLitU es) = ListLitU (map sub es)
+      sub (ListAppU a b) = ListAppU (sub a) (sub b)
+      sub t@ListVoidU = t
+      sub t@(SetVarU _) = t
+      sub t@SetEmptyU = t
+      sub (SetLitU es) = SetLitU (map sub es)
+      sub (SetUnionU a b) = SetUnionU (sub a) (sub b)
+      sub (SetInterU a b) = SetInterU (sub a) (sub b)
+      sub (SetDiffU a b) = SetDiffU (sub a) (sub b)
+      sub t@SetVoidU = t
+      -- Cross-kind functions recurse into their operand subterms so
+      -- that any nested Type-kinded variables receive substitutions.
+      sub (KeysU r) = KeysU (sub r)
+      sub (ListToSetU l) = ListToSetU (sub l)
+      sub (SizeU c) = SizeU (sub c)
+      sub (ProjectFieldU r f) = ProjectFieldU (sub r) (sub f)
+      sub (RecSingletonU k v) = RecSingletonU (sub k) (sub v)
       sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
@@ -637,7 +762,25 @@ extractKey (RecExtendU _ _ _) = TV "Rec"
 extractKey (RecUnionU _ _) = TV "Rec"
 extractKey (RecDiffU _ _) = TV "Rec"
 extractKey (RecIntersectU _ _) = TV "Rec"
+extractKey (RecRestrictU _ _) = TV "Rec"
+extractKey (RecDiffListU _ _) = TV "Rec"
 extractKey RecVoidU = TV "Rec"
+extractKey (ListVarU _) = TV "List"
+extractKey (ListLitU _) = TV "List"
+extractKey (ListAppU _ _) = TV "List"
+extractKey ListVoidU = TV "List"
+extractKey (SetVarU _) = TV "Set"
+extractKey SetEmptyU = TV "Set"
+extractKey (SetLitU _) = TV "Set"
+extractKey (SetUnionU _ _) = TV "Set"
+extractKey (SetInterU _ _) = TV "Set"
+extractKey (SetDiffU _ _) = TV "Set"
+extractKey SetVoidU = TV "Set"
+extractKey (KeysU _) = TV "Set"
+extractKey (ListToSetU _) = TV "Set"
+extractKey (SizeU _) = TV "Nat"
+extractKey (ProjectFieldU _ _) = TV "Type"
+extractKey (RecSingletonU _ _) = TV "Rec"
 extractKey (LabeledU _ t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
 
@@ -687,7 +830,30 @@ unresolvedType2type (RecExtendU _ _ _) = NatVoidT
 unresolvedType2type (RecUnionU _ _) = NatVoidT
 unresolvedType2type (RecDiffU _ _) = NatVoidT
 unresolvedType2type (RecIntersectU _ _) = NatVoidT
+unresolvedType2type (RecRestrictU _ _) = NatVoidT
+unresolvedType2type (RecDiffListU _ _) = NatVoidT
 unresolvedType2type RecVoidU = NatVoidT
+-- List- and Set-kinded constructs erase to NatVoidT at the ground type
+-- level. The Type ADT does not represent List or Set separately.
+unresolvedType2type (ListVarU _) = NatVoidT
+unresolvedType2type (ListLitU _) = NatVoidT
+unresolvedType2type (ListAppU _ _) = NatVoidT
+unresolvedType2type ListVoidU = NatVoidT
+unresolvedType2type (SetVarU _) = NatVoidT
+unresolvedType2type SetEmptyU = NatVoidT
+unresolvedType2type (SetLitU _) = NatVoidT
+unresolvedType2type (SetUnionU _ _) = NatVoidT
+unresolvedType2type (SetInterU _ _) = NatVoidT
+unresolvedType2type (SetDiffU _ _) = NatVoidT
+unresolvedType2type SetVoidU = NatVoidT
+-- Cross-kind functions: erase to NatVoidT (phantom). Solver-level
+-- reduction returns the proper TypeU; ground forms are folded into
+-- their result kinds before this lowering runs.
+unresolvedType2type (KeysU _) = NatVoidT
+unresolvedType2type (ListToSetU _) = NatVoidT
+unresolvedType2type (SizeU _) = NatVoidT
+unresolvedType2type (ProjectFieldU _ _) = NatVoidT
+unresolvedType2type (RecSingletonU _ _) = NatVoidT
 unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | get a fresh variable name that is not used in t1 or t2
@@ -840,7 +1006,26 @@ instance Pretty TypeU where
       f _ (RecUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
       f _ (RecDiffU a ks) = "(" <> f True a <+> "-" <+> braces (hcat (punctuate "," (map pretty ks))) <> ")"
       f _ (RecIntersectU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
+      f _ (RecRestrictU a b) = "(" <> f True a <+> "#" <+> f True b <> ")"
+      f _ (RecDiffListU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ RecVoidU = "_"
+      -- List- and Set-kinded constructs.
+      f _ (ListVarU v) = pretty v
+      f _ (ListLitU es) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
+      f _ (ListAppU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ ListVoidU = "_"
+      f _ (SetVarU v) = pretty v
+      f _ SetEmptyU = "{}"
+      f _ (SetLitU es) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
+      f _ (SetUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (SetInterU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
+      f _ (SetDiffU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
+      f _ SetVoidU = "_"
+      f _ (KeysU r) = "Keys" <+> f False r
+      f _ (ListToSetU l) = "ListToSet" <+> f False l
+      f _ (SizeU c) = "Size" <+> f False c
+      f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
+      f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
       f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
@@ -867,3 +1052,6 @@ instance Pretty EType where
 
 instance Pretty Constraint where
   pretty (Constraint cls ts) = pretty cls <+> hsep (map pretty ts)
+  pretty (CMember a s) = "Member" <+> pretty a <+> pretty s
+  pretty (CSubset a b) = "Subset" <+> pretty a <+> pretty b
+  pretty (CDisjoint a b) = "Disjoint" <+> pretty a <+> pretty b

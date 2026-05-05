@@ -1,0 +1,40 @@
+module main (added, replaced, dropped)
+
+import root
+
+-- Singleton-Str lifting (Stage 9.5). The signature parameter `f:Str`
+-- introduces `f` as both a value-level Str argument and a type-level
+-- Str-kinded variable. At the call site, a Str literal in the f-position
+-- gets lifted into the type as StrLitU, which then drives reduction of:
+--   - r - f          (RecDiffListU r [StrLitU])
+--   - Singleton f a  (RecSingletonU StrLitU val -> RecExtendU)
+-- Together these let `add`-style record operations track which key was
+-- added at the type level without baking key-presence into the language
+-- core.
+
+type TBox (r :: Rec)
+
+mk :: TBox {x=Int, y=Str}
+
+-- The canonical "set or replace" record extension. Drop f if present,
+-- then add {f=a}. Drop-of-absent is a no-op, so this works whether f
+-- is in r or not. The implicit Disjoint constraint discharges
+-- trivially because (r - f) is by construction f-free.
+addF :: f:Str -> a -> TBox r -> TBox ((r - f) + Singleton f a)
+
+-- Drop a column by name. Pure RecDiffListU; no constraint required
+-- because dropping an absent key is benign.
+dropF :: f:Str -> TBox r -> TBox (r - f)
+
+-- Add a new column with literal "z" lifted into the type.
+added :: TBox {x=Int, y=Str, z=Real}
+added = addF "z" (1.0 :: Real) mk
+
+-- Replace the column "x" with a different type. (r - "x") drops the
+-- old binding; Singleton "x" Real adds the new one.
+replaced :: TBox {y=Str, x=Real}
+replaced = addF "x" (2.0 :: Real) mk
+
+-- Drop a column.
+dropped :: TBox {y=Str}
+dropped = dropF "x" mk

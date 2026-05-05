@@ -1,0 +1,7 @@
+bound :: Table 12 {x=Int}
+double :: Table 20 {x=Int}
+both :: Table 5 {x=Int, y=Str}
+added :: Table 5 {x=Int, y=Str, z=Real}
+replaced :: Table 5 {y=Str, x=Real}
+dropped :: Table 5 {y=Str}
+chained :: Table 5 {y=Str, z=Real}

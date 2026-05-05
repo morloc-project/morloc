@@ -512,7 +512,28 @@ promoteNatVars natVars = go
     go (RecUnionU a b) = RecUnionU (go a) (go b)
     go (RecDiffU a ks) = RecDiffU (go a) ks
     go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
+    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
     go t@RecVoidU = t
+    -- List / Set constructors are not promoted by promoteNatVars but
+    -- recursion into their operand subterms is required so any nested
+    -- Type-kinded subexpressions still see the substitution.
+    go t@(ListVarU _) = t
+    go (ListLitU es) = ListLitU (map go es)
+    go (ListAppU a b) = ListAppU (go a) (go b)
+    go t@ListVoidU = t
+    go t@(SetVarU _) = t
+    go t@SetEmptyU = t
+    go (SetLitU es) = SetLitU (map go es)
+    go (SetUnionU a b) = SetUnionU (go a) (go b)
+    go (SetInterU a b) = SetInterU (go a) (go b)
+    go (SetDiffU a b) = SetDiffU (go a) (go b)
+    go t@SetVoidU = t
+    go (KeysU r) = KeysU (go r)
+    go (ListToSetU l) = ListToSetU (go l)
+    go (SizeU c) = SizeU (go c)
+    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
+    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
     go (LabeledU n t) = LabeledU n (go t)
 
 -- | Promote VarU to RecVarU for variables identified as rec-kinded.
@@ -547,7 +568,25 @@ promoteRecVars recVars = go
     go (RecUnionU a b) = RecUnionU (go a) (go b)
     go (RecDiffU a ks) = RecDiffU (go a) ks
     go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
+    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
     go t@RecVoidU = t
+    go t@(ListVarU _) = t
+    go (ListLitU es) = ListLitU (map go es)
+    go (ListAppU a b) = ListAppU (go a) (go b)
+    go t@ListVoidU = t
+    go t@(SetVarU _) = t
+    go t@SetEmptyU = t
+    go (SetLitU es) = SetLitU (map go es)
+    go (SetUnionU a b) = SetUnionU (go a) (go b)
+    go (SetInterU a b) = SetInterU (go a) (go b)
+    go (SetDiffU a b) = SetDiffU (go a) (go b)
+    go t@SetVoidU = t
+    go (KeysU r) = KeysU (go r)
+    go (ListToSetU l) = ListToSetU (go l)
+    go (SizeU c) = SizeU (go c)
+    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
+    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
     go (LabeledU n t) = LabeledU n (go t)
 
 -- | Promote VarU to StrVarU for variables identified as str-kinded.
@@ -582,7 +621,25 @@ promoteStrVars strVars = go
     go (RecUnionU a b) = RecUnionU (go a) (go b)
     go (RecDiffU a ks) = RecDiffU (go a) ks
     go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
+    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
     go t@RecVoidU = t
+    go t@(ListVarU _) = t
+    go (ListLitU es) = ListLitU (map go es)
+    go (ListAppU a b) = ListAppU (go a) (go b)
+    go t@ListVoidU = t
+    go t@(SetVarU _) = t
+    go t@SetEmptyU = t
+    go (SetLitU es) = SetLitU (map go es)
+    go (SetUnionU a b) = SetUnionU (go a) (go b)
+    go (SetInterU a b) = SetInterU (go a) (go b)
+    go (SetDiffU a b) = SetDiffU (go a) (go b)
+    go t@SetVoidU = t
+    go (KeysU r) = KeysU (go r)
+    go (ListToSetU l) = ListToSetU (go l)
+    go (SizeU c) = SizeU (go c)
+    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
+    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
     go (LabeledU n t) = LabeledU n (go t)
 
 parseLang :: Located -> D Lang
@@ -605,9 +662,9 @@ getName' (Located _ _ t) = t
 
 extractConstraints :: TypeU -> D [Constraint]
 extractConstraints (AppU (VarU (TV name)) args) =
-  return [Constraint (ClassName name) args]
+  return [mkPrimOrClass name args]
 extractConstraints (VarU (TV name)) =
-  return [Constraint (ClassName name) []]
+  return [mkPrimOrClass name []]
 extractConstraints (NamU NamRecord _ _ _) =
   dfail (Pos 0 0 "") "invalid constraint syntax"
 extractConstraints t =
@@ -615,19 +672,30 @@ extractConstraints t =
     Just cs -> return cs
     Nothing -> dfail (Pos 0 0 "") ("invalid constraint: " ++ show t)
 
+-- | Build a 'Constraint' from a head name and argument list, recognising
+-- the primitive set-theoretic constraint forms (Member / Subset /
+-- Disjoint) and routing everything else to the typeclass form. Mirrors
+-- 'mkConstraint' in the parser; the two converge on the same set of
+-- primitive heads so both grammar paths produce the same ADT.
+mkPrimOrClass :: Text -> [TypeU] -> Constraint
+mkPrimOrClass "Member" [a, s] = CMember a s
+mkPrimOrClass "Subset" [a, b] = CSubset a b
+mkPrimOrClass "Disjoint" [a, b] = CDisjoint a b
+mkPrimOrClass name ts = Constraint (ClassName name) ts
+
 flattenTupleConstraint :: TypeU -> Maybe [Constraint]
 flattenTupleConstraint (AppU (VarU (TV name)) args)
   | T.isPrefixOf "Tuple" name = mapM typeToConstraint args
-  | otherwise = Just [Constraint (ClassName name) args]
+  | otherwise = Just [mkPrimOrClass name args]
 flattenTupleConstraint (VarU (TV name)) =
-  Just [Constraint (ClassName name) []]
+  Just [mkPrimOrClass name []]
 flattenTupleConstraint _ = Nothing
 
 typeToConstraint :: TypeU -> Maybe Constraint
 typeToConstraint (AppU (VarU (TV name)) args) =
-  Just (Constraint (ClassName name) args)
+  Just (mkPrimOrClass name args)
 typeToConstraint (VarU (TV name)) =
-  Just (Constraint (ClassName name) [])
+  Just (mkPrimOrClass name [])
 typeToConstraint _ = Nothing
 
 extractClassDef :: TypeU -> D (ClassName, [TVar])

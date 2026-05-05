@@ -119,7 +119,12 @@ typedef enum {
     MORLOC_TUPLE    = 15,
     MORLOC_MAP      = 16,
     MORLOC_OPTIONAL = 17,
-    MORLOC_INT      = 18  // variable-width integer (Array of uint64_t limbs, two's complement)
+    MORLOC_INT      = 18, // variable-width integer (Array of uint64_t limbs, two's complement)
+    MORLOC_TABLE    = 19  // Arrow IPC primitive. Schema columns (if any) are
+                          // open constraints on the buffer's actual schema; the
+                          // binary layout is fully described by the Arrow
+                          // buffer itself, not by the morloc Schema. Wire form
+                          // is `T` (no declared columns) or `T:K<entries>`.
 } morloc_serial_type;
 
 // Single-character schema encoding tokens.
@@ -134,6 +139,7 @@ typedef enum {
 #define SCHEMA_MAP      'm'
 #define SCHEMA_OPTIONAL '?'
 #define SCHEMA_INT      'j'
+#define SCHEMA_TABLE    'T'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 struct Schema;

@@ -2,7 +2,7 @@ module main (makePeople)
 
 import root
 import root-py
-import tables-py
+import table-py
 
 -- Migrated from arrow-nexus-py using Stage 4 typed Table syntax. The
 -- legacy `table Person = Person { ... }` + `table Py => Person = "arrow"`

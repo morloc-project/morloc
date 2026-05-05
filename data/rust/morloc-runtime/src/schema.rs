@@ -22,6 +22,9 @@ pub enum SerialType {
     Map = 16,
     Optional = 17,
     Int = 18,       // variable-width integer (Array of uint64_t limbs, two's complement)
+    Table = 19,     // Arrow IPC primitive. Schema entries (if any) are open
+                    // constraints on the buffer's actual schema; the binary
+                    // layout is fully described by the Arrow buffer itself.
 }
 
 /// Schema character codes for parsing schema strings.
@@ -36,6 +39,7 @@ const SCHEMA_TUPLE: u8 = b't';
 const SCHEMA_MAP: u8 = b'm';
 const SCHEMA_OPTIONAL: u8 = b'?';
 const SCHEMA_INT: u8 = b'j';
+const SCHEMA_TABLE: u8 = b'T';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -108,7 +112,10 @@ impl Schema {
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
             SerialType::String | SerialType::Array | SerialType::Map
-            | SerialType::Int => {
+            | SerialType::Int | SerialType::Table => {
+                // Table values live in SHM as a single relative pointer
+                // to an Arrow buffer; same pointer-sized alignment as
+                // other indirect types.
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
             SerialType::Tuple => {
@@ -278,6 +285,55 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
             }
             Ok((make_map_schema(params, keys), p))
         }
+        SCHEMA_TABLE => {
+            // Table primitive (Arrow IPC).
+            //
+            // Two surface forms:
+            //   `T`           -- bare token; no declared columns. The
+            //                   buffer's Arrow schema is opaque to morloc;
+            //                   any value is accepted.
+            //   `T:K<entries>` -- K declared columns of declared types,
+            //                    parsed identically to `m`'s entries
+            //                    (one base-62 length char + key bytes
+            //                    + child schema). Open semantics: these
+            //                    are *minimum* constraints -- the buffer
+            //                    may carry extra columns.
+            //
+            // The colon disambiguates bare `T` from `T:0` (zero declared
+            // columns). Bare `T` means "schema unspecified"; `T:0` means
+            // "exactly zero columns required" (rare but legal).
+            if cur < bytes.len() && bytes[cur] == b':' {
+                cur += 1;
+                if cur >= bytes.len() {
+                    return Err(MorlocError::Schema("expected table column count after ':'".into()));
+                }
+                let n = decode_base62(bytes[cur])?;
+                let mut params = Vec::with_capacity(n);
+                let mut keys = Vec::with_capacity(n);
+                let mut p = cur + 1;
+                for _ in 0..n {
+                    if p >= bytes.len() {
+                        return Err(MorlocError::Schema("expected table column key length".into()));
+                    }
+                    let key_len = decode_base62(bytes[p])?;
+                    p += 1;
+                    if p + key_len > bytes.len() {
+                        return Err(MorlocError::Schema("table column key extends past end".into()));
+                    }
+                    let key = std::str::from_utf8(&bytes[p..p + key_len])
+                        .map_err(|_| MorlocError::Schema("invalid UTF-8 in table key".into()))?
+                        .to_string();
+                    p += key_len;
+                    keys.push(key);
+                    let (child, end) = parse_schema_r(bytes, p)?;
+                    params.push(child);
+                    p = end;
+                }
+                Ok((make_table_schema(params, keys), p))
+            } else {
+                Ok((make_table_schema(Vec::new(), Vec::new()), cur))
+            }
+        }
         _ => Err(MorlocError::Schema(format!(
             "unknown schema character '{}' at position {pos}",
             c as char
@@ -446,6 +502,31 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     }
 }
 
+/// Construct a Table schema from its open column constraints.
+///
+/// The morloc Table primitive carries an Arrow IPC buffer whose binary
+/// layout is fully self-describing; this Schema only records the
+/// declared columns (if any) for runtime constraint checking and for
+/// driving CSV/JSON parsing into typed Arrow fields. Empty `params` /
+/// `keys` correspond to the bare `T` wire form -- no declared columns,
+/// any Arrow buffer accepted. Non-empty entries are open constraints
+/// (the buffer may carry additional columns beyond these).
+///
+/// Width is the size of the SHM relative pointer that owns the Arrow
+/// buffer; the column entries themselves do not contribute to in-memory
+/// layout because the data lives outside the schema-described region.
+fn make_table_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
+    Schema {
+        serial_type: SerialType::Table,
+        size: params.len(),
+        width: std::mem::size_of::<crate::shm::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: params,
+        keys,
+    }
+}
+
 /// Calculate byte offsets for tuple fields (C struct layout with natural alignment).
 fn calculate_tuple_layout(params: &[Schema]) -> (usize, Vec<usize>) {
     let mut offsets = Vec::with_capacity(params.len());
@@ -529,6 +610,25 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::Optional => {
             buf.push('?');
             schema_to_string_inner(&schema.parameters[0], buf);
+        }
+        SerialType::Table => {
+            // Round-trip with the parser: bare `T` for empty constraint
+            // list, `T:K<entries>` otherwise. Hint has already been
+            // written above (Tables emit no hint by default, but the
+            // round-trip preserves whatever was parsed).
+            buf.push('T');
+            if schema.size > 0 {
+                buf.push(':');
+                buf.push(encode_base62(schema.size));
+                for (i, p) in schema.parameters.iter().enumerate() {
+                    if i < schema.keys.len() {
+                        let key = &schema.keys[i];
+                        buf.push(encode_base62(key.len()));
+                        buf.push_str(key);
+                    }
+                    schema_to_string_inner(p, buf);
+                }
+            }
         }
     }
 }

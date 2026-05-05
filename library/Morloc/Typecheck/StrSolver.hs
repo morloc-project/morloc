@@ -30,6 +30,7 @@ module Morloc.Typecheck.StrSolver
   , solveStr
   , isGround
   , freeStrVars
+  , disjoint
   ) where
 
 import Data.Map.Strict (Map)
@@ -106,5 +107,22 @@ solveStr lhs rhs =
         (_, StrVar v) | isGround l -> Right (Map.singleton v l)
         -- Same expression on both sides (after normalization).
         _ | l == r -> Right Map.empty
+        -- Two distinct variables: bind one to the other so subsequent
+        -- references unify. Mirrors the RecSolver / SetSolver fix; without
+        -- this, fresh string variables introduced at different call sites
+        -- stay separate, breaking constraint propagation across calls.
+        (StrVar v1, StrVar v2) -> Right (Map.singleton v2 (StrVar v1))
         -- Anything else with a free variable: defer.
         _ -> Left StrDeferred
+
+-- | Decide whether two Str expressions name distinct strings, used by
+-- the Lacks / Has / Member reductions in 'RecSolver' (Stage 9).
+--
+-- - @Just True@: both sides ground to distinct literals.
+-- - @Just False@: both sides ground to the same literal.
+-- - @Nothing@: one or both sides involve a free 'StrVar'; the answer
+--   is undecidable until the var grounds. The caller defers.
+disjoint :: StrExpr -> StrExpr -> Maybe Bool
+disjoint a b = case (normalize a, normalize b) of
+  (StrLit x, StrLit y) -> Just (x /= y)
+  _ -> Nothing

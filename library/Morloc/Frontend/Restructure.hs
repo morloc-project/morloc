@@ -124,7 +124,25 @@ checkForSelfRecursion d = do
     hasTerm v (RecUnionU a b) = hasTerm v a || hasTerm v b
     hasTerm v (RecDiffU a _) = hasTerm v a
     hasTerm v (RecIntersectU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (RecRestrictU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (RecDiffListU a b) = hasTerm v a || hasTerm v b
     hasTerm _ RecVoidU = False
+    hasTerm _ (ListVarU _) = False
+    hasTerm v (ListLitU es) = any (hasTerm v) es
+    hasTerm v (ListAppU a b) = hasTerm v a || hasTerm v b
+    hasTerm _ ListVoidU = False
+    hasTerm _ (SetVarU _) = False
+    hasTerm _ SetEmptyU = False
+    hasTerm v (SetLitU es) = any (hasTerm v) es
+    hasTerm v (SetUnionU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (SetInterU a b) = hasTerm v a || hasTerm v b
+    hasTerm v (SetDiffU a b) = hasTerm v a || hasTerm v b
+    hasTerm _ SetVoidU = False
+    hasTerm v (KeysU r) = hasTerm v r
+    hasTerm v (ListToSetU l) = hasTerm v l
+    hasTerm v (SizeU c) = hasTerm v c
+    hasTerm v (ProjectFieldU r f) = hasTerm v r || hasTerm v f
+    hasTerm v (RecSingletonU k v') = hasTerm v k || hasTerm v v'
     hasTerm v (LabeledU _ t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
 
@@ -662,7 +680,13 @@ refineKinds ::
   MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 refineKinds dag = do
   let allParams = concat [collectAllTypeDefParams e | e <- DAG.nodes dag]
-      hasKindedParam = any (\p -> either (\(_, k) -> k == KindNat || k == KindStr || k == KindRec) (const False) p)
+      hasKindedParam = any (\p -> either (\(_, k) -> case k of
+                                                       KindNat -> True
+                                                       KindStr -> True
+                                                       KindRec -> True
+                                                       KindList _ -> True
+                                                       KindSet _ -> True
+                                                       _ -> False) (const False) p)
       kindMap = Map.fromList [(v, map (either snd (const KindType)) ps) | (v, ps) <- allParams, hasKindedParam ps]
   if Map.null kindMap
     then return dag
@@ -676,12 +700,188 @@ refineKinds dag = do
     collectAllTypeDefParams _ = []
 
     refineExprKinds :: Map TVar [Kind] -> ExprI -> MorlocMonad ExprI
-    refineExprKinds km = AST.mapTypeInExprI (refineTypeKinds km)
+    refineExprKinds km expr = do
+      e' <- AST.mapTypeInExprI (refineTypeKinds km) (promoteLabelKindsExpr expr)
+      return (augmentImplicitConstraints e')
+
+    -- | Pre-pass: for every SigE whose @enatLabels@ binds a parameter to a
+    -- typed-position, infer the label's kind from the FunU argument type
+    -- at that position and promote any matching VarU mentions throughout
+    -- the type (and constraints) to the proper per-kind variable. This
+    -- bridges the gap between the @f:Str@ surface syntax and the
+    -- promotion pass: by the time refineTypeKinds runs, the labels have
+    -- already been stripped by Desugar's @extractLabels@, so the
+    -- LabeledU wrappers are gone but the labels map still records which
+    -- argument positions carried a kind hint.
+    promoteLabelKindsExpr :: ExprI -> ExprI
+    promoteLabelKindsExpr (ExprI i (ModE m es)) =
+      ExprI i (ModE m (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (SigE (Signature v lng et))) =
+      let kindedVars = labelDerivedKinds (enatLabels et) (etype et)
+          newType = promoteKindedVarsR kindedVars (etype et)
+          newCons = Set.map (AST.mapConstraint (promoteKindedVarsR kindedVars)) (econs et)
+      in ExprI i (SigE (Signature v lng et { etype = newType, econs = newCons }))
+    promoteLabelKindsExpr (ExprI i (AssE v e es)) =
+      ExprI i (AssE v (promoteLabelKindsExpr e) (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (IstE c ts es)) =
+      ExprI i (IstE c ts (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr e = e
+
+    -- | Given the @enatLabels@ map (var -> arg index) and the function
+    -- type with labels stripped, look up the type at each labeled
+    -- position and classify it as Str / Nat / List etc. Returns a
+    -- kindedVars map ready for promoteKindedVarsR.
+    labelDerivedKinds :: Map TVar Int -> TypeU -> Map TVar Kind
+    labelDerivedKinds labels = go
+      where
+        go (ForallU _ t) = go t
+        go (FunU args _) = Map.fromList
+          [ (var, k)
+          | (var, idx) <- Map.toList labels
+          , idx < length args
+          , Just k <- [kindOfLabelInner (args !! idx)]
+          ]
+        go _ = Map.empty
+
+        kindOfLabelInner :: TypeU -> Maybe Kind
+        kindOfLabelInner (VarU (TV "Str")) = Just KindStr
+        kindOfLabelInner (VarU (TV "Int")) = Just KindNat
+        kindOfLabelInner (AppU (VarU (TV "List")) [_]) = Just (KindList KindStr)
+        kindOfLabelInner _ = Nothing
+
+    -- After kind reclassification, walk every signature's TypeU and
+    -- harvest implicit set-theoretic constraints from the structure of
+    -- the type. The constraints are added to the signature's @econs@
+    -- set so they fire through the existing @=>@ machinery.
+    --
+    -- Implicit constraints come from canonical operator forms:
+    --
+    -- - @RecExtendU k _ (RecVarU r)@ — extending a polymorphic Rec by
+    --   a literal key emits @CDisjoint (SetLitU [StrLitU k]) (KeysU r)@.
+    -- - @RecRestrictU r l@ — restricting a Rec to a list of keys emits
+    --   @CSubset (ListToSetU l) (KeysU r)@.
+    --
+    -- Constraints are de-duplicated against the existing @econs@ set so
+    -- explicit @=>@ clauses that match an implicit are not duplicated.
+    augmentImplicitConstraints :: ExprI -> ExprI
+    augmentImplicitConstraints (ExprI i (SigE (Signature v l (EType t cs doc labels)))) =
+      let extras = collectImplicitConstraints t
+          cs' = Set.union cs (Set.fromList extras)
+      in ExprI i (SigE (Signature v l (EType t cs' doc labels)))
+    augmentImplicitConstraints (ExprI i (ModE m es)) =
+      ExprI i (ModE m (map augmentImplicitConstraints es))
+    augmentImplicitConstraints (ExprI i (AssE v e es)) =
+      ExprI i (AssE v (augmentImplicitConstraints e) (map augmentImplicitConstraints es))
+    augmentImplicitConstraints (ExprI i (IstE c ts es)) =
+      ExprI i (IstE c ts (map augmentImplicitConstraints es))
+    augmentImplicitConstraints e = e
+
+    -- Walk a TypeU and collect implicit constraints from the recognised
+    -- operator forms. Recurses into every subterm.
+    collectImplicitConstraints :: TypeU -> [Constraint]
+    collectImplicitConstraints = go
+      where
+        go (RecExtendU k _ (RecVarU v)) =
+          [CDisjoint (SetLitU [StrLitU k]) (KeysU (RecVarU v))]
+        go (RecRestrictU r l) =
+          [CSubset (ListToSetU l) (KeysU r)] ++ go r ++ go l
+        go (FunU ts t) = concatMap go (t : ts)
+        go (AppU h ts) = go h ++ concatMap go ts
+        go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+        go (ForallU _ t) = go t
+        go (EffectU _ t) = go t
+        go (OptionalU t) = go t
+        go (RecExtendU _ a b) = go a ++ go b
+        go (RecUnionU a b) = go a ++ go b
+        go (RecDiffU a _) = go a
+        go (RecIntersectU a b) = go a ++ go b
+        go (RecDiffListU a b) = go a ++ go b
+        go (LabeledU _ t) = go t
+        go _ = []
 
     refineTypeKinds :: Map TVar [Kind] -> TypeU -> TypeU
     refineTypeKinds km t0 =
       let kindedVars = collectKindedVarsFromScope km t0
-       in promoteKindedVarsR kindedVars t0
+       in rewriteCrossKindBuiltins (promoteKindedVarsR kindedVars t0)
+
+    -- | Recognise upper-case names of cross-kind builtins (Keys, Size,
+    -- ListToSet) used as function-application heads in a type
+    -- expression and rewrite them to the corresponding TypeU
+    -- constructor. Recognition is by name (matching morloc's
+    -- "uppercase identifiers are types" convention) so users write
+    -- @Keys r@ where @r@ has Rec kind and the typechecker sees
+    -- @KeysU r@. Unrecognised names are left as ordinary type
+    -- applications so user-defined types named e.g. \"Foo\" still work.
+    --
+    -- Recurses into all subterms so nested uses get rewritten too.
+    rewriteCrossKindBuiltins :: TypeU -> TypeU
+    rewriteCrossKindBuiltins = goRW
+      where
+        goRW (AppU (VarU (TV "Keys")) [r]) = KeysU (asRec (goRW r))
+        goRW (AppU (VarU (TV "ListToSet")) [l]) = ListToSetU (asList (goRW l))
+        goRW (AppU (VarU (TV "Size")) [c]) = SizeU (goRW c)
+          -- Size is kind-dispatched (List / Set / Rec). Don't force a
+          -- kind here; let downstream kindMap classify.
+        goRW (AppU (VarU (TV "ProjectField")) [r, f]) =
+          ProjectFieldU (asRec (goRW r)) (asStr (goRW f))
+        -- @Singleton k v@: a one-field Rec with a Str-kinded key (literal
+        -- or variable) and a Type-kinded value. Reduces to RecExtendU
+        -- when the key is solved at the call site.
+        goRW (AppU (VarU (TV "Singleton")) [k, v]) =
+          RecSingletonU (asStr (goRW k)) (goRW v)
+        -- @Restrict r l@: restrict the Rec @r@ to fields whose names
+        -- appear in the List @l@. Surface alternative to the `#`
+        -- operator (which would clash with morloc's `#{...}` string
+        -- interpolation if used as an inline binary operator).
+        goRW (AppU (VarU (TV "Restrict")) [r, l]) =
+          RecRestrictU (asRec (goRW r)) (asList (goRW l))
+        goRW (AppU h ts) = AppU (goRW h) (map goRW ts)
+        goRW (FunU ts t) = FunU (map goRW ts) (goRW t)
+        goRW (ForallU v t) = ForallU v (goRW t)
+        goRW (NamU r v ps rs) = NamU r v (map goRW ps) [(k, goRW t) | (k, t) <- rs]
+        goRW (ExistU v (ts, tc) (rs, rc)) =
+          ExistU v (map goRW ts, tc) ([(k, goRW t) | (k, t) <- rs], rc)
+        goRW (EffectU effs t) = EffectU effs (goRW t)
+        goRW (OptionalU t) = OptionalU (goRW t)
+        goRW (NatAddU a b) = NatAddU (goRW a) (goRW b)
+        goRW (NatMulU a b) = NatMulU (goRW a) (goRW b)
+        goRW (NatSubU a b) = NatSubU (goRW a) (goRW b)
+        goRW (NatDivU a b) = NatDivU (goRW a) (goRW b)
+        goRW (StrConcatU a b) = StrConcatU (goRW a) (goRW b)
+        goRW (RecExtendU k a b) = RecExtendU k (goRW a) (goRW b)
+        goRW (RecUnionU a b) = RecUnionU (goRW a) (goRW b)
+        goRW (RecDiffU a ks) = RecDiffU (goRW a) ks
+        goRW (RecIntersectU a b) = RecIntersectU (goRW a) (goRW b)
+        goRW (RecRestrictU a b) = RecRestrictU (goRW a) (goRW b)
+        goRW (RecDiffListU a b) = RecDiffListU (goRW a) (goRW b)
+        goRW (ListLitU es) = ListLitU (map goRW es)
+        goRW (ListAppU a b) = ListAppU (goRW a) (goRW b)
+        goRW (SetLitU es) = SetLitU (map goRW es)
+        goRW (SetUnionU a b) = SetUnionU (goRW a) (goRW b)
+        goRW (SetInterU a b) = SetInterU (goRW a) (goRW b)
+        goRW (SetDiffU a b) = SetDiffU (goRW a) (goRW b)
+        goRW (KeysU r) = KeysU (goRW r)
+        goRW (ListToSetU l) = ListToSetU (goRW l)
+        goRW (SizeU c) = SizeU (goRW c)
+        goRW (ProjectFieldU r f) = ProjectFieldU (goRW r) (goRW f)
+        goRW (RecSingletonU k v) = RecSingletonU (goRW k) (goRW v)
+        goRW (LabeledU n t) = LabeledU n (goRW t)
+        goRW t = t
+
+        -- Force a TypeU into the Rec / List / Str kind by promoting
+        -- bare 'VarU's to their kinded counterparts. Used at the
+        -- argument positions of cross-kind builtins so explicit
+        -- constraint expressions like @Keys r@ commit @r@ to the Rec
+        -- kind even when the surrounding context didn't already
+        -- classify it.
+        asRec (VarU v) = RecVarU v
+        asRec t = t
+
+        asList (VarU v) = ListVarU v
+        asList t = t
+
+        asStr (VarU v) = StrVarU v
+        asStr t = t
 
     -- Collect variables that appear in kinded positions according to typedef
     -- param kinds. Returns a map from var name to its required kind. In
@@ -697,6 +897,8 @@ refineKinds dag = do
                (KindNat, _) -> goSlot KindNat a
                (KindStr, _) -> goSlot KindStr a
                (KindRec, _) -> goSlot KindRec a
+               (KindList _, _) -> goSlot k a
+               (KindSet _, _) -> goSlot k a
                _ -> go a
             | (k, a) <- zip kinds args]
             ++ [go a | a <- drop (length kinds) args]
@@ -730,6 +932,45 @@ refineKinds dag = do
         goSlot KindStr = goStr
         goSlot KindRec = goRec
         goSlot KindType = go
+        -- List and Set kinds: variables in these slots are List/Set kinded.
+        -- The Stage 8/9/10 solvers will need parallel goList / goSet
+        -- traversals once the corresponding TypeU constructors land. For
+        -- now any variable seen in the slot is classified by the slot.
+        goSlot k@(KindList _) = goCollection k
+        goSlot k@(KindSet _) = goCollection k
+
+        -- Single-pass collection-kind classifier: any variable found
+        -- gets the slot's kind. Recurses through structural operators
+        -- (which were initially parsed as NatAddU / NatSubU because `+`
+        -- and `-` are kind-overloaded at the surface) so that variables
+        -- nested inside `l + ['z]` get classified as List rather than
+        -- Nat. Falls back to `go` for unrecognised subterms.
+        goCollection :: Kind -> TypeU -> Map TVar Kind
+        goCollection slotK (VarU v@(TV name))
+          | not (T.null name), isLower (T.head name) = Map.singleton v slotK
+          | otherwise = Map.empty
+        goCollection slotK (NatVarU v) = Map.singleton v slotK
+        goCollection slotK (StrVarU v) = Map.singleton v slotK
+        goCollection slotK (RecVarU v) = Map.singleton v slotK
+        goCollection slotK (ListVarU v) = Map.singleton v slotK
+        goCollection slotK (SetVarU v) = Map.singleton v slotK
+        goCollection slotK (NatAddU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection slotK (NatSubU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection slotK (NatMulU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection slotK (ListAppU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection slotK (ListLitU es) =
+          Map.unions (map (goCollection slotK) es)
+        goCollection slotK (SetUnionU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection slotK (SetInterU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection slotK (SetDiffU a b) =
+          Map.union (goCollection slotK a) (goCollection slotK b)
+        goCollection _ t = go t
 
         -- In a Nat-kinded slot, any lowercase-named variable is Nat-kinded,
         -- regardless of an earlier (Desugar-pass) classification. This
@@ -785,8 +1026,27 @@ refineKinds dag = do
     isRecLike (RecUnionU _ _) = True
     isRecLike (RecDiffU _ _) = True
     isRecLike (RecIntersectU _ _) = True
+    isRecLike (RecRestrictU _ _) = True
+    isRecLike (RecDiffListU _ _) = True
+    isRecLike (RecSingletonU _ _) = True
     isRecLike RecVoidU = True
     isRecLike _ = False
+
+    isListLike :: TypeU -> Bool
+    isListLike (ListVarU _) = True
+    isListLike (ListLitU _) = True
+    isListLike (ListAppU _ _) = True
+    isListLike ListVoidU = True
+    isListLike _ = False
+
+    isSetLike :: TypeU -> Bool
+    isSetLike (SetVarU _) = True
+    isSetLike SetEmptyU = True
+    isSetLike (SetUnionU _ _) = True
+    isSetLike (SetInterU _ _) = True
+    isSetLike (SetDiffU _ _) = True
+    isSetLike SetVoidU = True
+    isSetLike _ = False
 
     -- Promote VarU to NatVarU, StrVarU, or RecVarU per the kind map. Also
     -- override any incorrect Desugar-pass classification: Desugar's
@@ -802,19 +1062,39 @@ refineKinds dag = do
           Just KindNat -> NatVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
+          Just (KindList _) -> ListVarU v
+          Just (KindSet _) -> SetVarU v
           _ -> VarU v
         go (NatVarU v) = case Map.lookup v kindedVars of
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
+          Just (KindList _) -> ListVarU v
+          Just (KindSet _) -> SetVarU v
           _ -> NatVarU v
         go (StrVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
           Just KindRec -> RecVarU v
+          Just (KindList _) -> ListVarU v
+          Just (KindSet _) -> SetVarU v
           _ -> StrVarU v
         go (RecVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
           Just KindStr -> StrVarU v
+          Just (KindList _) -> ListVarU v
+          Just (KindSet _) -> SetVarU v
           _ -> RecVarU v
+        go (ListVarU v) = case Map.lookup v kindedVars of
+          Just KindNat -> NatVarU v
+          Just KindStr -> StrVarU v
+          Just KindRec -> RecVarU v
+          Just (KindSet _) -> SetVarU v
+          _ -> ListVarU v
+        go (SetVarU v) = case Map.lookup v kindedVars of
+          Just KindNat -> NatVarU v
+          Just KindStr -> StrVarU v
+          Just KindRec -> RecVarU v
+          Just (KindList _) -> ListVarU v
+          _ -> SetVarU v
         go (ForallU v t)
           | Map.member v kindedVars = go t  -- strip ForallU for kinded vars
         go (ForallU v t) = ForallU v (go t)
@@ -831,14 +1111,27 @@ refineKinds dag = do
         -- union RecUnionU. See plans/tables/10-rec-solver-decidability.md.
         go (NatAddU a b) =
           let a' = go a; b' = go b
-           in if isRecLike a' || isRecLike b'
-              then RecUnionU a' b'
+           in if      isListLike a' || isListLike b' then ListAppU a' b'
+              else if isSetLike  a' || isSetLike  b' then SetUnionU a' b'
+              else if isRecLike  a' || isRecLike  b' then RecUnionU a' b'
               else NatAddU a' b'
         go (NatMulU a b) = NatMulU (go a) (go b)
         go (NatSubU a b) =
           let a' = go a; b' = go b
            in case b' of
                 StrLitU f | isRecLike a' -> RecDiffU a' [f]
+                -- `r - f` where f is a Str variable (introduced by an
+                -- f:Str signature label) drops the single key f from r.
+                -- Wrapped as a singleton list so RecDiffListU's reducer
+                -- handles the deferred-then-substituted lifecycle: when
+                -- f gets solved at the call site, the list goes ground
+                -- and reduceRecDiffList strips the key.
+                StrVarU _ | isRecLike a' -> RecDiffListU a' (ListLitU [b'])
+                -- `r - l` where l is a List drops every key in l from r.
+                -- Routes to RecDiffListU; the new constructor's solver
+                -- reduces ground forms via reduceRecDiffList.
+                _ | isRecLike a' && isListLike b' -> RecDiffListU a' b'
+                _ | isSetLike a' || isSetLike b' -> SetDiffU a' b'
                 _ -> NatSubU a' b'
         go (NatDivU a b) = NatDivU (go a) (go b)
         go t@NatVoidU = t
@@ -852,7 +1145,25 @@ refineKinds dag = do
         go (RecUnionU a b) = RecUnionU (go a) (go b)
         go (RecDiffU a ks) = RecDiffU (go a) ks
         go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+        go (RecRestrictU a b) = RecRestrictU (go a) (go b)
+        go (RecDiffListU a b) = RecDiffListU (go a) (go b)
         go t@RecVoidU = t
+        go t@(ListVarU _) = t
+        go (ListLitU es) = ListLitU (map go es)
+        go (ListAppU a b) = ListAppU (go a) (go b)
+        go t@ListVoidU = t
+        go t@(SetVarU _) = t
+        go t@SetEmptyU = t
+        go (SetLitU es) = SetLitU (map go es)
+        go (SetUnionU a b) = SetUnionU (go a) (go b)
+        go (SetInterU a b) = SetInterU (go a) (go b)
+        go (SetDiffU a b) = SetDiffU (go a) (go b)
+        go t@SetVoidU = t
+        go (KeysU r) = KeysU (go r)
+        go (ListToSetU l) = ListToSetU (go l)
+        go (SizeU c) = SizeU (go c)
+        go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
+        go (RecSingletonU k v) = RecSingletonU (go k) (go v)
         go (LabeledU n t) = LabeledU n (go t)
 
 collectSources :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
@@ -909,5 +1220,23 @@ rename sourceName localAlias = f
     f (RecUnionU a b) = RecUnionU (f a) (f b)
     f (RecDiffU a ks) = RecDiffU (f a) ks
     f (RecIntersectU a b) = RecIntersectU (f a) (f b)
+    f (RecRestrictU a b) = RecRestrictU (f a) (f b)
+    f (RecDiffListU a b) = RecDiffListU (f a) (f b)
     f t@RecVoidU = t
+    f t@(ListVarU _) = t
+    f (ListLitU es) = ListLitU (map f es)
+    f (ListAppU a b) = ListAppU (f a) (f b)
+    f t@ListVoidU = t
+    f t@(SetVarU _) = t
+    f t@SetEmptyU = t
+    f (SetLitU es) = SetLitU (map f es)
+    f (SetUnionU a b) = SetUnionU (f a) (f b)
+    f (SetInterU a b) = SetInterU (f a) (f b)
+    f (SetDiffU a b) = SetDiffU (f a) (f b)
+    f t@SetVoidU = t
+    f (KeysU r) = KeysU (f r)
+    f (ListToSetU l) = ListToSetU (f l)
+    f (SizeU c) = SizeU (f c)
+    f (ProjectFieldU r fld) = ProjectFieldU (f r) (f fld)
+    f (RecSingletonU k v) = RecSingletonU (f k) (f v)
     f (LabeledU n t) = LabeledU n (f t)

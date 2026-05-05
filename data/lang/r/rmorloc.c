@@ -1183,8 +1183,10 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    // Arrow dispatch: if schema hint is "arrow", use Arrow C Data Interface
-    if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+    // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through the
+    // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
+    // the schema type itself now signals the dispatch.
+    if (schema->type == MORLOC_TABLE) {
         // Export R arrow RecordBatch via C Data Interface -> copy to shm -> packet
         // arrow::ExportRecordBatch(batch, array_ptr, schema_ptr)
         struct ArrowSchema arrow_schema;

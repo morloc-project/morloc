@@ -134,6 +134,15 @@ fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), Morl
                     pack_data(inner_ptr, inner_schema, buf)?;
                 }
             }
+            SerialType::Table => {
+                // Tables travel as Arrow IPC blobs through SHM, never as
+                // msgpack. Hitting this case means a Table value got
+                // routed to the msgpack path; the caller should have
+                // dispatched via the Arrow C Data Interface instead.
+                return Err(MorlocError::Serialization(
+                    "Cannot msgpack-encode a Table; Tables use the Arrow IPC SHM wire path".into(),
+                ));
+            }
         }
     }
     Ok(())
@@ -285,6 +294,13 @@ fn unpack_obj(
                     let inner_ptr = ptr.add(inner_offset);
                     unpack_obj(inner_ptr, inner_schema, cursor, reader)?;
                 }
+            }
+            SerialType::Table => {
+                // See pack_data: Tables are not msgpack-serialised. Hitting
+                // this case is a routing bug in the caller.
+                return Err(MorlocError::Serialization(
+                    "Cannot msgpack-decode a Table; Tables use the Arrow IPC SHM wire path".into(),
+                ));
             }
         }
     }
@@ -459,6 +475,15 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
                 let offset = shm::align_up(1, align);
                 Ok(offset + inner_size)
             }
+        }
+        SerialType::Table => {
+            // Tables are not msgpack-sized; the calc-size helper is part
+            // of the msgpack decode pipeline and would only be invoked on
+            // a Table by mistake. Return a serialisation error rather
+            // than an arbitrary number.
+            Err(MorlocError::Serialization(
+                "Cannot compute msgpack size for a Table; Tables use the Arrow IPC SHM wire path".into(),
+            ))
         }
     }
 }

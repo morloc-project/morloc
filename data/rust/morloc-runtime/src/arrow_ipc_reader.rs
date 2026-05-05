@@ -156,6 +156,164 @@ fn serial_to_arrow(st: SerialType) -> Option<u32> {
 /// Read all record batches from a sequence and concatenate into a single
 /// owned RecordBatch (potentially copying), then write out to SHM in
 /// morloc's Arrow column layout. Returns RelPtr to the SHM region.
+/// Project + cast a sequence of `RecordBatch`es to align with a morloc
+/// declared Table schema, applying open-Table semantics.
+///
+/// Used by readers whose source format (Arrow IPC, Parquet) carries its
+/// own typed schema, so unlike CSV / JSON we already know the actual
+/// column types the file ships with -- we just have to reconcile them
+/// with what the morloc type declares.
+///
+/// Reconciliation rules (mirroring 'merge_table_schema_with_json' for
+/// JSON and 'merge_table_schema_with_csv_header' for CSV):
+///
+///   * Declared columns are authoritative for *type*. If the morloc
+///     type says `x=Int` and the Parquet file's `x` is Int32, the
+///     output column has type Int (Sint64) -- arrow-rs's `cast`
+///     handles the actual byte-level conversion.
+///   * Declared columns are authoritative for *order and presence*.
+///     Output order is: declared columns first (in declared order),
+///     then file extras in file order.
+///   * Missing declared column = error. Same contract as JSON / CSV.
+///   * File extras flow through with their actual file types.
+///   * If declared cast is not possible (e.g., declared `Int` but the
+///     file column is non-numeric), surface the cast failure verbatim.
+///
+/// Returns the projected batches plus the merged morloc Schema. The
+/// caller passes both straight to 'batches_to_shm', which from that
+/// point on treats the merged schema as fully-declared -- no further
+/// validation happens downstream.
+unsafe fn align_batches_to_open_schema(
+    batches: Vec<RecordBatch>,
+    rs: &Schema,
+) -> Result<(Vec<RecordBatch>, Schema), MorlocError> {
+    use arrow_array::{ArrayRef, RecordBatch};
+    use std::sync::Arc;
+
+    if batches.is_empty() {
+        // Empty input: produce an empty merged schema. If declared
+        // columns exist they are dropped (no rows to validate against);
+        // a downstream consumer of an empty Table is by definition
+        // schema-agnostic.
+        return Ok((batches, rs.clone()));
+    }
+
+    // The file-side schema is shared across all batches in IPC /
+    // Parquet readers (they reject schema-shifting mid-stream).
+    let file_arrow_schema = batches[0].schema();
+
+    // Index file columns by name for O(1) "where is column k" lookup.
+    let mut file_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, f) in file_arrow_schema.fields().iter().enumerate() {
+        file_idx.insert(f.name().clone(), i);
+    }
+
+    // Validate declared columns are present in the file.
+    for k in &rs.keys {
+        if !file_idx.contains_key(k) {
+            return Err(MorlocError::Other(format!(
+                "Declared column '{}' missing from input file", k
+            )));
+        }
+    }
+
+    // Build merged morloc Schema: declared first, then file extras
+    // not in declared.
+    let mut merged_keys: Vec<String> = Vec::with_capacity(file_arrow_schema.fields().len());
+    let mut merged_params: Vec<Schema> = Vec::with_capacity(merged_keys.capacity());
+    let mut declared_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for k in &rs.keys { declared_set.insert(k.as_str()); }
+
+    for (i, k) in rs.keys.iter().enumerate() {
+        merged_keys.push(k.clone());
+        merged_params.push(rs.parameters[i].clone());
+    }
+    for f in file_arrow_schema.fields() {
+        if declared_set.contains(f.name().as_str()) { continue; }
+        let inner = Schema::primitive(arrow_dtype_to_serial_type(f.data_type()));
+        merged_keys.push(f.name().clone());
+        // Tables that arrive from typed file formats inherit the
+        // file's nullability (true if the Arrow field is nullable).
+        merged_params.push(maybe_optional_csv(inner, f.is_nullable()));
+    }
+    let merged_rs = Schema {
+        serial_type: SerialType::Table,
+        size: merged_keys.len(),
+        width: std::mem::size_of::<crate::shm::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: merged_params,
+        keys: merged_keys.clone(),
+    };
+
+    // Build the per-batch projected+cast columns. Order matches
+    // merged_rs.keys; types match merged_rs.parameters (which for
+    // declared columns is the morloc-declared type, requiring a cast
+    // when the file type differs).
+    let mut projected: Vec<RecordBatch> = Vec::with_capacity(batches.len());
+    for batch in &batches {
+        let mut new_cols: Vec<ArrayRef> = Vec::with_capacity(merged_rs.size);
+        let mut new_fields: Vec<arrow_schema::Field> = Vec::with_capacity(merged_rs.size);
+        for (i, k) in merged_rs.keys.iter().enumerate() {
+            let src_idx = *file_idx.get(k).expect("merged key must be in file");
+            let src_col = batch.column(src_idx);
+            let target = morloc_param_to_arrow_dtype(&merged_rs.parameters[i])?;
+            let target_dt = target.0;
+            let nullable = target.1;
+            let cast_col = if src_col.data_type() == &target_dt {
+                src_col.clone()
+            } else {
+                arrow_cast::cast(src_col, &target_dt).map_err(|e| MorlocError::Other(format!(
+                    "Cannot cast column '{}' from {:?} to {:?}: {}",
+                    k, src_col.data_type(), target_dt, e
+                )))?
+            };
+            new_cols.push(cast_col);
+            new_fields.push(arrow_schema::Field::new(k.clone(), target_dt, nullable));
+        }
+        let new_schema = Arc::new(arrow_schema::Schema::new(new_fields));
+        let new_batch = RecordBatch::try_new(new_schema, new_cols).map_err(|e| MorlocError::Other(format!(
+            "Failed to project record batch: {}", e
+        )))?;
+        projected.push(new_batch);
+    }
+
+    Ok((projected, merged_rs))
+}
+
+/// Map a morloc per-column 'Schema' (possibly Optional-wrapped) to the
+/// matching arrow-rs (DataType, nullable) pair. Used by
+/// 'align_batches_to_open_schema' to know what type to cast each
+/// declared column to.
+fn morloc_param_to_arrow_dtype(p: &Schema) -> Result<(arrow_schema::DataType, bool), MorlocError> {
+    use arrow_schema::DataType as DT;
+    let (inner, nullable) = if p.serial_type == SerialType::Optional {
+        (p.parameters.first()
+            .map(|c| c.serial_type)
+            .unwrap_or(SerialType::Nil), true)
+    } else {
+        (p.serial_type, false)
+    };
+    let dt = match inner {
+        SerialType::Bool => DT::Boolean,
+        SerialType::Sint8 => DT::Int8,
+        SerialType::Sint16 => DT::Int16,
+        SerialType::Sint32 => DT::Int32,
+        SerialType::Sint64 | SerialType::Int => DT::Int64,
+        SerialType::Uint8 => DT::UInt8,
+        SerialType::Uint16 => DT::UInt16,
+        SerialType::Uint32 => DT::UInt32,
+        SerialType::Uint64 => DT::UInt64,
+        SerialType::Float32 => DT::Float32,
+        SerialType::Float64 => DT::Float64,
+        SerialType::String => DT::Utf8,
+        other => return Err(MorlocError::Other(format!(
+            "Unsupported morloc Table column type: {:?}", other,
+        ))),
+    };
+    Ok((dt, nullable))
+}
+
 unsafe fn batches_to_shm(
     batches: Vec<RecordBatch>,
     rs: &Schema,
@@ -784,7 +942,17 @@ pub unsafe extern "C" fn read_arrow_ipc_to_shm(
         }
     };
 
-    batches_to_shm(batches, &rs, errmsg)
+    // Open Table semantics: align the file's columns with the morloc
+    // declared schema. Declared columns are coerced to the declared
+    // types (cast where the file's type differs); file-only columns
+    // flow through with their actual types appended after the
+    // declared set.
+    let (aligned, merged_rs) = match align_batches_to_open_schema(batches, &rs) {
+        Ok(p) => p,
+        Err(e) => { set_errmsg(errmsg, &e); return shm::RELNULL; }
+    };
+
+    batches_to_shm(aligned, &merged_rs, errmsg)
 }
 
 /// Build an arrow-rs Schema from a morloc Map+arrow Schema. Used by the
@@ -822,11 +990,166 @@ fn morloc_to_arrow_schema(rs: &Schema) -> Result<arrow_schema::Schema, MorlocErr
     Ok(arrow_schema::Schema::new(fields))
 }
 
-/// Read a CSV / TSV file into the morloc Arrow SHM layout. The schema is
-/// taken from the morloc target type; the CSV is required to have a header
-/// row whose names match the schema's column names. The `delimiter` byte is
-/// passed in to avoid sniffing -- callers pick comma for `.csv`, tab for
-/// `.tsv` (or whatever extension suggests).
+/// Map an arrow-rs 'DataType' (the result of CSV / Parquet schema
+/// inference) to the matching morloc 'SerialType'. Used by the CSV
+/// reader to surface inferred column types for un-declared columns
+/// in the open-semantics merge. Best-effort: variant types arrow-rs
+/// can produce that morloc has no analogue for (e.g., dates, decimals)
+/// fall through to 'SerialType::String', which round-trips the raw
+/// CSV cell text without lossy coercion.
+fn arrow_dtype_to_serial_type(dt: &arrow_schema::DataType) -> SerialType {
+    use arrow_schema::DataType as DT;
+    match dt {
+        DT::Boolean => SerialType::Bool,
+        DT::Int8 => SerialType::Sint8,
+        DT::Int16 => SerialType::Sint16,
+        DT::Int32 => SerialType::Sint32,
+        DT::Int64 => SerialType::Sint64,
+        DT::UInt8 => SerialType::Uint8,
+        DT::UInt16 => SerialType::Uint16,
+        DT::UInt32 => SerialType::Uint32,
+        DT::UInt64 => SerialType::Uint64,
+        DT::Float32 => SerialType::Float32,
+        DT::Float64 => SerialType::Float64,
+        DT::Utf8 | DT::LargeUtf8 => SerialType::String,
+        _ => SerialType::String,
+    }
+}
+
+/// Wrap a primitive 'Schema' in 'SerialType::Optional' when @nullable@.
+/// Mirrors 'arrow_ffi::maybe_optional' but is duplicated here to keep
+/// 'arrow_ipc_reader' self-contained (the FFI module is the canonical
+/// home for the JSON-side helpers; CSV merge logic lives here).
+fn maybe_optional_csv(inner: Schema, nullable: bool) -> Schema {
+    if !nullable { return inner; }
+    let inner_align = inner.alignment().max(1);
+    let inner_off = crate::shm::align_up(1, inner_align);
+    Schema {
+        serial_type: SerialType::Optional,
+        size: 1,
+        width: inner_off + inner.width,
+        offsets: vec![inner_off],
+        hint: None,
+        parameters: vec![inner],
+        keys: Vec::new(),
+    }
+}
+
+/// Merge a declared morloc Table schema with a CSV-inferred arrow_schema.
+///
+/// Implements the same *open* Table semantics as the JSON path:
+/// declared columns are authoritative for their types; columns the
+/// CSV has but the morloc declaration does not are appended with
+/// arrow-rs-inferred types.
+///
+/// Order: declared columns first (in declared order), then any extras
+/// in CSV-header order.
+///
+/// Returns a Vec of (column-name, morloc-declared-or-inferred Schema)
+/// pairs that the caller turns into both:
+///   * an arrow_schema::Schema to drive the CSV ReaderBuilder, and
+///   * a morloc 'Schema' for 'batches_to_shm' to lay out SHM columns.
+fn merge_table_schema_with_csv_header(
+    rs: &Schema,
+    inferred: &arrow_schema::Schema,
+) -> Result<Schema, MorlocError> {
+    let mut declared_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, k) in rs.keys.iter().enumerate() {
+        declared_idx.insert(k.as_str(), i);
+    }
+
+    // Validate declared columns are present in the CSV header.
+    for k in &rs.keys {
+        let mut found = false;
+        for f in inferred.fields() {
+            if f.name() == k { found = true; break; }
+        }
+        if !found {
+            return Err(MorlocError::Other(format!(
+                "Declared column '{}' missing from CSV header", k
+            )));
+        }
+    }
+
+    let mut keys: Vec<String> = Vec::with_capacity(rs.keys.len() + inferred.fields().len());
+    let mut params: Vec<Schema> = Vec::with_capacity(keys.capacity());
+
+    // 1. Declared columns first.
+    for (i, k) in rs.keys.iter().enumerate() {
+        keys.push(k.clone());
+        params.push(rs.parameters[i].clone());
+    }
+
+    // 2. CSV-header columns not in the declared set, in CSV-header order.
+    for f in inferred.fields() {
+        let name = f.name();
+        if declared_idx.contains_key(name.as_str()) { continue; }
+        let inner = Schema::primitive(arrow_dtype_to_serial_type(f.data_type()));
+        keys.push(name.clone());
+        params.push(maybe_optional_csv(inner, f.is_nullable()));
+    }
+
+    Ok(Schema {
+        serial_type: SerialType::Table,
+        size: keys.len(),
+        width: std::mem::size_of::<crate::shm::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: params,
+        keys,
+    })
+}
+
+/// Resolve the sniff-window size for CSV type inference.
+///
+/// Default is 100 records, which is enough to catch the typical
+/// "first row was an integer-looking string but later rows are
+/// floats" pattern that arises in real-world CSV (a column with
+/// values `1, 2, 3, 4.5` would mis-infer to `Int64` if we only
+/// sniffed the first row).
+///
+/// Override with the `MORLOC_CSV_SNIFF_ROWS` environment variable:
+///   * a positive integer -> sniff at most that many records before
+///     finalising types,
+///   * `0` -> sniff zero data rows, falling back to `String` for
+///     every column. Use this when your data has rare value types
+///     deep in the file that would mislead a prefix sniff.
+///
+/// Returned as `Option<usize>` because that is what
+/// `arrow_csv::Format::infer_schema` accepts: `None` means "scan the
+/// entire input", which we never want here (huge files would blow
+/// memory). Any non-zero override caps the scan; 0 disables.
+fn csv_sniff_rows() -> Option<usize> {
+    const DEFAULT: usize = 100;
+    match std::env::var("MORLOC_CSV_SNIFF_ROWS") {
+        Ok(s) => match s.parse::<usize>() {
+            Ok(n) => Some(n),
+            // A non-numeric override silently falls back to the default
+            // rather than failing the whole load -- the user gets
+            // sensible behaviour while learning the variable's syntax.
+            Err(_) => Some(DEFAULT),
+        },
+        Err(_) => Some(DEFAULT),
+    }
+}
+
+/// Read a CSV / TSV file into the morloc Arrow SHM layout.
+///
+/// Open Table semantics: the morloc target type is a constraint on
+/// (and parser hint for) the column set, but never an upper bound:
+///
+///   * Bare `T` (no declared columns) -- arrow-rs's CSV inference
+///     determines all column names and types from the header + samples.
+///   * `T:K<entries>` (declared columns) -- declared columns are
+///     coerced to the declared morloc types regardless of what the
+///     CSV looks like (within Arrow's casting rules); other columns
+///     in the CSV header are appended with inferred types.
+///
+/// Concretely we always run arrow-csv's `Format::infer_schema` over
+/// the bytes first, then merge with the declared morloc schema in
+/// 'merge_table_schema_with_csv_header'. The merged schema drives the
+/// final `ReaderBuilder`, so the parser knows the exact type to use
+/// per column without sniffing twice.
 ///
 /// # Safety
 /// `data` must point to `data_len` valid bytes. `schema` must be a valid
@@ -850,12 +1173,47 @@ pub unsafe extern "C" fn read_csv_to_shm(
     let rs = CSchema::to_rust(schema);
     if !crate::arrow_ffi::is_arrow_table_schema(&rs) {
         set_errmsg(errmsg, &MorlocError::Other(
-            "CSV reader requires Map+arrow schema".into(),
+            "CSV reader requires a morloc Table schema (T or T:K)".into(),
         ));
         return shm::RELNULL;
     }
 
-    let arrow_schema = match morloc_to_arrow_schema(&rs) {
+    // Step 1: infer the full CSV schema by sampling the file. arrow-rs
+    // reads the header, then up to N records to type-sniff each column.
+    // The sniff window is bounded so memory stays in check for huge
+    // files but large enough to catch promotions like
+    // "first row was integer, later rows are floats" -- a common case
+    // in real-world CSV.
+    //
+    // Default: 100 rows. Override with the @MORLOC_CSV_SNIFF_ROWS@
+    // environment variable; set it to `0` to disable inference and
+    // treat every column as `String` (the safest fallback when the
+    // user knows their data has surprising types deep in the file).
+    let format = arrow_csv::reader::Format::default()
+        .with_header(true)
+        .with_delimiter(delimiter);
+    let sniff_rows = csv_sniff_rows();
+    let mut sniff_cursor = Cursor::new(bytes);
+    let inferred_arrow_schema = match format.infer_schema(&mut sniff_cursor, sniff_rows) {
+        Ok((s, _records_read)) => s,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                format!("Failed to infer CSV schema: {}", e),
+            ));
+            return shm::RELNULL;
+        }
+    };
+
+    // Step 2: merge declared (rs) with inferred. The merged morloc
+    // schema dictates both the in-SHM column layout and (after a
+    // second mapping below) the typed Arrow schema given to
+    // ReaderBuilder.
+    let merged_rs = match merge_table_schema_with_csv_header(&rs, &inferred_arrow_schema) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return shm::RELNULL; }
+    };
+
+    let arrow_schema = match morloc_to_arrow_schema(&merged_rs) {
         Ok(s) => std::sync::Arc::new(s),
         Err(e) => { set_errmsg(errmsg, &e); return shm::RELNULL; }
     };
@@ -884,7 +1242,7 @@ pub unsafe extern "C" fn read_csv_to_shm(
         }
     };
 
-    batches_to_shm(batches, &rs, errmsg)
+    batches_to_shm(batches, &merged_rs, errmsg)
 }
 
 /// Read a Parquet file into the morloc Arrow SHM layout.
@@ -948,6 +1306,12 @@ pub unsafe extern "C" fn read_parquet_to_shm(
         }
     };
 
-    batches_to_shm(batches, &rs, errmsg)
+    // Open Table semantics: same alignment+cast pass as Arrow IPC.
+    let (aligned, merged_rs) = match align_batches_to_open_schema(batches, &rs) {
+        Ok(p) => p,
+        Err(e) => { set_errmsg(errmsg, &e); return shm::RELNULL; }
+    };
+
+    batches_to_shm(aligned, &merged_rs, errmsg)
 }
 

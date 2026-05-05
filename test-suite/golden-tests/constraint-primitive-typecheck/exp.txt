@@ -1,0 +1,2 @@
+useDisjoint :: TBox {x=Int, y=Str, z=Int}
+useSubset :: TBox {x=Int, y=Str}
