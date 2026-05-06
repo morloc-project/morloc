@@ -164,6 +164,8 @@ cmdInstall args verbosity conf buildConfig = do
                 mayTypecheck
                 userSources
                 Set.empty
+                Map.empty   -- empty resolver state at the install root
+                0           -- depth = 0 at the install root
                 Mod.ExplicitInstall
                 modstr
           )
@@ -567,11 +569,17 @@ instance JSON.FromJSON ModuleManifest where
       <*> o JSON..:? "version" JSON..!= ""
       <*> o JSON..:? "synopsis" JSON..!= ""
       <*> (o JSON..:? "exports" JSON..!= [] >>= mapM parseExport)
-      <*> o JSON..:? "morloc_dependencies" JSON..!= []
+      <*> (o JSON..:? "morloc_dependencies" JSON..!= [] >>= mapM parseDepName)
       <*> o JSON..:? "install_reason" JSON..!= ""
     where
       parseExport = JSON.withObject "Export" $ \o ->
         (,) <$> o JSON..: "name" <*> o JSON..: "type"
+      -- Accept both the legacy bare-string form ("foo") and the new
+      -- object form ({"name": "foo", "git_hash": "..."}). Only the name
+      -- is needed for `morloc list`'s reverse-dep view; hash provenance
+      -- in this report is a future enhancement.
+      parseDepName (JSON.String s) = return s
+      parseDepName v = JSON.withObject "MorlocDep" (\o -> o JSON..: "name") v
 
 instance JSON.FromJSON ProgramManifest where
   parseJSON = JSON.withObject "ProgramManifest" $ \o ->

@@ -28,6 +28,14 @@ module Morloc.Module
   , installModule
   , extractMorlocDeps
   , extractModuleName
+
+    -- * Dependency-pin resolver (exported for testing)
+  , PinEntry (..)
+  , PinMap
+  , addPin
+  , hashEq
+  , reconcileOverwrite
+  , readInstalledHash
   ) where
 
 import Control.Applicative (optional)
@@ -63,6 +71,78 @@ import System.Process (callProcess, readProcess)
 
 data InstallReason = ExplicitInstall | AutoDependency
   deriving (Show, Eq)
+
+-- | A pinned dependency: git commit hash, the depth at which it was declared
+-- (smaller = closer to the install root), and the package that declared it
+-- (used in conflict diagnostics).
+data PinEntry = PinEntry
+  { pinHash :: !Text
+  , pinDepth :: !Int
+  , pinDeclaredBy :: !Text
+  } deriving (Show, Eq, Ord)
+
+-- | Resolver state: module name -> pinned entry. Built up during the
+-- recursive install walk per the closer-to-install-root-wins rule.
+type PinMap = Map.Map Text PinEntry
+
+-- | Case-insensitive hash equality. Git is mid-transition between SHA-1
+-- (40 hex chars) and SHA-256 (64 hex chars); compare lowercased so
+-- copy-paste from different tools doesn't spuriously conflict.
+hashEq :: Text -> Text -> Bool
+hashEq a b = MT.toLower a == MT.toLower b
+
+-- | Add a pin to the map per closer-wins. Equal-depth disagreement throws.
+addPin :: PinMap -> Int -> Text -> Text -> Text -> MorlocMonad PinMap
+addPin pinMap depth declaredBy depName depHash =
+  case Map.lookup depName pinMap of
+    Nothing ->
+      return $ Map.insert depName (PinEntry depHash depth declaredBy) pinMap
+    Just existing
+      | pinDepth existing < depth ->
+          -- existing entry is closer to root, keep it
+          return pinMap
+      | pinDepth existing == depth ->
+          if hashEq (pinHash existing) depHash
+            then return pinMap
+            else MM.throwSystemError $
+                   "Conflicting pins for module" <+> squotes (pretty depName)
+                   <+> "at depth" <+> pretty depth <> ":"
+                   <+> "hash" <+> squotes (pretty (pinHash existing))
+                   <+> "from" <+> squotes (pretty (pinDeclaredBy existing))
+                   <+> "vs hash" <+> squotes (pretty depHash)
+                   <+> "from" <+> squotes (pretty declaredBy)
+      | otherwise ->
+          -- existing is deeper, we're closer, replace
+          return $ Map.insert depName (PinEntry depHash depth declaredBy) pinMap
+
+-- | Read the @installed_hash@ field from a module's fdb manifest.
+-- Returns @Nothing@ if the manifest is absent, malformed, or has no hash
+-- (e.g. legacy installs predating this schema bump).
+readInstalledHash :: FilePath -> Text -> IO (Maybe Text)
+readInstalledHash fdbDir modName = do
+  let manifestPath = fdbDir </> MT.unpack modName ++ ".module"
+  exists <- doesFileExist manifestPath
+  if not exists
+    then return Nothing
+    else do
+      bs <- BL.readFile manifestPath
+      case Aeson.decode bs :: Maybe Aeson.Value of
+        Just (Aeson.Object obj) ->
+          case KM.lookup "installed_hash" obj of
+            Just (Aeson.String s) -> return (Just s)
+            _ -> return Nothing
+        _ -> return Nothing
+
+-- | Decide whether reconciliation forces an overwrite. If the cache
+-- contains a different hash than the resolver expects, upgrade
+-- @DoNotOverwrite@ to @ForceOverwrite@. Explicit @ForceOverwrite@ stands.
+reconcileOverwrite ::
+  OverwriteProtocol -> Maybe Text -> Maybe Text -> OverwriteProtocol
+reconcileOverwrite ForceOverwrite _ _ = ForceOverwrite
+reconcileOverwrite DoNotOverwrite (Just expected) (Just actual)
+  | not (hashEq expected actual) = ForceOverwrite
+reconcileOverwrite DoNotOverwrite (Just _) Nothing = ForceOverwrite
+reconcileOverwrite ow _ _ = ow
 
 moduleInstallError :: MDoc -> MorlocMonad a
 moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
@@ -333,38 +413,27 @@ installModule ::
   Map.Map Text Text ->
   -- | Modules currently being installed (cycle detection)
   Set.Set Text ->
+  -- | Resolver state: pinned module versions discovered so far
+  PinMap ->
+  -- | Depth of this install in the dependency walk (0 = install root)
+  Int ->
   -- | Why this module is being installed
   InstallReason ->
   -- | Installation string, such as "github:weena/math@version:0.1.0"
   Text ->
   MorlocMonad ()
-installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress reason modstr = do
+installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress pinMap depth reason modstr = do
   config <- MM.ask
   let registry = Config.configRegistry config
+      fdbDir = Config.configHome config </> "fdb"
   -- Try registry first for bare names when a registry is configured
   case (registry, tryParseRegistryModule (MT.pack coreorg) modstr) of
     (Just _, Just (owner, name)) -> do
       let targetDir = libpath </> MT.unpack owner </> MT.unpack name
-      if Set.member name inProgress
-        then return ()
-        else do
-          targetExists <- liftIO $ doesDirectoryExist targetDir
-          case (targetExists, overwrite) of
-            (True, DoNotOverwrite) -> do
-              case reason of
-                ExplicitInstall ->
-                  MM.say $ "Module" <+> pretty name <+> "is already installed, use --force to reinstall"
-                AutoDependency ->
-                  MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
-              return ()
-            (True, ForceOverwrite) -> do
-              liftIO $ removeDirectoryRecursive targetDir
-              doInstall (ModuleSourceRegistry owner name) name targetDir
-            (False, _) ->
-              doInstall (ModuleSourceRegistry owner name) name targetDir
-    _ -> installModuleClassic
+      reconcileAndDispatch fdbDir (ModuleSourceRegistry owner name) name targetDir
+    _ -> installModuleClassic fdbDir
   where
-    installModuleClassic = case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
+    installModuleClassic fdbDir = case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
       (Left errstr) -> moduleInstallError (pretty . show $ errstr)
       (Right (Left errstr)) -> moduleInstallError $ pretty errstr
       (Right (Right source)) -> do
@@ -377,29 +446,45 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           Left err -> moduleInstallError $ pretty err
           Right n -> return n
         let targetDir = libpath </> MT.unpack name
+        reconcileAndDispatch fdbDir source name targetDir
 
-        if Set.member name inProgress
-          then return ()
-          else do
-            -- Check if already installed
-            targetExists <- liftIO $ doesDirectoryExist targetDir
-            case (targetExists, overwrite) of
-              (True, DoNotOverwrite) -> do
-                case reason of
-                  ExplicitInstall ->
-                    MM.say $ "Module" <+> pretty name <+> "is already installed, use --force to reinstall"
-                  AutoDependency ->
-                    MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
-                return ()
-              (True, ForceOverwrite) -> do
-                liftIO $ removeDirectoryRecursive targetDir
-                doInstall source name targetDir
-              (False, _) ->
-                doInstall source name targetDir
+    -- Shared reconciliation/dispatch logic. Reads any recorded
+    -- installed_hash from fdb, compares to the expected hash from the
+    -- resolver state, and upgrades DoNotOverwrite to ForceOverwrite when
+    -- the cache disagrees with the pin.
+    reconcileAndDispatch fdbDir source name targetDir =
+      if Set.member name inProgress
+        then return ()
+        else do
+          installedHash <- liftIO $ readInstalledHash fdbDir name
+          let expectedHash = pinHash <$> Map.lookup name pinMap
+              effectiveOverwrite = reconcileOverwrite overwrite expectedHash installedHash
+          targetExists <- liftIO $ doesDirectoryExist targetDir
+          case (targetExists, effectiveOverwrite) of
+            (True, DoNotOverwrite) -> do
+              case reason of
+                ExplicitInstall ->
+                  MM.say $ "Module" <+> pretty name <+> "is already installed, use --force to reinstall"
+                AutoDependency ->
+                  MM.sayVVV $ "Module" <+> pretty name <+> "already installed, skipping"
+              return ()
+            (True, ForceOverwrite) -> do
+              case (expectedHash, installedHash) of
+                (Just e, Just a) | not (hashEq e a) ->
+                  MM.say $ "Reinstalling" <+> pretty name
+                        <+> "to reconcile cache (have" <+> pretty a
+                        <> "; pin requires" <+> pretty e <> ")"
+                (Just e, Nothing) ->
+                  MM.say $ "Reinstalling" <+> pretty name
+                        <+> "to record pinned hash" <+> pretty e
+                _ -> return ()
+              liftIO $ removeDirectoryRecursive targetDir
+              doInstall fdbDir source name targetDir
+            (False, _) ->
+              doInstall fdbDir source name targetDir
 
-
-    doInstall :: ModuleSource -> Text -> FilePath -> MorlocMonad ()
-    doInstall source name targetDir = do
+    doInstall :: FilePath -> ModuleSource -> Text -> FilePath -> MorlocMonad ()
+    doInstall fdbDir source name targetDir = do
       let inProgress' = Set.insert name inProgress
 
       -- create the library path if it is missing
@@ -430,6 +515,16 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           then YC.loadYamlSettings [pkgYaml] [] YC.ignoreEnv
           else return defaultValue
 
+      -- Fold this package's morloc-dependencies into the resolver state.
+      -- Closer-wins: pins declared by this package (at depth `depth`) are
+      -- shadowed by any already-present pin at a smaller depth, supersede
+      -- any pin at a larger depth, and conflict with another pin at the
+      -- same depth that names a different hash.
+      pinMap' <- foldM
+        (\pm (depName, depHash) -> addPin pm depth name depName depHash)
+        pinMap
+        (packageMorlocDependencies meta)
+
       -- Determine morloc dependencies by scanning .loc imports
       morlocDeps <- do
         mainFile <- liftIO $ findMainLocFile targetDir (MT.unpack name)
@@ -437,16 +532,40 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           Nothing -> return []
           Just f -> liftIO $ extractMorlocDeps f
 
-      -- Recursively install dependencies
+      -- Stale-entry warnings: pins declared by THIS package whose name
+      -- does not appear among the auto-discovered imports.
+      let importedSet = Set.fromList morlocDeps
+          declaredHere = packageMorlocDependencies meta
+      forM_ declaredHere $ \(dn, _) ->
+        unless (Set.member dn importedSet) $
+          MM.say $ "warning: declared dependency" <+> squotes (pretty dn)
+                <+> "is not imported anywhere in" <+> squotes (pretty name)
+                <+> "(possibly stale)"
+
+      -- Recursively install dependencies, threading the updated resolver
+      -- state at depth+1.
       forM_ morlocDeps $ \dep -> do
-        let depDir = libpath </> MT.unpack dep
-            depDirNs = libpath </> coreorg </> MT.unpack dep
-        depExists <- liftIO $ (||) <$> doesDirectoryExist depDir <*> doesDirectoryExist depDirNs
-        unless (depExists || Set.member dep inProgress') $ do
-          let depModstr = case Map.lookup dep userSources of
+        unless (Set.member dep inProgress') $ do
+          let resolved = Map.lookup dep pinMap'
+              resolvedHash = pinHash <$> resolved
+              userOverride = Map.lookup dep userSources
+              -- If the user supplied an explicit install string for this
+              -- dep (via the CLI), honor it as-is. Otherwise build the
+              -- modstr from the bare name plus an @hash:HASH suffix when
+              -- pinned. The existing parser interprets the suffix as a
+              -- CommitHash selector for both local and remote sources.
+              depModstr = case userOverride of
                 Just s -> s
-                Nothing -> dep
-          MM.say $ "Auto-installing dependency:" <+> pretty dep
+                Nothing -> case resolvedHash of
+                  Nothing -> dep
+                  Just h  -> dep <> "@hash:" <> h
+          when (resolved == Nothing) $
+            -- Per-dep noise: only at verbose -v. Stale-entry warnings (a
+            -- declared pin with no matching import) stay at default level
+            -- because those are likely user errors, not the common case.
+            MM.sayV $ "warning: dependency" <+> squotes (pretty dep)
+                   <+> "is not pinned in any morloc-dependencies entry along the install path"
+          MM.sayVVV $ "Auto-installing dependency:" <+> pretty depModstr
           installModule
             DoNotOverwrite
             gitprot
@@ -455,6 +574,8 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
             mayTypecheck
             userSources
             inProgress'
+            pinMap'
+            (depth + 1)
             AutoDependency
             depModstr
 
@@ -468,16 +589,19 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
             Just f -> typecheckFn f
 
       -- Write module manifest to fdb/
-      config <- MM.ask
-      let fdbDir = Config.configHome config </> "fdb"
       liftIO $ createDirectoryIfMissing True fdbDir
       installTime <- liftIO $ floor <$> Time.getPOSIXTime
       let manifestPath = fdbDir </> MT.unpack name ++ ".module"
+          -- For each auto-discovered dep, record the resolved hash (if any)
+          morlocDepsWithHash =
+            [ (dep, pinHash <$> Map.lookup dep pinMap') | dep <- morlocDeps ]
+          installedSelfHash = pinHash <$> Map.lookup name pinMap
           manifestJson =
             buildModuleManifest
               meta
               name
-              morlocDeps
+              morlocDepsWithHash
+              installedSelfHash
               exports
               targetDir
               modstr
@@ -502,18 +626,22 @@ findMainLocFile dir name = do
           nameExists <- doesFileExist nameLoc
           return $ if nameExists then Just nameLoc else Nothing
 
--- | Build a module manifest JSON string
+-- | Build a module manifest JSON string. @morlocDeps@ now carries each
+-- dep's resolved hash alongside its name (Nothing = installed at latest);
+-- @installedSelfHash@ is the hash this module itself was installed at, as
+-- determined by the resolver (Nothing = installed at latest).
 buildModuleManifest ::
   PackageMeta ->
   Text ->
-  [Text] ->
+  [(Text, Maybe Text)] ->
+  Maybe Text ->
   [(Text, Text)] ->
   FilePath ->
   Text ->
   InstallReason ->
   Int ->
   Text
-buildModuleManifest meta name morlocDeps exports installPath installSource reason installTime =
+buildModuleManifest meta name morlocDeps installedSelfHash exports installPath installSource reason installTime =
   jsonObj
     [ ("kind", jsonStr "module")
     , ("name", jsonStr name)
@@ -523,7 +651,16 @@ buildModuleManifest meta name morlocDeps exports installPath installSource reaso
     , ("license", jsonStr (packageLicense meta))
     , ("homepage", jsonStr (packageHomepage meta))
     , ("c_dependencies", jsonStrArr (packageDependencies meta))
-    , ("morloc_dependencies", jsonStrArr morlocDeps)
+    ,
+      ( "morloc_dependencies"
+      , jsonArr
+          [ jsonObj $
+              [("name", jsonStr d)] ++
+              maybe [] (\h -> [("git_hash", jsonStr h)]) mh
+          | (d, mh) <- morlocDeps
+          ]
+      )
+    , ("installed_hash", maybe jsonNull jsonStr installedSelfHash)
     ,
       ( "exports"
       , jsonArr

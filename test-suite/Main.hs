@@ -5,6 +5,7 @@ import qualified System.Directory as SD
 import Test.Tasty
 
 import GoldenMakefileTests (goldenMakefileTest)
+import MorlocDepsTests (morlocDepsTests)
 import PropertyTests (propertyTests)
 import UnitTypeTests
 
@@ -39,6 +40,7 @@ main = do
       , natDimTests
       , letBindingTests
       , aliasConstructorTests
+      , morlocDepsTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
