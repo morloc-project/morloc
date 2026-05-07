@@ -27,7 +27,6 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
@@ -1135,11 +1134,9 @@ refineKinds dag = do
                 _ -> NatSubU a' b'
         go (NatDivU a b) = NatDivU (go a) (go b)
         go t@NatVoidU = t
-        go t@(StrVarU _) = t
         go t@(StrLitU _) = t
         go (StrConcatU a b) = StrConcatU (go a) (go b)
         go t@StrVoidU = t
-        go t@(RecVarU _) = t
         go t@RecEmptyU = t
         go (RecExtendU k a b) = RecExtendU k (go a) (go b)
         go (RecUnionU a b) = RecUnionU (go a) (go b)
@@ -1148,11 +1145,9 @@ refineKinds dag = do
         go (RecRestrictU a b) = RecRestrictU (go a) (go b)
         go (RecDiffListU a b) = RecDiffListU (go a) (go b)
         go t@RecVoidU = t
-        go t@(ListVarU _) = t
         go (ListLitU es) = ListLitU (map go es)
         go (ListAppU a b) = ListAppU (go a) (go b)
         go t@ListVoidU = t
-        go t@(SetVarU _) = t
         go t@SetEmptyU = t
         go (SetLitU es) = SetLitU (map go es)
         go (SetUnionU a b) = SetUnionU (go a) (go b)

@@ -1177,10 +1177,34 @@ checkE i g1 e1@(LstS _) b = do
 -- the value into whichever integer-family slot the context supplies.
 -- Without this, `3 :: Int8` would synthesize as Int and fail the
 -- Int <: Int8 check now that the fixed-width integer types are
--- standalone base types rather than aliases of Int.
-checkE _ g (IntS x) t  | BT.isIntegerBaseType t = return (g, t, IntS x)
-checkE _ g (RealS x) t | BT.isRealBaseType t    = return (g, t, RealS x)
-checkE i g1 e1 b = do
+-- standalone base types rather than aliases of Int. Type aliases are
+-- expanded through the scope so that user-defined names like
+-- `type Char = UInt8` also accept integer literals directly.
+checkE i g (IntS x) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const t) id (TE.evaluateType scope t)
+  if BT.isIntegerBaseType t || BT.isIntegerBaseType tEval
+    then return (g, t, IntS x)
+    else checkEFallback i g (IntS x) t
+checkE i g (RealS x) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const t) id (TE.evaluateType scope t)
+  if BT.isRealBaseType t || BT.isRealBaseType tEval
+    then return (g, t, RealS x)
+    else checkEFallback i g (RealS x) t
+checkE i g1 e1 b = checkEFallback i g1 e1 b
+
+checkEFallback ::
+  Int ->
+  Gamma ->
+  ExprS Int ManyPoly Int ->
+  TypeU ->
+  MorlocMonad
+    ( Gamma
+    , TypeU
+    , ExprS (Indexed TypeU) ManyPoly Int
+    )
+checkEFallback i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
   let a' = apply g2 a
       b' = apply g2 b

@@ -14,6 +14,7 @@ module UnitTypeTests
   , unitValuecheckTests
   , typeOrderTests
   , typeAliasTests
+  , numericLiteralAliasTests
   , packerTests
   , whereTests
   , orderInvarianceTests
@@ -169,7 +170,25 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
     f s (RecUnionU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecUnionU a' b')
     f s (RecDiffU a ks) = let (s', a') = f s a in (s', RecDiffU a' ks)
     f s (RecIntersectU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecIntersectU a' b')
+    f s (RecRestrictU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecRestrictU a' b')
+    f s (RecDiffListU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', RecDiffListU a' b')
     f s t@RecVoidU = (s, t)
+    f s t@(ListVarU _) = (s, t)
+    f s (ListLitU es) = let (s', es') = statefulMap f s es in (s', ListLitU es')
+    f s (ListAppU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', ListAppU a' b')
+    f s t@ListVoidU = (s, t)
+    f s t@(SetVarU _) = (s, t)
+    f s t@SetEmptyU = (s, t)
+    f s (SetLitU es) = let (s', es') = statefulMap f s es in (s', SetLitU es')
+    f s (SetUnionU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', SetUnionU a' b')
+    f s (SetInterU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', SetInterU a' b')
+    f s (SetDiffU a b) = let (s', a') = f s a; (s'', b') = f s' b in (s'', SetDiffU a' b')
+    f s t@SetVoidU = (s, t)
+    f s (KeysU rec_) = let (s', r') = f s rec_ in (s', KeysU r')
+    f s (ListToSetU l) = let (s', l') = f s l in (s', ListToSetU l')
+    f s (SizeU c) = let (s', c') = f s c in (s', SizeU c')
+    f s (ProjectFieldU rec_ fld) = let (s', r') = f s rec_; (s'', f') = f s' fld in (s'', ProjectFieldU r' f')
+    f s (RecSingletonU k v) = let (s', k') = f s k; (s'', v') = f s' v in (s'', RecSingletonU k' v')
     f s (LabeledU n t) = let (s', t') = f s t in (s', LabeledU n t')
 
 closeExistentials :: TypeU -> TypeU
@@ -200,7 +219,25 @@ closeExistentials = f
     f (RecUnionU a b) = RecUnionU (f a) (f b)
     f (RecDiffU a ks) = RecDiffU (f a) ks
     f (RecIntersectU a b) = RecIntersectU (f a) (f b)
+    f (RecRestrictU a b) = RecRestrictU (f a) (f b)
+    f (RecDiffListU a b) = RecDiffListU (f a) (f b)
     f t@RecVoidU = t
+    f t@(ListVarU _) = t
+    f (ListLitU es) = ListLitU (map f es)
+    f (ListAppU a b) = ListAppU (f a) (f b)
+    f t@ListVoidU = t
+    f t@(SetVarU _) = t
+    f t@SetEmptyU = t
+    f (SetLitU es) = SetLitU (map f es)
+    f (SetUnionU a b) = SetUnionU (f a) (f b)
+    f (SetInterU a b) = SetInterU (f a) (f b)
+    f (SetDiffU a b) = SetDiffU (f a) (f b)
+    f t@SetVoidU = t
+    f (KeysU rec_) = KeysU (f rec_)
+    f (ListToSetU l) = ListToSetU (f l)
+    f (SizeU c) = SizeU (f c)
+    f (ProjectFieldU rec_ fld) = ProjectFieldU (f rec_) (f fld)
+    f (RecSingletonU k v) = RecSingletonU (f k) (f v)
     f (LabeledU n t) = LabeledU n (f t)
 
 -- | Assert the general type before alias evaluation (preserves nat dimensions).
@@ -682,6 +719,214 @@ typeAliasTests =
              f :: Foo X Y -> Z
         |]
           (fun [tuple [var "X", var "Y"], var "Z"])
+      ]
+
+-- | Tests for integer/real literal defaulting through type aliases.
+-- A literal `65` checked against a type alias such as `type Char = UInt8`
+-- must take on the aliased base integer type instead of synthesizing as
+-- `Int` and failing the `Int <: UInt8` subtype step. Same for real
+-- literals and Float32/Float64 aliases. Covers single-depth and multi-hop
+-- alias chains, and every fixed-width primitive in the integer/real
+-- families.
+numericLiteralAliasTests :: TestTree
+numericLiteralAliasTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "Numeric literal defaulting through type aliases"
+      [ -- single-depth integer aliases: every fixed-width family member
+        assertGeneralType
+          "int literal :: Char  (Char = UInt8)"
+          [r|
+        module main (x)
+        type Char = UInt8
+        x :: Char
+        x = 65
+        |]
+          (var "UInt8")
+      , assertGeneralType
+          "int literal :: Word16  (Word16 = UInt16)"
+          [r|
+        module main (x)
+        type Word16 = UInt16
+        x :: Word16
+        x = 65000
+        |]
+          (var "UInt16")
+      , assertGeneralType
+          "int literal :: Word32  (Word32 = UInt32)"
+          [r|
+        module main (x)
+        type Word32 = UInt32
+        x :: Word32
+        x = 1
+        |]
+          (var "UInt32")
+      , assertGeneralType
+          "int literal :: Word64  (Word64 = UInt64)"
+          [r|
+        module main (x)
+        type Word64 = UInt64
+        x :: Word64
+        x = 1
+        |]
+          (var "UInt64")
+      , assertGeneralType
+          "int literal :: Byte  (Byte = Int8)"
+          [r|
+        module main (x)
+        type Byte = Int8
+        x :: Byte
+        x = 1
+        |]
+          (var "Int8")
+      , assertGeneralType
+          "int literal :: Short  (Short = Int16)"
+          [r|
+        module main (x)
+        type Short = Int16
+        x :: Short
+        x = 1
+        |]
+          (var "Int16")
+      , assertGeneralType
+          "int literal :: I32  (I32 = Int32)"
+          [r|
+        module main (x)
+        type I32 = Int32
+        x :: I32
+        x = 1
+        |]
+          (var "Int32")
+      , assertGeneralType
+          "int literal :: I64  (I64 = Int64)"
+          [r|
+        module main (x)
+        type I64 = Int64
+        x :: I64
+        x = 1
+        |]
+          (var "Int64")
+      , assertGeneralType
+          "int literal :: Word  (Word = UInt)"
+          [r|
+        module main (x)
+        type Word = UInt
+        x :: Word
+        x = 1
+        |]
+          (var "UInt")
+        -- multi-hop alias chains: literal must default through the chain
+      , assertGeneralType
+          "int literal :: FooChar  (FooChar = Char = UInt8)"
+          [r|
+        module main (x)
+        type Char = UInt8
+        type FooChar = Char
+        x :: FooChar
+        x = 65
+        |]
+          (var "UInt8")
+      , assertGeneralType
+          "int literal :: A  (A = B = C = UInt32)"
+          [r|
+        module main (x)
+        type A = B
+        type B = C
+        type C = UInt32
+        x :: A
+        x = 1
+        |]
+          (var "UInt32")
+        -- list literal flowing each element through the alias:
+        -- mirrors the encode/decode test in stdlib char-cpp that
+        -- triggered the original bug report.
+      , assertGeneralType
+          "list of int literals :: [Char]  (Char = UInt8)"
+          [r|
+        module main (xs)
+        type Char = UInt8
+        xs :: [Char]
+        xs = [65, 66, 67]
+        |]
+          (lst (var "UInt8"))
+      , assertGeneralType
+          "list of int literals :: [FooChar]  (chain to UInt8)"
+          [r|
+        module main (xs)
+        type Char = UInt8
+        type FooChar = Char
+        xs :: [FooChar]
+        xs = [65, 66, 67]
+        |]
+          (lst (var "UInt8"))
+        -- single-depth real aliases
+      , assertGeneralType
+          "real literal :: Mass  (Mass = Float32)"
+          [r|
+        module main (x)
+        type Mass = Float32
+        x :: Mass
+        x = 1.5
+        |]
+          (var "Float32")
+      , assertGeneralType
+          "real literal :: Distance  (Distance = Float64)"
+          [r|
+        module main (x)
+        type Distance = Float64
+        x :: Distance
+        x = 1.5
+        |]
+          (var "Float64")
+      , assertGeneralType
+          "real literal :: Quantity  (Quantity = Real)"
+          [r|
+        module main (x)
+        type Quantity = Real
+        x :: Quantity
+        x = 1.5
+        |]
+          (var "Real")
+        -- multi-hop real alias chain
+      , assertGeneralType
+          "real literal :: A  (A = B = Float32)"
+          [r|
+        module main (x)
+        type A = B
+        type B = Float32
+        x :: A
+        x = 1.5
+        |]
+          (var "Float32")
+      , assertGeneralType
+          "list of real literals :: [Mass]  (Mass = Float32)"
+          [r|
+        module main (xs)
+        type Mass = Float32
+        xs :: [Mass]
+        xs = [1.0, 2.0, 3.0]
+        |]
+          (lst (var "Float32"))
+        -- negative: an integer literal still cannot inhabit a non-numeric
+        -- alias. Guards against the fix accidentally letting any alias
+        -- swallow integer literals.
+      , expectError
+          "int literal :: Flag (Flag = Bool) must fail"
+          [r|
+        module main (x)
+        type Flag = Bool
+        x :: Flag
+        x = 65
+        |]
+        -- negative: a real literal still cannot inhabit an integer alias.
+      , expectError
+          "real literal :: Char (Char = UInt8) must fail"
+          [r|
+        module main (x)
+        type Char = UInt8
+        x :: Char
+        x = 1.5
+        |]
       ]
 
 whereTests :: TestTree

@@ -1342,7 +1342,7 @@ solve v t
     occursIn v' (ListToSetU l) = occursIn v' l
     occursIn v' (SizeU c) = occursIn v' c
     occursIn v' (ProjectFieldU r f) = occursIn v' r || occursIn v' f
-    occursIn v' (RecSingletonU k v) = occursIn v' k || occursIn v' v
+    occursIn v' (RecSingletonU k vt) = occursIn v' k || occursIn v' vt
     occursIn v' (LabeledU _ t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache

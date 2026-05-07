@@ -10,7 +10,6 @@ module MorlocDepsTests
 
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
-import qualified Data.Text as T
 import qualified Data.Yaml as Yaml
 import qualified Morloc.Monad as MM
 import qualified System.Directory as SD
@@ -20,7 +19,6 @@ import Test.Tasty.HUnit
 import Morloc.Module
   ( OverwriteProtocol (..)
   , PinEntry (..)
-  , PinMap
   , addPin
   , hashEq
   , reconcileOverwrite
@@ -28,11 +26,13 @@ import Morloc.Module
 import Morloc.Namespace.Prim (Defaultable (..))
 import Morloc.Namespace.State
   ( Config (..)
+  , MorlocError
+  , MorlocMonad
   , PackageMeta (..)
   )
 
 -- | Run a MorlocMonad-returning action and extract the Either result.
-runMM :: MM.MorlocMonad a -> IO (Either MM.MorlocError a)
+runMM :: MorlocMonad a -> IO (Either MorlocError a)
 runMM action = do
   home <- SD.getHomeDirectory
   let cfg =

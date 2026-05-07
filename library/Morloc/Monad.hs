@@ -91,7 +91,6 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
-import Data.List (sortBy)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Morloc.Data.Doc

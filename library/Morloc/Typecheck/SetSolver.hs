@@ -137,8 +137,7 @@ solveCanon (SetCanon ea (Just va)) (SetCanon eb (Just vb))
 -- | Lift a canonical Set back to a TypeU.
 canonToTypeU :: SetCanon -> TypeU
 canonToTypeU (SetCanon es tail_) =
-  let lit = if null es then SetEmptyU else SetUnionU SetEmptyU (litsToTypeU es)
-      tailType = maybe SetEmptyU SetVarU tail_
+  let tailType = maybe SetEmptyU SetVarU tail_
    in case (es, tail_) of
         ([], Nothing) -> SetEmptyU
         (_, Nothing) -> litsToTypeU es

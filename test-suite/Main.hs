@@ -20,6 +20,7 @@ main = do
       , unitValuecheckTests
       , typeOrderTests
       , typeAliasTests
+      , numericLiteralAliasTests
       , propertyTests
       , whereTests
       , orderInvarianceTests
