@@ -221,7 +221,18 @@ translate srcs es = do
   scopeMap <- MM.gets stateConcreteTypedefs
 
   -- universalScopeMap :: GMap Int MVar Scope
-  universalScopeMap <- MM.gets stateUniversalConcreteTypedefs
+  universalScopeMap0 <- MM.gets stateUniversalConcreteTypedefs
+
+  -- General-scope aliases (e.g. `type Timestamp = Int64`) must chain into
+  -- the concrete cpp scope so that a record field declared with a general
+  -- alias resolves through its concrete mapping (`Cpp => Int64 = "int64_t"`).
+  -- Without this merge, `evaluateType` against the cpp scope alone leaves
+  -- `Timestamp` un-expanded and the printer emits the morloc alias name
+  -- literally into pool.cpp. Concrete entries take precedence on collision.
+  generalScope <- MM.gets stateUniversalGeneralTypedefs
+  let cppScope = fromMaybe Map.empty (Map.lookup cppLang universalScopeMap0)
+      mergedCppScope = Map.union cppScope generalScope
+      universalScopeMap = Map.insert cppLang mergedCppScope universalScopeMap0
 
   effectMap <- MM.gets stateManifoldEffects
 
