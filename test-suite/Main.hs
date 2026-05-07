@@ -162,6 +162,7 @@ main = do
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
+      , golden "uint8-cross-language" "uint8-cross-language"
       , golden "string-json-parsing" "string-json-parsing"
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"

@@ -1,0 +1,18 @@
+=== single-language round-trips ===
+"hello world"
+"hello world"
+"hello world"
+=== two-language pipelines ===
+"hello world"
+"hello world"
+"hello world"
+"hello world"
+"hello world"
+"hello world"
+=== three-language pipelines ===
+"hello world"
+"hello world"
+=== native runtime types ===
+"python: bytes, len=3"
+"c++: std::vector<uint8_t>, size=3"
+"r: raw, length=3"

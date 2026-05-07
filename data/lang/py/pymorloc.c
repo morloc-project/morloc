@@ -308,6 +308,29 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                 }
                 // Note that we do not want to give ownership to Python.
                 // This is shared memory, which means python should not mutate it.
+            } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
+                // Explicit "list" hint takes precedence over the UInt8 fast-path
+                // below: the user declared `type Py => (List a) = "list" a`
+                // (or similar), so honour that representation even for UInt8
+                // elements. Without this, a [UInt8] packet would silently
+                // arrive as `bytes` and mismatch a Python-pool list literal
+                // of the same morloc type.
+                obj = PyList_New(array->size);
+                if(obj == NULL){
+                    PyRAISE("Failed to allocate list");
+                }
+                if(array->size > 0){
+                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
+                    size_t width = schema->parameters[0]->width;
+                    Schema* element_schema = schema->parameters[0];
+                    for (size_t i = 0; i < array->size; i++) {
+                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        if (!item || PyList_SetItem(obj, i, item) < 0) {
+                            Py_XDECREF(item);
+                            PyRAISE("Failed to access element in list")
+                        }
+                    }
+                }
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
                 // Create a Python bytearray object
                 void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
@@ -319,17 +342,17 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                 // Note: Similar to the numpy case, we don't want to give ownership to Python.
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
-                // Create a Python bytes object for UINT8 arrays
+                // Default for UInt8 arrays when hint is "bytes" or absent.
                 void* tmp_ptr = PyTRY(resolve_relptr, array->data, base_ptr);
                 obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
                 }
-            } else if (schema->hint == NULL || (schema->hint != NULL && strcmp(schema->hint, "list") == 0)) {
-                // For other types, create a standard list
+            } else if (schema->hint == NULL) {
+                // No hint, non-UInt8: default to a Python list
                 obj = PyList_New(array->size);
                 if(obj == NULL){
-                    PyRAISE("Failed to one string");
+                    PyRAISE("Failed to allocate list");
                 }
                 if(array->size > 0){
                     char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
