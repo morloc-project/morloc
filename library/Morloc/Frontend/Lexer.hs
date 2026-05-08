@@ -255,12 +255,25 @@ lexOne st@(LexState input pos toks) = case input of
         len = 1 + length word
      in Right st { lsInput = rest', lsPos = advanceCol pos len
                  , lsTokens = Located pos (TokIntrinsic name) (T.cons '@' name) : toks }
+  -- Negative numeric literal: '-' immediately followed by a digit, in unary
+  -- position. Unary position means: no previous token (start of input), or the
+  -- previous significant token is non-operand-finishing (e.g., '(', '[', ',',
+  -- '=', operator, keyword), or there is whitespace between the previous token
+  -- and this dash. Examples that lex as a single negative number token:
+  --   -1            (start of input)
+  --   f -1          (whitespace before dash)
+  --   1 + -2        (operator before, whitespace separated)
+  --   (-1) [-1,-2]  (open delimiter or comma before)
+  -- Examples that fall through to TokMinus (binary or section context):
+  --   f-1   x-1     (operand-finishing prev, no whitespace before dash)
+  --   f - 1         (whitespace AFTER dash, so next char isn't a digit)
+  '-' : c : rest
+    | isDigit c, isUnaryDashPosition pos toks ->
+        lexNegativeNumber pos (c : rest) st
   -- Operators and reserved operator sequences
   c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
   -- Identifiers and keywords
   c : rest | isAlpha c -> lexIdent pos (c : rest) st
-  -- Negative numbers: sign directly attached
-  -- This is handled in the parser by parsing - as a unary operator
 
   -- Unknown character
   c : _ -> Left (LexError pos ("unexpected character: " ++ show c))
@@ -598,6 +611,73 @@ lexMultilineAfterInterp pos input st _ delim = go pos input []
     go p ('\n' : rest) acc = go (nextLine p) rest ('\n' : acc)
     go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
     go p [] _ = Left (LexError p "unterminated multiline string literal")
+
+-- | Decide whether a '-' at @dashPos@ should be lexed as part of a negative
+-- numeric literal rather than as a TokMinus operator. See the call site in
+-- 'lexOne' for the rule rationale.
+isUnaryDashPosition :: Pos -> [Located] -> Bool
+isUnaryDashPosition dashPos toks = case prevSignificantToken toks of
+  Nothing -> True
+  Just (prev, prevEnd) -> prevEnd /= dashPos || not (isOperandFinishing prev)
+
+-- | The most recent token, skipping docstrings and group annotations. Returns
+-- the token plus the position of the character immediately after its text.
+prevSignificantToken :: [Located] -> Maybe (Token, Pos)
+prevSignificantToken [] = Nothing
+prevSignificantToken (Located _ TokDocLine{} _ : rest) = prevSignificantToken rest
+prevSignificantToken (Located _ TokGroupLine{} _ : rest) = prevSignificantToken rest
+prevSignificantToken (Located p tok txt : _) =
+  Just (tok, advanceCol p (T.length txt))
+
+-- | True for tokens that finish an operand (a complete sub-expression). After
+-- such a token, a '-' with no preceding whitespace is binary subtraction.
+isOperandFinishing :: Token -> Bool
+isOperandFinishing TokInteger{} = True
+isOperandFinishing TokFloat{} = True
+isOperandFinishing TokString{} = True
+isOperandFinishing TokStringEnd{} = True
+isOperandFinishing TokLowerName{} = True
+isOperandFinishing TokUpperName{} = True
+isOperandFinishing TokTickName{} = True
+isOperandFinishing TokIntrinsic{} = True
+isOperandFinishing TokRParen = True
+isOperandFinishing TokRBracket = True
+isOperandFinishing TokRBrace = True
+isOperandFinishing TokRAngle = True
+isOperandFinishing TokTrue = True
+isOperandFinishing TokFalse = True
+isOperandFinishing TokNull = True
+isOperandFinishing TokUnderscore = True
+isOperandFinishing _ = False
+
+-- | Lex a negative numeric literal. The leading '-' has been peeked but not
+-- yet consumed. @input@ is the post-dash text starting with a digit. Dispatches
+-- to the standard number lexers from the position of the first digit, then
+-- post-processes the emitted token to negate its value, prepend '-' to its
+-- text, and shift its position back to the dash.
+lexNegativeNumber :: Pos -> String -> LexState -> Either LexError LexState
+lexNegativeNumber dashPos input st = do
+  let digitPos = advanceCol dashPos 1
+      stAtDigit = st { lsPos = digitPos, lsInput = input }
+  st' <- dispatchNumber digitPos input stAtDigit
+  case lsTokens st' of
+    Located _ tok txt : restToks ->
+      let tok' = case tok of
+            TokInteger v -> TokInteger (negate v)
+            TokFloat v -> TokFloat (negate v)
+            other -> other
+          txt' = T.cons '-' txt
+       in Right st' { lsTokens = Located dashPos tok' txt' : restToks }
+    [] -> Left (LexError dashPos "internal: number lexer emitted no token")
+  where
+    dispatchNumber p inp s = case inp of
+      '0' : 'x' : rest -> lexHexNumber p rest s
+      '0' : 'X' : rest -> lexHexNumber p rest s
+      '0' : 'o' : rest -> lexOctalNumber p rest s
+      '0' : 'O' : rest -> lexOctalNumber p rest s
+      '0' : 'b' : rest -> lexBinaryNumber p rest s
+      '0' : 'B' : rest -> lexBinaryNumber p rest s
+      _ -> lexDecNumber p inp s
 
 -- | Lex a hexadecimal number after 0x prefix
 lexHexNumber :: Pos -> String -> LexState -> Either LexError LexState

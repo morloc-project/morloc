@@ -613,4 +613,6 @@ main = do
       , golden "bigint-factorial-py" "bigint-factorial-py"
       , golden "bigint-overflow-cpp" "bigint-overflow-cpp"
       , golden "bigint-overflow-r" "bigint-overflow-r"
+      , -- unary minus / negate operator
+        golden "negate-unary-operator" "negate-unary-operator"
       ]

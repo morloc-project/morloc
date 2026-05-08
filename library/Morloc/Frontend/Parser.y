@@ -561,8 +561,12 @@ infix_expr :: { Loc CstExpr }
 
 operand :: { Loc CstExpr }
   : app_expr                 { $1 }
-  | '-' INTEGER              { at $1 (CIntE (negate (getInt $2))) }
-  | '-' FLOAT                { at $1 (CRealE (DS.fromFloatDigits (negate (getFloat $2)))) }
+  -- Prefix unary minus: -x, -(1+x), -(f x) etc. desugar to `negate _`.
+  -- Literal forms like -1 are produced as atomic numeric tokens by the lexer
+  -- in unary positions, so they do not reach this production. The form `- 1`
+  -- (with whitespace between dash and digit) routes through here as well and
+  -- becomes `negate 1`.
+  | '-' app_expr             { at $1 (CAppE (at $1 (CVarE (EV "negate"))) [$2]) }
 
 app_expr :: { Loc CstExpr }
   : force_expr                     { $1 }
