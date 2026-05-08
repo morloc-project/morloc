@@ -269,6 +269,24 @@ unsafe fn convert_keys_to_indices(
     Ok(())
 }
 
+/// Count the number of terminal (End) nodes in a pattern. The return schema
+/// is a tuple-of-terminals only when this count exceeds one; with a single
+/// terminal the return schema IS the terminal's value type, even if that
+/// type is itself a tuple.
+unsafe fn count_pattern_terminals(pattern: *mut MorlocPattern) -> usize {
+    let pat = &*pattern;
+    match pat.ptype {
+        MorlocPatternType::End => 1,
+        MorlocPatternType::ByIndex | MorlocPatternType::ByKey => {
+            let mut total = 0;
+            for i in 0..pat.size {
+                total += count_pattern_terminals(*pat.selectors.add(i));
+            }
+            total
+        }
+    }
+}
+
 /// Extract fields from a voidstar value using a pattern, copying them into dest.
 ///
 /// # Safety
@@ -278,6 +296,7 @@ unsafe fn apply_getter(
     dest: AbsPtr,
     return_index: &mut usize,
     return_schema: *const CSchema,
+    multi_terminal: bool,
     pattern: *mut MorlocPattern,
     value_schema: *const CSchema,
     value: AbsPtr,
@@ -289,7 +308,7 @@ unsafe fn apply_getter(
             for i in 0..pat.size {
                 let idx = *pat.fields.indices.add(i);
                 apply_getter(
-                    dest, return_index, return_schema,
+                    dest, return_index, return_schema, multi_terminal,
                     *pat.selectors.add(i),
                     *(*value_schema).parameters.add(idx),
                     value.add(*(*value_schema).offsets.add(idx)),
@@ -298,10 +317,14 @@ unsafe fn apply_getter(
         }
         MorlocPatternType::ByKey => {
             convert_keys_to_indices(pattern, value_schema)?;
-            return apply_getter(dest, return_index, return_schema, pattern, value_schema, value);
+            return apply_getter(dest, return_index, return_schema, multi_terminal, pattern, value_schema, value);
         }
         MorlocPatternType::End => {
-            let (element_dest, element_width) = if (*return_schema).size > 1 {
+            // With multiple terminals the return schema is a tuple of those
+            // terminal values: write into the slot at `return_index`. With a
+            // single terminal the return schema IS the terminal's value type
+            // (possibly itself a tuple), so write the whole value into dest.
+            let (element_dest, element_width) = if multi_terminal {
                 (dest.add(*(*return_schema).offsets.add(*return_index)),
                  (*(*(*return_schema).parameters.add(*return_index))).width)
             } else {
@@ -527,8 +550,10 @@ unsafe fn morloc_eval_r(
                 MorlocAppExpressionType::Pattern => {
                     if nargs == 1 {
                         let mut return_index: usize = 0;
+                        let multi_terminal =
+                            count_pattern_terminals((*app).function.pattern) > 1;
                         apply_getter(
-                            dest, &mut return_index, schema,
+                            dest, &mut return_index, schema, multi_terminal,
                             (*app).function.pattern,
                             (*(*(*app).args)).schema,
                             arg_results[0],

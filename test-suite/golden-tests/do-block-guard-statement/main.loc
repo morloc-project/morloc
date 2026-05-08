@@ -1,0 +1,95 @@
+-- Variations on a bare guard expression `? cond = e1 : e2` appearing as a
+-- statement inside a do-block, written multi-line at the same indentation
+-- as preceding statements. Each function exercises a different position,
+-- nesting, or multiplicity of guards within do-blocks.
+
+module main
+  ( onlyStmt
+  , afterBind
+  , afterLet
+  , afterBare
+  , multiClause
+  , doInThen
+  , doInElse
+  , doInBoth
+  , nestedGuards
+  )
+
+import root-py
+
+source Py from "helper.py" ("py_double")
+py_double :: Int -> <IO> Int
+
+-- The guard is the only statement of the do-block.
+onlyStmt :: Int -> <IO> Int
+onlyStmt x = do
+  ? x > 10 = x + 100
+  : 0
+
+-- The guard is the final statement, after a bind. The bound name `y`
+-- must be in scope inside both branches.
+afterBind :: Int -> <IO> Int
+afterBind x = do
+  y <- py_double x
+  ? y > 20 = y + 1000
+  : y
+
+-- The guard is the final statement, after a let-binding.
+afterLet :: Int -> <IO> Int
+afterLet x = do
+  let z = x * 3
+  ? z > 30 = z + 10000
+  : z
+
+-- The guard is the final statement, after a bare statement whose
+-- result is evaluated for effects only and discarded.
+afterBare :: Int -> <IO> Int
+afterBare x = do
+  py_double x
+  ? x > 5 = x * x
+  : x
+
+-- A guard with multiple `?`-clauses falling through to a single `:`,
+-- as the only statement of the do-block.
+multiClause :: Int -> <IO> Int
+multiClause x = do
+  ? x > 100 = 3
+  ? x > 10  = 2
+  ? x > 0   = 1
+  : 0
+
+-- The `=`-branch of the guard is itself a do-block (with a bind).
+doInThen :: Int -> <IO> Int
+doInThen x = do
+  ? x > 0 = do
+      y <- py_double x
+      y + 1
+  : 0
+
+-- The `:`-branch is a do-block.
+doInElse :: Int -> <IO> Int
+doInElse x = do
+  ? x > 0 = x
+  : do
+      y <- py_double x
+      y + 100
+
+-- Both branches of the guard are do-blocks.
+doInBoth :: Int -> <IO> Int
+doInBoth x = do
+  ? x > 0 = do
+      y <- py_double x
+      y + 1
+  : do
+      y <- py_double x
+      y + 100
+
+-- A nested do-block inside the guard's `=`-branch contains its own
+-- bare guard at the same indentation as its preceding bind.
+nestedGuards :: Int -> <IO> Int
+nestedGuards x = do
+  ? x > 0 = do
+      y <- py_double x
+      ? y > 50 = y + 5000
+      : y + 1
+  : 0

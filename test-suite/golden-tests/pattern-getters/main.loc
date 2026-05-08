@@ -1,4 +1,15 @@
-module main (testpy, testr, testcpp)
+module main
+  ( testpy
+  , testr
+  , testcpp
+  , pureNestedTuple
+  , pureNested3Tuple
+  , pureScalar
+  , pureGrouped
+  , pureChained
+  , pureSingleGrouped
+  , pureChainedScalar
+  )
 
 import root
 import root-py
@@ -19,6 +30,10 @@ testr = idr
        (2,1)
   , (==) (.(.1) (1, 2))
        2
+  , (==) (.0 ((1,3), 2, 5))
+       (1, 3)
+  , (==) (.0 ((1,2,3), 4))
+       (1, 2, 3)
   ]
 
 testpy = idpy -- force into python
@@ -32,6 +47,10 @@ testpy = idpy -- force into python
        (2,1)
   , (==) (.(.1) (1, 2))
        2
+  , (==) (.0 ((1,3), 2, 5))
+       (1, 3)
+  , (==) (.0 ((1,2,3), 4))
+       (1, 2, 3)
   ]
 
 testcpp = idcpp
@@ -44,4 +63,40 @@ testcpp = idcpp
        (2,1)
   , (==) (.(.1) (1, 2))
        2
+  , (==) (.0 ((1,3), 2, 5))
+       (1, 3)
+  , (==) (.0 ((1,2,3), 4))
+       (1, 2, 3)
   ]
+
+-- Pure-morloc getter expressions (no language pool routing). These
+-- exercise the nexus's language-independent pattern resolution.
+
+-- Single index returning a tuple-valued element from a tuple-of-tuples.
+pureNestedTuple :: (Int, Int)
+pureNestedTuple = .0 ((1, 3), 2, 5)
+
+-- Single index returning a 3-tuple element from a tuple-of-tuples.
+pureNested3Tuple :: (Int, Int, Int)
+pureNested3Tuple = .0 ((1, 2, 3), 4)
+
+-- Single index returning a scalar (control case).
+pureScalar :: Str
+pureScalar = .1 (42, "Jim")
+
+-- Grouped pattern constructing a 2-tuple from two scalar terminals.
+pureGrouped :: (Int, Int)
+pureGrouped = .(.1, .0) (1, 2)
+
+-- Chained pattern: descend into the second field, then group two
+-- scalar terminals into a 2-tuple.
+pureChained :: (Str, Int)
+pureChained = .1.(.0,.2) (42, ("Jim", True, 69))
+
+-- Single-element grouping at one position (degenerate group).
+pureSingleGrouped :: Int
+pureSingleGrouped = .(.1) (1, 2)
+
+-- Chained single-index path returning a scalar from inside a tuple.
+pureChainedScalar :: Int
+pureChainedScalar = .0.1 ((1, 3), 2, 5)

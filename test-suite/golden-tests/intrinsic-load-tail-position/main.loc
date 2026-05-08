@@ -1,0 +1,29 @@
+-- @save / @load round-trip with @load at the tail position of the
+-- do-block (no intermediate `x <- @load path; x` binding). Covers all
+-- three save formats: flat binary, MessagePack, and JSON.
+
+module main
+  ( roundTripBin
+  , roundTripMsg
+  , roundTripJson
+  )
+
+import root-py
+
+source Py from "helper.py" ("identity")
+identity :: a -> a
+
+roundTripBin :: Int -> Str -> <IO> ?Int
+roundTripBin x path = do
+  @save (identity x) path
+  @load path
+
+roundTripMsg :: Int -> Str -> <IO> ?Int
+roundTripMsg x path = do
+  @savem (identity x) path
+  @load path
+
+roundTripJson :: Int -> Str -> <IO> ?Int
+roundTripJson x path = do
+  @savej (identity x) path
+  @load path

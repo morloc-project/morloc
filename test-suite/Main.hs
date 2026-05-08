@@ -415,6 +415,7 @@ main = do
       , golden "guards-let-cpp" "guards-let-cpp"
       , golden "guards-let-r" "guards-let-r"
       , golden "guards-inline-cpp" "guards-inline-cpp"
+      , golden "do-block-guard-statement" "do-block-guard-statement"
       , golden "recursion-direct-py" "recursion-direct-py"
       , golden "recursion-direct-cpp" "recursion-direct-cpp"
       , golden "recursion-direct-r" "recursion-direct-r"
@@ -459,6 +460,7 @@ main = do
       , golden "intrinsic-show-read" "intrinsic-show-read"
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
       , golden "intrinsic-show-ho-r" "intrinsic-show-ho-r"
+      , golden "intrinsic-load-tail-position" "intrinsic-load-tail-position"
       , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
         golden "parser-stress" "parser-stress"
       , -- stdout flush test: verify Python pool stdout is flushed before shutdown
