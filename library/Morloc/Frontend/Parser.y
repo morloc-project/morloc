@@ -180,8 +180,11 @@ sig_or_ass :: { [Loc CstExpr] }
       { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $5 $6)] }
 
 guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
-  : guard_clause                    { [$1] }
-  | guard_clauses guard_clause      { $1 ++ [$2] }
+  : guard_clause                          { [$1] }
+  | guard_clauses guard_clause            { $1 ++ [$2] }
+  -- Absorb layout-inserted VSEMIs between aligned `?`-clauses, e.g. when a
+  -- multi-line guard appears as a do-stmt at the do-block's indent column.
+  | guard_clauses VSEMI guard_clause      { $1 ++ [$3] }
 
 guard_clause :: { (Loc CstExpr, Loc CstExpr) }
   : '?' expr '=' expr              { ($2, $4) }
@@ -514,6 +517,10 @@ expr :: { Loc CstExpr }
 guard_expr :: { Loc CstExpr }
   : guard_clauses ':' expr
       { Loc (fst (head $1) <-> $3) (CGuardExprE $1 $3) }
+  -- Absorb a layout-inserted VSEMI between the last `?`-clause and the `:`
+  -- branch when both are at the same indent inside a do-block (or let).
+  | guard_clauses VSEMI ':' expr
+      { Loc (fst (head $1) <-> $4) (CGuardExprE $1 $4) }
 
 let_expr :: { Loc CstExpr }
   : 'let' VLBRACE let_bindings VRBRACE 'in' expr

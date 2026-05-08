@@ -69,7 +69,7 @@ doInThen x = do
 -- The `:`-branch is a do-block.
 doInElse :: Int -> <IO> Int
 doInElse x = do
-  ? x > 0 = x
+  ? x > 0 = do x
   : do
       y <- py_double x
       y + 100

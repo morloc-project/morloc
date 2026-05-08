@@ -774,8 +774,30 @@ synthE i g (IfS cond thenE elseE) = do
   g2 <- subtype' i condType (VarU (TV "Bool")) g1
   (g3, t2, thenE') <- synthG g2 thenE
   (g4, t3, elseE') <- synthG g3 elseE
-  g5 <- subtype' i t3 t2 g4
-  return (g5, apply g5 t2, IfS cond' thenE' elseE')
+  scope <- MM.getGeneralScope i
+  let t2' = apply g4 t2
+      t3' = apply g4 t3
+  -- Try strict subtype both directions first (zero-coercion path), then
+  -- fall back to tryCoerce (which handles a -> ?a, a -> <E> a, and chains).
+  -- The principle: a pure value can always be lifted into an effectful
+  -- (or optional) wrapper, so mixed pure/effectful branches unify by
+  -- lifting the pure one. Going the other way is unsafe and not allowed.
+  case subtype scope t3' t2' g4 of
+    Right g5 -> return (g5, apply g5 t2, IfS cond' thenE' elseE')
+    Left _ -> case subtype scope t2' t3' g4 of
+      Right g5 -> return (g5, apply g5 t3, IfS cond' thenE' elseE')
+      Left _ -> case tryCoerce scope t3' t2' g4 of
+        Just (coercions, g5) -> do
+          elseE'' <- wrapAnnoCoercions i (apply g5 t3') coercions elseE'
+          return (g5, apply g5 t2, IfS cond' thenE' elseE'')
+        Nothing -> case tryCoerce scope t2' t3' g4 of
+          Just (coercions, g5) -> do
+            thenE'' <- wrapAnnoCoercions i (apply g5 t2') coercions thenE'
+            return (g5, apply g5 t3, IfS cond' thenE'' elseE')
+          Nothing -> MM.throwSourcedError i $
+            "Branches of guard/if have incompatible types:"
+            <> line <> "  then-branch: " <> prettyTypeU t2'
+            <> line <> "  else-branch: " <> prettyTypeU t3'
 synthE i g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
@@ -1281,6 +1303,27 @@ tryCoerce scope a (EffectU effs b) g =
       Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
+
+-- | Wrap an already-annotated subexpression in successive CoerceS layers,
+-- producing a new annotated expression whose type reflects each coercion.
+-- Mirrors the inner fold of 'checkEFallback' but operates on an AnnoS
+-- (where the branch sub-expressions of IfS already live) rather than a
+-- raw ExprS.
+wrapAnnoCoercions ::
+  Int                                       -- ^ source position index
+  -> TypeU                                  -- ^ starting type of the AnnoS
+  -> [Coercion]                             -- ^ coercions to apply, outermost last
+  -> AnnoS (Indexed TypeU) ManyPoly Int     -- ^ subexpression to wrap
+  -> MorlocMonad (AnnoS (Indexed TypeU) ManyPoly Int)
+wrapAnnoCoercions i startT coercions anno0 = do
+  (_, finalAnno) <- foldlM step (startT, anno0) coercions
+  return finalAnno
+  where
+    step (curT, anno) coercion = do
+      idx <- MM.getCounterWithPos i
+      let newT = applyCoercion coercion curT
+          newExpr = CoerceS coercion anno
+      return (newT, AnnoS (Idx idx newT) i newExpr)
 
 -- | Strip OptionalU wrappers that result from coercion.
 -- Used in instance resolution to match the underlying type.
