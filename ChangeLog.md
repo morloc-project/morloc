@@ -1,4 +1,4 @@
-0.83.0 [2026-04-28]
+0.83.1 [2026-05-07]
 -------------------
  * add tensor support through Packable class
  * many fixes to the phantom types
