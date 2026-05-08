@@ -1,0 +1,77 @@
+module main
+  ( sliced, sorted, picked, reversed_
+  , rbound, cbound
+  , added_dropped, lit_selected
+  )
+
+import root
+import table-py
+
+source Py from "src.py"
+  ("mkData", "makeXY", "makeX", "makeY", "makeXYZ", "makeZ")
+
+-- Runtime stdlib operations through the python pool:
+--   sliceRows
+--   sortRows (multi-key with per-column ascending Bool)
+--   selectColsDyn (runtime [Str], polymorphic-Rec result)
+--   pickRows + reverse + range = the "reverse rows" idiom (no dedicated
+--     primitive any more; this exercises the composition rule)
+--   rbind (Nat addition), cbind (Rec union)
+--   setCol / dropCols (typed runtime add/drop with f:Str / l:[Str]
+--     label lifting and (r - f) + Singleton f a / (r - l) reductions)
+--   selectCols (typed list-label projection via Restrict)
+
+mkData :: Int -> Table n {x=Int, y=Str}
+makeXY :: Int -> Table n {x=Int, y=Str}
+makeX :: Int -> Table n {x=Int}
+makeY :: Int -> Table n {y=Str}
+makeXYZ :: Int -> Table n {x=Int, y=Str, z=Real}
+makeZ :: Int -> Vector n Real
+
+-- sliceRows: take rows in the half-open range [start, end).
+sliced :: Int -> Table m {x=Int, y=Str}
+sliced n = sliceRows 1 3 (mkData n)
+
+-- sortRows with descending direction (False) on a single column.
+sorted :: Int -> Table n {x=Int, y=Str}
+sorted n = sortRows [("x", False)] (mkData n)
+
+-- selectColsDyn: runtime-list projection. Output Rec left polymorphic;
+-- the function's return type fixes it.
+picked :: Int -> Table n r2
+picked n = selectColsDyn ["y"] (mkData n)
+
+-- "reverseRows" composed from primitives: enumerate row indices,
+-- reverse the index list, and pick in that order. This replaces the
+-- removed reverseRows primitive.
+reversed_ :: Int -> Table n {x=Int, y=Str}
+reversed_ n =
+  let t = mkData n
+  in pickRows (reverse (range 0 (nrow t - 1))) t
+
+-- rbind: doubled row count via Nat addition; pyarrow concat_arrays.
+rbound :: Int -> Table m {x=Int, y=Str}
+rbound n =
+  let t = makeXY n
+  in rbind t t
+
+-- cbind: row count must match; column schemas union.
+cbound :: Int -> Table n ({x=Int} + {y=Str})
+cbound n = cbind (makeX n) (makeY n)
+
+-- Typed setCol/dropCols: build {x,y}, append Real column z, drop x.
+-- Final schema is statically Table n {y=Str, z=Real}.
+added_dropped :: Int -> Table n {y=Str, z=Real}
+added_dropped n =
+    let t0 = makeXY n
+    let zs = makeZ n
+    let t1 = setCol "z" zs t0
+    in dropCols ["x"] t1
+
+-- selectCols + dropCols: list-label lifting drives (Restrict r l) and
+-- (r - l) reductions per call site.
+lit_selected :: Int -> Table n {z=Real}
+lit_selected n =
+    let t = makeXYZ n
+    let projected = selectCols ["x", "z"] t
+    in dropCols ["x"] projected

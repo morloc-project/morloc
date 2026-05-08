@@ -20,6 +20,8 @@ module Morloc.TypeEval
   , pairEval
   , reduceType
   , reduceTypeLeaves
+  , expandHeadOnly
+  , expandLeavesOnce
   ) where
 
 import qualified Data.Set as Set
@@ -232,6 +234,36 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
     f bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
     f bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
+    f _ t@NatVoidU = return t
+    f _ t@(StrVarU _) = return t
+    f _ t@(StrLitU _) = return t
+    f bnd (StrConcatU a b) = StrConcatU <$> recurse bnd a <*> recurse bnd b
+    f _ t@StrVoidU = return t
+    f _ t@(RecVarU _) = return t
+    f _ t@RecEmptyU = return t
+    f bnd (RecExtendU k a b) = RecExtendU k <$> recurse bnd a <*> recurse bnd b
+    f bnd (RecUnionU a b) = RecUnionU <$> recurse bnd a <*> recurse bnd b
+    f bnd (RecDiffU a ks) = RecDiffU <$> recurse bnd a <*> pure ks
+    f bnd (RecIntersectU a b) = RecIntersectU <$> recurse bnd a <*> recurse bnd b
+    f bnd (RecRestrictU a b) = RecRestrictU <$> recurse bnd a <*> recurse bnd b
+    f bnd (RecDiffListU a b) = RecDiffListU <$> recurse bnd a <*> recurse bnd b
+    f _ t@RecVoidU = return t
+    f _ t@(ListVarU _) = return t
+    f bnd (ListLitU es) = ListLitU <$> mapM (recurse bnd) es
+    f bnd (ListAppU a b) = ListAppU <$> recurse bnd a <*> recurse bnd b
+    f _ t@ListVoidU = return t
+    f _ t@(SetVarU _) = return t
+    f _ t@SetEmptyU = return t
+    f bnd (SetLitU es) = SetLitU <$> mapM (recurse bnd) es
+    f bnd (SetUnionU a b) = SetUnionU <$> recurse bnd a <*> recurse bnd b
+    f bnd (SetInterU a b) = SetInterU <$> recurse bnd a <*> recurse bnd b
+    f bnd (SetDiffU a b) = SetDiffU <$> recurse bnd a <*> recurse bnd b
+    f _ t@SetVoidU = return t
+    f bnd (KeysU r) = KeysU <$> recurse bnd r
+    f bnd (ListToSetU l) = ListToSetU <$> recurse bnd l
+    f bnd (SizeU c) = SizeU <$> recurse bnd c
+    f bnd (ProjectFieldU r fld) = ProjectFieldU <$> recurse bnd r <*> recurse bnd fld
+    f bnd (RecSingletonU k v) = RecSingletonU <$> recurse bnd k <*> recurse bnd v
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
@@ -252,6 +284,36 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
     terminate bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
     terminate bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@NatVoidU = return t
+    terminate _ t@(StrVarU _) = return t
+    terminate _ t@(StrLitU _) = return t
+    terminate bnd (StrConcatU a b) = StrConcatU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@StrVoidU = return t
+    terminate _ t@(RecVarU _) = return t
+    terminate _ t@RecEmptyU = return t
+    terminate bnd (RecExtendU k a b) = RecExtendU k <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (RecUnionU a b) = RecUnionU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (RecDiffU a ks) = RecDiffU <$> recurse bnd a <*> pure ks
+    terminate bnd (RecIntersectU a b) = RecIntersectU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (RecRestrictU a b) = RecRestrictU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (RecDiffListU a b) = RecDiffListU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@RecVoidU = return t
+    terminate _ t@(ListVarU _) = return t
+    terminate bnd (ListLitU es) = ListLitU <$> mapM (recurse bnd) es
+    terminate bnd (ListAppU a b) = ListAppU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@ListVoidU = return t
+    terminate _ t@(SetVarU _) = return t
+    terminate _ t@SetEmptyU = return t
+    terminate bnd (SetLitU es) = SetLitU <$> mapM (recurse bnd) es
+    terminate bnd (SetUnionU a b) = SetUnionU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (SetInterU a b) = SetInterU <$> recurse bnd a <*> recurse bnd b
+    terminate bnd (SetDiffU a b) = SetDiffU <$> recurse bnd a <*> recurse bnd b
+    terminate _ t@SetVoidU = return t
+    terminate bnd (KeysU r) = KeysU <$> recurse bnd r
+    terminate bnd (ListToSetU l) = ListToSetU <$> recurse bnd l
+    terminate bnd (SizeU c) = SizeU <$> recurse bnd c
+    terminate bnd (ProjectFieldU r fld) = ProjectFieldU <$> recurse bnd r <*> recurse bnd fld
+    terminate bnd (RecSingletonU k v) = RecSingletonU <$> recurse bnd k <*> recurse bnd v
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     renameTypedefs ::
@@ -361,4 +423,114 @@ parsub pair (NatAddU a b) = NatAddU (parsub pair a) (parsub pair b)
 parsub pair (NatMulU a b) = NatMulU (parsub pair a) (parsub pair b)
 parsub pair (NatSubU a b) = NatSubU (parsub pair a) (parsub pair b)
 parsub pair (NatDivU a b) = NatDivU (parsub pair a) (parsub pair b)
+parsub _ t@NatVoidU = t
+parsub _ t@(StrVarU _) = t
+parsub _ t@(StrLitU _) = t
+parsub pair (StrConcatU a b) = StrConcatU (parsub pair a) (parsub pair b)
+parsub _ t@StrVoidU = t
+parsub _ t@(RecVarU _) = t
+parsub _ t@RecEmptyU = t
+parsub pair (RecExtendU k a b) = RecExtendU k (parsub pair a) (parsub pair b)
+parsub pair (RecUnionU a b) = RecUnionU (parsub pair a) (parsub pair b)
+parsub pair (RecDiffU a ks) = RecDiffU (parsub pair a) ks
+parsub pair (RecIntersectU a b) = RecIntersectU (parsub pair a) (parsub pair b)
+parsub pair (RecRestrictU a b) = RecRestrictU (parsub pair a) (parsub pair b)
+parsub pair (RecDiffListU a b) = RecDiffListU (parsub pair a) (parsub pair b)
+parsub _ t@RecVoidU = t
+parsub _ t@(ListVarU _) = t
+parsub pair (ListLitU es) = ListLitU (map (parsub pair) es)
+parsub pair (ListAppU a b) = ListAppU (parsub pair a) (parsub pair b)
+parsub _ t@ListVoidU = t
+parsub _ t@(SetVarU _) = t
+parsub _ t@SetEmptyU = t
+parsub pair (SetLitU es) = SetLitU (map (parsub pair) es)
+parsub pair (SetUnionU a b) = SetUnionU (parsub pair a) (parsub pair b)
+parsub pair (SetInterU a b) = SetInterU (parsub pair a) (parsub pair b)
+parsub pair (SetDiffU a b) = SetDiffU (parsub pair a) (parsub pair b)
+parsub _ t@SetVoidU = t
+parsub pair (KeysU r) = KeysU (parsub pair r)
+parsub pair (ListToSetU l) = ListToSetU (parsub pair l)
+parsub pair (SizeU c) = SizeU (parsub pair c)
+parsub pair (ProjectFieldU r fld) = ProjectFieldU (parsub pair r) (parsub pair fld)
+parsub pair (RecSingletonU k v) = RecSingletonU (parsub pair k) (parsub pair v)
 parsub pair (LabeledU n t) = LabeledU n (parsub pair t)
+
+-- | Expand the outermost type alias one step. Substitutes the alias body's
+-- parameters with the actual args, but does NOT recurse into the args. This
+-- preserves inner-element types when the outer alias changes the root type
+-- (e.g. expanding Vector -> List without reducing Int32 -> Int).
+--
+-- When the call-site has fewer args than the alias has params, we attempt
+-- a kind-based realignment: drop Nat-kinded params (filling them with the
+-- 'NatVoidU' phantom-Nat sentinel) so the remaining type-kinded params line
+-- up with the supplied args. This matters for list-literal lowering, which
+-- strips Nat phantom args before we get here -- e.g.
+-- `[1.0,2.0,3.0,4.0] :: Vector 4 Real` arrives as `AppU Vector [Real]`
+-- (1 arg) while the alias is `Vector n a = List a` (2 params). Substituting
+-- only `a -> Real` still produces `List Real`.
+expandHeadOnly :: Scope -> TypeU -> Maybe TypeU
+expandHeadOnly scope (AppU (VarU v) args) =
+  case Map.lookup v scope of
+    (Just ((paramKinds, body, _, _) : _))
+      | length paramKinds == length args ->
+          let params = [p | Left (p, _) <- paramKinds]
+          in if length params == length args
+             then Just $ foldr parsub body (zip params args)
+             else Nothing
+      | length args < length paramKinds ->
+          -- Kind-based realignment: bind type-kinded params from `args`
+          -- in order, fill Nat-kinded params with NatVoidU sentinels.
+          let typeParams = [p | Left (p, KindType) <- paramKinds]
+              natParams  = [p | Left (p, KindNat)  <- paramKinds]
+          in if length typeParams == length args
+             then Just $ foldr parsub body
+                    (zip typeParams args
+                      ++ [(p, NatVoidU) | p <- natParams])
+             else Nothing
+      | otherwise -> Nothing
+    _ -> Nothing
+expandHeadOnly scope (VarU v) =
+  case Map.lookup v scope of
+    (Just (([], body, _, _) : _)) -> Just body
+    _ -> Nothing
+expandHeadOnly _ _ = Nothing
+
+-- | Like reduceTypeLeaves, but uses one-step head substitution
+-- (expandHeadOnly) at each position rather than full evaluateStep. This is
+-- crucial when an alias body's outer head is itself abstract (e.g.
+-- `type Vector n a = List a` where List is abstract): full evaluation
+-- recurses into the substituted body and `resolveFail`s on the abstract
+-- head, returning Nothing -- masking the fact that ONE step of
+-- substitution succeeded. expandLeavesOnce performs the substitution
+-- and stops, returning the partially-reduced type.
+--
+-- Descends through ForallU/EffectU/OptionalU wrappers so that quantified
+-- instance method types reduce too.
+expandLeavesOnce :: Scope -> TypeU -> Maybe TypeU
+expandLeavesOnce scope t0 =
+  let (t1, changed) = go t0
+  in if changed then Just t1 else Nothing
+  where
+    go t = case expandHeadOnly scope t of
+      Just t' -> (t', True)
+      Nothing -> descend t
+
+    descend (ForallU v t) =
+      let (t', c) = go t in (ForallU v t', c)
+    descend (FunU ts t) =
+      let (ts', cs1) = unzip (map go ts)
+          (t', c2) = go t
+      in (FunU ts' t', or (c2 : cs1))
+    descend (AppU f ts) =
+      let (f', c1) = go f
+          (ts', cs) = unzip (map go ts)
+      in (AppU f' ts', or (c1 : cs))
+    descend (NamU o n ps rs) =
+      let (ps', cs1) = unzip (map go ps)
+          (vs', cs2) = unzip (map (go . snd) rs)
+      in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
+    descend (EffectU effs t) =
+      let (t', c) = go t in (EffectU effs t', c)
+    descend (OptionalU t) =
+      let (t', c) = go t in (OptionalU t', c)
+    descend t = (t, False)

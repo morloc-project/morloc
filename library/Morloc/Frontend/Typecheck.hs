@@ -17,6 +17,7 @@ segregation in the code generator.
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import qualified Data.IntMap.Strict as IntMap
+import Data.Text (Text)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -34,6 +35,16 @@ Check the general types, do nothing to the concrete types which may only be
 solved after segregation. Later the concrete types will need to be checked
 for type consistency and correctness of packers.
 -}
+-- | True for primitive set-theoretic constraints (Member / Subset /
+-- Disjoint), which 'dischargeConstraints' is responsible for resolving.
+-- Typeclass-form constraints (@Constraint cls ts@) are handled by the
+-- class-resolution pass and pass through this filter unchanged.
+isPrimitiveConstraint :: Constraint -> Bool
+isPrimitiveConstraint (Constraint _ _) = False
+isPrimitiveConstraint (CMember _ _) = True
+isPrimitiveConstraint (CSubset _ _) = True
+isPrimitiveConstraint (CDisjoint _ _) = True
+
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
@@ -42,7 +53,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaIntVals = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -60,6 +71,50 @@ typecheck = mapM run
           mapM_ (\(t1, t2) ->
             MM.sayV $ "Warning: unresolved Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
             ) remaining
+
+      -- discharge primitive set-theoretic constraints (Member / Subset /
+      -- Disjoint) accumulated through subtype calls. Each constraint
+      -- runs through reduceConstraint after the final substitution.
+      --
+      -- Three failure modes for *primitive* constraints (CMember /
+      -- CSubset / CDisjoint):
+      --   1. Contradiction: the constraint cannot ever be satisfied
+      --      under any further substitution. Hard error.
+      --   2. Undecidable AND not subsumed by the function's declared
+      --      assumptions: the function body needs a constraint the
+      --      signature did not declare. Hard error pointing at the
+      --      missing constraint.
+      --   3. Undecidable but subsumed by an assumption: silently
+      --      discharged inside dischargeConstraints.
+      --
+      -- Typeclass-form constraints (@Constraint cls _@) are handled by
+      -- the separate class-resolution machinery; we leave any leftover
+      -- of that form in place rather than error.
+      case dischargeConstraints g3 of
+        Left err -> MM.throwSystemError ("Constraint violation: " <> err)
+        Right g3' ->
+          case filter isPrimitiveConstraint (gammaConstraints g3') of
+            [] -> return ()
+            cs ->
+              -- Apply gamma so the displayed form reflects what was
+              -- actually unsolved (the queue still carries pre-substitution
+              -- variable names; the user wants to see post-substitution
+              -- structure with internal @\@nN@ rename suffixes stripped).
+              -- prettyConstraint also parenthesises compound args so the
+              -- output reads as something that could be pasted into the
+              -- signature's @=>@ clause.
+              let displayed = map (prettyConstraint . apply g3') cs
+                  -- The outermost VarS in the AnnoS names the function
+                  -- being typechecked; surface it in the error so the
+                  -- user knows which signature to amend.
+                  fnName = case e0 of
+                    AnnoS _ _ (VarS (EV n) _) -> Just n
+                    _ -> Nothing
+                  prefix = case fnName of
+                    Just n -> "Unsolved constraint(s) on " <> dquotes (pretty n) <> "; add to its signature: "
+                    Nothing -> "Unsolved constraint(s); add to the function signature: "
+              in MM.throwSystemError $
+                prefix <> hcat (punctuate ", " displayed)
 
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
@@ -115,7 +170,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -236,6 +291,13 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
 -- the alias chain. This prevents sibling aliases from inheriting each
 -- other's instances: walking A' -> Str never reaches A (a sibling),
 -- but walking B -> A does reach A (a parent).
+--
+-- This walks gt's chain only. Walking the instance's chain too (so that
+-- e.g. an instance with head `Vector (d1*d2) a` matches a call site with
+-- head `List a`) was tried and reverted: it broke nominal-distinct
+-- aliases like Deque a / Array a / Vector n a -- all alias to List a,
+-- but each has its own typeclass instances that should NOT be applied
+-- to List call sites. Bidirectional walking conflates them.
 filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
 filterByAliasChain scope gt0 candidates = go gt0
   where
@@ -256,6 +318,16 @@ filterByAliasChain scope gt0 candidates = go gt0
 -- ExistU act as wildcards (match anything). Other VarU nodes require exact
 -- name match. This checks if an instance type matches the call-site type
 -- at a specific alias level without evaluating aliases.
+--
+-- Nat positions are treated permissively: if both positions are Nat-kinded
+-- expressions (literal, variable, or arithmetic), they are considered
+-- compatible at this filtering stage. Strict equivalence is enforced later
+-- by `isSubtypeOf2` / `subtype`, which run the Nat SOP solver and can
+-- reduce expressions like `2*2` to `4`. Without this leniency, an instance
+-- whose head carries a Nat-arithmetic constraint (e.g. Vector (d1*d2) a)
+-- would be filtered out before subtyping can prove the constraint, with
+-- the call site's literal Nat (e.g. Vector 4 Real) treated as structurally
+-- distinct from the instance's expression.
 compatibleTypeU :: TypeU -> TypeU -> Bool
 compatibleTypeU = go Set.empty Set.empty
   where
@@ -284,8 +356,20 @@ compatibleTypeU = go Set.empty Set.empty
         && all (\((k1,v1),(k2,v2)) -> k1 == k2 && go b1 b2 v1 v2) (zip rs1 rs2)
     go b1 b2 (OptionalU t1) (OptionalU t2) = go b1 b2 t1 t2
     go b1 b2 (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && go b1 b2 t1 t2
-    go _  _  (NatLitU n1) (NatLitU n2) = n1 == n2
+    -- Nat-kinded positions: any Nat expression matches any other. The
+    -- isSubtypeOf2 / subtype pipeline does proper Nat solving downstream.
+    go _  _  t1 t2 | isNatExprT t1 && isNatExprT t2 = True
     go _  _  _ _ = False
+
+    isNatExprT :: TypeU -> Bool
+    isNatExprT (NatLitU _) = True
+    isNatExprT (NatVarU _) = True
+    isNatExprT (NatAddU _ _) = True
+    isNatExprT (NatMulU _ _) = True
+    isNatExprT (NatSubU _ _) = True
+    isNatExprT (NatDivU _ _) = True
+    isNatExprT NatVoidU = True
+    isNatExprT _ = False
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a
@@ -535,8 +619,39 @@ synthE _ g0 (NamS rs) = do
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
-  let (g1, t1) = rename g0 (etype t0)
-      g1' = g1 ++> [AnnG v t1]
+  -- Rename type AND constraints together so primitive constraints
+  -- (CMember / CSubset / CDisjoint) reference the same fresh-name
+  -- variables that the type uses. The renamed constraints are queued
+  -- onto gammaConstraints so they discharge against call-site
+  -- substitutions at end-of-typecheck.
+  --
+  -- Constraint propagation: the *outermost* VarS encountered during a
+  -- top-level typecheck represents the function being defined. Its
+  -- declared @econs@ are taken as assumptions for the body and parked
+  -- in @gammaAssumedConstraints@. A deferred obligation that cannot
+  -- be decided at end-of-typecheck is allowed to discharge if it
+  -- matches one of these assumptions: that is exactly the semantics
+  -- of "the body may use the constraints the signature declared."
+  -- Subsequent (inner) VarS calls just enqueue obligations on
+  -- @gammaConstraints@ and do not touch the assumptions list.
+  --
+  -- Outermost-vs-inner is detected by @gammaAssumedConstraints ==
+  -- Nothing@: 'run' initialises it to @Nothing@ and only the
+  -- outermost VarS finds it so. Once any signature has been claimed,
+  -- the slot is @Just _@ (possibly @Just []@ if the signature had no
+  -- declared constraints) and stays that way. This Maybe sentinel is
+  -- necessary because a signature with no constraints would otherwise
+  -- be indistinguishable from "not yet seen" if we used a plain list.
+  let (g1, t0') = renameEType g0 t0
+      t1 = etype t0'
+      newCs = Set.toList (econs t0')
+      g1Cs = g1
+        { gammaConstraints = gammaConstraints g1 ++ newCs
+        , gammaAssumedConstraints = case gammaAssumedConstraints g1 of
+            Nothing -> Just newCs
+            Just _  -> gammaAssumedConstraints g1
+        }
+      g1' = g1Cs ++> [AnnG v t1]
   (g2, t2, xs1) <- foldCheck g1' xs0 t1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
@@ -1023,8 +1138,73 @@ checkE i g (EvalS e) t = do
 checkE i g e t@(ExistU v _ _)
   | Just _ <- lookupU v g
   = checkE' i g e (apply g t)
+-- Nat dimension checking for list literals against nat-parameterized aliases
+checkE i g1 e1@(LstS _) b = do
+  (g2, a, e2) <- synthE' i g1 e1
+  let a' = apply g2 a
+      b' = apply g2 b
+  scope <- MM.getGeneralScope i
+  case subtype scope a' b' g2 of
+    Right g3 -> do
+      let natArgs = getNatArgs scope b'
+          anno2 = AnnoS (Idx i a') i e2
+      g4 <- checkListNatDims g3 natArgs anno2
+      return (g4, apply g4 b', e2)
+    Left err ->
+      case tryCoerce scope a' b' g2 of
+        Just (coercions, g3) -> do
+          (finalExpr, _) <- foldlM
+            (\(expr, currentType) coercion -> do
+              idx <- MM.getCounterWithPos i
+              let wrappedAnno = AnnoS (Idx idx currentType) i expr
+              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+            (e2, apply g3 a')
+            coercions
+          let natArgs = getNatArgs scope b'
+              anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
+          g4 <- checkListNatDims g3 natArgs anno3
+          return (g4, apply g4 b', finalExpr)
+        Nothing -> MM.throwSourcedError i $
+          "Type mismatch:"
+          <> line <> "  expected: " <> prettyTypeU b'
+          <> line <> "  inferred: " <> prettyTypeU a'
+          <> line <> err
 --   Sub (with coercion fallback)
-checkE i g1 e1 b = do
+-- Numeric literal defaulting: an `IntS` checked against any integer base
+-- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
+-- type directly. Same for `RealS` against Real / Float32 / Float64. This
+-- mirrors Haskell's polymorphic numeric literals: the literal `3` writes
+-- the value into whichever integer-family slot the context supplies.
+-- Without this, `3 :: Int8` would synthesize as Int and fail the
+-- Int <: Int8 check now that the fixed-width integer types are
+-- standalone base types rather than aliases of Int. Type aliases are
+-- expanded through the scope so that user-defined names like
+-- `type Char = UInt8` also accept integer literals directly.
+checkE i g (IntS x) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const t) id (TE.evaluateType scope t)
+  if BT.isIntegerBaseType t || BT.isIntegerBaseType tEval
+    then return (g, t, IntS x)
+    else checkEFallback i g (IntS x) t
+checkE i g (RealS x) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const t) id (TE.evaluateType scope t)
+  if BT.isRealBaseType t || BT.isRealBaseType tEval
+    then return (g, t, RealS x)
+    else checkEFallback i g (RealS x) t
+checkE i g1 e1 b = checkEFallback i g1 e1 b
+
+checkEFallback ::
+  Int ->
+  Gamma ->
+  ExprS Int ManyPoly Int ->
+  TypeU ->
+  MorlocMonad
+    ( Gamma
+    , TypeU
+    , ExprS (Indexed TypeU) ManyPoly Int
+    )
+checkEFallback i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
   let a' = apply g2 a
       b' = apply g2 b
@@ -1060,6 +1240,28 @@ subtype' i a b g = do
         MM.sayV $ "Warning: deferred Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
         ) newDeferred
       return g'
+
+-- | Extract nat-kinded argument values from a type, given the Scope.
+-- For Matrix 2 4 Int with alias params [(m, KindNat), (n, KindNat), (a, KindType)]
+-- and args [NatLitU 2, NatLitU 4, VarU Int], returns [NatLitU 2, NatLitU 4].
+getNatArgs :: Scope -> TypeU -> [TypeU]
+getNatArgs scope (AppU (VarU v) args) =
+  case Map.lookup v scope of
+    Just ((params, _, _, _) : _) ->
+      [arg | (Left (_, KindNat), arg) <- zip params args]
+    _ -> []
+getNatArgs _ _ = []
+
+-- | Recursively check nat dimension constraints on list literals.
+-- At each nesting level, checks length(xs) ~ natArg.
+-- For checking (NatLitU): error on mismatch.
+-- For inference (NatVarU): solves the variable via NatSolver.
+checkListNatDims :: Gamma -> [TypeU] -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad Gamma
+checkListNatDims g [] _ = return g
+checkListNatDims g (nat:nats) (AnnoS _ idx (LstS xs)) = do
+  g' <- subtype' idx (NatLitU (fromIntegral (length xs))) nat g
+  foldlM (\g'' x -> checkListNatDims g'' nats x) g' xs
+checkListNatDims g _ _ = return g
 
 -- | Try to find a coercion chain from type a to type b.
 -- Returns a list of coercions (inside-out) and the resulting gamma.
@@ -1242,9 +1444,11 @@ application' i g es t = do
 -- non-constant variables, or unsupported expression forms.
 tryEvalConst :: Gamma -> ExprS g f c -> Maybe ConstVal
 tryEvalConst _ (IntS n) = Just (ConstInt n)
+tryEvalConst _ (StrS s) = Just (ConstStr s)
 tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (TupS es) = ConstTup <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
+tryEvalConst g (LstS es) = ConstList <$> mapM (\(AnnoS _ _ e) -> tryEvalConst g e) es
 tryEvalConst g (LetS v (AnnoS _ _ e1) (AnnoS _ _ e2)) = do
   val' <- tryEvalConst g e1
   tryEvalConst (g { gammaIntVals = Map.insert v val' (gammaIntVals g) }) e2
@@ -1271,10 +1475,36 @@ tryEvalInt g e = case tryEvalConst g e of
 tryExtractIntPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Integer
 tryExtractIntPre g (AnnoS _ _ e) = tryEvalInt g e
 
--- | Resolve nat labels from int literal arguments.
+-- | Try to reduce an expression to a string constant.
+tryEvalStr :: Gamma -> ExprS g f c -> Maybe Text
+tryEvalStr g e = case tryEvalConst g e of
+  Just (ConstStr s) -> Just s
+  _ -> Nothing
+
+tryExtractStrPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe Text
+tryExtractStrPre g (AnnoS _ _ e) = tryEvalStr g e
+
+-- | Try to reduce an expression to a list of string constants. Used to
+-- lift @l:[Str]@ label arguments into ListLitU [StrLitU ...] at the call
+-- site so subsequent @r - l@, @r # l@, etc. reduce.
+tryEvalStrList :: Gamma -> ExprS g f c -> Maybe [Text]
+tryEvalStrList g e = case tryEvalConst g e of
+  Just (ConstList vs) -> mapM asStr vs
+  _ -> Nothing
+  where
+    asStr (ConstStr s) = Just s
+    asStr _ = Nothing
+
+tryExtractStrListPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe [Text]
+tryExtractStrListPre g (AnnoS _ _ e) = tryEvalStrList g e
+
+-- | Resolve nat / str labels from literal arguments.
 -- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
 -- and the corresponding arguments are int literals or let-bound ints,
--- inject NatVarU solutions into gamma so the return type gets concrete dimensions.
+-- inject NatVarU solutions into gamma so the return type gets concrete
+-- dimensions. Same for Str labels (e.g., f:Str -> Tagged f a) — extract
+-- string literals from the corresponding args and inject StrVarU solutions
+-- into gammaStrSubs. See plans/tables/05-labels-as-type-vars.md.
 resolveNatLabels ::
   AnnoS Int ManyPoly Int ->  -- the function expression (pre-synthesis)
   TypeU ->                    -- the synthesized (renamed) function type
@@ -1282,17 +1512,46 @@ resolveNatLabels ::
   Gamma -> Gamma
 resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args g
   | not (Map.null labels) =
-    let origNvs = nub (collectNatVarNames (etype et))
+    let -- Nat labels: match each original NatVarU name to its renamed counterpart
+        origNvs = nub (collectNatVarNames (etype et))
         renamedNvs = nub (collectNatVarNames funType)
-        renMap = Map.fromList (zip origNvs renamedNvs)
-        solutions = Map.fromList
+        natRenMap = Map.fromList (zip origNvs renamedNvs)
+        natSolutions = Map.fromList
           [ (renamedVar, NatLitU n)
           | (origVar, argIdx) <- Map.toList labels
-          , Just renamedVar <- [Map.lookup origVar renMap]
+          , Just renamedVar <- [Map.lookup origVar natRenMap]
           , argIdx < length args
           , Just n <- [tryExtractIntPre g (args !! argIdx)]
           ]
-    in g { gammaNatSubs = Map.union solutions (gammaNatSubs g) }
+        -- Str labels: same pattern, but for StrVarU vars and string literals
+        origSvs = nub (collectStrVarNames (etype et))
+        renamedSvs = nub (collectStrVarNames funType)
+        strRenMap = Map.fromList (zip origSvs renamedSvs)
+        strSolutions = Map.fromList
+          [ (renamedVar, StrLitU s)
+          | (origVar, argIdx) <- Map.toList labels
+          , Just renamedVar <- [Map.lookup origVar strRenMap]
+          , argIdx < length args
+          , Just s <- [tryExtractStrPre g (args !! argIdx)]
+          ]
+        -- List labels: l:[Str] params bind l as a List Str-kinded type
+        -- variable. Lift a literal [Str] argument into a ListLitU of
+        -- StrLitU at the call site so subsequent r - l, r # l, etc.
+        -- reduce.
+        origLvs = nub (collectListVarNames (etype et))
+        renamedLvs = nub (collectListVarNames funType)
+        listRenMap = Map.fromList (zip origLvs renamedLvs)
+        listSolutions = Map.fromList
+          [ (renamedVar, ListLitU (map StrLitU ss))
+          | (origVar, argIdx) <- Map.toList labels
+          , Just renamedVar <- [Map.lookup origVar listRenMap]
+          , argIdx < length args
+          , Just ss <- [tryExtractStrListPre g (args !! argIdx)]
+          ]
+    in g { gammaNatSubs = Map.union natSolutions (gammaNatSubs g)
+         , gammaStrSubs = Map.union strSolutions (gammaStrSubs g)
+         , gammaListSubs = Map.union listSolutions (gammaListSubs g)
+         }
   where
     labels = enatLabels et
 resolveNatLabels _ _ _ g = g

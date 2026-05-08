@@ -109,8 +109,8 @@ data IExpr
   | ITupleLit [IExpr]
   | IRecordLit NamType FVar [(Key, IExpr)]
   | IAccess IExpr IAccessor
-  | ISerCall Text IExpr -- put_value(schema, expr)
-  | IDesCall Text (Maybe IType) IExpr -- get_value[<T>](schema, expr); type used by C++ template
+  | ISerCall Int IExpr -- put_value(schemaId, expr)
+  | IDesCall Int (Maybe IType) IExpr -- get_value[<T>](schemaId, expr); type used by C++ template
   | IForeignCall Text Int [IExpr]
   | IRemoteCall Text Int RemoteResources [IExpr]
   | ILambda [Text] IExpr
@@ -118,11 +118,11 @@ data IExpr
   | IRawExpr Text
   | IDoBlock IExpr -- effect: lambda wrapping expression
   | IEval IExpr -- eval: call effect with no args
-  | IIntrinsicSave Text Text IExpr IExpr -- format, schema, data, path
-  | IIntrinsicLoad Text (Maybe IType) IExpr -- schema, returnType, path -> result (nullable)
-  | IIntrinsicHash Text IExpr -- schema, data -> hex string
-  | IIntrinsicShow Text IExpr -- schema, data -> JSON string
-  | IIntrinsicRead Text (Maybe IType) IExpr -- schema, returnType, json_string -> typed data (nullable)
+  | IIntrinsicSave Text Int IExpr IExpr -- format, schemaId, data, path
+  | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
+  | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
+  | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
+  | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
 
 data IParam = IParam Text (Maybe IType)
 
@@ -198,26 +198,29 @@ data IProgram = IProgram
   , ipManifolds :: [Text]
   , ipLocalDispatch :: [DispatchEntry]
   , ipRemoteDispatch :: [DispatchEntry]
+  , ipSchemaTable :: [Text]  -- ordered list of schema strings; index = schema ID
   }
   deriving (Generic)
 
 instance Binary IProgram
 
 -- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
-buildProgram :: [MDoc] -> [MDoc] -> [SerialManifold] -> IProgram
-buildProgram sources manifolds es =
+buildProgram :: [MDoc] -> [MDoc] -> [SerialManifold] -> [Text] -> IProgram
+buildProgram sources manifolds es schemas =
   IProgram
     { ipSources = map render sources
     , ipManifolds = map render manifolds
     , ipLocalDispatch = extractLocalDispatch es
     , ipRemoteDispatch = extractRemoteDispatch es
+    , ipSchemaTable = schemas
     }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
-buildProgramM :: (Monad m) => [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m IProgram
-buildProgramM sources es translateSeg = do
+buildProgramM :: (Monad m) => [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m [Text] -> m IProgram
+buildProgramM sources es translateSeg getSchemas = do
   manifolds <- mapM translateSeg es
-  return $ buildProgram sources manifolds es
+  schemas <- getSchemas
+  return $ buildProgram sources manifolds es schemas
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
@@ -246,8 +249,10 @@ data LowerConfig m = LowerConfig
   , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
   -- ^ Pattern evaluation (language-specific because patterns use
   -- language-specific constructors for tuples/records)
-  , lcListConstructor :: FVar -> TypeF -> [MDoc] -> MDoc
+  , lcListConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
+  -- The [TypeF] is the FULL applied-type arg list (Nat positions included).
+  -- Use 'listElemTypeF' if you only want the runtime element type.
   , lcTupleConstructor :: FVar -> [MDoc] -> MDoc
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
@@ -276,6 +281,8 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise
   , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
   -- ^ name, contextArgs, boundArgs → partial application expression
+  , lcRegisterSchema :: Text -> m Int
+  -- ^ Register a schema string and return its unique ID (index into schema table)
   }
 
 {- | Expand serialization into IR statements.
@@ -284,8 +291,8 @@ Returns (final expression representing the serialized value, prior statements).
 expandSerialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
 expandSerialize cfg v0 s0 = do
   (stmts, vExpr) <- go v0 s0
-  let schema = render $ serialAstToMsgpackSchema s0
-  return (ISerCall schema vExpr, stmts)
+  schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
+  return (ISerCall schemaId vExpr, stmts)
   where
     go v s
       | isSerializable s = return ([], IRawExpr (render v))
@@ -294,7 +301,7 @@ expandSerialize cfg v0 s0 = do
     construct v (SerialPack _ (p, s)) =
       let unpacker = lcUnpackerName cfg (typePackerReverse p)
        in go (unpacker <> parens v) s
-    construct v lst@(SerialList _ s) = do
+    construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst
       let v' = render $ helperNamer idx
@@ -327,16 +334,16 @@ Returns (final expression representing the deserialized value, prior statements)
 expandDeserialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
 expandDeserialize cfg v0 s0
   | isSerializable s0 = do
-      let schema = render $ serialAstToMsgpackSchema s0
+      schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
-      return (IDesCall schema desType (IRawExpr (render v0)), [])
+      return (IDesCall schemaId desType (IRawExpr (render v0)), [])
   | otherwise = do
       idx <- lcNewIndex cfg
       rawType <- lcRawDeserialAstType cfg s0
       let rawvar = render $ helperNamer idx
-          schema = render $ serialAstToMsgpackSchema s0
+      schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       (x, befores) <- check (helperNamer idx) s0
-      return (x, IAssign rawvar rawType (IDesCall schema rawType (IRawExpr (render v0))) : befores)
+      return (x, IAssign rawvar rawType (IDesCall schemaId rawType (IRawExpr (render v0))) : befores)
   where
     check v s
       | isSerializable s = return (IRawExpr (render v), [])
@@ -346,7 +353,7 @@ expandDeserialize cfg v0 s0
       (x, before) <- check v s'
       let packer = render $ lcPackerName cfg (typePackerForward p)
       return (IPack packer x, before)
-    construct v lst@(SerialList _ s) = do
+    construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg lst
       let v' = render $ helperNamer idx
@@ -488,29 +495,36 @@ lowerNativeExpr cfg _ (CoerceN_ (CoerceToEffect _) _ x) =
   return $ x {poolExpr = lcPrintExpr cfg (IDoBlock (IRawExpr (render (poolExpr x))))}
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) =
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash schema (IRawExpr (render (poolExpr dataDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [dataDocs, pathDocs]) =
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs))))}
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [dataDocs, pathDocs]) = do
+  sid <- lcRegisterSchema cfg schema
   let fmt = "voidstar"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) =
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) = do
+  sid <- lcRegisterSchema cfg schema
   let fmt = "msgpack"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) =
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) = do
+  sid <- lcRegisterSchema cfg schema
   let fmt = "json"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt schema (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
+  sid <- lcRegisterSchema cfg schema
   innerType <- case typeFof origExpr of
     OptionalF t -> lcTypeOf cfg t
     _ -> return Nothing
-  return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad schema innerType (IRawExpr (render (poolExpr pathDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) =
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicShow schema (IRawExpr (render (poolExpr dataDocs))))}
+  return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad sid innerType (IRawExpr (render (poolExpr pathDocs))))}
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs))))}
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
+  sid <- lcRegisterSchema cfg schema
   innerType <- case typeFof origExpr of
     OptionalF t -> lcTypeOf cfg t
     _ -> return Nothing
-  return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead schema innerType (IRawExpr (render (poolExpr strDocs))))}
+  return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead sid innerType (IRawExpr (render (poolExpr strDocs))))}
 -- @schema and @typeof erase their argument: the result is a compile-time
 -- constant string (the schema or user-facing type name), already resolved
 -- into the Intrinsic node's schema slot by Serialize.hs. Emit it as a

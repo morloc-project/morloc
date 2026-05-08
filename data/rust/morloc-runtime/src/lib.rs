@@ -24,6 +24,7 @@ pub mod slurm_ffi;
 pub mod manifest_ffi;
 pub mod eval_ffi;
 pub mod arrow_ffi;
+pub mod arrow_ipc_reader;
 pub mod pool_ffi;
 pub mod daemon_ffi;
 pub mod router_ffi;
@@ -48,4 +49,4 @@ pub(crate) fn init_test_shm() {
 pub use error::MorlocError;
 pub use schema::{Schema, SerialType};
 pub use packet::{PacketHeader, PACKET_MAGIC};
-pub use shm::{RelPtr, VolPtr, AbsPtr, Array, Tensor};
+pub use shm::{RelPtr, VolPtr, AbsPtr, Array};

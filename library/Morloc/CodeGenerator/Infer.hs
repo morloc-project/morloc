@@ -89,20 +89,19 @@ inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
   case weave gscopeUni generalType concreteType of
     (Right tf) -> return tf
     (Left _) -> do
-      -- Evaluate the general type one level and try again
+      -- Evaluate the general type one level and recurse. This is the
+      -- same pattern as inferConcreteType: if a parameterized alias
+      -- resolves only via its body (e.g. `type FixedPair (n :: Nat) a = (a, a)`
+      -- where the concrete-scope mapping lives on Tuple2, not FixedPair),
+      -- we step the alias and retry inference on the body.
       case T.evaluateStep gscopeUni generalType of
-        (Just reducedGType) ->
-          if reducedGType == generalType
-            then
-              MM.throwSystemError $
-                "Failed to resolve concrete type for" <+> pretty t <+> "and cannot evaluate any further"
-            else
-              MM.throwSystemError $
-                "Failed to infer concrete type for" <+> pretty generalType
-                  <> ": Cannot unify with" <+> pretty reducedGType
-        Nothing ->
+        (Just reducedGType)
+          | reducedGType /= generalType ->
+              inferConcreteTypeUniversal lang (typeOf reducedGType)
+        _ ->
           MM.throwSystemError $
-            "Failed to infer concrete type for" <+> pretty t <+> ": Could not reduce type in broadest scope"
+            "Failed to infer concrete type for" <+> pretty t
+              <> ": Could not reduce type in broadest scope"
 
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
@@ -136,13 +135,14 @@ weave gscope = w
     w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
     w (NatLitU n) (NatLitU _) = return $ NatLitF n
     w (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
-    w (NatAddU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
-    w (NatMulU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
-    w (NatSubU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
-    w (NatDivU _ _) _ = return $ NatLitF 0  -- Nat arithmetic erased in concrete type
-    w (NatVarU _) _ = return $ NatLitF 0  -- Nat variable erased in concrete type
+    w NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
+    w (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
     w (LabeledU _ t1) t2 = w t1 t2
-    w (ForallU v (VarU v')) _ | v == v' = return $ NatLitF 0  -- Unresolved variable (UnkT pattern)
+    w (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
     w t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
@@ -151,22 +151,41 @@ weave gscope = w
           else do
             w t1' t2
 
-    -- Weave type arguments, handling Nat params that may be erased in concrete type.
-    -- Nat-kinded general args have no concrete counterpart, so we consume them
-    -- without advancing the concrete list, but still emit a NatLitF placeholder.
+    -- Weave type arguments, handling Nat params that may be erased OR
+    -- preserved in the concrete type. When the concrete head is also a Nat
+    -- expression, consume it in lockstep; otherwise consume only the general
+    -- arg (erased in concrete). Either way we emit a NatLitF placeholder.
     weaveArgs :: [TypeU] -> [TypeU] -> Either MDoc [TypeF]
     weaveArgs [] [] = Right []
-    weaveArgs [] _ = Left "concrete type has more args than general type in weave"
-    weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs cs
-    weaveArgs (NatAddU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
-    weaveArgs (NatMulU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
-    weaveArgs (NatSubU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
-    weaveArgs (NatDivU _ _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs [] cs
+      | all isNatLikeU cs = Right []  -- trailing Nat args in concrete only
+      | otherwise = Left "concrete type has more non-Nat args than general type in weave"
+    weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
-    weaveArgs (NatVarU _ : gs) cs = (NatLitF 0 :) <$> weaveArgs gs cs
-    weaveArgs (ForallU v (VarU v') : gs) cs | v == v' = (NatLitF 0 :) <$> weaveArgs gs cs
+    weaveArgs (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
     weaveArgs (g:gs) (c:cs) = (:) <$> w g c <*> weaveArgs gs cs
     weaveArgs _ [] = Left "general type has more non-Nat args than concrete type in weave"
+
+    isNatLikeU :: TypeU -> Bool
+    isNatLikeU (NatLitU _) = True
+    isNatLikeU (NatVarU _) = True
+    isNatLikeU (NatAddU _ _) = True
+    isNatLikeU (NatMulU _ _) = True
+    isNatLikeU (NatSubU _ _) = True
+    isNatLikeU (NatDivU _ _) = True
+    isNatLikeU NatVoidU = True
+    isNatLikeU _ = False
+
+    -- Drop a leading Nat-shaped concrete arg, if present.
+    dropNatHead :: [TypeU] -> [TypeU]
+    dropNatHead (c : cs) | isNatLikeU c = cs
+    dropNatHead cs = cs
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do
@@ -175,19 +194,45 @@ inferConcreteVar lang t0@(Idx i v) = do
   globalScope <- MM.getConcreteUniversalScope lang
   case Map.lookup v localScope of
     (Just ((_, t, _, True) : _)) -> return $ FV v (CV . unTVar $ extractKey t)
-    (Just ((_, t, _, False) : _)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
+    -- Non-terminal concrete alias: e.g. `type Cpp => Array a = List a`.
+    -- Follow through the body's head (recursively) until a terminal entry
+    -- is reached, then pair the *original* v with the resolved concrete
+    -- name. This preserves the morloc-level identity (Array stays Array)
+    -- while picking up the runtime concrete (std::vector here).
+    (Just ((_, t, _, False) : _)) -> do
+      FV _ cv <- inferConcreteVar lang (Idx i (extractKey t))
+      return $ FV v cv
     _ -> case Map.lookup v globalScope of
       (Just ((_, t, _, True) : _)) -> do
         -- TODO fix this, the types should be in scope
         MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
         return $ FV v (CV . unTVar $ extractKey t)
-      (Just ((_, t, _, False) : _)) -> error $ "Substituting the non-terminal " <> show (extractKey t) <> " into type " <> show t
+      -- Same recursive resolution at the global scope level.
+      (Just ((_, t, _, False) : _)) -> do
+        FV _ cv <- inferConcreteVar lang (Idx i (extractKey t))
+        return $ FV v cv
       _ -> do
-        -- Try transitive resolution: expand through general scope
-        (cscope, gscope) <- getScope i lang
-        case T.pairEval cscope gscope (VarU v) of
-          Right (VarU v') -> return $ FV v (CV (unTVar v'))
-          Right _ -> error $ "Transitive resolution of " <> show (unTVar v)
-                          <> " yielded non-variable type"
-          Left _ -> error $ "Cannot find type variable "
-                         <> show (unTVar v) <> " in scope"
+        -- Not in any concrete scope. Try general scope: a general-only
+        -- alias like `type MyVec (n :: Nat) a = Vector n a` has no
+        -- concrete mapping of its own, but its body's head (Vector)
+        -- should be resolvable. Recurse on the body's head, preserving
+        -- the original morloc identity (`v`) while picking up the
+        -- transitively resolved concrete name.
+        --
+        -- This is the bare-VarU analog of `expandHeadOnly`'s kind-based
+        -- realignment: for general aliases that have params but no args
+        -- in this lookup, we still want to chase the alias by its head.
+        gscopeUni <- MM.getGeneralUniversalScope
+        case Map.lookup v gscopeUni of
+          (Just ((_, body, _, _) : _)) -> do
+            FV _ cv <- inferConcreteVar lang (Idx i (extractKey body))
+            return $ FV v cv
+          _ -> do
+            -- Last resort: transitive resolution via pairEval.
+            (cscope, gscope) <- getScope i lang
+            case T.pairEval cscope gscope (VarU v) of
+              Right (VarU v') -> return $ FV v (CV (unTVar v'))
+              Right _ -> error $ "Transitive resolution of " <> show (unTVar v)
+                              <> " yielded non-variable type"
+              Left _ -> error $ "Cannot find type variable "
+                             <> show (unTVar v) <> " in scope"

@@ -1,0 +1,50 @@
+--- vecReal4 ---
+[1,2,3,4]
+--- vecReal0 ---
+[]
+--- vecInt3 ---
+[10,20,30]
+--- vecBool2 ---
+[true,false]
+--- vecStr3 ---
+["a","b","c"]
+--- chainVecReal3 ---
+[7,8,9]
+--- chainVecReal0 ---
+[]
+--- fixedPairInt ---
+[42,99]
+--- fixedPairStr ---
+["hello","world"]
+--- rtVecReal4 ---
+[1,2,3,4]
+--- rtVecReal0 ---
+[]
+--- rtVecInt3 ---
+[10,20,30]
+--- rtVecInt0 ---
+[]
+--- rtVecBool2 ---
+[true,false]
+--- rtChainVec ---
+[7,8,9]
+--- rtFixedPair ---
+[42,99]
+--- sumVecArg ---
+7
+--- sumVecZeroArg ---
+0
+--- makeVecResult ---
+[100,200,300,400]
+--- mat2x3 ---
+[[2,3],[1,2,3,4,5,6]]
+--- mat0x3 ---
+[[0,3],[]]
+--- mat3x0 ---
+[[3,0],[]]
+--- mat0x0 ---
+[[0,0],[]]
+--- rtMat2x3 ---
+[[2,3],[1,2,3,4,5,6]]
+--- rtMat0x3 ---
+[[0,3],[]]

@@ -626,6 +626,12 @@ checkSuperclassConstraints i cls params constraints = do
   mapM_ (checkOne classDefs) constraints
   where
     checkOne :: Map ClassName [Constraint] -> Constraint -> MorlocMonad ()
+    -- Primitive constraints (CMember / CSubset / CDisjoint) are not
+    -- superclass constraints; they are typecheck-time constraints over
+    -- kind-level structural relationships. Skip them here.
+    checkOne _ (CMember _ _) = return ()
+    checkOne _ (CSubset _ _) = return ()
+    checkOne _ (CDisjoint _ _) = return ()
     checkOne classDefs (Constraint superCls superTypeArgs) = do
       let substArgs = applyParams superTypeArgs params
       case Map.lookup superCls classDefs of

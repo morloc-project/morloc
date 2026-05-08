@@ -27,6 +27,7 @@ import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified CppPrinter as CP
 import qualified Data.Char as DC
+import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -41,6 +42,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , expandSerialize
   , toIType
   )
+import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -109,16 +111,28 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
   cppTypeOf = f . typeFof
     where
       f (UnkF (FV _ x)) = return $ pretty x
+      -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
+      -- the general type variable @BT.table@. The wire schema marker is
+      -- @T@ on the encoder side; here on the C++ side it must lower to
+      -- @mlc::ArrowTable@ regardless of any concrete-type hint (the
+      -- legacy @<arrow>@ hint has been retired -- recognition is now
+      -- by general-type identity, not by the concrete-name slot).
+      f (VarF (FV gv _)) | gv == BT.table = return "mlc::ArrowTable"
       f (VarF (FV _ x)) = return $ pretty x
       f (FunF ts t) = do
         t' <- f t
         ts' <- mapM f ts
         return $ "std::function<" <> t' <> tupled ts' <> ">"
       f (NatLitF _) = return mempty
+      f NatVoidF = return mempty
+      f (StrLitF _) = return mempty
+      f StrVoidF = return mempty
       f (AppF t ts) = do
+        -- Macro $N is positional in the body args (Nat positions included).
+        -- Both NatLitF and NatVoidF render to mempty, preserving alignment
+        -- without contributing to template instantiations.
         t' <- f t
-        let runtimeTs = [x | x <- ts, not (isNatLitF x)]
-        ts' <- mapM f runtimeTs
+        ts' <- mapM f ts
         return . pretty $ expandMacro (render t') (map render ts')
       f t@(NamF _ (FV gc (CV "struct")) _ rs) = do
         recmap <- CMS.gets translatorRecmap
@@ -128,7 +142,11 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
             return $ recName rec <> params
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
-      f (NamF _ (FV _ (CV "arrow")) _ _) = return "mlc::ArrowTable"
+      -- Typed `Table n r` (NamF tagged NamTable) lowers to mlc::ArrowTable
+      -- the same way as the kindless form. The concrete-name slot is
+      -- empty post-refactor; the structural NamTable identifier carries
+      -- the dispatch.
+      f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
       f (NamF _ (FV _ s) ps _) = do
         ps' <- mapM f ps
         return $ pretty s <> CP.printRecordTemplate ps'
@@ -138,8 +156,6 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       f (OptionalF t) = do
         t' <- f t
         return $ "std::optional<" <> t' <> ">"
-      isNatLitF (NatLitF _) = True
-      isNatLitF _ = False
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
@@ -153,6 +169,7 @@ data CppTranslatorState = CppTranslatorState
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
+  , translatorSchemas :: Map.Map Text Int
   }
 
 instance Defaultable CppTranslatorState where
@@ -165,6 +182,7 @@ instance Defaultable CppTranslatorState where
       , translatorRemoteManifoldSet = Set.empty
       , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
       , translatorEffectLabels = Map.empty
+      , translatorSchemas = Map.empty
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -182,13 +200,39 @@ resetCounter = do
   s <- CMS.get
   CMS.put $ s {translatorCounter = 0}
 
+cppRegisterSchema :: Text -> CppTranslator Int
+cppRegisterSchema schema = do
+  s <- CMS.get
+  case Map.lookup schema (translatorSchemas s) of
+    Just sid -> return sid
+    Nothing -> do
+      let sid = Map.size (translatorSchemas s)
+      CMS.put $ s {translatorSchemas = Map.insert schema sid (translatorSchemas s)}
+      return sid
+
+getCppSchemaTable :: CppTranslator [Text]
+getCppSchemaTable = do
+  m <- CMS.gets translatorSchemas
+  return $ map fst $ sortBy (comparing snd) $ Map.toList m
+
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
   -- scopeMap :: GMap Int MVar (Map.Map Lang Scope)
   scopeMap <- MM.gets stateConcreteTypedefs
 
   -- universalScopeMap :: GMap Int MVar Scope
-  universalScopeMap <- MM.gets stateUniversalConcreteTypedefs
+  universalScopeMap0 <- MM.gets stateUniversalConcreteTypedefs
+
+  -- General-scope aliases (e.g. `type Timestamp = Int64`) must chain into
+  -- the concrete cpp scope so that a record field declared with a general
+  -- alias resolves through its concrete mapping (`Cpp => Int64 = "int64_t"`).
+  -- Without this merge, `evaluateType` against the cpp scope alone leaves
+  -- `Timestamp` un-expanded and the printer emits the morloc alias name
+  -- literally into pool.cpp. Concrete entries take precedence on collision.
+  generalScope <- MM.gets stateUniversalGeneralTypedefs
+  let cppScope = fromMaybe Map.empty (Map.lookup cppLang universalScopeMap0)
+      mergedCppScope = Map.union cppScope generalScope
+      universalScopeMap = Map.insert cppLang mergedCppScope universalScopeMap0
 
   effectMap <- MM.gets stateManifoldEffects
 
@@ -234,7 +278,7 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
   -- build the program (translates each manifold tree)
-  program <- buildProgramM includeDocs es translateSegment
+  program <- buildProgramM includeDocs es translateSegment getCppSchemaTable
 
   -- create and return complete pool script
   return $ CP.printProgram serializationCode signatures program
@@ -298,7 +342,7 @@ makeTheMaker srcs = do
 
   let cmd =
         SysRun . Code . render $
-          [idoc|g++ -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+          [idoc|${CXX:-g++} -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 
@@ -471,6 +515,7 @@ PROPAGATE_ERROR(errmsg)|]
     , lcMakeLambda = \mname contextArgs boundArgs ->
         let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
          in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
+    , lcRegisterSchema = cppRegisterSchema
     }
   where
     -- For serialization, records become tuples (that's what _put_value/toAnything expects)
@@ -687,17 +732,18 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
     showDefType _ (NamT _ v _ _) = pretty v
     showDefType _ (NatLitT _) = mempty
-    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) runtimeTs)
-      where runtimeTs = [t | t <- ts, not (isNatLitT t)]
+    showDefType _ NatVoidT = mempty
+    showDefType ps (AppT (VarT (TV v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ (EffectT _ _) = error "Cannot show EffectT"
     showDefType _ (NatAddT _ _) = mempty
     showDefType _ (NatMulT _ _) = mempty
     showDefType _ (NatSubT _ _) = mempty
     showDefType _ (NatDivT _ _) = mempty
+    showDefType _ (StrLitT _) = mempty
+    showDefType _ (StrConcatT _ _) = mempty
+    showDefType _ StrVoidT = mempty
     showDefType ps (OptionalT t) = "std::optional<" <> showDefType ps t <> ">"
-    isNatLitT (NatLitT _) = True
-    isNatLitT _ = False
 
 -- C++ specific source handling (flags, headers, libraries)
 
@@ -725,7 +771,7 @@ handleFlagsAndPaths srcs = do
 
 gccVersionFlag :: Int -> Text
 gccVersionFlag i
-  | i <= 17 = "-std=c++17"
+  | i <= 20 = "-std=c++20"
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)

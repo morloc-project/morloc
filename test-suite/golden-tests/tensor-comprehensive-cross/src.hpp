@@ -1,15 +1,17 @@
 #ifndef __SRC_HPP__
 #define __SRC_HPP__
 #include "mlc_tensor.hpp"
+#include <vector>
 #include <cstdint>
 
 // --- 2D Real (3x4, values 1..12) ---
 
 mlc::Tensor2<double> cppMakeMat() {
     mlc::Tensor2<double> m({3, 4});
+    auto mv = m.view();
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 4; j++)
-            m(i, j) = (double)(i * 4 + j + 1);
+            mv(i, j) = (double)(i * 4 + j + 1);
     return m;
 }
 
@@ -44,15 +46,15 @@ std::vector<double> cppGetCorners3d(const mlc::Tensor3<double>& t) {
 
 // --- 1D Real (10 elements, values 1..10) ---
 
-mlc::Tensor1<double> cppMakeVec() {
-    mlc::Tensor1<double> v({10});
+std::vector<double> cppMakeVec() {
+    std::vector<double> v(10);
     for (int i = 0; i < 10; i++) v[i] = (double)(i + 1);
     return v;
 }
 
-double cppSumVec(const mlc::Tensor1<double>& v) {
+double cppSumVec(const std::vector<double>& v) {
     double s = 0;
-    for (size_t k = 0; k < v.size(); k++) s += v.data()[k];
+    for (double x : v) s += x;
     return s;
 }
 
@@ -70,87 +72,83 @@ double cppSum4d(const mlc::Tensor4<double>& t) {
     return s;
 }
 
-// --- 1D Int (8 elements, values 10..17) ---
+// --- 1D Int32 (8 elements, values 10..17) ---
 
-mlc::Tensor1<int> cppMakeIntVec() {
-    mlc::Tensor1<int> v({8});
-    for (int i = 0; i < 8; i++) v[i] = i + 10;
+std::vector<int32_t> cppMakeIntVec() {
+    std::vector<int32_t> v(8);
+    for (int i = 0; i < 8; i++) v[i] = (int32_t)(i + 10);
     return v;
 }
 
-int cppSumIntVec(const mlc::Tensor1<int>& v) {
+int cppSumIntVec(const std::vector<int32_t>& v) {
     int s = 0;
-    for (size_t k = 0; k < v.size(); k++) s += v.data()[k];
+    for (int32_t x : v) s += x;
     return s;
 }
 
 // --- 1D Bool (6 elements: T,F,T,T,F,T) ---
 
-mlc::Tensor1<bool> cppMakeBoolVec() {
-    mlc::Tensor1<bool> v({6});
-    v[0] = 1; v[1] = 0; v[2] = 1; v[3] = 1; v[4] = 0; v[5] = 1;
-    return v;
+std::vector<bool> cppMakeBoolVec() {
+    return std::vector<bool>{true, false, true, true, false, true};
 }
 
-int cppCountTrue(const mlc::Tensor1<bool>& v) {
+int cppCountTrue(const std::vector<bool>& v) {
     int count = 0;
-    for (size_t k = 0; k < v.size(); k++) {
-        if (v.data()[k]) count++;
+    for (bool b : v) {
+        if (b) count++;
     }
     return count;
 }
 
 // --- Empty tensor (0 elements) ---
 
-mlc::Tensor1<double> cppMakeEmpty() {
-    return mlc::Tensor1<double>({0});
+std::vector<double> cppMakeEmpty() {
+    return std::vector<double>();
 }
 
-double cppSumEmpty(const mlc::Tensor1<double>& v) {
+double cppSumEmpty(const std::vector<double>& v) {
     double s = 0;
-    for (size_t k = 0; k < v.size(); k++) s += v.data()[k];
+    for (double x : v) s += x;
     return s;
 }
 
 // --- Single element (value 42) ---
 
-mlc::Tensor1<double> cppMakeSingle() {
-    mlc::Tensor1<double> v({1});
-    v[0] = 42.0;
-    return v;
+std::vector<double> cppMakeSingle() {
+    return std::vector<double>{42.0};
 }
 
-double cppSumSingle(const mlc::Tensor1<double>& v) {
+double cppSumSingle(const std::vector<double>& v) {
     double s = 0;
-    for (size_t k = 0; k < v.size(); k++) s += v.data()[k];
+    for (double x : v) s += x;
     return s;
 }
 
 // --- Large tensor (5000 doubles = 40KB) ---
 
-mlc::Tensor1<double> cppMakeLarge() {
-    mlc::Tensor1<double> v({5000});
+std::vector<double> cppMakeLarge() {
+    std::vector<double> v(5000);
     for (int i = 0; i < 5000; i++) v[i] = (double)i;
     return v;
 }
 
-double cppSumLarge(const mlc::Tensor1<double>& v) {
+double cppSumLarge(const std::vector<double>& v) {
     double s = 0;
-    for (size_t k = 0; k < v.size(); k++) s += v.data()[k];
+    for (double x : v) s += x;
     return s;
 }
 
 // --- Very large tensor (50000 doubles = 400KB, crosses SHM threshold) ---
 
-mlc::Tensor1<double> cppMakeHuge() {
-    mlc::Tensor1<double> v({50000});
+std::vector<double> cppMakeHuge() {
+    std::vector<double> v(50000);
     for (int i = 0; i < 50000; i++) v[i] = (double)i;
     return v;
 }
 
-double cppSumHuge(const mlc::Tensor1<double>& v) {
+double cppSumHuge(const std::vector<double>& v) {
     double s = 0;
-    for (size_t k = 0; k < v.size(); k++) s += v.data()[k];
+    for (double x : v) s += x;
     return s;
 }
 

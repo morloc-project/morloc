@@ -1,0 +1,87 @@
+-- ============================================================================
+-- let-do-fusion-effects: explore the interaction between named effects and
+-- the fusion changes.
+--
+-- Hazards probed:
+--   1. <IO> effects on a chain whose statements come from multiple langs.
+--      pushForceIntoRemote in Express.hs strips EffectT from the cross-
+--      language manifold's return type so the remote pool returns the
+--      forced concrete type. This must keep working when fusion changes
+--      the chain's manifold structure.
+--   2. Multi-label effects (<IO, Error>) on a fused do-block. The chain's
+--      effect set must be inferred from its statements; if Realize picks
+--      a lang based on bindings only, multi-label effect inference must
+--      not change.
+--   3. Pure expression at the tail of an effectful do-block (must coerce
+--      from `a` to `<IO> a` via CoerceToEffect; the coercion site must
+--      survive fusion).
+-- ============================================================================
+
+module main
+  ( ioOnly
+  , effectThenPure
+  , polyglotEffectChain
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "helpers.hpp" ("cppEcho", "cppAdd")
+source Py from "helpers.py" ("py_echo" as pyEcho, "py_add" as pyAdd)
+
+cppEcho :: Int -> <IO> Int
+cppAdd :: Int -> Int -> Int
+pyEcho :: Int -> <IO> Int
+pyAdd :: Int -> Int -> Int
+
+------------------------------------------------------------------------
+-- STORY 1: <IO> chain with all-Cpp statements.
+--
+-- A pure-Cpp do-block annotated <IO>. The `<IO>` effect comes from the
+-- statements, not from the chain itself. Fusion should give us ONE
+-- C++ manifold containing all three echoes.
+--
+-- Stderr: C5, C6, C7
+-- Result: cppEcho 7 returns 8
+------------------------------------------------------------------------
+ioOnly :: <IO> Int
+ioOnly = do
+  a <- cppEcho 5
+  b <- cppEcho 6
+  cppEcho (cppAdd a b)
+-- a = 6, b = 7, cppAdd 6 7 = 13, cppEcho 13 = 14, but stderr is "C5, C6, C13"
+-- Wait: cppEcho 5 prints "C5" and returns 6. cppEcho 6 prints "C6" returns 7.
+--       cppAdd a b = cppAdd 6 7 = 13. cppEcho 13 prints "C13" returns 14.
+-- Stderr: C5, C6, C13. Result: 14.
+
+------------------------------------------------------------------------
+-- STORY 2: Effectful do-block with a pure tail expression.
+--
+-- `do { x <- cppEcho 1; cppAdd x 100 }` has an effectful bind followed
+-- by a pure expression. The chain's type is `<IO> Int`. The tail
+-- `cppAdd x 100` is `Int`, which gets coerced to `<IO> Int` at the
+-- chain boundary.
+--
+-- Hazard: a fusion bug might lift the tail above the EvalS, changing
+-- the observed effect order. Order: C1, then add. Result: 102.
+------------------------------------------------------------------------
+effectThenPure :: <IO> Int
+effectThenPure = do
+  x <- cppEcho 1
+  cppAdd x 100
+
+------------------------------------------------------------------------
+-- STORY 3: Polyglot <IO> chain.
+--
+-- Mix Cpp and Py effectful calls. Each statement is its own pool;
+-- the chain CANNOT be fused into a single language. Each call still
+-- runs in order, with the right pool.
+--
+-- Stderr: C2, P3
+-- Result: cppEcho 2 -> 3, pyEcho 3 -> 4. cppAdd 3 4 = 7
+------------------------------------------------------------------------
+polyglotEffectChain :: <IO> Int
+polyglotEffectChain = do
+  a <- cppEcho 2
+  b <- pyEcho a
+  cppAdd a b

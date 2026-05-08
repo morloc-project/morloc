@@ -118,8 +118,14 @@ fn main() {
     };
     process::set_tmpdir(tmpdir.clone());
 
+    // Reap orphaned SHM segments from previous runs (SIGKILLed nexus,
+    // crashed tests, etc.) before we create our own. Best-effort.
+    process::cleanup_stale_shm();
+
     let job_hash = process::make_job_hash(42);
-    let shm_basename = format!("morloc-{}", job_hash);
+    // PID is embedded in the basename so cleanup_stale_shm() can identify
+    // orphans without reading the SHM headers.
+    let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
 
     // Initialize shared memory via libmorloc.so using dlsym.
     // CRITICAL: We must use dlsym to call the CDYLIB's shinit, not the rlib's.

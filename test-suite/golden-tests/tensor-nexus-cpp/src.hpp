@@ -4,9 +4,10 @@
 
 mlc::Tensor2<int> makeMatrix() {
     mlc::Tensor2<int> m({3, 4});
+    auto mv = m.view();
     for (int i = 0; i < 3; i++)
         for (int j = 0; j < 4; j++)
-            m(i, j) = i * 4 + j + 1;
+            mv(i, j) = i * 4 + j + 1;
     return m;
 }
 #endif

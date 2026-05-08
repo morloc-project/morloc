@@ -63,6 +63,7 @@ data RState = RState
   { rLangs :: [Lang]
   , rApplied :: [AnnoS (Indexed Type) Many Int]
   , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
+  , rLetVars :: Map EVar [(Lang, Int)] -- ^ let-bound variable -> RHS scores
   }
 
 emptyRState =
@@ -70,6 +71,7 @@ emptyRState =
     { rLangs = []
     , rApplied = []
     , rBndVars = Map.empty
+    , rLetVars = Map.empty
     }
 
 {- | Choose a single concrete implementation. In the future, this component
@@ -184,12 +186,22 @@ realizeWithRegistry registry s0 = do
     scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
     scoreExpr rstat (LetS v e1 e2, i) = do
       e1' <- scoreAnnoS rstat e1
-      e2' <- scoreAnnoS rstat e2
-      -- include RHS scores so unused let bindings (e.g. from do-block bare
-      -- statements) still propagate their language requirement
-      let best = minPairs (scoresOf e1' ++ scoresOf e2')
+      -- Make the let-bound variable's RHS scores available to LetBndS
+      -- references in the body. Without this, LetBndS would fall back to
+      -- the calling context's lang preferences (zipLang on rstat.rLangs)
+      -- and miss the binding's actual language requirement.
+      let rstat' = rstat { rLetVars = Map.insert v (scoresOf e1') (rLetVars rstat) }
+      e2' <- scoreAnnoS rstat' e2
+      -- Score the chain like an application: the binding's RHS and the body
+      -- both contribute, with cross-language penalties applied per-lang.
+      let best = scoreApp [] [ minPairs (scoresOf e1')
+                             , minPairs (scoresOf e2')
+                             ]
       return (LetS v e1' e2', Idx i best)
-    scoreExpr rstat (LetBndS v, i) = return (LetBndS v, zipLang i rstat)
+    scoreExpr rstat (LetBndS v, i) =
+      case Map.lookup v (rLetVars rstat) of
+        Just scs -> return (LetBndS v, Idx i scs)
+        Nothing -> return (LetBndS v, zipLang i rstat)
     scoreExpr rstat (CallS v, i) = return (CallS v, zipLang i rstat)
     scoreExpr rstat (IfS c t e, i) = do
       c' <- scoreAnnoS rstat c
@@ -211,7 +223,7 @@ realizeWithRegistry registry s0 = do
       let Idx _ langScores = zipLang i rstat
           best = case xs' of
             [] -> langScores
-            _ -> minPairs (concatMap scoresOf xs')
+            _ -> scoreApp [] [minPairs (scoresOf x') | x' <- xs']
       return (IntrinsicS intr xs', Idx i best)
 
     -- calculate the score for an application based on the score of the function
@@ -252,8 +264,8 @@ realizeWithRegistry registry s0 = do
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState _ rstat@(RState _ [] _) = rstat
-    updateRState (v : vs) rstat@(RState _ (p : ps) bound) =
+    updateRState _ rstat@(RState _ [] _ _) = rstat
+    updateRState (v : vs) rstat@(RState _ (p : ps) bound _) =
       updateRState vs $
         rstat {rApplied = ps, rBndVars = Map.insert v p bound}
 
@@ -408,6 +420,10 @@ realizeWithRegistry registry s0 = do
         compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
         compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
         compatibleType (NatLitT n1) (NatLitT n2) = n1 == n2
+        -- NatVoidT is wildcard-compatible with any Nat-shaped value
+        compatibleType NatVoidT (NatLitT _) = True
+        compatibleType (NatLitT _) NatVoidT = True
+        compatibleType NatVoidT NatVoidT = True
         compatibleType t1 t2 = t1 == t2
 
     ----- NOTE: Some cases are inseperable, the code above does not

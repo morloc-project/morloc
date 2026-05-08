@@ -156,16 +156,33 @@ makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
 makeSchema mid lang t = do
   ft <- Infer.inferConcreteTypeUniversal lang t
   ast <- Serial.makeSerialAST mid lang ft
-  return $ Serial.serialAstToMsgpackSchema ast
+  -- Apply nat dimension constraints from the original type to the SerialAST.
+  -- The TypeF may have lost nat params during alias expansion, but the
+  -- original Type still has them.
+  let ast' = applyNatDimsFromType t ast
+  return $ Serial.serialAstToMsgpackSchema ast'
+
+-- | Extract nat dimension constraints from a Type and apply them to a SerialAST.
+-- For example, Matrix 2 3 Int has NatLitT args [2, 3]. After alias expansion,
+-- the SerialAST is SerialList(SerialList(SerialInt)). This function annotates
+-- each nesting level with the corresponding dimension constraint.
+applyNatDimsFromType :: Type -> SerialAST -> SerialAST
+applyNatDimsFromType (AppT _ args) ast =
+  let dims = [Just n | NatLitT n <- args, n > 0]
+  in applyDims dims ast
+  where
+    applyDims (d:ds) (SerialList v _ inner) = SerialList v d (applyDims ds inner)
+    applyDims _ s = s
+applyNatDimsFromType _ ast = ast
 
 makeGastSchemas :: Type -> MorlocMonad (MDoc, [MDoc])
 makeGastSchemas (FunT ts t) = do
-  serialAsts <- mapM generalTypeToSerialAST (t : ts)
+  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM generalTypeToSerialAST (t : ts)
   case map Serial.serialAstToMsgpackSchema serialAsts of
     (s : ss) -> return (s, ss)
     [] -> error "makeGastSchemas: FunT produced empty serial AST list"
 makeGastSchemas t = do
-  s <- Serial.serialAstToMsgpackSchema <$> generalTypeToSerialAST t
+  s <- Serial.serialAstToMsgpackSchema . applyNatDimsFromType t <$> generalTypeToSerialAST t
   return (s, [])
 
 generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
@@ -194,10 +211,21 @@ generalTypeToSerialAST (VarT v)
         Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
         x -> error $ "Unexpected scope: " <> show x
 generalTypeToSerialAST (AppT (VarT v) [t])
-  | v == MBT.list = SerialList (FV v (CV "")) <$> generalTypeToSerialAST t
+  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST t
   | otherwise = resolveAliasApp v [t]
 generalTypeToSerialAST (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) = SerialTuple (FV v (CV "")) <$> mapM generalTypeToSerialAST ts
+  -- A Table lowers to a SerialObject NamTable. The encoder emits the
+  -- @T@ wire token (or @T:K<entries>@ when the row is concrete);
+  -- 'Serial.hasArrowHint' identifies these structurally for the
+  -- Arrow-SHM dispatch. No concrete-type hint is attached -- the @T@
+  -- marker itself is the dispatch signal.
+  | v == MBT.table =
+      let cols = case ts of
+            [_, NamT _ _ _ rs] -> rs
+            _                  -> []
+      in SerialObject NamTable (FV MBT.table (CV "")) []
+           <$> mapM (secondM generalTypeToSerialAST) cols
   | otherwise = resolveAliasApp v ts
 generalTypeToSerialAST (EffectT _ t) = generalTypeToSerialAST t
 generalTypeToSerialAST (OptionalT t) = do
@@ -261,9 +289,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       return $ case s of
         (SerialFloat32 _) -> LitX F32X (MT.pack (show v))
         _ -> LitX F64X (MT.pack (show v))
-    toNexusExpr (AnnoS (Idx i t) _ (IntS v)) = do
+    toNexusExpr (AnnoS (Idx ix t) _ (IntS v)) = do
       s <- generalTypeToSerialAST t
-      checkIntBounds i v s
+      checkIntBounds ix v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
         (SerialInt16 _) -> LitX I16X (MT.pack (show v))

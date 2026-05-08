@@ -188,6 +188,13 @@ fn json_to_voidstar(
             let arr_val = value.as_array().ok_or_else(|| err("expected array"))?;
             let es = schema.parameters.first().ok_or_else(|| err("array has no element type"))?;
             let n = arr_val.len();
+            // Validate array length against schema constraint (offsets[0], 0 = unconstrained)
+            let expected = schema.offsets.first().copied().unwrap_or(0);
+            if expected > 0 && n != expected {
+                return Err(MorlocError::Other(format!(
+                    "Array length mismatch: expected {}, got {}", expected, n
+                )));
+            }
             let ew = es.width;
             let hdr = std::mem::size_of::<Array>();
 
@@ -239,8 +246,16 @@ fn json_to_voidstar(
             }
             Ok(w.as_ptr())
         }
-
-        SerialType::Tensor => Err(err("Tensor JSON parsing not yet implemented")),
+        SerialType::Table => {
+            // JSON-to-Table is conceptually meaningful (read records from
+            // a JSON array and build an Arrow buffer) but is not the
+            // standard JSON-load path; CSV/JSON-to-Arrow lives in the
+            // dedicated arrow_ipc_reader module. Hitting this branch
+            // means a Table value was routed through the generic JSON
+            // loader, which has no Arrow construction logic. Surface a
+            // clear error rather than silently corrupt.
+            Err(err("Cannot load a Table from generic JSON; use the Arrow CSV/JSON reader path"))
+        }
     }
 }
 
@@ -369,44 +384,15 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
                 to_json(&r.at(shm::align_up(1, inner.alignment().max(1))), inner, buf)?;
             }
         }
-        SerialType::Tensor => {
-            // SAFETY: reading Tensor struct from SHM
-            let tensor = unsafe { &*(r.ptr as *const shm::Tensor) };
-            if tensor.total_elements == 0 {
-                buf.push_str("[]");
-            } else {
-                let ndim = schema.offsets.first().copied().unwrap_or(1);
-                let sp = shm::rel2abs(tensor.shape)?;
-                // SAFETY: sp points to ndim i64 values in SHM
-                let shape: Vec<usize> = (0..ndim).map(|i| unsafe { *((sp as *const i64).add(i)) } as usize).collect();
-                let dp = shm::rel2abs(tensor.data)?;
-                let es = &schema.parameters[0];
-                tensor_to_json(buf, dp, &shape, tensor.total_elements, es)?;
-            }
+        SerialType::Table => {
+            // Reverse of the json_to_voidstar Table branch: rendering a
+            // Table to JSON requires walking the Arrow buffer's records,
+            // which lives in a dedicated path (arrow-to-json), not the
+            // generic JSON serialiser. Surface a clear error rather than
+            // emit malformed JSON.
+            return Err(err("Cannot render a Table to generic JSON; use the Arrow-to-JSON path"));
         }
     }
-    Ok(())
-}
-
-fn tensor_to_json(
-    buf: &mut String, data: *const u8, shape: &[usize], stride: usize, es: &Schema,
-) -> Result<(), MorlocError> {
-    buf.push('[');
-    if shape.len() == 1 {
-        for i in 0..shape[0] {
-            if i > 0 { buf.push(','); }
-            // SAFETY: data + i * es.width within tensor data
-            let r = unsafe { ShmReader::new(data.add(i * es.width)) };
-            to_json(&r, es, buf)?;
-        }
-    } else {
-        let inner = stride / shape[0];
-        for i in 0..shape[0] {
-            if i > 0 { buf.push(','); }
-            tensor_to_json(buf, data.wrapping_add(i * inner * es.width), &shape[1..], inner, es)?;
-        }
-    }
-    buf.push(']');
     Ok(())
 }
 

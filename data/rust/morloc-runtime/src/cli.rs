@@ -157,9 +157,6 @@ fn shfree_by_schema_inner(
                     shfree_by_schema_inner(child, &schema.parameters[i])?;
                 }
             }
-            SerialType::Tensor => {
-                // shape and data are inline, freed by parent shfree
-            }
             _ => {
                 // fixed-size: no sub-data
             }
@@ -246,13 +243,6 @@ fn adjust_relptrs_inner(
                     )?;
                 }
             }
-            SerialType::Tensor => {
-                let tensor = &mut *(data as *mut shm::Tensor);
-                if tensor.total_elements > 0 {
-                    tensor.shape += base_rel;
-                    tensor.data += base_rel;
-                }
-            }
             _ => {}
         }
     }
@@ -302,6 +292,35 @@ pub unsafe extern "C" fn read_voidstar_binary(
 // This function is complex and calls many C functions (read_json_with_schema,
 // unpack_with_schema). Keep delegating to C for now via extern declarations.
 
+/// Resolve the (already SHM-allocated) Arrow JSON read into a raw abs pointer
+/// usable as the result of `load_morloc_data_file`. On error returns null and
+/// sets `errmsg`. The caller is responsible for `data` (and frees on error).
+unsafe fn arrow_load_json(
+    data: *mut u8,
+    data_size: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    let buf = libc::realloc(data as *mut c_void, data_size + 1) as *mut u8;
+    if buf.is_null() {
+        libc::free(data as *mut c_void);
+        set_errmsg(errmsg, &MorlocError::Other("realloc failed".into()));
+        return ptr::null_mut();
+    }
+    *buf.add(data_size) = 0;
+    let mut err: *mut c_char = ptr::null_mut();
+    let relptr = crate::arrow_ffi::read_json_to_arrow_shm(buf as *const c_char, schema, &mut err);
+    libc::free(buf as *mut c_void);
+    if !err.is_null() {
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+    match shm::rel2abs(relptr) {
+        Ok(p) => p as *mut c_void,
+        Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn load_morloc_data_file(
     path: *const c_char,
@@ -328,11 +347,68 @@ pub unsafe extern "C" fn load_morloc_data_file(
         return ptr::null_mut();
     }
 
+    // Detect arrow-table targets: the JSON / Arrow-IPC paths produce an
+    // ArrowShm directly. Other formats (Parquet, CSV) are still deferred.
+    let arrow_target = !schema.is_null() && {
+        let rs = CSchema::to_rust(schema);
+        crate::arrow_ffi::is_arrow_table_schema(&rs)
+    };
+
+    // Arrow IPC file format is detected purely by content magic, no extension
+    // sniffing. The IPC reader handles both file (ARROW1 magic) and stream
+    // formats; only the file form is distinguishable up front, so we match
+    // the magic here and let the reader fall through to stream form for
+    // headerless content if requested elsewhere.
+    if arrow_target && data_size >= 8 {
+        let head = std::slice::from_raw_parts(data, 8);
+        let full = std::slice::from_raw_parts(data, data_size);
+        if crate::arrow_ipc_reader::is_arrow_file_magic(head) {
+            let mut err: *mut c_char = ptr::null_mut();
+            let relptr = crate::arrow_ipc_reader::read_arrow_ipc_to_shm(
+                data, data_size, schema, &mut err,
+            );
+            libc::free(data as *mut c_void);
+            if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
+            return match shm::rel2abs(relptr) {
+                Ok(p) => p as *mut c_void,
+                Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+            };
+        }
+        if crate::arrow_ipc_reader::is_parquet_magic(full) {
+            let mut err: *mut c_char = ptr::null_mut();
+            let relptr = crate::arrow_ipc_reader::read_parquet_to_shm(
+                data, data_size, schema, &mut err,
+            );
+            libc::free(data as *mut c_void);
+            if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
+            return match shm::rel2abs(relptr) {
+                Ok(p) => p as *mut c_void,
+                Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+            };
+        }
+    }
+
     let path_str = CStr::from_ptr(path).to_string_lossy();
     let mut err: *mut c_char = ptr::null_mut();
 
     // 1. Extension-based dispatch
+    if arrow_target && (path_str.ends_with(".csv") || path_str.ends_with(".tsv")) {
+        let delim: u8 = if path_str.ends_with(".tsv") { b'\t' } else { b',' };
+        let mut err: *mut c_char = ptr::null_mut();
+        let relptr = crate::arrow_ipc_reader::read_csv_to_shm(
+            data, data_size, delim, schema, &mut err,
+        );
+        libc::free(data as *mut c_void);
+        if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
+        return match shm::rel2abs(relptr) {
+            Ok(p) => p as *mut c_void,
+            Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+        };
+    }
     if path_str.ends_with(".json") {
+        if arrow_target {
+            return arrow_load_json(data, data_size, schema, errmsg);
+        }
         let json_buf = libc::realloc(data as *mut c_void, data_size + 1) as *mut u8;
         if json_buf.is_null() {
             libc::free(data as *mut c_void);
@@ -406,6 +482,9 @@ pub unsafe extern "C" fn load_morloc_data_file(
     );
 
     if (data_size > 1 && may_be_json) || (data_size == 1 && first_byte >= b'0' && first_byte <= b'9') {
+        if arrow_target {
+            return arrow_load_json(data, data_size, schema, errmsg);
+        }
         let json_buf = libc::realloc(data as *mut c_void, data_size + 1) as *mut u8;
         if !json_buf.is_null() {
             *json_buf.add(data_size) = 0;
@@ -576,6 +655,17 @@ unsafe fn parse_cli_data_argument_singular(
 
     if fd.is_null() {
         // Literal JSON data
+        if crate::arrow_ffi::is_arrow_table_schema(&rs) {
+            let relptr = crate::arrow_ffi::read_json_to_arrow_shm(arg as *const c_char, schema, &mut err);
+            if !err.is_null() {
+                *errmsg = err;
+                return ptr::null_mut();
+            }
+            return match shm::rel2abs(relptr) {
+                Ok(p) => p,
+                Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+            };
+        }
         if dest.is_null() {
             match shm::shcalloc(1, rs.width) {
                 Ok(p) => dest = p,
@@ -748,8 +838,18 @@ pub unsafe extern "C" fn parse_cli_data_argument(
         Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
     };
 
-    // Call the Rust make_standard_data_packet FFI
-    crate::packet_ffi::make_standard_data_packet(relptr, schema)
+    // Arrow tables need a PACKET_FORMAT_ARROW header so the receiver routes
+    // to arrow_from_shm rather than voidstar deserialization.
+    let arrow = !schema.is_null() && {
+        let rs = CSchema::to_rust(schema);
+        crate::arrow_ffi::is_arrow_table_schema(&rs)
+    };
+
+    if arrow {
+        crate::packet_ffi::make_arrow_data_packet(relptr, schema)
+    } else {
+        crate::packet_ffi::make_standard_data_packet(relptr, schema)
+    }
 }
 
 // ── make_call_packet_from_cli ────────────────────────────────────────────────

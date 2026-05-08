@@ -1,0 +1,6 @@
+--- correct 2x3 ---
+[[2,3],[1,2,3,4,5,6]]
+--- wrong inner dim (2x4 instead of 2x3) ---
+Error: failed to parse argument #0: Array length mismatch: expected 6, got 8
+--- wrong outer dim (3x3 instead of 2x3) ---
+Error: failed to parse argument #0: Array length mismatch: expected 6, got 9

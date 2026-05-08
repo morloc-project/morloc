@@ -1,0 +1,11 @@
+module main (makePeople)
+
+import root
+import root-cpp
+import table-cpp
+
+-- Migrated from arrow-nexus-cpp using Stage 4 typed Table syntax.
+
+source Cpp from "src.hpp" ("makePeople")
+
+makePeople :: Table n {name=Str, age=Int}

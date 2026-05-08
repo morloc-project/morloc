@@ -238,9 +238,14 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           return (n', (calls <> declarations))
 
         termExprToAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
-        termExprToAnnoS n e@(ExprI ci _) = do
-          (n', e') <- reindexExprI e >>= collectExprS n
-          return $ (n', AnnoS gi0 ci e')
+        termExprToAnnoS n e = do
+          -- Capture ci AFTER reindexExprI: each inlining of a top-level term
+          -- needs its own concrete index so downstream passes (e.g. Express's
+          -- LetS handler that falls back to cidx as a let-binding id when the
+          -- bound variable is unused) don't collide across inlinings.
+          e2@(ExprI ci _) <- reindexExprI e
+          (n', e') <- collectExprS n e2
+          return (n', AnnoS gi0 ci e')
     f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
     f namer (TupE es) = statefulMapM collectAnnoS namer es |>> second TupS
     f namer (NamE rs) = do

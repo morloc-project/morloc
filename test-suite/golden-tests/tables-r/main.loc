@@ -1,0 +1,51 @@
+module main
+  ( mvp
+  , rbound, cbound
+  , sliced, sorted, picked, reversed_
+  )
+
+import root
+import table-r
+
+source R from "src.R" ("mkData", "makeT_r", "makeXR", "makeYR")
+
+-- R-pool parity for the table-stdlib operations covered by tables-py-*:
+--   * mvp        -- table construction + return through the R pool
+--   * rbound     -- rbind composes row counts (data.frame round-trip)
+--   * cbound     -- cbind unions column schemas
+--   * sliced     -- sliceRows
+--   * sorted     -- sortRows with descending direction (False)
+--   * picked     -- selectColsDyn with kindless r
+--   * reversed_  -- pickRows (reverse range), the "reverse rows" idiom
+--                   (reverseRows was removed; this verifies the
+--                   composition is sound on the R backend too)
+
+mkData :: Int -> Table n {x=Int, y=Str}
+makeT_r :: Int -> Table n {x=Int, y=Str}
+makeXR :: Int -> Table n {x=Int}
+makeYR :: Int -> Table n {y=Str}
+
+mvp :: Int -> Table n r
+mvp n = makeT_r n
+
+rbound :: Int -> Table m {x=Int, y=Str}
+rbound n =
+  let t = makeT_r n
+  in rbind t t
+
+cbound :: Int -> Table n ({x=Int} + {y=Str})
+cbound n = cbind (makeXR n) (makeYR n)
+
+sliced :: Int -> Table m {x=Int, y=Str}
+sliced n = sliceRows 1 3 (mkData n)
+
+sorted :: Int -> Table n {x=Int, y=Str}
+sorted n = sortRows [("x", False)] (mkData n)
+
+picked :: Int -> Table n r2
+picked n = selectColsDyn ["y"] (mkData n)
+
+reversed_ :: Int -> Table n {x=Int, y=Str}
+reversed_ n =
+  let t = mkData n
+  in pickRows (reverse (range 0 (nrow t - 1))) t

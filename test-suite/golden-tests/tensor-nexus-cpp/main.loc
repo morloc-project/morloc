@@ -2,7 +2,9 @@ module main (makeMatrix)
 
 import root
 import root-cpp
+import tensor
+import tensor-cpp
 
 source Cpp from "src.hpp" ("makeMatrix")
 
-makeMatrix :: Tensor2 3 4 Int
+makeMatrix :: Matrix 3 4 Int

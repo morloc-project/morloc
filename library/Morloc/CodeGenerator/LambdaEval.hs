@@ -116,6 +116,22 @@ applyLambdas ::
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) = applyLambdas $ AnnoS g1 c2 e
 -- eliminate empty applications
 applyLambdas (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) = applyLambdas $ AnnoS g1 c2 e
+-- Push an application through a let in function position. A let-expression
+-- whose body evaluates to a function (e.g. a top-level binding written as
+-- `f = let v = ... in <function>`) ends up in function position when f is
+-- applied. Without this rewrite, a LamS hidden inside the let body never
+-- meets its arguments at the AppS-of-LamS pattern below, so beta-reduction
+-- is skipped and code generation later errors with "unexpected LamS".
+--
+--   (let v = e1 in body) args  =>  let v = e1 in (body args)
+--
+-- The new inner AppS keeps the outer application's index and contextual
+-- annotation (g1, c1) since it computes the same value as the original.
+-- The outer let keeps its own annotations.
+applyLambdas (AnnoS g1 c1 (AppS (AnnoS gLet cLet (LetS v e1 body)) es)) =
+  applyLambdas $
+    AnnoS gLet cLet $
+      LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- substitute applied lambdas
 applyLambdas
   ( AnnoS
@@ -172,11 +188,16 @@ applyLambdas (AnnoS g c (IfS cond thenE elseE)) = do
   elseE' <- applyLambdas elseE
   return (AnnoS g c (IfS cond' thenE' elseE'))
 applyLambdas (AnnoS g c (DoBlockS e)) = AnnoS g c . DoBlockS <$> applyLambdas e
--- cancel force-suspend: !{e} --> e, preserving outer annotation
-applyLambdas (AnnoS g c (EvalS (AnnoS _ _ (DoBlockS e)))) = do
+-- cancel force-suspend: !{e} --> e. Keep the OUTER general type (the EvalS
+-- already strips the effect wrapper from the type), but keep the INNER
+-- concrete annotation so the chain's chosen language survives. Without this,
+-- the cancellation overrides the chain's lang with the EvalS's lang (which
+-- comes from its calling context), defeating fusion when the chain's own
+-- statements dictate a different lang.
+applyLambdas (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
   e' <- applyLambdas e
   let AnnoS _ _ inner = e'
-  return (AnnoS g c inner)
+  return (AnnoS g cInner inner)
 applyLambdas (AnnoS g c (EvalS e)) = AnnoS g c . EvalS <$> applyLambdas e
 applyLambdas (AnnoS g c (CoerceS co e)) = AnnoS g c . CoerceS co <$> applyLambdas e
 applyLambdas (AnnoS g c (IntrinsicS intr es)) = AnnoS g c . IntrinsicS intr <$> mapM applyLambdas es

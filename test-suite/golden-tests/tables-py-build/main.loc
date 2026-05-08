@@ -1,0 +1,32 @@
+module main (mvp_kindless, mvp_typed, mvp_polymorphic)
+
+import table-py
+
+source Py from "src.py" ("makeXY", "makeXY_typed", "makeXYZ")
+
+-- Stage 1 of the tables refactor. Each export validates a different
+-- row-type shape moving through the same `sliceRows 0 k` operation
+-- (the new "take first k rows" idiom — `head` no longer exists):
+--
+--   * mvp_kindless    -- kindless polymorphic row `r`
+--   * mvp_typed       -- fully-specified Rec schema {x=Int, y=Str}
+--   * mvp_polymorphic -- bare `T` wire form via row-polymorphic slice
+--                        (pre-refactor this generated `<arrow>m0` and the
+--                        runtime rejected an empty struct schema)
+
+makeXY :: Int -> Table n r
+makeXY_typed :: Int -> Table n {x=Int, y=Str}
+makeXYZ :: Int -> Table n {x=Int, y=Str, z=Real}
+
+mvp_kindless :: Int -> Int -> Table m r
+mvp_kindless total take = sliceRows 0 take (makeXY total)
+
+mvp_typed :: Int -> Int -> Table m {x=Int, y=Str}
+mvp_typed total take = sliceRows 0 take (makeXY_typed total)
+
+-- Polymorphic-row helper drives a concrete makeXYZ.
+foo :: Int -> Table n r -> Table n r
+foo n t = sliceRows 0 n t
+
+mvp_polymorphic :: Int -> Table m r
+mvp_polymorphic n = foo 3 (makeXYZ n)

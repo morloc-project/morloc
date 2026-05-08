@@ -49,7 +49,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 82
+%expect 86
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -92,7 +92,6 @@ import qualified Morloc.BaseTypes as BT
   'type'     { Located _ TokType _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
-  'table'    { Located _ TokTable _ }
   'class'    { Located _ TokClass _ }
   'instance' { Located _ TokInstance _ }
   'infixl'   { Located _ TokInfixl _ }
@@ -116,6 +115,7 @@ import qualified Morloc.BaseTypes as BT
   INTERPOPEN { Located _ TokInterpOpen _ }
   INTERPCLOSE { Located _ TokInterpClose _ }
   INTRINSIC  { Located _ (TokIntrinsic _) _ }
+  TICKNAME   { Located _ (TokTickName _) _ }
   ';'        { Located _ TokSemicolon _ }
   '%inline'  { Located _ TokPragmaInline _ }
   EOF        { Located _ TokEOF _ }
@@ -294,7 +294,6 @@ typedef_decl :: { Loc CstExpr }
 nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
   | 'object'   { ($1, NamObject) }
-  | 'table'    { ($1, NamTable) }
 
 nam_constructor :: { (Text, Bool) }
   : STRING                    { (getString $1, True) }
@@ -316,6 +315,7 @@ typedef_term :: { (TVar, [Either (TVar, Kind) TypeU]) }
 typedef_params :: { [Either (TVar, Kind) TypeU] }
   : {- empty -}                        { [] }
   | typedef_params LOWER               { $1 ++ [Left (TV (getName $2), KindType)] }
+  | typedef_params UPPER               { $1 ++ [Right (VarU (TV (getName $2)))] }
   | typedef_params '(' LOWER '::' UPPER ')'  { $1 ++ [Left (TV (getName $3), parseKind (getName $5))] }
   | typedef_params '(' type ')'        { $1 ++ [Right $3] }
 
@@ -727,11 +727,34 @@ atom_type :: { TypeU }
   | '(' type ',' type_list1 ')' { BT.tupleU ($2 : $4) }
   | '[' type ']'              { BT.listU $2 }
   | '?' atom_type             { OptionalU $2 }
+  | '{' '}'                   { RecEmptyU }
+  | '{' rec_entries '}'       { foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2 }
+  -- Type-level list literal of Str elements: `['x, 'y]` parses to
+  -- ListLitU [StrLitU "x", StrLitU "y"]. Tick-prefix is the disambiguator
+  -- between value-level list type `[Int]` (still BT.listU Int) and the
+  -- new type-level list literal. TICKNAME is intentionally NOT a
+  -- standalone @atom_type@ -- if it were, @[TICKNAME]@ would be
+  -- ambiguous between @BT.listU StrLitU@ and @ListLitU [StrLitU]@. Bare
+  -- ticks are admitted only at the constraint-argument level
+  -- (see @constraint_arg@ below) where the surrounding context rules
+  -- out the ambiguity.
+  | '[' tick_list1 ']'        { ListLitU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
   | LOWER ':' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
-  | STRING                    { VarU (TV (getString $1)) }
+  | STRING                    { StrLitU (getString $1) }
   | INTEGER                   { NatLitU (getInt $1) }
+
+tick_list1 :: { [TypeU] }
+  : TICKNAME                          { [StrLitU (getTickName $1)] }
+  | tick_list1 ',' TICKNAME           { $1 ++ [StrLitU (getTickName $3)] }
+
+rec_entries :: { [(Text, TypeU)] }
+  : rec_entry                              { [$1] }
+  | rec_entries ',' rec_entry              { $1 ++ [$3] }
+
+rec_entry :: { (Text, TypeU) }
+  : LOWER '=' non_fun_type                 { (getName $1, $3) }
 
 type_list1 :: { [TypeU] }
   : type                      { [$1] }
@@ -784,14 +807,16 @@ pos_atom_type :: { (Pos, TypeU) }
   | '(' type ',' type_list1 ')' { (locPos $1, BT.tupleU ($2 : $4)) }
   | '[' type ']'                { (locPos $1, BT.listU $2) }
   | '?' pos_atom_type            { (locPos $1, OptionalU (snd $2)) }
+  | '{' '}'                      { (locPos $1, RecEmptyU) }
+  | '{' rec_entries '}'          { (locPos $1, foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
   | LOWER ':' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
-  | STRING                      { (locPos $1, VarU (TV (getString $1))) }
+  | STRING                      { (locPos $1, StrLitU (getString $1)) }
   | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }
 
 single_constraint :: { Constraint }
-  : UPPER types1                         { Constraint (ClassName (getName $1)) $2 }
+  : UPPER types1                         { mkConstraint (getName $1) $2 }
 
 --------------------------------------------------------------------
 -- Helpers
@@ -890,9 +915,33 @@ getIntrinsicName :: Located -> Text
 getIntrinsicName (Located _ (TokIntrinsic n) _) = n
 getIntrinsicName _ = ""
 
+-- Strip the leading tick from a TokTickName payload (the tick is in the
+-- raw source text but not in the carried Text value).
+getTickName :: Located -> Text
+getTickName (Located _ (TokTickName n) _) = n
+getTickName _ = ""
+
 parseKind :: Text -> Kind
 parseKind "Nat" = KindNat
+parseKind "Str" = KindStr
+parseKind "Rec" = KindRec
+-- The first cut only produces List Str / Set Str. The element kind is
+-- defaulted; explicit `(l :: List Nat)` parameterisation is a future
+-- extension that will need its own production.
+parseKind "List" = KindList KindStr
+parseKind "Set" = KindSet KindStr
 parseKind _ = KindType
+
+-- Build a Constraint, recognising primitive heads (Member / Subset /
+-- Disjoint) and routing typeclass-shaped constraints to the existing
+-- 'Constraint' constructor. The argument count is checked: if the head
+-- is a primitive name with the wrong arity, the constraint is left in
+-- the typeclass form, which downstream typecheck will diagnose.
+mkConstraint :: Text -> [TypeU] -> Constraint
+mkConstraint "Member" [a, s] = CMember a s
+mkConstraint "Subset" [a, b] = CSubset a b
+mkConstraint "Disjoint" [a, b] = CDisjoint a b
+mkConstraint name ts = Constraint (ClassName name) ts
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t

@@ -16,13 +16,15 @@ pub enum SerialType {
     Uint64 = 9,
     Float32 = 10,
     Float64 = 11,
-    Tensor = 12,
     String = 13,
     Array = 14,
     Tuple = 15,
     Map = 16,
     Optional = 17,
     Int = 18,       // variable-width integer (Array of uint64_t limbs, two's complement)
+    Table = 19,     // Arrow IPC primitive. Schema entries (if any) are open
+                    // constraints on the buffer's actual schema; the binary
+                    // layout is fully described by the Arrow buffer itself.
 }
 
 /// Schema character codes for parsing schema strings.
@@ -33,11 +35,11 @@ const SCHEMA_UINT: u8 = b'u';
 const SCHEMA_FLOAT: u8 = b'f';
 const SCHEMA_STRING: u8 = b's';
 const SCHEMA_ARRAY: u8 = b'a';
-const SCHEMA_TENSOR: u8 = b'T';
 const SCHEMA_TUPLE: u8 = b't';
 const SCHEMA_MAP: u8 = b'm';
 const SCHEMA_OPTIONAL: u8 = b'?';
 const SCHEMA_INT: u8 = b'j';
+const SCHEMA_TABLE: u8 = b'T';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -47,7 +49,7 @@ pub struct Schema {
     pub size: usize,
     /// Byte width when stored in a fixed-width array.
     pub width: usize,
-    /// Field offsets for tuples/records, or ndim storage for tensors.
+    /// Field offsets for tuples/records.
     pub offsets: Vec<usize>,
     /// Optional type hint string.
     pub hint: Option<String>,
@@ -109,8 +111,11 @@ impl Schema {
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
-            SerialType::String | SerialType::Array | SerialType::Map | SerialType::Tensor
-            | SerialType::Int => {
+            SerialType::String | SerialType::Array | SerialType::Map
+            | SerialType::Int | SerialType::Table => {
+                // Table values live in SHM as a single relative pointer
+                // to an Arrow buffer; same pointer-sized alignment as
+                // other indirect types.
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
             SerialType::Tuple => {
@@ -129,6 +134,31 @@ impl Schema {
             }
         }
     }
+
+    /// True if this schema is a primitive numeric type. Used to decide whether
+    /// Array data buffers should be SIMD/BLAS-aligned.
+    pub fn is_primitive_numeric(&self) -> bool {
+        matches!(
+            self.serial_type,
+            SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64
+                | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+                | SerialType::Float32 | SerialType::Float64
+        )
+    }
+
+    /// Alignment for an Array's element data buffer in SHM. For primitive
+    /// numerics, bumped to MORLOC_ARRAY_DATA_ALIGN (64 bytes -- SIMD/BLAS); for
+    /// other element types, the natural alignment. Fixed constant in the wire
+    /// format spec, architecture-independent.
+    pub fn array_data_alignment(&self) -> usize {
+        const MORLOC_ARRAY_DATA_ALIGN: usize = 64;
+        let natural = self.alignment();
+        if self.is_primitive_numeric() {
+            std::cmp::max(MORLOC_ARRAY_DATA_ALIGN, natural)
+        } else {
+            natural
+        }
+    }
 }
 
 /// Parse a schema string into a Schema tree.
@@ -140,7 +170,6 @@ impl Schema {
 /// - `t2i4s` -> Tuple of (Sint32, String)
 /// - `m24namesi4` -> Map with keys "name"->String, "i4"  (base-62 field count, then key-len + key + value for each)
 /// - `?i4` -> Optional Sint32
-/// - `T2f8` -> 2D Tensor of Float64
 /// - `<hint>i4` -> Sint32 with hint annotation
 pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
     let bytes = input.as_bytes();
@@ -160,7 +189,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
     }
 
     let c = bytes[pos];
-    let cur = pos + 1;
+    let mut cur = pos + 1;
 
     match c {
         b'<' => {
@@ -189,9 +218,17 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
         SCHEMA_UINT => parse_sized_int(bytes, cur, false),
         SCHEMA_FLOAT => parse_sized_float(bytes, cur),
         SCHEMA_ARRAY => {
-            // Array: one child schema follows immediately
+            // Array: optional dimension constraint (:N in decimal), then child schema
+            let expected_len = if cur < bytes.len() && bytes[cur] == b':' {
+                cur += 1;
+                let (n, after) = parse_decimal(bytes, cur)?;
+                cur = after;
+                n
+            } else {
+                0 // unconstrained
+            };
             let (child, end) = parse_schema_r(bytes, cur)?;
-            Ok((make_array_schema(child), end))
+            Ok((make_array_schema_with_dim(expected_len, child), end))
         }
         SCHEMA_INT => {
             // Variable-width integer: no parameters, uses Array layout
@@ -248,14 +285,54 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
             }
             Ok((make_map_schema(params, keys), p))
         }
-        SCHEMA_TENSOR => {
-            // Tensor: base-62 ndim char, then element schema
-            if cur >= bytes.len() {
-                return Err(MorlocError::Schema("expected tensor ndim".into()));
+        SCHEMA_TABLE => {
+            // Table primitive (Arrow IPC).
+            //
+            // Two surface forms:
+            //   `T`           -- bare token; no declared columns. The
+            //                   buffer's Arrow schema is opaque to morloc;
+            //                   any value is accepted.
+            //   `T:K<entries>` -- K declared columns of declared types,
+            //                    parsed identically to `m`'s entries
+            //                    (one base-62 length char + key bytes
+            //                    + child schema). Open semantics: these
+            //                    are *minimum* constraints -- the buffer
+            //                    may carry extra columns.
+            //
+            // The colon disambiguates bare `T` from `T:0` (zero declared
+            // columns). Bare `T` means "schema unspecified"; `T:0` means
+            // "exactly zero columns required" (rare but legal).
+            if cur < bytes.len() && bytes[cur] == b':' {
+                cur += 1;
+                if cur >= bytes.len() {
+                    return Err(MorlocError::Schema("expected table column count after ':'".into()));
+                }
+                let n = decode_base62(bytes[cur])?;
+                let mut params = Vec::with_capacity(n);
+                let mut keys = Vec::with_capacity(n);
+                let mut p = cur + 1;
+                for _ in 0..n {
+                    if p >= bytes.len() {
+                        return Err(MorlocError::Schema("expected table column key length".into()));
+                    }
+                    let key_len = decode_base62(bytes[p])?;
+                    p += 1;
+                    if p + key_len > bytes.len() {
+                        return Err(MorlocError::Schema("table column key extends past end".into()));
+                    }
+                    let key = std::str::from_utf8(&bytes[p..p + key_len])
+                        .map_err(|_| MorlocError::Schema("invalid UTF-8 in table key".into()))?
+                        .to_string();
+                    p += key_len;
+                    keys.push(key);
+                    let (child, end) = parse_schema_r(bytes, p)?;
+                    params.push(child);
+                    p = end;
+                }
+                Ok((make_table_schema(params, keys), p))
+            } else {
+                Ok((make_table_schema(Vec::new(), Vec::new()), cur))
             }
-            let ndim = decode_base62(bytes[cur])?;
-            let (child, end) = parse_schema_r(bytes, cur + 1)?;
-            Ok((make_tensor_schema(ndim, child), end))
         }
         _ => Err(MorlocError::Schema(format!(
             "unknown schema character '{}' at position {pos}",
@@ -355,14 +432,28 @@ fn encode_base62(n: usize) -> char {
     }
 }
 
+/// Parse a decimal integer from the byte stream. Returns (value, position after last digit).
+fn parse_decimal(bytes: &[u8], pos: usize) -> Result<(usize, usize), MorlocError> {
+    let mut cur = pos;
+    let mut n: usize = 0;
+    if cur >= bytes.len() || !bytes[cur].is_ascii_digit() {
+        return Err(MorlocError::Schema("expected decimal digit".into()));
+    }
+    while cur < bytes.len() && bytes[cur].is_ascii_digit() {
+        n = n * 10 + (bytes[cur] - b'0') as usize;
+        cur += 1;
+    }
+    Ok((n, cur))
+}
+
 // ── Schema constructors ────────────────────────────────────────────────────
 
-fn make_array_schema(child: Schema) -> Schema {
+fn make_array_schema_with_dim(expected_len: usize, child: Schema) -> Schema {
     Schema {
         serial_type: SerialType::Array,
         size: 1,
         width: std::mem::size_of::<crate::shm::Array>(),
-        offsets: Vec::new(),
+        offsets: vec![expected_len],
         hint: None,
         parameters: vec![child],
         keys: Vec::new(),
@@ -411,15 +502,28 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     }
 }
 
-fn make_tensor_schema(ndim: usize, child: Schema) -> Schema {
+/// Construct a Table schema from its open column constraints.
+///
+/// The morloc Table primitive carries an Arrow IPC buffer whose binary
+/// layout is fully self-describing; this Schema only records the
+/// declared columns (if any) for runtime constraint checking and for
+/// driving CSV/JSON parsing into typed Arrow fields. Empty `params` /
+/// `keys` correspond to the bare `T` wire form -- no declared columns,
+/// any Arrow buffer accepted. Non-empty entries are open constraints
+/// (the buffer may carry additional columns beyond these).
+///
+/// Width is the size of the SHM relative pointer that owns the Arrow
+/// buffer; the column entries themselves do not contribute to in-memory
+/// layout because the data lives outside the schema-described region.
+fn make_table_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     Schema {
-        serial_type: SerialType::Tensor,
-        size: 1,
-        width: std::mem::size_of::<crate::shm::Tensor>(),
-        offsets: vec![ndim],
+        serial_type: SerialType::Table,
+        size: params.len(),
+        width: std::mem::size_of::<crate::shm::Array>(),
+        offsets: Vec::new(),
         hint: None,
-        parameters: vec![child],
-        keys: Vec::new(),
+        parameters: params,
+        keys,
     }
 }
 
@@ -474,6 +578,11 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::String => buf.push('s'),
         SerialType::Array => {
             buf.push('a');
+            let expected = schema.offsets.first().copied().unwrap_or(0);
+            if expected > 0 {
+                buf.push(':');
+                buf.push_str(&expected.to_string());
+            }
             schema_to_string_inner(&schema.parameters[0], buf);
         }
         SerialType::Tuple => {
@@ -502,11 +611,24 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             buf.push('?');
             schema_to_string_inner(&schema.parameters[0], buf);
         }
-        SerialType::Tensor => {
-            let ndim = schema.offsets.first().copied().unwrap_or(0);
+        SerialType::Table => {
+            // Round-trip with the parser: bare `T` for empty constraint
+            // list, `T:K<entries>` otherwise. Hint has already been
+            // written above (Tables emit no hint by default, but the
+            // round-trip preserves whatever was parsed).
             buf.push('T');
-            buf.push(encode_base62(ndim));
-            schema_to_string_inner(&schema.parameters[0], buf);
+            if schema.size > 0 {
+                buf.push(':');
+                buf.push(encode_base62(schema.size));
+                for (i, p) in schema.parameters.iter().enumerate() {
+                    if i < schema.keys.len() {
+                        let key = &schema.keys[i];
+                        buf.push(encode_base62(key.len()));
+                        buf.push_str(key);
+                    }
+                    schema_to_string_inner(p, buf);
+                }
+            }
         }
     }
 }
@@ -565,14 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tensor() {
-        let s = parse_schema("T2f8").unwrap();
-        assert_eq!(s.serial_type, SerialType::Tensor);
-        assert_eq!(s.offsets[0], 2); // ndim
-        assert_eq!(s.parameters[0].serial_type, SerialType::Float64);
-    }
-
-    #[test]
     fn test_parse_with_hints() {
         let s = parse_schema("<float>f8").unwrap();
         assert_eq!(s.serial_type, SerialType::Float64);
@@ -586,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        let cases = ["z", "b", "i4", "u8", "f8", "s", "ai4", "t2i4s", "?i4", "T2f8"];
+        let cases = ["z", "b", "i4", "u8", "f8", "s", "ai4", "t2i4s", "?i4"];
         for case in cases {
             let schema = parse_schema(case).unwrap();
             let rendered = schema_to_string(&schema);
@@ -632,7 +746,6 @@ mod compat_tests {
             ("t2i4s", "type=15 size=2 width=24"),
             ("?i4", "type=17 size=1 width=8"),
             ("?s", "type=17 size=1 width=24"),
-            ("T2f8", "type=12 size=1 width=32"),
         ];
         for (input, expected_root) in &cases {
             let s = parse_schema(input).unwrap();
@@ -655,10 +768,5 @@ mod compat_tests {
         assert_eq!(s.parameters.len(), 1);
         assert_eq!(s.parameters[0].serial_type, SerialType::Uint8);
         assert_eq!(s.parameters[0].width, 1);
-
-        // Verify tensor
-        let t = parse_schema("T2f8").unwrap();
-        assert_eq!(t.offsets, vec![2]); // ndim
-        assert_eq!(t.width, 32); // sizeof(Tensor)
     }
 }

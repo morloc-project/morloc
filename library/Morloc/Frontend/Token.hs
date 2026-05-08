@@ -123,7 +123,6 @@ data Token
   | TokType
   | TokRecord
   | TokObject
-  | TokTable
   | TokClass
   | TokInstance
   | TokInfixl
@@ -167,6 +166,10 @@ data Token
     TokGroupLine !Text
   | -- Intrinsics (@name)
     TokIntrinsic !Text
+  | -- Type-level Str literal ('name) -- e.g. ['x, 'y] is a List of two
+    -- type-level strings. The leading-tick prefix disambiguates from
+    -- value-level identifiers and from prime-suffixed identifiers (x').
+    TokTickName !Text
   | -- Pragmas
     TokPragmaInline
   | -- Special
@@ -216,7 +219,6 @@ showToken TokFalse = "'False'"
 showToken TokType = "'type'"
 showToken TokRecord = "'record'"
 showToken TokObject = "'object'"
-showToken TokTable = "'table'"
 showToken TokClass = "'class'"
 showToken TokInstance = "'instance'"
 showToken TokInfixl = "'infixl'"
@@ -241,5 +243,6 @@ showToken TokInterpClose = "'}' (interpolation)"
 showToken (TokDocLine _) = "docstring"
 showToken (TokGroupLine _) = "group annotation"
 showToken (TokIntrinsic n) = "intrinsic '@" ++ T.unpack n ++ "'"
+showToken (TokTickName n) = "type-level string \"'" ++ T.unpack n ++ "\""
 showToken TokPragmaInline = "'%inline'"
 showToken TokEOF = "end of input"

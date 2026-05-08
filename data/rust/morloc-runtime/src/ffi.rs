@@ -338,10 +338,10 @@ pub fn calc_voidstar_size_inner(
     schema: &crate::schema::Schema,
 ) -> Result<usize, MorlocError> {
     use crate::schema::SerialType;
-    use crate::shm::{self, Array, Tensor};
+    use crate::shm::{self, Array};
 
     // SAFETY: data points to voidstar data in SHM with layout described by schema.
-    // We only read Array/Tensor headers and follow relptrs to compute total size.
+    // We only read Array headers and follow relptrs to compute total size.
     unsafe {
         match schema.serial_type {
             SerialType::Int => {
@@ -366,7 +366,8 @@ pub fn calc_voidstar_size_inner(
                 }
                 let elem_schema = &schema.parameters[0];
                 let elem_width = elem_schema.width;
-                size += elem_schema.alignment().saturating_sub(1);
+                // bumps to 64 for primitive numerics for SIMD/BLAS
+                size += elem_schema.array_data_alignment().saturating_sub(1);
 
                 if schema.is_fixed_width() {
                     size += elem_width * arr.size;
@@ -396,17 +397,6 @@ pub fn calc_voidstar_size_inner(
                         size += inner_total - schema.parameters[0].width;
                     }
                 }
-                Ok(size)
-            }
-            SerialType::Tensor => {
-                let tensor = &*(data as *const Tensor);
-                let ndim = schema.offsets.first().copied().unwrap_or(0);
-                let elem_width = schema.parameters[0].width;
-                let mut size = std::mem::size_of::<Tensor>();
-                size += schema.parameters[0].alignment().saturating_sub(1);
-                size += ndim * std::mem::size_of::<i64>();
-                size += schema.parameters[0].alignment().saturating_sub(1);
-                size += tensor.total_elements * elem_width;
                 Ok(size)
             }
             SerialType::Tuple | SerialType::Map => {

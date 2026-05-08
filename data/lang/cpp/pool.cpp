@@ -24,9 +24,6 @@
 #include <limits>
 #include <utility>
 
-
-using namespace std;
-
 char* g_tmpdir;
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
@@ -109,20 +106,9 @@ static void _flush_shm_tracker() {
     _shm_tracker.clear();
 }
 
-// Thread-local schema cache: avoids re-parsing the same schema strings
-Schema* get_cached_schema(const char* schema_str) {
-    thread_local std::unordered_map<std::string, Schema*> cache;
-    auto it = cache.find(schema_str);
-    if (it != cache.end()) return it->second;
-    Schema* schema = parse_schema_cpp(schema_str);
-    cache[schema_str] = schema;
-    return schema;
-}
-
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
-uint8_t* _put_value(const T& value, const std::string& schema_str) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+uint8_t* _put_value(const T& value, Schema* schema) {
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
         // Arrow export: move table data into SHM, build packet.
@@ -140,9 +126,10 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
         if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr, nullptr}); }
         return packet;
     } else {
-        // Arrow dispatch: if schema hint is "arrow", the C++ type must be mlc::ArrowTable
-        if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
-            throw std::runtime_error("Arrow schema but C++ type is not mlc::ArrowTable");
+        // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through
+        // mlc::ArrowTable. The legacy `<arrow>` hint has been retired.
+        if (schema->type == MORLOC_TABLE) {
+            throw std::runtime_error("Table schema but C++ type is not mlc::ArrowTable");
         }
 
         void* voidstar = nullptr;
@@ -180,14 +167,13 @@ uint8_t* _put_value(const T& value, const std::string& schema_str) {
 
 // Use a key to retrieve a value
 template <typename T>
-T _get_value(const uint8_t* packet, const std::string& schema_str){
+T _get_value(const uint8_t* packet, Schema* schema){
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
         // Arrow import: packet -> arrow_from_shm -> ArrowTable
-        Schema* schema = get_cached_schema(schema_str.c_str());
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
         if (errmsg) { PROPAGATE_ERROR(errmsg); }
@@ -209,8 +195,6 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
         if (format == PACKET_FORMAT_ARROW) {
             throw std::runtime_error("Arrow data but C++ type is not mlc::ArrowTable");
         }
-
-        Schema* schema = get_cached_schema(schema_str.c_str());
 
         // Fast path: inline voidstar -- read directly from packet, no SHM needed
         if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
@@ -245,8 +229,7 @@ T _get_value(const uint8_t* packet, const std::string& schema_str){
 
 // Hash a value, returning a 16-char hex string
 template <typename T>
-std::string _mlc_hash(const T& value, const std::string& schema_str) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+std::string _mlc_hash(const T& value, Schema* schema) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
     char* hex = mlc_hash(voidstar, schema, &errmsg);
@@ -261,8 +244,7 @@ std::string _mlc_hash(const T& value, const std::string& schema_str) {
 
 // Save a value to file in msgpack format
 template <typename T>
-void _mlc_save(const T& value, const std::string& schema_str, const std::string& path) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+void _mlc_save(const T& value, Schema* schema, const std::string& path) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
     mlc_save(voidstar, schema, path.c_str(), &errmsg);
@@ -274,8 +256,7 @@ void _mlc_save(const T& value, const std::string& schema_str, const std::string&
 
 // Save a value to file in flat voidstar binary format
 template <typename T>
-void _mlc_save_voidstar(const T& value, const std::string& schema_str, const std::string& path) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+void _mlc_save_voidstar(const T& value, Schema* schema, const std::string& path) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
     mlc_save_voidstar(voidstar, schema, path.c_str(), &errmsg);
@@ -287,8 +268,7 @@ void _mlc_save_voidstar(const T& value, const std::string& schema_str, const std
 
 // Save a value to file in JSON format
 template <typename T>
-void _mlc_save_json(const T& value, const std::string& schema_str, const std::string& path) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+void _mlc_save_json(const T& value, Schema* schema, const std::string& path) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
     mlc_save_json(voidstar, schema, path.c_str(), &errmsg);
@@ -300,8 +280,7 @@ void _mlc_save_json(const T& value, const std::string& schema_str, const std::st
 
 // Serialize a value to a JSON string
 template <typename T>
-std::string _mlc_show(const T& value, const std::string& schema_str) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+std::string _mlc_show(const T& value, Schema* schema) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
     char* json = mlc_show(voidstar, schema, &errmsg);
@@ -317,8 +296,7 @@ std::string _mlc_show(const T& value, const std::string& schema_str) {
 // Deserialize a JSON string to a typed value
 // Returns std::nullopt on parse failure
 template <typename T>
-std::optional<T> _mlc_read(const std::string& schema_str, const std::string& json_str) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+std::optional<T> _mlc_read(Schema* schema, const std::string& json_str) {
     char* errmsg = NULL;
     void* voidstar = mlc_read(json_str.c_str(), schema, &errmsg);
     if (errmsg != NULL) {
@@ -336,8 +314,7 @@ std::optional<T> _mlc_read(const std::string& schema_str, const std::string& jso
 // Load a value from file, auto-detecting format
 // Returns std::nullopt if file does not exist
 template <typename T>
-std::optional<T> _mlc_load(const std::string& schema_str, const std::string& path) {
-    Schema* schema = get_cached_schema(schema_str.c_str());
+std::optional<T> _mlc_load(Schema* schema, const std::string& path) {
     char* errmsg = NULL;
     void* voidstar = mlc_load(path.c_str(), schema, &errmsg);
     if (errmsg != NULL) {
@@ -498,6 +475,7 @@ int main(int argc, char* argv[]) {
     config.initial_workers = 1;
     config.dynamic_scaling = true;
 
+    _init_schemas();
     int result = pool_main(argc, argv, &config);
 
     free(g_tmpdir);

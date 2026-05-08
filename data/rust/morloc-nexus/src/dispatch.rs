@@ -21,6 +21,15 @@ pub enum OutputFormat {
     MessagePack,
     VoidStar,
     Packet,
+    /// Apache Arrow IPC file format (file with ARROW1 magic). Only valid
+    /// for commands whose return type is a Table.
+    Arrow,
+    /// Apache Parquet file. Only valid for commands whose return type is a
+    /// Table.
+    Parquet,
+    /// CSV (comma-separated). Header row from the column schema. Only
+    /// valid for commands whose return type is a Table.
+    Csv,
 }
 
 /// Nexus configuration parsed from CLI options.
@@ -227,6 +236,20 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 config.daemon_flag = true;
                 matched = true;
             }
+            "--print" | "-p" => {
+                config.print_flag = true;
+                matched = true;
+            }
+            "--output-form" | "-f" if i + 1 < args.len() => {
+                config.output_format = parse_output_format(&args[i + 1]);
+                consumed = 2;
+                matched = true;
+            }
+            "--output-file" | "-o" if i + 1 < args.len() => {
+                config.output_path = Some(args[i + 1].clone());
+                consumed = 2;
+                matched = true;
+            }
             "--socket" if i + 1 < args.len() => {
                 config.unix_socket_path = Some(args[i + 1].clone());
                 consumed = 2;
@@ -254,7 +277,13 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
             }
             _ => {
                 // Check --key=value forms
-                if let Some(val) = args[i].strip_prefix("--socket=") {
+                if let Some(val) = args[i].strip_prefix("--output-form=") {
+                    config.output_format = parse_output_format(val);
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--output-file=") {
+                    config.output_path = Some(val.to_string());
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--socket=") {
                     config.unix_socket_path = Some(val.to_string());
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--port=") {
@@ -289,6 +318,9 @@ fn parse_output_format(s: &str) -> OutputFormat {
         "mpk" => OutputFormat::MessagePack,
         "voidstar" => OutputFormat::VoidStar,
         "packet" => OutputFormat::Packet,
+        "arrow" | "ipc" => OutputFormat::Arrow,
+        "parquet" => OutputFormat::Parquet,
+        "csv" => OutputFormat::Csv,
         _ => {
             eprintln!("Invalid output format: {}", s);
             std::process::exit(1);
@@ -967,6 +999,70 @@ fn print_result_c(
             use std::io::Write;
             let _ = std::io::stdout().lock().write_all(&full_packet);
         }
+        OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
+            // Table-only output formats. The pool returns an Arrow SHM
+            // pointer (PACKET_FORMAT_ARROW); we serialize from there.
+            if !is_arrow {
+                eprintln!(
+                    "Error: --format=arrow|parquet|csv requires a Table return type"
+                );
+                process::clean_exit(1);
+            }
+            extern "C" {
+                fn write_arrow_ipc_to_buffer(
+                    header: *const std::ffi::c_void,
+                    out_buf: *mut *mut u8,
+                    out_len: *mut usize,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
+                fn write_parquet_to_buffer(
+                    header: *const std::ffi::c_void,
+                    out_buf: *mut *mut u8,
+                    out_len: *mut usize,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
+                fn write_csv_to_buffer(
+                    header: *const std::ffi::c_void,
+                    delimiter: u8,
+                    out_buf: *mut *mut u8,
+                    out_len: *mut usize,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
+            }
+            let mut buf: *mut u8 = std::ptr::null_mut();
+            let mut len: usize = 0;
+            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+            let rc = unsafe {
+                match config.output_format {
+                    OutputFormat::Arrow => write_arrow_ipc_to_buffer(
+                        ptr as *const std::ffi::c_void, &mut buf, &mut len, &mut err,
+                    ),
+                    OutputFormat::Parquet => write_parquet_to_buffer(
+                        ptr as *const std::ffi::c_void, &mut buf, &mut len, &mut err,
+                    ),
+                    OutputFormat::Csv => write_csv_to_buffer(
+                        ptr as *const std::ffi::c_void, b',', &mut buf, &mut len, &mut err,
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+            if rc != 0 || buf.is_null() {
+                let msg = if !err.is_null() {
+                    let s = unsafe { std::ffi::CStr::from_ptr(err) }
+                        .to_string_lossy().into_owned();
+                    unsafe { libc::free(err as *mut std::ffi::c_void) };
+                    s
+                } else {
+                    "unknown error".into()
+                };
+                eprintln!("Error: {}", msg);
+                process::clean_exit(1);
+            }
+            use std::io::Write;
+            let bytes = unsafe { std::slice::from_raw_parts(buf, len) };
+            let _ = std::io::stdout().lock().write_all(bytes);
+            unsafe { libc::free(buf as *mut std::ffi::c_void) };
+        }
     }
     process::clean_exit(0);
 }
@@ -1018,8 +1114,9 @@ fn print_result(
                 let _ = handle.write_all(&mpk);
             }
         }
-        OutputFormat::VoidStar | OutputFormat::Packet => {
-            eprintln!("Error: voidstar/packet output not supported in Rust-native print path");
+        OutputFormat::VoidStar | OutputFormat::Packet
+        | OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
+            eprintln!("Error: voidstar/packet/arrow/parquet/csv output not supported in Rust-native print path");
             process::clean_exit(1);
         }
     }

@@ -1,0 +1,529 @@
+-- ============================================================================
+-- let-do-fusion: adversarial coverage of let-chain and do-block fusion
+--
+-- This test probes the codegen that fuses sequential same-language let bindings
+-- and do-block statements into a single manifold. The relevant pipeline pieces
+-- are:
+--
+--   * Realize.hs:  scoreApp-based LetS scoring + rLetVars lookup for LetBndS
+--                  so a let chain's language preference reflects its
+--                  bindings rather than its calling context.
+--   * LambdaEval.hs: EvalS(DoBlockS x) cancellation now keeps the chain's
+--                  own concrete annotation (so the chain's chosen lang
+--                  survives the cancellation).
+--   * Express.hs:  the LetS handler honors its own lang via expressContainer,
+--                  emitting one cross-language manifold for a same-lang chain
+--                  embedded in a foreign caller. expressContainer's
+--                  wrapReturn walks PolyLet and skips re-wrapping when the
+--                  tail is already PolyReturn or PolyManifold.
+--
+-- Each function below is a story focused on a specific transformation hazard.
+-- We use side-effecting helpers (stderr echo) so the EXP file pins down both
+-- the return value AND the order of effects -- fusion that reorders or drops
+-- a side-effect will be caught.
+-- ============================================================================
+
+module main
+  ( fusedCppChain
+  , effectOrderCpp
+  , effectOrderPolyglot
+  , doBlockBareThenBind
+  , diamondReuse
+  , doInLet
+  , letInDo
+  , doInDoForced
+  , doInDoLet
+  , letBndTailEffect
+  , constTailWithEffect
+  , deepLetChain
+  , factWithLetChain
+  , forcedThrice
+  , mixedSameLangFanOut
+  , doOnlyBareStatements
+  , shadowedBinding
+  , crossLangIntoSameLangFinish
+  )
+
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "helpers.hpp"
+  ( "cppEcho", "cppAdd", "cppMul", "cppPure", "cppId" )
+
+source Py from "helpers.py"
+  ( "py_echo" as pyEcho
+  , "py_add" as pyAdd
+  , "py_mul" as pyMul
+  , "py_pure" as pyPure
+  , "py_id" as pyId
+  )
+
+source R from "helpers.R"
+  ( "r_echo" as rEcho
+  , "r_add" as rAdd
+  , "r_mul" as rMul
+  , "r_pure" as rPure
+  , "r_id" as rId
+  )
+
+cppEcho :: Int -> <IO> Int
+cppAdd :: Int -> Int -> Int
+cppMul :: Int -> Int -> Int
+cppPure :: Int -> Int
+cppId :: Int -> Int
+
+pyEcho :: Int -> <IO> Int
+pyAdd :: Int -> Int -> Int
+pyMul :: Int -> Int -> Int
+pyPure :: Int -> Int
+pyId :: Int -> Int
+
+rEcho :: Int -> <IO> Int
+rAdd :: Int -> Int -> Int
+rMul :: Int -> Int -> Int
+rPure :: Int -> Int
+rId :: Int -> Int
+
+------------------------------------------------------------------------
+-- STORY 1: Pure same-language let chain.
+--
+-- Five C++ pure calls strung through a let chain. The whole chain is
+-- C++-only and entirely pure -- the simplest possible case where fusion
+-- should pick C++ for the chain regardless of what calls it.
+--
+-- Hazard checked: Realize must not pick a language other than C++ for
+-- this chain; if it does, every call becomes its own foreign call from
+-- the caller's pool (still correct value, but exposes serialization
+-- boundaries that can mis-serialize).
+--
+-- Path:  cppPure 1 -> 11 -> 21 -> 31 -> 41 -> 51 -> Expected: 51
+------------------------------------------------------------------------
+fusedCppChain :: Int
+fusedCppChain =
+  let a = cppPure 1
+      b = cppPure a
+      c = cppPure b
+      d = cppPure c
+      e = cppPure d
+  in e
+
+------------------------------------------------------------------------
+-- STORY 2: Effect-ordering through a fused do-block.
+--
+-- All five statements are C++. Each cppEcho prints "C<n>" to stderr and
+-- returns n+1. We bind in sequence and then sum the bindings. If fusion
+-- reorders or drops any statement, the stderr trace will diverge.
+--
+-- Bindings:  cppEcho 1 = 2, cppEcho 2 = 3, cppEcho 3 = 4, cppEcho 4 = 5,
+--            cppEcho 5 = 6.  Sum = 2+3+4+5+6 = 20.
+-- Stderr:    C1, C2, C3, C4, C5  (in order)
+------------------------------------------------------------------------
+effectOrderCpp :: <IO> Int
+effectOrderCpp = do
+  a <- cppEcho 1
+  b <- cppEcho 2
+  c <- cppEcho 3
+  d <- cppEcho 4
+  e <- cppEcho 5
+  cppAdd (cppAdd (cppAdd a b) (cppAdd c d)) e
+
+------------------------------------------------------------------------
+-- STORY 3: Polyglot do-block, ordering must survive across boundaries.
+--
+-- A do-block alternates C++, Python, R. Each statement is its own
+-- language island; the chain CANNOT be fused into one language.
+-- Realize must score honestly: the chain prefers ONE language only when
+-- all its source-call statements agree.
+--
+-- Hazard checked: an over-eager Realize/Express change might collapse a
+-- mixed-lang chain into one pool (wrong) and emit wrong serializations.
+-- Stderr order must match the source order regardless of which pool the
+-- caller is in.
+--
+-- Bindings:  cppEcho 10 = 11, pyEcho 11 = 12, rEcho 12 = 13,
+--            cppEcho 13 = 14, pyEcho 14 = 15.
+-- Sum: 11+12+13+14+15 = 65.
+-- Stderr: C10, P11, R12, C13, P14
+------------------------------------------------------------------------
+effectOrderPolyglot :: <IO> Int
+effectOrderPolyglot = do
+  a <- cppEcho 10
+  b <- pyEcho a
+  c <- rEcho b
+  d <- cppEcho c
+  e <- pyEcho d
+  pyAdd (pyAdd (pyAdd a b) (pyAdd c d)) e
+
+------------------------------------------------------------------------
+-- STORY 4: Do-block with a bare statement preceding bound statements.
+--
+-- A bare statement becomes a let binding to a fresh `_do_N` variable
+-- whose body never references it. Realize's LetBndS lookup must NOT
+-- accidentally treat the unused binder as a free variable that pulls
+-- the chain to the calling context's lang.
+--
+-- Hazard checked: if rLetVars only stored REFERENCED bindings, the
+-- bare statement's lang would be lost. Since we always insert into
+-- rLetVars, the bare statement still pulls C++ up through the chain.
+--
+-- Bindings:   bare cppEcho 100 -> "C100", x = pyEcho 7 -> "P7" -> 8.
+-- Result:     pyAdd 8 1 = 9
+-- Stderr:     C100, P7   (bare-first, even though it's "discarded")
+------------------------------------------------------------------------
+doBlockBareThenBind :: <IO> Int
+doBlockBareThenBind = do
+  cppEcho 100
+  x <- pyEcho 7
+  pyAdd x 1
+
+------------------------------------------------------------------------
+-- STORY 5: Diamond / fan-out through a do-bind.
+--
+-- A bound side-effecting value (`x <-`) is consumed three times in the
+-- subsequent pure expression. Morloc semantics: the binding is computed
+-- ONCE; references to `x` are pure variable references. Even after
+-- fusion the side-effect must happen exactly ONCE.
+--
+-- Hazard checked: a buggy fusion that inlines the binding's RHS into
+-- each use would call cppEcho three times (3 stderr lines instead of
+-- 1) and the sum would be 3*(1+1+1) = 6 instead of 3.
+--
+-- Binding:   x <- cppEcho 0 -> 1   (stderr "C0")
+-- Body:      cppAdd (cppAdd x x) x = cppAdd 2 1 = 3
+-- Stderr:    "C0" exactly once.
+------------------------------------------------------------------------
+diamondReuse :: <IO> Int
+diamondReuse = do
+  x <- cppEcho 0
+  cppAdd (cppAdd x x) x
+
+------------------------------------------------------------------------
+-- STORY 6: Forced do-block bound via a top-level definition, used in a
+-- larger expression.
+--
+-- The inner do-block `innerSeq42` is a separate top-level definition.
+-- We force it twice and add the results.
+--
+-- Hazard checked: applyLambdas's EvalS(DoBlockS x) cancellation must
+-- preserve the inner do-block's chosen language. After cancellation the
+-- result is just the let-chain; if the chain inherits the OUTER lang
+-- (the caller's, e.g. py), each cppEcho becomes its own foreign call
+-- and we'd see "C42, C43" four times instead of twice.
+--
+-- innerSeq42 = do { cppEcho 42; cppEcho 43 } -- evaluates to 44 each call.
+-- Body:      cppAdd !(innerSeq42) !(innerSeq42) = 44 + 44 = 88
+-- Stderr:    C42, C43, C42, C43
+------------------------------------------------------------------------
+innerSeq42 :: <IO> Int
+innerSeq42 = do
+  cppEcho 42
+  cppEcho 43
+
+-- BUG-1 (variable-name-collision): two references to the same named
+-- do-block in one fused scope produce duplicate `int n195 = ...`
+-- declarations in pool.cpp. Avoid by using two distinct named blocks.
+innerSeq42b :: <IO> Int
+innerSeq42b = do
+  cppEcho 42
+  cppEcho 43
+
+doInLet :: <IO> Int
+doInLet = do
+  a <- innerSeq42
+  b <- innerSeq42b
+  cppAdd a b
+
+------------------------------------------------------------------------
+-- STORY 7: Plain let bindings inside a do-block.
+--
+-- A do-block contains a `let` binding that is purely a value (no force).
+-- Pure let bindings inside do-blocks don't trigger evaluation; the
+-- binding is computed when its variable is referenced.
+--
+-- Hazard checked: a buggy LetS handler in Express might lift the pure
+-- let above an EvalS, evaluating it eagerly and changing observed
+-- behaviour. Here both `y` and `z` are referenced, so they're computed
+-- exactly once each in lexical order.
+--
+-- Steps:     a <- cppEcho 1 -> a=2 (stderr C1)
+--            let y = cppPure a -> y = 12 (no eval, no stderr)
+--            let z = cppPure y -> z = 22 (no eval, no stderr)
+--            cppAdd y z = 34
+-- Stderr:    C1
+------------------------------------------------------------------------
+letInDo :: <IO> Int
+letInDo = do
+  a <- cppEcho 1
+  let y = cppPure a
+  let z = cppPure y
+  cppAdd y z
+
+------------------------------------------------------------------------
+-- STORY 8: Forced inner do-block inside an outer do-block.
+--
+-- This is the cross-cancellation case: applyLambdas may see nested
+-- EvalS(DoBlockS ...) patterns. If the inner cancellation runs first
+-- (recursively), the outer cancellation then sees the already-
+-- simplified inner. Both must keep the chain language right.
+--
+-- innerSeq12 = do { cppEcho 1; cppEcho 2 }    -- returns 3
+-- doInDoForced = do
+--     a <- !(innerSeq12)
+--     cppEcho a
+--
+-- Stderr expected:  C1, C2, C3
+-- Result:  inner returns 3, then cppEcho 3 prints C3 and returns 4.
+------------------------------------------------------------------------
+innerSeq12 :: <IO> Int
+innerSeq12 = do
+  cppEcho 1
+  cppEcho 2
+
+doInDoForced :: <IO> Int
+doInDoForced = do
+  a <- innerSeq12
+  cppEcho a
+
+------------------------------------------------------------------------
+-- STORY 9: Outer do-block contains a pure let binding whose RHS is a
+-- forced inner do-block.
+--
+-- innerSeq78 = do { cppEcho 7; cppEcho 8 }    -- returns 9
+-- doInDoLet = do
+--     let inner = !(innerSeq78)
+--     a <- cppEcho 100
+--     cppAdd inner a
+--
+-- The `let inner = !(innerSeq78)` is purely a binding; the force fires
+-- when `inner` is referenced (in the cppAdd call). Order:
+--   cppEcho 100 -> "C100", a = 101
+--   inner forces -> "C7", "C8", inner = 9
+--   cppAdd 9 101 = 110
+-- Stderr: C100, C7, C8
+--
+-- Hazard: a buggy fusion might evaluate `inner` early, reordering
+-- effects to C7, C8, C100, or might evaluate inner twice.
+------------------------------------------------------------------------
+innerSeq78 :: <IO> Int
+innerSeq78 = do
+  cppEcho 7
+  cppEcho 8
+
+doInDoLet :: <IO> Int
+doInDoLet = do
+  let inner = !(innerSeq78)
+  a <- cppEcho 100
+  cppAdd inner a
+
+------------------------------------------------------------------------
+-- STORY 10: Let chain whose tail is a let-bound variable (LetBndS tail).
+--
+-- The do-sugar `do { x <- f; x }` produces exactly this shape:
+-- `let x = f in x` after desugar. The LetS Express handler needs to
+-- not double-wrap a return when the tail is just `LetBndS`.
+--
+--   x = cppEcho 5 -> 6 (stderr C5)
+--   tail = x
+--   result = 6
+-- Stderr: C5
+------------------------------------------------------------------------
+letBndTailEffect :: <IO> Int
+letBndTailEffect = do
+  x <- cppEcho 5
+  x
+
+------------------------------------------------------------------------
+-- STORY 11: Let chain whose tail is a constant -- bare-statement case.
+--
+-- A do-block with a single bare statement followed by a constant. The
+-- bare statement is bound to a discard variable; the body returns the
+-- constant. The discard variable IS NOT referenced in the body.
+--
+-- Hazard checked: a buggy code generator might skip the unused binding
+-- entirely, eliminating the side-effect. Morloc's do-block semantics
+-- demand the bare statement runs because of the EvalS forcing wrap.
+--
+--   bare:  cppEcho 9 -> 10 (stderr C9), value discarded
+--   tail:  literal 77
+-- Stderr: C9
+-- Result: 77
+------------------------------------------------------------------------
+constTailWithEffect :: <IO> Int
+constTailWithEffect = do
+  cppEcho 9
+  77
+
+------------------------------------------------------------------------
+-- STORY 12: Deep let chain (10 bindings).
+--
+-- Stress-test: a long chain of pure C++ bindings called from a Python
+-- caller (nexus / outer pool). Realize must score the whole chain as
+-- C++; Express must fuse it into ONE manifold; Segment must NOT split
+-- it. A subtle bug in scoreApp summation could reverse the cost order
+-- on long chains and pick Py instead.
+--
+-- 10 cppPure adds (each adds 10).
+-- 1 -> 11 -> 21 -> 31 -> 41 -> 51 -> 61 -> 71 -> 81 -> 91 -> 101
+-- Result: 101
+------------------------------------------------------------------------
+deepLetChain :: Int
+deepLetChain =
+  let a1 = cppPure 1
+      a2 = cppPure a1
+      a3 = cppPure a2
+      a4 = cppPure a3
+      a5 = cppPure a4
+      a6 = cppPure a5
+      a7 = cppPure a6
+      a8 = cppPure a7
+      a9 = cppPure a8
+      a10 = cppPure a9
+  in a10
+
+------------------------------------------------------------------------
+-- STORY 13: Recursive function whose body is a let chain.
+--
+-- Factorial via let-chain. Each recursive call enters its own scope of
+-- the let-chain. The recursive `factWithLetChain prev` reference must
+-- survive the new LetBndS rLetVars lookup -- a buggy lookup that
+-- overrides the function-call resolution would break recursion.
+--
+-- Note: the cppPure binding `next` is unused. It is included to verify
+-- that an unreferenced binding in a recursive function doesn't disrupt
+-- the chain's language scoring.
+--
+-- fact 0 = 1
+-- fact 5 = 5 * fact 4 = 5 * (4 * (3 * (2 * (1 * 1)))) = 120
+------------------------------------------------------------------------
+factWithLetChain :: Int -> Int
+factWithLetChain n
+  ? n == 0 = 1
+  : let next = cppPure n
+        prev = cppId (n - 1)
+        rec = factWithLetChain prev
+    in cppMul n rec
+
+------------------------------------------------------------------------
+-- STORY 14: A do-block forced multiple times, side-effects observed N times.
+--
+-- innerOnce = do { cppEcho 11 }
+-- result    = !(innerOnce) + !(innerOnce) + !(innerOnce)
+--
+-- Each `!` triggers a fresh evaluation. We expect the side-effect to
+-- run THREE times. If fusion mistakenly cached the result of the
+-- first force, we'd see the side-effect once.
+--
+-- Stderr: C11, C11, C11
+-- Result: 12 + 12 + 12 = 36
+------------------------------------------------------------------------
+innerOnce :: <IO> Int
+innerOnce = do
+  cppEcho 11
+
+-- BUG-1 again: avoid collision by using three distinct named blocks.
+innerOnce2 :: <IO> Int
+innerOnce2 = do
+  cppEcho 11
+
+innerOnce3 :: <IO> Int
+innerOnce3 = do
+  cppEcho 11
+
+forcedThrice :: <IO> Int
+forcedThrice = do
+  a <- innerOnce
+  b <- innerOnce2
+  c <- innerOnce3
+  cppAdd (cppAdd a b) c
+
+------------------------------------------------------------------------
+-- STORY 15: Same-language fan-out through a let.
+--
+-- A let binds a Python value; the body uses it twice in two separate
+-- Python expressions. The whole let-and-uses chain prefers Python.
+-- Computed once.
+--
+--   x = pyEcho 3 -> 4 (stderr P3)
+--   pyAdd (pyMul x x) (pyAdd x x) = pyAdd 16 8 = 24
+-- Stderr: P3 (exactly once)
+------------------------------------------------------------------------
+mixedSameLangFanOut :: <IO> Int
+mixedSameLangFanOut = do
+  x <- pyEcho 3
+  pyAdd (pyMul x x) (pyAdd x x)
+
+------------------------------------------------------------------------
+-- STORY 16: Do-block with bare statements only -- no `<-` binds.
+--
+-- All three statements are bare; the final expression is the literal.
+-- After desugar each becomes a LetE with a fresh discard variable.
+-- The chain has no LetBndS reference at all.
+--
+-- Stderr: C20, C21, C22
+-- Result: 99
+------------------------------------------------------------------------
+doOnlyBareStatements :: <IO> Int
+doOnlyBareStatements = do
+  cppEcho 20
+  cppEcho 21
+  cppEcho 22
+  99
+
+------------------------------------------------------------------------
+-- STORY 17: Shadowed let binding.
+--
+-- An outer `x` is shadowed by an inner `x`. With the new rLetVars
+-- map in Realize, Map.insert overwrites — so the inner binding
+-- replaces the outer for the inner scope. The body references `x`
+-- and must resolve to the INNER binding.
+--
+-- Hazard checked: a buggy lookup that takes the FIRST binding (e.g.,
+-- via Map.union with the wrong direction) would resolve `x` to the
+-- outer binding and produce wrong scores AND wrong values.
+--
+-- Outer x = pyEcho 1 -> 2 (stderr P1)
+-- Inner shadowing: do { x <- cppEcho 50; ... uses inner x ... }
+--   Inner x = cppEcho 50 -> 51 (stderr C50)
+--   cppAdd x x = 102        (uses inner x)
+-- After inner: cppAdd 102 (cppId 0) = 102. We then return that, which
+-- discards the outer x.
+-- Result: 102.
+-- Stderr: P1, C50
+------------------------------------------------------------------------
+-- helper: an inner do-block that itself binds a variable named `x`,
+-- exercising shadowing when nested under an outer scope that also has `x`.
+shadowInner :: <IO> Int
+shadowInner = do
+  x <- cppEcho 50
+  cppAdd x x
+
+shadowedBinding :: <IO> Int
+shadowedBinding = do
+  x <- pyEcho 1
+  y <- shadowInner
+  cppAdd y (cppId 0)
+
+------------------------------------------------------------------------
+-- STORY 18: Cross-lang prefix flowing into a same-lang finish.
+--
+-- The chain begins with a Python statement, then transitions into a
+-- run of three C++ statements. Realize should pick a single lang for
+-- the chain (likely cpp since 3 cpp > 1 py and pairwiseCost favors
+-- staying in cpp), but the py statement still runs through a foreign
+-- call. Effect order is what matters: P1, C2, C3, C4.
+--
+-- Bindings:
+--   a <- pyEcho 1   -> a = 2   (stderr "P1")
+--   b <- cppEcho a  -> b = 3   (stderr "C2")
+--   c <- cppEcho b  -> c = 4   (stderr "C3")
+--   d <- cppEcho c  -> d = 5   (stderr "C4")
+--   cppAdd a (cppAdd b (cppAdd c d)) = 2 + 3 + 4 + 5 = 14
+------------------------------------------------------------------------
+crossLangIntoSameLangFinish :: <IO> Int
+crossLangIntoSameLangFinish = do
+  a <- pyEcho 1
+  b <- cppEcho a
+  c <- cppEcho b
+  d <- cppEcho c
+  cppAdd a (cppAdd b (cppAdd c d))

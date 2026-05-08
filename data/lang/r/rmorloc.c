@@ -68,8 +68,13 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             {
                 size_t length = (size_t)LENGTH(obj);
                 size = sizeof(Array);
-                // worst-case cursor alignment padding for element data
-                size += schema_alignment(schema->parameters[0]) - 1;
+                // worst-case cursor alignment padding for element data.
+                // String stays at natural element alignment (1 byte for chars);
+                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
+                size_t buf_align = (schema->type == MORLOC_STRING)
+                    ? schema_alignment(schema->parameters[0])
+                    : array_data_alignment(schema->parameters[0]);
+                size += buf_align - 1;
                 const char* str;
 
                 switch (TYPEOF(obj)) {
@@ -178,28 +183,8 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
                 return size;
             }
 
-        case MORLOC_TENSOR:
-            {
-                size_t ndim = schema_tensor_ndim(schema);
-                size_t elem_width = schema->parameters[0]->width;
-                SEXP dim = getAttrib(obj, R_DimSymbol);
-                size_t total = 1;
-                if (dim != R_NilValue) {
-                    for (int i = 0; i < length(dim); i++)
-                        total *= (size_t)INTEGER(dim)[i];
-                } else {
-                    total = (size_t)XLENGTH(obj);
-                }
-                size = sizeof(Tensor);
-                size += _Alignof(int64_t) - 1;
-                size += ndim * sizeof(int64_t);
-                size += schema_alignment(schema->parameters[0]) - 1;
-                size += total * elem_width;
-                return size;
-            }
-
         default:
-            MORLOC_ERROR("Unhandled schema type");
+            MORLOC_ERROR("Unhandled schema type %d in get_size_inner", (int)schema->type);
             break;
     }
 
@@ -329,7 +314,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                 Array* array = (Array*)dest;
                 array->size = length;  // Do not include null terminator
                 if(length > 0){
-                    // align cursor for element data placement
+                    // String character data: natural alignment (1 byte for chars)
                     *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
                     array->data = R_TRY(abs2rel, *cursor);
                     absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
@@ -351,7 +336,8 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             }
 
             // align cursor for element data placement
-            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
+            // (bumps to 64 for primitive numerics for SIMD/BLAS)
+            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, array_data_alignment(schema->parameters[0]));
             array->data = R_TRY(abs2rel, *cursor);
             Schema* element_schema = schema->parameters[0];
             char* start;
@@ -478,153 +464,8 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             }
             break;
 
-        case MORLOC_TENSOR:
-            {
-                size_t ndim = schema_tensor_ndim(schema);
-                size_t elem_width = schema->parameters[0]->width;
-
-                // Get shape from dim attribute (or length for 1D)
-                SEXP dim = getAttrib(obj, R_DimSymbol);
-                int64_t shape[5];
-                size_t total = 1;
-                if (dim != R_NilValue) {
-                    for (size_t i = 0; i < ndim; i++) {
-                        shape[i] = (int64_t)INTEGER(dim)[i];
-                        total *= (size_t)shape[i];
-                    }
-                } else {
-                    shape[0] = (int64_t)XLENGTH(obj);
-                    total = (size_t)shape[0];
-                }
-
-                Tensor* tensor = (Tensor*)dest;
-                tensor->total_elements = total;
-                tensor->device_type = 0;
-                tensor->device_id = 0;
-
-                if (total == 0) {
-                    tensor->shape = RELNULL;
-                    tensor->data = RELNULL;
-                    break;
-                }
-
-                // Write shape
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(int64_t));
-                tensor->shape = R_TRY(abs2rel, (absptr_t)*cursor);
-                int64_t* shape_dst = (int64_t*)*cursor;
-                for (size_t i = 0; i < ndim; i++) shape_dst[i] = shape[i];
-                *cursor = (char*)*cursor + ndim * sizeof(int64_t);
-
-                // Write data: transpose from column-major (R) to row-major (C)
-                size_t data_align = schema_alignment(schema->parameters[0]);
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, data_align);
-                tensor->data = R_TRY(abs2rel, (absptr_t)*cursor);
-
-                    // Coerce R object to match schema element type
-                SEXP coerced = obj;
-                int need_protect = 0;
-                morloc_serial_type etype = schema->parameters[0]->type;
-                if ((etype == MORLOC_FLOAT64 || etype == MORLOC_FLOAT32) && !isReal(obj)) {
-                    coerced = PROTECT(coerceVector(obj, REALSXP));
-                    need_protect = 1;
-                } else if (etype != MORLOC_FLOAT64 && etype != MORLOC_FLOAT32 && etype != MORLOC_BOOL && !isInteger(obj)) {
-                    coerced = PROTECT(coerceVector(obj, INTSXP));
-                    need_protect = 1;
-                }
-
-                if (ndim == 1) {
-                    // 1D: no transpose needed
-                    if (isReal(coerced)) {
-                        memcpy(*cursor, REAL(coerced), total * elem_width);
-                    } else if (isInteger(coerced)) {
-                        // R integer is always 32-bit; widen to schema width
-                        int* src = INTEGER(coerced);
-                        char* dst = (char*)*cursor;
-                        for (size_t i = 0; i < total; i++) {
-                            switch(etype) {
-                                case MORLOC_SINT64: *(int64_t*)(dst + i * elem_width) = (int64_t)src[i]; break;
-                                case MORLOC_UINT64: *(uint64_t*)(dst + i * elem_width) = (uint64_t)(unsigned int)src[i]; break;
-                                default: *(int32_t*)(dst + i * elem_width) = (int32_t)src[i]; break;
-                            }
-                        }
-                    } else if (isLogical(coerced)) {
-                        int* src = LOGICAL(coerced);
-                        uint8_t* dst = (uint8_t*)*cursor;
-                        for (size_t i = 0; i < total; i++) dst[i] = (uint8_t)(src[i] != 0);
-                    }
-                } else if (ndim == 2) {
-                    size_t nrows = (size_t)shape[0];
-                    size_t ncols = (size_t)shape[1];
-                    if (isReal(coerced)) {
-                        double* src = REAL(coerced);
-                        double* dst = (double*)*cursor;
-                        for (size_t r = 0; r < nrows; r++)
-                            for (size_t c = 0; c < ncols; c++)
-                                dst[r * ncols + c] = src[c * nrows + r];
-                    } else if (isInteger(coerced)) {
-                        // R integer is always 32-bit; transpose with widening
-                        int* src = INTEGER(coerced);
-                        char* dst = (char*)*cursor;
-                        for (size_t r = 0; r < nrows; r++)
-                            for (size_t c = 0; c < ncols; c++) {
-                                size_t dst_idx = r * ncols + c;
-                                size_t src_idx = c * nrows + r;
-                                switch(etype) {
-                                    case MORLOC_SINT64: *(int64_t*)(dst + dst_idx * elem_width) = (int64_t)src[src_idx]; break;
-                                    case MORLOC_UINT64: *(uint64_t*)(dst + dst_idx * elem_width) = (uint64_t)(unsigned int)src[src_idx]; break;
-                                    default: *(int32_t*)(dst + dst_idx * elem_width) = (int32_t)src[src_idx]; break;
-                                }
-                            }
-                    }
-                } else {
-                    size_t col_strides[5];
-                    col_strides[0] = 1;
-                    for (size_t d = 1; d < ndim; d++)
-                        col_strides[d] = col_strides[d-1] * (size_t)shape[d-1];
-                    size_t row_strides[5];
-                    row_strides[ndim-1] = 1;
-                    for (size_t d = ndim-1; d > 0; d--)
-                        row_strides[d-1] = row_strides[d] * (size_t)shape[d];
-
-                    if (isReal(coerced)) {
-                        double* src = REAL(coerced);
-                        double* dst = (double*)*cursor;
-                        for (size_t i = 0; i < total; i++) {
-                            size_t rem = i;
-                            size_t col_idx = 0;
-                            for (size_t d = 0; d < ndim; d++) {
-                                size_t coord = rem / row_strides[d];
-                                rem %= row_strides[d];
-                                col_idx += coord * col_strides[d];
-                            }
-                            dst[i] = src[col_idx];
-                        }
-                    } else if (isInteger(coerced)) {
-                        int* src = INTEGER(coerced);
-                        char* dst = (char*)*cursor;
-                        for (size_t i = 0; i < total; i++) {
-                            size_t rem = i;
-                            size_t col_idx = 0;
-                            for (size_t d = 0; d < ndim; d++) {
-                                size_t coord = rem / row_strides[d];
-                                rem %= row_strides[d];
-                                col_idx += coord * col_strides[d];
-                            }
-                            switch(etype) {
-                                case MORLOC_SINT64: *(int64_t*)(dst + i * elem_width) = (int64_t)src[col_idx]; break;
-                                case MORLOC_UINT64: *(uint64_t*)(dst + i * elem_width) = (uint64_t)(unsigned int)src[col_idx]; break;
-                                default: *(int32_t*)(dst + i * elem_width) = (int32_t)src[col_idx]; break;
-                            }
-                        }
-                    }
-                }
-                if (need_protect) UNPROTECT(1);
-                *cursor = (char*)*cursor + total * elem_width;
-            }
-            break;
-
         default:
-            MORLOC_ERROR("Unhandled schema type");
+            MORLOC_ERROR("Unhandled schema type %d in to_voidstar_r", (int)schema->type);
             break;
     }
 
@@ -1015,141 +856,8 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
             obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0], base_ptr);
             break;
         }
-        case MORLOC_TENSOR: {
-            const Tensor* tensor = (const Tensor*)data;
-            size_t ndim = schema_tensor_ndim(schema);
-            size_t total = tensor->total_elements;
-
-            if (total == 0) {
-                if (isReal(obj)) {
-                    obj = PROTECT(allocVector(REALSXP, 0));
-                } else {
-                    obj = PROTECT(allocVector(INTSXP, 0));
-                }
-                UNPROTECT(1);
-                break;
-            }
-
-            const int64_t* shape = (const int64_t*)resolve_relptr(tensor->shape, base_ptr, NULL);
-            const void* tdata = resolve_relptr(tensor->data, base_ptr, NULL);
-
-            // Allocate R vector
-            int sexptype;
-            switch (schema->parameters[0]->type) {
-                case MORLOC_FLOAT32:
-                case MORLOC_FLOAT64: sexptype = REALSXP; break;
-                case MORLOC_BOOL:    sexptype = LGLSXP; break;
-                default:             sexptype = INTSXP; break;
-            }
-
-            obj = PROTECT(allocVector(sexptype, (R_xlen_t)total));
-
-            if (ndim == 1) {
-                // 1D: no transpose
-                if (sexptype == REALSXP) {
-                    if (schema->parameters[0]->type == MORLOC_FLOAT32) {
-                        const float* src = (const float*)tdata;
-                        double* dst = REAL(obj);
-                        for (size_t i = 0; i < total; i++) dst[i] = (double)src[i];
-                    } else {
-                        memcpy(REAL(obj), tdata, total * sizeof(double));
-                    }
-                } else if (sexptype == INTSXP) {
-                    size_t elem_w = schema->parameters[0]->width;
-                    if (elem_w == sizeof(int)) {
-                        memcpy(INTEGER(obj), tdata, total * sizeof(int));
-                    } else {
-                        // Widen or narrow to int
-                        int* dst = INTEGER(obj);
-                        const char* src = (const char*)tdata;
-                        for (size_t i = 0; i < total; i++) {
-                            int64_t v = 0;
-                            memcpy(&v, src + i * elem_w, elem_w);
-                            dst[i] = (int)v;
-                        }
-                    }
-                } else if (sexptype == LGLSXP) {
-                    const uint8_t* src = (const uint8_t*)tdata;
-                    int* dst = LOGICAL(obj);
-                    for (size_t i = 0; i < total; i++) dst[i] = src[i] ? 1 : 0;
-                }
-            } else if (ndim == 2) {
-                // 2D: row-major to col-major transpose
-                size_t nrows = (size_t)shape[0];
-                size_t ncols = (size_t)shape[1];
-                if (sexptype == REALSXP) {
-                    const double* src = (const double*)tdata;
-                    double* dst = REAL(obj);
-                    for (size_t r = 0; r < nrows; r++)
-                        for (size_t c = 0; c < ncols; c++)
-                            dst[c * nrows + r] = src[r * ncols + c];
-                } else if (sexptype == INTSXP) {
-                    // Read at schema width, narrow to R int
-                    size_t elem_w = schema->parameters[0]->width;
-                    const char* src = (const char*)tdata;
-                    int* dst = INTEGER(obj);
-                    for (size_t r = 0; r < nrows; r++)
-                        for (size_t c = 0; c < ncols; c++) {
-                            int64_t v = 0;
-                            memcpy(&v, src + (r * ncols + c) * elem_w, elem_w);
-                            dst[c * nrows + r] = (int)v;
-                        }
-                }
-            } else {
-                // General N-D: row-major to col-major
-                size_t col_strides[5];
-                col_strides[0] = 1;
-                for (size_t d = 1; d < ndim; d++)
-                    col_strides[d] = col_strides[d-1] * (size_t)shape[d-1];
-                size_t row_strides[5];
-                row_strides[ndim-1] = 1;
-                for (size_t d = ndim-1; d > 0; d--)
-                    row_strides[d-1] = row_strides[d] * (size_t)shape[d];
-
-                if (sexptype == REALSXP) {
-                    const double* src = (const double*)tdata;
-                    double* dst = REAL(obj);
-                    for (size_t i = 0; i < total; i++) {
-                        // i is row-major index, compute col-major index
-                        size_t rem = i;
-                        size_t col_idx = 0;
-                        for (size_t d = 0; d < ndim; d++) {
-                            size_t coord = rem / row_strides[d];
-                            rem %= row_strides[d];
-                            col_idx += coord * col_strides[d];
-                        }
-                        dst[col_idx] = src[i];
-                    }
-                } else if (sexptype == INTSXP) {
-                    // Read at schema width, narrow to R int
-                    size_t elem_w = schema->parameters[0]->width;
-                    const char* src = (const char*)tdata;
-                    int* dst = INTEGER(obj);
-                    for (size_t i = 0; i < total; i++) {
-                        size_t rem = i;
-                        size_t col_idx = 0;
-                        for (size_t d = 0; d < ndim; d++) {
-                            size_t coord = rem / row_strides[d];
-                            rem %= row_strides[d];
-                            col_idx += coord * col_strides[d];
-                        }
-                        int64_t v = 0;
-                        memcpy(&v, src + i * elem_w, elem_w);
-                        dst[col_idx] = (int)v;
-                    }
-                }
-            }
-
-            // Set dim attribute
-            SEXP r_dim = PROTECT(allocVector(INTSXP, (R_xlen_t)ndim));
-            for (size_t i = 0; i < ndim; i++)
-                INTEGER(r_dim)[i] = (int)shape[i];
-            setAttrib(obj, R_DimSymbol, r_dim);
-            UNPROTECT(2);
-            break;
-        }
         default:
-            MORLOC_ERROR("Unsupported schema type");
+            MORLOC_ERROR("Unsupported schema type %d in from_voidstar", (int)schema->type);
             goto error;
     }
 
@@ -1475,8 +1183,10 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    // Arrow dispatch: if schema hint is "arrow", use Arrow C Data Interface
-    if (schema->hint && strcmp(schema->hint, "arrow") == 0) {
+    // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through the
+    // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
+    // the schema type itself now signals the dispatch.
+    if (schema->type == MORLOC_TABLE) {
         // Export R arrow RecordBatch via C Data Interface -> copy to shm -> packet
         // arrow::ExportRecordBatch(batch, array_ptr, schema_ptr)
         struct ArrowSchema arrow_schema;

@@ -26,6 +26,7 @@ module Morloc.Frontend.AST
   , maxIndex
   , getIndices
   , mapTypeInExprI
+  , mapConstraint
   ) where
 
 import qualified Data.Set as Set
@@ -117,6 +118,36 @@ findTypeTerms (NatAddU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatMulU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatSubU a b) = findTypeTerms a <> findTypeTerms b
 findTypeTerms (NatDivU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms NatVoidU = []
+findTypeTerms (StrVarU _) = []
+findTypeTerms (StrLitU _) = []
+findTypeTerms (StrConcatU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms StrVoidU = []
+findTypeTerms (RecVarU _) = []
+findTypeTerms RecEmptyU = []
+findTypeTerms (RecExtendU _ a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (RecUnionU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (RecDiffU a _) = findTypeTerms a
+findTypeTerms (RecIntersectU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (RecRestrictU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (RecDiffListU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms RecVoidU = []
+findTypeTerms (ListVarU _) = []
+findTypeTerms (ListLitU es) = concatMap findTypeTerms es
+findTypeTerms (ListAppU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms ListVoidU = []
+findTypeTerms (SetVarU _) = []
+findTypeTerms SetEmptyU = []
+findTypeTerms (SetLitU es) = concatMap findTypeTerms es
+findTypeTerms (SetUnionU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (SetInterU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms (SetDiffU a b) = findTypeTerms a <> findTypeTerms b
+findTypeTerms SetVoidU = []
+findTypeTerms (KeysU r) = findTypeTerms r
+findTypeTerms (ListToSetU l) = findTypeTerms l
+findTypeTerms (SizeU c) = findTypeTerms c
+findTypeTerms (ProjectFieldU r f) = findTypeTerms r <> findTypeTerms f
+findTypeTerms (RecSingletonU k v) = findTypeTerms k <> findTypeTerms v
 findTypeTerms (LabeledU _ t) = findTypeTerms t
 
 -- | Build the fixity map from top-level fixity declarations.
@@ -222,11 +253,23 @@ getIndices (ExprI i (ParenE e)) = i : getIndices e
 getIndices (ExprI i _) = [i]
 
 -- | Apply a type transformation to all types in signatures and type definitions.
+-- | Apply a TypeU transformer to every TypeU appearing inside a
+-- 'Constraint'. Used by 'mapTypeInExprI' so primitive constraints
+-- (CMember / CSubset / CDisjoint) and typeclass constraints
+-- ('Constraint') both pick up the same kind-refinement pass that
+-- transforms type signatures.
+mapConstraint :: (TypeU -> TypeU) -> Constraint -> Constraint
+mapConstraint f (Constraint cls ts) = Constraint cls (map f ts)
+mapConstraint f (CMember a s) = CMember (f a) (f s)
+mapConstraint f (CSubset a b) = CSubset (f a) (f b)
+mapConstraint f (CDisjoint a b) = CDisjoint (f a) (f b)
+
 mapTypeInExprI :: (Monad m) => (TypeU -> TypeU) -> ExprI -> m ExprI
 mapTypeInExprI f = go
   where
     go (ExprI i (SigE (Signature v l (EType t cs doc labels)))) =
-      return $ ExprI i (SigE (Signature v l (EType (f t) cs doc labels)))
+      let cs' = Set.map (mapConstraint f) cs
+      in return $ ExprI i (SigE (Signature v l (EType (f t) cs' doc labels)))
     go (ExprI i (AnnE e t)) = do
       e' <- go e
       return $ ExprI i (AnnE e' (f t))

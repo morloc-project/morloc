@@ -59,9 +59,9 @@ printExpr (IRecordLit _ _ entries) =
 printExpr (IAccess e (IIdx i)) = "std::get<" <> pretty i <> ">(" <> printExpr e <> ")"
 printExpr (IAccess e (IKey _)) = printExpr e -- should not be reached for C++
 printExpr (IAccess e (IField f)) = printExpr e <> "." <> pretty f
-printExpr (ISerCall schema e) = [idoc|_put_value(#{printExpr e}, "#{pretty schema}")|]
-printExpr (IDesCall schema (Just rawtype) e) = [idoc|_get_value<#{renderIType rawtype}>(#{printExpr e}, "#{pretty schema}")|]
-printExpr (IDesCall schema Nothing e) = [idoc|_get_value(#{printExpr e}, "#{pretty schema}")|]
+printExpr (ISerCall sid e) = [idoc|_put_value(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IDesCall sid (Just rawtype) e) = [idoc|_get_value<#{renderIType rawtype}>(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IDesCall sid Nothing e) = [idoc|_get_value(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
 printExpr (IPack packer e) = pretty packer <> parens (printExpr e)
 printExpr (ICall f Nothing argGroups) =
   pretty f <> hsep (map (tupled . map printExpr) argGroups)
@@ -80,22 +80,22 @@ printExpr (ILambda args body) =
 printExpr (IRawExpr d) = pretty d
 printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
 printExpr (IEval e) = printExpr e <> "()"
-printExpr (IIntrinsicHash schema e) =
-  [idoc|_mlc_hash(#{printExpr e}, "#{pretty schema}")|]
-printExpr (IIntrinsicSave fmt schema e path)
-  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, "#{pretty schema}", #{printExpr path})|]
-  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, "#{pretty schema}", #{printExpr path})|]
-  | otherwise = [idoc|_mlc_save(#{printExpr e}, "#{pretty schema}", #{printExpr path})|]
-printExpr (IIntrinsicLoad schema (Just t) path) =
-  [idoc|_mlc_load<#{renderIType t}>("#{pretty schema}", #{printExpr path})|]
-printExpr (IIntrinsicLoad schema Nothing path) =
-  [idoc|_mlc_load("#{pretty schema}", #{printExpr path})|]
-printExpr (IIntrinsicShow schema e) =
-  [idoc|_mlc_show(#{printExpr e}, "#{pretty schema}")|]
-printExpr (IIntrinsicRead schema (Just t) e) =
-  [idoc|_mlc_read<#{renderIType t}>("#{pretty schema}", #{printExpr e})|]
-printExpr (IIntrinsicRead schema Nothing e) =
-  [idoc|_mlc_read("#{pretty schema}", #{printExpr e})|]
+printExpr (IIntrinsicHash sid e) =
+  [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicSave fmt sid e path)
+  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+  | otherwise = [idoc|_mlc_save(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicLoad sid (Just t) path) =
+  [idoc|_mlc_load<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicLoad sid Nothing path) =
+  [idoc|_mlc_load(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicShow sid e) =
+  [idoc|_mlc_show(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicRead sid (Just t) e) =
+  [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicRead sid Nothing e) =
+  [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> pretty v <+> "=" <+> printExpr e <> ";"
@@ -180,11 +180,28 @@ printProgram serialization signatures prog =
     (DF.embededFileText (DF.poolTemplate "cpp"))
     "// <<<BREAK>>>"
     [ vsep (map pretty (ipSources prog))
-    , vsep serialization
+    , vsep (schemaTableDecl : serialization)
     , vsep signatures
     , vsep (map pretty (ipManifolds prog))
     , printDispatch (ipLocalDispatch prog) (ipRemoteDispatch prog)
     ]
+  where
+    schemas = ipSchemaTable prog
+    n = length schemas
+    schemaTableDecl
+      | n == 0 = "void _init_schemas() {}"
+      | otherwise = vsep
+          [ "static Schema* mlc_schema_table[" <> pretty n <> "];"
+          , "void _init_schemas() {"
+          , indent 4 $ vsep
+              [ "static const char* _schema_strs[] = {"
+              , indent 4 $ vsep [dquotes (pretty s) <> "," | s <- schemas]
+              , "};"
+              , "for (int i = 0; i < " <> pretty n <> "; i++)"
+              , indent 4 "mlc_schema_table[i] = parse_schema_cpp(_schema_strs[i]);"
+              ]
+          , "}"
+          ]
 
 printTemplateHeader :: [MDoc] -> MDoc
 printTemplateHeader [] = ""

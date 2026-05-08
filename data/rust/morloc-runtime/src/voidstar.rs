@@ -6,7 +6,7 @@
 
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
-use crate::shm::{self, AbsPtr, Array, RelPtr, Tensor};
+use crate::shm::{self, AbsPtr, Array, RelPtr};
 
 // ── adjust_voidstar_relptrs ────────────────────────────────────────────────
 
@@ -52,13 +52,6 @@ pub fn adjust_relptrs(
                     adjust_relptrs(data.add(off), &schema.parameters[0], base_rel)?;
                 }
             }
-            SerialType::Tensor => {
-                let t = &mut *(data as *mut Tensor);
-                if t.total_elements > 0 {
-                    t.shape += base_rel;
-                    t.data += base_rel;
-                }
-            }
             _ => {}
         }
     }
@@ -102,7 +95,6 @@ pub fn free_by_schema(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
                     free_by_schema(ptr.add(schema.offsets[i]), &schema.parameters[i])?;
                 }
             }
-            SerialType::Tensor => {} // inline, freed by parent
             _ => {}
         }
         std::ptr::write_bytes(ptr, 0, schema.width);
@@ -169,7 +161,13 @@ fn flatten_fixup(
                 }
                 let orig_data = shm::rel2abs(orig_arr.data)?;
                 let elem_schema = &schema.parameters[0];
-                let align = elem_schema.alignment();
+                // String stays at natural element alignment (1 byte for chars);
+                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
+                let align = if schema.serial_type == SerialType::String {
+                    elem_schema.alignment()
+                } else {
+                    elem_schema.array_data_alignment()
+                };
                 *cursor = shm::align_up(*cursor, align);
                 buf_arr.data = *cursor as RelPtr;
                 let elem_w = elem_schema.width;
@@ -206,35 +204,6 @@ fn flatten_fixup(
                         data.add(off), &schema.parameters[0], cursor,
                     )?;
                 }
-            }
-            SerialType::Tensor => {
-                let orig = &*(data as *const Tensor);
-                let buf_t = &mut *(buf.as_mut_ptr().add(buf_offset) as *mut Tensor);
-                if orig.total_elements == 0 {
-                    buf_t.shape = 0;
-                    buf_t.data = 0;
-                    return Ok(());
-                }
-                let ndim = schema.offsets.first().copied().unwrap_or(0);
-                let orig_shape = shm::rel2abs(orig.shape)?;
-                *cursor = shm::align_up(*cursor, std::mem::align_of::<i64>());
-                buf_t.shape = *cursor as RelPtr;
-                let shape_bytes = ndim * std::mem::size_of::<i64>();
-                buf[*cursor..*cursor + shape_bytes].copy_from_slice(
-                    std::slice::from_raw_parts(orig_shape, shape_bytes)
-                );
-                *cursor += shape_bytes;
-
-                let orig_data = shm::rel2abs(orig.data)?;
-                let elem_w = schema.parameters[0].width;
-                let elem_align = schema.parameters[0].alignment();
-                *cursor = shm::align_up(*cursor, elem_align);
-                buf_t.data = *cursor as RelPtr;
-                let data_bytes = orig.total_elements * elem_w;
-                buf[*cursor..*cursor + data_bytes].copy_from_slice(
-                    std::slice::from_raw_parts(orig_data, data_bytes)
-                );
-                *cursor += data_bytes;
             }
             _ => {} // primitives already copied by parent
         }

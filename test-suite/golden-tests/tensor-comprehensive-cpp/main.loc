@@ -17,6 +17,8 @@ module main
 
 import root
 import root-cpp
+import tensor
+import tensor-cpp
 
 source Cpp from "src.hpp"
   ( "makeVec"
@@ -35,27 +37,27 @@ source Cpp from "src.hpp"
   )
 
 -- Basic constructors for each dimension
-makeVec :: Tensor1 5 Real
-makeMat :: Tensor2 3 4 Real
+makeVec :: Vector 5 Real
+makeMat :: Matrix 3 4 Real
 make3d :: Tensor3 2 3 4 Real
 
 -- Edge cases: empty and minimal
-makeEmpty :: Tensor1 0 Real
-makeSingle :: Tensor1 1 Real
-makeOneByOne :: Tensor2 1 1 Real
+makeEmpty :: Vector 0 Real
+makeSingle :: Vector 1 Real
+makeOneByOne :: Matrix 1 1 Real
 
 -- Element type variety
-makeIntVec :: Tensor1 4 Int32
-makeF32Vec :: Tensor1 3 Float32
+makeIntVec :: Vector 4 Int32
+makeF32Vec :: Vector 3 Float32
 
 -- Extraction: tensor -> scalar
-sumMat :: Tensor2 3 4 Real -> Real
-sumVec :: Tensor1 5 Real -> Real
+sumMat :: Matrix 3 4 Real -> Real
+sumVec :: Vector 5 Real -> Real
 sum3d :: Tensor3 2 3 4 Real -> Real
 
 -- Large tensor to test SHM path (exceeds inline threshold)
-makeLargeVec :: Tensor1 100000 Real
-checkLargeVec :: Tensor1 100000 Real -> Real
+makeLargeVec :: Vector 100000 Real
+checkLargeVec :: Vector 100000 Real -> Real
 
 -- Direct output tests
 vec1d = makeVec

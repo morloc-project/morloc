@@ -1,0 +1,28 @@
+module main (useDisjoint, useSubset)
+
+import root
+
+-- Primitive constraint discharge at instantiation time. Each typed
+-- function carries an explicit `=>` constraint (Disjoint or Subset)
+-- over the cross-kind algebra (Keys, ListToSet). When the row
+-- variable is solved at the call site, the constraint reduces to a
+-- ground predicate and either discharges silently or raises a hard
+-- "Constraint violation" typecheck error. This file exercises the
+-- success paths.
+
+type TBox (r :: Rec)
+
+-- Disjoint singleton vs. Keys: succeeds because 'z' is not a key of r.
+addZ :: (Disjoint (ListToSet ['z]) (Keys r)) => TBox r -> TBox (r + {z=Int})
+
+mkXY :: TBox {x=Int, y=Str}
+
+useDisjoint :: TBox {x=Int, y=Str, z=Int}
+useDisjoint = addZ mkXY
+
+-- Subset of keys: ['x] is a subset of {x,y}'s keys, so the constraint
+-- discharges. The row schema flows through unchanged.
+checkKeys :: (Subset (ListToSet ['x]) (Keys r)) => TBox r -> TBox r
+
+useSubset :: TBox {x=Int, y=Str}
+useSubset = checkKeys mkXY

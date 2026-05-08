@@ -5,6 +5,7 @@ import qualified System.Directory as SD
 import Test.Tasty
 
 import GoldenMakefileTests (goldenMakefileTest)
+import MorlocDepsTests (morlocDepsTests)
 import PropertyTests (propertyTests)
 import UnitTypeTests
 
@@ -19,6 +20,7 @@ main = do
       , unitValuecheckTests
       , typeOrderTests
       , typeAliasTests
+      , numericLiteralAliasTests
       , propertyTests
       , whereTests
       , orderInvarianceTests
@@ -36,8 +38,10 @@ main = do
       , natArithTests
       , natLabelTests
       , natKindPromotionTests
+      , natDimTests
       , letBindingTests
       , aliasConstructorTests
+      , morlocDepsTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -105,6 +109,9 @@ main = do
       , golden "tensor-nat-basic" "tensor-nat-basic"
       , golden "slurm-label-codegen" "slurm-label-codegen"
       , golden "let-crosslang" "let-crosslang"
+      , golden "let-do-fusion" "let-do-fusion"
+      , golden "let-do-fusion-effects" "let-do-fusion-effects"
+      , golden "let-do-fusion-namecollide" "let-do-fusion-namecollide"
       , golden "functional-data-1" "functional-data-1"
       , golden "functional-data-2" "functional-data-2"
       , golden "functional-data-3a" "functional-data-3a"
@@ -149,13 +156,16 @@ main = do
       , golden "alias-concrete-bugs" "alias-concrete-bugs"
       , golden "alias-constructor-equiv" "alias-constructor-equiv"
       , golden "alias-array-monoid" "alias-array-monoid"
+      , golden "alias-array-deque-specialized" "alias-array-deque-specialized"
       , golden "alias-typeclass-specificity" "alias-typeclass-specificity"
       , golden "alias-no-cross-instance" "alias-no-cross-instance"
       , golden "alias-string-hierarchy" "alias-string-hierarchy"
+      , golden "phantom-dimension" "phantom-dimension"
       , golden "poly-list-1" "poly-list-1"
       , golden "higher-kinded-types" "higher-kinded-types"
       , golden "string-encoding" "string-encoding"
       , golden "string-encoding-utf8" "string-encoding-utf8"
+      , golden "uint8-cross-language" "uint8-cross-language"
       , golden "string-json-parsing" "string-json-parsing"
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"
@@ -369,13 +379,6 @@ main = do
       , golden "R(R) serial-form-12-c" "serial-form-12-c"
       , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r" "serial-form-12-r"
-      , -- table handling
-        golden "table-1-c" "table-1-c"
-      , golden "table-1-py" "table-1-py"
-      , golden "table-1-r" "table-1-r"
-      , golden "table-2-c" "table-2-c"
-      , golden "table-2-py" "table-2-py"
-      , golden "table-2-r" "table-2-r"
       , -- object handling
         golden "object-1-c" "object-1-c"
       , golden "object-1-py" "object-1-py"
@@ -501,17 +504,108 @@ main = do
       , golden "memory-nested-misalign-cpp" "memory-nested-misalign-cpp"
       , golden "memory-nested-misalign-py" "memory-nested-misalign-py"
       , golden "memory-split-block-cpp" "memory-split-block-cpp"
-      , -- arrow immutable table tests (large table passed by reference into map)
-        golden "arrow-immutable-pr" "arrow-immutable-pr"
-      , golden "arrow-immutable-rp" "arrow-immutable-rp"
-      , golden "arrow-immutable-cp" "arrow-immutable-cp"
-      , golden "arrow-immutable-pc" "arrow-immutable-pc"
+      , -- Consolidated `tables-*` suite. The 25 original directories were
+        --   merged into 8 by import set / coverage axis (see commit log).
+        --   Each merged module exports one function per original test and
+        --   is driven by a Makefile that invokes them in sequence with
+        --   banner separators in obs.txt.
+        --
+        -- tables-typecheck:    typecheck-only typed Table algebra
+        --                      (Nat+Rec arithmetic, add/drop f:Str lifting).
+        -- tables-py-build:     basic Table construction + head under three
+        --                      row-type shapes (kindless r, typed Rec,
+        --                      bare-T polymorphic).
+        -- tables-py-ops:       runtime stdlib ops through the python pool
+        --                      -- sliceRows, arrange, select, reverseRows,
+        --                      rbind, cbind, add/drop, selectLit/dropMany.
+        -- tables-py-formats:   CSV/JSON/Parquet/Arrow-IPC input round-trip
+        --                      and CSV output via --output-form csv.
+        -- tables-py-schema-inference:
+        --                      open-table CSV/JSON merge, CSV sniff-window
+        --                      promotion, bare-T JSON schema inference.
+        -- tables-r:            R-pool parity for the python ops coverage.
+        -- tables-pipeline-py:  end-to-end chained integration test
+        --                      (read CSV -> head -> rbind -> lookupRow).
+        -- tables-mvp-pc:       cross-pool py->cpp Table identity wire path.
+        golden "tables-typecheck" "tables-typecheck"
+      , golden "tables-py-build" "tables-py-build"
+      , golden "tables-py-ops" "tables-py-ops"
+      , golden "tables-py-formats" "tables-py-formats"
+      , golden "tables-py-schema-inference" "tables-py-schema-inference"
+      , golden "tables-r" "tables-r"
+      , golden "tables-mvp-pc" "tables-mvp-pc"
+      , -- Stage 4: legacy `table Stats = Stats { ... }` migrated to typed
+        --   `Table n {idx=Int, value=Real}`. Same Python/R/C++ sources,
+        --   same runtime behaviour as arrow-immutable-{pr,rp,pc,cp},
+        --   but using the new stage-3 Rec kind syntax. Proves users can
+        --   migrate cleanly across all language combinations.
+        golden "arrow-immutable-pr-typed" "arrow-immutable-pr-typed"
+      , golden "arrow-immutable-rp-typed" "arrow-immutable-rp-typed"
+      , golden "arrow-immutable-pc-typed" "arrow-immutable-pc-typed"
+      , golden "arrow-immutable-cp-typed" "arrow-immutable-cp-typed"
+      , -- Stage 4: arrow-nexus migrations. Single-pool table generators
+        --   exposed through the nexus; output is row-oriented JSON via
+        --   print_arrow_as_json. Typed Table form is a 1-line declaration
+        --   instead of the 3-line legacy table syntax.
+        golden "arrow-nexus-py-typed" "arrow-nexus-py-typed"
+      , golden "arrow-nexus-cpp-typed" "arrow-nexus-cpp-typed"
+      , -- Stage 4: end-to-end pipeline demo. Chains readData -> head 5 ->
+        --   rbind self -> lookupRow i. Demonstrates schema preservation
+        --   through multiple ops and runtime correctness for the doubled
+        --   row count (lookupRow 7 of doubled-from-head-5 -> value at
+        --   original index 2 = 1.0).
+        golden "tables-pipeline-py" "tables-pipeline-py"
+      , -- Stage 2 Str kind. A typedef parameter declared (s :: Str) marks
+        --   its slot as Str-kinded; refineKinds promotes corresponding
+        --   variables to StrVarU; the StrSolver unifies them with literal
+        --   StrLitU values at call sites. End-to-end check that the
+        --   parser-promotion-solver path is wired correctly.
+        golden "str-kind-typecheck" "str-kind-typecheck"
+      , -- Stage 3 Rec kind. A typedef parameter declared (r :: Rec) marks
+        --   its slot as Rec-kinded; refineKinds promotes corresponding
+        --   variables to RecVarU; the RecSolver leaves free row variables
+        --   in place (row polymorphism). End-to-end check that the
+        --   parser-promotion-solver path is wired for Rec.
+        golden "rec-kind-typecheck" "rec-kind-typecheck"
+      , -- Stage 10 instantiation-time constraint discharge. An explicit
+        --   `=>` clause carrying primitive constraints (Disjoint, Subset)
+        --   over the cross-kind algebra (Keys, ListToSet) gets renamed,
+        --   queued at the call site, reduced under the call-site row
+        --   substitution, and discharged. Verifies the success paths;
+        --   the contradiction path is locked in by RecSolver overlap.
+        golden "constraint-primitive-typecheck" "constraint-primitive-typecheck"
+      , -- Stage 10 constraint propagation. A function whose body uses
+        --   another function carrying a primitive constraint over a
+        --   row variable cannot discharge that obligation locally
+        --   (the row variable belongs to the *caller's* signature).
+        --   Propagation: the caller declares the same constraint, the
+        --   RecSolver unifies the inner-call's renamed row variable
+        --   with the caller's renamed row variable, and the
+        --   subsumption check in @dischargeConstraints@ recognises
+        --   the obligation as satisfied by the caller's promise.
+        golden "constraint-propagation" "constraint-propagation"
+      , -- Negative path of constraint propagation. A caller invokes a
+        --   function with a primitive constraint over a row variable
+        --   but does NOT re-declare the constraint; the typechecker
+        --   reports it as unsolved with a copy-pasteable form
+        --   naming the offending function.
+        golden "constraint-missing-error" "constraint-missing-error"
+      , -- Stage 9.5 singleton-Str lifting. An f:Str signature label
+        --   introduces `f` as a Str-kinded type-level variable. At the
+        --   call site a Str literal gets lifted into the type, driving
+        --   reduction of (r - f), Singleton f a, etc. End-to-end check
+        --   that the parser-promotion-substitution-reduction chain
+        --   delivers a flat ground Rec for the canonical "set or
+        --   replace" extension pattern.
+        golden "singleton-str-lifting" "singleton-str-lifting"
       , -- dense tensor tests
         golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"
       , golden "tensor-dimensions" "tensor-dimensions"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
+      -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
+      , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
       , -- big integer tests
         golden "numeric-literals" "numeric-literals"
       , golden "bigint-factorial-py" "bigint-factorial-py"

@@ -40,8 +40,10 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
+  , renameEType
   , cleanTypeName
   , prettyTypeU
+  , prettyConstraint
   , occursCheck
   , toExistential
   , gammaContextList
@@ -57,8 +59,16 @@ module Morloc.Typecheck.Internal
   , isSubtypeOf2
   , recheckDeferred
 
+    -- * primitive constraint discharge (Stage 9 of the tables refactor)
+  , reduceConstraint
+  , dischargeConstraints
+  , normaliseSet
+
     -- * nat label helpers
   , collectNatVarNames
+  , collectStrVarNames
+  , collectRecVarNames
+  , collectListVarNames
 
     -- * debugging
   , seeGamma
@@ -84,6 +94,10 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 import qualified Morloc.Typecheck.NatSolver as NS
+import qualified Morloc.Typecheck.StrSolver as SS
+import qualified Morloc.Typecheck.RecSolver as RS
+import qualified Morloc.Typecheck.ListSolver as LS
+import qualified Morloc.Typecheck.SetSolver as SetS
 import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
@@ -103,6 +117,266 @@ toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0
 
 class Applicable a where
   apply :: Gamma -> a -> a
+
+----------------------------------------------------------------------
+-- Cross-kind function reduction (Stage 9)
+----------------------------------------------------------------------
+
+-- | Walk a Rec extension chain and collect (key, type) fields. Returns
+-- Nothing if the chain doesn't terminate cleanly in RecEmptyU (free
+-- row variable, unsolved Rec operator).
+collectGroundRec :: TypeU -> Maybe [(Text, TypeU)]
+collectGroundRec RecEmptyU = Just []
+collectGroundRec (RecExtendU k t rest) = ((k, t):) <$> collectGroundRec rest
+collectGroundRec _ = Nothing
+
+-- | Reduce @Keys r@ when @r@ is a ground Rec. Returns a SetLitU of the
+-- key names; otherwise leaves the form symbolic for solver-time deferral.
+reduceKeys :: TypeU -> TypeU
+reduceKeys r = case collectGroundRec r of
+  Just fs -> SetLitU [StrLitU k | (k, _) <- fs]
+  Nothing -> KeysU r
+
+-- | Reduce @ListToSet l@ when @l@ is a ground list literal.
+reduceListToSet :: TypeU -> TypeU
+reduceListToSet (ListLitU es) = SetLitU (dedupSorted es)
+  where
+    dedupSorted = go . map normalise
+    normalise t = t
+    go [] = []
+    go (x:xs) = x : go (filter (/= x) xs)
+reduceListToSet l = ListToSetU l
+
+-- | Reduce @Size c@ when @c@ is ground.
+reduceSize :: TypeU -> TypeU
+reduceSize (ListLitU es) = NatLitU (toInteger (length es))
+reduceSize (SetLitU es) = NatLitU (toInteger (length es))
+reduceSize SetEmptyU = NatLitU 0
+reduceSize r@(RecExtendU _ _ _) = case collectGroundRec r of
+  Just fs -> NatLitU (toInteger (length fs))
+  Nothing -> SizeU r
+reduceSize RecEmptyU = NatLitU 0
+reduceSize c = SizeU c
+
+-- | Reduce @ProjectField r f@ when both are ground.
+reduceProjectField :: TypeU -> TypeU -> TypeU
+reduceProjectField r (StrLitU name) = case collectGroundRec r of
+  Just fs -> case lookup name fs of
+    Just t -> t
+    Nothing -> ProjectFieldU r (StrLitU name)
+  Nothing -> ProjectFieldU r (StrLitU name)
+reduceProjectField r f = ProjectFieldU r f
+
+-- | Reduce @Singleton k v@ when the key is a Str literal: a one-field
+-- Rec extension of the empty Rec. Defers when the key is still a
+-- variable.
+reduceRecSingleton :: TypeU -> TypeU -> TypeU
+reduceRecSingleton (StrLitU k) v = RecExtendU k v RecEmptyU
+reduceRecSingleton k v = RecSingletonU k v
+
+-- | Extract a list of ground Str literals from a TypeU, if possible.
+-- Returns Just on a fully-ground @ListLitU@ of @StrLitU@ values, Nothing
+-- otherwise.
+collectGroundStrList :: TypeU -> Maybe [Text]
+collectGroundStrList (ListLitU es) = traverse asStrLit es
+  where
+    asStrLit (StrLitU s) = Just s
+    asStrLit _ = Nothing
+collectGroundStrList _ = Nothing
+
+-- | Reduce @r # l@ to a Rec containing only the fields of @r@ whose
+-- names appear in @l@. Both operands must be ground; otherwise leaves
+-- the form symbolic. Order of result fields matches the original Rec.
+reduceRecRestrict :: TypeU -> TypeU -> TypeU
+reduceRecRestrict r l = case (collectGroundRec r, collectGroundStrList l) of
+  (Just fs, Just keys) ->
+    let kept = [(k, t) | (k, t) <- fs, k `elem` keys]
+    in foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU kept
+  _ -> RecRestrictU r l
+
+-- | Reduce @r - l@ to a Rec containing every field of @r@ whose name is
+-- not in @l@. Drop-of-absent is benign (no constraint required).
+reduceRecDiffList :: TypeU -> TypeU -> TypeU
+reduceRecDiffList r l = case (collectGroundRec r, collectGroundStrList l) of
+  (Just fs, Just keys) ->
+    let kept = [(k, t) | (k, t) <- fs, k `notElem` keys]
+    in foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU kept
+  _ -> RecDiffListU r l
+
+-- | Reduce @r1 + r2@ when both are ground Recs to a single literal Rec.
+-- Conflicting keys (same name on both sides with different types) are
+-- preserved as-is in the symbolic form so the existing RecSolver
+-- contradiction path produces a clear error. When one side is symbolic
+-- (a row variable, etc.) the form stays @RecUnionU@.
+reduceRecUnion :: TypeU -> TypeU -> TypeU
+reduceRecUnion a b = case (collectGroundRec a, collectGroundRec b) of
+  (Just fa, Just fb)
+    | not anyOverlap ->
+        foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU (fa ++ fb)
+    where
+      keysA = map fst fa
+      keysB = map fst fb
+      anyOverlap = any (`elem` keysB) keysA
+  _ -> RecUnionU a b
+
+----------------------------------------------------------------------
+-- Generic constraint discharge (Stage 9)
+----------------------------------------------------------------------
+
+-- | Reduce a primitive constraint to one of three outcomes:
+--
+-- - @Right Nothing@: discharged (constraint is satisfied).
+-- - @Right (Just c)@: still defers; @c@ is the reduced form to keep
+--   in the gamma queue. The reduced form is at least as
+--   informative as the input.
+-- - @Left msg@: contradicts; constraint cannot be satisfied.
+--
+-- Typeclass constraints ('Constraint cls ts') aren't handled here —
+-- they pass through unchanged and are left for the typeclass-discharge
+-- machinery elsewhere.
+reduceConstraint :: Constraint -> Either Text (Maybe Constraint)
+reduceConstraint c@(Constraint _ _) = Right (Just c)
+reduceConstraint (CMember a s) = case (a, normaliseSet s) of
+  (_, SetEmptyU) -> Left "Member: element required in empty set"
+  (StrLitU x, SetLitU es)
+    | StrLitU x `elem` es -> Right Nothing
+    | all isStrLit es -> Left ("Member: '" <> x <> "' not in literal set")
+    | otherwise -> Right (Just (CMember a (SetLitU es)))
+  (_, s') -> Right (Just (CMember a s'))
+  where
+    isStrLit (StrLitU _) = True
+    isStrLit _ = False
+reduceConstraint (CSubset a b) = case (normaliseSet a, normaliseSet b) of
+  (SetEmptyU, _) -> Right Nothing
+  (SetLitU [], _) -> Right Nothing
+  (SetLitU es, SetLitU bs)
+    | all (`elem` bs) es -> Right Nothing
+    | all isStrLit es && all isStrLit bs ->
+        let missing = [e | e <- es, e `notElem` bs]
+        in Left ("Subset: literal set missing " <> showStrLits missing)
+    | otherwise -> Right (Just (CSubset (SetLitU es) (SetLitU bs)))
+  (a', b') -> Right (Just (CSubset a' b'))
+  where
+    isStrLit (StrLitU _) = True
+    isStrLit _ = False
+    showStrLits xs = MT.intercalate ", " ["'" <> n <> "'" | StrLitU n <- xs]
+reduceConstraint (CDisjoint a b) = case (normaliseSet a, normaliseSet b) of
+  (SetEmptyU, _) -> Right Nothing
+  (_, SetEmptyU) -> Right Nothing
+  (SetLitU [], _) -> Right Nothing
+  (_, SetLitU []) -> Right Nothing
+  (SetLitU as, SetLitU bs)
+    | null overlap -> Right Nothing
+    | all isStrLit as && all isStrLit bs ->
+        Left ("Disjoint: shared element(s) " <> showStrLits overlap)
+    | otherwise -> Right (Just (CDisjoint (SetLitU as) (SetLitU bs)))
+    where
+      overlap = [x | x <- as, x `elem` bs]
+  (a', b') -> Right (Just (CDisjoint a' b'))
+  where
+    isStrLit (StrLitU _) = True
+    isStrLit _ = False
+    showStrLits xs = MT.intercalate ", " ["'" <> n <> "'" | StrLitU n <- xs]
+
+-- | Aggressive ground-form normalisation for set expressions only.
+-- Non-set inputs return unchanged. Used by constraint reduction to
+-- canonicalise both sides before structural checks.
+normaliseSet :: TypeU -> TypeU
+normaliseSet SetEmptyU = SetEmptyU
+normaliseSet (SetLitU es) = SetLitU (dedupOrdered es)
+  where
+    dedupOrdered = go []
+    go acc [] = reverse acc
+    go acc (x:xs) = if x `elem` acc then go acc xs else go (x:acc) xs
+normaliseSet (SetUnionU a b) = case (normaliseSet a, normaliseSet b) of
+  (SetEmptyU, x) -> x
+  (x, SetEmptyU) -> x
+  (SetLitU as, SetLitU bs) ->
+    let combined = as ++ [x | x <- bs, x `notElem` as]
+    in SetLitU combined
+  (a', b') -> SetUnionU a' b'
+normaliseSet (SetInterU a b) = case (normaliseSet a, normaliseSet b) of
+  (SetEmptyU, _) -> SetEmptyU
+  (_, SetEmptyU) -> SetEmptyU
+  (SetLitU as, SetLitU bs) -> SetLitU [x | x <- as, x `elem` bs]
+  (a', b') -> SetInterU a' b'
+normaliseSet (SetDiffU a b) = case (normaliseSet a, normaliseSet b) of
+  (SetEmptyU, _) -> SetEmptyU
+  (x, SetEmptyU) -> x
+  (SetLitU as, SetLitU bs) -> SetLitU [x | x <- as, x `notElem` bs]
+  (a', b') -> SetDiffU a' b'
+normaliseSet t = t
+
+-- | Walk gammaConstraints, discharging each obligation against the final
+-- substitution. The algorithm has three outcomes per constraint:
+--
+--   1. @apply g c@ then @reduceConstraint@ returns 'Right Nothing'
+--      (fully decided as true): drop it.
+--   2. Returns 'Left msg' (contradiction): the whole pass fails with
+--      the first contradiction.
+--   3. Returns 'Right (Just c')' (still deferred — typically because a
+--      row variable, list variable, etc., is not yet ground): the
+--      constraint is checked against @gammaAssumedConstraints@. If
+--      @c'@ is identical (after applying gamma) to one of the
+--      assumptions, the obligation is "subsumed" by what the current
+--      function's signature already declared, and we drop it.
+--      Otherwise we either keep it for a later pass (if the algorithm
+--      is being run mid-typecheck) or report it as an unsolved-
+--      constraint error (if we are at end-of-typecheck).
+--
+-- Constraint propagation algorithm. A function body is allowed to use
+-- any constraint that the function's signature has declared. When the
+-- body invokes another function whose signature carries an obligation,
+-- the obligation is renamed to fresh per-call names and queued. After
+-- the body's gamma has solved everything that *can* be solved at this
+-- function's level, a leftover obligation is one of two things:
+--
+--   * Equivalent (after apply) to a declared assumption — meaning the
+--     caller has already promised this. We discharge it: the obligation
+--     is the caller's promise.
+--   * Not equivalent to anything — meaning the body needs more than the
+--     signature declares. That is a real error: the user must add the
+--     missing constraint to the function's @=>@ clause (or change the
+--     body so the constraint is no longer needed).
+--
+-- This is essentially the same shape as Haskell's "missing class
+-- constraint" diagnostic, restricted to morloc's primitive Member /
+-- Subset / Disjoint forms. Equivalence is structural after gamma
+-- application — two constraints are subsumed when their applied forms
+-- are exactly @==@. We do not attempt logical implication (e.g.,
+-- @CSubset a b /\ CSubset b c => CSubset a c@); subsumption is the
+-- conservative-but-decidable approximation.
+dischargeConstraints :: Gamma -> Either MDoc Gamma
+dischargeConstraints g = case go (gammaConstraints g) [] of
+  Left msg -> Left (pretty msg)
+  Right kept -> Right (g { gammaConstraints = kept })
+  where
+    -- | An obligation is subsumed by an assumption when the two are
+    -- structurally equal after applying the same gamma to both. The
+    -- assumption already had gamma applied (via @apply g a@), so the
+    -- obligation must be applied symmetrically before comparison.
+    -- @Nothing@ in the assumption slot (top-level had no signature)
+    -- means there are no assumptions to subsume against.
+    assumed :: [Constraint]
+    assumed = case gammaAssumedConstraints g of
+      Just cs -> map (apply g) cs
+      Nothing -> []
+
+    -- | A constraint @c@ is subsumed iff @c == a@ for some assumption
+    -- @a@. Direct equality is sufficient because both sides have
+    -- already been ground out by gamma application.
+    subsumed :: Constraint -> Bool
+    subsumed c = c `elem` assumed
+
+    go [] acc = Right (reverse acc)
+    go (c:cs) acc = case reduceConstraint (apply g c) of
+      Left msg -> Left msg
+      Right Nothing -> go cs acc
+      Right (Just c')
+        | subsumed c' -> go cs acc
+        | otherwise   -> go cs (c':acc)
+
+----------------------------------------------------------------------
 
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where
@@ -138,6 +412,50 @@ instance Applicable TypeU where
   apply g (NatMulU a b) = NatMulU (apply g a) (apply g b)
   apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
+  apply _ t@NatVoidU = t
+  apply g (StrVarU v) = case Map.lookup v (gammaStrSubs g) of
+    Just t -> t
+    Nothing -> StrVarU v
+  apply _ t@(StrLitU _) = t
+  apply g (StrConcatU a b) = StrConcatU (apply g a) (apply g b)
+  apply _ t@StrVoidU = t
+  apply g (RecVarU v) = case Map.lookup v (gammaRecSubs g) of
+    Just t -> t
+    Nothing -> RecVarU v
+  apply _ t@RecEmptyU = t
+  apply g (RecExtendU k a b) = RecExtendU k (apply g a) (apply g b)
+  apply g (RecUnionU a b) = reduceRecUnion (apply g a) (apply g b)
+  apply g (RecDiffU a ks) = RecDiffU (apply g a) ks
+  apply g (RecIntersectU a b) = RecIntersectU (apply g a) (apply g b)
+  apply g (RecRestrictU a b) = reduceRecRestrict (apply g a) (apply g b)
+  apply g (RecDiffListU a b) = reduceRecDiffList (apply g a) (apply g b)
+  apply _ t@RecVoidU = t
+  -- List- and Set-kinded constructs: variables look up gammaListSubs /
+  -- gammaSetSubs (parallel to RecVarU); operators recurse into operands.
+  apply g (ListVarU v) = case Map.lookup v (gammaListSubs g) of
+    Just t -> t
+    Nothing -> ListVarU v
+  apply g (ListLitU es) = ListLitU (map (apply g) es)
+  apply g (ListAppU a b) = ListAppU (apply g a) (apply g b)
+  apply _ t@ListVoidU = t
+  apply g (SetVarU v) = case Map.lookup v (gammaSetSubs g) of
+    Just t -> t
+    Nothing -> SetVarU v
+  apply _ t@SetEmptyU = t
+  apply g (SetLitU es) = SetLitU (map (apply g) es)
+  apply g (SetUnionU a b) = SetUnionU (apply g a) (apply g b)
+  apply g (SetInterU a b) = SetInterU (apply g a) (apply g b)
+  apply g (SetDiffU a b) = SetDiffU (apply g a) (apply g b)
+  apply _ t@SetVoidU = t
+  -- Cross-kind functions: recurse into operands first, then attempt
+  -- ground-form reduction. When the operand is fully ground these
+  -- reduce to a concrete value of the result kind; otherwise they
+  -- stay symbolic and propagate.
+  apply g (KeysU r) = reduceKeys (apply g r)
+  apply g (ListToSetU l) = reduceListToSet (apply g l)
+  apply g (SizeU c) = reduceSize (apply g c)
+  apply g (ProjectFieldU r f) = reduceProjectField (apply g r) (apply g f)
+  apply g (RecSingletonU k v) = reduceRecSingleton (apply g k) (apply g v)
   apply g (LabeledU n t) = LabeledU n (apply g t)
 
 instance Applicable EType where
@@ -148,6 +466,15 @@ instance Applicable EType where
       }
     where
       applyConstraint g' (Constraint cls ts) = Constraint cls (map (apply g') ts)
+      applyConstraint g' (CMember a s) = CMember (apply g' a) (apply g' s)
+      applyConstraint g' (CSubset a b) = CSubset (apply g' a) (apply g' b)
+      applyConstraint g' (CDisjoint a b) = CDisjoint (apply g' a) (apply g' b)
+
+instance Applicable Constraint where
+  apply g (Constraint cls ts) = Constraint cls (map (apply g) ts)
+  apply g (CMember a s) = CMember (apply g a) (apply g s)
+  apply g (CSubset a b) = CSubset (apply g a) (apply g b)
+  apply g (CDisjoint a b) = CDisjoint (apply g a) (apply g b)
 
 instance Applicable Gamma where
   apply g1 g2 =
@@ -155,6 +482,11 @@ instance Applicable Gamma where
       { gammaContext = IntMap.map f (gammaContext g2)
       , gammaSolved = Map.map (apply g1) (gammaSolved g2)
       , gammaNatSubs = Map.map (apply g1) (gammaNatSubs g2)
+      , gammaStrSubs = Map.map (apply g1) (gammaStrSubs g2)
+      , gammaRecSubs = Map.map (apply g1) (gammaRecSubs g2)
+      , gammaListSubs = Map.map (apply g1) (gammaListSubs g2)
+      , gammaSetSubs = Map.map (apply g1) (gammaSetSubs g2)
+      , gammaConstraints = map (apply g1) (gammaConstraints g2)
       }
     where
       f :: GammaIndex -> GammaIndex
@@ -198,7 +530,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -299,6 +631,7 @@ isNatExpr (NatAddU _ _) = True
 isNatExpr (NatMulU _ _) = True
 isNatExpr (NatSubU _ _) = True
 isNatExpr (NatDivU _ _) = True
+isNatExpr NatVoidU = True
 isNatExpr _ = False
 
 typeUToNatExpr :: TypeU -> Maybe NS.NatExpr
@@ -320,6 +653,133 @@ natExprToTypeU (NS.NatMul a b) = NatMulU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatSub a b) = NatSubU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatDiv a b) = NatDivU (natExprToTypeU a) (natExprToTypeU b)
 
+-- | True iff the TypeU is a Str-kinded expression (literal, variable, or
+-- concat of those). Used to gate which deferred constraints are sent to the
+-- StrSolver. See plans/tables/04-str-solver-scope.md.
+isStrExpr :: TypeU -> Bool
+isStrExpr (StrVarU _) = True
+isStrExpr (StrLitU _) = True
+isStrExpr (StrConcatU _ _) = True
+isStrExpr StrVoidU = True
+isStrExpr _ = False
+
+typeUToStrExpr :: TypeU -> Maybe SS.StrExpr
+typeUToStrExpr (StrVarU v) = Just (SS.StrVar v)
+typeUToStrExpr (StrLitU s) = Just (SS.StrLit s)
+typeUToStrExpr (StrConcatU a b) = SS.StrConcat <$> typeUToStrExpr a <*> typeUToStrExpr b
+typeUToStrExpr _ = Nothing
+
+strExprToTypeU :: SS.StrExpr -> TypeU
+strExprToTypeU (SS.StrLit s) = StrLitU s
+strExprToTypeU (SS.StrVar v) = StrVarU v
+strExprToTypeU (SS.StrConcat a b) = StrConcatU (strExprToTypeU a) (strExprToTypeU b)
+
+-- | Insert solved Str-variable assignments into the gamma's gammaStrSubs.
+-- Mirrors applyNatSolutions but the StrSolver only ever produces ground
+-- assignments (per memo 04), so there is no existential-vs-StrVar dispatch.
+applyStrSolutions :: Map.Map TVar SS.StrExpr -> Gamma -> Gamma
+applyStrSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
+  where
+    insertSub g (v, se) = g { gammaStrSubs = Map.insert v (strExprToTypeU se) (gammaStrSubs g) }
+
+-- | True iff the TypeU is a Rec-kinded expression (variable, empty,
+-- extension, union, difference, intersection). Mirrors isNatExpr/isStrExpr.
+isRecExpr :: TypeU -> Bool
+isRecExpr (RecVarU _) = True
+isRecExpr RecEmptyU = True
+isRecExpr (RecExtendU _ _ _) = True
+isRecExpr (RecUnionU _ _) = True
+isRecExpr (RecDiffU _ _) = True
+isRecExpr (RecIntersectU _ _) = True
+isRecExpr (RecRestrictU _ _) = True
+isRecExpr (RecDiffListU _ _) = True
+isRecExpr (RecSingletonU _ _) = True
+isRecExpr RecVoidU = True
+isRecExpr _ = False
+
+typeUToRecExpr :: TypeU -> Maybe RS.RecExpr
+typeUToRecExpr (RecVarU v) = Just (RS.RecVar v)
+typeUToRecExpr RecEmptyU = Just RS.RecEmpty
+typeUToRecExpr (RecExtendU k t rest) = RS.RecExtend k t <$> typeUToRecExpr rest
+typeUToRecExpr (RecUnionU a b) = RS.RecUnion <$> typeUToRecExpr a <*> typeUToRecExpr b
+typeUToRecExpr (RecDiffU a ks) = (\a' -> RS.RecDiff a' ks) <$> typeUToRecExpr a
+typeUToRecExpr (RecIntersectU a b) = RS.RecIntersect <$> typeUToRecExpr a <*> typeUToRecExpr b
+typeUToRecExpr _ = Nothing
+
+recExprToTypeU :: RS.RecExpr -> TypeU
+recExprToTypeU (RS.RecVar v) = RecVarU v
+recExprToTypeU RS.RecEmpty = RecEmptyU
+recExprToTypeU (RS.RecExtend k t rest) = RecExtendU k t (recExprToTypeU rest)
+recExprToTypeU (RS.RecUnion a b) = RecUnionU (recExprToTypeU a) (recExprToTypeU b)
+recExprToTypeU (RS.RecDiff a ks) = RecDiffU (recExprToTypeU a) ks
+recExprToTypeU (RS.RecIntersect a b) = RecIntersectU (recExprToTypeU a) (recExprToTypeU b)
+
+-- | Insert solved Rec-tail variable assignments into the gamma's gammaRecSubs.
+applyRecSolutions :: Map.Map TVar RS.RecExpr -> Gamma -> Gamma
+applyRecSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
+  where
+    insertSub g (v, re) = g { gammaRecSubs = Map.insert v (recExprToTypeU re) (gammaRecSubs g) }
+
+-- | True iff the TypeU is a List-kinded expression. Mirrors isRecExpr.
+isListExpr :: TypeU -> Bool
+isListExpr (ListVarU _) = True
+isListExpr (ListLitU _) = True
+isListExpr (ListAppU _ _) = True
+isListExpr ListVoidU = True
+isListExpr _ = False
+
+typeUToListExpr :: TypeU -> Maybe LS.ListExpr
+typeUToListExpr (ListVarU v) = Just (LS.ListVar v)
+typeUToListExpr (ListLitU es) = Just (LS.ListLit es)
+typeUToListExpr (ListAppU a b) = LS.ListApp <$> typeUToListExpr a <*> typeUToListExpr b
+typeUToListExpr _ = Nothing
+
+listExprToTypeU :: LS.ListExpr -> TypeU
+listExprToTypeU (LS.ListVar v) = ListVarU v
+listExprToTypeU (LS.ListLit es) = ListLitU es
+listExprToTypeU (LS.ListApp a b) = ListAppU (listExprToTypeU a) (listExprToTypeU b)
+
+-- | Insert solved List-tail variable assignments into the gammaListSubs.
+applyListSolutions :: Map.Map TVar LS.ListExpr -> Gamma -> Gamma
+applyListSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
+  where
+    insertSub g (v, le) = g { gammaListSubs = Map.insert v (listExprToTypeU le) (gammaListSubs g) }
+
+-- | True iff the TypeU is a Set-kinded expression. Mirrors isRecExpr.
+isSetExpr :: TypeU -> Bool
+isSetExpr (SetVarU _) = True
+isSetExpr SetEmptyU = True
+isSetExpr (SetUnionU _ _) = True
+isSetExpr (SetInterU _ _) = True
+isSetExpr (SetDiffU _ _) = True
+isSetExpr SetVoidU = True
+isSetExpr _ = False
+
+typeUToSetExpr :: TypeU -> Maybe SetS.SetExpr
+typeUToSetExpr (SetVarU v) = Just (SetS.SetVar v)
+typeUToSetExpr SetEmptyU = Just SetS.SetEmpty
+typeUToSetExpr (SetUnionU a b) = SetS.SetUnion <$> typeUToSetExpr a <*> typeUToSetExpr b
+typeUToSetExpr (SetInterU a b) = SetS.SetInter <$> typeUToSetExpr a <*> typeUToSetExpr b
+typeUToSetExpr (SetDiffU a b) = SetS.SetDiff <$> typeUToSetExpr a <*> typeUToSetExpr b
+typeUToSetExpr _ = Nothing
+
+setExprToTypeU :: SetS.SetExpr -> TypeU
+setExprToTypeU (SetS.SetVar v) = SetVarU v
+setExprToTypeU SetS.SetEmpty = SetEmptyU
+setExprToTypeU (SetS.SetLit []) = SetEmptyU
+setExprToTypeU (SetS.SetLit (x:xs)) = SetUnionU (setExprToTypeU (SetS.SetLit xs)) (singletonU x)
+  where
+    singletonU = SetUnionU SetEmptyU
+setExprToTypeU (SetS.SetUnion a b) = SetUnionU (setExprToTypeU a) (setExprToTypeU b)
+setExprToTypeU (SetS.SetInter a b) = SetInterU (setExprToTypeU a) (setExprToTypeU b)
+setExprToTypeU (SetS.SetDiff a b) = SetDiffU (setExprToTypeU a) (setExprToTypeU b)
+
+-- | Insert solved Set-tail variable assignments into the gammaSetSubs.
+applySetSolutions :: Map.Map TVar SetS.SetExpr -> Gamma -> Gamma
+applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
+  where
+    insertSub g (v, se) = g { gammaSetSubs = Map.insert v (setExprToTypeU se) (gammaSetSubs g) }
+
 applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
 applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
   where
@@ -334,10 +794,11 @@ applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
              Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
            Left err -> Left err
 
--- | Re-check deferred Nat constraints after all existentials are solved.
--- Applies the final gamma to each deferred pair, converts to NatExpr,
--- and re-solves. Returns Left on contradiction, Right with remaining
--- still-deferred constraints (now truly unsolvable).
+-- | Re-check deferred Nat / Str constraints after all existentials are
+-- solved. Applies the final gamma to each deferred pair, converts to the
+-- appropriate kind-specific expression, and re-solves. Returns Left on
+-- contradiction, Right with remaining still-deferred constraints (now
+-- truly unsolvable).
 recheckDeferred :: Gamma -> Either MDoc [(TypeU, TypeU)]
 recheckDeferred g = foldM check [] (gammaDeferred g)
   where
@@ -352,7 +813,24 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
                  Left $ "Nat constraint mismatch (deferred):"
                    <+> prettyTypeU t1' <+> "~" <+> prettyTypeU t2'
                Left (NS.Deferred _) -> Right ((t1', t2') : acc)
-           _ -> Right acc  -- not nat exprs after apply, skip
+           _ -> case (typeUToStrExpr t1', typeUToStrExpr t2') of
+             (Just se1, Just se2) ->
+               case SS.solveStr se1 se2 of
+                 Right _ -> Right acc
+                 Left (SS.StrContradiction s1 s2) ->
+                   Left $ "Str constraint mismatch (deferred):"
+                     <+> dquotes (pretty s1) <+> "vs" <+> dquotes (pretty s2)
+                 Left SS.StrDeferred -> Right ((t1', t2') : acc)
+             _ -> case (typeUToRecExpr t1', typeUToRecExpr t2') of
+               (Just re1, Just re2) ->
+                 case RS.solveRec re1 re2 of
+                   Right _ -> Right acc
+                   Left (RS.RecContradiction msg) ->
+                     Left $ "Rec constraint mismatch (deferred):" <+> pretty msg
+                   Left (RS.RecMalformed msg) ->
+                     Left $ "Rec malformed (deferred):" <+> pretty msg
+                   Left RS.RecDeferred -> Right ((t1', t2') : acc)
+               _ -> Right acc  -- not a kind we can solve, skip
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
@@ -420,6 +898,16 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2@(ExistU _ _ _) vs2) g
   | otherwise = subtypeEvaluated scope t1 t2 g
 subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | v1 == v2 && length vs1 == length vs2 = zipSubtype t1 t2 scope vs1 vs2 g
+  -- Concrete-side type aliases for nat-parameterised types (e.g.
+  -- `type Cpp => Vector (n :: Nat) a = "mlc::Tensor1<$1>" a`) drop Nat
+  -- args from the C++ template -- the morloc-side has [n, a] but the
+  -- concrete head only takes [a]. When comparing AppUs with the same
+  -- head, retry after filtering Nat args from both sides.
+  | v1 == v2
+  , let vs1' = filter (not . isNatExpr) vs1
+        vs2' = filter (not . isNatExpr) vs2
+  , length vs1' == length vs2' && length vs1' /= length vs1
+  = zipSubtype t1 t2 scope vs1' vs2' g
   | otherwise = subtypeEvaluated scope t1 t2 g
 -- subtype unordered records
 subtype scope (NamU _ v1 _ []) (NamU _ v2 _ []) g
@@ -478,6 +966,14 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
+-- NatVoidU is the erased-phantom-Nat sentinel; it is wildcard-compatible
+-- with any Nat expression. This mirrors the PartialOrd instance and is
+-- needed for subtyping at the codegen boundary, where unweaved TypeFs
+-- carry NatVoidU on positions that were erased during weaving (e.g.
+-- unresolved opaque output dims). Match before the generic Nat-expression
+-- branch so we short-circuit without sending NatVoidU to typeUToNatExpr.
+subtype _ NatVoidU t g | isNatExpr t = return g
+subtype _ t NatVoidU g | isNatExpr t = return g
 -- Nat expressions: compare via SOP normalization (handles commutativity,
 -- associativity, and cross-form equality like 2+3 ~ 5)
 subtype _ t1 t2 g
@@ -493,6 +989,93 @@ subtype _ t1 t2 g
                Left NS.Contradiction -> subtypeError t1 t2 "Nat constraint mismatch"
                Left (NS.Deferred _) -> return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Nat expressions"
+-- StrVoidU is the erased phantom Str slot; it is compatible with any Str
+-- expression. Mirrors the NatVoidU rule above.
+subtype _ StrVoidU t g | isStrExpr t = return g
+subtype _ t StrVoidU g | isStrExpr t = return g
+-- Str expressions: compare via literal equality after normalization
+-- (handles concat-of-literals folding). Variables defer per memo 04.
+subtype _ t1 t2 g
+  | isStrExpr t1 && isStrExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToStrExpr t1', typeUToStrExpr t2') of
+           (Just se1, Just se2) ->
+             case SS.solveStr se1 se2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> return (applyStrSolutions subs g)
+               Left (SS.StrContradiction _ _) ->
+                 subtypeError t1 t2 "Str constraint mismatch"
+               Left SS.StrDeferred ->
+                 return g { gammaDeferred = (t1', t2') : gammaDeferred g }
+           _ -> subtypeError t1 t2 "Cannot compare Str expressions"
+-- RecVoidU is the erased phantom Rec slot; compatible with any Rec
+-- expression. Mirrors the NatVoidU and StrVoidU rules above.
+subtype _ RecVoidU t g | isRecExpr t = return g
+subtype _ t RecVoidU g | isRecExpr t = return g
+-- Rec expressions: compare via the Rec solver, which canonicalizes
+-- structural ops (extend, union, diff, intersect) and aligns ground
+-- field maps. See plans/tables/10-rec-solver-decidability.md.
+subtype _ t1 t2 g
+  | isRecExpr t1 && isRecExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToRecExpr t1', typeUToRecExpr t2') of
+           (Just re1, Just re2) ->
+             case RS.solveRec re1 re2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> return (applyRecSolutions subs g)
+               Left (RS.RecContradiction msg) ->
+                 subtypeError t1 t2 ("Rec constraint mismatch: " <> pretty msg)
+               Left (RS.RecMalformed msg) ->
+                 subtypeError t1 t2 ("Rec malformed: " <> pretty msg)
+               Left RS.RecDeferred ->
+                 return g { gammaDeferred = (t1', t2') : gammaDeferred g }
+           _ -> subtypeError t1 t2 "Cannot compare Rec expressions"
+-- ListVoidU is the erased phantom List slot; compatible with any List
+-- expression. Mirrors RecVoidU / StrVoidU.
+subtype _ ListVoidU t g | isListExpr t = return g
+subtype _ t ListVoidU g | isListExpr t = return g
+-- List expressions: dispatch to ListSolver. Canonical form flattens
+-- ListAppU into chunk sequences; equality strips matching prefixes
+-- and suffixes, solving a single residual variable when possible.
+subtype _ t1 t2 g
+  | isListExpr t1 && isListExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToListExpr t1', typeUToListExpr t2') of
+           (Just le1, Just le2) ->
+             case LS.solveList le1 le2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> return (applyListSolutions subs g)
+               Left (LS.ListContradiction msg) ->
+                 subtypeError t1 t2 ("List constraint mismatch: " <> pretty msg)
+               Left LS.ListDeferred ->
+                 return g { gammaDeferred = (t1', t2') : gammaDeferred g }
+           _ -> subtypeError t1 t2 "Cannot compare List expressions"
+-- SetVoidU is the erased phantom Set slot; compatible with any Set
+-- expression. Mirrors RecVoidU / ListVoidU.
+subtype _ SetVoidU t g | isSetExpr t = return g
+subtype _ t SetVoidU g | isSetExpr t = return g
+-- Set expressions: dispatch to SetSolver.
+subtype _ t1 t2 g
+  | isSetExpr t1 && isSetExpr t2 =
+      let t1' = apply g t1
+          t2' = apply g t2
+      in case (typeUToSetExpr t1', typeUToSetExpr t2') of
+           (Just se1, Just se2) ->
+             case SetS.solveSet se1 se2 of
+               Right subs
+                 | Map.null subs -> return g
+                 | otherwise -> return (applySetSolutions subs g)
+               Left (SetS.SetContradiction msg) ->
+                 subtypeError t1 t2 ("Set constraint mismatch: " <> pretty msg)
+               Left SetS.SetDeferred ->
+                 return g { gammaDeferred = (t1', t2') : gammaDeferred g }
+           _ -> subtypeError t1 t2 "Cannot compare Set expressions"
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
@@ -730,6 +1313,36 @@ solve v t
     occursIn v' (NatMulU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatSubU a b) = occursIn v' a || occursIn v' b
     occursIn v' (NatDivU a b) = occursIn v' a || occursIn v' b
+    occursIn _ NatVoidU = False
+    occursIn _ (StrVarU _) = False
+    occursIn _ (StrLitU _) = False
+    occursIn v' (StrConcatU a b) = occursIn v' a || occursIn v' b
+    occursIn _ StrVoidU = False
+    occursIn _ (RecVarU _) = False
+    occursIn _ RecEmptyU = False
+    occursIn v' (RecExtendU _ a b) = occursIn v' a || occursIn v' b
+    occursIn v' (RecUnionU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (RecDiffU a _) = occursIn v' a
+    occursIn v' (RecIntersectU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (RecRestrictU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (RecDiffListU a b) = occursIn v' a || occursIn v' b
+    occursIn _ RecVoidU = False
+    occursIn _ (ListVarU _) = False
+    occursIn v' (ListLitU es) = any (occursIn v') es
+    occursIn v' (ListAppU a b) = occursIn v' a || occursIn v' b
+    occursIn _ ListVoidU = False
+    occursIn _ (SetVarU _) = False
+    occursIn _ SetEmptyU = False
+    occursIn v' (SetLitU es) = any (occursIn v') es
+    occursIn v' (SetUnionU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (SetInterU a b) = occursIn v' a || occursIn v' b
+    occursIn v' (SetDiffU a b) = occursIn v' a || occursIn v' b
+    occursIn _ SetVoidU = False
+    occursIn v' (KeysU r) = occursIn v' r
+    occursIn v' (ListToSetU l) = occursIn v' l
+    occursIn v' (SizeU c) = occursIn v' c
+    occursIn v' (ProjectFieldU r f) = occursIn v' r || occursIn v' f
+    occursIn v' (RecSingletonU k vt) = occursIn v' k || occursIn v' vt
     occursIn v' (LabeledU _ t') = occursIn v' t'
 
 -- | Record a solved variable in the gamma map cache
@@ -1007,26 +1620,77 @@ newvarRich ps rs prefix g =
 
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
-rename g0 (ForallU v@(TV s) t0) =
-  let (g1, v') = tvarname g0 (s <> "@q")
-      (g2, t1) = rename g1 t0
-      t2 = substituteTVar v (VarU v') t1
-   in (g2, ForallU v' t2)
--- After stripping ForallU, rename NatVarU variables to fresh names
 rename g0 t0 =
+  let (g1, t1, _) = renameWithMap g0 t0 in (g1, t1)
+
+-- | Variant of 'rename' that also returns a rewrite function that can
+-- be applied to associated TypeU values (for example, the constraints
+-- in a function signature) so they pick up the same fresh-name
+-- substitutions. Used by 'renameEType' to keep a signature's
+-- constraint clauses in sync with the renamed type.
+renameWithMap :: Gamma -> TypeU -> (Gamma, TypeU, TypeU -> TypeU)
+renameWithMap g0 (ForallU v@(TV s) t0) =
+  let (g1, v') = tvarname g0 (s <> "@q")
+      (g2, t1, rw) = renameWithMap g1 t0
+      t2 = substituteTVar v (VarU v') t1
+      rw' = substituteTVar v (VarU v') . rw
+   in (g2, ForallU v' t2, rw')
+-- After stripping ForallU, rename NatVarU / StrVarU / RecVarU variables to
+-- fresh names. All three kinds are implicitly forall-quantified and need
+-- per-instantiation freshening so multiple uses of a polymorphic function
+-- don't accidentally share a kind-variable name across call sites.
+renameWithMap g0 t0 =
   let nvs = nub (collectNatVarNames t0)
-   in if null nvs then (g0, t0)
+      svs = nub (collectStrVarNames t0)
+      rvs = nub (collectRecVarNames t0)
+      lvs = nub (collectListVarNames t0)
+   in if null nvs && null svs && null rvs && null lvs
+      then (g0, t0, id)
       else
         let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@n")) g0 nvs
-            renameMap = Map.fromList (zip nvs nvs')
-         in (g1, renameNatVars renameMap t0)
+            (g2, svs') = statefulMap (\g (TV s) -> tvarname g (s <> "@s")) g1 svs
+            (g3, rvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@r")) g2 rvs
+            (g4, lvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@l")) g3 lvs
+            natMap = Map.fromList (zip nvs nvs')
+            strMap = Map.fromList (zip svs svs')
+            recMap = Map.fromList (zip rvs rvs')
+            listMap = Map.fromList (zip lvs lvs')
+            rw = renameKindedVars natMap strMap recMap listMap
+         in (g4, rw t0, rw)
 
--- | Rename NatVarU variables according to a mapping
-renameNatVars :: Map.Map TVar TVar -> TypeU -> TypeU
-renameNatVars m = go
+-- | Rename a signature's TypeU together with its primitive constraints.
+-- Both share the same fresh-name substitutions so a constraint like
+-- @CDisjoint (KeysU r1) (KeysU r2)@ tracks the same renamed @r1@ and
+-- @r2@ that appear in the renamed type.
+renameEType :: Gamma -> EType -> (Gamma, EType)
+renameEType g0 et =
+  let (g1, t', rw) = renameWithMap g0 (etype et)
+      cs' = Set.map (renameConstraint rw) (econs et)
+   in (g1, et { etype = t', econs = cs' })
   where
-    ren v = Map.findWithDefault v v m
-    go (NatVarU v) = NatVarU (ren v)
+    renameConstraint rw (Constraint cls ts) = Constraint cls (map rw ts)
+    renameConstraint rw (CMember a s) = CMember (rw a) (rw s)
+    renameConstraint rw (CSubset a b) = CSubset (rw a) (rw b)
+    renameConstraint rw (CDisjoint a b) = CDisjoint (rw a) (rw b)
+
+-- | Rename kind-variable occurrences according to per-kind name maps.
+-- Mirrors the old renameNatVars but additionally renames StrVarU and
+-- RecVarU. Each kind has its own map so name spaces stay disjoint.
+renameKindedVars ::
+  Map.Map TVar TVar ->  -- Nat-var renames
+  Map.Map TVar TVar ->  -- Str-var renames
+  Map.Map TVar TVar ->  -- Rec-var renames
+  Map.Map TVar TVar ->  -- List-var renames
+  TypeU -> TypeU
+renameKindedVars natM strM recM listM = go
+  where
+    renN v = Map.findWithDefault v v natM
+    renS v = Map.findWithDefault v v strM
+    renR v = Map.findWithDefault v v recM
+    renL v = Map.findWithDefault v v listM
+    go (NatVarU v) = NatVarU (renN v)
+    go (StrVarU v) = StrVarU (renS v)
+    go (RecVarU v) = RecVarU (renR v)
     go (VarU v) = VarU v
     go (ExistU v (ts, tc) (rs, rc)) = ExistU v (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
     go (ForallU v t) = ForallU v (go t)
@@ -1040,6 +1704,34 @@ renameNatVars m = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go t@NatVoidU = t
+    go t@(StrLitU _) = t
+    go (StrConcatU a b) = StrConcatU (go a) (go b)
+    go t@StrVoidU = t
+    go t@RecEmptyU = t
+    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
+    go (RecUnionU a b) = RecUnionU (go a) (go b)
+    go (RecDiffU a ks) = RecDiffU (go a) ks
+    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
+    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
+    go t@RecVoidU = t
+    go (ListVarU v) = ListVarU (renL v)
+    go (ListLitU es) = ListLitU (map go es)
+    go (ListAppU a b) = ListAppU (go a) (go b)
+    go t@ListVoidU = t
+    go t@(SetVarU _) = t
+    go t@SetEmptyU = t
+    go (SetLitU es) = SetLitU (map go es)
+    go (SetUnionU a b) = SetUnionU (go a) (go b)
+    go (SetInterU a b) = SetInterU (go a) (go b)
+    go (SetDiffU a b) = SetDiffU (go a) (go b)
+    go t@SetVoidU = t
+    go (KeysU r) = KeysU (go r)
+    go (ListToSetU l) = ListToSetU (go l)
+    go (SizeU c) = SizeU (go c)
+    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
+    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
     go (LabeledU n t) = LabeledU n (go t)
 
 {- | Rename all generic type variables (ForallU-bound and ExistU) to clean
@@ -1051,7 +1743,9 @@ cleanTypeName t0 =
   let (vs, body) = unqualify t0
       evs = collectExistVars body
       nvs = collectNatVarNames body
-      allGeneric = nub (vs ++ evs ++ nvs)
+      svs = collectStrVarNames body
+      rvs = collectRecVarNames body
+      allGeneric = nub (vs ++ evs ++ nvs ++ svs ++ rvs)
       fixed = collectFixedNames (Set.fromList allGeneric) body
       pool = filter (\(TV n) -> Set.notMember n fixed) letterPool
       renameMap = Map.fromList (zip allGeneric pool)
@@ -1106,6 +1800,36 @@ collectExistVars = go
     go (NatMulU a b) = go a ++ go b
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrVarU _) = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go (RecVarU _) = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go (RecRestrictU a b) = go a ++ go b
+    go (RecDiffListU a b) = go a ++ go b
+    go RecVoidU = []
+    go (ListVarU _) = []
+    go (ListLitU es) = concatMap go es
+    go (ListAppU a b) = go a ++ go b
+    go ListVoidU = []
+    go (SetVarU _) = []
+    go SetEmptyU = []
+    go (SetLitU es) = concatMap go es
+    go (SetUnionU a b) = go a ++ go b
+    go (SetInterU a b) = go a ++ go b
+    go (SetDiffU a b) = go a ++ go b
+    go SetVoidU = []
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = go r ++ go f
+    go (RecSingletonU k v) = go k ++ go v
     go (LabeledU _ t) = go t
 
 -- | Collect NatVarU variable names from a type (for renaming)
@@ -1126,6 +1850,190 @@ collectNatVarNames = go
     go (NatMulU a b) = go a ++ go b
     go (NatSubU a b) = go a ++ go b
     go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrVarU _) = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go (RecVarU _) = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go (RecRestrictU a b) = go a ++ go b
+    go (RecDiffListU a b) = go a ++ go b
+    go RecVoidU = []
+    go (ListVarU _) = []
+    go (ListLitU es) = concatMap go es
+    go (ListAppU a b) = go a ++ go b
+    go ListVoidU = []
+    go (SetVarU _) = []
+    go SetEmptyU = []
+    go (SetLitU es) = concatMap go es
+    go (SetUnionU a b) = go a ++ go b
+    go (SetInterU a b) = go a ++ go b
+    go (SetDiffU a b) = go a ++ go b
+    go SetVoidU = []
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = go r ++ go f
+    go (RecSingletonU k v) = go k ++ go v
+    go (LabeledU _ t) = go t
+
+-- | Collect StrVarU variable names from a type. Mirrors collectNatVarNames.
+-- Used by the resolveStrLabels bridge that turns runtime Str-literal args
+-- into type-level Str solutions when the function uses f:Str labels.
+collectStrVarNames :: TypeU -> [TVar]
+collectStrVarNames = go
+  where
+    go (StrVarU v) = [v]
+    go (VarU _) = []
+    go (NatVarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go (RecVarU _) = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go (RecRestrictU a b) = go a ++ go b
+    go (RecDiffListU a b) = go a ++ go b
+    go RecVoidU = []
+    go (ListVarU _) = []
+    go (ListLitU es) = concatMap go es
+    go (ListAppU a b) = go a ++ go b
+    go ListVoidU = []
+    go (SetVarU _) = []
+    go SetEmptyU = []
+    go (SetLitU es) = concatMap go es
+    go (SetUnionU a b) = go a ++ go b
+    go (SetInterU a b) = go a ++ go b
+    go (SetDiffU a b) = go a ++ go b
+    go SetVoidU = []
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = go r ++ go f
+    go (RecSingletonU k v) = go k ++ go v
+    go (LabeledU _ t) = go t
+
+-- | Collect RecVarU variable names from a type. Mirrors collectNatVarNames.
+collectRecVarNames :: TypeU -> [TVar]
+collectRecVarNames = go
+  where
+    go (RecVarU v) = [v]
+    go (VarU _) = []
+    go (NatVarU _) = []
+    go (StrVarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go (RecRestrictU a b) = go a ++ go b
+    go (RecDiffListU a b) = go a ++ go b
+    go RecVoidU = []
+    go (ListVarU _) = []
+    go (ListLitU es) = concatMap go es
+    go (ListAppU a b) = go a ++ go b
+    go ListVoidU = []
+    go (SetVarU _) = []
+    go SetEmptyU = []
+    go (SetLitU es) = concatMap go es
+    go (SetUnionU a b) = go a ++ go b
+    go (SetInterU a b) = go a ++ go b
+    go (SetDiffU a b) = go a ++ go b
+    go SetVoidU = []
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = go r ++ go f
+    go (RecSingletonU k v) = go k ++ go v
+    go (LabeledU _ t) = go t
+
+-- | Collect ListVarU variable names from a type. Mirrors collectStrVarNames.
+-- Used by the resolveListLabels bridge that turns runtime [Str]-literal args
+-- into type-level List solutions when the function uses l:[Str] labels.
+collectListVarNames :: TypeU -> [TVar]
+collectListVarNames = go
+  where
+    go (ListVarU v) = [v]
+    go (VarU _) = []
+    go (NatVarU _) = []
+    go (StrVarU _) = []
+    go (RecVarU _) = []
+    go (SetVarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go (RecRestrictU a b) = go a ++ go b
+    go (RecDiffListU a b) = go a ++ go b
+    go RecVoidU = []
+    go (ListLitU es) = concatMap go es
+    go (ListAppU a b) = go a ++ go b
+    go ListVoidU = []
+    go SetEmptyU = []
+    go (SetLitU es) = concatMap go es
+    go (SetUnionU a b) = go a ++ go b
+    go (SetInterU a b) = go a ++ go b
+    go (SetDiffU a b) = go a ++ go b
+    go SetVoidU = []
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = go r ++ go f
+    go (RecSingletonU k v) = go k ++ go v
     go (LabeledU _ t) = go t
 
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
@@ -1148,6 +2056,36 @@ collectFixedNames generics = go
     go (NatMulU a b) = Set.union (go a) (go b)
     go (NatSubU a b) = Set.union (go a) (go b)
     go (NatDivU a b) = Set.union (go a) (go b)
+    go NatVoidU = Set.empty
+    go (StrVarU _) = Set.empty
+    go (StrLitU _) = Set.empty
+    go (StrConcatU a b) = Set.union (go a) (go b)
+    go StrVoidU = Set.empty
+    go (RecVarU _) = Set.empty
+    go RecEmptyU = Set.empty
+    go (RecExtendU _ a b) = Set.union (go a) (go b)
+    go (RecUnionU a b) = Set.union (go a) (go b)
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = Set.union (go a) (go b)
+    go (RecRestrictU a b) = Set.union (go a) (go b)
+    go (RecDiffListU a b) = Set.union (go a) (go b)
+    go RecVoidU = Set.empty
+    go (ListVarU _) = Set.empty
+    go (ListLitU es) = Set.unions (map go es)
+    go (ListAppU a b) = Set.union (go a) (go b)
+    go ListVoidU = Set.empty
+    go (SetVarU _) = Set.empty
+    go SetEmptyU = Set.empty
+    go (SetLitU es) = Set.unions (map go es)
+    go (SetUnionU a b) = Set.union (go a) (go b)
+    go (SetInterU a b) = Set.union (go a) (go b)
+    go (SetDiffU a b) = Set.union (go a) (go b)
+    go SetVoidU = Set.empty
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = Set.union (go r) (go f)
+    go (RecSingletonU k v) = Set.union (go k) (go v)
     go (LabeledU _ t) = go t
 
 applyVarRenaming :: Map.Map TVar TVar -> TypeU -> TypeU
@@ -1169,7 +2107,77 @@ applyVarRenaming m = go
     go (NatMulU a b) = NatMulU (go a) (go b)
     go (NatSubU a b) = NatSubU (go a) (go b)
     go (NatDivU a b) = NatDivU (go a) (go b)
+    go t@NatVoidU = t
+    -- StrVarU and RecVarU must be renamed by the same map as VarU so
+    -- references to a kinded type-level variable stay in sync after
+    -- renaming. Treating them as inert was a bug that caused
+    -- Holder (r + {x=Int}) signatures to lose the connection between
+    -- the input r and the output r after cleanTypeName.
+    go (StrVarU v) = StrVarU (ren v)
+    go t@(StrLitU _) = t
+    go (StrConcatU a b) = StrConcatU (go a) (go b)
+    go t@StrVoidU = t
+    go (RecVarU v) = RecVarU (ren v)
+    go t@RecEmptyU = t
+    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
+    go (RecUnionU a b) = RecUnionU (go a) (go b)
+    go (RecDiffU a ks) = RecDiffU (go a) ks
+    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
+    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
+    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
+    go t@RecVoidU = t
+    go (ListVarU v) = ListVarU (ren v)
+    go (ListLitU es) = ListLitU (map go es)
+    go (ListAppU a b) = ListAppU (go a) (go b)
+    go t@ListVoidU = t
+    go (SetVarU v) = SetVarU (ren v)
+    go t@SetEmptyU = t
+    go (SetLitU es) = SetLitU (map go es)
+    go (SetUnionU a b) = SetUnionU (go a) (go b)
+    go (SetInterU a b) = SetInterU (go a) (go b)
+    go (SetDiffU a b) = SetDiffU (go a) (go b)
+    go t@SetVoidU = t
+    go (KeysU r) = KeysU (go r)
+    go (ListToSetU l) = ListToSetU (go l)
+    go (SizeU c) = SizeU (go c)
+    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
+    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
     go (LabeledU n t) = LabeledU n (go t)
+
+-- | User-facing constraint display for diagnostics. Strips internal
+-- rename suffixes (e.g. @r\@r0@ -> @r@) by routing through
+-- 'prettyTypeU' on each TypeU sub-term, and adds parentheses around
+-- compound arguments so the rendered form can be copy-pasted directly
+-- into a function signature's @=>@ clause. Mirrors the structure of
+-- the 'Pretty' instance in 'Morloc.Namespace.Type' but produces a
+-- copy-paste-ready surface.
+prettyConstraint :: Constraint -> MDoc
+prettyConstraint (Constraint cls ts) = pretty cls <+> hsep (map argDoc ts)
+prettyConstraint (CMember a s) = "Member" <+> argDoc a <+> argDoc s
+prettyConstraint (CSubset a b) = "Subset" <+> argDoc a <+> argDoc b
+prettyConstraint (CDisjoint a b) = "Disjoint" <+> argDoc a <+> argDoc b
+
+-- | Render a constraint argument: atomic types (single variables or
+-- literals) appear bare; compound types (applications, operators)
+-- get parenthesised so the output reads as one would write the
+-- constraint in a signature.
+argDoc :: TypeU -> MDoc
+argDoc t = if isAtomicType t then prettyTypeU t else parens (prettyTypeU t)
+
+isAtomicType :: TypeU -> Bool
+isAtomicType (VarU _) = True
+isAtomicType (NatVarU _) = True
+isAtomicType (StrVarU _) = True
+isAtomicType (RecVarU _) = True
+isAtomicType (ListVarU _) = True
+isAtomicType (SetVarU _) = True
+isAtomicType (NatLitU _) = True
+isAtomicType (StrLitU _) = True
+isAtomicType (ListLitU _) = True
+isAtomicType (SetLitU _) = True
+isAtomicType RecEmptyU = True
+isAtomicType (RecExtendU _ _ _) = True  -- {f=a, ...} is bracket-delimited
+isAtomicType _ = False
 
 -- | User-facing type display: clean variable names, no forall, no angle brackets.
 prettyTypeU :: TypeU -> MDoc
@@ -1203,6 +2211,40 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
     f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
     f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
+    f _ NatVoidU = "_"
+    f _ (StrVarU v) = tv v
+    f _ (StrLitU s) = dquotes (pretty s)
+    f _ (StrConcatU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ StrVoidU = "_"
+    f _ (RecVarU v) = tv v
+    f _ RecEmptyU = "{}"
+    f _ rec@(RecExtendU _ _ _)
+      | (fields, RecEmptyU) <- collectExtends rec =
+          braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fields]))
+      | (fields, tl) <- collectExtends rec =
+          "(" <> f True tl <+> hsep ["+" <+> pretty k <> "=" <> f False t | (k, t) <- fields] <> ")"
+    f _ (RecUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ (RecDiffU a ks) = "(" <> f True a <+> "-" <+> braces (hcat (punctuate "," (map pretty ks))) <> ")"
+    f _ (RecIntersectU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
+    f _ (RecRestrictU a b) = "(" <> f True a <+> "#" <+> f True b <> ")"
+    f _ (RecDiffListU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
+    f _ RecVoidU = "_"
+    f _ (ListVarU v) = tv v
+    f _ (ListLitU es) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
+    f _ (ListAppU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ ListVoidU = "_"
+    f _ (SetVarU v) = tv v
+    f _ SetEmptyU = "{}"
+    f _ (SetLitU es) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
+    f _ (SetUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
+    f _ (SetInterU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
+    f _ (SetDiffU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
+    f _ SetVoidU = "_"
+    f _ (KeysU r) = "Keys" <+> f False r
+    f _ (ListToSetU l) = "ListToSet" <+> f False l
+    f _ (SizeU c) = "Size" <+> f False c
+    f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
+    f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
     f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
