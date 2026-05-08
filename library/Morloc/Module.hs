@@ -1115,14 +1115,16 @@ getBaseUrl RemoteAzure = "dev.azure.com"
 
 -- | Checkout a specific git reference (pure IO)
 checkoutRefIO :: FilePath -> GitSnapshotSelector -> IO ()
-checkoutRefIO targetDir selector = case selector of
-  LatestDefaultBranch -> return ()
-  LatestOnBranch branch -> do
-    callProcess "git" ["-C", targetDir, "checkout", MT.unpack branch]
-    callProcess "git" ["-C", targetDir, "pull"]
-  CommitHash hash ->
-    callProcess "git" ["-C", targetDir, "checkout", MT.unpack hash]
-  ReleaseTag tag ->
-    callProcess "git" ["-C", targetDir, "checkout", "tags/" ++ MT.unpack tag]
+checkoutRefIO targetDir selector =
+  let gitQuiet args = callProcess "git" (["-c", "advice.detachedHead=false", "-C", targetDir] ++ args)
+   in case selector of
+        LatestDefaultBranch -> return ()
+        LatestOnBranch branch -> do
+          gitQuiet ["checkout", MT.unpack branch]
+          gitQuiet ["pull"]
+        CommitHash hash ->
+          gitQuiet ["checkout", MT.unpack hash]
+        ReleaseTag tag ->
+          gitQuiet ["checkout", "tags/" ++ MT.unpack tag]
 
 -- }}}
