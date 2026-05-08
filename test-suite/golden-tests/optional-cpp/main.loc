@@ -8,6 +8,11 @@ module main
   , testOptionalAddNull
   , testOptionalList
   , testCountNulls
+  , testNestedNull
+  , testNestedValue
+  , testNestedRoundTrip
+  , testNestedRoundTripNull
+  , testNestedJustNull
   )
 
 type Cpp => Int = "int"
@@ -22,6 +27,8 @@ safeHead :: [Int] -> ?Int
 optionalAdd :: ?Int -> ?Int -> ?Int
 optionalList :: [Int] -> [?Int]
 countNulls :: [?Int] -> Int
+identityNested :: ?(?Int) -> ?(?Int)
+mkJustNull :: Int -> ?(?Int)
 
 source Cpp from "foo.hpp"
   ( "isNull"
@@ -31,6 +38,8 @@ source Cpp from "foo.hpp"
   , "optionalAdd"
   , "optionalList"
   , "countNulls"
+  , "identityNested"
+  , "mkJustNull"
   )
 
 testNull :: ?Int
@@ -59,3 +68,24 @@ testOptionalList = optionalList [1, -2, 3, -4, 5]
 
 testCountNulls :: Int
 testCountNulls = countNulls (optionalList [1, -2, 3, -4, 5])
+
+-- Nested optional: pure-nexus literal coerced from Int through ?Int to ?(?Int)
+testNestedNull :: ?(?Int)
+testNestedNull = Null
+
+testNestedValue :: ?(?Int)
+testNestedValue = 42
+
+-- Nested optional: round-trip through a C++ pool function. Exercises
+-- cross-language serialization of the nested-optional voidstar layout.
+testNestedRoundTrip :: ?(?Int)
+testNestedRoundTrip = identityNested 42
+
+testNestedRoundTripNull :: ?(?Int)
+testNestedRoundTripNull = identityNested Null
+
+-- Outer Just, inner Null: a state std::optional<std::optional<T>> can
+-- represent distinctly from outer Null. Serializes to JSON `null` because
+-- JSON has only one null sentinel, but exercises the layered tag bytes.
+testNestedJustNull :: ?(?Int)
+testNestedJustNull = mkJustNull 0

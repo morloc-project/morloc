@@ -7,3 +7,7 @@ null
 null
 [1,null,3,null,5]
 2
+null
+42
+42
+null

@@ -80,6 +80,9 @@ data NexusExpr
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
   | SaveX Text Text NexusExpr NexusExpr  -- format + schema + value + path -> ()
   | LoadX Text NexusExpr  -- schema + path -> ?a
+  | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
+                          -- (Just-coerce: at runtime sets tag=1 and writes
+                          -- the child into the optional's inner slot).
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -318,6 +321,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
+    -- CoerceToOptional changes the value's runtime layout (tag byte + inner
+    -- slot), so at the pure-nexus level we must materialize the wrapping
+    -- explicitly. CoerceToEffect is purely a type-level lift (effects are
+    -- runtime side-effects of function calls, not part of value layout) and
+    -- can still be stripped here.
+    toNexusExpr (AnnoS (Idx _ t) _ (CoerceS CoerceToOptional e)) = do
+      outerSchema <- type2schema t
+      childX <- toNexusExpr e
+      return $ OptX outerSchema childX
     toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
@@ -598,6 +610,12 @@ exprToJson (LoadX schema child) =
     [ ("tag", jsonStr "load")
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
+    ]
+exprToJson (OptX schema child) =
+  jsonObj
+    [ ("tag", jsonStr "container")
+    , ("schema", jsonStr schema)
+    , ("elements", jsonArr [exprToJson child])
     ]
 exprToJson (PatX schema (PatternText p ps)) =
   jsonObj

@@ -54,4 +54,12 @@ int countNulls(const std::vector<std::optional<int>>& xs) {
     return count;
 }
 
+std::optional<std::optional<int>> identityNested(const std::optional<std::optional<int>>& x) {
+    return x;
+}
+
+std::optional<std::optional<int>> mkJustNull(int /*unused*/) {
+    return std::optional<std::optional<int>>(std::nullopt);
+}
+
 #endif

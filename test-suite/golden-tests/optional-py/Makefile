@@ -10,6 +10,10 @@ all:
 	./nexus testOptionalAddNull >> obs.txt 2>> obs.err
 	./nexus testOptionalList >> obs.txt 2>> obs.err
 	./nexus testCountNulls >> obs.txt 2>> obs.err
+	./nexus testNestedNull >> obs.txt 2>> obs.err
+	./nexus testNestedValue >> obs.txt 2>> obs.err
+	./nexus testNestedRoundTrip >> obs.txt 2>> obs.err
+	./nexus testNestedRoundTripNull >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *err
