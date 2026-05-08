@@ -2,6 +2,18 @@
 -------------------
  * add tensor support through Packable class
  * many fixes to the phantom types
+ * open-world Arrow-based table support
+   * native CSV, Parquet, Arrow, JSON, and voidstar inputs/outputs
+   * Arrow on the wire
+   * Nat checking over row number
+   * Rec kind for checking/inferring column name/types
+ * remove all old table support
+ * fix internal quoting and extra newlines in multi-line strings
+ * add dimensional validation
+ * build type schemas at compile time and cache (performance optimization)
+ * add `morloc-dependencies` field to package.yaml for pinning module hashes
+ * fix typechecking for aliases of numeric literals
+ * bug fixes in let/do-block code gen
 
 0.82.0 [2026-04-26]
 -------------------
