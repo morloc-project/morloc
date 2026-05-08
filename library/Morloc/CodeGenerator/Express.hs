@@ -415,6 +415,31 @@ expressPolyExpr
       isLocal = isNothing remote
       stripPolyReturn (PolyReturn e) = return e
       stripPolyReturn e = return e
+-- Inline pattern call: skip PolyManifold. PatCallP (record/struct
+-- accessors, format patterns) renders as a direct expression in the
+-- target language (e.g. `x.field` for .isFile). Wrapping in
+-- PolyManifold creates a nested manifold whose body's `return` leaks
+-- into the parent's scope when the manifold gets inlined by codegen.
+-- Treating PatCallP like srcInline matches its semantics — it's
+-- always a leaf expression, never a real function call.
+expressPolyExpr
+  findRemote
+  parentLang
+  _
+  ( AnnoS
+      (Idx midx _)
+      _
+      (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (PatCall _))) xs)
+    )
+    | isLocal = do
+        propagateScope gidxCall midx
+        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        expressPolyApp parentLang f xsExpr >>= stripPolyReturn
+    where
+      remote = findRemote parentLang callLang
+      isLocal = isNothing remote
+      stripPolyReturn (PolyReturn e) = return e
+      stripPolyReturn e = return e
 expressPolyExpr
   findRemote
   parentLang
@@ -504,18 +529,21 @@ expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (LetBndS v)) = do
 expressPolyExpr
   _
   parentLang
-  parentType
-  (AnnoS _ (Idx cidx _, _) (LetS v e1 e2)) = do
-    let bodyArgs = case e2 of AnnoS _ (_, args) _ -> args
-        -- unused let-bound variables (e.g. from do-block bare statements) won't
-        -- appear in body args; use cidx as a unique dummy ID in that case
+  pc
+  (AnnoS (Idx midx _) (Idx cidx lang, args) (LetS v e1 e2)) = do
+    let bodyArgs = case e2 of AnnoS _ (_, ba) _ -> ba
         letId = case [j | Arg j v' <- bodyArgs, v' == v] of
           [j] -> j
           _ -> cidx
     let e1Type = case e1 of AnnoS (Idx _ t) _ _ -> mkIdx e1 t
-    e1' <- expressPolyExprWrap parentLang e1Type e1
-    e2' <- expressPolyExprWrap parentLang parentType e2
-    return $ PolyLet letId e1' e2'
+    -- Express children under the LetS's OWN language (from Realize), not the
+    -- caller's. expressContainer wraps in a cross-language manifold when the
+    -- chain's lang differs from parentLang. This fuses sequential
+    -- same-language calls (especially do-blocks) into one manifold.
+    e1' <- expressPolyExprWrap lang e1Type e1
+    e2' <- expressPolyExprWrap lang pc e2
+    let e = PolyLet letId e1' e2'
+    return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x)) = return $ PolyInt (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
@@ -710,11 +738,19 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
       PolyApp
         ( PolyRemoteInterface lang pc [i | Arg i _ <- args] ForeignCall
             . PolyManifold lang midx (ManifoldFull (map unvalue args))
-            . PolyReturn
-            $ e
+            $ wrapReturn e
         )
         $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
   | otherwise = e
+  where
+    -- Push PolyReturn through PolyLet to the tail. Skip wrap if the tail
+    -- is already a PolyReturn or a PolyManifold (whose own body produces a
+    -- return when MonoManifold is unwrapped during serialize). Avoids
+    -- `return(return(...))` in generated pools.
+    wrapReturn (PolyLet i e1 e2) = PolyLet i e1 (wrapReturn e2)
+    wrapReturn r@(PolyReturn _) = r
+    wrapReturn r@(PolyManifold _ _ _ _) = r
+    wrapReturn x = PolyReturn x
 
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None

@@ -188,11 +188,16 @@ applyLambdas (AnnoS g c (IfS cond thenE elseE)) = do
   elseE' <- applyLambdas elseE
   return (AnnoS g c (IfS cond' thenE' elseE'))
 applyLambdas (AnnoS g c (DoBlockS e)) = AnnoS g c . DoBlockS <$> applyLambdas e
--- cancel force-suspend: !{e} --> e, preserving outer annotation
-applyLambdas (AnnoS g c (EvalS (AnnoS _ _ (DoBlockS e)))) = do
+-- cancel force-suspend: !{e} --> e. Keep the OUTER general type (the EvalS
+-- already strips the effect wrapper from the type), but keep the INNER
+-- concrete annotation so the chain's chosen language survives. Without this,
+-- the cancellation overrides the chain's lang with the EvalS's lang (which
+-- comes from its calling context), defeating fusion when the chain's own
+-- statements dictate a different lang.
+applyLambdas (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
   e' <- applyLambdas e
   let AnnoS _ _ inner = e'
-  return (AnnoS g c inner)
+  return (AnnoS g cInner inner)
 applyLambdas (AnnoS g c (EvalS e)) = AnnoS g c . EvalS <$> applyLambdas e
 applyLambdas (AnnoS g c (CoerceS co e)) = AnnoS g c . CoerceS co <$> applyLambdas e
 applyLambdas (AnnoS g c (IntrinsicS intr es)) = AnnoS g c . IntrinsicS intr <$> mapM applyLambdas es

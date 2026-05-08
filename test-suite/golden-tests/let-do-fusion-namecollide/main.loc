@@ -1,0 +1,21 @@
+-- test old bug in C++ that failed on repeated function use
+
+module main (collide)
+
+import root-cpp
+
+source Cpp from "helpers.hpp" ("cppEcho", "cppAdd")
+
+cppEcho :: Int -> <IO> Int
+cppAdd :: Int -> Int -> Int
+
+pair :: <IO> Int
+pair = do
+  cppEcho 42
+  cppEcho 43
+
+collide :: <IO> Int
+collide = do
+  a <- pair
+  b <- pair
+  cppAdd a b

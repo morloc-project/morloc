@@ -1,0 +1,36 @@
+--- fusedCppChain ---
+51
+--- effectOrderCpp ---
+20
+--- effectOrderPolyglot ---
+65
+--- doBlockBareThenBind ---
+9
+--- diamondReuse ---
+3
+--- doInLet ---
+88
+--- letInDo ---
+34
+--- doInDoForced ---
+4
+--- doInDoLet ---
+110
+--- letBndTailEffect ---
+6
+--- constTailWithEffect ---
+77
+--- deepLetChain ---
+101
+--- factWithLetChain ---
+120
+--- forcedThrice ---
+36
+--- mixedSameLangFanOut ---
+24
+--- doOnlyBareStatements ---
+99
+--- shadowedBinding ---
+102
+--- crossLangIntoSameLangFinish ---
+14
