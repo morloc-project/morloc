@@ -6,12 +6,12 @@ import root-py
 
 val1 = .1 (10, 20)
 val2 = .(.1, .0) (10, 20)
-val3 = (_, 42) 7
-val4 = .1 ((_, 42) 7)
+val3 = (\x -> (x, 42)) 7
+val4 = .1 ((\x -> (x, 42)) 7)
 add5 = (+) 5
 neg_add5 = neg . (+) 5
 get_fst = .0
-inc = (+) _ 1
+inc = (+) 1
 neg_snd = neg . .1
 add10_fst = (+) 10 . .0
 
@@ -19,9 +19,9 @@ add10_fst = (+) 10 . .0
 
 get_second x = .1 x
 set_first v pair = .(.0 = v) pair
-pair_with x = (_, x)
+pair_with x y = (y, x)
 extract_neg x = neg (g x) where g = .1
-apply_template x = f 10 where f = (_, x)
+apply_template x = f 10 where f y = (y, x)
 transform x = h x where h = neg . .0
 
 -- Map/fold with combined features
@@ -46,8 +46,8 @@ test =
   , apply_template 42 == (10, 42)
   , transform (5, 20) == neg 5
   , neg_seconds [(1, 2), (3, 4)] == [neg 2, neg 4]
-  , map (_, 0) [1, 2, 3] == [(1, 0), (2, 0), (3, 0)]
+  , map (\x -> (x, 0)) [1, 2, 3] == [(1, 0), (2, 0), (3, 0)]
   , map .(.1 = 0) [(1, 2), (3, 4)] == [(1, 0), (3, 0)]
-  , map ((+) _ 1) [1, 2, 3] == [2, 3, 4]
+  , map (+ 1) [1, 2, 3] == [2, 3, 4]
   , fold (\acc x -> acc + .1 x) 0 [(1, 10), (2, 20), (3, 30)] == 60
   ]
