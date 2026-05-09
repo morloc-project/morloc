@@ -1,0 +1,4 @@
+module main (bad)
+
+bad :: Str
+bad = "oops \q here"

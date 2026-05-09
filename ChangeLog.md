@@ -8,6 +8,7 @@
  * fix bug in parsing guards in do-blocks
  * fix segfault in ?(?x) double optionals
  * fix silent integer overflow errors
+ * raise error on illegal string escapes
 
 0.83.2 [2026-05-07]
 -------------------

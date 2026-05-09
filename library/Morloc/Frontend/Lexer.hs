@@ -454,14 +454,14 @@ lexDoubleString start input st = go (advanceCol start 1) input []
               { lsTokens = Located (advanceCol pos 0) TokInterpOpen "#{" : Located start tok prefixTxt : lsTokens st
               }
             start
-    go pos ('\\' : c : rest) acc =
-      let escaped = case c of
-            'n' -> '\n'
-            't' -> '\t'
-            '\\' -> '\\'
-            '"' -> '"'
-            _ -> c
-       in go (advanceCol pos 2) rest (escaped : acc)
+    go pos ('\\' : c : rest) acc = case c of
+      'n'  -> go (advanceCol pos 2) rest ('\n' : acc)
+      't'  -> go (advanceCol pos 2) rest ('\t' : acc)
+      'r'  -> go (advanceCol pos 2) rest ('\r' : acc)
+      '0'  -> go (advanceCol pos 2) rest ('\0' : acc)
+      '\\' -> go (advanceCol pos 2) rest ('\\' : acc)
+      '"'  -> go (advanceCol pos 2) rest ('"'  : acc)
+      _    -> Left (LexError pos ("invalid escape sequence \\" ++ [c]))
     go pos ('\n' : _) _ = Left (LexError pos "unterminated string literal (use triple quotes for multi-line strings)")
     go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
     go pos [] _ = Left (LexError pos "unterminated string literal")
@@ -533,14 +533,14 @@ lexStringAfterInterp pos input st _ = go pos input []
             1
             st {lsTokens = Located p TokInterpOpen "#{" : Located pos (TokStringMid txt) "" : lsTokens st}
             pos
-    go p ('\\' : c : rest) acc =
-      let escaped = case c of
-            'n' -> '\n'
-            't' -> '\t'
-            '\\' -> '\\'
-            '"' -> '"'
-            _ -> c
-       in go (advanceCol p 2) rest (escaped : acc)
+    go p ('\\' : c : rest) acc = case c of
+      'n'  -> go (advanceCol p 2) rest ('\n' : acc)
+      't'  -> go (advanceCol p 2) rest ('\t' : acc)
+      'r'  -> go (advanceCol p 2) rest ('\r' : acc)
+      '0'  -> go (advanceCol p 2) rest ('\0' : acc)
+      '\\' -> go (advanceCol p 2) rest ('\\' : acc)
+      '"'  -> go (advanceCol p 2) rest ('"'  : acc)
+      _    -> Left (LexError p ("invalid escape sequence \\" ++ [c]))
     go p ('\n' : _) _ = Left (LexError p "unterminated string literal")
     go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
     go p [] _ = Left (LexError p "unterminated string literal")
@@ -576,15 +576,15 @@ lexMultilineString start delim input st = go (advanceCol start 3) input []
             st {lsTokens = Located pos TokInterpOpen "#{" : Located start tok "" : lsTokens st}
             start
             delim
-    go pos ('\\' : c : rest) acc =
-      let escaped = case c of
-            'n' -> '\n'
-            't' -> '\t'
-            '\\' -> '\\'
-            '\'' -> '\''
-            '"' -> '"'
-            _ -> c
-       in go (advanceCol pos 2) rest (escaped : acc)
+    go pos ('\\' : c : rest) acc = case c of
+      'n'  -> go (advanceCol pos 2) rest ('\n' : acc)
+      't'  -> go (advanceCol pos 2) rest ('\t' : acc)
+      'r'  -> go (advanceCol pos 2) rest ('\r' : acc)
+      '0'  -> go (advanceCol pos 2) rest ('\0' : acc)
+      '\\' -> go (advanceCol pos 2) rest ('\\' : acc)
+      '\'' -> go (advanceCol pos 2) rest ('\'' : acc)
+      '"'  -> go (advanceCol pos 2) rest ('"'  : acc)
+      _    -> Left (LexError pos ("invalid escape sequence \\" ++ [c]))
     go pos ('\n' : rest) acc = go (nextLine pos) rest ('\n' : acc)
     go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
     go pos [] _ = Left (LexError pos "unterminated multiline string literal")
