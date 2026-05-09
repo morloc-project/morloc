@@ -217,6 +217,7 @@ module_comp :: { Text }
 exports :: { CstExport }
   : '*'                     { CstExportAll }
   | export_list             { CstExportMany $1 }
+  | {- empty -}             { CstExportMany [] }
 
 export_list :: { [Located] }
   : export_item                      { [$1] }

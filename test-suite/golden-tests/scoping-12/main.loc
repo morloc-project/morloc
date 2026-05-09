@@ -1,3 +1,7 @@
+-- placeholder module with no body and an empty export list, exercises
+-- layout for empty-body declarations followed by another module
+module empty ()
+
 -- base module defines a general typeclass and function using it
 module foo (*)
 class Addable a where
@@ -5,14 +9,21 @@ class Addable a where
 inc :: Int -> Int
 inc = add 1
 
--- language-specific module adds an implementation
-module foo-py (*)
-import foo 
+-- language-specific module adds an implementation. The export list is
+-- empty -- the typeclass instance is not a named export, but it should
+-- still become visible to importers of this module. The 'empty' module
+-- above is also imported so it joins the dependency DAG.
+module foo-py ()
+import foo
+import empty
 type Py => Int = "int"
 instance Addable Int where
     source Py from "foo.py" ("morloc_add" as add)
 
--- 3rd party module uses a function depending on add but does NOT explicitly use add
+-- 3rd party module uses a function depending on add but does NOT explicitly use add.
+-- 'foo' is imported for inc; 'foo-py' contributes only the Addable Int instance
+-- (its export list is empty), which inc resolution depends on.
 module main (foo)
+import foo
 import foo-py
 foo x = inc (inc x)

@@ -1,4 +1,4 @@
-0.83.3 [2026-05-08]
+0.84.0 [2026-05-xx]
 -------------------
  * add float Inf/-Inf/NaN support 
  * add literal int and float overflow error
@@ -10,6 +10,8 @@
  * fix silent integer overflow errors
  * fix errors on illegal hex/oct/bin literals (e.g., "0x4dzzz")
  * raise error on illegal string escapes
+ * fix parser bug preventing multi-module files
+ * allow empty module export lists
 
 0.83.2 [2026-05-07]
 -------------------

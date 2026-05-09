@@ -1016,6 +1016,13 @@ insertLayout toks = beginTopLevel toks
       Located (locPos eof) TokVLBrace ""
         : Located (locPos eof) TokVRBrace ""
         : closingBraces ctxs [eof]
+    -- Empty body immediately followed by another module declaration:
+    -- synthesize an empty VLBRACE/VRBRACE pair and process the next
+    -- 'module' keyword in the outer context (no new IndentCtx).
+    startLayoutCtx _ ctxs (t@(Located _ TokModule _) : rest) =
+      Located (locPos t) TokVLBrace ""
+        : Located (locPos t) TokVRBrace ""
+        : emitToken ctxs t rest
     -- Explicit brace after layout keyword: skip virtual layout, let the
     -- brace be handled as an explicit context by emitToken/process.
     startLayoutCtx _ ctxs (t@(Located _ TokLBrace _) : rest) =
