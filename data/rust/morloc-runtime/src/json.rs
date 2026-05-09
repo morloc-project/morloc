@@ -11,6 +11,10 @@
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RELNULL};
+use indexmap::IndexMap;
+use serde_json::value::RawValue;
+use std::collections::HashMap;
+use std::str::FromStr;
 
 // ── Safe SHM abstractions ────────────────────────────────────────────────────
 
@@ -99,9 +103,12 @@ pub fn read_json_with_schema(json_str: &str, schema: &Schema) -> Result<AbsPtr, 
 pub fn read_json_with_schema_dest(
     dest: Option<AbsPtr>, json_str: &str, schema: &Schema,
 ) -> Result<AbsPtr, MorlocError> {
-    let value: serde_json::Value = serde_json::from_str(json_str)
+    // Parse to RawValue (preserves the raw text of every leaf). Avoids
+    // serde_json's f64 fallback for numbers that exceed i64/u64, which
+    // silently corrupts BigInt (`Int`) values.
+    let rv: Box<RawValue> = serde_json::from_str(json_str)
         .map_err(|e| MorlocError::Serialization(format!("JSON parse error: {}", e)))?;
-    json_to_voidstar(&value, schema, dest)
+    json_to_voidstar(&rv, schema, dest)
 }
 
 fn alloc(dest: Option<AbsPtr>, size: usize) -> Result<ShmWriter, MorlocError> {
@@ -111,49 +118,47 @@ fn alloc(dest: Option<AbsPtr>, size: usize) -> Result<ShmWriter, MorlocError> {
 }
 
 fn json_to_voidstar(
-    value: &serde_json::Value, schema: &Schema, dest: Option<AbsPtr>,
+    rv: &RawValue, schema: &Schema, dest: Option<AbsPtr>,
 ) -> Result<AbsPtr, MorlocError> {
+    let text = rv.get();
     match schema.serial_type {
-        SerialType::Nil => { let w = alloc(dest, 1)?; w.write_val::<u8>(0, 0); Ok(w.as_ptr()) }
-        SerialType::Bool => {
-            let b = value.as_bool().ok_or_else(|| err("expected bool"))?;
-            let w = alloc(dest, 1)?; w.write_val::<u8>(0, b as u8); Ok(w.as_ptr())
+        SerialType::Nil => {
+            if !is_null(text) { return Err(err(&format!("expected null, got {}", truncate_for_msg(text)))); }
+            let w = alloc(dest, 1)?; w.write_val::<u8>(0, 0); Ok(w.as_ptr())
         }
-        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  as_i64(value)? as i8);  Ok(w.as_ptr()) }
-        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, as_i64(value)? as i16); Ok(w.as_ptr()) }
-        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, as_i64(value)? as i32); Ok(w.as_ptr()) }
-        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, as_i64(value)?);        Ok(w.as_ptr()) }
-        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  as_u64(value)? as u8);  Ok(w.as_ptr()) }
-        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, as_u64(value)? as u16); Ok(w.as_ptr()) }
-        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, as_u64(value)? as u32); Ok(w.as_ptr()) }
-        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, as_u64(value)?);        Ok(w.as_ptr()) }
-        SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, as_f64(value)? as f32); Ok(w.as_ptr()) }
-        SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, as_f64(value)?);        Ok(w.as_ptr()) }
+        SerialType::Bool => {
+            let t = text.trim();
+            let b = match t {
+                "true" => 1u8, "false" => 0u8,
+                _ => return Err(err(&format!("expected bool, got {}", truncate_for_msg(t)))),
+            };
+            let w = alloc(dest, 1)?; w.write_val::<u8>(0, b); Ok(w.as_ptr())
+        }
+        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_sint(text, i8::MIN  as i64, i8::MAX  as i64, "Int8")?  as i8);  Ok(w.as_ptr()) }
+        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_sint(text, i16::MIN as i64, i16::MAX as i64, "Int16")? as i16); Ok(w.as_ptr()) }
+        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "Int32")? as i32); Ok(w.as_ptr()) }
+        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "Int64")?);        Ok(w.as_ptr()) }
+        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "UInt8")?  as u8);  Ok(w.as_ptr()) }
+        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_uint(text, u16::MAX as u64, "UInt16")? as u16); Ok(w.as_ptr()) }
+        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_uint(text, u32::MAX as u64, "UInt32")? as u32); Ok(w.as_ptr()) }
+        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_uint(text, u64::MAX,        "UInt64")?);        Ok(w.as_ptr()) }
+        SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, parse_float(text, "Float32")? as f32); Ok(w.as_ptr()) }
+        SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "Float64")?);        Ok(w.as_ptr()) }
 
         SerialType::Int => {
-            // Variable-width integer: parse JSON number → BigInt limbs
-            let decimal = match value {
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::String(s) => {
-                    let t = s.trim();
-                    let digits = if t.starts_with('-') { &t[1..] } else { t };
-                    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                        return Err(err(&format!("invalid integer string: {:?}", s)));
-                    }
-                    s.clone()
-                }
-                _ => return Err(err("expected integer for MORLOC_INT")),
-            };
-            let limbs = crate::eval_ffi::decimal_to_limbs(&decimal);
+            // Variable-width integer (BigInt): hand the raw digit string
+            // straight to decimal_to_limbs. RawValue preserves the input
+            // text exactly, so values beyond i64/u64 round-trip without
+            // f64 corruption.
+            let digits = extract_bigint_digits(text)?;
+            let limbs = crate::eval_ffi::decimal_to_limbs(digits)?;
             let nlimbs = limbs.len();
             // Inline layout: [size:i64, value_or_relptr:i64] = 16 bytes
             let w = alloc(dest, 16)?;
             if nlimbs <= 1 {
-                // Inline: value stored directly in second field
                 w.write_val::<i64>(0, nlimbs as i64);
                 w.write_val::<i64>(8, if nlimbs == 1 { limbs[0] as i64 } else { 0 });
             } else {
-                // Overflow: second field is relptr to limb array
                 let limb_bytes = nlimbs * 8;
                 let abs = shm::shmemcpy(limbs.as_ptr() as *const u8, limb_bytes)?;
                 w.write_val::<usize>(0, nlimbs);
@@ -163,7 +168,9 @@ fn json_to_voidstar(
         }
 
         SerialType::String => {
-            let s = value.as_str().ok_or_else(|| err("expected string"))?;
+            // serde_json::from_str::<String> decodes JSON escapes (\n, \uXXXX, etc.)
+            let s: String = serde_json::from_str(text)
+                .map_err(|e| err(&format!("expected string: {}", e)))?;
             let bytes = s.as_bytes();
             let hdr = std::mem::size_of::<Array>();
 
@@ -185,9 +192,9 @@ fn json_to_voidstar(
         }
 
         SerialType::Array => {
-            let arr_val = value.as_array().ok_or_else(|| err("expected array"))?;
+            let children = parse_array_children(text)?;
             let es = schema.parameters.first().ok_or_else(|| err("array has no element type"))?;
-            let n = arr_val.len();
+            let n = children.len();
             // Validate array length against schema constraint (offsets[0], 0 = unconstrained)
             let expected = schema.offsets.first().copied().unwrap_or(0);
             if expected > 0 && n != expected {
@@ -210,25 +217,63 @@ fn json_to_voidstar(
             };
             let data_rel = if data_ptr.is_null() { RELNULL } else { shm::abs2rel(data_ptr)? };
 
-            for (i, elem) in arr_val.iter().enumerate() {
+            for (i, child) in children.iter().enumerate() {
                 // SAFETY: data_ptr + i * ew is within the data allocation
                 let ep = unsafe { data_ptr.add(i * ew) };
-                json_to_voidstar(elem, es, Some(ep))?;
+                json_to_voidstar(child, es, Some(ep))?;
             }
             hw.write_array_header(0, n, data_rel);
             Ok(hw.as_ptr())
         }
 
-        SerialType::Tuple | SerialType::Map => {
-            let fields = extract_fields(value, schema)?;
-            if fields.len() != schema.parameters.len() {
-                return Err(err(&format!("expected {} fields, got {}", schema.parameters.len(), fields.len())));
+        SerialType::Tuple => {
+            let children = parse_array_children(text)?;
+            if children.len() != schema.parameters.len() {
+                return Err(err(&format!("expected {} fields, got {}", schema.parameters.len(), children.len())));
             }
             let w = alloc(dest, schema.width)?;
             w.zero(0, schema.width);
-            for (i, (fv, fs)) in fields.iter().zip(schema.parameters.iter()).enumerate() {
+            for (i, (child, fs)) in children.iter().zip(schema.parameters.iter()).enumerate() {
                 let sub = w.sub(schema.offsets[i], fs.width);
-                json_to_voidstar(fv, fs, Some(sub.as_ptr()))?;
+                json_to_voidstar(child, fs, Some(sub.as_ptr()))?;
+            }
+            Ok(w.as_ptr())
+        }
+
+        SerialType::Map => {
+            // Preserve the existing tolerance: a Map can be encoded either as
+            // a JSON object {"k": v, ...} or as a positional JSON array
+            // [v0, v1, ...]. The trimmed first byte tells us which.
+            let t = text.trim_start();
+            let w = alloc(dest, schema.width)?;
+            w.zero(0, schema.width);
+            if t.starts_with('{') {
+                let obj = parse_object_children(text)?;
+                for (i, (key, fs)) in schema.keys.iter().zip(schema.parameters.iter()).enumerate() {
+                    let sub = w.sub(schema.offsets[i], fs.width);
+                    match obj.get(key) {
+                        Some(child) => { json_to_voidstar(child, fs, Some(sub.as_ptr()))?; }
+                        // Missing key: synthesize a 'null' RawValue so the
+                        // child handler decides whether null is acceptable
+                        // (e.g. allowed for Optional, error for non-optional).
+                        // Matches the old extract_fields behavior that
+                        // substituted Value::Null for missing keys.
+                        None => {
+                            let null_rv: Box<RawValue> = serde_json::from_str("null")
+                                .expect("'null' is always valid JSON");
+                            json_to_voidstar(&null_rv, fs, Some(sub.as_ptr()))?;
+                        }
+                    }
+                }
+            } else {
+                let children = parse_array_children(text)?;
+                if children.len() != schema.parameters.len() {
+                    return Err(err(&format!("expected {} fields, got {}", schema.parameters.len(), children.len())));
+                }
+                for (i, (child, fs)) in children.iter().zip(schema.parameters.iter()).enumerate() {
+                    let sub = w.sub(schema.offsets[i], fs.width);
+                    json_to_voidstar(child, fs, Some(sub.as_ptr()))?;
+                }
             }
             Ok(w.as_ptr())
         }
@@ -238,11 +283,11 @@ fn json_to_voidstar(
             let off = shm::align_up(1, inner.alignment().max(1));
             let total = off + inner.width;
             let w = alloc(dest, total)?;
-            if value.is_null() {
+            if is_null(text) {
                 w.zero(0, total);
             } else {
                 w.write_val::<u8>(0, 1);
-                json_to_voidstar(value, inner, Some(w.sub(off, inner.width).as_ptr()))?;
+                json_to_voidstar(rv, inner, Some(w.sub(off, inner.width).as_ptr()))?;
             }
             Ok(w.as_ptr())
         }
@@ -259,13 +304,16 @@ fn json_to_voidstar(
     }
 }
 
-fn extract_fields(value: &serde_json::Value, schema: &Schema) -> Result<Vec<serde_json::Value>, MorlocError> {
-    if schema.serial_type == SerialType::Map && value.is_object() {
-        let obj = value.as_object().unwrap();
-        Ok(schema.keys.iter().map(|k| obj.get(k).cloned().unwrap_or(serde_json::Value::Null)).collect())
-    } else {
-        value.as_array().ok_or_else(|| err("expected array for tuple/map")).cloned()
-    }
+fn parse_array_children(text: &str) -> Result<Vec<Box<RawValue>>, MorlocError> {
+    serde_json::from_str(text).map_err(|e| MorlocError::Serialization(format!(
+        "expected JSON array: {} (in {})", e, truncate_for_msg(text)
+    )))
+}
+
+fn parse_object_children(text: &str) -> Result<HashMap<String, Box<RawValue>>, MorlocError> {
+    serde_json::from_str(text).map_err(|e| MorlocError::Serialization(format!(
+        "expected JSON object: {} (in {})", e, truncate_for_msg(text)
+    )))
 }
 
 // ── Voidstar -> JSON ───────────────────────────────────────────────────────
@@ -285,18 +333,98 @@ pub fn print_voidstar(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
 
 pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     let json = voidstar_to_json_string(ptr, schema)?;
-    let v: serde_json::Value = serde_json::from_str(&json).map_err(|e| err(&e.to_string()))?;
-    match &v {
-        // Print strings as raw text (unescaped, no quotes)
-        serde_json::Value::String(s) => println!("{}", s),
-        // Print numbers and bools as plain values
-        serde_json::Value::Number(n) => println!("{}", n),
-        serde_json::Value::Bool(b) => println!("{}", b),
-        serde_json::Value::Null => println!("null"),
-        // Print arrays and objects as indented JSON
-        _ => println!("{}", serde_json::to_string_pretty(&v).map_err(|e| err(&e.to_string()))?),
+    let rv: Box<RawValue> = serde_json::from_str(&json).map_err(|e| err(&e.to_string()))?;
+    let t = rv.get().trim_start();
+    // Top-level scalars: render without surrounding quotes (for strings) and
+    // without re-parsing numbers (preserving BigInt precision).
+    if let Some(first) = t.chars().next() {
+        match first {
+            '"' => {
+                // JSON string - unescape and print without quotes.
+                let s: String = serde_json::from_str(rv.get())
+                    .map_err(|e| err(&format!("string decode: {}", e)))?;
+                println!("{}", s);
+                return Ok(());
+            }
+            '{' | '[' => {
+                let mut buf = String::new();
+                pretty_indent(&rv, 0, &mut buf);
+                println!("{}", buf);
+                return Ok(());
+            }
+            _ => {
+                // Number, bool, or null - emit raw text. Numbers keep full
+                // precision because we never round-trip through Value::Number.
+                println!("{}", rv.get().trim());
+                return Ok(());
+            }
+        }
     }
+    // Empty input shouldn't occur (to_json always emits something), but be safe.
+    println!("{}", rv.get());
     Ok(())
+}
+
+/// Recursively pretty-print a RawValue tree with two-space indentation.
+/// Scalars (numbers, strings, bools, null) are emitted verbatim from the
+/// raw text; only containers (arrays/objects) introduce whitespace.
+fn pretty_indent(rv: &RawValue, depth: usize, buf: &mut String) {
+    let text = rv.get().trim();
+    let first = text.chars().next();
+    match first {
+        Some('[') => {
+            // Try to parse as array of children. Fall back to raw text on parse error.
+            match serde_json::from_str::<Vec<Box<RawValue>>>(text) {
+                Ok(children) if !children.is_empty() => {
+                    buf.push('[');
+                    for (i, child) in children.iter().enumerate() {
+                        if i > 0 { buf.push(','); }
+                        buf.push('\n');
+                        push_indent(buf, depth + 1);
+                        pretty_indent(child, depth + 1, buf);
+                    }
+                    buf.push('\n');
+                    push_indent(buf, depth);
+                    buf.push(']');
+                }
+                _ => buf.push_str(text), // empty array, or parse error: emit verbatim
+            }
+        }
+        Some('{') => {
+            // IndexMap preserves source key order so the pretty-printed
+            // object matches the JSON that to_json emitted (which is
+            // schema-ordered). serde_json::Map is locked to Value, so we
+            // can't use it for Box<RawValue>.
+            match serde_json::from_str::<IndexMap<String, Box<RawValue>>>(text) {
+                Ok(map) if !map.is_empty() => {
+                    buf.push('{');
+                    let n = map.len();
+                    for (i, (key, child)) in map.iter().enumerate() {
+                        buf.push('\n');
+                        push_indent(buf, depth + 1);
+                        // Re-escape the key via serde_json::to_string (returns "key" with surrounding quotes).
+                        match serde_json::to_string(key) {
+                            Ok(quoted) => buf.push_str(&quoted),
+                            Err(_) => { buf.push('"'); buf.push_str(key); buf.push('"'); }
+                        }
+                        buf.push_str(": ");
+                        pretty_indent(child, depth + 1, buf);
+                        if i + 1 < n { buf.push(','); }
+                    }
+                    buf.push('\n');
+                    push_indent(buf, depth);
+                    buf.push('}');
+                }
+                _ => buf.push_str(text),
+            }
+        }
+        // Scalars: emit raw text. Numbers (including BigInts) survive intact.
+        _ => buf.push_str(text),
+    }
+}
+
+fn push_indent(buf: &mut String, depth: usize) {
+    for _ in 0..depth { buf.push_str("  "); }
 }
 
 fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), MorlocError> {
@@ -413,9 +541,111 @@ fn json_escape(s: &str, buf: &mut String) {
 }
 
 fn err(msg: &str) -> MorlocError { MorlocError::Serialization(msg.into()) }
-fn as_i64(v: &serde_json::Value) -> Result<i64, MorlocError> { v.as_i64().ok_or_else(|| err("expected integer")) }
-fn as_u64(v: &serde_json::Value) -> Result<u64, MorlocError> { v.as_u64().ok_or_else(|| err("expected unsigned integer")) }
-fn as_f64(v: &serde_json::Value) -> Result<f64, MorlocError> { v.as_f64().ok_or_else(|| err("expected number")) }
+
+fn is_null(text: &str) -> bool { text.trim() == "null" }
+
+fn truncate_for_msg(s: &str) -> String {
+    let t = s.trim();
+    if t.len() <= 80 { return t.to_string(); }
+    let mut end = 77;
+    while end > 0 && !t.is_char_boundary(end) { end -= 1; }
+    format!("{}...", &t[..end])
+}
+
+/// Strip optional surrounding double-quotes (JSON string form) and reject
+/// any non-integer sigils. Returns the digit body for `decimal_to_limbs`.
+fn extract_bigint_digits(text: &str) -> Result<&str, MorlocError> {
+    let t = text.trim();
+    let body = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    let body = body.trim();
+    if body.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        return Err(MorlocError::Serialization(format!(
+            "expected integer for Int, got {}", truncate_for_msg(t)
+        )));
+    }
+    Ok(body)
+}
+
+/// Parse a fixed-width signed integer leaf. Operates directly on the raw
+/// JSON text (preserves precision for diagnostics), rejects float syntax,
+/// and reports out-of-range values with the original magnitude verbatim.
+fn parse_sint(text: &str, lo: i64, hi: i64, name: &str) -> Result<i64, MorlocError> {
+    let t = text.trim();
+    if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        return Err(MorlocError::Serialization(format!(
+            "expected integer for {}, got {}", name, truncate_for_msg(t)
+        )));
+    }
+    match i64::from_str(t) {
+        Ok(v) if v >= lo && v <= hi => Ok(v),
+        Ok(v) => Err(MorlocError::Serialization(format!(
+            "value {} out of range for {} (range {} to {})", v, name, lo, hi
+        ))),
+        Err(_) => {
+            // i64::from_str failed: the value is either malformed or exceeds
+            // i64. If the body is a valid decimal-digit run (with optional
+            // leading '-'), it must be out of range; otherwise it's invalid.
+            let body = t.strip_prefix('-').unwrap_or(t);
+            if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
+                Err(MorlocError::Serialization(format!(
+                    "value {} out of range for {} (range {} to {})", t, name, lo, hi
+                )))
+            } else {
+                Err(MorlocError::Serialization(format!(
+                    "invalid integer for {}: {}", name, truncate_for_msg(t)
+                )))
+            }
+        }
+    }
+}
+
+fn parse_uint(text: &str, hi: u64, name: &str) -> Result<u64, MorlocError> {
+    let t = text.trim();
+    if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        return Err(MorlocError::Serialization(format!(
+            "expected unsigned integer for {}, got {}", name, truncate_for_msg(t)
+        )));
+    }
+    if let Some(rest) = t.strip_prefix('-') {
+        // Negative is necessarily out of range for unsigned; report so.
+        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(MorlocError::Serialization(format!(
+                "value {} out of range for {} (range 0 to {})", t, name, hi
+            )));
+        }
+        return Err(MorlocError::Serialization(format!(
+            "invalid unsigned integer for {}: {}", name, truncate_for_msg(t)
+        )));
+    }
+    match u64::from_str(t) {
+        Ok(v) if v <= hi => Ok(v),
+        Ok(v) => Err(MorlocError::Serialization(format!(
+            "value {} out of range for {} (range 0 to {})", v, name, hi
+        ))),
+        Err(_) => {
+            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+                Err(MorlocError::Serialization(format!(
+                    "value {} out of range for {} (range 0 to {})", t, name, hi
+                )))
+            } else {
+                Err(MorlocError::Serialization(format!(
+                    "invalid unsigned integer for {}: {}", name, truncate_for_msg(t)
+                )))
+            }
+        }
+    }
+}
+
+fn parse_float(text: &str, name: &str) -> Result<f64, MorlocError> {
+    let t = text.trim();
+    f64::from_str(t).map_err(|_| MorlocError::Serialization(format!(
+        "expected {}, got {}", name, truncate_for_msg(t)
+    )))
+}
 
 fn write_float(buf: &mut String, f: f64, fmt: &[u8]) {
     if f.is_nan() || f.is_infinite() { buf.push_str("null"); return; }

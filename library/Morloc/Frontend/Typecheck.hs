@@ -137,8 +137,8 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LstS xs) = LstS (map resolveTypes xs)
     f (TupS xs) = TupS (map resolveTypes xs)
     f (NamS rs) = NamS (zip (map fst rs) (map (resolveTypes . snd) rs))
-    f (RealS x) = RealS x
-    f (IntS x) = IntS x
+    f (RealS si x) = RealS si x
+    f (IntS si x) = IntS si x
     f (LogS x) = LogS x
     f (StrS x) = StrS x
     f UniS = UniS
@@ -257,8 +257,8 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 NullS = return (g0, NullS)
     f _ g0 (BndS v) = return (g0, BndS v)
     f _ g0 (CallS v) = return (g0, CallS v)
-    f _ g0 (RealS x) = return (g0, RealS x)
-    f _ g0 (IntS x) = return (g0, IntS x)
+    f _ g0 (RealS si x) = return (g0, RealS si x)
+    f _ g0 (IntS si x) = return (g0, IntS si x)
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
@@ -421,8 +421,8 @@ synthE _ g UniS = return (g, BT.unitU, UniS)
 synthE _ g NullS =
   let (g1, v) = newvar "nullType_" g
    in return (g1, OptionalU v, NullS)
-synthE _ g (RealS x) = return (g, BT.realU, RealS x)
-synthE _ g (IntS x) = return (g, BT.intU, IntS x)
+synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
+synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- Ensures pattern setting operations return the correct type.
@@ -1202,18 +1202,18 @@ checkE i g1 e1@(LstS _) b = do
 -- standalone base types rather than aliases of Int. Type aliases are
 -- expanded through the scope so that user-defined names like
 -- `type Char = UInt8` also accept integer literals directly.
-checkE i g (IntS x) t = do
+checkE i g (IntS si x) t = do
   scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
   if BT.isIntegerBaseType t || BT.isIntegerBaseType tEval
-    then return (g, t, IntS x)
-    else checkEFallback i g (IntS x) t
-checkE i g (RealS x) t = do
+    then return (g, t, IntS si x)
+    else checkEFallback i g (IntS si x) t
+checkE i g (RealS si x) t = do
   scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
   if BT.isRealBaseType t || BT.isRealBaseType tEval
-    then return (g, t, RealS x)
-    else checkEFallback i g (RealS x) t
+    then return (g, t, RealS si x)
+    else checkEFallback i g (RealS si x) t
 checkE i g1 e1 b = checkEFallback i g1 e1 b
 
 checkEFallback ::
@@ -1486,7 +1486,7 @@ application' i g es t = do
 -- Returns Nothing for anything involving foreign function calls,
 -- non-constant variables, or unsupported expression forms.
 tryEvalConst :: Gamma -> ExprS g f c -> Maybe ConstVal
-tryEvalConst _ (IntS n) = Just (ConstInt n)
+tryEvalConst _ (IntS _ n) = Just (ConstInt n)
 tryEvalConst _ (StrS s) = Just (ConstStr s)
 tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
@@ -1610,8 +1610,8 @@ peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
 peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)
 peakSExpr (TupS xs) = "TupS" <> "n=" <> pretty (length xs)
 peakSExpr (NamS rs) = "NamS" <> encloseSep "{" "}" "," (map (pretty . fst) rs)
-peakSExpr (RealS x) = "RealS" <+> viaShow x
-peakSExpr (IntS x) = "IntS" <+> pretty x
+peakSExpr (RealS _ x) = "RealS" <+> viaShow x
+peakSExpr (IntS _ x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty x
 peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe

@@ -544,8 +544,8 @@ expressPolyExpr
     e2' <- expressPolyExprWrap lang pc e2
     let e = PolyLet letId e1' e2'
     return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x)) = return $ PolyInt (Idx cidx v) x
+expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS _ x)) = return $ PolyReal (Idx cidx v) x
+expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS _ x)) = return $ PolyInt (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x)) = return $ PolyStr (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx v)
@@ -737,8 +737,8 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (LstS _) = "LstS"
     tagExpr (TupS _) = "TupS"
     tagExpr (NamS _) = "NamS"
-    tagExpr (RealS _) = "RealS"
-    tagExpr (IntS _) = "IntS"
+    tagExpr (RealS _ _) = "RealS"
+    tagExpr (IntS _ _) = "IntS"
     tagExpr (LogS _) = "LogS"
     tagExpr (StrS _) = "StrS"
     tagExpr (DoBlockS _) = "DoBlockS"

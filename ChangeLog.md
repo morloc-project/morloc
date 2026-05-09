@@ -1,9 +1,11 @@
 0.83.3 [2026-05-08]
 -------------------
+ * add proper negation operator
  * fix pure morloc tuple pattern getters
  * fix guards with mixed effects across branches
  * fix bug in parsing guards in do-blocks
  * fix segfault in ?(?x) double optionals
+ * fix silent integer overflow errors
 
 0.83.2 [2026-05-07]
 -------------------

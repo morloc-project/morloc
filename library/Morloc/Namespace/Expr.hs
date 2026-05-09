@@ -368,8 +368,13 @@ data ExprS g f c
   | LstS [AnnoS g f c]
   | TupS [AnnoS g f c]
   | NamS [(Key, AnnoS g f c)]
-  | RealS Scientific
-  | IntS Integer
+  -- Numeric literals carry an Int source-position index. The wrapping
+  -- AnnoS index points at the binding/expression that owns the literal,
+  -- which after term inlining can be the export reference. Keeping the
+  -- literal's own index lets compile-time overflow checks (Nexus.hs)
+  -- report the error at the literal's actual location.
+  | RealS Int Scientific
+  | IntS Int Integer
   | LogS Bool
   | StrS Text
   | ExeS ExecutableExpr
@@ -486,8 +491,8 @@ mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
 mapExprSM _ UniS = return UniS
 mapExprSM _ NullS = return NullS
 mapExprSM _ (BndS v) = return $ BndS v
-mapExprSM _ (RealS x) = return $ RealS x
-mapExprSM _ (IntS x) = return $ IntS x
+mapExprSM _ (RealS i x) = return $ RealS i x
+mapExprSM _ (IntS i x) = return $ IntS i x
 mapExprSM _ (LogS x) = return $ LogS x
 mapExprSM _ (StrS x) = return $ StrS x
 mapExprSM _ (ExeS x) = return $ ExeS x
@@ -700,8 +705,8 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty UniS = "UniS"
   pretty NullS = "NullS"
   pretty (BndS x) = "(BndS" <+> pretty x <> ")"
-  pretty (RealS x) = viaShow x
-  pretty (IntS x) = viaShow x
+  pretty (RealS _ x) = viaShow x
+  pretty (IntS _ x) = viaShow x
   pretty (LogS x) = viaShow x
   pretty (StrS x) = viaShow x
   pretty (ExeS x) = pretty x

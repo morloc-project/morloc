@@ -192,12 +192,27 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 }
 
 
+// IEEE 754 double can exactly represent every integer in [-2^53, 2^53].
+// Beyond that, fixed-width 64-bit integers cannot survive a round-trip
+// through R's "numeric" storage: nearby int64 / uint64 values collapse to
+// the same double, and casting back is silent corruption. Use this bound
+// as the threshold for the SINT64 / UINT64 / MORLOC_INT paths instead of
+// (double)INT64_MAX, which itself rounds to 2^63 and defeats the check.
+#define R_DOUBLE_INT_MAX 9007199254740992LL  // 2^53
+
+// NA/NaN rejection: NaN comparisons are always false, so the range checks
+// below silently admit any NaN (including R's NA_integer_/NA_real_, which
+// asReal collapses to NA_REAL). Casting NaN to an integer is undefined
+// behaviour and typically wraps to INT*_MIN. Reject explicitly.
 #define HANDLE_SINT_TYPE(CTYPE, MIN, MAX) \
     do { \
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
         double value = asReal(obj); \
+        if (ISNAN(value)) { \
+            MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
+        } \
         if (value < MIN || value > MAX) { \
             MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
         } \
@@ -210,10 +225,58 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
         double value = asReal(obj); \
+        if (ISNAN(value)) { \
+            MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
+        } \
         if (value < 0 || value > MAX) { \
             MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
         } \
         *(CTYPE*)dest = (CTYPE)value; \
+    } while(0)
+
+// 64-bit fixed-width: can't reuse HANDLE_*_TYPE because (double)INT64_MAX
+// and (double)UINT64_MAX both round to 2^63 / 2^64, so the range check
+// admits values that then cast to INT64_MIN / 0 silently.
+#define HANDLE_SINT64() \
+    do { \
+        if (!(isInteger(obj) || isReal(obj))) { \
+            MORLOC_ERROR("Expected integer for int64_t, but got %s", type2char(TYPEOF(obj))); \
+        } \
+        double value = asReal(obj); \
+        if (ISNAN(value)) { \
+            MORLOC_ERROR("Cannot pack NA or NaN into int64_t"); \
+        } \
+        if (value != trunc(value)) { \
+            MORLOC_ERROR("Expected integer for int64_t, got non-integer numeric %.17g", value); \
+        } \
+        if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) { \
+            MORLOC_ERROR( \
+                "Integer %.0f does not fit in R's numeric type" \
+                " (max 2^53 = 9007199254740992 for integer precision).", \
+                value); \
+        } \
+        *(int64_t*)dest = (int64_t)value; \
+    } while(0)
+
+#define HANDLE_UINT64() \
+    do { \
+        if (!(isInteger(obj) || isReal(obj))) { \
+            MORLOC_ERROR("Expected integer for uint64_t, but got %s", type2char(TYPEOF(obj))); \
+        } \
+        double value = asReal(obj); \
+        if (ISNAN(value)) { \
+            MORLOC_ERROR("Cannot pack NA or NaN into uint64_t"); \
+        } \
+        if (value != trunc(value)) { \
+            MORLOC_ERROR("Expected integer for uint64_t, got non-integer numeric %.17g", value); \
+        } \
+        if (value < 0 || value > (double)R_DOUBLE_INT_MAX) { \
+            MORLOC_ERROR( \
+                "Unsigned integer %.0f does not fit in R's numeric type" \
+                " (max 2^53 = 9007199254740992 for integer precision).", \
+                value); \
+        } \
+        *(uint64_t*)dest = (uint64_t)value; \
     } while(0)
 
 static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
@@ -242,7 +305,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             HANDLE_SINT_TYPE(int32_t, INT32_MIN, INT32_MAX);
             break;
         case MORLOC_SINT64:
-            HANDLE_SINT_TYPE(int64_t, INT64_MIN, INT64_MAX);
+            HANDLE_SINT64();
             break;
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, UINT8_MAX);
@@ -254,7 +317,7 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             HANDLE_UINT_TYPE(uint32_t, UINT32_MAX);
             break;
         case MORLOC_UINT64:
-            HANDLE_UINT_TYPE(uint64_t, UINT64_MAX);
+            HANDLE_UINT64();
             break;
         case MORLOC_INT: {
             // Inline BigInt: [size=1, value] — no allocation needed
@@ -262,11 +325,20 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
                 MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
             }
             double value = asReal(obj);
+            if (ISNAN(value)) {
+                MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
+            }
             if (value != trunc(value)) {
                 MORLOC_ERROR("Expected integer value for MORLOC_INT, got non-integer double");
             }
-            if (value < (double)INT64_MIN || value > (double)INT64_MAX) {
-                MORLOC_ERROR("Integer value too large for single-limb BigInt from R");
+            if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
+                // (double)INT64_MAX rounds to 2^63 and defeats the bound check;
+                // anything outside [-2^53, 2^53] cannot have come from R as a
+                // precise integer, so reject rather than silently corrupt.
+                MORLOC_ERROR(
+                    "Integer %.0f does not fit in R's numeric type"
+                    " (max 2^53 = 9007199254740992 for integer precision).",
+                    value);
             }
             int64_t* fields = (int64_t*)dest;
             fields[0] = 1;
@@ -518,11 +590,27 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
             obj = ScalarInteger((int)(*(int16_t*)data));
             break;
         case MORLOC_SINT32:
-            obj = ScalarInteger(*(int32_t*)data);
+            // R's integer reserves INT32_MIN as NA_integer_, so storing the
+            // full Int32 range as INTSXP would conflate the legitimate value
+            // -2^31 with missing data. Use REALSXP (double) instead — int32
+            // fits in 53 bits, so values round-trip exactly.
+            obj = ScalarReal((double)(*(int32_t*)data));
             break;
-        case MORLOC_SINT64:
-            obj = ScalarReal((double)(*(int64_t*)data));
+        case MORLOC_SINT64: {
+            // R's "numeric" is a double; values outside [-2^53, 2^53] are
+            // not exactly representable, and a silent (double) cast would
+            // collapse distinct int64 values onto the same double. Reject
+            // rather than corrupt.
+            int64_t val = *(int64_t*)data;
+            if (val < -R_DOUBLE_INT_MAX || val > R_DOUBLE_INT_MAX) {
+                MORLOC_ERROR(
+                    "Integer overflow: int64_t value %lld does not fit in R's numeric type"
+                    " (max 2^53 = 9007199254740992 for integer precision).",
+                    (long long)val);
+            }
+            obj = ScalarReal((double)val);
             break;
+        }
         case MORLOC_UINT8:
             obj = ScalarInteger((int)(*(uint8_t*)data));
             break;
@@ -532,9 +620,17 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
         case MORLOC_UINT32:
             obj = ScalarReal((double)(*(uint32_t*)data));
             break;
-        case MORLOC_UINT64:
-            obj = ScalarReal((double)(*(uint64_t*)data));
+        case MORLOC_UINT64: {
+            uint64_t val = *(uint64_t*)data;
+            if (val > (uint64_t)R_DOUBLE_INT_MAX) {
+                MORLOC_ERROR(
+                    "Integer overflow: uint64_t value %llu does not fit in R's numeric type"
+                    " (max 2^53 = 9007199254740992 for integer precision).",
+                    (unsigned long long)val);
+            }
+            obj = ScalarReal((double)val);
             break;
+        }
         case MORLOC_FLOAT32:
             obj = ScalarReal((double)(*(float*)data));
             break;
@@ -549,15 +645,21 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                 int64_t val = (bigint_size == 0) ? 0 : fields[1];
                 if (val >= INT32_MIN && val <= INT32_MAX) {
                     obj = ScalarInteger((int)val);
-                } else {
+                } else if (val >= -R_DOUBLE_INT_MAX && val <= R_DOUBLE_INT_MAX) {
                     obj = ScalarReal((double)val);
+                } else {
+                    // Single-limb BigInt that fits int64 but exceeds 2^53:
+                    // representable on the wire, not in R's numeric.
+                    MORLOC_ERROR(
+                        "Integer overflow: BigInt value %lld does not fit in R's numeric type"
+                        " (max 2^53 = 9007199254740992 for integer precision).",
+                        (long long)val);
                 }
             } else {
                 // Overflow: multi-limb integer
                 MORLOC_ERROR(
                     "Integer overflow: %lld-limb integer (%lld bits)"
-                    " does not fit in R's numeric type (max 2^53 for integer precision)."
-                    " Use a fixed-width type (Int32, Int64) or keep computation in Python.",
+                    " does not fit in R's numeric type (max 2^53 for integer precision).",
                     (long long)bigint_size, (long long)(bigint_size * 64));
                 // unreachable, but satisfy compiler
                 const uint64_t* limbs = (const uint64_t*)resolve_relptr(
@@ -640,14 +742,17 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         UNPROTECT(1);
                         break;
                     case MORLOC_SINT32:
-                        obj = PROTECT(allocVector(INTSXP, array->size));
+                        // INT32_MIN clashes with NA_integer_ in R, so store
+                        // the array as REALSXP (double). Doubles represent
+                        // every int32 exactly.
+                        obj = PROTECT(allocVector(REALSXP, array->size));
                         if(array->size == 0) {
                             UNPROTECT(1);
                             break;
                         }
-                        {
-                            void* tmp_ptr = R_TRY(resolve_relptr, array->data, base_ptr);
-                            memcpy(INTEGER(obj), tmp_ptr, array->size * sizeof(int32_t));
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        for (size_t i = 0; i < array->size; i++) {
+                            REAL(obj)[i] = (double)(*(int32_t*)(start + i * sizeof(int32_t)));
                         }
                         UNPROTECT(1);
                         break;
@@ -659,7 +764,16 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         }
                         start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
-                            REAL(obj)[i] = (double)(*(int64_t*)(start + i * sizeof(int64_t)));
+                            int64_t v = *(int64_t*)(start + i * sizeof(int64_t));
+                            if (v < -R_DOUBLE_INT_MAX || v > R_DOUBLE_INT_MAX) {
+                                UNPROTECT(1);
+                                MORLOC_ERROR(
+                                    "Integer overflow at array index %zu: int64_t value %lld"
+                                    " does not fit in R's numeric type"
+                                    " (max 2^53 = 9007199254740992 for integer precision).",
+                                    i, (long long)v);
+                            }
+                            REAL(obj)[i] = (double)v;
                         }
                         UNPROTECT(1);
                         break;
@@ -699,7 +813,9 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         UNPROTECT(1);
                         break;
                     case MORLOC_UINT64:
-                        // NOTE: the R integer cannot store a 64 bit int
+                        // NOTE: the R integer cannot store a 64 bit int.
+                        // Values beyond 2^53 are not exactly representable in
+                        // R's numeric (double); reject rather than corrupt.
                         obj = PROTECT(allocVector(REALSXP, array->size));
                         if(array->size == 0) {
                             UNPROTECT(1);
@@ -707,7 +823,16 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         }
                         start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         for (size_t i = 0; i < array->size; i++) {
-                            REAL(obj)[i] = (double)(*(uint64_t*)(start + i * sizeof(uint64_t)));
+                            uint64_t v = *(uint64_t*)(start + i * sizeof(uint64_t));
+                            if (v > (uint64_t)R_DOUBLE_INT_MAX) {
+                                UNPROTECT(1);
+                                MORLOC_ERROR(
+                                    "Integer overflow at array index %zu: uint64_t value %llu"
+                                    " does not fit in R's numeric type"
+                                    " (max 2^53 = 9007199254740992 for integer precision).",
+                                    i, (unsigned long long)v);
+                            }
+                            REAL(obj)[i] = (double)v;
                         }
                         UNPROTECT(1);
                         break;
@@ -759,16 +884,33 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
                         break;
                     case MORLOC_INT:
                         {
-                            // Inline BigInt array: each element is [size:i64, value_or_relptr:i64]
+                            // Inline BigInt array: each element is [size:i64, value_or_relptr:i64].
+                            // First pass: validate each element is single-limb AND fits 2^53.
+                            // Multi-limb or beyond-2^53 elements cannot be represented in R's
+                            // numeric type and would silently corrupt if cast through double.
                             int all_fit_int32 = 1;
                             size_t elem_w = element_schema->width; // 16
                             if (array->size > 0) {
                                 start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                                 for (size_t i = 0; i < array->size; i++) {
                                     const int64_t* f = (const int64_t*)(start + i * elem_w);
-                                    if (f[0] > 1) { all_fit_int32 = 0; break; }
-                                    int64_t val = (f[0] == 0) ? 0 : f[1];
-                                    if (val < INT32_MIN || val > INT32_MAX) { all_fit_int32 = 0; break; }
+                                    int64_t bigint_size = f[0];
+                                    if (bigint_size > 1) {
+                                        MORLOC_ERROR(
+                                            "Integer overflow at array index %zu: %lld-limb BigInt"
+                                            " does not fit in R's numeric type"
+                                            " (max 2^53 = 9007199254740992 for integer precision).",
+                                            i, (long long)bigint_size);
+                                    }
+                                    int64_t val = (bigint_size == 0) ? 0 : f[1];
+                                    if (val < INT32_MIN || val > INT32_MAX) all_fit_int32 = 0;
+                                    if (val < -R_DOUBLE_INT_MAX || val > R_DOUBLE_INT_MAX) {
+                                        MORLOC_ERROR(
+                                            "Integer overflow at array index %zu: BigInt value %lld"
+                                            " does not fit in R's numeric type"
+                                            " (max 2^53 = 9007199254740992 for integer precision).",
+                                            i, (long long)val);
+                                    }
                                 }
                             }
                             if (all_fit_int32) {

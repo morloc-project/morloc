@@ -287,14 +287,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
-    toNexusExpr (AnnoS (Idx _ t) _ (RealS v)) = do
+    toNexusExpr (AnnoS (Idx _ t) _ (RealS _ v)) = do
       s <- generalTypeToSerialAST t
       return $ case s of
         (SerialFloat32 _) -> LitX F32X (MT.pack (show v))
         _ -> LitX F64X (MT.pack (show v))
-    toNexusExpr (AnnoS (Idx ix t) _ (IntS v)) = do
+    -- Use the literal's own source-map index (litIx) for overflow reporting.
+    -- The wrapping AnnoS index points at the term that owns the literal,
+    -- which after term inlining is often the export reference, not the
+    -- literal itself. See Treeify.collectExprS for where litIx is set.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) = do
       s <- generalTypeToSerialAST t
-      checkIntBounds ix v s
+      checkIntBounds litIx v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
         (SerialInt16 _) -> LitX I16X (MT.pack (show v))

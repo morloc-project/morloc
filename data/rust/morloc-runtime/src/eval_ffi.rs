@@ -115,10 +115,17 @@ pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
 /// Convert a decimal string (possibly with leading '-') to a Vec of uint64
 /// limbs in little-endian order using two's complement for negative values.
 /// For values that fit in i64 (the common case), produces exactly 1 limb.
-pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
+///
+/// Strict: every non-sign byte must be an ASCII digit. The empty string and
+/// `-` alone are rejected. Callers that want lenient parsing should
+/// pre-strip whitespace/quotes themselves.
+pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
     let s = s.trim();
-    if s.is_empty() || s == "0" {
-        return vec![0u64];
+    if s.is_empty() {
+        return Err(MorlocError::Serialization("empty integer literal".into()));
+    }
+    if s == "0" || s == "-0" {
+        return Ok(vec![0u64]);
     }
 
     let (negative, digits) = if let Some(rest) = s.strip_prefix('-') {
@@ -127,10 +134,18 @@ pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
         (false, s)
     };
 
+    if digits.is_empty() {
+        return Err(MorlocError::Serialization("integer literal has no digits".into()));
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(MorlocError::Serialization(format!(
+            "invalid integer literal: {:?} (expected decimal digits)", s
+        )));
+    }
+
     // Parse magnitude into limbs (base 2^64, little-endian)
     let mut limbs: Vec<u64> = vec![0];
     for &b in digits.as_bytes() {
-        if !b.is_ascii_digit() { continue; }
         let d = (b - b'0') as u64;
         let mut carry = d;
         for limb in limbs.iter_mut() {
@@ -163,7 +178,7 @@ pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
         }
     }
 
-    limbs
+    Ok(limbs)
 }
 
 /// Convert BigInt limbs (little-endian, two's complement) back to decimal string.
@@ -521,7 +536,7 @@ unsafe fn morloc_eval_r(
                 let decimal = if s.is_null() { "0" } else {
                     std::ffi::CStr::from_ptr(s).to_str().unwrap_or("0")
                 };
-                let limbs = decimal_to_limbs(decimal);
+                let limbs = decimal_to_limbs(decimal)?;
                 let nlimbs = limbs.len();
                 let fields = dest as *mut i64;
                 if nlimbs <= 1 {

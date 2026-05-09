@@ -312,17 +312,52 @@ fn unpack_int(ptr: AbsPtr, st: SerialType, reader: &mut &[u8]) -> Result<(), Mor
     let val: i64 = rmp::decode::read_int(reader)
         .map_err(|e| MorlocError::Serialization(format!("msgpack int: {}", e)))?;
 
+    // Range-check before narrowing. The msgpack stream may carry a wider
+    // integer than the receiving schema slot (e.g. a producer that wrote
+    // an i64-tagged value that fits in the wire width but not the target
+    // type). Silent truncation here would defeat the json.rs check.
+    let check_s = |lo: i64, hi: i64, name: &str| -> Result<i64, MorlocError> {
+        if val < lo || val > hi {
+            Err(MorlocError::Serialization(format!(
+                "value {} out of range for {} (range {} to {})", val, name, lo, hi
+            )))
+        } else { Ok(val) }
+    };
+    let check_u = |hi: u64, name: &str| -> Result<u64, MorlocError> {
+        if val < 0 || (val as u64) > hi {
+            Err(MorlocError::Serialization(format!(
+                "value {} out of range for {} (range 0 to {})", val, name, hi
+            )))
+        } else { Ok(val as u64) }
+    };
+
+    // Compute the narrowed values (with checks) outside the unsafe block.
+    let i8v = if matches!(st, SerialType::Sint8)  { check_s(i8::MIN  as i64, i8::MAX  as i64, "Int8" )? as i8  } else { 0 };
+    let i16v = if matches!(st, SerialType::Sint16) { check_s(i16::MIN as i64, i16::MAX as i64, "Int16")? as i16 } else { 0 };
+    let i32v = if matches!(st, SerialType::Sint32) { check_s(i32::MIN as i64, i32::MAX as i64, "Int32")? as i32 } else { 0 };
+    let u8v  = if matches!(st, SerialType::Uint8)  { check_u(u8::MAX  as u64, "UInt8" )? as u8  } else { 0 };
+    let u16v = if matches!(st, SerialType::Uint16) { check_u(u16::MAX as u64, "UInt16")? as u16 } else { 0 };
+    let u32v = if matches!(st, SerialType::Uint32) { check_u(u32::MAX as u64, "UInt32")? as u32 } else { 0 };
+    let u64v: u64 = if matches!(st, SerialType::Uint64) {
+        if val < 0 {
+            return Err(MorlocError::Serialization(format!(
+                "value {} out of range for UInt64 (range 0 to {})", val, u64::MAX
+            )));
+        }
+        val as u64
+    } else { 0 };
+
     // SAFETY: ptr points to schema.width bytes in SHM; each cast writes exactly that width.
     unsafe {
         match st {
-            SerialType::Sint8 => *(ptr as *mut i8) = val as i8,
-            SerialType::Sint16 => *(ptr as *mut i16) = val as i16,
-            SerialType::Sint32 => *(ptr as *mut i32) = val as i32,
+            SerialType::Sint8  => *(ptr as *mut i8)  = i8v,
+            SerialType::Sint16 => *(ptr as *mut i16) = i16v,
+            SerialType::Sint32 => *(ptr as *mut i32) = i32v,
             SerialType::Sint64 => *(ptr as *mut i64) = val,
-            SerialType::Uint8 => *ptr = val as u8,
-            SerialType::Uint16 => *(ptr as *mut u16) = val as u16,
-            SerialType::Uint32 => *(ptr as *mut u32) = val as u32,
-            SerialType::Uint64 => *(ptr as *mut u64) = val as u64,
+            SerialType::Uint8  => *ptr               = u8v,
+            SerialType::Uint16 => *(ptr as *mut u16) = u16v,
+            SerialType::Uint32 => *(ptr as *mut u32) = u32v,
+            SerialType::Uint64 => *(ptr as *mut u64) = u64v,
             _ => {}
         }
     }

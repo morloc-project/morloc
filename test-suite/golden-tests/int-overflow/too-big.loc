@@ -1,0 +1,8 @@
+-- Scenario A: literal that overflows UInt8 at compile time.
+-- The compile must fail and the error must point at the `1000` literal on
+-- line 8, NOT at the module/export line (line 5). The Makefile greps the
+-- compiler error for the line:column prefix `8:` to verify this.
+module bad (tooLarge)
+
+tooLarge :: UInt8
+tooLarge = 1000
