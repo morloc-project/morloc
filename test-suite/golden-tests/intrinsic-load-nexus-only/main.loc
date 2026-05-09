@@ -1,0 +1,134 @@
+-- @save / @load round-trip executed entirely inside the nexus, with
+-- no language pool involved. This exercises the path that previously
+-- aborted with `free(): invalid size` -- mlc_load returns SHM-allocated
+-- memory but the eval handler called libc::free on it. The Python-pool
+-- variant in intrinsic-load-tail-position does not cover this case
+-- because routing the value through `identity :: a -> a` from helper.py
+-- forces a pool round-trip that masks the bug.
+--
+-- Each case exercises a different shape in voidstar::deep_copy, the
+-- helper that converts mlc_load's single-block payload into the
+-- multi-block layout the rest of the evaluator uses:
+--   * Int  -- primitive (wrapper IS the data)
+--   * Real -- primitive (Float64)
+--   * Str  -- Array<u8>: wrapper + separate char block
+--   * [Str] -- nested Array<Array<u8>>: variable-width elements
+--   * (Int, Str) -- Tuple with mixed fixed and variable elements
+--   * [(Int, Real)] -- Array of fixed-width Tuple (bulk-copy path)
+-- across the three save formats (binary voidstar, msgpack, json).
+
+module main
+  ( binInt
+  , msgInt
+  , jsonInt
+  , binReal
+  , msgReal
+  , jsonReal
+  , binStr
+  , msgStr
+  , jsonStr
+  , binList
+  , msgList
+  , jsonList
+  , binTup
+  , msgTup
+  , jsonTup
+  , binFixedTupList
+  , msgFixedTupList
+  , jsonFixedTupList
+  , loadMissing
+  )
+
+binInt :: Int -> Str -> <IO> ?Int
+binInt x path = do
+  @save x path
+  @load path
+
+msgInt :: Int -> Str -> <IO> ?Int
+msgInt x path = do
+  @savem x path
+  @load path
+
+jsonInt :: Int -> Str -> <IO> ?Int
+jsonInt x path = do
+  @savej x path
+  @load path
+
+binReal :: Real -> Str -> <IO> ?Real
+binReal x path = do
+  @save x path
+  @load path
+
+msgReal :: Real -> Str -> <IO> ?Real
+msgReal x path = do
+  @savem x path
+  @load path
+
+jsonReal :: Real -> Str -> <IO> ?Real
+jsonReal x path = do
+  @savej x path
+  @load path
+
+binStr :: Str -> Str -> <IO> ?Str
+binStr s path = do
+  @save s path
+  @load path
+
+msgStr :: Str -> Str -> <IO> ?Str
+msgStr s path = do
+  @savem s path
+  @load path
+
+jsonStr :: Str -> Str -> <IO> ?Str
+jsonStr s path = do
+  @savej s path
+  @load path
+
+binList :: [Str] -> Str -> <IO> ?[Str]
+binList xs path = do
+  @save xs path
+  @load path
+
+msgList :: [Str] -> Str -> <IO> ?[Str]
+msgList xs path = do
+  @savem xs path
+  @load path
+
+jsonList :: [Str] -> Str -> <IO> ?[Str]
+jsonList xs path = do
+  @savej xs path
+  @load path
+
+binTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
+binTup t path = do
+  @save t path
+  @load path
+
+msgTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
+msgTup t path = do
+  @savem t path
+  @load path
+
+jsonTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
+jsonTup t path = do
+  @savej t path
+  @load path
+
+binFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
+binFixedTupList xs path = do
+  @save xs path
+  @load path
+
+msgFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
+msgFixedTupList xs path = do
+  @savem xs path
+  @load path
+
+jsonFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
+jsonFixedTupList xs path = do
+  @savej xs path
+  @load path
+
+-- Loading a missing file must return null, not crash.
+loadMissing :: Str -> <IO> ?Int
+loadMissing path = @load path

@@ -836,10 +836,24 @@ unsafe fn morloc_eval_r(
                 }
                 *opt_dest = 0; // None
             } else {
-                // Copy loaded voidstar data into the optional's inner slot
-                let inner_width = (*inner_schema).width;
-                ptr::copy_nonoverlapping(loaded as *const u8, opt_dest.add(inner_offset), inner_width);
-                libc::free(loaded as *mut c_void);
+                // mlc_load returns SHM but the layout depends on the file
+                // format: msgpack and voidstar pack the wrapper and nested
+                // data into a single block (relptrs reference addresses
+                // inside the block), JSON returns a multi-block tree. A
+                // straight bit-copy of the wrapper would alias the source
+                // block, and libc::free on SHM is undefined (was the cause
+                // of `free(): invalid size` aborts on every nexus-side
+                // @load). Deep-copy into multi-block layout so the result
+                // matches what the rest of the evaluator produces, then
+                // shfree the source block as one allocation.
+                let inner_rs = crate::cschema::CSchema::to_rust(inner_schema);
+                let copy_result = crate::voidstar::deep_copy(
+                    loaded as *const u8,
+                    opt_dest.add(inner_offset),
+                    &inner_rs,
+                );
+                let _ = shm::shfree(loaded as shm::AbsPtr);
+                copy_result?;
                 *opt_dest = 1; // Some
             }
         }

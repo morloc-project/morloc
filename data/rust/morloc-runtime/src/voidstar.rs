@@ -102,6 +102,115 @@ pub fn free_by_schema(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     Ok(())
 }
 
+// ── deep_copy ──────────────────────────────────────────────────────────────
+
+/// Deep-copy a voidstar tree into multi-block layout: every Array/String
+/// payload and BigInt limb buffer is allocated in its own SHM block, so the
+/// resulting tree can be released by separately shfree-ing each sub-block.
+///
+/// The source layout is irrelevant -- this works for both single-block
+/// payloads (e.g. mlc_load output, CLI-arg voidstars) and pre-existing
+/// multi-block trees. After the copy the source can be released as a single
+/// shfree on its top-level block (single-block source) or via per-block
+/// cleanup (multi-block source).
+///
+/// `dst` must point to `schema.width` writable bytes (typically a slot
+/// inside an already-allocated parent block). Sub-block allocations are
+/// charged to the SHM allocator and the resulting relptrs are written into
+/// `dst`.
+pub unsafe fn deep_copy(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
+    match schema.serial_type {
+        SerialType::String => {
+            let src_arr = &*(src as *const Array);
+            let dst_arr = &mut *(dst as *mut Array);
+            dst_arr.size = src_arr.size;
+            if src_arr.size > 0 && src_arr.data >= 0 {
+                let src_data = shm::rel2abs(src_arr.data)?;
+                let new_data = shm::shmemcpy(src_data, src_arr.size)?;
+                dst_arr.data = shm::abs2rel(new_data)?;
+            } else {
+                dst_arr.data = shm::RELNULL;
+            }
+        }
+        SerialType::Array => {
+            let src_arr = &*(src as *const Array);
+            let dst_arr = &mut *(dst as *mut Array);
+            dst_arr.size = src_arr.size;
+            if src_arr.size > 0 && src_arr.data >= 0 && !schema.parameters.is_empty() {
+                let elem_schema = &schema.parameters[0];
+                let elem_width = elem_schema.width;
+                let src_data = shm::rel2abs(src_arr.data)?;
+                let new_data = shm::shcalloc(src_arr.size, elem_width)?;
+                if elem_schema.is_fixed_width() {
+                    std::ptr::copy_nonoverlapping(src_data, new_data, src_arr.size * elem_width);
+                } else {
+                    for i in 0..src_arr.size {
+                        deep_copy(
+                            src_data.add(i * elem_width),
+                            new_data.add(i * elem_width),
+                            elem_schema,
+                        )?;
+                    }
+                }
+                dst_arr.data = shm::abs2rel(new_data)?;
+            } else {
+                dst_arr.data = shm::RELNULL;
+            }
+        }
+        SerialType::Tuple | SerialType::Map => {
+            for i in 0..schema.parameters.len() {
+                let off = schema.offsets[i];
+                deep_copy(src.add(off), dst.add(off), &schema.parameters[i])?;
+            }
+        }
+        SerialType::Optional => {
+            let tag = *src;
+            *dst = tag;
+            if tag != 0 && !schema.parameters.is_empty() {
+                let off = schema.offsets.first().copied().unwrap_or_else(|| {
+                    shm::align_up(1, schema.parameters[0].alignment().max(1))
+                });
+                deep_copy(src.add(off), dst.add(off), &schema.parameters[0])?;
+            }
+        }
+        SerialType::Int => {
+            // Inline BigInt: [size, value_or_relptr]
+            let size = *(src as *const usize);
+            *(dst as *mut usize) = size;
+            let off = std::mem::size_of::<usize>();
+            if size > 1 {
+                let src_relptr = *(src.add(off) as *const RelPtr);
+                if src_relptr >= 0 {
+                    let src_limbs = shm::rel2abs(src_relptr)?;
+                    let new_limbs = shm::shmemcpy(src_limbs, size * std::mem::size_of::<u64>())?;
+                    *(dst.add(off) as *mut RelPtr) = shm::abs2rel(new_limbs)?;
+                } else {
+                    *(dst.add(off) as *mut RelPtr) = shm::RELNULL;
+                }
+            } else {
+                *(dst.add(off) as *mut i64) = *(src.add(off) as *const i64);
+            }
+        }
+        SerialType::Table => {
+            // Arrow IPC tables are a single relptr to an out-of-line Arrow
+            // buffer. Properly deep-copying requires reproducing the buffer,
+            // which is not implemented yet.
+            return Err(MorlocError::Other(
+                "voidstar::deep_copy: Table type not yet supported".into(),
+            ));
+        }
+        _ => {
+            // Fixed-size primitives (Bool/Sint*/Uint*/Float*/Nil): bit-copy
+            std::ptr::copy_nonoverlapping(src, dst, schema.width);
+        }
+    }
+    Ok(())
+}
+
 // ── flatten_voidstar_to_buffer ─────────────────────────────────────────────
 
 /// Flatten a voidstar structure in SHM into a self-contained byte buffer.

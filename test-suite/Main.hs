@@ -460,6 +460,7 @@ main = do
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
       , golden "intrinsic-show-ho-r" "intrinsic-show-ho-r"
       , golden "intrinsic-load-tail-position" "intrinsic-load-tail-position"
+      , golden "intrinsic-load-nexus-only" "intrinsic-load-nexus-only"
       , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
         golden "parser-stress" "parser-stress"
       , -- stdout flush test: verify Python pool stdout is flushed before shutdown
