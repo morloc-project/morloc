@@ -237,7 +237,26 @@ generalTypeToSerialAST (OptionalT t) = do
 generalTypeToSerialAST (NamT o v [] rs) =
   SerialObject o (FV v (CV "")) []
     <$> mapM (secondM generalTypeToSerialAST) rs
-generalTypeToSerialAST t = error $ "cannot serialize this type: " <> show t
+generalTypeToSerialAST t = MM.throwSystemError $ "cannot serialize this type: " <> pretty (show t)
+
+-- | Check whether a type contains a function type anywhere in its structure.
+-- Used to detect higher-order functions appearing as arguments or in
+-- compound positions (lists, tuples, records, optionals), which the CLI
+-- nexus cannot serialize.
+containsFunT :: Type -> Bool
+containsFunT (FunT _ _) = True
+containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
+containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
+containsFunT (EffectT _ t) = containsFunT t
+containsFunT (OptionalT t) = containsFunT t
+containsFunT _ = False
+
+-- | True if the export type carries a function type in argument or return
+-- position. The top-level FunT of an exported function itself is fine; what
+-- isn't fine is any nested FunT (HOF) embedded inside arguments or returns.
+exportHasHigherOrder :: Type -> Bool
+exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
+exportHasHigherOrder t = containsFunT t
 
 resolveAliasApp :: TVar -> [Type] -> MorlocMonad SerialAST
 resolveAliasApp v ts = do
@@ -247,7 +266,7 @@ resolveAliasApp v ts = do
       let tvars = [tv | Left (tv, _) <- params]
           resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
       in generalTypeToSerialAST resolved
-    _ -> error $ "Cannot serialize type: " <> show (AppT (VarT v) ts)
+    _ -> MM.throwSystemError $ "Cannot serialize type: " <> pretty (show (AppT (VarT v) ts))
 
 -- ======================================================================
 -- Pure expression extraction
@@ -259,6 +278,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   gname <- case mayName of
     Nothing -> MM.throwSourcedError i $ "No name found for call-free function"
     (Just n') -> return n'
+
+  CM.when (exportHasHigherOrder gtype) $
+    MM.throwSourcedError i "cannot export higher-order functions through the CLI"
 
   (retSchemaDoc, argSchemaDocs) <- makeGastSchemas gtype
   expr <- toNexusExpr x0

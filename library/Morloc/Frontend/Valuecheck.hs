@@ -32,8 +32,14 @@ toE (AnnoS g _ (LamS vs e)) = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es)) = LstP g (map toE es)
 toE (AnnoS g _ (TupS es)) = TupP g (map toE es)
 toE (AnnoS g _ (NamS rs)) = NamP g (map (second toE) rs)
-toE (AnnoS g _ (RealS _ x)) = LitP g (MNum x)
-toE (AnnoS g _ (IntS _ x)) = LitP g (MInt x)
+-- For numeric literals carry the literal's own source index (si) rather
+-- than the wrapping AnnoS index. When a top-level term body is inlined
+-- via Treeify.termExprToAnnoS, the wrapping AnnoS holds the export
+-- reference's index (gi0), so the literal's own position would otherwise
+-- be lost. Using si here lets value-conflict diagnostics caret on the
+-- literal that triggered the conflict, not on the export list.
+toE (AnnoS (Idx _ t) _ (RealS si x)) = LitP (Idx si t) (MNum x)
+toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
 toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s

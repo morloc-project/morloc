@@ -175,4 +175,4 @@ all:
 
 
 clean:
-	rm -rf nexus nexus_bad pools *err obs.txt __pycache__
+	rm -rf nexus nexus_bad pools *err __pycache__

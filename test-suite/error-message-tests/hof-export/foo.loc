@@ -1,0 +1,7 @@
+-- Higher-order functions cannot be exported through the CLI nexus,
+-- because their function-typed arguments have no msgpack schema.
+-- Compilation must reject this with a clear diagnostic.
+module main (apply5)
+
+apply5 :: (Int -> Int) -> Int
+apply5 f = f 5
