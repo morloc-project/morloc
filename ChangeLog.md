@@ -13,6 +13,7 @@
  * fix parser bug preventing multi-module files
  * allow empty module export lists
  * fix segfault in pure morloc @load intrinsic
+ * fix bugs in pure morloc patter getters/setters
 
 0.83.2 [2026-05-07]
 -------------------

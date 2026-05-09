@@ -125,6 +125,7 @@ main = do
       , golden "functional-data-5" "functional-data-5"
       , golden "pattern-getters" "pattern-getters"
       , golden "pattern-setters" "pattern-setters"
+      , golden "pattern-setters-pure" "pattern-setters-pure"
       , golden "type-annotations-1" "type-annotations-1"
       , golden "native-morloc-1" "native-morloc-1"
       , golden "native-morloc-2" "native-morloc-2"

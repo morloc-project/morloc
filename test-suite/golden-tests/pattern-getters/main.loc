@@ -9,6 +9,9 @@ module main
   , pureChained
   , pureSingleGrouped
   , pureChainedScalar
+  , pureRecordHetGetter
+  , pureRecordSingleField
+  , pureRecordKeyChain
   )
 
 import root
@@ -100,3 +103,20 @@ pureSingleGrouped = .(.1) (1, 2)
 -- Chained single-index path returning a scalar from inside a tuple.
 pureChainedScalar :: Int
 pureChainedScalar = .0.1 ((1, 3), 2, 5)
+
+-- Sub-record getter on a heterogeneous record literal: selects two
+-- same-typed fields from a record whose intervening field has a
+-- different type. Regression for the bug where the literal's
+-- existential was solved against a narrower projection-shaped
+-- existential, dropping the unselected field from the schema and
+-- leaving the remaining fields at the wrong byte offsets.
+pureRecordHetGetter :: (Int, Int)
+pureRecordHetGetter = .(.x, .z) { x = 7, y = "hi", z = 8 }
+
+-- Single key on a heterogeneous record (control case).
+pureRecordSingleField :: Int
+pureRecordSingleField = .x { x = 7, y = "hi", z = 8 }
+
+-- Chained selector descending through a record key into a tuple.
+pureRecordKeyChain :: Int
+pureRecordKeyChain = .x.0 { x = (7, "hi"), y = 99 }

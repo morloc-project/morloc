@@ -1215,9 +1215,18 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
       g3
       [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
 
-  -- define new types to insert
+  -- define new types to insert.
+  -- Use rs1' for both (rs1' and rs2' contain the same key set after
+  -- extendRec; rs1' preserves the left side's original key order).
+  -- This matters for record literals (rc1 = Closed): the literal's
+  -- field order is the on-disk layout, and downstream serialization
+  -- builds the schema from this list. Without this, a sub-record
+  -- pattern application would solve the literal's existential to a
+  -- record whose key order is pattern-driven (rs2 ++ literal-extras),
+  -- and the materialized value would write fields in the wrong
+  -- positions.
   let taExpanded = ExistU v1 (ps1', pc1) (rs1', rc1)
-  let tbExpanded = ExistU v2 (ps2', pc1) (rs2', rc1)
+  let tbExpanded = ExistU v2 (ps1', pc1) (rs1', rc1)
 
   -- Check gammaSolved first: if either is already solved, skip access2
   case (Map.lookup v1 (gammaSolved g4), Map.lookup v2 (gammaSolved g4)) of
@@ -1530,11 +1539,13 @@ selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0)
       Selector ->
       (TypeU, [TypeU]) -- the modified type and the list of remaining setters
     f _ (t : ts) SelectorEnd = (t, ts)
+    -- Walk selectors left-to-right so the i-th selector consumes the i-th
+    -- value from setTypes1; foldr would walk right-to-left and swap them.
     f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorKey s ss) =
-      let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s : ss)
+      let (ks', setTypes2) = foldl' (flip subKey) (ks, setTypes1) (s : ss)
        in (ExistU v (ts, tc) (ks', kc), setTypes2)
     f (NamU o v ps ks) setTypes1 (SelectorKey s ss) =
-      let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s : ss)
+      let (ks', setTypes2) = foldl' (flip subKey) (ks, setTypes1) (s : ss)
        in (NamU o v ps ks', setTypes2)
     -- handle non-existential records
     --  * note that this may well change the field type of the record, this should

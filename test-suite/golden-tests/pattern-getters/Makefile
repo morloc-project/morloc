@@ -11,6 +11,9 @@ all:
 	./nexus pureChained        2>> obs.err >> obs.txt
 	./nexus pureSingleGrouped  2>> obs.err >> obs.txt
 	./nexus pureChainedScalar  2>> obs.err >> obs.txt
+	./nexus pureRecordHetGetter   2>> obs.err >> obs.txt
+	./nexus pureRecordSingleField 2>> obs.err >> obs.txt
+	./nexus pureRecordKeyChain    2>> obs.err >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

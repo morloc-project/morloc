@@ -1232,7 +1232,18 @@ checkEFallback i g1 e1 b = do
       b' = apply g2 b
   scope <- MM.getGeneralScope i
   case subtype scope a' b' g2 of
-    Right g3 -> return (g3, apply g3 b', e2)
+    -- Pick the type with more record keys: when an open-keyed expected
+    -- type (b) is checked against a synthesized record literal that has
+    -- additional keys, the InstLReach rule for two record existentials
+    -- only solves the literal's existential, leaving the expected
+    -- existential's view stuck at its narrower keyset. Using a' here
+    -- keeps the literal's full type on the AST so the schema generator
+    -- emits all fields. For non-record cases a' and b' are equivalent
+    -- post-substitution, so the choice is a no-op.
+    Right g3 ->
+      let aApplied = apply g3 a'
+          bApplied = apply g3 b'
+      in return (g3, pickWiderRecord aApplied bApplied, e2)
     Left err ->
       case tryCoerce scope a' b' g2 of
         Just (coercions, g3) -> do
@@ -1249,6 +1260,18 @@ checkEFallback i g1 e1 b = do
           <> line <> "  expected: " <> prettyTypeU b'
           <> line <> "  inferred: " <> prettyTypeU a'
           <> line <> err
+
+-- | Choose the record-shaped type with the most keys. Non-record cases
+-- fall back to the second argument (the standard "return the expected
+-- type" convention used by checkEFallback).
+pickWiderRecord :: TypeU -> TypeU -> TypeU
+pickWiderRecord a b = case (recordKeyCount a, recordKeyCount b) of
+  (Just na, Just nb) | na > nb -> a
+  _ -> b
+  where
+    recordKeyCount (ExistU _ _ (rs, _)) = Just (length rs)
+    recordKeyCount (NamU _ _ _ rs) = Just (length rs)
+    recordKeyCount _ = Nothing
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
