@@ -715,18 +715,21 @@ lexNegativeNumber dashPos input st = do
 lexHexNumber :: Pos -> String -> LexState -> Either LexError LexState
 lexHexNumber pos input st =
   let (digits, rest) = span isHexDigit input
-   in if null digits
-        then Left (LexError pos "expected hexadecimal digits after 0x")
-        else
-          let val = foldl (\n d -> n * 16 + fromIntegral (hexVal d)) 0 digits
-              len = 2 + length digits
-              txt = T.pack ("0x" ++ digits)
-           in Right
-                st
-                  { lsInput = rest
-                  , lsPos = advanceCol pos len
-                  , lsTokens = Located pos (TokInteger val) txt : lsTokens st
-                  }
+      (junk, _)      = span isNumLitTail rest
+   in if not (null junk)
+        then Left (LexError pos ("malformed hexadecimal literal: 0x" ++ digits ++ junk))
+        else if null digits
+          then Left (LexError pos "expected hexadecimal digits after 0x")
+          else
+            let val = foldl (\n d -> n * 16 + fromIntegral (hexVal d)) 0 digits
+                len = 2 + length digits
+                txt = T.pack ("0x" ++ digits)
+             in Right
+                  st
+                    { lsInput = rest
+                    , lsPos = advanceCol pos len
+                    , lsTokens = Located pos (TokInteger val) txt : lsTokens st
+                    }
   where
     hexVal c
       | c >= '0' && c <= '9' = fromEnum c - fromEnum '0'
@@ -734,39 +737,52 @@ lexHexNumber pos input st =
       | c >= 'A' && c <= 'F' = fromEnum c - fromEnum 'A' + 10
       | otherwise = 0
 
+-- | Characters that cannot legally follow a numeric literal without an
+-- intervening boundary. Used to detect malformed prefixed integers like
+-- @0xFOOD@ or @0b2@, where the trailing run would otherwise be silently
+-- re-tokenized as an identifier.
+isNumLitTail :: Char -> Bool
+isNumLitTail c = isAlphaNum c || c == '_'
+
 -- | Lex an octal number after 0o prefix
 lexOctalNumber :: Pos -> String -> LexState -> Either LexError LexState
 lexOctalNumber pos input st =
   let (digits, rest) = span isOctDigit input
-   in if null digits
-        then Left (LexError pos "expected octal digits after 0o")
-        else
-          let val = foldl (\n d -> n * 8 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
-              len = 2 + length digits
-              txt = T.pack ("0o" ++ digits)
-           in Right
-                st
-                  { lsInput = rest
-                  , lsPos = advanceCol pos len
-                  , lsTokens = Located pos (TokInteger val) txt : lsTokens st
-                  }
+      (junk, _)      = span isNumLitTail rest
+   in if not (null junk)
+        then Left (LexError pos ("malformed octal literal: 0o" ++ digits ++ junk))
+        else if null digits
+          then Left (LexError pos "expected octal digits after 0o")
+          else
+            let val = foldl (\n d -> n * 8 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
+                len = 2 + length digits
+                txt = T.pack ("0o" ++ digits)
+             in Right
+                  st
+                    { lsInput = rest
+                    , lsPos = advanceCol pos len
+                    , lsTokens = Located pos (TokInteger val) txt : lsTokens st
+                    }
 
 -- | Lex a binary number after 0b prefix
 lexBinaryNumber :: Pos -> String -> LexState -> Either LexError LexState
 lexBinaryNumber pos input st =
   let (digits, rest) = span (\c -> c == '0' || c == '1') input
-   in if null digits
-        then Left (LexError pos "expected binary digits after 0b")
-        else
-          let val = foldl (\n d -> n * 2 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
-              len = 2 + length digits
-              txt = T.pack ("0b" ++ digits)
-           in Right
-                st
-                  { lsInput = rest
-                  , lsPos = advanceCol pos len
-                  , lsTokens = Located pos (TokInteger val) txt : lsTokens st
-                  }
+      (junk, _)      = span isNumLitTail rest
+   in if not (null junk)
+        then Left (LexError pos ("malformed binary literal: 0b" ++ digits ++ junk))
+        else if null digits
+          then Left (LexError pos "expected binary digits after 0b")
+          else
+            let val = foldl (\n d -> n * 2 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
+                len = 2 + length digits
+                txt = T.pack ("0b" ++ digits)
+             in Right
+                  st
+                    { lsInput = rest
+                    , lsPos = advanceCol pos len
+                    , lsTokens = Located pos (TokInteger val) txt : lsTokens st
+                    }
 
 -- | Lex a decimal integer or float, with optional scientific notation
 lexDecNumber :: Pos -> String -> LexState -> Either LexError LexState
