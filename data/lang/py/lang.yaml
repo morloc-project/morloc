@@ -18,6 +18,9 @@ preamble:
 ldBoolTrue: "True"
 ldBoolFalse: "False"
 ldNullLiteral: "None"
+ldRealPosInf: "float('inf')"
+ldRealNegInf: "float('-inf')"
+ldRealNaN: "float('nan')"
 
 # Constructors
 ldListStyle: bracket

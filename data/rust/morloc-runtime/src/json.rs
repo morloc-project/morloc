@@ -640,15 +640,55 @@ fn parse_uint(text: &str, hi: u64, name: &str) -> Result<u64, MorlocError> {
     }
 }
 
+// Non-finite IEEE-754 values cannot appear as numeric literals in RFC 8259
+// JSON. We follow the spec's recommended workaround: represent them as
+// strings. The emit form is compact lowercase ("nan", "inf", "-inf"); the
+// decoder accepts case-insensitive variants of every common spelling
+// (nan/inf/infinity, with optional sign), as well as bareword `null` for
+// best-effort recovery of payloads written by older morloc runtimes that
+// emitted `null` for non-finites.
 fn parse_float(text: &str, name: &str) -> Result<f64, MorlocError> {
     let t = text.trim();
-    f64::from_str(t).map_err(|_| MorlocError::Serialization(format!(
+    // Strip surrounding double-quotes if the value arrived as a JSON string
+    // (the encoder emits "nan"/"inf"/"-inf"). RawValue text for a JSON
+    // string includes the quotes verbatim.
+    let unquoted = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    if let Some(v) = parse_nonfinite(unquoted) {
+        return Ok(v);
+    }
+    f64::from_str(unquoted).map_err(|_| MorlocError::Serialization(format!(
         "expected {}, got {}", name, truncate_for_msg(t)
     )))
 }
 
+// Recognise non-finite literal forms case-insensitively. Returns None if the
+// input is not a recognised non-finite spelling. Accepts: nan, +nan, -nan,
+// inf, +inf, -inf, infinity, +infinity, -infinity, and bareword null
+// (legacy recovery -> NaN).
+fn parse_nonfinite(s: &str) -> Option<f64> {
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "nan" | "+nan" | "-nan" => Some(f64::NAN),
+        "inf" | "+inf" | "infinity" | "+infinity" => Some(f64::INFINITY),
+        "-inf" | "-infinity" => Some(f64::NEG_INFINITY),
+        "null" => Some(f64::NAN),
+        _ => None,
+    }
+}
+
 fn write_float(buf: &mut String, f: f64, fmt: &[u8]) {
-    if f.is_nan() || f.is_infinite() { buf.push_str("null"); return; }
+    if f.is_nan() {
+        buf.push_str("\"nan\"");
+        return;
+    }
+    if f.is_infinite() {
+        buf.push_str(if f > 0.0 { "\"inf\"" } else { "\"-inf\"" });
+        return;
+    }
     let mut cbuf = [0u8; 64];
     // SAFETY: snprintf writes to stack-local buffer with explicit size limit
     let n = unsafe { libc::snprintf(cbuf.as_mut_ptr() as *mut libc::c_char, cbuf.len(), fmt.as_ptr() as *const libc::c_char, f) };

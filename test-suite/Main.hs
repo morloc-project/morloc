@@ -55,7 +55,6 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "multiprocessing-py-1" "multiprocessing-py-1"
-
       , -- bug regression tests from doc-agents code-tester (v0.74.0)
         -- Each test asserts correct behavior; currently FAIL until bug is fixed
         golden "bug-load-type-infer" "bug-load-type-infer"
@@ -608,12 +607,14 @@ main = do
         golden "nat-typecheck" "nat-typecheck"
       -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
       , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
+
       , -- big integer tests
         golden "numeric-literals" "numeric-literals"
       , golden "bigint-factorial-py" "bigint-factorial-py"
       , golden "bigint-overflow-cpp" "bigint-overflow-cpp"
       , golden "bigint-overflow-r" "bigint-overflow-r"
       , golden "int-overflow" "int-overflow"
+      , golden "real-overflow" "real-overflow"
       , -- unary minus / negate operator
         golden "negate-unary-operator" "negate-unary-operator"
       ]

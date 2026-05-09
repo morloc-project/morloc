@@ -43,6 +43,9 @@ module Morloc.Namespace.Expr
   , ExprI (..)
   , E (..)
   , Lit (..)
+  , RealLit (..)
+  , isFiniteRealLit
+  , showRealLit
   , Import (..)
   , Export (..)
   , ExportGroup (..)
@@ -273,7 +276,7 @@ data Expr
   | LamE [EVar] ExprI
   | AnnE ExprI TypeU
   | LetE [(EVar, ExprI)] ExprI
-  | RealE Scientific
+  | RealE RealLit
   | IntE Integer
   | LogE Bool
   | StrE Text
@@ -308,13 +311,40 @@ data Fixity = Fixity
   deriving (Show, Ord, Eq)
 
 data Lit
-  = MNum Scientific
+  = MNum RealLit
   | MInt Integer
   | MLog Bool
   | MStr Text
   | MUni
   | MNull
   deriving (Ord, Eq, Show)
+
+-- | Real (IEEE 754) literal. Finite values carry a 'Scientific' to preserve
+-- arbitrary precision until codegen, where they are bounds-checked against
+-- the target Float32/Float64 representation. The non-finite forms are
+-- introduced by the source-level keywords @Inf@ / @-Inf@ / @NaN@; they bypass
+-- the bounds check (they have no finite magnitude to overflow) and are
+-- emitted directly in each language's idiomatic non-finite syntax.
+data RealLit
+  = RealFinite !Scientific
+  | RealPosInf
+  | RealNegInf
+  | RealNaN
+  deriving (Show, Ord, Eq)
+
+-- | True when the literal carries a finite Scientific payload.
+isFiniteRealLit :: RealLit -> Bool
+isFiniteRealLit (RealFinite _) = True
+isFiniteRealLit _ = False
+
+-- | Lowercase canonical text form, matching the JSON wire convention
+-- ("nan"/"inf"/"-inf"). Used by Show/pretty paths and by Nexus.hs when
+-- emitting the literal text into the manifest.
+showRealLit :: RealLit -> String
+showRealLit (RealFinite x) = show x
+showRealLit RealPosInf = "inf"
+showRealLit RealNegInf = "-inf"
+showRealLit RealNaN = "nan"
 
 data E
   = BndP (Indexed Type) EVar
@@ -373,7 +403,7 @@ data ExprS g f c
   -- which after term inlining can be the export reference. Keeping the
   -- literal's own index lets compile-time overflow checks (Nexus.hs)
   -- report the error at the literal's actual location.
-  | RealS Int Scientific
+  | RealS Int RealLit
   | IntS Int Integer
   | LogS Bool
   | StrS Text
@@ -548,7 +578,7 @@ mapExprSC f = mapExprS (\(AnnoS gi ci e) -> AnnoS gi (f ci) (mapExprSC f e))
 ----- Pretty instances -------------------------------------------------------
 
 instance Pretty Lit where
-  pretty (MNum x) = viaShow x
+  pretty (MNum x) = pretty (showRealLit x)
   pretty (MInt x) = pretty x
   pretty (MLog x) = pretty x
   pretty (MStr x) = pretty x
@@ -655,7 +685,7 @@ instance Pretty Expr where
   pretty (TupE es) = encloseSep "[" "]" "," (map pretty es)
   pretty (AppE f es) = vsep (map pretty (f : es))
   pretty (NamE rs) = block 4 "<RECORD>" (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
-  pretty (RealE x) = pretty (show x)
+  pretty (RealE x) = pretty (showRealLit x)
   pretty (IntE x) = pretty (show x)
   pretty (StrE x) = dquotes (pretty x)
   pretty (LogE x) = pretty x
@@ -705,7 +735,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty UniS = "UniS"
   pretty NullS = "NullS"
   pretty (BndS x) = "(BndS" <+> pretty x <> ")"
-  pretty (RealS _ x) = viaShow x
+  pretty (RealS _ x) = pretty (showRealLit x)
   pretty (IntS _ x) = viaShow x
   pretty (LogS x) = viaShow x
   pretty (StrS x) = viaShow x

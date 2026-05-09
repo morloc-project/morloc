@@ -522,7 +522,7 @@ data PolyExpr
   | PolyTuple (Indexed TVar) [(Indexed Type, PolyExpr)]
   | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]
   | PolyLog (Indexed TVar) Bool
-  | PolyReal (Indexed TVar) Scientific
+  | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
   | PolyNull (Indexed TVar)
@@ -556,7 +556,7 @@ data MonoExpr
   | MonoList (Indexed TVar) [Indexed Type] [MonoExpr]
   | MonoTuple (Indexed TVar) [(Indexed Type, MonoExpr)]
   | MonoLog (Indexed TVar) Bool
-  | MonoReal (Indexed TVar) Scientific
+  | MonoReal (Indexed TVar) RealLit
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
   | MonoNull (Indexed TVar)
@@ -631,7 +631,7 @@ data NativeExpr
   | TupleN FVar [NativeExpr]
   | RecordN NamType FVar [TypeF] [(Key, NativeExpr)]
   | LogN FVar Bool
-  | RealN FVar Scientific
+  | RealN FVar RealLit
   | IntN FVar Integer
   | StrN FVar Text
   | NullN FVar
@@ -902,7 +902,7 @@ data NativeExpr_ nm se ne sr nr
   | TupleN_ FVar [ne]
   | RecordN_ NamType FVar [TypeF] [(Key, ne)]
   | LogN_ FVar Bool
-  | RealN_ FVar Scientific
+  | RealN_ FVar RealLit
   | IntN_ FVar Integer
   | StrN_ FVar Text
   | NullN_ FVar
@@ -1414,7 +1414,7 @@ instance Pretty MonoExpr where
   pretty (MonoRecord o v fs _) =
     block 4 (pretty o <+> pretty v <> encloseSep "<" ">" "," (map pretty fs)) "manifold record stub"
   pretty (MonoLog _ x) = viaShow x
-  pretty (MonoReal _ x) = viaShow x
+  pretty (MonoReal _ x) = pretty (showRealLit x)
   pretty (MonoInt _ x) = viaShow x
   pretty (MonoStr _ x) = viaShow x
   pretty (MonoNull _) = "NULL"

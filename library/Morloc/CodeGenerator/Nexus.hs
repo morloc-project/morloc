@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Nexus
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
+import qualified Data.Scientific as DS
 import Data.Text (Text)
 import qualified Data.Text as MT
 import qualified Data.Time.Clock
@@ -191,8 +192,14 @@ makeGastSchemas t = do
 generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
 generalTypeToSerialAST (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
-  | v == MBT.f32 = return $ SerialReal (FV v (CV ""))
-  | v == MBT.f64 = return $ SerialReal (FV v (CV ""))
+  -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
+  -- not SerialReal. checkRealBounds (and any future bound check) keys off
+  -- this distinction to bound a literal against its target type's range
+  -- (Float32 max ~3.4e38 vs Float64 max ~1.8e308). Collapsing both to
+  -- SerialReal makes Float32 overflow checks silently fall through to
+  -- the Float64 path.
+  | v == MBT.f32 = return $ SerialFloat32 (FV v (CV ""))
+  | v == MBT.f64 = return $ SerialFloat64 (FV v (CV ""))
   | v == MBT.int = return $ SerialInt (FV v (CV ""))
   | v == MBT.i8 = return $ SerialInt8 (FV v (CV ""))
   | v == MBT.i16 = return $ SerialInt16 (FV v (CV ""))
@@ -309,11 +316,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
-    toNexusExpr (AnnoS (Idx _ t) _ (RealS _ v)) = do
+    -- Use the literal's own source-map index (litIx) for overflow reporting,
+    -- mirroring the IntS path. RealS carries litIx in its first parameter.
+    -- Non-finite variants (Inf/-Inf/NaN) bypass bounds-checking and emit
+    -- the canonical wire string ("inf" / "-inf" / "nan"); the runtime JSON
+    -- decoder accepts these on parse.
+    toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) = do
       s <- generalTypeToSerialAST t
-      return $ case s of
-        (SerialFloat32 _) -> LitX F32X (MT.pack (show v))
-        _ -> LitX F64X (MT.pack (show v))
+      checkRealBounds litIx v s
+      let litCode = case s of
+            (SerialFloat32 _) -> F32X
+            _ -> F64X
+      return $ LitX litCode (MT.pack (showRealLit v))
     -- Use the literal's own source-map index (litIx) for overflow reporting.
     -- The wrapping AnnoS index points at the term that owns the literal,
     -- which after term inlining is often the export reference, not the
@@ -396,6 +410,33 @@ checkIntBounds i v s =
          "Integer literal " <> pretty v
          <> " overflows " <> (name :: MDoc)
          <> " (range " <> pretty lo <> " to " <> pretty hi <> ")"
+
+-- Check that a finite Real literal fits its target IEEE-754 representation.
+-- Data.Scientific.toRealFloat collapses out-of-range values to infinity, so
+-- isInfinite on the result detects overflow at compile time. The non-finite
+-- RealLit variants (Inf/-Inf/NaN) are explicitly written by the user and
+-- bypass the bounds check entirely.
+checkRealBounds :: Int -> RealLit -> SerialAST -> MorlocMonad ()
+checkRealBounds i (RealFinite v) s = case s of
+  SerialFloat32 _ ->
+    let f = DS.toRealFloat v :: Float
+     in CM.when (isInfinite f) $
+          MM.throwSourcedError i $
+            "Float literal " <> pretty (show v)
+            <> " overflows Float32 (|x| > 3.4e38)"
+  -- Real and Float64 share the same IEEE-754 binary64 representation; bound
+  -- both against Float64 max.
+  SerialFloat64 _ -> overflowsF64
+  SerialReal _    -> overflowsF64
+  _ -> return ()
+  where
+    overflowsF64 =
+      let d = DS.toRealFloat v :: Double
+       in CM.when (isInfinite d) $
+            MM.throwSourcedError i $
+              "Float literal " <> pretty (show v)
+              <> " overflows Float64 (|x| > 1.8e308)"
+checkRealBounds _ _ _ = return ()
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr

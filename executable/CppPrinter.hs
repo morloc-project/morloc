@@ -32,7 +32,7 @@ module CppPrinter
 
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (MDoc)
+import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..))
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.Quasi
@@ -47,10 +47,10 @@ printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i)
   | t == "int" = viaShow i
   | otherwise = "static_cast<" <> pretty t <> ">(" <> viaShow i <> ")"
-printExpr (IRealLit Nothing r) = viaShow r
+printExpr (IRealLit Nothing r) = renderRealLit r
 printExpr (IRealLit (Just t) r)
-  | t == "double" = viaShow r
-  | otherwise = "static_cast<" <> pretty t <> ">(" <> viaShow r <> ")"
+  | t == "double" = renderRealLit r
+  | otherwise = "static_cast<" <> pretty t <> ">(" <> renderRealLit r <> ")"
 printExpr (IStrLit _ s) = [idoc|std::string(#{textEsc' s})|]
 printExpr (IListLit es) = encloseSep "{" "}" "," (map printExpr es)
 printExpr (ITupleLit es) = "std::make_tuple" <> tupled (map printExpr es)
@@ -96,6 +96,15 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =
   [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+
+-- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
+-- float-typed per C99 but convert losslessly to double; non-default Real
+-- types are wrapped in static_cast<T>(...) by the IRealLit caller above.
+renderRealLit :: RealLit -> MDoc
+renderRealLit (RealFinite r) = viaShow r
+renderRealLit RealPosInf = "INFINITY"
+renderRealLit RealNegInf = "-INFINITY"
+renderRealLit RealNaN    = "NAN"
 
 printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> pretty v <+> "=" <+> printExpr e <> ";"

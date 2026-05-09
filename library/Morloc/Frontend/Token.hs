@@ -16,6 +16,7 @@ module Morloc.Frontend.Token
   , showToken
   ) where
 
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -132,6 +133,14 @@ data Token
   | TokIn
   | TokDo
   | TokNull
+  | -- Non-finite Real literals (IEEE 754). `-Inf` is lexed as a single
+    -- atomic token to keep negative infinity usable from pure morloc
+    -- (where `negate` is not in scope), mirroring how the lexer treats
+    -- `-1.5` as one token rather than `negate(1.5)`. NaN sign is collapsed
+    -- since our wire format has a single "nan" form.
+    TokInf
+  | TokNegInf
+  | TokNaN
   | -- Identifiers and literals
 
     -- | lowercase identifier
@@ -143,7 +152,7 @@ data Token
   | -- | - (needed separately for module names and unary negation)
     TokMinus
   | TokInteger !Integer
-  | TokFloat !Double
+  | TokFloat !Scientific
   | -- | plain string (no interpolation)
     TokString !Text
   | -- | start of interpolated string: text before first #{}
@@ -228,6 +237,9 @@ showToken TokLet = "'let'"
 showToken TokIn = "'in'"
 showToken TokDo = "'do'"
 showToken TokNull = "'Null'"
+showToken TokInf = "'Inf'"
+showToken TokNegInf = "'-Inf'"
+showToken TokNaN = "'NaN'"
 showToken (TokLowerName n) = "identifier '" ++ T.unpack n ++ "'"
 showToken (TokUpperName n) = "type name '" ++ T.unpack n ++ "'"
 showToken (TokOperator n) = "operator '" ++ T.unpack n ++ "'"

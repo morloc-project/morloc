@@ -1,0 +1,265 @@
+module main (
+  realId,
+  f32Id,
+  fact,
+  pyInf, pyNegInf, pyNaN,
+  rInf, rNegInf, rNaN,
+  cppInf, cppNegInf, cppNaN,
+  -- Source-level non-finite literals
+  litInf, litNegInf, litNaN,
+  -- Python IEEE-754 arithmetic on non-finites
+  pyInfPlusInf, pyInfPlusNegInf, pyInfMinusInf,
+  pyInfTimesZero, pyZeroTimesInf,
+  pyInfTimesTwo, pyInfTimesNegOne,
+  pyInfTimesInf, pyInfTimesNegInf,
+  pyNaNPlusOne, pyNaNTimesZero, pyNaNTimesInf,
+  pyNegOfInf, pyNegOfNaN,
+  pyFiniteOverflow,
+  -- R IEEE-754 arithmetic on non-finites
+  rInfPlusInf, rInfPlusNegInf, rInfMinusInf,
+  rInfTimesZero, rZeroTimesInf,
+  rInfTimesTwo, rInfTimesNegOne,
+  rInfTimesInf, rInfTimesNegInf,
+  rNaNPlusOne, rNaNTimesZero, rNaNTimesInf,
+  rNegOfInf, rNegOfNaN,
+  rFiniteOverflow,
+  -- C++ IEEE-754 arithmetic on non-finites
+  cppInfPlusInf, cppInfPlusNegInf, cppInfMinusInf,
+  cppInfTimesZero, cppZeroTimesInf,
+  cppInfTimesTwo, cppInfTimesNegOne,
+  cppInfTimesInf, cppInfTimesNegInf,
+  cppNaNPlusOne, cppNaNTimesZero, cppNaNTimesInf,
+  cppNegOfInf, cppNegOfNaN,
+  cppFiniteOverflow
+)
+
+import root-py
+import root-r
+import root-cpp
+
+realId :: Real -> Real
+realId x = x
+
+f32Id :: Float32 -> Float32
+f32Id x = x
+
+-- Reproduces the report's `f 200` factorial overflow example.
+fact :: Int -> Real
+source Py from "nonfinite.py" ("fact" as fact)
+
+-- Per-language non-finite producers (single-arg, ignores input).
+pyInf :: Real -> Real
+source Py from "nonfinite.py" ("pyInf" as pyInf)
+
+pyNegInf :: Real -> Real
+source Py from "nonfinite.py" ("pyNegInf" as pyNegInf)
+
+pyNaN :: Real -> Real
+source Py from "nonfinite.py" ("pyNaN" as pyNaN)
+
+rInf :: Real -> Real
+source R from "nonfinite.R" ("rInf" as rInf)
+
+rNegInf :: Real -> Real
+source R from "nonfinite.R" ("rNegInf" as rNegInf)
+
+rNaN :: Real -> Real
+source R from "nonfinite.R" ("rNaN" as rNaN)
+
+cppInf :: Real -> Real
+source Cpp from "nonfinite.hpp" ("cppInf" as cppInf)
+
+cppNegInf :: Real -> Real
+source Cpp from "nonfinite.hpp" ("cppNegInf" as cppNegInf)
+
+cppNaN :: Real -> Real
+source Cpp from "nonfinite.hpp" ("cppNaN" as cppNaN)
+
+-- Source-level literal forms. `-Inf` (and `-NaN`) are lexed as atomic
+-- tokens so they work in pure morloc without depending on a `negate`
+-- function being in scope, mirroring how `-1.5` is one token rather
+-- than `negate(1.5)`.
+litInf :: Real
+litInf = Inf
+
+litNegInf :: Real
+litNegInf = -Inf
+
+litNaN :: Real
+litNaN = NaN
+
+-- Per-language arithmetic. Each language has its own add/sub/mul/neg so we
+-- can verify IEEE-754 conformance per pool.
+pyAdd :: Real -> Real -> Real
+source Py from "nonfinite.py" ("add" as pyAdd)
+
+pySub :: Real -> Real -> Real
+source Py from "nonfinite.py" ("sub" as pySub)
+
+pyMul :: Real -> Real -> Real
+source Py from "nonfinite.py" ("mul" as pyMul)
+
+pyNegFn :: Real -> Real
+source Py from "nonfinite.py" ("neg" as pyNegFn)
+
+rAdd :: Real -> Real -> Real
+source R from "nonfinite.R" ("add" as rAdd)
+
+rSub :: Real -> Real -> Real
+source R from "nonfinite.R" ("sub" as rSub)
+
+rMul :: Real -> Real -> Real
+source R from "nonfinite.R" ("mul" as rMul)
+
+rNegFn :: Real -> Real
+source R from "nonfinite.R" ("neg" as rNegFn)
+
+cppAdd :: Real -> Real -> Real
+source Cpp from "nonfinite.hpp" ("add" as cppAdd)
+
+cppSub :: Real -> Real -> Real
+source Cpp from "nonfinite.hpp" ("sub" as cppSub)
+
+cppMul :: Real -> Real -> Real
+source Cpp from "nonfinite.hpp" ("mul" as cppMul)
+
+cppNegFn :: Real -> Real
+source Cpp from "nonfinite.hpp" ("neg" as cppNegFn)
+
+-- ===== Python IEEE-754 arithmetic test cases =====
+pyInfPlusInf :: Real
+pyInfPlusInf = pyAdd Inf Inf
+
+pyInfPlusNegInf :: Real
+pyInfPlusNegInf = pyAdd Inf (-Inf)
+
+pyInfMinusInf :: Real
+pyInfMinusInf = pySub Inf Inf
+
+pyInfTimesZero :: Real
+pyInfTimesZero = pyMul Inf 0.0
+
+pyZeroTimesInf :: Real
+pyZeroTimesInf = pyMul 0.0 Inf
+
+pyInfTimesTwo :: Real
+pyInfTimesTwo = pyMul Inf 2.0
+
+pyInfTimesNegOne :: Real
+pyInfTimesNegOne = pyMul Inf (-1.0)
+
+pyInfTimesInf :: Real
+pyInfTimesInf = pyMul Inf Inf
+
+pyInfTimesNegInf :: Real
+pyInfTimesNegInf = pyMul Inf (-Inf)
+
+pyNaNPlusOne :: Real
+pyNaNPlusOne = pyAdd NaN 1.0
+
+pyNaNTimesZero :: Real
+pyNaNTimesZero = pyMul NaN 0.0
+
+pyNaNTimesInf :: Real
+pyNaNTimesInf = pyMul NaN Inf
+
+pyNegOfInf :: Real
+pyNegOfInf = pyNegFn Inf
+
+pyNegOfNaN :: Real
+pyNegOfNaN = pyNegFn NaN
+
+pyFiniteOverflow :: Real
+pyFiniteOverflow = pyMul 1.0e308 10.0
+
+-- ===== R IEEE-754 arithmetic test cases =====
+rInfPlusInf :: Real
+rInfPlusInf = rAdd Inf Inf
+
+rInfPlusNegInf :: Real
+rInfPlusNegInf = rAdd Inf (-Inf)
+
+rInfMinusInf :: Real
+rInfMinusInf = rSub Inf Inf
+
+rInfTimesZero :: Real
+rInfTimesZero = rMul Inf 0.0
+
+rZeroTimesInf :: Real
+rZeroTimesInf = rMul 0.0 Inf
+
+rInfTimesTwo :: Real
+rInfTimesTwo = rMul Inf 2.0
+
+rInfTimesNegOne :: Real
+rInfTimesNegOne = rMul Inf (-1.0)
+
+rInfTimesInf :: Real
+rInfTimesInf = rMul Inf Inf
+
+rInfTimesNegInf :: Real
+rInfTimesNegInf = rMul Inf (-Inf)
+
+rNaNPlusOne :: Real
+rNaNPlusOne = rAdd NaN 1.0
+
+rNaNTimesZero :: Real
+rNaNTimesZero = rMul NaN 0.0
+
+rNaNTimesInf :: Real
+rNaNTimesInf = rMul NaN Inf
+
+rNegOfInf :: Real
+rNegOfInf = rNegFn Inf
+
+rNegOfNaN :: Real
+rNegOfNaN = rNegFn NaN
+
+rFiniteOverflow :: Real
+rFiniteOverflow = rMul 1.0e308 10.0
+
+-- ===== C++ IEEE-754 arithmetic test cases =====
+cppInfPlusInf :: Real
+cppInfPlusInf = cppAdd Inf Inf
+
+cppInfPlusNegInf :: Real
+cppInfPlusNegInf = cppAdd Inf (-Inf)
+
+cppInfMinusInf :: Real
+cppInfMinusInf = cppSub Inf Inf
+
+cppInfTimesZero :: Real
+cppInfTimesZero = cppMul Inf 0.0
+
+cppZeroTimesInf :: Real
+cppZeroTimesInf = cppMul 0.0 Inf
+
+cppInfTimesTwo :: Real
+cppInfTimesTwo = cppMul Inf 2.0
+
+cppInfTimesNegOne :: Real
+cppInfTimesNegOne = cppMul Inf (-1.0)
+
+cppInfTimesInf :: Real
+cppInfTimesInf = cppMul Inf Inf
+
+cppInfTimesNegInf :: Real
+cppInfTimesNegInf = cppMul Inf (-Inf)
+
+cppNaNPlusOne :: Real
+cppNaNPlusOne = cppAdd NaN 1.0
+
+cppNaNTimesZero :: Real
+cppNaNTimesZero = cppMul NaN 0.0
+
+cppNaNTimesInf :: Real
+cppNaNTimesInf = cppMul NaN Inf
+
+cppNegOfInf :: Real
+cppNegOfInf = cppNegFn Inf
+
+cppNegOfNaN :: Real
+cppNegOfNaN = cppNegFn NaN
+
+cppFiniteOverflow :: Real
+cppFiniteOverflow = cppMul 1.0e308 10.0

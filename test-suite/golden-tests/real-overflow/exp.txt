@@ -1,0 +1,124 @@
+=== S1: compile-time real-literal overflow ===
+bad-overflow-f64.loc:8:10: error:
+Float literal 1.0e500 overflows Float64 (|x| > 1.8e308)
+  |
+8 | tooBig = 1e500
+  |          ^
+
+bad-neg-overflow.loc:9:10: error:
+Float literal -1.0e500 overflows Float64 (|x| > 1.8e308)
+  |
+9 | tooNeg = -1e500
+  |          ^
+
+bad-overflow-f32.loc:10:13: error:
+Float literal 1.0e100 overflows Float32 (|x| > 3.4e38)
+   |
+10 | tooBigF32 = 1e100
+   |             ^
+
+
+=== S2: pure-morloc Real identity (finite values) ===
+1.5
+0
+-3.14
+1.79769313486232e+308
+
+=== S3: factorial overflow (the report's f 200 example) ===
+3628800
+7.25741561530799e+306
+"inf"
+"inf"
+
+=== S4: Python non-finite emission ===
+"inf"
+"-inf"
+"nan"
+
+=== S5: R non-finite emission ===
+"inf"
+"-inf"
+"nan"
+
+=== S6: C++ non-finite emission ===
+"inf"
+"-inf"
+"nan"
+
+=== S7: source-level non-finite literals (Inf / -Inf / NaN) ===
+"inf"
+"-inf"
+"nan"
+
+=== S8: JSON decode of non-finite string forms (CLI -> Real) ===
+"inf"
+"-inf"
+"nan"
+"inf"
+"-inf"
+"nan"
+"inf"
+
+=== S9: legacy null decode (best-effort recovery -> NaN) ===
+"nan"
+
+=== S10: invalid Real strings reject ===
+PARSE_ERROR
+PARSE_ERROR
+
+=== S11: Float32 round-trip incl. non-finites ===
+3.14
+"inf"
+"-inf"
+"nan"
+
+=== S12: Python IEEE-754 arithmetic on Inf / -Inf / NaN ===
+"inf"
+"nan"
+"nan"
+"nan"
+"nan"
+"inf"
+"-inf"
+"inf"
+"-inf"
+"nan"
+"nan"
+"nan"
+"-inf"
+"nan"
+"inf"
+
+=== S13: R IEEE-754 arithmetic on Inf / -Inf / NaN ===
+"inf"
+"nan"
+"nan"
+"nan"
+"nan"
+"inf"
+"-inf"
+"inf"
+"-inf"
+"nan"
+"nan"
+"nan"
+"-inf"
+"nan"
+"inf"
+
+=== S14: C++ IEEE-754 arithmetic on Inf / -Inf / NaN ===
+"inf"
+"nan"
+"nan"
+"nan"
+"nan"
+"inf"
+"-inf"
+"inf"
+"-inf"
+"nan"
+"nan"
+"nan"
+"-inf"
+"nan"
+"inf"

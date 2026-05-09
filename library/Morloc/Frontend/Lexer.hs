@@ -20,6 +20,7 @@ module Morloc.Frontend.Lexer
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, isLower, isOctDigit, isUpper)
 import qualified Data.Map.Strict as Map
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.Frontend.Token
@@ -270,6 +271,27 @@ lexOne st@(LexState input pos toks) = case input of
   '-' : c : rest
     | isDigit c, isUnaryDashPosition pos toks ->
         lexNegativeNumber pos (c : rest) st
+  -- Atomic non-finite literals: `-Inf` / `-NaN` in unary dash position
+  -- behave like `-1.5` -- a single token rather than `negate(Inf)`. This
+  -- keeps non-finite literals usable from pure morloc, where `negate` is
+  -- not in scope. NaN sign is collapsed (our wire format has a single
+  -- "nan" form), so `-NaN` produces TokNaN identical to bare `NaN`.
+  '-' : 'I' : 'n' : 'f' : rest
+    | isUnaryDashPosition pos toks
+    , not (isIdentBodyChar rest) ->
+        Right st
+          { lsInput = rest
+          , lsPos = advanceCol pos 4
+          , lsTokens = Located pos TokNegInf "-Inf" : toks
+          }
+  '-' : 'N' : 'a' : 'N' : rest
+    | isUnaryDashPosition pos toks
+    , not (isIdentBodyChar rest) ->
+        Right st
+          { lsInput = rest
+          , lsPos = advanceCol pos 4
+          , lsTokens = Located pos TokNaN "-NaN" : toks
+          }
   -- Operators and reserved operator sequences
   c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
   -- Identifiers and keywords
@@ -365,6 +387,8 @@ classifyWord "let" = TokLet
 classifyWord "in" = TokIn
 classifyWord "do" = TokDo
 classifyWord "Null" = TokNull
+classifyWord "Inf" = TokInf
+classifyWord "NaN" = TokNaN
 classifyWord t
   | isUpper (T.head t) = TokUpperName t
   | otherwise = TokLowerName t
@@ -612,6 +636,14 @@ lexMultilineAfterInterp pos input st _ delim = go pos input []
     go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
     go p [] _ = Left (LexError p "unterminated multiline string literal")
 
+-- | True when the next char in @input@ would extend an identifier (i.e. the
+-- previous keyword/identifier match is not yet at a word boundary). Used to
+-- guard atomic `-Inf` / `-NaN` lexing so `-Information` stays as TokMinus +
+-- TokUpperName "Information".
+isIdentBodyChar :: String -> Bool
+isIdentBodyChar (c : _) = isAlphaNum c || c == '_' || c == '\''
+isIdentBodyChar [] = False
+
 -- | Decide whether a '-' at @dashPos@ should be lexed as part of a negative
 -- numeric literal rather than as a TokMinus operator. See the call site in
 -- 'lexOne' for the rule rationale.
@@ -747,7 +779,7 @@ lexDecNumber pos input st =
               let (fracPart, rest3) = span isDigit (c : rest2)
                   (expPart, rest4) = lexExponent rest3
                   numStr = intPart ++ "." ++ fracPart ++ expPart
-                  val = read numStr :: Double
+                  val = read numStr :: Scientific
                   len = length numStr
                in Right
                     st
@@ -762,7 +794,7 @@ lexDecNumber pos input st =
                 then mkInt intPart rest1
                 else
                   let numStr = intPart ++ expPart
-                      val = read numStr :: Double
+                      val = read numStr :: Scientific
                       len = length numStr
                    in Right
                         st
@@ -776,7 +808,7 @@ lexDecNumber pos input st =
                 then mkInt intPart rest1
                 else
                   let numStr = intPart ++ expPart
-                      val = read numStr :: Double
+                      val = read numStr :: Scientific
                       len = length numStr
                    in Right
                         st

@@ -1,5 +1,7 @@
 0.83.3 [2026-05-08]
 -------------------
+ * add float Inf/-Inf/NaN support 
+ * add literal int and float overflow error
  * add proper negation operator
  * fix pure morloc tuple pattern getters
  * fix guards with mixed effects across branches

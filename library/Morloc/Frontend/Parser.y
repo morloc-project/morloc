@@ -49,7 +49,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 86
+%expect 92
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -101,6 +101,9 @@ import qualified Morloc.BaseTypes as BT
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
   'Null'     { Located _ TokNull _ }
+  INF        { Located _ TokInf _ }
+  NEGINF     { Located _ TokNegInf _ }
+  NAN        { Located _ TokNaN _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
   '+'        { Located _ (TokOperator "+") _ }
@@ -686,7 +689,10 @@ bool_expr :: { Loc CstExpr }
 
 num_expr :: { Loc CstExpr }
   : INTEGER                    { at $1 (CIntE (getInt $1)) }
-  | FLOAT                      { at $1 (CRealE (DS.fromFloatDigits (getFloat $1))) }
+  | FLOAT                      { at $1 (CRealE (RealFinite (getFloat $1))) }
+  | INF                        { at $1 (CRealE RealPosInf) }
+  | NEGINF                     { at $1 (CRealE RealNegInf) }
+  | NAN                        { at $1 (CRealE RealNaN) }
 
 string_expr :: { Loc CstExpr }
   : STRING                     { at $1 (CStrE (getString $1)) }
@@ -911,7 +917,7 @@ getInt :: Located -> Integer
 getInt (Located _ (TokInteger n) _) = n
 getInt _ = 0
 
-getFloat :: Located -> Double
+getFloat :: Located -> DS.Scientific
 getFloat (Located _ (TokFloat d) _) = d
 getFloat _ = 0
 
