@@ -84,6 +84,7 @@ main = do
       , golden "infix-typeclass-polyglot" "infix-typeclass-polyglot"
       , golden "infix-typeclass-simple" "infix-typeclass-simple"
       , golden "operator-sections" "operator-sections"
+      , golden "eval-basic" "eval-basic"
       , golden "claude-test-1" "claude-test-1"
       , golden "claude-test-2" "claude-test-2"
       , golden "claude-test-3" "claude-test-3"

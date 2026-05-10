@@ -1,0 +1,8 @@
+case1: 3
+case2: 3
+case3: 3
+case4: "foobar"
+case5_exit: FAIL
+case5_msg: OK
+case6: 30
+case7: 30
