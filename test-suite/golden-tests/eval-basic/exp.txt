@@ -6,3 +6,5 @@ case5_exit: FAIL
 case5_msg: OK
 case6: 30
 case7: 30
+case8: 42
+case9: 101

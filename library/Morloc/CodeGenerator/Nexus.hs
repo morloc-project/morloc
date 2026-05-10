@@ -923,10 +923,18 @@ generate cs rASTs = do
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
+  -- In eval mode the source module is always synthesized as `main`, so a
+  -- shared `exe/main` directory would collide across distinct `--save NAME`
+  -- invocations. Use the outfile name (which carries --save NAME) to give
+  -- each saved eval program its own install directory.
+  installName <-
+    if stateEvalMode st
+      then MM.getOutfileName
+      else return programName
   buildDir <-
     if stateInstall st
       then do
-        let installDir = configHome config </> "exe" </> programName
+        let installDir = configHome config </> "exe" </> installName
         CMS.modify (\s -> s {stateInstallDir = Just installDir})
         return installDir
       else liftIO Dir.getCurrentDirectory
