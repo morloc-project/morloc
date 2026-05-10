@@ -119,8 +119,6 @@ pub unsafe extern "C" fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) ->
     ffi_try!(errmsg, false, shm::shincref(ptr as AbsPtr).map(|_| true))
 }
 
-// shfree_by_schema is provided by cli.c
-
 #[no_mangle]
 pub unsafe extern "C" fn total_shm_size() -> usize {
     shm::total_shm_size()

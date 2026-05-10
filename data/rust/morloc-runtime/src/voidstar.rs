@@ -70,34 +70,80 @@ pub fn read_binary(blob: &[u8], schema: &Schema) -> Result<AbsPtr, MorlocError> 
     Ok(base)
 }
 
-// ── shfree_by_schema ───────────────────────────────────────────────────────
+// ── shfree_inplace ─────────────────────────────────────────────────────────
 
-/// Zero metadata for nested structures so the parent block can be cleanly freed.
-/// Does NOT call shfree on sub-pointers (they're cursor-packed in the same block).
-pub fn free_by_schema(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
-    // SAFETY: ptr points to voidstar data in SHM with layout described by schema.
-    // We zero metadata at schema.width offsets within the structure.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {} // flat limb data, no nested structures
-            SerialType::String | SerialType::Array => {
-                let arr = &*(ptr as *const Array);
-                if arr.data > 0 && !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
-                    let arr_data = shm::rel2abs(arr.data)?;
-                    let w = schema.parameters[0].width;
+/// Release every separately-allocated SHM sub-block reachable from a voidstar
+/// wrapper at `ptr`, without freeing the wrapper itself.
+///
+/// Use this when `ptr` points to a slot inside a larger allocation (e.g. a
+/// record/tuple field, an array element of compound type) and you want to
+/// release the slot's resources before overwriting the slot in place. The
+/// caller is responsible for writing fresh contents into `ptr` afterwards or
+/// for ensuring the parent allocation is itself freed.
+///
+/// Assumes multi-block layout: each Array/String payload, each BigInt limb
+/// buffer, etc. is its own SHM block (the format produced by the eval
+/// pipeline and by `read_json_with_schema`). Do not call on single-block
+/// payloads from `read_voidstar_binary` / `unpack_with_schema` -- their
+/// sub-data is cursor-packed inside the parent block, not at separately
+/// freeable block heads.
+///
+/// Counterpart of [`deep_copy`]: deep_copy allocates the same set of
+/// sub-blocks that shfree_inplace releases.
+pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    match schema.serial_type {
+        SerialType::String => {
+            let arr = &*(ptr as *const Array);
+            if arr.size > 0 && arr.data >= 0 {
+                let data = shm::rel2abs(arr.data)?;
+                shm::shfree(data)?;
+            }
+        }
+        SerialType::Array => {
+            let arr = &*(ptr as *const Array);
+            if arr.size > 0 && arr.data >= 0 && !schema.parameters.is_empty() {
+                let elem_schema = &schema.parameters[0];
+                let data = shm::rel2abs(arr.data)?;
+                if !elem_schema.is_fixed_width() {
+                    let w = elem_schema.width;
                     for i in 0..arr.size {
-                        free_by_schema(arr_data.add(i * w), &schema.parameters[0])?;
+                        shfree_inplace(data.add(i * w), elem_schema)?;
                     }
                 }
+                shm::shfree(data)?;
             }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..schema.parameters.len() {
-                    free_by_schema(ptr.add(schema.offsets[i]), &schema.parameters[i])?;
+        }
+        SerialType::Tuple | SerialType::Map => {
+            for i in 0..schema.parameters.len() {
+                shfree_inplace(ptr.add(schema.offsets[i]), &schema.parameters[i])?;
+            }
+        }
+        SerialType::Optional => {
+            let tag = *ptr;
+            if tag != 0 && !schema.parameters.is_empty() {
+                let off = schema.offsets.first().copied().unwrap_or_else(|| {
+                    shm::align_up(1, schema.parameters[0].alignment().max(1))
+                });
+                shfree_inplace(ptr.add(off), &schema.parameters[0])?;
+            }
+        }
+        SerialType::Int => {
+            // Inline BigInt: [size, value_or_relptr]. Limb buffer only allocated
+            // when size > 1.
+            let size = *(ptr as *const usize);
+            if size > 1 {
+                let off = std::mem::size_of::<usize>();
+                let relptr = *(ptr.add(off) as *const shm::RelPtr);
+                if relptr >= 0 {
+                    let limbs = shm::rel2abs(relptr)?;
+                    shm::shfree(limbs)?;
                 }
             }
-            _ => {}
         }
-        std::ptr::write_bytes(ptr, 0, schema.width);
+        _ => {
+            // Fixed-size primitives (Bool/Sint*/Uint*/Float*/Nil/Table): no
+            // sub-blocks to release.
+        }
     }
     Ok(())
 }

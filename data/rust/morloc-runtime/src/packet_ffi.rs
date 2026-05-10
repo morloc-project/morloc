@@ -402,8 +402,9 @@ pub unsafe extern "C" fn get_data_packet_as_mpk(
                     }
                     Err(e) => { set_errmsg(errmsg, &e); return 0; }
                 }
-                // Free SHM
-                let _ = crate::voidstar::free_by_schema(abs, &rs);
+                // Free SHM. shm::shfree zeros the whole block on final ref-drop;
+                // since `abs` came from read_binary's single-block layout, one
+                // shfree releases the wrapper and all packed sub-data.
                 let _ = shm::shfree(abs);
             }
             Err(e) => { set_errmsg(errmsg, &e); return 0; }

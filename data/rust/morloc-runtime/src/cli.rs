@@ -103,70 +103,6 @@ pub unsafe extern "C" fn free_argument_t(arg: *mut ArgumentT) {
     libc::free(arg as *mut c_void);
 }
 
-// ── shfree_by_schema ───────────────────────────────────────────────────────
-
-#[no_mangle]
-pub unsafe extern "C" fn shfree_by_schema(
-    ptr: *mut c_void,
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> bool {
-    clear_errmsg(errmsg);
-    if ptr.is_null() || schema.is_null() {
-        return true;
-    }
-    let rs = CSchema::to_rust(schema);
-    match shfree_by_schema_inner(ptr as *mut u8, &rs) {
-        Ok(_) => true,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            false
-        }
-    }
-}
-
-fn shfree_by_schema_inner(
-    ptr: *mut u8,
-    schema: &crate::schema::Schema,
-) -> Result<(), MorlocError> {
-    use crate::schema::SerialType;
-
-    // SAFETY: ptr points to voidstar data in SHM with layout described by schema.
-    // We recursively visit sub-structures and zero metadata before the parent shfree.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {} // flat limb data, no nested structures
-            SerialType::String | SerialType::Array => {
-                let arr = &*(ptr as *const shm::Array);
-                if arr.data > 0 {
-                    if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
-                        let arr_data = shm::rel2abs(arr.data)?;
-                        let elem_width = schema.parameters[0].width;
-                        for i in 0..arr.size {
-                            shfree_by_schema_inner(
-                                arr_data.add(i * elem_width),
-                                &schema.parameters[0],
-                            )?;
-                        }
-                    }
-                }
-            }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..schema.parameters.len() {
-                    let child = ptr.add(schema.offsets[i]);
-                    shfree_by_schema_inner(child, &schema.parameters[i])?;
-                }
-            }
-            _ => {
-                // fixed-size: no sub-data
-            }
-        }
-        // Zero this node's metadata
-        std::ptr::write_bytes(ptr, 0, schema.width);
-    }
-    Ok(())
-}
-
 // ── adjust_voidstar_relptrs ────────────────────────────────────────────────
 
 #[no_mangle]
@@ -769,9 +705,15 @@ unsafe fn parse_cli_data_argument_unrolled(
                 let elem_cs = *(*schema).parameters.add(i);
 
                 if !field_val.is_null() {
-                    // Free memory from default for this field
-                    shfree_by_schema(element_dest as *mut c_void, elem_cs, &mut err);
-                    if !err.is_null() { libc::free(err as *mut c_void); err = ptr::null_mut(); }
+                    // Release any sub-blocks the default value owns before
+                    // overwriting this slot in place.
+                    let elem_rs = CSchema::to_rust(elem_cs);
+                    if let Err(e) = crate::voidstar::shfree_inplace(
+                        element_dest, &elem_rs,
+                    ) {
+                        set_errmsg(errmsg, &e);
+                        return ptr::null_mut();
+                    }
 
                     let result = parse_cli_data_argument_singular(
                         element_dest, field_val, elem_cs, &mut err,

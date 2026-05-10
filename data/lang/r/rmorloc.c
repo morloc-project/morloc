@@ -1388,10 +1388,9 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
-        // Data inlined in packet -- free SHM immediately
+        // Data inlined in packet -- free SHM immediately. shfree zeros the
+        // block on final ref-drop.
         char* free_err = NULL;
-        shfree_by_schema((absptr_t)voidstar, schema, &free_err);
-        if (free_err) { free(free_err); free_err = NULL; }
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
     }
