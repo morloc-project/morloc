@@ -1146,6 +1146,20 @@ pub unsafe extern "C" fn daemon_dispatch(
         // the flat view; the outer pointer array is owned by us and
         // freed below, but the inner C strings remain owned by the
         // ManifestArg objects.
+        //
+        // Open a per-eval SHM arena for the duration of this remote call.
+        // make_call_packet_from_cli -> parse_cli_data_argument allocates
+        // SHM blocks for non-trivial args (these are referenced by relptr
+        // in the call packet shipped to the pool); the pool's arg ingress
+        // shincref's any RPTR args it consumes, so we can safely shfree
+        // our originals when the arena drops here. Pool-shipped RPTR
+        // results are NOT in the arena because they did not flow through
+        // shmalloc on this thread (rel2abs only); they remain owned by
+        // the pool, which releases them at its own next dispatch.
+        let _arena = match crate::eval_arena::enter() {
+            Ok(g) => Some(g),
+            Err(_) => None,  // already active is unexpected here; proceed without
+        };
         let arg_schemas_flat = cmd.build_arg_schemas_array();
         let call_packet = make_call_packet_from_cli(
             ptr::null_mut(),

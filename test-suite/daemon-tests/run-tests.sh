@@ -244,6 +244,7 @@ compile_program() {
 
     cp "$SCRIPT_DIR/$loc_file" "$work_dir/"
     cp "$SCRIPT_DIR"/*.py "$work_dir/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.R "$work_dir/" 2>/dev/null || true
 
     if ! (cd "$work_dir" && morloc make -o nexus "$loc_file" > /dev/null 2>"$work_dir/build-${name}.err"); then
         echo "COMPILE FAIL: $loc_file" >&2
@@ -1051,6 +1052,95 @@ if should_run "shm-leak"; then
         fi
 
         stop_daemon "$SHM_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 15: R-pool SHM-leak regression
+# ======================================================================
+#
+# Same idea as [shm-leak] but routes the call through the R pool. Asserts
+# that the R-pool's morloc_put_value path (PACKET_SOURCE_RPTR result) does
+# not leak SHM across requests. With the rmorloc.c shm_tracker fix, the
+# block from the prior request is released at the start of every new
+# request in run_job_c. Without the fix, every R-routed request would
+# leak the result block in the daemon's volume.
+
+if should_run "r-shm-leak"; then
+    echo "${BOLD}[r-shm-leak] R pool SHM-leak regression${RESET}"
+
+    R_LEAK_DIR=$(mktemp -d)
+    WORK_DIRS+=("$R_LEAK_DIR")
+    if ! compile_program "r-shm-leak.loc" "$R_LEAK_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("r-shm-leak: compilation failed")
+    else
+        R_HTTP_PORT=$(pick_port)
+        start_daemon "$R_LEAK_DIR" --http-port "$R_HTTP_PORT"
+        wait_for_http "$R_HTTP_PORT" 15
+        R_DAEMON_PID=$LAST_DAEMON_PID
+
+        shm_size_for_pid() {
+            local pid="$1"
+            local total=0
+            local sz
+            for f in /dev/shm/morloc-${pid}-*; do
+                [ -e "$f" ] || continue
+                sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+                total=$((total + sz))
+            done
+            echo "$total"
+        }
+        shm_count_for_pid() {
+            ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
+        }
+
+        # Warm-up: get all per-pool / per-binding lazy SHM in place.
+        curl -s -o /dev/null -X POST \
+            "http://127.0.0.1:${R_HTTP_PORT}/call/echoList" \
+            -H "Content-Type: application/json" \
+            -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]'
+
+        before_size=$(shm_size_for_pid "$R_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$R_DAEMON_PID")
+
+        N=1000
+        for i in $(seq 1 $N); do
+            curl -s -o /dev/null -X POST \
+                "http://127.0.0.1:${R_HTTP_PORT}/call/echoList" \
+                -H "Content-Type: application/json" \
+                -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]'
+        done
+
+        after_size=$(shm_size_for_pid "$R_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$R_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+
+        # Each call ships ~250 B of [Str] result via PACKET_SOURCE_RPTR.
+        # Pre-fix: the R pool never released that block, so 1000 calls
+        # ~= 250 KB / several new 64 KB volumes. Post-fix: blocks reused
+        # in the existing volume, delta ~= 0.
+        THRESHOLD_BYTES=$((200 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} R calls grow daemon /dev/shm < 200 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("r-shm-leak: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        fi
+
+        stop_daemon "$R_DAEMON_PID"
     fi
 
     echo ""

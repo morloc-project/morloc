@@ -42,6 +42,53 @@
 
 /// }}}
 
+// {{{ shm_tracker
+//
+// Deferred-cleanup list of SHM blocks that morloc_put_value handed off to a
+// PACKET_SOURCE_RPTR result packet. The voidstar's relptr is shipped to the
+// caller; the pool retains the only reference until the next request. We
+// flush at the start of every request (in run_job_c) so blocks from the
+// prior request are released before any new allocations land. Mirrors the
+// pattern in pymorloc.c and pool.cpp.
+
+#define SHM_TRACKER_INIT_CAP 16
+typedef struct {
+    absptr_t ptr;
+    Schema* schema;  // owned by the tracker; freed in flush_shm_tracker
+} shm_entry_t;
+static shm_entry_t* shm_tracker = NULL;
+static size_t shm_tracker_count = 0;
+static size_t shm_tracker_cap = 0;
+
+static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+    if (shm_tracker_count >= shm_tracker_cap) {
+        size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
+        shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
+        if (!new_buf) return;  // best-effort: drop the tracking entry on OOM
+        shm_tracker = new_buf;
+        shm_tracker_cap = new_cap;
+    }
+    shm_tracker[shm_tracker_count].ptr = ptr;
+    shm_tracker[shm_tracker_count].schema = schema;
+    shm_tracker_count++;
+}
+
+static void flush_shm_tracker(void) {
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        char* err = NULL;
+        // shfree decrements the refcount and zeros the block on final
+        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
+        shfree(shm_tracker[i].ptr, &err);
+        if (err) { free(err); }
+        if (shm_tracker[i].schema) {
+            free_schema(shm_tracker[i].schema);
+        }
+    }
+    shm_tracker_count = 0;
+}
+
+/// }}}
+
 // {{{ to_voidstar
 
 static size_t get_shm_size(const Schema* schema, SEXP obj) {
@@ -1387,7 +1434,16 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     uint8_t* packet = R_TRY_WITH(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+    bool tracked = false;
+    if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+        // SHM is referenced by the result packet; the pool retains the only
+        // reference until the next request. Hand voidstar AND schema to the
+        // tracker -- they are freed by flush_shm_tracker at the start of the
+        // next dispatch in run_job_c. Without this, every RPTR-shipped
+        // value would leak its SHM block for the lifetime of the pool.
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
+    } else {
         // Data inlined in packet -- free SHM immediately. shfree zeros the
         // block on final ref-drop.
         char* free_err = NULL;
@@ -1395,12 +1451,16 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         if (free_err) { free(free_err); }
     }
 
-    size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
+    size_t packet_size = R_TRY_WITH(
+        {free(packet); if (!tracked) free_schema(schema);},
+        morloc_packet_size, packet);
 
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
     free(packet);
-    free_schema(schema);
+    if (!tracked) {
+        free_schema(schema);
+    }
 
     UNPROTECT(1);
     return result;
@@ -1515,16 +1575,45 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
         return obj_r;
     }
 
-    // SHM paths
+    // SHM paths (RPTR source from upstream pool/daemon, or our own
+    // unpack_with_schema for MESG msgpack args).
+    bool is_rptr = (source == PACKET_SOURCE_RPTR);
     uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+
+    if (is_rptr) {
+        // Sender (daemon or peer pool) holds the original ref and will
+        // release it at their next dispatch. We add our own ref and stash
+        // it in the tracker so flush_shm_tracker() releases it at the
+        // start of our next request -- after R has finished consuming
+        // the deserialized form.
+        char* incref_err = NULL;
+        shincref((absptr_t)voidstar, &incref_err);
+        if (incref_err) { free(incref_err); }
+        shm_tracker_push((absptr_t)voidstar, schema);
+    }
 
     SEXP obj_r = from_voidstar(voidstar, schema, NULL);
     if (obj_r == NULL) {
-        free_schema(schema);
+        if (!is_rptr) {
+            char* free_err = NULL;
+            shfree((absptr_t)voidstar, &free_err);
+            if (free_err) { free(free_err); }
+            free_schema(schema);
+        }
+        // For RPTR, schema and voidstar are owned by the tracker; do not
+        // double-free here.
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
-    free_schema(schema);
+    if (!is_rptr) {
+        // We allocated this voidstar (via unpack_with_schema for MESG
+        // msgpack args). from_voidstar deep-copied into R-managed memory,
+        // so the SHM block is no longer needed.
+        char* free_err = NULL;
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
+        free_schema(schema);
+    }
 
     return obj_r;
 }
@@ -2036,6 +2125,13 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 // the actual manifold evaluation.
 static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     char* errmsg = NULL;
+
+    // Release any SHM that the previous request's morloc_put_value handed
+    // off via PACKET_SOURCE_RPTR. The block stays alive until now so the
+    // calling daemon can dereference its relptr; once we're starting a new
+    // request, it is safe to reclaim. Without this every RPTR result would
+    // leak per call and grow /dev/shm/morloc-* monotonically.
+    flush_shm_tracker();
 
     uint8_t* packet = stream_from_client(client_fd, &errmsg);
     if (errmsg) {
