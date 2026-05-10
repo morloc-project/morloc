@@ -19,6 +19,7 @@ Nexus
  * do not write JSON null for Unit of Optional Nothing
  * add --keep-null to nexus to print JSON null
  * fix --output-file argument to properly write files for all output types
+ * reject unknown CLI options
 
 Other bug fixes
  * fix segfault in pure morloc @load intrinsic

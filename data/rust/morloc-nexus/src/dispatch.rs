@@ -493,6 +493,10 @@ fn parse_command_args(
             if let Some(eq_pos) = arg.find('=') {
                 let key = &arg[2..eq_pos];
                 let val = &arg[eq_pos + 1..];
+                if !is_known_long_opt(cmd, key) {
+                    eprintln!("Error: unknown option --{}", key);
+                    process::clean_exit(1);
+                }
                 opt_values.insert(key.to_string(), val.to_string());
                 i += 1;
             } else {
@@ -506,6 +510,9 @@ fn parse_command_args(
                         flag_values.insert(orig, flag_reverse_value_by_rev(cmd, key));
                     }
                     i += 1;
+                } else if !is_known_long_opt(cmd, key) {
+                    eprintln!("Error: unknown option --{}", key);
+                    process::clean_exit(1);
                 } else if i + 1 < args.len() {
                     opt_values.insert(key.to_string(), args[i + 1].clone());
                     i += 2;
@@ -522,6 +529,9 @@ fn parse_command_args(
                     flag_forward_value_by_short(cmd, ch),
                 );
                 i += 1;
+            } else if !is_known_short_opt(cmd, ch) {
+                eprintln!("Error: unknown option -{}", ch);
+                process::clean_exit(1);
             } else if i + 1 < args.len() {
                 opt_values.insert(
                     short_to_long(cmd, ch).unwrap_or_else(|| ch.to_string()),
@@ -1463,6 +1473,40 @@ fn is_short_flag(cmd: &Command, ch: char) -> bool {
         }
         _ => false,
     })
+}
+
+/// True when `name` is a long option declared by the command (as an
+/// `Optional`, `Flag` long_opt, `Flag` long_rev, or a `Group`'s
+/// group_opt). Used to reject unknown `--foo` rather than silently
+/// absorbing them as opt-with-value.
+fn is_known_long_opt(cmd: &Command, name: &str) -> bool {
+    let matches_arg = |arg: &Arg| -> bool {
+        match arg {
+            Arg::Optional { long_opt, .. } => long_opt.as_deref() == Some(name),
+            Arg::Flag { long_opt, long_rev, .. } => {
+                long_opt.as_deref() == Some(name) || long_rev.as_deref() == Some(name)
+            }
+            _ => false,
+        }
+    };
+    cmd.args.iter().any(|a| match a {
+        Arg::Group { entries, group_opt, .. } => {
+            let go_match = group_opt
+                .as_ref()
+                .and_then(|g| g.long_opt.as_deref())
+                == Some(name);
+            go_match || entries.iter().any(|e| matches_arg(&e.arg))
+        }
+        _ => matches_arg(a),
+    })
+}
+
+/// True when `ch` is a short option declared by the command. Short
+/// flags and short Optionals share this lookup; the body reuses
+/// `short_to_long` which already walks Group entries and both Arg
+/// variants that carry a short_opt.
+fn is_known_short_opt(cmd: &Command, ch: char) -> bool {
+    short_to_long(cmd, ch).is_some()
 }
 
 fn short_to_long(cmd: &Command, ch: char) -> Option<String> {

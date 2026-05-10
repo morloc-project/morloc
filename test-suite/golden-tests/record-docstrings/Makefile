@@ -14,7 +14,7 @@ all:
 	./nexus bar [1,2,3] 2>> obs.err  >> obs.txt
 	./nexus bar -y a [1,2,3] 2>> obs.err  >> obs.txt
 	./nexus bar -y a -t 5 -m 6 [1,2,3] 2>> obs.err  >> obs.txt
-	./nexus bar -y f -t 5 -m 6 --alg-conf=algconf.json [1,2,3] 2>> obs.err  >> obs.txt
+	./nexus bar -y f -t 5 -m 6 --alg-config=algconf.json [1,2,3] 2>> obs.err  >> obs.txt
 	echo travelTime 2>> obs.err  >> obs.txt
 	./nexus travelTime -w 2 3 4 2>> obs.err  >> obs.txt
 	echo baz 2>> obs.err  >> obs.txt
