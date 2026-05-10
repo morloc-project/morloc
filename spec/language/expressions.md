@@ -136,4 +136,4 @@ Operators can be used in prefix position by enclosing them in parentheses:
 
 - **No recursion.** Use higher-order functions (`map`, `fold`, `filter`) for iteration.
 - **No conditionals.** Use pattern matching or foreign functions for branching.
-- **No side effects.** Morloc expressions are pure; effects are confined to foreign implementations.
+- **No native side effects.** All side effects originate in foreign implementations and are surfaced through effect annotations on source signatures. See [[../types/effects.md]].

@@ -38,3 +38,4 @@ Subtyping connects the two: a synthesized type may be a subtype of the expected 
 - [[polymorphism.md]] -- Parametric polymorphism and quantification
 - [[subtyping.md]] -- Subtyping rules and instantiation
 - [[inference.md]] -- Bidirectional type inference
+- [[effects.md]] -- Effect annotations, propagation, and checking
