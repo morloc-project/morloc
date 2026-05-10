@@ -294,6 +294,24 @@ s.close()
 "
 }
 
+# Sum sizes of all /dev/shm/morloc-<pid>-* segments belonging to a daemon.
+shm_size_for_pid() {
+    local pid="$1"
+    local total=0
+    local sz
+    for f in /dev/shm/morloc-${pid}-*; do
+        [ -e "$f" ] || continue
+        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+        total=$((total + sz))
+    done
+    echo "$total"
+}
+
+# Count /dev/shm/morloc-<pid>-* segments for a daemon.
+shm_count_for_pid() {
+    ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
+}
+
 # ======================================================================
 # Test selector
 # ======================================================================
@@ -991,23 +1009,6 @@ if should_run "shm-leak"; then
         wait_for_http "$SHM_HTTP_PORT" 10
         SHM_DAEMON_PID=$LAST_DAEMON_PID
 
-        # Volumes are named morloc-<pid>-<job-hash>_<vol-idx>.
-        # Sum sizes across all volumes belonging to this daemon.
-        shm_size_for_pid() {
-            local pid="$1"
-            local total=0
-            local sz
-            for f in /dev/shm/morloc-${pid}-*; do
-                [ -e "$f" ] || continue
-                sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-                total=$((total + sz))
-            done
-            echo "$total"
-        }
-        shm_count_for_pid() {
-            ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
-        }
-
         # One warm-up call so all per-pool / per-binding SHM that the
         # daemon allocates lazily is in place before we snapshot.
         curl -s -o /dev/null -X POST \
@@ -1083,21 +1084,6 @@ if should_run "r-shm-leak"; then
         wait_for_http "$R_HTTP_PORT" 15
         R_DAEMON_PID=$LAST_DAEMON_PID
 
-        shm_size_for_pid() {
-            local pid="$1"
-            local total=0
-            local sz
-            for f in /dev/shm/morloc-${pid}-*; do
-                [ -e "$f" ] || continue
-                sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-                total=$((total + sz))
-            done
-            echo "$total"
-        }
-        shm_count_for_pid() {
-            ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
-        }
-
         # Warm-up: get all per-pool / per-binding lazy SHM in place.
         curl -s -o /dev/null -X POST \
             "http://127.0.0.1:${R_HTTP_PORT}/call/echoList" \
@@ -1141,6 +1127,131 @@ if should_run "r-shm-leak"; then
         fi
 
         stop_daemon "$R_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 16: Pool-crash SHM-orphan diagnostic
+# ======================================================================
+#
+# Quantifies the cross-process SHM leak that opens when a pool process
+# dies between "ship a PACKET_SOURCE_RPTR result" and "flush its tracker
+# at next dispatch". Under normal operation the pool's tracker holds the
+# block until the next request arrives; if the pool is SIGKILL'd in
+# between, the block orphans in the shared volume forever.
+#
+# This is a DIAGNOSTIC test: the threshold is intentionally generous so
+# the suite stays green today (cross-process cleanup is documented as
+# out-of-scope in project_eval_shm_leak.md). The "delta=" / "per-crash="
+# numbers in the output are the actual exposure -- if/when per-pool
+# sub-volumes or equivalent cleanup lands, tighten the threshold to a
+# few KB so this becomes a real regression test.
+
+if should_run "pool-crash-stress"; then
+    echo "${BOLD}[pool-crash-stress] Pool-crash SHM-orphan diagnostic${RESET}"
+
+    PCS_DIR=$(mktemp -d)
+    WORK_DIRS+=("$PCS_DIR")
+    if ! compile_program "r-shm-leak.loc" "$PCS_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("pool-crash-stress: compilation failed")
+    else
+        PCS_PORT=$(pick_port)
+        start_daemon "$PCS_DIR" --http-port "$PCS_PORT"
+        wait_for_http "$PCS_PORT" 15
+        PCS_DAEMON_PID=$LAST_DAEMON_PID
+
+        # Warm-up: a few requests to get pool spawned and per-pool lazy
+        # state allocated. The last warm-up's RPTR result will be in the
+        # pool's tracker when we take the baseline; the kill-loop below
+        # measures incremental growth from there.
+        for i in 1 2 3; do
+            curl -s -o /dev/null -X POST \
+                "http://127.0.0.1:${PCS_PORT}/call/echoList" \
+                -H "Content-Type: application/json" \
+                -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]'
+        done
+
+        before_size=$(shm_size_for_pid "$PCS_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$PCS_DAEMON_PID")
+
+        # Crash loop: each iteration sends a request (so the pool ships
+        # a fresh RPTR result), then SIGKILLs all child pools, sleeps to
+        # let the daemon reap and respawn (1s polling cycle per memory
+        # note). The next request pulls in a fresh pool, leaving the
+        # prior pool's outgoing block orphaned in the volume.
+        N=20
+        successful_calls=0
+        failed_calls=0
+        kills=0
+        for i in $(seq 1 $N); do
+            status=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" -X POST \
+                "http://127.0.0.1:${PCS_PORT}/call/echoList" \
+                -H "Content-Type: application/json" \
+                -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]') \
+                || status="000"
+            if [ "$status" = "200" ]; then
+                successful_calls=$((successful_calls + 1))
+            else
+                failed_calls=$((failed_calls + 1))
+            fi
+
+            pool_pids=$(pgrep -P "$PCS_DAEMON_PID" 2>/dev/null) || pool_pids=""
+            for ppid in $pool_pids; do
+                if kill -9 "$ppid" 2>/dev/null; then
+                    kills=$((kills + 1))
+                fi
+            done
+
+            # Daemon polls pool liveness on a ~1s cycle; give it time to
+            # reap and respawn before the next iteration's request.
+            sleep 1.2
+        done
+
+        # Final ping after the loop to ensure the pool is up and any
+        # post-crash daemon-side bookkeeping has settled.
+        curl -s --max-time 5 -o /dev/null -X POST \
+            "http://127.0.0.1:${PCS_PORT}/call/echoList" \
+            -H "Content-Type: application/json" \
+            -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]' \
+            || true
+
+        after_size=$(shm_size_for_pid "$PCS_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$PCS_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+        if [ "$N" -gt 0 ]; then
+            per_crash=$((delta_size / N))
+        else
+            per_crash=0
+        fi
+
+        # Generous threshold: 5 MB. Real per-crash leak today is ~10 KB
+        # (one outgoing PACKET_SOURCE_RPTR result block); 20 crashes
+        # ~= 200 KB plus volume creation overhead, well below 5 MB.
+        # Tighten this to a few KB once cross-process cleanup lands.
+        THRESHOLD_BYTES=$((5 * 1024 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} pool kills leak < 5 MB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("pool-crash-stress: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+        fi
+        echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
+        echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
+        echo "      (Diagnostic only: cross-process cleanup is out of scope today;"
+        echo "       see memory/project_eval_shm_leak.md.)"
+
+        stop_daemon "$PCS_DAEMON_PID"
     fi
 
     echo ""
