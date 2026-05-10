@@ -4,12 +4,282 @@
 
 use std::ffi::CString;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::manifest::Pool;
 
 pub const MAX_DAEMONS: usize = 32;
+
+/// Pool-crash recovery generation counter. Starts at 0 (initial daemon
+/// startup). Each successful coordinated recovery (kill all pools, drop
+/// SHM, respawn) increments this. The current generation is encoded into
+/// the SHM basename so volumes from a prior generation can never be
+/// confused for current-generation volumes -- if a generation 0 file
+/// somehow survives the recovery teardown, generation 1's `morloc-<pid>-
+/// <hash>-gen1_X` will not collide. The next nexus startup sweep
+/// (`cleanup_stale_shm`) catches any stragglers because everything still
+/// starts with `morloc-<pid>-`.
+pub static RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Compute the SHM basename for a given recovery generation. Generation
+/// 0 returns the base unchanged (preserves the current naming for the
+/// happy path); generations 1+ append `-gen<N>`.
+pub fn basename_for_generation(base: &str, generation: u64) -> String {
+    if generation == 0 {
+        base.to_string()
+    } else {
+        format!("{}-gen{}", base, generation)
+    }
+}
+
+// ── Recovery context ────────────────────────────────────────────────────────
+
+/// State retained across a daemon's lifetime so the recovery callback can
+/// rebuild pool syscmds with a fresh basename and respawn pool processes.
+/// The C-side MorlocSocket array passed to the callback only carries enough
+/// fields to talk to live pools; it doesn't carry the original spawn
+/// arguments. We keep the original Rust PoolSocket array here so recovery
+/// can mutate the basename embedded in each pool's syscmd in place.
+struct RecoveryContext {
+    /// The Vec<PoolSocket> originally built by setup_sockets, owned for
+    /// the daemon's lifetime. Recovery rewrites each pool's syscmd
+    /// argv-tail (the basename slot) on every generation bump.
+    sockets: Vec<PoolSocket>,
+    /// Pool list from the manifest, retained so we can call
+    /// `setup_sockets` again to rebuild syscmds with a fresh basename.
+    pools: Vec<Pool>,
+    /// tmpdir, retained for setup_sockets re-invocation on recovery.
+    tmpdir: String,
+    /// The original (gen=0) basename. Each recovery computes
+    /// `basename_for_generation(base_basename, RECOVERY_GENERATION)` for
+    /// the new namespace.
+    base_basename: String,
+    /// Recent recovery attempt timestamps, for the loop-guard (max ~5 per
+    /// minute before we exit the daemon process).
+    recent_attempts: Vec<std::time::Instant>,
+}
+
+static RECOVERY_CONTEXT: std::sync::Mutex<Option<RecoveryContext>> =
+    std::sync::Mutex::new(None);
+
+/// Install the recovery context. Called by main once, before daemon_run,
+/// so the recovery callback has the data it needs to respawn pools.
+pub fn install_recovery_context(
+    sockets: Vec<PoolSocket>,
+    pools: Vec<Pool>,
+    tmpdir: String,
+    base_basename: String,
+) {
+    let mut guard = RECOVERY_CONTEXT.lock().unwrap();
+    *guard = Some(RecoveryContext {
+        sockets,
+        pools,
+        tmpdir,
+        base_basename,
+        recent_attempts: Vec::new(),
+    });
+}
+
+/// Return the C-ABI function pointer for the recovery callback. Pass to
+/// the daemon via DaemonConfig.pool_check_fn.
+pub fn pool_check_and_recover_ptr() -> *const std::ffi::c_void {
+    pool_check_and_recover as *const std::ffi::c_void
+}
+
+/// Maximum recovery attempts within `RECOVERY_WINDOW`. If exceeded the
+/// daemon exits fatally so an external supervisor can decide what to
+/// do (most likely the underlying problem -- e.g. a missing native
+/// library so the pool can't even initialize -- is fundamentally
+/// outside the daemon's control). The window is wide enough to
+/// accommodate stress-test workloads that intentionally kill pools at
+/// up to ~1/second; sustained higher rates indicate genuinely broken
+/// pools rather than bursty user-driven crashes.
+const RECOVERY_MAX_ATTEMPTS: usize = 100;
+const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
+/// Brief drain wait between marking recovery in progress and tearing
+/// down SHM, so any worker mid-request can fail back through its
+/// per-eval arena's Drop and release SHM before we munmap.
+const RECOVERY_DRAIN: Duration = Duration::from_millis(250);
+/// Wait between SIGTERM and SIGKILL on remaining live pools.
+const RECOVERY_TERM_GRACE: Duration = Duration::from_millis(250);
+
+extern "C" {
+    fn shclose(errmsg: *mut *mut std::ffi::c_char) -> bool;
+    fn shinit(
+        basename: *const std::ffi::c_char,
+        volume_index: usize,
+        shm_size: usize,
+        errmsg: *mut *mut std::ffi::c_char,
+    ) -> *mut std::ffi::c_void;
+}
+
+/// C-ABI callback wired into DaemonConfig.pool_check_fn.
+///
+/// Invoked once per daemon main-loop iteration (~1 s cadence).
+/// Detects dead pool processes via `pool_is_alive`. If any are dead,
+/// runs the coordinated recovery sequence:
+/// 1. Set `RECOVERY_IN_PROGRESS` so request handlers bail out.
+/// 2. Brief drain so in-flight workers' arenas release SHM.
+/// 3. SIGTERM -> SIGKILL all remaining live pools; reap each.
+/// 4. Drop the entire SHM namespace (shclose / reset_all).
+/// 5. Bump RECOVERY_GENERATION, compute new basename.
+/// 6. Re-shinit and respawn every pool with the new basename.
+/// 7. Wait for ping responses.
+/// 8. Clear `RECOVERY_IN_PROGRESS` so workers resume serving.
+///
+/// Loop guard: if more than RECOVERY_MAX_ATTEMPTS recoveries fire
+/// within RECOVERY_WINDOW, the daemon exits with a fatal error.
+extern "C" fn pool_check_and_recover(
+    _sockets: *mut morloc_runtime::daemon_ffi::MorlocSocket,
+    n_pools: usize,
+) {
+    // Fast path: if no pool has died, we're done. This runs every
+    // poll cycle so it must be cheap.
+    let mut any_dead = false;
+    for i in 0..n_pools {
+        if !pool_is_alive(i) {
+            any_dead = true;
+            break;
+        }
+    }
+    if !any_dead {
+        return;
+    }
+
+    // If the daemon is already shutting down, the dead pool we just
+    // observed is the result of `clean_exit` SIGTERM'ing the pool
+    // group, not a crash. Don't fight the shutdown by respawning.
+    if morloc_runtime::daemon_ffi::is_shutting_down() {
+        return;
+    }
+
+    // Begin recovery; if another caller got here first, bail.
+    if !morloc_runtime::daemon_ffi::begin_recovery() {
+        return;
+    }
+
+    // Loop-guard bookkeeping under lock so concurrent (extremely
+    // unlikely) recoveries don't all see an empty history.
+    {
+        let mut guard = RECOVERY_CONTEXT.lock().unwrap();
+        if let Some(ref mut ctx) = *guard {
+            let now = std::time::Instant::now();
+            ctx.recent_attempts
+                .retain(|t| now.duration_since(*t) < RECOVERY_WINDOW);
+            ctx.recent_attempts.push(now);
+            if ctx.recent_attempts.len() > RECOVERY_MAX_ATTEMPTS {
+                eprintln!(
+                    "morloc daemon: pool crash recovery attempted {} times in {:?}; giving up",
+                    ctx.recent_attempts.len(),
+                    RECOVERY_WINDOW
+                );
+                drop(guard);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    eprintln!("morloc daemon: pool crash detected; coordinated recovery starting");
+    for i in 0..n_pools {
+        if let Some(info) = pool_death_info(i) {
+            eprintln!("  pool {}: {}", i, info);
+        }
+    }
+
+    // Step 1: drain. Workers see RECOVERY_IN_PROGRESS at request entry
+    // and bail. In-flight workers' socket calls to dying pools fail
+    // with ECONNREFUSED; their per-eval arenas drop, releasing SHM.
+    std::thread::sleep(RECOVERY_DRAIN);
+
+    // Step 2: SIGTERM remaining live pools; brief grace; SIGKILL the
+    // holdouts; reap.
+    for i in 0..n_pools {
+        let pgid = PGIDS[i].load(Ordering::Relaxed);
+        if pgid > 0 && pool_is_alive(i) {
+            unsafe { libc::kill(-pgid, libc::SIGTERM); }
+        }
+    }
+    std::thread::sleep(RECOVERY_TERM_GRACE);
+    for i in 0..n_pools {
+        let pgid = PGIDS[i].load(Ordering::Relaxed);
+        if pgid > 0 && pool_is_alive(i) {
+            unsafe { libc::kill(-pgid, libc::SIGKILL); }
+        }
+    }
+    while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+
+    // Step 3: tear down all SHM.
+    unsafe {
+        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+        shclose(&mut err);
+        if !err.is_null() {
+            libc::free(err as *mut libc::c_void);
+        }
+    }
+
+    // Step 4: bump generation, compute new basename.
+    let generation = RECOVERY_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+
+    // Step 5: rebuild syscmds with the new basename and respawn.
+    let respawn_result: Result<(), String> = (|| {
+        let mut guard = RECOVERY_CONTEXT.lock().unwrap();
+        let ctx = guard
+            .as_mut()
+            .ok_or_else(|| "recovery context not installed".to_string())?;
+        let new_basename = basename_for_generation(&ctx.base_basename, generation);
+
+        // Rebuild Vec<PoolSocket> with fresh syscmd argv-tails.
+        let new_sockets = setup_sockets(&ctx.pools, &ctx.tmpdir, &new_basename);
+        ctx.sockets = new_sockets;
+
+        // Bootstrap the daemon's allocator with the new basename. This
+        // both sets COMMON_BASENAME and creates volume 0 ready for use.
+        let basename_c = CString::new(new_basename.as_str()).unwrap();
+        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+        let shm = unsafe { shinit(basename_c.as_ptr(), 0, 0xffff, &mut err) };
+        if shm.is_null() {
+            let msg = if !err.is_null() {
+                let s = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
+                unsafe { libc::free(err as *mut libc::c_void) };
+                s
+            } else {
+                "unknown shinit error".into()
+            };
+            return Err(format!("shinit({}) after recovery failed: {}", new_basename, msg));
+        }
+
+        // Spawn each pool fresh.
+        let indices: Vec<usize> = (0..n_pools).collect();
+        start_daemons(&mut ctx.sockets, &indices)
+    })();
+
+    match respawn_result {
+        Ok(()) => {
+            eprintln!(
+                "morloc daemon: recovery complete (generation {})",
+                generation
+            );
+        }
+        Err(msg) => {
+            eprintln!(
+                "morloc daemon: recovery failed (generation {}): {}",
+                generation, msg
+            );
+            // Fall through to end_recovery so the next poll cycle can
+            // retry. The loop guard above counts every attempt
+            // (including failed ones) and exits the daemon if too many
+            // pile up in a short window -- that's the correct response
+            // to a fundamentally broken pool that can't be respawned.
+        }
+    }
+
+    // Always clear the gate, even on respawn failure: leaving
+    // RECOVERY_IN_PROGRESS pinned would wedge the daemon forever
+    // (every subsequent request returns "recovering", and
+    // begin_recovery's compare_exchange would refuse to retry).
+    morloc_runtime::daemon_ffi::end_recovery();
+}
 
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(1);
@@ -50,6 +320,7 @@ static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// are caught inside each pool's dispatch wrapper (see pool.py/pool.cpp/
 /// pool.R/pool.jl) and returned as morloc error packets, which the nexus
 /// then annotates with call-site context when bubbling them up.
+#[derive(Clone)]
 pub struct PoolSocket {
     pub lang: String,
     pub socket_path: String,

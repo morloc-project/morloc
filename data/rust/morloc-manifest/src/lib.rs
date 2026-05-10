@@ -122,7 +122,7 @@ pub struct Build {
 
 /// A single language pool daemon. Each pool is one OS process that
 /// hosts the language-specific implementations of source functions.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct Pool {
     /// Language tag (e.g. `"py"`, `"cpp"`, `"r"`, `"julia"`).

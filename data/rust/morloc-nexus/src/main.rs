@@ -198,6 +198,17 @@ fn main() {
             process::clean_exit(1);
         }
 
+        // Install the recovery context so the pool_check_fn callback can
+        // rebuild syscmds with a fresh basename and respawn pools after a
+        // pool crash. Done before daemon_run so the callback (invoked from
+        // the daemon's main loop) sees a populated context.
+        process::install_recovery_context(
+            sockets.clone(),
+            manifest.pools.clone(),
+            tmpdir.clone(),
+            shm_basename.clone(),
+        );
+
         // Build DaemonConfig and call daemon_run in libmorloc.so
         run_daemon(&config, &mut sockets, &shm_basename, &payload);
         process::clean_exit(0);
@@ -360,7 +371,7 @@ fn run_daemon(
             .map_or(ptr::null(), |c| c.as_ptr()),
         tcp_port: config.tcp_port.unwrap_or(0),
         http_port: config.http_port.unwrap_or(0),
-        pool_check_fn: ptr::null(),
+        pool_check_fn: process::pool_check_and_recover_ptr(),
         pool_alive_fn: process::pool_is_alive_ptr(),
         n_pools,
         eval_timeout: config.eval_timeout,

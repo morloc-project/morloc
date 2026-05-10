@@ -23,6 +23,43 @@ const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
 
+/// Set true while the daemon is performing pool-crash recovery: SIGTERM/KILL
+/// pools, drop SHM, respawn, etc. Workers must bail out of any incoming or
+/// in-flight request immediately when this is set, returning a "recovering"
+/// error to the client rather than touching pool sockets or SHM. Cleared once
+/// the new pools are pingable. See `nexus::process::pool_check_and_recover`.
+pub static RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// True while the daemon is recovering from a pool crash. Public read-only
+/// helper for callers that need a one-line guard at the top of a request
+/// handler.
+#[inline]
+pub fn is_recovering() -> bool {
+    RECOVERY_IN_PROGRESS.load(Ordering::Acquire)
+}
+
+/// Mark recovery as starting. Returns `false` if recovery was already in
+/// progress (caller should treat that as "someone else got here first" and
+/// skip the recovery sequence).
+pub fn begin_recovery() -> bool {
+    RECOVERY_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+/// Mark recovery as complete. Workers will start accepting requests again.
+pub fn end_recovery() {
+    RECOVERY_IN_PROGRESS.store(false, Ordering::Release);
+}
+
+/// True once the daemon has begun graceful shutdown (SIGTERM received,
+/// `daemon_run` main loop is exiting). Recovery should bail in this case
+/// rather than fight the shutdown by respawning pools the daemon is
+/// trying to tear down.
+pub fn is_shutting_down() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+}
+
 // SAFETY: These globals are set once during daemon_run initialization (single-threaded)
 // and only read afterwards. The daemon is single-threaded for request dispatch.
 static mut G_POOL_ALIVE_FN: Option<unsafe extern "C" fn(usize) -> bool> = None;
@@ -688,6 +725,22 @@ pub unsafe extern "C" fn daemon_dispatch(
     // Echo request id
     if !(*request).id.is_null() {
         (*resp).id = libc::strdup((*request).id);
+    }
+
+    // Recovery gate. If a pool process has died and the nexus is currently
+    // tearing down + respawning all pools, we cannot safely talk to any
+    // pool socket or touch SHM. Every method returns success=false with a
+    // clear retryable error so callers (including the health endpoint
+    // poller in pool-crash-stress) can distinguish the recovery window
+    // from normal operation: the outer JSON wrapper turns success=false
+    // into `"status":"error"`, which a polling loop can wait on.
+    if is_recovering() {
+        (*resp).success = false;
+        let c = CString::new(
+            "Daemon recovering from a pool process crash; please retry."
+        ).unwrap();
+        (*resp).error = libc::strdup(c.as_ptr());
+        return resp;
     }
 
     match (*request).method {

@@ -1,0 +1,19 @@
+-- Pool returns a large RPTR-shipped payload, then is SIGKILL'd
+-- mid-stream. The pool-crash-recovery code in nexus must release the
+-- pool's entire SHM sub-volumes (which contain that large payload)
+-- on each crash; otherwise the daemon's /dev/shm grows by ~payload
+-- size per crash, which scales catastrophically for the multi-GB
+-- scientific-computing case the recovery design is built for.
+--
+-- The function takes an integer N and returns a list of N strings,
+-- each ~256 chars wide. With N=1000 the result is ~250 KB per call,
+-- enough to make any per-crash leak immediately visible in
+-- /dev/shm/morloc-* file growth.
+
+module large_payload (bigList)
+
+import root-r
+
+source R from "large-payload.R" ("bigList")
+
+bigList :: Int -> [Str]

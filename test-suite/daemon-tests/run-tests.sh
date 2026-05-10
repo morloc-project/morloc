@@ -1178,17 +1178,38 @@ if should_run "pool-crash-stress"; then
         before_size=$(shm_size_for_pid "$PCS_DAEMON_PID")
         before_count=$(shm_count_for_pid "$PCS_DAEMON_PID")
 
+        # Wait for the daemon to finish any in-progress recovery: health
+        # endpoint returns status="recovering" while RECOVERY_IN_PROGRESS
+        # is set and "ok" once respawn is done. Bounded by max_wait
+        # seconds to avoid hanging if recovery itself wedges.
+        wait_for_recovery_done() {
+            local max_wait="${1:-15}"
+            local i=0
+            local step_ms=200
+            local max_steps=$(( max_wait * 1000 / step_ms ))
+            while [ "$i" -lt "$max_steps" ]; do
+                local h
+                h=$(curl -s --max-time 2 "http://127.0.0.1:${PCS_PORT}/health" 2>/dev/null) || h=""
+                if echo "$h" | grep -q '"status":"ok"'; then
+                    return 0
+                fi
+                sleep 0.2
+                i=$((i + 1))
+            done
+            return 1
+        }
+
         # Crash loop: each iteration sends a request (so the pool ships
-        # a fresh RPTR result), then SIGKILLs all child pools, sleeps to
-        # let the daemon reap and respawn (1s polling cycle per memory
-        # note). The next request pulls in a fresh pool, leaving the
-        # prior pool's outgoing block orphaned in the volume.
+        # a fresh RPTR result), then SIGKILLs all child pools, polls the
+        # health endpoint until recovery completes. Without the fix the
+        # daemon never respawns; with the fix every iteration's pool is
+        # cleanly torn down and replaced.
         N=20
         successful_calls=0
         failed_calls=0
         kills=0
         for i in $(seq 1 $N); do
-            status=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" -X POST \
+            status=$(curl -s --max-time 15 -o /dev/null -w "%{http_code}" -X POST \
                 "http://127.0.0.1:${PCS_PORT}/call/echoList" \
                 -H "Content-Type: application/json" \
                 -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]') \
@@ -1199,16 +1220,25 @@ if should_run "pool-crash-stress"; then
                 failed_calls=$((failed_calls + 1))
             fi
 
-            pool_pids=$(pgrep -P "$PCS_DAEMON_PID" 2>/dev/null) || pool_pids=""
+            # Find pool processes by working-dir + command pattern. The
+            # shell wrapper script's PID (LAST_DAEMON_PID) often differs
+            # from the actual morloc-nexus PID (sh runs the wrapper,
+            # then execs morloc-nexus on systems where exec is
+            # implemented as fork+exec). The `R --file=<dir>/pools/...`
+            # pattern targets only this test's R pool processes, not
+            # the test harness or unrelated runs.
+            pool_pids=$(pgrep -f "${PCS_DIR}/pools/.*pool\.R" 2>/dev/null) || pool_pids=""
             for ppid in $pool_pids; do
                 if kill -9 "$ppid" 2>/dev/null; then
                     kills=$((kills + 1))
                 fi
             done
 
-            # Daemon polls pool liveness on a ~1s cycle; give it time to
-            # reap and respawn before the next iteration's request.
-            sleep 1.2
+            # Wait for the daemon to finish reaping and respawning before
+            # the next iteration sends a request. Without this, the next
+            # curl might race the recovery and either fail or trigger an
+            # additional spurious recovery attempt.
+            wait_for_recovery_done 15
         done
 
         # Final ping after the loop to ensure the pool is up and any
@@ -1230,14 +1260,17 @@ if should_run "pool-crash-stress"; then
             per_crash=0
         fi
 
-        # Generous threshold: 5 MB. Real per-crash leak today is ~10 KB
-        # (one outgoing PACKET_SOURCE_RPTR result block); 20 crashes
-        # ~= 200 KB plus volume creation overhead, well below 5 MB.
-        # Tighten this to a few KB once cross-process cleanup lands.
-        THRESHOLD_BYTES=$((5 * 1024 * 1024))
+        # With coordinated recovery (kill all pools + drop SHM + respawn
+        # at fresh basename per generation), each crash should fully
+        # reclaim the prior generation's volumes. delta_size should be
+        # ~0 plus the new generation's bootstrap volume(s). 256 KB is
+        # generous (a couple of 64 KB volumes' worth) but well under
+        # what an actual per-crash leak (~10 KB to multi-MB) would
+        # accumulate at 20 crashes.
+        THRESHOLD_BYTES=$((256 * 1024))
 
         TOTAL=$((TOTAL + 1))
-        printf "  %-50s " "${N} pool kills leak < 5 MB"
+        printf "  %-50s " "${N} pool kills, /dev/shm bounded < 256 KB"
         if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
             printf "%sPASS%s\n" "$GREEN" "$RESET"
             PASSED=$((PASSED + 1))
@@ -1248,10 +1281,128 @@ if should_run "pool-crash-stress"; then
         fi
         echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
         echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
-        echo "      (Diagnostic only: cross-process cleanup is out of scope today;"
-        echo "       see memory/project_eval_shm_leak.md.)"
 
         stop_daemon "$PCS_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 17: Pool-crash recovery with large payloads
+# ======================================================================
+#
+# The motivating case for the recovery design: scientific-computing
+# pools may ship multi-GB RPTRs (genomes, tensors, Arrow tables). A
+# single ill-timed crash without proper SHM reclamation could OOM the
+# host. This test fires repeated requests that ship a ~250 KB payload
+# per call, kills the pool mid-stream each iteration, and asserts that
+# /dev/shm/morloc-<daemon-pid>-* total bytes stay bounded across many
+# crash/recover cycles. Without recovery's coordinated SHM teardown the
+# delta would grow by roughly the payload size per crash.
+
+if should_run "pool-recovery-large"; then
+    echo "${BOLD}[pool-recovery-large] Pool-crash recovery (large payloads)${RESET}"
+
+    LP_DIR=$(mktemp -d)
+    WORK_DIRS+=("$LP_DIR")
+    if ! compile_program "large-payload.loc" "$LP_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("pool-recovery-large: compilation failed")
+    else
+        LP_PORT=$(pick_port)
+        start_daemon "$LP_DIR" --http-port "$LP_PORT"
+        wait_for_http "$LP_PORT" 15
+        LP_DAEMON_PID=$LAST_DAEMON_PID
+
+        wait_lp_recovery_done() {
+            local max_wait="${1:-15}"
+            local i=0
+            local step_ms=200
+            local max_steps=$(( max_wait * 1000 / step_ms ))
+            while [ "$i" -lt "$max_steps" ]; do
+                local h
+                h=$(curl -s --max-time 2 "http://127.0.0.1:${LP_PORT}/health" 2>/dev/null) || h=""
+                if echo "$h" | grep -q '"status":"ok"'; then
+                    return 0
+                fi
+                sleep 0.2
+                i=$((i + 1))
+            done
+            return 1
+        }
+
+        # Warm-up: ensure the pool is fully spawned and /dev/shm
+        # baseline reflects steady-state lazy allocations.
+        curl -s --max-time 30 -o /dev/null -X POST \
+            "http://127.0.0.1:${LP_PORT}/call/bigList" \
+            -H "Content-Type: application/json" \
+            -d '[1000]'
+
+        before_size=$(shm_size_for_pid "$LP_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$LP_DAEMON_PID")
+
+        # Each iteration ships ~250 KB via PACKET_SOURCE_RPTR, then
+        # SIGKILLs the pool. Pre-recovery this would orphan ~250 KB of
+        # SHM per crash; post-recovery the unlink at recovery time
+        # reclaims it.
+        N=10
+        successful_calls=0
+        failed_calls=0
+        kills=0
+        for i in $(seq 1 $N); do
+            status=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" -X POST \
+                "http://127.0.0.1:${LP_PORT}/call/bigList" \
+                -H "Content-Type: application/json" \
+                -d '[1000]') || status="000"
+            if [ "$status" = "200" ]; then
+                successful_calls=$((successful_calls + 1))
+            else
+                failed_calls=$((failed_calls + 1))
+            fi
+
+            pool_pids=$(pgrep -f "${LP_DIR}/pools/.*pool\.R" 2>/dev/null) || pool_pids=""
+            for ppid in $pool_pids; do
+                if kill -9 "$ppid" 2>/dev/null; then
+                    kills=$((kills + 1))
+                fi
+            done
+
+            wait_lp_recovery_done 15
+        done
+
+        after_size=$(shm_size_for_pid "$LP_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$LP_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+        if [ "$N" -gt 0 ]; then
+            per_crash=$((delta_size / N))
+        else
+            per_crash=0
+        fi
+
+        # Pre-recovery would leak ~250 KB per crash * 10 crashes =
+        # ~2.5 MB plus extra volumes from each pool's growth. With
+        # recovery's coordinated SHM teardown the delta should be
+        # ~zero (or at most a couple of bootstrap volumes).
+        THRESHOLD_BYTES=$((512 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} large-payload kills, /dev/shm < 512 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("pool-recovery-large: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+        fi
+        echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
+        echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
+
+        stop_daemon "$LP_DAEMON_PID"
     fi
 
     echo ""

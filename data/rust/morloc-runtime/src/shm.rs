@@ -357,7 +357,60 @@ pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError
 pub fn shclose() -> Result<(), MorlocError> {
     let _lock = ALLOC_MUTEX.lock().unwrap();
     let mut vols = VOLUMES.lock().unwrap();
+    shclose_locked(&mut vols);
+    Ok(())
+}
 
+/// Drop every SHM volume currently held by this process: munmap, unlink,
+/// clear bookkeeping (VOLUMES / CURRENT_VOLUME / COMMON_BASENAME).
+///
+/// Intended for in-process recovery (pool-crash teardown). After this
+/// returns, no SHM is mapped or named on disk for this basename, and the
+/// allocator is reset to its pre-`shinit` state. Caller is responsible
+/// for calling `shinit` again with a fresh basename and respawning any
+/// pools so they shopen the new files.
+///
+/// Holds `ALLOC_MUTEX` across the entire teardown, so any concurrent
+/// `shmalloc` or `shfree` blocks until reset completes. Callers that
+/// `shfree` after reset against a stale pointer will hit the
+/// "address not inside any mapped volume" guard added to `shfree` and
+/// no-op rather than segfault.
+pub fn reset_all() -> Result<(), MorlocError> {
+    let _lock = ALLOC_MUTEX.lock().unwrap();
+    let mut vols = VOLUMES.lock().unwrap();
+    shclose_locked(&mut vols);
+    CURRENT_VOLUME.store(0, std::sync::atomic::Ordering::Release);
+    let mut cb = COMMON_BASENAME.lock().unwrap();
+    for b in cb.iter_mut() {
+        *b = 0;
+    }
+    Ok(())
+}
+
+/// Returns true if `ptr` falls inside any currently-mapped SHM volume.
+/// Used by `shfree` as a safety guard against being called with a
+/// stale pointer after `reset_all` (e.g. a worker that was holding an
+/// SHM ptr when its request was failed by the recovery quiesce).
+fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
+    let p = ptr as usize;
+    let vols = VOLUMES.lock().unwrap();
+    for i in 0..MAX_VOLUME_NUMBER {
+        let shm = vols[i].ptr();
+        if shm.is_null() {
+            continue;
+        }
+        // SAFETY: shm is a valid mmap'd ShmHeader from VOLUMES.
+        let vol_size = unsafe { (*shm).volume_size };
+        let base = unsafe { (shm as *const u8).add(std::mem::size_of::<ShmHeader>()) } as usize;
+        if p >= base && p < base + vol_size {
+            return true;
+        }
+    }
+    false
+}
+
+/// Internal: do the unlink/munmap walk under already-held locks.
+fn shclose_locked(vols: &mut [SendPtr; MAX_VOLUME_NUMBER]) {
     for i in 0..MAX_VOLUME_NUMBER {
         let shm = if !vols[i].is_null() {
             vols[i].ptr()
@@ -383,7 +436,6 @@ pub fn shclose() -> Result<(), MorlocError> {
         }
         vols[i] = SendPtr::null();
     }
-    Ok(())
 }
 
 /// Allocate at least `size` bytes from shared memory and return a pointer
@@ -440,6 +492,15 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
     let _lock = ALLOC_MUTEX.lock().unwrap();
+    // Pool-crash recovery: if `reset_all` has unmapped every volume since
+    // this caller obtained `ptr`, dereferencing the (now-unmapped) header
+    // would segfault. The recovery sequence is responsible for getting all
+    // workers to drop their references; this guard is just defense in
+    // depth for the in-flight case where a worker's arena drop race-loses
+    // to reset_all's munmap.
+    if !ptr.is_null() && !ptr_is_in_any_volume(ptr) {
+        return Ok(());
+    }
     shfree_unlocked(ptr)
 }
 
