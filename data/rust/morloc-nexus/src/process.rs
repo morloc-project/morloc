@@ -139,6 +139,13 @@ pub fn get_tmpdir() -> Option<&'static str> {
 pub fn clean_exit(exit_code: i32) -> ! {
     CLEANING_UP.store(true, Ordering::SeqCst);
 
+    // Flush stdout. Critical when -o redirected fd 1 to a file: Rust
+    // and libc both buffer when stdout is not a TTY, and std::process::exit
+    // skips destructors so any unflushed bytes would be lost.
+    use std::io::Write;
+    let _ = std::io::stdout().lock().flush();
+    unsafe { libc::fflush(std::ptr::null_mut()) };
+
     // Flush nexus stderr so our error messages are visible even if
     // the process is killed by a parent (e.g., shell pipeline).
     unsafe { libc::fsync(2) };
