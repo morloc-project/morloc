@@ -790,8 +790,8 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
 // ========================================================================
 
 char* quoted(const char* input);
-bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
-bool pretty_print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
+bool print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
+bool pretty_print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
 bool print_arrow_as_json(const void* data, ERRMSG);
 bool print_arrow_as_table(const void* data, ERRMSG);
 bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG);

@@ -90,11 +90,12 @@ pub unsafe extern "C" fn voidstar_to_json_string(
 pub unsafe extern "C" fn print_voidstar(
     data: *const c_void,
     schema: *const CSchema,
+    keep_null: bool,
     errmsg: *mut *mut c_char,
 ) -> bool {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match crate::json::print_voidstar(data as *mut u8, &rs) {
+    match crate::json::print_voidstar(data as *mut u8, &rs, keep_null) {
         Ok(_) => true,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -107,11 +108,12 @@ pub unsafe extern "C" fn print_voidstar(
 pub unsafe extern "C" fn pretty_print_voidstar(
     data: *const c_void,
     schema: *const CSchema,
+    keep_null: bool,
     errmsg: *mut *mut c_char,
 ) -> bool {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match crate::json::pretty_print_voidstar(data as *mut u8, &rs) {
+    match crate::json::pretty_print_voidstar(data as *mut u8, &rs, keep_null) {
         Ok(_) => true,
         Err(e) => {
             set_errmsg(errmsg, &e);

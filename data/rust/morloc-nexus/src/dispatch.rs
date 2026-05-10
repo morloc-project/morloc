@@ -37,6 +37,7 @@ pub enum OutputFormat {
 pub struct NexusConfig {
     pub help_flag: bool,
     pub print_flag: bool,
+    pub keep_null: bool,
     pub packet_path: Option<String>,
     pub socket_base: Option<String>,
     pub output_path: Option<String>,
@@ -55,6 +56,7 @@ impl Default for NexusConfig {
         NexusConfig {
             help_flag: false,
             print_flag: false,
+            keep_null: false,
             packet_path: None,
             socket_base: None,
             output_path: None,
@@ -119,6 +121,10 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
             }
             "-p" | "--print" => {
                 config.print_flag = true;
+                i += 1;
+            }
+            "--keep-null" => {
+                config.keep_null = true;
                 i += 1;
             }
             "-c" | "--call-packet" => {
@@ -238,6 +244,10 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
             }
             "--print" | "-p" => {
                 config.print_flag = true;
+                matched = true;
+            }
+            "--keep-null" => {
+                config.keep_null = true;
                 matched = true;
             }
             "--output-form" | "-f" if i + 1 < args.len() => {
@@ -632,7 +642,7 @@ fn run_remote_command(
     config: &NexusConfig,
 ) {
     use morloc_runtime::packet;
-    use morloc_runtime::schema::{parse_schema, SerialType};
+    use morloc_runtime::schema::parse_schema;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -869,11 +879,11 @@ fn run_remote_command(
     // Check if response is Arrow format
     let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
 
-    // Print using the C library for correct output.
-    // Suppress "null" for Unit-returning commands (CLI convention).
-    if return_schema.serial_type != SerialType::Nil {
-        print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
-    }
+    // Print using the C library for correct output. Top-level null-ish
+    // suppression (Unit and Optional-None producing empty stdout) lives
+    // inside the JSON path; binary formats always emit a well-formed
+    // stream so downstream consumers see the expected bytes.
+    print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
     unsafe { morloc_runtime::cschema::CSchema::free(c_schema) };
 }
 
@@ -889,11 +899,13 @@ fn print_result_c(
         fn print_voidstar(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime::cschema::CSchema,
+            keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> bool;
         fn pretty_print_voidstar(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime::cschema::CSchema,
+            keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> bool;
         fn print_arrow_as_json(
@@ -923,9 +935,9 @@ fn print_result_c(
                 } else if is_arrow {
                     print_arrow_as_json(ptr as *const std::ffi::c_void, &mut errmsg)
                 } else if config.print_flag {
-                    pretty_print_voidstar(ptr as *const std::ffi::c_void, schema, &mut errmsg)
+                    pretty_print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
                 } else {
-                    print_voidstar(ptr as *const std::ffi::c_void, schema, &mut errmsg)
+                    print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
                 }
             };
             if !ok {
@@ -1079,12 +1091,12 @@ fn print_result(
     match config.output_format {
         OutputFormat::Json => {
             if config.print_flag {
-                if let Err(e) = json::pretty_print_voidstar(ptr, schema) {
+                if let Err(e) = json::pretty_print_voidstar(ptr, schema, config.keep_null) {
                     eprintln!("Error: {}", e);
                     process::clean_exit(1);
                 }
             } else {
-                if let Err(e) = json::print_voidstar(ptr, schema) {
+                if let Err(e) = json::print_voidstar(ptr, schema, config.keep_null) {
                     eprintln!("Error: {}", e);
                     process::clean_exit(1);
                 }
@@ -1125,7 +1137,7 @@ fn print_result(
 
 /// Execute a pure command by evaluating the expression via C library.
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
-    use morloc_runtime::schema::{parse_schema, SerialType};
+    use morloc_runtime::schema::parse_schema;
 
     extern "C" {
         fn build_manifest_expr(
@@ -1272,9 +1284,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     // Extract voidstar value from the result packet
     let result_ptr = unsafe { get_morloc_data_packet_value(pkt_bytes.as_ptr(), c_return_schema, &mut errmsg) };
 
-    if return_schema.serial_type != SerialType::Nil {
-        print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
-    }
+    print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
     // Cleanup
     for cs in &c_arg_schemas {

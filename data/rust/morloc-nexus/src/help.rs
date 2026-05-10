@@ -16,6 +16,8 @@ pub fn print_nexus_usage(prog_name: &str) -> ! {
     eprintln!("  -p, --print          Pretty-print output for human consumption");
     eprintln!("  -o, --output-file    Print to this file instead of STDOUT");
     eprintln!("  -f, --output-format  Output format [json|mpk|voidstar]");
+    eprintln!("      --keep-null      Print top-level () or None as 'null'");
+    eprintln!("                       (default: produce empty output)");
     eprintln!();
     eprintln!("Daemon mode:");
     eprintln!("  --daemon             Run as a long-lived daemon");
@@ -48,6 +50,8 @@ pub fn print_usage(prog_name: &str, manifest: &Manifest) -> ! {
     eprintln!("  -p, --print          Pretty-print output for human consumption");
     eprintln!("  -o, --output-file    Print to this file instead of STDOUT");
     eprintln!("  -f, --output-format  Output format [json|mpk|voidstar]");
+    eprintln!("      --keep-null      Print top-level () or None as 'null'");
+    eprintln!("                       (default: produce empty output)");
     eprintln!();
     eprintln!("Daemon mode:");
     eprintln!("  --daemon             Run as a long-lived daemon");
@@ -177,6 +181,7 @@ pub fn print_command_help_single(prog_name: &str, cmd: &Command) -> ! {
     eprintln!("  --print          Pretty-print output for human consumption");
     eprintln!("  --output-file    Print to this file instead of STDOUT");
     eprintln!("  --output-form    Output format [json|mpk|voidstar]");
+    eprintln!("  --keep-null      Print top-level () or None as 'null' (default: empty)");
     eprintln!("\nDaemon mode:");
     eprintln!("  --daemon         Run as a long-lived daemon");
     eprintln!("  --http-port PORT Listen on HTTP port");

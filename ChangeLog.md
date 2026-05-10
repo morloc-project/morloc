@@ -1,19 +1,32 @@
 0.84.0 [2026-05-xx]
 -------------------
+
+Numeric handling
  * add float Inf/-Inf/NaN support 
  * add literal int and float overflow error
  * add proper negation operator
+ * fix silent integer overflow errors
+ * fix errors on illegal hex/oct/bin literals (e.g., "0x4dzzz")
+
+String processing
+ * raise error on illegal string escapes
+
+Modules
+ * fix parser bug preventing multi-module files
+ * allow empty module export lists
+
+Nexus
+ * do not write JSON null for Unit of Optional Nothing
+ * add --keep-null to nexus to print JSON null
+
+Other bug fixes
+ * fix segfault in pure morloc @load intrinsic
+ * fix bugs in pure morloc patter getters/setters
  * fix pure morloc tuple pattern getters
  * fix guards with mixed effects across branches
  * fix bug in parsing guards in do-blocks
  * fix segfault in ?(?x) double optionals
- * fix silent integer overflow errors
- * fix errors on illegal hex/oct/bin literals (e.g., "0x4dzzz")
- * raise error on illegal string escapes
- * fix parser bug preventing multi-module files
- * allow empty module export lists
- * fix segfault in pure morloc @load intrinsic
- * fix bugs in pure morloc patter getters/setters
+
 
 0.83.2 [2026-05-07]
 -------------------

@@ -326,12 +326,34 @@ pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, M
     Ok(buf)
 }
 
-pub fn print_voidstar(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+/// True when the top-level wire value is "null-ish": either Unit (Nil) or
+/// an Optional whose discriminant byte is 0 (None). Nested null inside a
+/// container is not detected here; that would lose structural information.
+pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
+    match schema.serial_type {
+        SerialType::Nil => true,
+        SerialType::Optional => {
+            // SAFETY: ptr from shmalloc/rel2abs - same provenance as the
+            // reader path used elsewhere in this module.
+            let r = unsafe { ShmReader::new(ptr) };
+            r.read_u8(0) == 0
+        }
+        _ => false,
+    }
+}
+
+pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
+    if !keep_null && is_top_null(ptr, schema) {
+        return Ok(());
+    }
     println!("{}", voidstar_to_json_string(ptr, schema)?);
     Ok(())
 }
 
-pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
+    if !keep_null && is_top_null(ptr, schema) {
+        return Ok(());
+    }
     let json = voidstar_to_json_string(ptr, schema)?;
     let rv: Box<RawValue> = serde_json::from_str(&json).map_err(|e| err(&e.to_string()))?;
     let t = rv.get().trim_start();
