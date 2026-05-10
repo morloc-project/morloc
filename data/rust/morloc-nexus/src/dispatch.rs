@@ -225,8 +225,13 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
     i
 }
 
-/// Extract daemon/server long options from argv in single-command mode.
-/// Removes matched options from the args vector.
+/// Extract nexus-level long options from argv in single-command mode.
+/// Removes matched options from the args vector. In single-command mode
+/// the subcommand is optional, so nexus options and program arguments
+/// share an argv. To avoid stealing common short flags from the program
+/// (e.g. -o, -p, -f), only long forms (--print, --output-file, etc.)
+/// are recognized as nexus options here. Short flags pass through to
+/// the pool's argument parser.
 pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) {
     let mut i = 1;
     while i < args.len() {
@@ -238,11 +243,15 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
         let mut consumed = 1;
 
         match args[i].as_str() {
+            "--help" => {
+                config.help_flag = true;
+                matched = true;
+            }
             "--daemon" => {
                 config.daemon_flag = true;
                 matched = true;
             }
-            "--print" | "-p" => {
+            "--print" => {
                 config.print_flag = true;
                 matched = true;
             }
@@ -250,12 +259,12 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 config.keep_null = true;
                 matched = true;
             }
-            "--output-form" | "-f" if i + 1 < args.len() => {
+            "--output-form" if i + 1 < args.len() => {
                 config.output_format = parse_output_format(&args[i + 1]);
                 consumed = 2;
                 matched = true;
             }
-            "--output-file" | "-o" if i + 1 < args.len() => {
+            "--output-file" if i + 1 < args.len() => {
                 config.output_path = Some(args[i + 1].clone());
                 consumed = 2;
                 matched = true;
