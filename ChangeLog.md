@@ -28,7 +28,7 @@ Other bug fixes
  * fix guards with mixed effects across branches
  * fix bug in parsing guards in do-blocks
  * fix segfault in ?(?x) double optionals
-
+ * raise error on repeated keys in records
 
 0.83.2 [2026-05-07]
 -------------------

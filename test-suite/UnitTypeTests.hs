@@ -1927,6 +1927,98 @@ unitValuecheckTests =
            f xs = [1, sum xs]
            f xs = [2, sum xs]
       |]
+      , -- non-export terms must also be value-checked
+        valuecheckFail
+          "non-export term value contradiction"
+          [r|
+         module foo (a)
+           a = y
+           y = 1
+           y = 2
+      |]
+      , valuecheckFail
+          "where-clause value contradiction"
+          [r|
+         module foo (a)
+           a = y where
+             y = 1
+             y = 2
+      |]
+      , valuecheckFail
+          "where-clause contradiction inside lambda body"
+          [r|
+         module foo (f)
+           f x = [x, y] where
+             y = 1
+             y = 2
+      |]
+      , valuecheckPass
+          "where with equivalent values is legal"
+          [r|
+         module foo (a)
+           a = y where
+             y = 1
+             y = 1
+      |]
+      , -- self-referential / cyclic bindings without concrete sources
+        valuecheckFail
+          "direct self-referential binding"
+          [r|
+         module foo (omega)
+           omega = omega
+      |]
+      , valuecheckFail
+          "mutual self-reference cycle"
+          [r|
+         module foo (a)
+           a = b
+           b = a
+      |]
+      , valuecheckFail
+          "three-cycle self-reference"
+          [r|
+         module foo (a)
+           a = b
+           b = c
+           c = a
+      |]
+      , -- duplicate record fields (caught at parse time)
+        valuecheckFail
+          "duplicate record field literal"
+          [r|
+         module foo (r)
+           r = {a = 1, b = 2, a = 3}
+      |]
+      , valuecheckPass
+          "distinct record fields are legal"
+          [r|
+         module foo (r)
+           r = {a = 1, b = 2, c = 3}
+      |]
+      , valuecheckFail
+          "duplicate field in record type (where form)"
+          [r|
+         module foo (Foo)
+           record Foo where
+             a :: Int
+             b :: Bool
+             a :: Real
+      |]
+      , valuecheckFail
+          "duplicate field in record type (legacy form)"
+          [r|
+         module foo (Foo)
+           record Foo = MkFoo {a :: Int, b :: Bool, a :: Real}
+      |]
+      , valuecheckPass
+          "distinct fields in record type (where form)"
+          [r|
+         module foo (Foo)
+           record Foo where
+             a :: Int
+             b :: Bool
+             c :: Real
+      |]
       ]
 
 {- | Tests for infix operator functionality
