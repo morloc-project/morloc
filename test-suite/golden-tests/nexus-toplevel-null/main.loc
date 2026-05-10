@@ -1,0 +1,21 @@
+-- Verify Stage 1 nexus contract:
+--   * top-level () prints empty by default; "null" with --keep-null
+--   * top-level None prints empty by default; "null" with --keep-null
+--   * Some v prints v unchanged
+--   * nested null inside a tuple keeps printing as null
+
+module main (unitTop, optNone, optSome, pair)
+
+import root-py
+
+unitTop :: ()
+unitTop = ()
+
+optNone :: ?Int
+optNone = Null
+
+optSome :: ?Int
+optSome = 7
+
+pair :: (Int, ())
+pair = (5, ())
