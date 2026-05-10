@@ -15,6 +15,11 @@ Modules
  * fix parser bug preventing multi-module files
  * allow empty module export lists
 
+SHM
+ * inline small data packets (under 64kb)
+ * fix leaked shm memory on pool crash
+ * in daemon-mode, do full restart of all pools if any crash
+
 Nexus
  * do not write JSON null for Unit of Optional Nothing
  * add --keep-null to nexus to print JSON null

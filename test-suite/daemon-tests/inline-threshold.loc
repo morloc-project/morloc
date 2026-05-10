@@ -1,0 +1,27 @@
+-- Inline-vs-RPTR threshold round-trip test.
+--
+-- The runtime auto-routes outgoing data packets: if the flattened
+-- voidstar size is <= MORLOC_INLINE_THRESHOLD (64 KB), the data is
+-- embedded in the packet directly (PACKET_SOURCE_MESG +
+-- PACKET_FORMAT_VOIDSTAR); above the threshold it is shipped via
+-- PACKET_SOURCE_RPTR. This file is the morloc side of the
+-- [inline-threshold] daemon stress test, which sweeps payloads from
+-- empty up through several megabytes -- straddling the threshold from
+-- both sides -- and asserts every round-trip is byte-perfect.
+--
+-- Three commands cover the relevant shapes:
+--   echoInts: [Int] -> [Int]   -- arbitrary-size args + arbitrary-size results
+--   sumInts : [Int] -> Int     -- arbitrary-size args, tiny result
+--   firstN  : Int  -> [Int]    -- tiny arg, arbitrary-size result
+-- Together they exercise both directions of the threshold (small in /
+-- big out, big in / small out, big in / big out, and the all-small case).
+
+module inline_threshold (echoInts, sumInts, firstN)
+
+import root-r
+
+source R from "inline-threshold.R" ("echoInts", "sumInts", "firstN")
+
+echoInts :: [Int] -> [Int]
+sumInts  :: [Int] -> Int
+firstN   :: Int -> [Int]

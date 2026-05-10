@@ -1044,3 +1044,158 @@ unsafe fn print_binary(
     }
     0
 }
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod auto_routing_tests {
+    //! Verifies the inline-vs-RPTR routing decision in
+    //! `make_data_packet_auto`. The packet header layout puts the
+    //! `source` byte at offset 13 (4 magic + 2 plain + 2 version + 2
+    //! flavor + 2 mode + 1 cmd_type = 13). PACKET_SOURCE_MESG = 0x00
+    //! triggers the inline path; PACKET_SOURCE_RPTR = 0x02 ships the
+    //! relptr. Tests synthesize an `Array<u8>` voidstar of a chosen
+    //! flat size, run the routing function, and inspect the resulting
+    //! packet's source byte.
+    //!
+    //! The flat size of an `Array<u8>` of N data bytes is `16 + N`
+    //! (an `Array` wrapper is 16 bytes: usize size + isize relptr).
+    //! `MORLOC_INLINE_THRESHOLD` is 65536 bytes. So:
+    //!   - N <= 65520 → flat <= 65536 → MESG (inline)
+    //!   - N >  65520 → flat >  65536 → RPTR
+    //!
+    //! Sizes far from the boundary are picked to avoid the test
+    //! becoming alignment-sensitive; the boundary itself is checked
+    //! once each side.
+    use super::*;
+    use crate::packet::{MORLOC_INLINE_THRESHOLD, PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR};
+    use crate::shm::{self, Array, RelPtr};
+
+    /// Byte offset of the `source` field inside the 32-byte packet
+    /// header (see `PacketHeader` in `packet.rs`).
+    const SOURCE_OFFSET: usize = 13;
+
+    fn ensure_shm() {
+        crate::init_test_shm();
+    }
+
+    /// Build a flat blob laid out as `Array<u8>` with `n` data bytes,
+    /// hand it to `voidstar::read_binary` to materialize into SHM, and
+    /// return both the abs-ptr and the relptr ready to feed into
+    /// `make_data_packet_auto`.
+    unsafe fn build_byte_array_voidstar(n: usize) -> (AbsPtr, RelPtr) {
+        let total = std::mem::size_of::<Array>() + n;
+        let mut blob = vec![0u8; total];
+        // Wrapper: size = n, data = relative offset 16 within the blob
+        // (read_binary's adjust_relptrs adds the global base so it
+        // resolves to the byte-array region after copy).
+        let arr = Array {
+            size: n,
+            data: std::mem::size_of::<Array>() as RelPtr,
+        };
+        std::ptr::copy_nonoverlapping(
+            &arr as *const Array as *const u8,
+            blob.as_mut_ptr(),
+            std::mem::size_of::<Array>(),
+        );
+        // Fill data with a recognizable pattern so any in-place
+        // corruption later would be visible (the pattern itself is
+        // not asserted on; tests only check the source byte).
+        for i in 0..n {
+            blob[std::mem::size_of::<Array>() + i] = (i & 0xff) as u8;
+        }
+        let schema = byte_array_schema();
+        let abs = crate::voidstar::read_binary(&blob, &schema).unwrap();
+        let rel = shm::abs2rel(abs).unwrap();
+        (abs, rel)
+    }
+
+    fn byte_array_schema() -> crate::schema::Schema {
+        // Array of UInt8 (`au1` in the schema mini-language).
+        crate::schema::parse_schema("au1").unwrap()
+    }
+
+    /// Run `make_data_packet_auto` on a synthetic byte-array voidstar
+    /// of size `n` and return the `source` byte from the resulting
+    /// packet header.
+    fn auto_route_source_for(n: usize) -> u8 {
+        ensure_shm();
+        let schema = byte_array_schema();
+        let cs = crate::cschema::CSchema::from_rust(&schema);
+        unsafe {
+            let (abs, rel) = build_byte_array_voidstar(n);
+            let mut errmsg: *mut c_char = ptr::null_mut();
+            let packet = make_data_packet_auto(
+                abs as *mut c_void,
+                rel,
+                cs as *const crate::cschema::CSchema,
+                &mut errmsg,
+            );
+            assert!(
+                !packet.is_null(),
+                "make_data_packet_auto returned null for N={}",
+                n
+            );
+            let source = *packet.add(SOURCE_OFFSET);
+            // Sanity: cmd_type at offset 12 should be DATA.
+            assert_eq!(
+                *packet.add(12),
+                crate::packet::PACKET_TYPE_DATA,
+                "expected DATA packet for N={}",
+                n
+            );
+            libc::free(packet as *mut c_void);
+            crate::cschema::CSchema::free(cs);
+            // Best-effort SHM cleanup so the small test pool isn't
+            // exhausted across many tests; arena isn't active here.
+            let _ = shm::shfree(abs);
+            source
+        }
+    }
+
+    #[test]
+    fn empty_payload_inlines() {
+        // N=0: just the 16-byte wrapper, no data. Far below threshold.
+        assert_eq!(auto_route_source_for(0), PACKET_SOURCE_MESG);
+    }
+
+    #[test]
+    fn one_byte_inlines() {
+        assert_eq!(auto_route_source_for(1), PACKET_SOURCE_MESG);
+    }
+
+    #[test]
+    fn small_payload_inlines() {
+        assert_eq!(auto_route_source_for(1024), PACKET_SOURCE_MESG);
+    }
+
+    #[test]
+    fn just_below_threshold_inlines() {
+        // 16 + 65000 = 65016 < 65536. Comfortable under the cutoff.
+        assert_eq!(auto_route_source_for(65000), PACKET_SOURCE_MESG);
+    }
+
+    #[test]
+    fn at_threshold_inlines() {
+        // The contract is `flat_size <= MORLOC_INLINE_THRESHOLD` so the
+        // exactly-equal case must inline. Wrapper is 16 bytes so an
+        // N-byte data section gives flat = 16+N; pick N so 16+N equals
+        // the threshold exactly (this is also the largest allowed
+        // inline payload).
+        let n = MORLOC_INLINE_THRESHOLD - std::mem::size_of::<Array>();
+        assert_eq!(auto_route_source_for(n), PACKET_SOURCE_MESG);
+    }
+
+    #[test]
+    fn one_byte_over_threshold_uses_rptr() {
+        // Same wrapper, one extra data byte: must flip to RPTR.
+        let n = MORLOC_INLINE_THRESHOLD - std::mem::size_of::<Array>() + 1;
+        assert_eq!(auto_route_source_for(n), PACKET_SOURCE_RPTR);
+    }
+
+    #[test]
+    fn well_over_threshold_uses_rptr() {
+        // ~128 KB. Comfortably in the RPTR regime.
+        assert_eq!(auto_route_source_for(128 * 1024), PACKET_SOURCE_RPTR);
+    }
+}

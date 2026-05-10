@@ -781,7 +781,13 @@ pub unsafe extern "C" fn parse_cli_data_argument(
     };
 
     // Arrow tables need a PACKET_FORMAT_ARROW header so the receiver routes
-    // to arrow_from_shm rather than voidstar deserialization.
+    // to arrow_from_shm rather than voidstar deserialization. For non-arrow
+    // payloads we route through make_data_packet_auto, which inlines small
+    // values (<= MORLOC_INLINE_THRESHOLD bytes) into PACKET_SOURCE_MESG +
+    // PACKET_FORMAT_VOIDSTAR packets and ships larger ones as
+    // PACKET_SOURCE_RPTR. Inlining avoids the cross-process SHM round-trip
+    // and the rel2abs lookup on the receiver, which dominates latency for
+    // tiny args (the common case for scalar inputs and small lists).
     let arrow = !schema.is_null() && {
         let rs = CSchema::to_rust(schema);
         crate::arrow_ffi::is_arrow_table_schema(&rs)
@@ -790,7 +796,12 @@ pub unsafe extern "C" fn parse_cli_data_argument(
     if arrow {
         crate::packet_ffi::make_arrow_data_packet(relptr, schema)
     } else {
-        crate::packet_ffi::make_standard_data_packet(relptr, schema)
+        crate::packet_ffi::make_data_packet_auto(
+            result as *mut c_void,
+            relptr,
+            schema,
+            errmsg,
+        )
     }
 }
 
