@@ -1098,62 +1098,6 @@ fn print_result_c(
     process::clean_exit(0);
 }
 
-/// Print using Rust-native functions (kept for reference, currently unused).
-#[allow(dead_code)]
-fn print_result(
-    ptr: morloc_runtime::shm::AbsPtr,
-    schema: &morloc_runtime::Schema,
-    config: &NexusConfig,
-) {
-    use morloc_runtime::{json, mpack};
-
-    match config.output_format {
-        OutputFormat::Json => {
-            if config.print_flag {
-                if let Err(e) = json::pretty_print_voidstar(ptr, schema, config.keep_null) {
-                    eprintln!("Error: {}", e);
-                    process::clean_exit(1);
-                }
-            } else {
-                if let Err(e) = json::print_voidstar(ptr, schema, config.keep_null) {
-                    eprintln!("Error: {}", e);
-                    process::clean_exit(1);
-                }
-            }
-        }
-        OutputFormat::MessagePack => {
-            let mpk = match mpack::pack_with_schema(ptr, schema) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::clean_exit(1);
-                }
-            };
-            if config.print_flag {
-                // Hex dump for human-readable msgpack
-                for (i, byte) in mpk.iter().enumerate() {
-                    if i > 0 && i % 16 == 0 {
-                        println!();
-                    }
-                    print!("{:02x} ", byte);
-                }
-                println!();
-            } else {
-                use std::io::Write;
-                let stdout = std::io::stdout();
-                let mut handle = stdout.lock();
-                let _ = handle.write_all(&mpk);
-            }
-        }
-        OutputFormat::VoidStar | OutputFormat::Packet
-        | OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
-            eprintln!("Error: voidstar/packet/arrow/parquet/csv output not supported in Rust-native print path");
-            process::clean_exit(1);
-        }
-    }
-    process::clean_exit(0);
-}
-
 /// Execute a pure command by evaluating the expression via C library.
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     use morloc_runtime::schema::parse_schema;
