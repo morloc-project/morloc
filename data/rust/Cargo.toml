@@ -16,3 +16,12 @@ thiserror = "2"
 [profile.release]
 opt-level = 2
 lto = "thin"
+# Required: the per-eval SHM arena (eval_arena.rs) relies on Drop running
+# during stack unwind to release tracked SHM blocks on panic. Switching to
+# `panic = "abort"` would leak every block held by the active arena when a
+# worker thread panics. If a future release wants smaller binaries via abort,
+# also rework the arena to install a panic handler or use atexit-style cleanup.
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

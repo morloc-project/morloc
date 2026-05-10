@@ -1,0 +1,26 @@
+-- Daemon SHM-leak regression test program.
+--
+-- A nullary pure command that returns a non-trivial multi-block voidstar
+-- (a list of moderately-sized strings). Each call allocates ~10+ SHM
+-- blocks: the list wrapper, the element wrapper array, and one char
+-- block per element. Without the per-eval arena fix in eval_arena.rs
+-- those blocks accumulate forever in the daemon's volume; with it they
+-- are released at end-of-request scope.
+--
+-- Used by the [shm-leak] test group in run-tests.sh to assert that
+-- /dev/shm/morloc-<daemon-pid>-* total bytes do not grow unboundedly
+-- across many requests.
+
+module shm_leak (echoList)
+
+echoList = [ "alpha-twentyfourcharsxxxxx"
+           , "beta-twentyfourcharsxxxxxx"
+           , "gamma-twentyfourcharsxxxxx"
+           , "delta-twentyfourcharsxxxxx"
+           , "epsilon-twentyfourcharsxxx"
+           , "zeta-twentyfourcharsxxxxxx"
+           , "eta-twentyfourcharsxxxxxxx"
+           , "theta-twentyfourcharsxxxxx"
+           , "iota-twentyfourcharsxxxxxx"
+           , "kappa-twentyfourcharsxxxxx"
+           ] :: [Str]

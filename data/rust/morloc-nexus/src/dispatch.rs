@@ -1148,6 +1148,30 @@ fn print_result(
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     use morloc_runtime::schema::parse_schema;
 
+    // Open a per-eval SHM arena. Every shm::shmalloc that fires while
+    // this guard is alive (CLI arg ingress via msgpack/voidstar unpack,
+    // morloc_eval intermediates, the result tree) is tracked and
+    // released when the guard drops at the end of this function. Result
+    // serialization (print_result_c -> voidstar_to_json_string) reads
+    // SHM and writes a libc-allocated JSON string, which survives the
+    // drop. For one-shot CLI this is functionally a no-op (the process
+    // exits and atexit's shclose unlinks the volumes anyway), but the
+    // explicit lifetime keeps nexus and daemon symmetric and protects
+    // any future repeated-call use of run_pure_command.
+    //
+    // Note: error branches below call process::clean_exit(1) which does
+    // NOT run Rust destructors; the arena guard's drop is skipped on
+    // those paths. That's acceptable here because clean_exit also tears
+    // down the whole process via atexit shclose. No additional handling
+    // is needed.
+    let _arena = match morloc_runtime::eval_arena::enter() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Error: eval arena could not be opened: {}", e);
+            process::clean_exit(1);
+        }
+    };
+
     extern "C" {
         fn build_manifest_expr(
             json_str: *const std::ffi::c_char,

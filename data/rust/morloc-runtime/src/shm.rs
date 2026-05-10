@@ -391,8 +391,15 @@ pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     // Allow 0-size: round up to minimum block alignment.
     // Needed for nil type (width=0) in morloc_eval.
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
-    let _lock = ALLOC_MUTEX.lock().unwrap();
-    shmalloc_unlocked(size)
+    let ptr = {
+        let _lock = ALLOC_MUTEX.lock().unwrap();
+        shmalloc_unlocked(size)?
+    };
+    // If a per-eval arena is active on this thread, hand the block to it
+    // so guard-drop can shfree it. No-op otherwise (pool processes,
+    // unrelated callers). See eval_arena.rs for the boundary contract.
+    crate::eval_arena::record_if_active(ptr);
+    Ok(ptr)
 }
 
 /// Copy data into a new SHM allocation.
@@ -415,6 +422,10 @@ pub fn shcalloc(nmemb: usize, size: usize) -> Result<AbsPtr, MorlocError> {
 
 /// Free a shared memory block (decrement reference count).
 pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
+    // Remove this pointer from any active eval arena before freeing, so
+    // guard-drop won't attempt a second free. No-op if no arena is active
+    // or if `ptr` was never tracked.
+    crate::eval_arena::forget_if_active(ptr);
     let _lock = ALLOC_MUTEX.lock().unwrap();
     shfree_unlocked(ptr)
 }

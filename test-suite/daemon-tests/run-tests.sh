@@ -960,6 +960,103 @@ print('true' if any(pools) else 'false')
 fi
 
 # ======================================================================
+# Test Group 14: SHM-leak regression
+# ======================================================================
+#
+# Asserts that the daemon's per-call SHM allocations are released when
+# each request finishes (via the per-eval arena in eval_arena.rs). With
+# the leak in place, every call would accumulate ~500 bytes in the
+# daemon's /dev/shm/morloc-<pid>-* volumes; over 1000 calls the volume
+# would fill and additional 64 KB volumes would be created. With the
+# fix, blocks are reused and total /dev/shm bytes for the daemon stay
+# essentially flat.
+
+if should_run "shm-leak"; then
+    echo "${BOLD}[shm-leak] Daemon SHM-leak regression${RESET}"
+
+    SHM_LEAK_DIR=$(mktemp -d)
+    WORK_DIRS+=("$SHM_LEAK_DIR")
+    cp "$SCRIPT_DIR/shm-leak.loc" "$SHM_LEAK_DIR/"
+    if ! (cd "$SHM_LEAK_DIR" && morloc make -o nexus shm-leak.loc \
+            > /dev/null 2>"$SHM_LEAK_DIR/build.err"); then
+        echo "  COMPILE FAIL: shm-leak.loc"
+        cat "$SHM_LEAK_DIR/build.err"
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("shm-leak: compilation failed")
+    else
+        SHM_HTTP_PORT=$(pick_port)
+        start_daemon "$SHM_LEAK_DIR" --http-port "$SHM_HTTP_PORT"
+        wait_for_http "$SHM_HTTP_PORT" 10
+        SHM_DAEMON_PID=$LAST_DAEMON_PID
+
+        # Volumes are named morloc-<pid>-<job-hash>_<vol-idx>.
+        # Sum sizes across all volumes belonging to this daemon.
+        shm_size_for_pid() {
+            local pid="$1"
+            local total=0
+            local sz
+            for f in /dev/shm/morloc-${pid}-*; do
+                [ -e "$f" ] || continue
+                sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+                total=$((total + sz))
+            done
+            echo "$total"
+        }
+        shm_count_for_pid() {
+            ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
+        }
+
+        # One warm-up call so all per-pool / per-binding SHM that the
+        # daemon allocates lazily is in place before we snapshot.
+        curl -s -o /dev/null -X POST \
+            "http://127.0.0.1:${SHM_HTTP_PORT}/call/echoList" \
+            -H "Content-Type: application/json" -d '[]'
+
+        before_size=$(shm_size_for_pid "$SHM_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$SHM_DAEMON_PID")
+
+        N=1000
+        for i in $(seq 1 $N); do
+            curl -s -o /dev/null -X POST \
+                "http://127.0.0.1:${SHM_HTTP_PORT}/call/echoList" \
+                -H "Content-Type: application/json" -d '[]'
+        done
+
+        after_size=$(shm_size_for_pid "$SHM_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$SHM_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+
+        # Each echoList call allocates ~500 bytes of multi-block voidstar
+        # (list wrapper, element wrappers, char blocks). 1000 calls ~=
+        # 500 KB unfreed without the arena fix; with the fix, blocks are
+        # reused inside the existing 64 KB volume and delta_size ~ 0.
+        # Threshold of 200 KB cleanly distinguishes the two states while
+        # absorbing daemon bookkeeping noise.
+        THRESHOLD_BYTES=$((200 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} calls grow daemon /dev/shm < 200 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("shm-leak: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        fi
+
+        stop_daemon "$SHM_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
 # Results
 # ======================================================================
 

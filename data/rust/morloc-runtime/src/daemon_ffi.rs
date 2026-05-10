@@ -1025,39 +1025,60 @@ pub unsafe extern "C" fn daemon_dispatch(
 
         let mut cleanup_and_fail = false;
 
-        for i in 0..nargs {
-            let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
-            *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
-            if !err.is_null() {
+        // Open a per-eval SHM arena. Every shm::shmalloc that fires while
+        // this guard is alive (CLI arg ingress via msgpack/voidstar
+        // unpack, all morloc_eval intermediates, the final result tree)
+        // is tracked and released when the guard drops below. The result
+        // serializer voidstar_to_json_string reads SHM and writes a libc
+        // JSON string -- it MUST run before the guard drops, but the
+        // libc-allocated JSON survives the drop and gets stored on resp.
+        let arena_guard = match crate::eval_arena::enter() {
+            Ok(g) => Some(g),
+            Err(e) => {
                 (*resp).success = false;
-                (*resp).error = err;
+                let msg = CString::new(format!("eval arena error: {}", e))
+                    .unwrap_or_default();
+                (*resp).error = libc::strdup(msg.as_ptr());
                 cleanup_and_fail = true;
-                break;
+                None
             }
+        };
 
-            *arg_packets.add(i) = parse_cli_data_argument(
-                ptr::null_mut(),
-                *args.add(i),
-                *arg_schemas_arr.add(i),
-                &mut err,
-            );
-            if !err.is_null() {
-                (*resp).success = false;
-                (*resp).error = err;
-                cleanup_and_fail = true;
-                break;
-            }
+        if !cleanup_and_fail {
+            for i in 0..nargs {
+                let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
+                *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
+                if !err.is_null() {
+                    (*resp).success = false;
+                    (*resp).error = err;
+                    cleanup_and_fail = true;
+                    break;
+                }
 
-            *arg_voidstars.add(i) = get_morloc_data_packet_value(
-                *arg_packets.add(i),
-                *arg_schemas_arr.add(i),
-                &mut err,
-            );
-            if !err.is_null() {
-                (*resp).success = false;
-                (*resp).error = err;
-                cleanup_and_fail = true;
-                break;
+                *arg_packets.add(i) = parse_cli_data_argument(
+                    ptr::null_mut(),
+                    *args.add(i),
+                    *arg_schemas_arr.add(i),
+                    &mut err,
+                );
+                if !err.is_null() {
+                    (*resp).success = false;
+                    (*resp).error = err;
+                    cleanup_and_fail = true;
+                    break;
+                }
+
+                *arg_voidstars.add(i) = get_morloc_data_packet_value(
+                    *arg_packets.add(i),
+                    *arg_schemas_arr.add(i),
+                    &mut err,
+                );
+                if !err.is_null() {
+                    (*resp).success = false;
+                    (*resp).error = err;
+                    cleanup_and_fail = true;
+                    break;
+                }
             }
         }
 
@@ -1095,6 +1116,14 @@ pub unsafe extern "C" fn daemon_dispatch(
                 free_schema(return_schema);
             }
         }
+
+        // Drop the arena guard explicitly here, before the libc cleanup
+        // loop below. This is the point at which all SHM blocks allocated
+        // for this request -- args, eval intermediates, result tree --
+        // are returned to the volume's free list. The libc cleanup that
+        // follows is independent (it frees the outer arrays for packets,
+        // schemas, and the voidstar pointer array).
+        drop(arena_guard);
 
         // Cleanup
         for i in 0..nargs {

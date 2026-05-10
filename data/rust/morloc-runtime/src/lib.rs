@@ -22,6 +22,7 @@ pub mod ipc_ffi;
 pub mod http_ffi;
 pub mod slurm_ffi;
 pub mod manifest_ffi;
+pub mod eval_arena;
 pub mod eval_ffi;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
