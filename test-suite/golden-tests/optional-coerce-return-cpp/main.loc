@@ -1,0 +1,17 @@
+module main
+  ( testReturn
+  , optOfPure
+  )
+
+type Cpp => Int = "int"
+
+-- Return-position coercion: function body has type Int, declared return is ?Int.
+pCoerce :: Int -> ?Int
+pCoerce x = x
+
+testReturn :: ?Int
+testReturn = pCoerce 7
+
+-- Top-level pure binding: declared ?Int, RHS is a bare Int literal.
+optOfPure :: ?Int
+optOfPure = 42

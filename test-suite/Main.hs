@@ -444,6 +444,8 @@ main = do
         golden "optional-coerce-py" "optional-coerce-py"
       , golden "optional-coerce-cpp" "optional-coerce-cpp"
       , golden "optional-coerce-interop" "optional-coerce-interop"
+      , golden "optional-coerce-return-py" "optional-coerce-return-py"
+      , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
       , -- effect coercion tests (a -> <IO> a)
         golden "effect-coerce-py" "effect-coerce-py"
       , golden "effect-coerce-cpp" "effect-coerce-cpp"
