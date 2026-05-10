@@ -386,18 +386,31 @@ pub fn shclose() -> Result<(), MorlocError> {
     Ok(())
 }
 
-/// Allocate `size` bytes from shared memory.
+/// Allocate at least `size` bytes from shared memory and return a pointer
+/// to the start of the data region.
+///
+/// **Size contract.** The returned block always has at least `BLOCK_ALIGN`
+/// usable bytes; requests for any size in `0..=BLOCK_ALIGN` all yield a
+/// `BLOCK_ALIGN`-byte block. Larger requests are rounded up to a multiple
+/// of `BLOCK_ALIGN`. Callers that ship "zero bytes of payload" (e.g. nil
+/// values, empty arrays whose width comes from `schema.width == 0`) get a
+/// real, freeable block back -- there is no zero-byte sentinel. This is
+/// load-bearing: the eval pipeline (`morloc_eval_r` shcalloc'ing the
+/// top-level wrapper at width 0 for nil), `unpack_with_schema`, and
+/// `read_binary` all rely on receiving a non-null pointer for nil-shaped
+/// allocations.
+///
+/// **Lifetime contract.** Every successful return must be paired with
+/// either an `shfree` or, when active on the current thread, registration
+/// in the per-eval arena (which auto-shfrees at scope drop). The arena
+/// hook fires here unconditionally on success; callers outside the arena
+/// see no behavioral difference.
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
-    // Allow 0-size: round up to minimum block alignment.
-    // Needed for nil type (width=0) in morloc_eval.
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
     let ptr = {
         let _lock = ALLOC_MUTEX.lock().unwrap();
         shmalloc_unlocked(size)?
     };
-    // If a per-eval arena is active on this thread, hand the block to it
-    // so guard-drop can shfree it. No-op otherwise (pool processes,
-    // unrelated callers). See eval_arena.rs for the boundary contract.
     crate::eval_arena::record_if_active(ptr);
     Ok(ptr)
 }
