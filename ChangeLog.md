@@ -3,6 +3,7 @@
 
  * Add support for all intrinsics to pure morloc code
  * Stricter rule for conflicting instances (same lang, diff source)
+ * Fix bug in nested record patterns
 
 Strings
  * accept NUL as \000 instead of emitting a raw NUL byte

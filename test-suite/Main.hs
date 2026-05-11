@@ -309,6 +309,7 @@ main = do
       , golden "records-nested" "records-nested"
       , golden "records-alias" "records-alias"
       , golden "record-literal-ordering" "record-literal-ordering"
+      , golden "record-nested-getter-chain" "record-nested-getter-chain"
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"

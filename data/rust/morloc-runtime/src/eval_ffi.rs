@@ -240,6 +240,14 @@ type BndVars<'a> = HashMap<&'a str, AbsPtr>;
 
 /// Convert key-based pattern selectors to index-based using the schema's key names.
 ///
+/// Walks top-down so that each child pattern is recursed with the schema
+/// it actually corresponds to (`schema.parameters[converted_index]`),
+/// rather than with the schema parameter at the *pattern's* positional
+/// index. The latter was the pre-fix behaviour and silently mismatched
+/// child schemas in chained nested patterns like `.a.b r`, dereferencing
+/// a null `keys` pointer when the wrong child schema was a primitive
+/// (e.g. Str) whose `keys` field is null.
+///
 /// # Safety
 /// `pattern` and `schema` must be valid, non-null pointers to C-allocated structures.
 /// `schema` keys array must have `schema.size` entries.
@@ -250,15 +258,10 @@ unsafe fn convert_keys_to_indices(
     let pat = &mut *pattern;
     let n_params = (*schema).size;
 
-    if n_params > 1 {
-        for i in 0..pat.size {
-            let child_schema = *(*schema).parameters.add(i);
-            convert_keys_to_indices(*pat.selectors.add(i), child_schema)?;
-        }
-    }
-
+    // Convert THIS level's keys to indices first, so child recursion below
+    // can pick the correct child schema from `schema.parameters`.
     if pat.ptype == MorlocPatternType::ByKey {
-        let indices = libc::calloc(n_params, std::mem::size_of::<usize>()) as *mut usize;
+        let indices = libc::calloc(pat.size, std::mem::size_of::<usize>()) as *mut usize;
         for i in 0..pat.size {
             let key = CStr::from_ptr(*pat.fields.keys.add(i)).to_str().unwrap_or("");
             let mut found = false;
@@ -279,6 +282,22 @@ unsafe fn convert_keys_to_indices(
         pat.ptype = MorlocPatternType::ByIndex;
         libc::free(pat.fields.keys as *mut c_void);
         pat.fields.indices = indices;
+    }
+
+    // Now recurse into each child using the *converted* index to pick
+    // the right child schema (instead of `parameters.add(i)`, which would
+    // index by pattern position).
+    if pat.ptype == MorlocPatternType::ByIndex {
+        for i in 0..pat.size {
+            let idx = *pat.fields.indices.add(i);
+            if idx >= n_params {
+                return Err(MorlocError::Other(format!(
+                    "Pattern child index {} out of range for schema size {}", idx, n_params
+                )));
+            }
+            let child_schema = *(*schema).parameters.add(idx);
+            convert_keys_to_indices(*pat.selectors.add(i), child_schema)?;
+        }
     }
 
     Ok(())

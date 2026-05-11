@@ -1,0 +1,64 @@
+-- C2 regression: chained nested record getter `.a.b r` segfaulted
+-- the nexus pattern evaluator. The bug was in convert_keys_to_indices
+-- (eval_ffi.rs): it recursed into child patterns using the schema
+-- parameter at the *pattern's* positional index instead of the
+-- converted-key index. For `.address.city r`, the inner sub-pattern
+-- ("city") was paired with the schema of field 0 ("name", a Str
+-- whose `keys` pointer is null) and dereferenced that null pointer.
+--
+-- This test exercises:
+--   - the original 2-level chain (.address.city)
+--   - a 3-level chain (.a.b.c)
+--   - off-axis keys (chain skips the first field at each level, so
+--     the buggy positional indexing would consistently mismatch)
+--   - chain ending in a non-leftmost field
+--   - the working `let` form for regression equivalence
+--   - chained getter as part of a tuple expression
+module main
+  ( deepCity
+  , deepCityLet
+  , deepZip
+  , triple
+  , tripleLet
+  , combo
+  )
+
+record Address  = Address  { city :: Str, zip :: Str }
+record Resident = Resident { name :: Str, address :: Address }
+
+-- Three-level: each declaration intentionally puts the "next" field
+-- second so the buggy positional indexing would mismatch at every step.
+record Inner   = Inner   { ifirst :: Int, ival :: Int }
+record Middle  = Middle  { mfirst :: Int, inner :: Inner }
+record Outer   = Outer   { ofirst :: Int, middle :: Middle }
+
+-- 2-level chain (the original tester repro).
+deepCity :: Resident -> Str
+deepCity r = .address.city r
+
+-- Equivalent via intermediate let; baseline that always worked.
+deepCityLet :: Resident -> Str
+deepCityLet r = let a = .address r in .city a
+
+-- 2-level chain ending in a non-leftmost field (.address.zip, where
+-- "zip" is the second field of Address).
+deepZip :: Resident -> Str
+deepZip r = .address.zip r
+
+-- 3-level chain — every step picks the second field, so the buggy
+-- positional indexing would point at the first field's schema at
+-- every level and segfault when descending into it.
+triple :: Outer -> Int
+triple o = .middle.inner.ival o
+
+-- 3-level via let-decomposition.
+tripleLet :: Outer -> Int
+tripleLet o =
+  let m = .middle o in
+  let i = .inner m in
+  .ival i
+
+-- Tuple combining all three forms — exercises the pattern evaluator
+-- both in argument position and as part of a larger expression.
+combo :: Resident -> Outer -> (Str, Str, Int)
+combo r o = (.address.city r, .address.zip r, .middle.inner.ival o)
