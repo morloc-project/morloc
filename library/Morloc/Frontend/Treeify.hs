@@ -274,8 +274,13 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       return (namer'', AppS e' es')
     f namer UniE = return (namer, UniS)
     f namer NullE = return (namer, NullS)
-    f namer (RealE x) = return (namer, RealS x)
-    f namer (IntE x) = return (namer, IntS x)
+    -- gi0 is the literal's own ExprI index (its source-map entry was
+    -- populated by Desugar.freshIdSpan and is preserved across reindex
+    -- via copyState). The wrapping AnnoS uses a different index when
+    -- this literal is inlined as a top-level term body (Treeify.hs:248
+    -- termExprToAnnoS), so carry the literal's own index explicitly.
+    f namer (RealE x) = return (namer, RealS gi0 x)
+    f namer (IntE x) = return (namer, IntS gi0 x)
     f namer (LogE x) = return (namer, LogS x)
     f namer (StrE x) = return (namer, StrS x)
     f namer (PatE p) = return (namer, ExeS (PatCall p))

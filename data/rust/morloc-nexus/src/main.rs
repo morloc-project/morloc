@@ -198,6 +198,17 @@ fn main() {
             process::clean_exit(1);
         }
 
+        // Install the recovery context so the pool_check_fn callback can
+        // rebuild syscmds with a fresh basename and respawn pools after a
+        // pool crash. Done before daemon_run so the callback (invoked from
+        // the daemon's main loop) sees a populated context.
+        process::install_recovery_context(
+            sockets.clone(),
+            manifest.pools.clone(),
+            tmpdir.clone(),
+            shm_basename.clone(),
+        );
+
         // Build DaemonConfig and call daemon_run in libmorloc.so
         run_daemon(&config, &mut sockets, &shm_basename, &payload);
         process::clean_exit(0);
@@ -205,6 +216,37 @@ fn main() {
 
     // Normal CLI mode
     if config.packet_path.is_none() {
+        // Redirect stdout to the file given via -o/--output-file. Done
+        // at the fd level so the redirect applies uniformly to every
+        // output path (Rust println! through json.rs, raw byte writes
+        // for mpk, C-side printf in the Arrow JSON path, etc.) without
+        // changing each print site. clean_exit flushes both Rust and
+        // libc stdout before std::process::exit.
+        //
+        // Scoped to normal CLI dispatch only: call-packet mode already
+        // honors output_path internally (writes a sibling .mpk file
+        // via write_atomic) and must not have its stdout hijacked.
+        if let Some(ref path) = config.output_path {
+            use std::os::unix::io::AsRawFd;
+            match std::fs::File::create(path) {
+                Ok(f) => {
+                    let rc = unsafe { libc::dup2(f.as_raw_fd(), libc::STDOUT_FILENO) };
+                    if rc == -1 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!("Error: cannot redirect stdout to '{}': {}", path, err);
+                        process::clean_exit(1);
+                    }
+                    // Drop the File handle so the original fd is closed;
+                    // the dup2'd fd 1 keeps the file alive.
+                    drop(f);
+                }
+                Err(e) => {
+                    eprintln!("Error: cannot open output file '{}': {}", path, e);
+                    process::clean_exit(1);
+                }
+            }
+        }
+
         if single_command {
             // Single-command: dispatch directly to the command, no subcommand lookup
             // Allow optional command name prefix for backward compatibility
@@ -329,7 +371,7 @@ fn run_daemon(
             .map_or(ptr::null(), |c| c.as_ptr()),
         tcp_port: config.tcp_port.unwrap_or(0),
         http_port: config.http_port.unwrap_or(0),
-        pool_check_fn: ptr::null(),
+        pool_check_fn: process::pool_check_and_recover_ptr(),
         pool_alive_fn: process::pool_is_alive_ptr(),
         n_pools,
         eval_timeout: config.eval_timeout,

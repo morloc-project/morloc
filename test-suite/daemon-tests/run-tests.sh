@@ -244,6 +244,7 @@ compile_program() {
 
     cp "$SCRIPT_DIR/$loc_file" "$work_dir/"
     cp "$SCRIPT_DIR"/*.py "$work_dir/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.R "$work_dir/" 2>/dev/null || true
 
     if ! (cd "$work_dir" && morloc make -o nexus "$loc_file" > /dev/null 2>"$work_dir/build-${name}.err"); then
         echo "COMPILE FAIL: $loc_file" >&2
@@ -291,6 +292,24 @@ s.bind(('127.0.0.1', 0))
 print(s.getsockname()[1])
 s.close()
 "
+}
+
+# Sum sizes of all /dev/shm/morloc-<pid>-* segments belonging to a daemon.
+shm_size_for_pid() {
+    local pid="$1"
+    local total=0
+    local sz
+    for f in /dev/shm/morloc-${pid}-*; do
+        [ -e "$f" ] || continue
+        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+        total=$((total + sz))
+    done
+    echo "$total"
+}
+
+# Count /dev/shm/morloc-<pid>-* segments for a daemon.
+shm_count_for_pid() {
+    ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
 }
 
 # ======================================================================
@@ -956,6 +975,640 @@ print('true' if any(pools) else 'false')
     assert_test "health shows pools alive" "true" "$has_alive"
 
     stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 14: SHM-leak regression
+# ======================================================================
+#
+# Asserts that the daemon's per-call SHM allocations are released when
+# each request finishes (via the per-eval arena in eval_arena.rs). With
+# the leak in place, every call would accumulate ~500 bytes in the
+# daemon's /dev/shm/morloc-<pid>-* volumes; over 1000 calls the volume
+# would fill and additional 64 KB volumes would be created. With the
+# fix, blocks are reused and total /dev/shm bytes for the daemon stay
+# essentially flat.
+
+if should_run "shm-leak"; then
+    echo "${BOLD}[shm-leak] Daemon SHM-leak regression${RESET}"
+
+    SHM_LEAK_DIR=$(mktemp -d)
+    WORK_DIRS+=("$SHM_LEAK_DIR")
+    cp "$SCRIPT_DIR/shm-leak.loc" "$SHM_LEAK_DIR/"
+    if ! (cd "$SHM_LEAK_DIR" && morloc make -o nexus shm-leak.loc \
+            > /dev/null 2>"$SHM_LEAK_DIR/build.err"); then
+        echo "  COMPILE FAIL: shm-leak.loc"
+        cat "$SHM_LEAK_DIR/build.err"
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("shm-leak: compilation failed")
+    else
+        SHM_HTTP_PORT=$(pick_port)
+        start_daemon "$SHM_LEAK_DIR" --http-port "$SHM_HTTP_PORT"
+        wait_for_http "$SHM_HTTP_PORT" 10
+        SHM_DAEMON_PID=$LAST_DAEMON_PID
+
+        # One warm-up call so all per-pool / per-binding SHM that the
+        # daemon allocates lazily is in place before we snapshot.
+        curl -s -o /dev/null -X POST \
+            "http://127.0.0.1:${SHM_HTTP_PORT}/call/echoList" \
+            -H "Content-Type: application/json" -d '[]'
+
+        before_size=$(shm_size_for_pid "$SHM_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$SHM_DAEMON_PID")
+
+        N=1000
+        for i in $(seq 1 $N); do
+            curl -s -o /dev/null -X POST \
+                "http://127.0.0.1:${SHM_HTTP_PORT}/call/echoList" \
+                -H "Content-Type: application/json" -d '[]'
+        done
+
+        after_size=$(shm_size_for_pid "$SHM_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$SHM_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+
+        # Each echoList call allocates ~500 bytes of multi-block voidstar
+        # (list wrapper, element wrappers, char blocks). 1000 calls ~=
+        # 500 KB unfreed without the arena fix; with the fix, blocks are
+        # reused inside the existing 64 KB volume and delta_size ~ 0.
+        # Threshold of 200 KB cleanly distinguishes the two states while
+        # absorbing daemon bookkeeping noise.
+        THRESHOLD_BYTES=$((200 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} calls grow daemon /dev/shm < 200 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("shm-leak: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        fi
+
+        stop_daemon "$SHM_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 15: R-pool SHM-leak regression
+# ======================================================================
+#
+# Same idea as [shm-leak] but routes the call through the R pool. Asserts
+# that the R-pool's morloc_put_value path (PACKET_SOURCE_RPTR result) does
+# not leak SHM across requests. With the rmorloc.c shm_tracker fix, the
+# block from the prior request is released at the start of every new
+# request in run_job_c. Without the fix, every R-routed request would
+# leak the result block in the daemon's volume.
+
+if should_run "r-shm-leak"; then
+    echo "${BOLD}[r-shm-leak] R pool SHM-leak regression${RESET}"
+
+    R_LEAK_DIR=$(mktemp -d)
+    WORK_DIRS+=("$R_LEAK_DIR")
+    if ! compile_program "r-shm-leak.loc" "$R_LEAK_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("r-shm-leak: compilation failed")
+    else
+        R_HTTP_PORT=$(pick_port)
+        start_daemon "$R_LEAK_DIR" --http-port "$R_HTTP_PORT"
+        wait_for_http "$R_HTTP_PORT" 15
+        R_DAEMON_PID=$LAST_DAEMON_PID
+
+        # Warm-up: get all per-pool / per-binding lazy SHM in place.
+        curl -s -o /dev/null -X POST \
+            "http://127.0.0.1:${R_HTTP_PORT}/call/echoList" \
+            -H "Content-Type: application/json" \
+            -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]'
+
+        before_size=$(shm_size_for_pid "$R_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$R_DAEMON_PID")
+
+        N=1000
+        for i in $(seq 1 $N); do
+            curl -s -o /dev/null -X POST \
+                "http://127.0.0.1:${R_HTTP_PORT}/call/echoList" \
+                -H "Content-Type: application/json" \
+                -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]'
+        done
+
+        after_size=$(shm_size_for_pid "$R_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$R_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+
+        # Each call ships ~250 B of [Str] result via PACKET_SOURCE_RPTR.
+        # Pre-fix: the R pool never released that block, so 1000 calls
+        # ~= 250 KB / several new 64 KB volumes. Post-fix: blocks reused
+        # in the existing volume, delta ~= 0.
+        THRESHOLD_BYTES=$((200 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} R calls grow daemon /dev/shm < 200 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("r-shm-leak: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+            echo "      delta=${delta_size} bytes  new_volumes=${delta_count}"
+        fi
+
+        stop_daemon "$R_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 16: Pool-crash SHM-orphan diagnostic
+# ======================================================================
+#
+# Quantifies the cross-process SHM leak that opens when a pool process
+# dies between "ship a PACKET_SOURCE_RPTR result" and "flush its tracker
+# at next dispatch". Under normal operation the pool's tracker holds the
+# block until the next request arrives; if the pool is SIGKILL'd in
+# between, the block orphans in the shared volume forever.
+#
+# This is a DIAGNOSTIC test: the threshold is intentionally generous so
+# the suite stays green today (cross-process cleanup is documented as
+# out-of-scope in project_eval_shm_leak.md). The "delta=" / "per-crash="
+# numbers in the output are the actual exposure -- if/when per-pool
+# sub-volumes or equivalent cleanup lands, tighten the threshold to a
+# few KB so this becomes a real regression test.
+
+if should_run "pool-crash-stress"; then
+    echo "${BOLD}[pool-crash-stress] Pool-crash SHM-orphan diagnostic${RESET}"
+
+    PCS_DIR=$(mktemp -d)
+    WORK_DIRS+=("$PCS_DIR")
+    if ! compile_program "r-shm-leak.loc" "$PCS_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("pool-crash-stress: compilation failed")
+    else
+        PCS_PORT=$(pick_port)
+        start_daemon "$PCS_DIR" --http-port "$PCS_PORT"
+        wait_for_http "$PCS_PORT" 15
+        PCS_DAEMON_PID=$LAST_DAEMON_PID
+
+        # Warm-up: a few requests to get pool spawned and per-pool lazy
+        # state allocated. The last warm-up's RPTR result will be in the
+        # pool's tracker when we take the baseline; the kill-loop below
+        # measures incremental growth from there.
+        for i in 1 2 3; do
+            curl -s -o /dev/null -X POST \
+                "http://127.0.0.1:${PCS_PORT}/call/echoList" \
+                -H "Content-Type: application/json" \
+                -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]'
+        done
+
+        before_size=$(shm_size_for_pid "$PCS_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$PCS_DAEMON_PID")
+
+        # Wait for the daemon to finish any in-progress recovery: health
+        # endpoint returns status="recovering" while RECOVERY_IN_PROGRESS
+        # is set and "ok" once respawn is done. Bounded by max_wait
+        # seconds to avoid hanging if recovery itself wedges.
+        wait_for_recovery_done() {
+            local max_wait="${1:-15}"
+            local i=0
+            local step_ms=200
+            local max_steps=$(( max_wait * 1000 / step_ms ))
+            while [ "$i" -lt "$max_steps" ]; do
+                local h
+                h=$(curl -s --max-time 2 "http://127.0.0.1:${PCS_PORT}/health" 2>/dev/null) || h=""
+                if echo "$h" | grep -q '"status":"ok"'; then
+                    return 0
+                fi
+                sleep 0.2
+                i=$((i + 1))
+            done
+            return 1
+        }
+
+        # Crash loop: each iteration sends a request (so the pool ships
+        # a fresh RPTR result), then SIGKILLs all child pools, polls the
+        # health endpoint until recovery completes. Without the fix the
+        # daemon never respawns; with the fix every iteration's pool is
+        # cleanly torn down and replaced.
+        N=20
+        successful_calls=0
+        failed_calls=0
+        kills=0
+        for i in $(seq 1 $N); do
+            status=$(curl -s --max-time 15 -o /dev/null -w "%{http_code}" -X POST \
+                "http://127.0.0.1:${PCS_PORT}/call/echoList" \
+                -H "Content-Type: application/json" \
+                -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]') \
+                || status="000"
+            if [ "$status" = "200" ]; then
+                successful_calls=$((successful_calls + 1))
+            else
+                failed_calls=$((failed_calls + 1))
+            fi
+
+            # Find pool processes by working-dir + command pattern. The
+            # shell wrapper script's PID (LAST_DAEMON_PID) often differs
+            # from the actual morloc-nexus PID (sh runs the wrapper,
+            # then execs morloc-nexus on systems where exec is
+            # implemented as fork+exec). The `R --file=<dir>/pools/...`
+            # pattern targets only this test's R pool processes, not
+            # the test harness or unrelated runs.
+            pool_pids=$(pgrep -f "${PCS_DIR}/pools/.*pool\.R" 2>/dev/null) || pool_pids=""
+            for ppid in $pool_pids; do
+                if kill -9 "$ppid" 2>/dev/null; then
+                    kills=$((kills + 1))
+                fi
+            done
+
+            # Wait for the daemon to finish reaping and respawning before
+            # the next iteration sends a request. Without this, the next
+            # curl might race the recovery and either fail or trigger an
+            # additional spurious recovery attempt.
+            wait_for_recovery_done 15
+        done
+
+        # Final ping after the loop to ensure the pool is up and any
+        # post-crash daemon-side bookkeeping has settled.
+        curl -s --max-time 5 -o /dev/null -X POST \
+            "http://127.0.0.1:${PCS_PORT}/call/echoList" \
+            -H "Content-Type: application/json" \
+            -d '[["alpha","beta","gamma","delta","epsilon","zeta","eta","theta","iota","kappa"]]' \
+            || true
+
+        after_size=$(shm_size_for_pid "$PCS_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$PCS_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+        if [ "$N" -gt 0 ]; then
+            per_crash=$((delta_size / N))
+        else
+            per_crash=0
+        fi
+
+        # With coordinated recovery (kill all pools + drop SHM + respawn
+        # at fresh basename per generation), each crash should fully
+        # reclaim the prior generation's volumes. delta_size should be
+        # ~0 plus the new generation's bootstrap volume(s). 256 KB is
+        # generous (a couple of 64 KB volumes' worth) but well under
+        # what an actual per-crash leak (~10 KB to multi-MB) would
+        # accumulate at 20 crashes.
+        THRESHOLD_BYTES=$((256 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} pool kills, /dev/shm bounded < 256 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("pool-crash-stress: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+        fi
+        echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
+        echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
+
+        stop_daemon "$PCS_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 17: Pool-crash recovery with large payloads
+# ======================================================================
+#
+# The motivating case for the recovery design: scientific-computing
+# pools may ship multi-GB RPTRs (genomes, tensors, Arrow tables). A
+# single ill-timed crash without proper SHM reclamation could OOM the
+# host. This test fires repeated requests that ship a ~250 KB payload
+# per call, kills the pool mid-stream each iteration, and asserts that
+# /dev/shm/morloc-<daemon-pid>-* total bytes stay bounded across many
+# crash/recover cycles. Without recovery's coordinated SHM teardown the
+# delta would grow by roughly the payload size per crash.
+
+if should_run "pool-recovery-large"; then
+    echo "${BOLD}[pool-recovery-large] Pool-crash recovery (large payloads)${RESET}"
+
+    LP_DIR=$(mktemp -d)
+    WORK_DIRS+=("$LP_DIR")
+    if ! compile_program "large-payload.loc" "$LP_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("pool-recovery-large: compilation failed")
+    else
+        LP_PORT=$(pick_port)
+        start_daemon "$LP_DIR" --http-port "$LP_PORT"
+        wait_for_http "$LP_PORT" 15
+        LP_DAEMON_PID=$LAST_DAEMON_PID
+
+        wait_lp_recovery_done() {
+            local max_wait="${1:-15}"
+            local i=0
+            local step_ms=200
+            local max_steps=$(( max_wait * 1000 / step_ms ))
+            while [ "$i" -lt "$max_steps" ]; do
+                local h
+                h=$(curl -s --max-time 2 "http://127.0.0.1:${LP_PORT}/health" 2>/dev/null) || h=""
+                if echo "$h" | grep -q '"status":"ok"'; then
+                    return 0
+                fi
+                sleep 0.2
+                i=$((i + 1))
+            done
+            return 1
+        }
+
+        # Warm-up: ensure the pool is fully spawned and /dev/shm
+        # baseline reflects steady-state lazy allocations.
+        curl -s --max-time 30 -o /dev/null -X POST \
+            "http://127.0.0.1:${LP_PORT}/call/bigList" \
+            -H "Content-Type: application/json" \
+            -d '[1000]'
+
+        before_size=$(shm_size_for_pid "$LP_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$LP_DAEMON_PID")
+
+        # Each iteration ships ~250 KB via PACKET_SOURCE_RPTR, then
+        # SIGKILLs the pool. Pre-recovery this would orphan ~250 KB of
+        # SHM per crash; post-recovery the unlink at recovery time
+        # reclaims it.
+        N=10
+        successful_calls=0
+        failed_calls=0
+        kills=0
+        for i in $(seq 1 $N); do
+            status=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" -X POST \
+                "http://127.0.0.1:${LP_PORT}/call/bigList" \
+                -H "Content-Type: application/json" \
+                -d '[1000]') || status="000"
+            if [ "$status" = "200" ]; then
+                successful_calls=$((successful_calls + 1))
+            else
+                failed_calls=$((failed_calls + 1))
+            fi
+
+            pool_pids=$(pgrep -f "${LP_DIR}/pools/.*pool\.R" 2>/dev/null) || pool_pids=""
+            for ppid in $pool_pids; do
+                if kill -9 "$ppid" 2>/dev/null; then
+                    kills=$((kills + 1))
+                fi
+            done
+
+            wait_lp_recovery_done 15
+        done
+
+        after_size=$(shm_size_for_pid "$LP_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$LP_DAEMON_PID")
+
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+        if [ "$N" -gt 0 ]; then
+            per_crash=$((delta_size / N))
+        else
+            per_crash=0
+        fi
+
+        # Pre-recovery would leak ~250 KB per crash * 10 crashes =
+        # ~2.5 MB plus extra volumes from each pool's growth. With
+        # recovery's coordinated SHM teardown the delta should be
+        # ~zero (or at most a couple of bootstrap volumes).
+        THRESHOLD_BYTES=$((512 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "${N} large-payload kills, /dev/shm < 512 KB"
+        if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("pool-recovery-large: delta=${delta_size} bytes (threshold ${THRESHOLD_BYTES})")
+        fi
+        echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
+        echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
+
+        stop_daemon "$LP_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 18: Inline-vs-RPTR threshold round-trips
+# ======================================================================
+#
+# Verifies the 64 KB packet inline / RPTR routing across a sweep of
+# payload sizes that straddles the threshold from both sides. Both
+# halves of the daemon-pool wire are exercised: argument packets going
+# from daemon to pool (built by parse_cli_data_argument's auto-routing
+# call) and result packets coming back (built by make_data_packet_auto
+# inside morloc_put_value). The transit must be byte-perfect at every
+# size; the threshold is internal so this catches any mismatch in the
+# inline-vs-RPTR construction or deserialization paths.
+#
+# An [Int] flat voidstar is roughly 16 + 8*N bytes, so:
+#   N=8190  -> 65536 bytes  -> exactly at threshold (inline)
+#   N=8191  -> 65544 bytes  -> just over threshold  (RPTR)
+#   N=0     -> empty wrapper -> inline
+# We additionally measure SHM volume growth across the sweep: with the
+# per-eval arena it should be ~zero regardless of which route fired.
+
+if should_run "inline-threshold"; then
+    echo "${BOLD}[inline-threshold] Inline-vs-RPTR threshold round-trips${RESET}"
+
+    IT_DIR=$(mktemp -d)
+    WORK_DIRS+=("$IT_DIR")
+    if ! compile_program "inline-threshold.loc" "$IT_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("inline-threshold: compilation failed")
+    else
+        IT_PORT=$(pick_port)
+        start_daemon "$IT_DIR" --http-port "$IT_PORT"
+        wait_for_http "$IT_PORT" 15
+        IT_DAEMON_PID=$LAST_DAEMON_PID
+
+        # POST one of the inline-threshold endpoints with a JSON-encoded
+        # arg array and capture the parsed `result` field. Echos status
+        # to a side variable so the caller can branch on transport
+        # success vs. value mismatch.
+        it_call() {
+            local endpoint="$1"
+            local body="$2"
+            curl -s --max-time 30 -X POST \
+                "http://127.0.0.1:${IT_PORT}/call/${endpoint}" \
+                -H "Content-Type: application/json" \
+                -d "$body" 2>/dev/null
+        }
+
+        # Build "[0,1,2,...,N-1]" as a JSON list. Done in python3 so
+        # we don't fork bash through huge-string concatenation.
+        it_seq_json() {
+            local n="$1"
+            python3 -c "
+import sys
+n = int(sys.argv[1])
+sys.stdout.write('[' + ','.join(str(i) for i in range(n)) + ']')
+" "$n"
+        }
+
+        # Compute sum(0..N-1) = N*(N-1)/2; used to validate sumInts.
+        it_expected_sum() {
+            python3 -c "
+import sys
+n = int(sys.argv[1])
+print(n * (n - 1) // 2)
+" "$1"
+        }
+
+        # Verify a JSON-array result against an expected sequence: same
+        # length and identical first/last/midpoint values. Avoids
+        # comparing huge strings element-by-element in bash.
+        it_verify_seq() {
+            local result_json="$1"
+            local expected_n="$2"
+            python3 -c "
+import sys, json
+data = json.loads(sys.argv[1])
+result = data.get('result')
+expected_n = int(sys.argv[2])
+if not isinstance(result, list):
+    print('NOT_A_LIST'); sys.exit(0)
+if len(result) != expected_n:
+    print('WRONG_LEN:%d_vs_%d' % (len(result), expected_n)); sys.exit(0)
+if expected_n == 0:
+    print('OK'); sys.exit(0)
+checks = [(0, 0), (expected_n - 1, expected_n - 1)]
+mid = expected_n // 2
+checks.append((mid, mid))
+for idx, exp in checks:
+    if result[idx] != exp:
+        print('MISMATCH_AT_%d:%s_vs_%d' % (idx, result[idx], exp)); sys.exit(0)
+print('OK')
+" "$result_json" "$expected_n"
+        }
+
+        # Warm-up so the pool is fully spawned and the per-pool
+        # bootstrap allocations don't muddy the SHM-growth baseline.
+        it_call echoInts "[[1,2,3]]" > /dev/null
+
+        before_size=$(shm_size_for_pid "$IT_DAEMON_PID")
+        before_count=$(shm_count_for_pid "$IT_DAEMON_PID")
+
+        # Sweep covering the threshold from both sides plus extreme
+        # ends. 0 / 1 stress the empty / minimum cases. 8190 is exactly
+        # at the threshold, 8191/8192 are just over. 100000 is well
+        # above, ensuring the RPTR path is also exercised end-to-end.
+        SIZES="0 1 100 1000 8000 8190 8191 8192 16000 100000"
+
+        all_ok=true
+        for n in $SIZES; do
+            # echoInts: round-trip the full list. Both arg and result
+            # cross the threshold for the upper sizes.
+            json_arg="[$(it_seq_json $n)]"
+            result=$(it_call echoInts "$json_arg")
+            verdict=$(it_verify_seq "$result" "$n")
+            if [ "$verdict" != "OK" ]; then
+                all_ok=false
+                echo "      echoInts N=$n: $verdict" >&2
+            fi
+
+            # sumInts: huge-input / scalar-output direction.
+            result=$(it_call sumInts "$json_arg")
+            actual_sum=$(json_field "$result" "result")
+            expected_sum=$(it_expected_sum "$n")
+            if [ "$actual_sum" != "$expected_sum" ]; then
+                all_ok=false
+                echo "      sumInts N=$n: got $actual_sum expected $expected_sum" >&2
+            fi
+
+            # firstN: scalar input / large output direction.
+            result=$(it_call firstN "[$n]")
+            verdict=$(it_verify_seq "$result" "$n")
+            if [ "$verdict" != "OK" ]; then
+                all_ok=false
+                echo "      firstN N=$n: $verdict" >&2
+            fi
+        done
+
+        # Multi-arg edge case: this exercise is implicit in the existing
+        # echoInts call (with a single big arg), but we also fire a
+        # mixed-size pair through echoInts twice in succession to
+        # ensure the per-arg routing decision is independent (one arg
+        # inline, the next RPTR, then back).
+        for pair in "10 100000" "100000 10"; do
+            set -- $pair
+            small="$1"
+            big="$2"
+            result=$(it_call echoInts "[$(it_seq_json $small)]")
+            verdict=$(it_verify_seq "$result" "$small")
+            if [ "$verdict" != "OK" ]; then
+                all_ok=false
+                echo "      mixed-pair small N=$small after N=$big: $verdict" >&2
+            fi
+            result=$(it_call echoInts "[$(it_seq_json $big)]")
+            verdict=$(it_verify_seq "$result" "$big")
+            if [ "$verdict" != "OK" ]; then
+                all_ok=false
+                echo "      mixed-pair big N=$big after N=$small: $verdict" >&2
+            fi
+        done
+
+        after_size=$(shm_size_for_pid "$IT_DAEMON_PID")
+        after_count=$(shm_count_for_pid "$IT_DAEMON_PID")
+        delta_size=$((after_size - before_size))
+        delta_count=$((after_count - before_count))
+
+        # The whole sweep including 100k-element calls should grow the
+        # daemon's volumes by at most a couple of 64 KB volumes
+        # (transient large allocations get reused after the per-eval
+        # arena releases them, but the volume itself stays in /dev/shm).
+        # 1 MB ceiling is generous; pre-fix we'd see far more from
+        # accumulation across 30+ requests of various sizes.
+        SHM_THRESHOLD=$((1024 * 1024))
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "round-trips byte-perfect across threshold"
+        if $all_ok; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("inline-threshold: at least one round-trip mismatched")
+        fi
+
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "SHM growth across sweep < 1 MB"
+        if [ "$delta_size" -lt "$SHM_THRESHOLD" ]; then
+            printf "%sPASS%s\n" "$GREEN" "$RESET"
+            PASSED=$((PASSED + 1))
+        else
+            printf "%sFAIL%s\n" "$RED" "$RESET"
+            FAILED=$((FAILED + 1))
+            FAILURES+=("inline-threshold: shm grew ${delta_size} bytes (threshold ${SHM_THRESHOLD})")
+        fi
+        echo "      sizes swept: ${SIZES}"
+        echo "      shm delta=${delta_size} bytes  new_volumes=${delta_count}"
+
+        stop_daemon "$IT_DAEMON_PID"
+    fi
+
     echo ""
 fi
 

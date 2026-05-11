@@ -584,7 +584,10 @@ genericPrintExpr desc = go
     go (IBoolLit False) = pretty (ldBoolFalse desc)
     go (INullLit _) = pretty (ldNullLiteral desc)
     go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
-    go (IRealLit _ r) = viaShow r
+    go (IRealLit _ (RealFinite r)) = viaShow r
+    go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)
+    go (IRealLit _ RealNegInf) = pretty (ldRealNegInf desc)
+    go (IRealLit _ RealNaN)    = pretty (ldRealNaN desc)
     go (IStrLit Nothing s) = textEsc' s
     go (IStrLit (Just t) s) = case Map.lookup t (ldStrLiteralMap desc) of
       Just prefix -> pretty prefix <> textEsc' s

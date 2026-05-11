@@ -137,8 +137,8 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (LstS xs) = LstS (map resolveTypes xs)
     f (TupS xs) = TupS (map resolveTypes xs)
     f (NamS rs) = NamS (zip (map fst rs) (map (resolveTypes . snd) rs))
-    f (RealS x) = RealS x
-    f (IntS x) = IntS x
+    f (RealS si x) = RealS si x
+    f (IntS si x) = IntS si x
     f (LogS x) = LogS x
     f (StrS x) = StrS x
     f UniS = UniS
@@ -257,8 +257,8 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 NullS = return (g0, NullS)
     f _ g0 (BndS v) = return (g0, BndS v)
     f _ g0 (CallS v) = return (g0, CallS v)
-    f _ g0 (RealS x) = return (g0, RealS x)
-    f _ g0 (IntS x) = return (g0, IntS x)
+    f _ g0 (RealS si x) = return (g0, RealS si x)
+    f _ g0 (IntS si x) = return (g0, IntS si x)
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
@@ -391,7 +391,16 @@ checkG g (AnnoS i j e) t = do
     (Just annType) -> do
       gAnn <- subtype' i annType t g
       checkE' i gAnn e t
-  return (g', t', AnnoS (Idx i t') j e')
+  let annotatedBody = AnnoS (Idx i t') j e'
+  -- When the user declared a signature at this site, verify that the
+  -- body's evaluation-time effects are a subset of those the signature
+  -- permits.  See spec/types/effects.md "Effect Checking".  Inner
+  -- positions without an annotation flow through ordinary structural
+  -- subtyping, which already rejects narrowing on EffectU types.
+  case Map.lookup j annotation of
+    Just annType -> checkEffectCoverage i (apply g' annType) annotatedBody
+    Nothing -> return ()
+  return (g', t', annotatedBody)
 
 synthG ::
   Gamma ->
@@ -406,7 +415,14 @@ synthG g (AnnoS gi ci e) = do
   (g', t, e') <- case Map.lookup ci annotation of
     Nothing -> synthE' gi g e
     (Just annType) -> checkE' gi g e annType
-  return (g', t, AnnoS (Idx gi t) ci e')
+  let annotatedBody = AnnoS (Idx gi t) ci e'
+  -- Mirror the body-effect check from 'checkG'.  When a signature is
+  -- attached at this synthesis site, verify the body's evaluation
+  -- effects against it.
+  case Map.lookup ci annotation of
+    Just annType -> checkEffectCoverage gi (apply g' annType) annotatedBody
+    Nothing -> return ()
+  return (g', t, annotatedBody)
 
 synthE ::
   Int ->
@@ -421,8 +437,8 @@ synthE _ g UniS = return (g, BT.unitU, UniS)
 synthE _ g NullS =
   let (g1, v) = newvar "nullType_" g
    in return (g1, OptionalU v, NullS)
-synthE _ g (RealS x) = return (g, BT.realU, RealS x)
-synthE _ g (IntS x) = return (g, BT.intU, IntS x)
+synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
+synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- Ensures pattern setting operations return the correct type.
@@ -618,7 +634,7 @@ synthE _ g0 (NamS rs) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
+synthE varIdx g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- Rename type AND constraints together so primitive constraints
   -- (CMember / CSubset / CDisjoint) reference the same fresh-name
   -- variables that the type uses. The renamed constraints are queued
@@ -653,6 +669,12 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
         }
       g1' = g1Cs ++> [AnnG v t1]
   (g2, t2, xs1) <- foldCheck g1' xs0 t1
+  -- Verify the body's evaluation-time effects fit within the declared
+  -- signature.  Catches forces outside do-blocks (e.g. `f = !rint`)
+  -- that the structural subtype rule cannot see, because EvalS strips
+  -- the effect wrapper from the inner type.  See
+  -- spec/types/effects.md "Effect Checking".
+  mapM_ (checkEffectCoverage varIdx (apply g2 t1)) xs1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -774,8 +796,30 @@ synthE i g (IfS cond thenE elseE) = do
   g2 <- subtype' i condType (VarU (TV "Bool")) g1
   (g3, t2, thenE') <- synthG g2 thenE
   (g4, t3, elseE') <- synthG g3 elseE
-  g5 <- subtype' i t3 t2 g4
-  return (g5, apply g5 t2, IfS cond' thenE' elseE')
+  scope <- MM.getGeneralScope i
+  let t2' = apply g4 t2
+      t3' = apply g4 t3
+  -- Try strict subtype both directions first (zero-coercion path), then
+  -- fall back to tryCoerce (which handles a -> ?a, a -> <E> a, and chains).
+  -- The principle: a pure value can always be lifted into an effectful
+  -- (or optional) wrapper, so mixed pure/effectful branches unify by
+  -- lifting the pure one. Going the other way is unsafe and not allowed.
+  case subtype scope t3' t2' g4 of
+    Right g5 -> return (g5, apply g5 t2, IfS cond' thenE' elseE')
+    Left _ -> case subtype scope t2' t3' g4 of
+      Right g5 -> return (g5, apply g5 t3, IfS cond' thenE' elseE')
+      Left _ -> case tryCoerce scope t3' t2' g4 of
+        Just (coercions, g5) -> do
+          elseE'' <- wrapAnnoCoercions i (apply g5 t3') coercions elseE'
+          return (g5, apply g5 t2, IfS cond' thenE' elseE'')
+        Nothing -> case tryCoerce scope t2' t3' g4 of
+          Just (coercions, g5) -> do
+            thenE'' <- wrapAnnoCoercions i (apply g5 t2') coercions thenE'
+            return (g5, apply g5 t3, IfS cond' thenE'' elseE')
+          Nothing -> MM.throwSourcedError i $
+            "Branches of guard/if have incompatible types:"
+            <> line <> "  then-branch: " <> prettyTypeU t2'
+            <> line <> "  else-branch: " <> prettyTypeU t3'
 synthE i g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
   case apply g1 t1 of
@@ -1180,18 +1224,18 @@ checkE i g1 e1@(LstS _) b = do
 -- standalone base types rather than aliases of Int. Type aliases are
 -- expanded through the scope so that user-defined names like
 -- `type Char = UInt8` also accept integer literals directly.
-checkE i g (IntS x) t = do
+checkE i g (IntS si x) t = do
   scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
   if BT.isIntegerBaseType t || BT.isIntegerBaseType tEval
-    then return (g, t, IntS x)
-    else checkEFallback i g (IntS x) t
-checkE i g (RealS x) t = do
+    then return (g, t, IntS si x)
+    else checkEFallback i g (IntS si x) t
+checkE i g (RealS si x) t = do
   scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
   if BT.isRealBaseType t || BT.isRealBaseType tEval
-    then return (g, t, RealS x)
-    else checkEFallback i g (RealS x) t
+    then return (g, t, RealS si x)
+    else checkEFallback i g (RealS si x) t
 checkE i g1 e1 b = checkEFallback i g1 e1 b
 
 checkEFallback ::
@@ -1210,7 +1254,18 @@ checkEFallback i g1 e1 b = do
       b' = apply g2 b
   scope <- MM.getGeneralScope i
   case subtype scope a' b' g2 of
-    Right g3 -> return (g3, apply g3 b', e2)
+    -- Pick the type with more record keys: when an open-keyed expected
+    -- type (b) is checked against a synthesized record literal that has
+    -- additional keys, the InstLReach rule for two record existentials
+    -- only solves the literal's existential, leaving the expected
+    -- existential's view stuck at its narrower keyset. Using a' here
+    -- keeps the literal's full type on the AST so the schema generator
+    -- emits all fields. For non-record cases a' and b' are equivalent
+    -- post-substitution, so the choice is a no-op.
+    Right g3 ->
+      let aApplied = apply g3 a'
+          bApplied = apply g3 b'
+      in return (g3, pickWiderRecord aApplied bApplied, e2)
     Left err ->
       case tryCoerce scope a' b' g2 of
         Just (coercions, g3) -> do
@@ -1227,6 +1282,18 @@ checkEFallback i g1 e1 b = do
           <> line <> "  expected: " <> prettyTypeU b'
           <> line <> "  inferred: " <> prettyTypeU a'
           <> line <> err
+
+-- | Choose the record-shaped type with the most keys. Non-record cases
+-- fall back to the second argument (the standard "return the expected
+-- type" convention used by checkEFallback).
+pickWiderRecord :: TypeU -> TypeU -> TypeU
+pickWiderRecord a b = case (recordKeyCount a, recordKeyCount b) of
+  (Just na, Just nb) | na > nb -> a
+  _ -> b
+  where
+    recordKeyCount (ExistU _ _ (rs, _)) = Just (length rs)
+    recordKeyCount (NamU _ _ _ rs) = Just (length rs)
+    recordKeyCount _ = Nothing
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
@@ -1282,6 +1349,27 @@ tryCoerce scope a (EffectU effs b) g =
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
 
+-- | Wrap an already-annotated subexpression in successive CoerceS layers,
+-- producing a new annotated expression whose type reflects each coercion.
+-- Mirrors the inner fold of 'checkEFallback' but operates on an AnnoS
+-- (where the branch sub-expressions of IfS already live) rather than a
+-- raw ExprS.
+wrapAnnoCoercions ::
+  Int                                       -- ^ source position index
+  -> TypeU                                  -- ^ starting type of the AnnoS
+  -> [Coercion]                             -- ^ coercions to apply, outermost last
+  -> AnnoS (Indexed TypeU) ManyPoly Int     -- ^ subexpression to wrap
+  -> MorlocMonad (AnnoS (Indexed TypeU) ManyPoly Int)
+wrapAnnoCoercions i startT coercions anno0 = do
+  (_, finalAnno) <- foldlM step (startT, anno0) coercions
+  return finalAnno
+  where
+    step (curT, anno) coercion = do
+      idx <- MM.getCounterWithPos i
+      let newT = applyCoercion coercion curT
+          newExpr = CoerceS coercion anno
+      return (newT, AnnoS (Idx idx newT) i newExpr)
+
 -- | Strip OptionalU wrappers that result from coercion.
 -- Used in instance resolution to match the underlying type.
 stripCoercionWrappers :: TypeU -> TypeU
@@ -1336,6 +1424,101 @@ collectDoEffects = go
       | b == emptyEffectSet = a
       | a == b = a
       | otherwise = EffectUnion a b
+
+-- | Compute the set of effects produced when an expression is evaluated.
+--
+-- Evaluation-time effects fire at every 'EvalS' (force) node that is
+-- reachable from the root WITHOUT crossing a thunk boundary.  Thunks
+-- (lambdas and do-blocks) carry their inner effects in their TYPE, so
+-- those effects do not fire when the surrounding expression is reduced;
+-- only forcing the thunk later via 'EvalS' would trigger them.
+--
+-- This is the inference half of the rule in 'spec/types/effects.md'
+-- under "Effect Inference".  The companion check
+-- 'checkEffectCoverage' verifies that the inferred set is a subset of
+-- the declared effect set on the surrounding signature.
+inferExprEffects :: AnnoS (Indexed TypeU) f c -> EffectSet
+inferExprEffects = go
+  where
+    go (AnnoS _ _ expr) = case expr of
+      EvalS e -> effectOfAnno e `effUnion` go e
+      LetS _ e1 e2 -> go e1 `effUnion` go e2
+      AppS f args -> unions (go f : map go args)
+      TupS es -> unions (map go es)
+      LstS es -> unions (map go es)
+      NamS rs -> unions (map (go . snd) rs)
+      IfS c t e -> go c `effUnion` go t `effUnion` go e
+      CoerceS _ e -> go e
+      IntrinsicS _ es -> unions (map go es)
+      -- Thunk boundaries: their effects live in the type, not in the
+      -- evaluation of the surrounding expression.
+      DoBlockS _ -> emptyEffectSet
+      LamS _ _ -> emptyEffectSet
+      _ -> emptyEffectSet
+
+    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
+    effectOfAnno _ = emptyEffectSet
+
+    unions = foldl effUnion emptyEffectSet
+
+    effUnion a b
+      | a == emptyEffectSet = b
+      | b == emptyEffectSet = a
+      | a == b = a
+      | otherwise = EffectUnion a b
+
+-- | Strip lambda layers from the body in lockstep with function-arrow
+-- layers on the expected type.  Returns the innermost expected return
+-- type and the innermost body (after lambdas are peeled).  Used to
+-- locate the "actual return position" where evaluation-time effects
+-- of the function body must be covered.
+--
+-- A function whose declared type has N argument arrows and whose body
+-- is a single LamS binding N parameters peels cleanly.  Anything else
+-- (point-free, partial lambda, mismatched arity) returns as-is and
+-- relies on the surrounding structural check to have rejected the
+-- shape.
+peelLambdaLayers
+  :: TypeU
+  -> AnnoS (Indexed TypeU) f c
+  -> (TypeU, AnnoS (Indexed TypeU) f c)
+peelLambdaLayers (FunU args ret) body@(AnnoS _ _ (LamS vs inner))
+  | length args == length vs = peelLambdaLayers ret inner
+  | otherwise = (FunU args ret, body)
+peelLambdaLayers t body = (t, body)
+
+-- | After structural typechecking, verify that the evaluation-time
+-- effects of a function body are a subset of the effects the declared
+-- return type permits.  Fires the widening-rule rejection described in
+-- 'spec/types/effects.md' under "Effect Checking".
+--
+-- Catches forces that escape do-blocks, the case the type-level
+-- subtype rule cannot see because EvalS strips the effect wrapper
+-- from the inner type.  Pointing the diagnostic at the surrounding
+-- annotation index ('idx') keeps the caret on the user-visible
+-- signature rather than on a deeply nested sub-expression.
+checkEffectCoverage
+  :: Int
+  -> TypeU
+  -> AnnoS (Indexed TypeU) f c
+  -> MorlocMonad ()
+checkEffectCoverage idx declared body = do
+  let (innerDecl, innerBody) = peelLambdaLayers declared body
+      declEffs = case innerDecl of
+        EffectU effs _ -> resolveEffectSet effs
+        _ -> Set.empty
+      inferred = resolveEffectSet (inferExprEffects innerBody)
+      uncovered = Set.difference inferred declEffs
+  if Set.null uncovered
+    then return ()
+    else MM.throwSourcedError idx $
+      "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
+        <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
+        <+> "Either add the effect to the signature or sequence the operation in a do-block."
+  where
+    renderEffectLabels s
+      | Set.null s = "<>"
+      | otherwise = "<" <> hcat (punctuate ", " (map pretty (Set.toList s))) <> ">"
 
 -- helpers
 
@@ -1443,7 +1626,7 @@ application' i g es t = do
 -- Returns Nothing for anything involving foreign function calls,
 -- non-constant variables, or unsupported expression forms.
 tryEvalConst :: Gamma -> ExprS g f c -> Maybe ConstVal
-tryEvalConst _ (IntS n) = Just (ConstInt n)
+tryEvalConst _ (IntS _ n) = Just (ConstInt n)
 tryEvalConst _ (StrS s) = Just (ConstStr s)
 tryEvalConst g (LetBndS v) = Map.lookup v (gammaIntVals g)
 tryEvalConst g (BndS v) = Map.lookup v (gammaIntVals g)
@@ -1567,8 +1750,8 @@ peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
 peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)
 peakSExpr (TupS xs) = "TupS" <> "n=" <> pretty (length xs)
 peakSExpr (NamS rs) = "NamS" <> encloseSep "{" "}" "," (map (pretty . fst) rs)
-peakSExpr (RealS x) = "RealS" <+> viaShow x
-peakSExpr (IntS x) = "IntS" <+> pretty x
+peakSExpr (RealS _ x) = "RealS" <+> viaShow x
+peakSExpr (IntS _ x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty x
 peakSExpr (StrS x) = "StrS" <+> pretty x
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe

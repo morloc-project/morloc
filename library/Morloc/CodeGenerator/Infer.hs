@@ -232,7 +232,16 @@ inferConcreteVar lang t0@(Idx i v) = do
             (cscope, gscope) <- getScope i lang
             case T.pairEval cscope gscope (VarU v) of
               Right (VarU v') -> return $ FV v (CV (unTVar v'))
-              Right _ -> error $ "Transitive resolution of " <> show (unTVar v)
-                              <> " yielded non-variable type"
-              Left _ -> error $ "Cannot find type variable "
-                             <> show (unTVar v) <> " in scope"
+              Right t' -> MM.throwSourcedError i $
+                "No concrete" <+> pretty lang <+> "type for"
+                <+> squotes (pretty v) <> ":"
+                <+> "alias resolves to a composite type"
+                <+> parens (pretty t')
+                <> ", but a single type variable is required here."
+              Left _ -> MM.throwSourcedError i $
+                "No concrete" <+> pretty lang <+> "type for"
+                <+> squotes (pretty v) <> "."
+                <+> "Add a 'type" <+> pretty lang <+> "=>"
+                <+> pretty v <+> "= \"...\"' declaration,"
+                <+> "or import a module that provides one"
+                <+> parens ("e.g. root-" <> pretty lang) <> "."

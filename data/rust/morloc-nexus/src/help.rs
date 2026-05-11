@@ -11,11 +11,13 @@ pub fn print_nexus_usage(prog_name: &str) -> ! {
     eprintln!("Arguments:");
     eprintln!("  <manifest>           Path to a .manifest file or wrapper script");
     eprintln!();
-    eprintln!("Nexus options:");
+    eprintln!("Nexus options (must precede COMMAND):");
     eprintln!("  -h, --help           Print this help message");
     eprintln!("  -p, --print          Pretty-print output for human consumption");
     eprintln!("  -o, --output-file    Print to this file instead of STDOUT");
     eprintln!("  -f, --output-format  Output format [json|mpk|voidstar]");
+    eprintln!("      --keep-null      Print top-level () or None as 'null'");
+    eprintln!("                       (default: produce empty output)");
     eprintln!();
     eprintln!("Daemon mode:");
     eprintln!("  --daemon             Run as a long-lived daemon");
@@ -43,11 +45,13 @@ pub fn print_usage(prog_name: &str, manifest: &Manifest) -> ! {
     }
 
     eprintln!();
-    eprintln!("Nexus options:");
+    eprintln!("Nexus options (must precede COMMAND):");
     eprintln!("  -h, --help           Print this help message");
     eprintln!("  -p, --print          Pretty-print output for human consumption");
     eprintln!("  -o, --output-file    Print to this file instead of STDOUT");
     eprintln!("  -f, --output-format  Output format [json|mpk|voidstar]");
+    eprintln!("      --keep-null      Print top-level () or None as 'null'");
+    eprintln!("                       (default: produce empty output)");
     eprintln!();
     eprintln!("Daemon mode:");
     eprintln!("  --daemon             Run as a long-lived daemon");
@@ -172,11 +176,16 @@ pub fn print_command_help_single(prog_name: &str, cmd: &Command) -> ! {
         }
     }
 
-    // Nexus options
-    eprintln!("\nNexus options:");
+    // Nexus options. Single-command programs make the COMMAND name
+    // optional, so nexus options share argv with program arguments. To
+    // keep short flags (-p, -o, -f) free for program use, only long
+    // forms are recognized here as nexus options.
+    eprintln!("\nNexus options (long form only; short forms reserved for the program):");
+    eprintln!("  --help           Print this help message");
     eprintln!("  --print          Pretty-print output for human consumption");
     eprintln!("  --output-file    Print to this file instead of STDOUT");
     eprintln!("  --output-form    Output format [json|mpk|voidstar]");
+    eprintln!("  --keep-null      Print top-level () or None as 'null' (default: empty)");
     eprintln!("\nDaemon mode:");
     eprintln!("  --daemon         Run as a long-lived daemon");
     eprintln!("  --http-port PORT Listen on HTTP port");

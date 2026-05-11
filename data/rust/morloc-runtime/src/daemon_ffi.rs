@@ -23,6 +23,43 @@ const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
 
+/// Set true while the daemon is performing pool-crash recovery: SIGTERM/KILL
+/// pools, drop SHM, respawn, etc. Workers must bail out of any incoming or
+/// in-flight request immediately when this is set, returning a "recovering"
+/// error to the client rather than touching pool sockets or SHM. Cleared once
+/// the new pools are pingable. See `nexus::process::pool_check_and_recover`.
+pub static RECOVERY_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// True while the daemon is recovering from a pool crash. Public read-only
+/// helper for callers that need a one-line guard at the top of a request
+/// handler.
+#[inline]
+pub fn is_recovering() -> bool {
+    RECOVERY_IN_PROGRESS.load(Ordering::Acquire)
+}
+
+/// Mark recovery as starting. Returns `false` if recovery was already in
+/// progress (caller should treat that as "someone else got here first" and
+/// skip the recovery sequence).
+pub fn begin_recovery() -> bool {
+    RECOVERY_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+/// Mark recovery as complete. Workers will start accepting requests again.
+pub fn end_recovery() {
+    RECOVERY_IN_PROGRESS.store(false, Ordering::Release);
+}
+
+/// True once the daemon has begun graceful shutdown (SIGTERM received,
+/// `daemon_run` main loop is exiting). Recovery should bail in this case
+/// rather than fight the shutdown by respawning pools the daemon is
+/// trying to tear down.
+pub fn is_shutting_down() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+}
+
 // SAFETY: These globals are set once during daemon_run initialization (single-threaded)
 // and only read afterwards. The daemon is single-threaded for request dispatch.
 static mut G_POOL_ALIVE_FN: Option<unsafe extern "C" fn(usize) -> bool> = None;
@@ -690,6 +727,22 @@ pub unsafe extern "C" fn daemon_dispatch(
         (*resp).id = libc::strdup((*request).id);
     }
 
+    // Recovery gate. If a pool process has died and the nexus is currently
+    // tearing down + respawning all pools, we cannot safely talk to any
+    // pool socket or touch SHM. Every method returns success=false with a
+    // clear retryable error so callers (including the health endpoint
+    // poller in pool-crash-stress) can distinguish the recovery window
+    // from normal operation: the outer JSON wrapper turns success=false
+    // into `"status":"error"`, which a polling loop can wait on.
+    if is_recovering() {
+        (*resp).success = false;
+        let c = CString::new(
+            "Daemon recovering from a pool process crash; please retry."
+        ).unwrap();
+        (*resp).error = libc::strdup(c.as_ptr());
+        return resp;
+    }
+
     match (*request).method {
         DaemonMethod::Health => {
             (*resp).success = true;
@@ -1025,39 +1078,60 @@ pub unsafe extern "C" fn daemon_dispatch(
 
         let mut cleanup_and_fail = false;
 
-        for i in 0..nargs {
-            let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
-            *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
-            if !err.is_null() {
+        // Open a per-eval SHM arena. Every shm::shmalloc that fires while
+        // this guard is alive (CLI arg ingress via msgpack/voidstar
+        // unpack, all morloc_eval intermediates, the final result tree)
+        // is tracked and released when the guard drops below. The result
+        // serializer voidstar_to_json_string reads SHM and writes a libc
+        // JSON string -- it MUST run before the guard drops, but the
+        // libc-allocated JSON survives the drop and gets stored on resp.
+        let arena_guard = match crate::eval_arena::enter() {
+            Ok(g) => Some(g),
+            Err(e) => {
                 (*resp).success = false;
-                (*resp).error = err;
+                let msg = CString::new(format!("eval arena error: {}", e))
+                    .unwrap_or_default();
+                (*resp).error = libc::strdup(msg.as_ptr());
                 cleanup_and_fail = true;
-                break;
+                None
             }
+        };
 
-            *arg_packets.add(i) = parse_cli_data_argument(
-                ptr::null_mut(),
-                *args.add(i),
-                *arg_schemas_arr.add(i),
-                &mut err,
-            );
-            if !err.is_null() {
-                (*resp).success = false;
-                (*resp).error = err;
-                cleanup_and_fail = true;
-                break;
-            }
+        if !cleanup_and_fail {
+            for i in 0..nargs {
+                let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
+                *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
+                if !err.is_null() {
+                    (*resp).success = false;
+                    (*resp).error = err;
+                    cleanup_and_fail = true;
+                    break;
+                }
 
-            *arg_voidstars.add(i) = get_morloc_data_packet_value(
-                *arg_packets.add(i),
-                *arg_schemas_arr.add(i),
-                &mut err,
-            );
-            if !err.is_null() {
-                (*resp).success = false;
-                (*resp).error = err;
-                cleanup_and_fail = true;
-                break;
+                *arg_packets.add(i) = parse_cli_data_argument(
+                    ptr::null_mut(),
+                    *args.add(i),
+                    *arg_schemas_arr.add(i),
+                    &mut err,
+                );
+                if !err.is_null() {
+                    (*resp).success = false;
+                    (*resp).error = err;
+                    cleanup_and_fail = true;
+                    break;
+                }
+
+                *arg_voidstars.add(i) = get_morloc_data_packet_value(
+                    *arg_packets.add(i),
+                    *arg_schemas_arr.add(i),
+                    &mut err,
+                );
+                if !err.is_null() {
+                    (*resp).success = false;
+                    (*resp).error = err;
+                    cleanup_and_fail = true;
+                    break;
+                }
             }
         }
 
@@ -1096,6 +1170,14 @@ pub unsafe extern "C" fn daemon_dispatch(
             }
         }
 
+        // Drop the arena guard explicitly here, before the libc cleanup
+        // loop below. This is the point at which all SHM blocks allocated
+        // for this request -- args, eval intermediates, result tree --
+        // are returned to the volume's free list. The libc cleanup that
+        // follows is independent (it frees the outer arrays for packets,
+        // schemas, and the voidstar pointer array).
+        drop(arena_guard);
+
         // Cleanup
         for i in 0..nargs {
             let s = *arg_schemas_arr.add(i);
@@ -1117,6 +1199,20 @@ pub unsafe extern "C" fn daemon_dispatch(
         // the flat view; the outer pointer array is owned by us and
         // freed below, but the inner C strings remain owned by the
         // ManifestArg objects.
+        //
+        // Open a per-eval SHM arena for the duration of this remote call.
+        // make_call_packet_from_cli -> parse_cli_data_argument allocates
+        // SHM blocks for non-trivial args (these are referenced by relptr
+        // in the call packet shipped to the pool); the pool's arg ingress
+        // shincref's any RPTR args it consumes, so we can safely shfree
+        // our originals when the arena drops here. Pool-shipped RPTR
+        // results are NOT in the arena because they did not flow through
+        // shmalloc on this thread (rel2abs only); they remain owned by
+        // the pool, which releases them at its own next dispatch.
+        let _arena = match crate::eval_arena::enter() {
+            Ok(g) => Some(g),
+            Err(_) => None,  // already active is unexpected here; proceed without
+        };
         let arg_schemas_flat = cmd.build_arg_schemas_array();
         let call_packet = make_call_packet_from_cli(
             ptr::null_mut(),

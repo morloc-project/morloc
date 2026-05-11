@@ -37,11 +37,8 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
 static void flush_shm_tracker(void) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
-        block_header_t* blk = (block_header_t*)((char*)shm_tracker[i].ptr - sizeof(block_header_t));
-        if (shm_tracker[i].schema && blk->reference_count <= 1) {
-            shfree_by_schema(shm_tracker[i].ptr, shm_tracker[i].schema, &err);
-            if (err) { free(err); err = NULL; }
-        }
+        // shm::shfree decrements the refcount and zeros the block on final
+        // ref-drop, so no separate metadata-zeroing pass is needed here.
         shfree(shm_tracker[i].ptr, &err);
         if (err) { free(err); }
         if (shm_tracker[i].schema) {
@@ -1182,10 +1179,9 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
             shm_tracker_push((absptr_t)voidstar, schema);
             tracked = true;
         } else {
-            // Data inlined in packet -- free SHM immediately
+            // Data inlined in packet -- free SHM immediately. shfree zeros
+            // the block on final ref-drop, so no metadata-walk needed.
             char* free_err = NULL;
-            shfree_by_schema((absptr_t)voidstar, schema, &free_err);
-            if (free_err) { free(free_err); free_err = NULL; }
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
             voidstar = NULL;
@@ -1208,8 +1204,6 @@ error:
     if (!tracked) {
         if (voidstar && schema) {
             char* free_err = NULL;
-            shfree_by_schema((absptr_t)voidstar, schema, &free_err);
-            if (free_err) { free(free_err); free_err = NULL; }
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
         }

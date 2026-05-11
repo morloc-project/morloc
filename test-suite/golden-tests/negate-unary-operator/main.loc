@@ -1,0 +1,184 @@
+-- Comprehensive test for unary minus / negate.
+-- Covers: lexer-level negative literals (atomic), whitespace-sensitive
+-- application, parser-level desugaring of `-e` to `negate e`, and the
+-- `Negatable` typeclass dispatch across Python, C++, and R backends.
+module main (test)
+
+import root-py
+import root-cpp
+import root-r
+
+----------------------------------------------------------------
+-- Group 1: Atomic negative literals (lexer-level).
+-- The lexer recognizes `-NUM` as a single numeric token in unary
+-- positions (start of input, after open delimiters, after commas,
+-- after operators, or after whitespace). These cases produce
+-- atomic IntE/RealE nodes, NOT calls to negate. They therefore
+-- work in pure-data contexts where function calls are forbidden.
+----------------------------------------------------------------
+
+-- Plain decimal in list.
+litIntList :: [Int]
+litIntList = [-1, -2, -3, -100]
+
+-- Floats including scientific notation.
+litFloatList :: [Real]
+litFloatList = [-1.5, -2.5, -3.0, -1.5e2, -2.0e-3]
+
+-- Hex, octal, binary integers.
+litHex :: [Int]
+litHex = [-0xff, -0xab]
+
+litOct :: [Int]
+litOct = [-0o17, -0o20]
+
+litBin :: [Int]
+litBin = [-0b101, -0b1111]
+
+-- Negative literal in a tuple. Demonstrates that `,` is a
+-- non-operand-finishing context, so `-2` after the comma lexes
+-- as a single literal regardless of whitespace.
+litTuple :: (Int, Int, Int)
+litTuple = (-1, -2, -3)
+
+
+----------------------------------------------------------------
+-- Group 2: Negative literals in non-list contexts.
+-- After `=`, after operators, inside parens. Each of these
+-- positions makes `-NUM` a single token, never a function call.
+----------------------------------------------------------------
+
+-- After `=` in a let-binding RHS.
+letNeg :: Int
+letNeg = let x = -42
+         in x
+
+-- Negative literal as the right operand of `+`. The lexer
+-- treats `-5` as a single token because `+` is a non-operand
+-- token, so this parses as `x + (-5)` (subtraction by 5),
+-- not as a syntax error.
+opNeg :: Int -> Int
+opNeg x = x + -5
+
+-- Negative literal alone inside parens.
+parenLit :: Int
+parenLit = (-7)
+
+
+----------------------------------------------------------------
+-- Group 3: Whitespace-sensitive `f -1` rule.
+-- Asymmetric whitespace (space before dash, none after dash and
+-- followed by digit) means unary literal. Symmetric whitespace
+-- or no whitespace means binary subtraction. Tests below pin
+-- both interpretations.
+----------------------------------------------------------------
+
+dbl :: Int -> Int
+dbl x = x + x
+
+-- `dbl -3` lexes as `dbl` applied to literal `-3`.
+-- Result: dbl (-3) = -6.
+wsApply :: Int
+wsApply = dbl -3
+
+-- `x - 1` (symmetric whitespace) is binary subtraction.
+-- Result for x=10: 9.
+wsSubSpaced :: Int -> Int
+wsSubSpaced x = x - 1
+
+-- `x-1` (no whitespace) is also binary subtraction.
+-- Result for x=10: 9.
+wsSubTight :: Int -> Int
+wsSubTight x = x-1
+
+
+----------------------------------------------------------------
+-- Group 4: Prefix `-` on non-literal expressions.
+-- The parser desugars `-e` to `negate e` whenever e is not a
+-- numeric literal already collapsed by the lexer. These cases
+-- exercise the `App (Var negate) e` path through the typechecker
+-- and codegen.
+----------------------------------------------------------------
+
+-- Simple variable: -x => negate x.
+negateVar :: Int -> Int
+negateVar x = -x
+
+-- Parenthesized arithmetic expression.
+negateExpr :: Int -> Int
+negateExpr x = -(x + 1)
+
+-- Double negation: -(-x). The inner -x is `negate x`; the
+-- outer dash applies negate again, yielding the original x.
+doubleNegate :: Int -> Int
+doubleNegate x = -(-x)
+
+-- Negate a function-call result: -(f x).
+negateApp :: Int -> Int
+negateApp x = -(dbl x)
+
+-- Negate inside a larger expression. Note Haskell's positional
+-- rule: `1 + -x` is illegal in the middle of an infix chain;
+-- you must parenthesize the negation as `1 + (-x)`.
+negateInExpr :: Int -> Int
+negateInExpr x = 1 + (-x)
+
+
+----------------------------------------------------------------
+-- Group 5: Negatable Int dispatch across all three languages.
+-- Each function uses idpy/idcpp/idr to pin the negation step
+-- to a specific language backend, exercising every per-language
+-- Negatable Int instance independently.
+----------------------------------------------------------------
+
+pyNegInt :: Int -> Int
+pyNegInt x = idpy (-x)
+
+cppNegInt :: Int -> Int
+cppNegInt x = idcpp (-x)
+
+rNegInt :: Int -> Int
+rNegInt x = idr (-x)
+
+
+----------------------------------------------------------------
+-- Group 6: Negatable Real dispatch across all three languages.
+-- Same pattern as Group 5 but on the Real numeric type, which
+-- routes through different per-instance implementations.
+----------------------------------------------------------------
+
+pyNegReal :: Real -> Real
+pyNegReal x = idpy (-x)
+
+cppNegReal :: Real -> Real
+cppNegReal x = idcpp (-x)
+
+rNegReal :: Real -> Real
+rNegReal x = idr (-x)
+
+
+----------------------------------------------------------------
+-- Top-level test: a tuple of group-tuples. Grouping mirrors the
+-- six sections above. Tuple sizes are kept within the Tuple8
+-- limit imposed by the per-language type mappings.
+----------------------------------------------------------------
+
+-- Group 1 results: atomic literals across collection contexts.
+group1 = (litIntList, litFloatList, litHex, litOct, litBin, litTuple)
+
+-- Group 2 results: literals after non-list tokens (=, +, ().
+group2 = (letNeg, opNeg 10, parenLit)
+
+-- Group 3 results: whitespace-sensitive `f -1` vs binary minus.
+group3 = (wsApply, wsSubSpaced 10, wsSubTight 10)
+
+-- Group 4 results: prefix `-` desugared to `negate`.
+group4 = (negateVar 5, negateExpr 4, doubleNegate 7, negateApp 3, negateInExpr 4)
+
+-- Group 5 results: Negatable Int across py/cpp/r.
+group5 = (pyNegInt 11, cppNegInt 22, rNegInt 33)
+
+-- Group 6 results: Negatable Real across py/cpp/r.
+group6 = (pyNegReal 1.5, cppNegReal 2.5, rNegReal 3.5)
+
+test = (group1, group2, group3, group4, group5, group6)

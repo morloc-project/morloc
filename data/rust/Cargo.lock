@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manifest"
-version = "0.82.0"
+version = "0.83.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.82.0"
+version = "0.83.2"
 dependencies = [
  "clap",
  "libc",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.82.0"
+version = "0.83.2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -835,6 +835,7 @@ dependencies = [
  "arrow-select",
  "bytes",
  "cbindgen",
+ "indexmap",
  "libc",
  "morloc-manifest",
  "nix",
@@ -1177,6 +1178,7 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

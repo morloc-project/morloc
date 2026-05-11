@@ -51,8 +51,8 @@ parameterize' ::
 -- primitives, no arguments are required for a primitive, so empty lists
 parameterize' _ (AnnoS g c UniS) = return $ AnnoS g (c, []) UniS
 parameterize' _ (AnnoS g c NullS) = return $ AnnoS g (c, []) NullS
-parameterize' _ (AnnoS g c (RealS x)) = return (AnnoS g (c, []) (RealS x))
-parameterize' _ (AnnoS g c (IntS x)) = return (AnnoS g (c, []) (IntS x))
+parameterize' _ (AnnoS g c (RealS si x)) = return (AnnoS g (c, []) (RealS si x))
+parameterize' _ (AnnoS g c (IntS si x)) = return (AnnoS g (c, []) (IntS si x))
 parameterize' _ (AnnoS g c (LogS x)) = return (AnnoS g (c, []) (LogS x))
 parameterize' _ (AnnoS g c (StrS x)) = return (AnnoS g (c, []) (StrS x))
 parameterize' args (AnnoS g c (BndS v)) = do

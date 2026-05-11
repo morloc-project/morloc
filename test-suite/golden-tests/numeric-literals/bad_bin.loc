@@ -1,0 +1,4 @@
+module main (x)
+
+x :: Int
+x = 0b102

@@ -32,8 +32,14 @@ toE (AnnoS g _ (LamS vs e)) = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es)) = LstP g (map toE es)
 toE (AnnoS g _ (TupS es)) = TupP g (map toE es)
 toE (AnnoS g _ (NamS rs)) = NamP g (map (second toE) rs)
-toE (AnnoS g _ (RealS x)) = LitP g (MNum x)
-toE (AnnoS g _ (IntS x)) = LitP g (MInt x)
+-- For numeric literals carry the literal's own source index (si) rather
+-- than the wrapping AnnoS index. When a top-level term body is inlined
+-- via Treeify.termExprToAnnoS, the wrapping AnnoS holds the export
+-- reference's index (gi0), so the literal's own position would otherwise
+-- be lost. Using si here lets value-conflict diagnostics caret on the
+-- literal that triggered the conflict, not on the export list.
+toE (AnnoS (Idx _ t) _ (RealS si x)) = LitP (Idx si t) (MNum x)
+toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
 toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
@@ -72,13 +78,61 @@ indexOfE (IntrinsicP (Idx i _) _ _) = i
 -- in exponential time in some cases. This can be avoided with a touch of
 -- memoization. But I will leave that as an exercise for my user (PR's accepted).
 valuecheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
-valuecheck e0 = check (toE e0) >> return e0
+valuecheck e0 = groundCheck e0 >> check (toE e0) >> return e0
+
+-- A term whose every alternative is just a back-edge to itself (or to other
+-- such terms) has no concrete implementation. Treeify already detects these
+-- recursive references and emits CallS, but lets them through to codegen
+-- where they fail at runtime in the target language. Here we walk the tree
+-- and reject any VarS whose alternatives all lack ground content. Walks
+-- children first so the deepest culprit is reported.
+--
+-- Catches both `omega = omega` and mutual cycles like `a = b; b = a` when
+-- none of the participants has a concrete source.
+groundCheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad ()
+groundCheck (AnnoS _ _ e0) = case e0 of
+  VarS v (Many es) -> do
+    mapM_ groundCheck es
+    if any hasGround es
+      then return ()
+      else case es of
+        (AnnoS (Idx i _) _ _ : _) ->
+          MM.throwSourcedError i $
+            "Self-referential or cyclic binding:" <+> squotes (pretty v)
+              <> "; the term is defined only by reference to itself"
+        [] -> return () -- typechecker would have rejected an alternative-less term
+  AppS f es -> groundCheck f >> mapM_ groundCheck es
+  LamS _ body -> groundCheck body
+  LstS es -> mapM_ groundCheck es
+  TupS es -> mapM_ groundCheck es
+  NamS rs -> mapM_ (groundCheck . snd) rs
+  IfS c t e -> groundCheck c >> groundCheck t >> groundCheck e
+  DoBlockS e -> groundCheck e
+  EvalS e -> groundCheck e
+  CoerceS _ e -> groundCheck e
+  LetS _ e1 e2 -> groundCheck e1 >> groundCheck e2
+  IntrinsicS _ es -> mapM_ groundCheck es
+  _ -> return ()
+
+-- True if the AnnoS contains any substantive content (not just BndS/CallS
+-- references). VarS forwards to its alternatives.
+hasGround :: AnnoS (Indexed Type) Many Int -> Bool
+hasGround (AnnoS _ _ e) = case e of
+  BndS _ -> False
+  CallS _ -> False
+  LetBndS _ -> False
+  VarS _ (Many es) -> any hasGround es
+  _ -> True
 
 -- walk through a tree
 -- find the sets of implementations in VarS expressions
 -- compare all pairs of implementations
 check :: E -> MorlocMonad ()
-check (VarP (Idx i _) _ es) = mapM_ (uncurry (checkPair i)) (pairwise es)
+check (VarP (Idx i _) _ es) = do
+  mapM_ (uncurry (checkPair i)) (pairwise es)
+  -- recurse into each alternative so nested VarPs (e.g. non-export terms
+  -- referenced from the export, or where-bound terms) are also checked
+  mapM_ check es
   where
     -- find all unique pairs
     pairwise :: [a] -> [(a, a)]

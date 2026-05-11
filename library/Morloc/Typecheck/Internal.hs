@@ -860,9 +860,26 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- EffectU: covariant subtyping with effect row subsumption.
 -- <E1> T1 <: <E2> T2 when E1 is a subset of E2 and T1 <: T2.
 -- Fewer effects can be used where more effects are expected.
-subtype scope (EffectU e1 t1) (EffectU e2 t2) g
-  | effectSubsetOf e1 e2 = subtype scope t1 t2 g
-  | otherwise = subtype scope t1 t2 g -- permissive for now: EffectVar not yet solved
+-- An effectful type cannot be narrowed to a type with fewer effects: this
+-- is the narrowing check the user-facing rules call out. When either side
+-- has an unsolved EffectVar we defer (effect inference does not yet solve
+-- effect variables); for concrete sets the subset check is strict.
+subtype scope t1@(EffectU e1 i1) t2@(EffectU e2 i2) g
+  | effectSubsetOf e1 e2 = subtype scope i1 i2 g
+  | effectSetHasVar e1 || effectSetHasVar e2 = subtype scope i1 i2 g
+  | otherwise = subtypeError t1 t2 "effect set on left is not a subset of effect set on right"
+-- Effectful type on the left, non-effectful on the right.
+-- Effects do not silently drop; the surrounding term must declare them.
+-- This catches e.g. `rint :: <Rand> Int` bound to `a :: Int`.
+-- ExistU and ForallU on the right fall through to their own rules below
+-- so that polymorphism and existential solving still work uniformly.
+subtype _ t1@(EffectU _ _) t2 _
+  | not (isAbsorbing t2) =
+      subtypeError t1 t2 "cannot discard effects when matching pure type"
+  where
+    isAbsorbing (ForallU _ _)  = True
+    isAbsorbing (ExistU _ _ _) = True
+    isAbsorbing _              = False
 -- OptionalU: covariant subtyping
 subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 --  g1 |- B1 <: A1 -| g2
@@ -1215,9 +1232,18 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
       g3
       [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
 
-  -- define new types to insert
+  -- define new types to insert.
+  -- Use rs1' for both (rs1' and rs2' contain the same key set after
+  -- extendRec; rs1' preserves the left side's original key order).
+  -- This matters for record literals (rc1 = Closed): the literal's
+  -- field order is the on-disk layout, and downstream serialization
+  -- builds the schema from this list. Without this, a sub-record
+  -- pattern application would solve the literal's existential to a
+  -- record whose key order is pattern-driven (rs2 ++ literal-extras),
+  -- and the materialized value would write fields in the wrong
+  -- positions.
   let taExpanded = ExistU v1 (ps1', pc1) (rs1', rc1)
-  let tbExpanded = ExistU v2 (ps2', pc1) (rs2', rc1)
+  let tbExpanded = ExistU v2 (ps1', pc1) (rs1', rc1)
 
   -- Check gammaSolved first: if either is already solved, skip access2
   case (Map.lookup v1 (gammaSolved g4), Map.lookup v2 (gammaSolved g4)) of
@@ -1530,11 +1556,13 @@ selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0)
       Selector ->
       (TypeU, [TypeU]) -- the modified type and the list of remaining setters
     f _ (t : ts) SelectorEnd = (t, ts)
+    -- Walk selectors left-to-right so the i-th selector consumes the i-th
+    -- value from setTypes1; foldr would walk right-to-left and swap them.
     f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorKey s ss) =
-      let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s : ss)
+      let (ks', setTypes2) = foldl' (flip subKey) (ks, setTypes1) (s : ss)
        in (ExistU v (ts, tc) (ks', kc), setTypes2)
     f (NamU o v ps ks) setTypes1 (SelectorKey s ss) =
-      let (ks', setTypes2) = foldr subKey (ks, setTypes1) (s : ss)
+      let (ks', setTypes2) = foldl' (flip subKey) (ks, setTypes1) (s : ss)
        in (NamU o v ps ks', setTypes2)
     -- handle non-existential records
     --  * note that this may well change the field type of the record, this should

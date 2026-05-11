@@ -512,7 +512,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*data).is_voidstar = false;
 
             let schema_type = (*schema).serial_type;
-            // MORLOC_ARRAY = 14, MORLOC_TUPLE = 15, MORLOC_MAP = 16
+            // MORLOC_ARRAY = 14, MORLOC_TUPLE = 15, MORLOC_MAP = 16, MORLOC_OPTIONAL = 17
             if schema_type == 14 { // Array
                 let arr = libc::calloc(1, std::mem::size_of::<MorlocDataArray>()) as *mut MorlocDataArray;
                 (*arr).schema = if (*schema).size > 0 && !(*schema).parameters.is_null() { *(*schema).parameters } else { ptr::null_mut() };
@@ -520,6 +520,8 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 (*arr).values = values;
                 (*data).data.array_val = arr;
             } else if schema_type == 15 || schema_type == 16 { // Tuple or Map
+                (*data).data.tuple_val = values;
+            } else if schema_type == 17 { // Optional (Just-coerce: one inner element)
                 (*data).data.tuple_val = values;
             } else {
                 libc::free(values as *mut c_void);

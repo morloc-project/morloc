@@ -368,7 +368,17 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
       | otherwise = case Map.lookup v cs of
           -- handle both monomorphic terms and polymorphic typeclass terms
           (Just (sigIdx, _)) -> updateSigLinks v termIdx sigIdx
-          Nothing -> MM.throwSourcedError termIdx $ "Undefined term: " <> pretty v
+          Nothing -> do
+            evalMode <- MM.gets stateEvalMode
+            let hint =
+                  if evalMode
+                    then line <> "hint: an eval expression has no implicit prelude;"
+                              <+> "prefix the expression with"
+                              <+> squotes "import root-py;"
+                              <+> "(or the module that defines" <+> pretty v <> ")"
+                              <+> "to bring it into scope"
+                    else mempty
+            MM.throwSourcedError termIdx $ "Undefined term: " <> pretty v <> hint
     linkLocal _ _ cs (ExprI i (ExpE (ExportMany (Set.toList -> ss) gs))) =
       let allSs = ss ++ concatMap (Set.toList . exportGroupMembers) gs
        in mapM_ linkExp [(v, termIdx, Map.lookup v cs) | (termIdx, TermSymbol v) <- allSs]

@@ -55,7 +55,6 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "multiprocessing-py-1" "multiprocessing-py-1"
-
       , -- bug regression tests from doc-agents code-tester (v0.74.0)
         -- Each test asserts correct behavior; currently FAIL until bug is fixed
         golden "bug-load-type-infer" "bug-load-type-infer"
@@ -85,6 +84,7 @@ main = do
       , golden "infix-typeclass-polyglot" "infix-typeclass-polyglot"
       , golden "infix-typeclass-simple" "infix-typeclass-simple"
       , golden "operator-sections" "operator-sections"
+      , golden "eval-basic" "eval-basic"
       , golden "claude-test-1" "claude-test-1"
       , golden "claude-test-2" "claude-test-2"
       , golden "claude-test-3" "claude-test-3"
@@ -126,6 +126,7 @@ main = do
       , golden "functional-data-5" "functional-data-5"
       , golden "pattern-getters" "pattern-getters"
       , golden "pattern-setters" "pattern-setters"
+      , golden "pattern-setters-pure" "pattern-setters-pure"
       , golden "type-annotations-1" "type-annotations-1"
       , golden "native-morloc-1" "native-morloc-1"
       , golden "native-morloc-2" "native-morloc-2"
@@ -138,6 +139,7 @@ main = do
       , golden "native-morloc-9" "native-morloc-9"
       , golden "nexus-let-pure" "nexus-let-pure"
       , golden "nexus-let-lambda" "nexus-let-lambda"
+      , golden "nexus-toplevel-null" "nexus-toplevel-null"
       , golden "demo-trimming" "demo-trimming"
       , golden "formatting" "formatting"
       , golden "record-docstrings" "record-docstrings"
@@ -415,6 +417,7 @@ main = do
       , golden "guards-let-cpp" "guards-let-cpp"
       , golden "guards-let-r" "guards-let-r"
       , golden "guards-inline-cpp" "guards-inline-cpp"
+      , golden "do-block-guard-statement" "do-block-guard-statement"
       , golden "recursion-direct-py" "recursion-direct-py"
       , golden "recursion-direct-cpp" "recursion-direct-cpp"
       , golden "recursion-direct-r" "recursion-direct-r"
@@ -442,6 +445,8 @@ main = do
         golden "optional-coerce-py" "optional-coerce-py"
       , golden "optional-coerce-cpp" "optional-coerce-cpp"
       , golden "optional-coerce-interop" "optional-coerce-interop"
+      , golden "optional-coerce-return-py" "optional-coerce-return-py"
+      , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
       , -- effect coercion tests (a -> <IO> a)
         golden "effect-coerce-py" "effect-coerce-py"
       , golden "effect-coerce-cpp" "effect-coerce-cpp"
@@ -459,6 +464,8 @@ main = do
       , golden "intrinsic-show-read" "intrinsic-show-read"
       , golden "intrinsic-show-read-nexus" "intrinsic-show-read-nexus"
       , golden "intrinsic-show-ho-r" "intrinsic-show-ho-r"
+      , golden "intrinsic-load-tail-position" "intrinsic-load-tail-position"
+      , golden "intrinsic-load-nexus-only" "intrinsic-load-nexus-only"
       , -- parser stress test: precedence, parentheses, negatives, numeric literals, getters
         golden "parser-stress" "parser-stress"
       , -- stdout flush test: verify Python pool stdout is flushed before shutdown
@@ -606,9 +613,14 @@ main = do
         golden "nat-typecheck" "nat-typecheck"
       -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
       , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
+
       , -- big integer tests
         golden "numeric-literals" "numeric-literals"
       , golden "bigint-factorial-py" "bigint-factorial-py"
       , golden "bigint-overflow-cpp" "bigint-overflow-cpp"
       , golden "bigint-overflow-r" "bigint-overflow-r"
+      , golden "int-overflow" "int-overflow"
+      , golden "real-overflow" "real-overflow"
+      , -- unary minus / negate operator
+        golden "negate-unary-operator" "negate-unary-operator"
       ]

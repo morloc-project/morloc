@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Nexus
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
+import qualified Data.Scientific as DS
 import Data.Text (Text)
 import qualified Data.Text as MT
 import qualified Data.Time.Clock
@@ -80,6 +81,9 @@ data NexusExpr
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
   | SaveX Text Text NexusExpr NexusExpr  -- format + schema + value + path -> ()
   | LoadX Text NexusExpr  -- schema + path -> ?a
+  | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
+                          -- (Just-coerce: at runtime sets tag=1 and writes
+                          -- the child into the optional's inner slot).
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -188,8 +192,14 @@ makeGastSchemas t = do
 generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
 generalTypeToSerialAST (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
-  | v == MBT.f32 = return $ SerialReal (FV v (CV ""))
-  | v == MBT.f64 = return $ SerialReal (FV v (CV ""))
+  -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
+  -- not SerialReal. checkRealBounds (and any future bound check) keys off
+  -- this distinction to bound a literal against its target type's range
+  -- (Float32 max ~3.4e38 vs Float64 max ~1.8e308). Collapsing both to
+  -- SerialReal makes Float32 overflow checks silently fall through to
+  -- the Float64 path.
+  | v == MBT.f32 = return $ SerialFloat32 (FV v (CV ""))
+  | v == MBT.f64 = return $ SerialFloat64 (FV v (CV ""))
   | v == MBT.int = return $ SerialInt (FV v (CV ""))
   | v == MBT.i8 = return $ SerialInt8 (FV v (CV ""))
   | v == MBT.i16 = return $ SerialInt16 (FV v (CV ""))
@@ -234,7 +244,26 @@ generalTypeToSerialAST (OptionalT t) = do
 generalTypeToSerialAST (NamT o v [] rs) =
   SerialObject o (FV v (CV "")) []
     <$> mapM (secondM generalTypeToSerialAST) rs
-generalTypeToSerialAST t = error $ "cannot serialize this type: " <> show t
+generalTypeToSerialAST t = MM.throwSystemError $ "cannot serialize this type: " <> pretty (show t)
+
+-- | Check whether a type contains a function type anywhere in its structure.
+-- Used to detect higher-order functions appearing as arguments or in
+-- compound positions (lists, tuples, records, optionals), which the CLI
+-- nexus cannot serialize.
+containsFunT :: Type -> Bool
+containsFunT (FunT _ _) = True
+containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
+containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
+containsFunT (EffectT _ t) = containsFunT t
+containsFunT (OptionalT t) = containsFunT t
+containsFunT _ = False
+
+-- | True if the export type carries a function type in argument or return
+-- position. The top-level FunT of an exported function itself is fine; what
+-- isn't fine is any nested FunT (HOF) embedded inside arguments or returns.
+exportHasHigherOrder :: Type -> Bool
+exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
+exportHasHigherOrder t = containsFunT t
 
 resolveAliasApp :: TVar -> [Type] -> MorlocMonad SerialAST
 resolveAliasApp v ts = do
@@ -244,7 +273,7 @@ resolveAliasApp v ts = do
       let tvars = [tv | Left (tv, _) <- params]
           resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
       in generalTypeToSerialAST resolved
-    _ -> error $ "Cannot serialize type: " <> show (AppT (VarT v) ts)
+    _ -> MM.throwSystemError $ "Cannot serialize type: " <> pretty (show (AppT (VarT v) ts))
 
 -- ======================================================================
 -- Pure expression extraction
@@ -256,6 +285,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   gname <- case mayName of
     Nothing -> MM.throwSourcedError i $ "No name found for call-free function"
     (Just n') -> return n'
+
+  CM.when (exportHasHigherOrder gtype) $
+    MM.throwSourcedError i "cannot export higher-order functions through the CLI"
 
   (retSchemaDoc, argSchemaDocs) <- makeGastSchemas gtype
   expr <- toNexusExpr x0
@@ -284,14 +316,25 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
-    toNexusExpr (AnnoS (Idx _ t) _ (RealS v)) = do
+    -- Use the literal's own source-map index (litIx) for overflow reporting,
+    -- mirroring the IntS path. RealS carries litIx in its first parameter.
+    -- Non-finite variants (Inf/-Inf/NaN) bypass bounds-checking and emit
+    -- the canonical wire string ("inf" / "-inf" / "nan"); the runtime JSON
+    -- decoder accepts these on parse.
+    toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) = do
       s <- generalTypeToSerialAST t
-      return $ case s of
-        (SerialFloat32 _) -> LitX F32X (MT.pack (show v))
-        _ -> LitX F64X (MT.pack (show v))
-    toNexusExpr (AnnoS (Idx ix t) _ (IntS v)) = do
+      checkRealBounds litIx v s
+      let litCode = case s of
+            (SerialFloat32 _) -> F32X
+            _ -> F64X
+      return $ LitX litCode (MT.pack (showRealLit v))
+    -- Use the literal's own source-map index (litIx) for overflow reporting.
+    -- The wrapping AnnoS index points at the term that owns the literal,
+    -- which after term inlining is often the export reference, not the
+    -- literal itself. See Treeify.collectExprS for where litIx is set.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) = do
       s <- generalTypeToSerialAST t
-      checkIntBounds ix v s
+      checkIntBounds litIx v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
         (SerialInt16 _) -> LitX I16X (MT.pack (show v))
@@ -318,6 +361,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
+    -- CoerceToOptional changes the value's runtime layout (tag byte + inner
+    -- slot), so at the pure-nexus level we must materialize the wrapping
+    -- explicitly. CoerceToEffect is purely a type-level lift (effects are
+    -- runtime side-effects of function calls, not part of value layout) and
+    -- can still be stripped here.
+    toNexusExpr (AnnoS (Idx _ t) _ (CoerceS CoerceToOptional e)) = do
+      outerSchema <- type2schema t
+      childX <- toNexusExpr e
+      return $ OptX outerSchema childX
     toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
@@ -358,6 +410,33 @@ checkIntBounds i v s =
          "Integer literal " <> pretty v
          <> " overflows " <> (name :: MDoc)
          <> " (range " <> pretty lo <> " to " <> pretty hi <> ")"
+
+-- Check that a finite Real literal fits its target IEEE-754 representation.
+-- Data.Scientific.toRealFloat collapses out-of-range values to infinity, so
+-- isInfinite on the result detects overflow at compile time. The non-finite
+-- RealLit variants (Inf/-Inf/NaN) are explicitly written by the user and
+-- bypass the bounds check entirely.
+checkRealBounds :: Int -> RealLit -> SerialAST -> MorlocMonad ()
+checkRealBounds i (RealFinite v) s = case s of
+  SerialFloat32 _ ->
+    let f = DS.toRealFloat v :: Float
+     in CM.when (isInfinite f) $
+          MM.throwSourcedError i $
+            "Float literal " <> pretty (show v)
+            <> " overflows Float32 (|x| > 3.4e38)"
+  -- Real and Float64 share the same IEEE-754 binary64 representation; bound
+  -- both against Float64 max.
+  SerialFloat64 _ -> overflowsF64
+  SerialReal _    -> overflowsF64
+  _ -> return ()
+  where
+    overflowsF64 =
+      let d = DS.toRealFloat v :: Double
+       in CM.when (isInfinite d) $
+            MM.throwSourcedError i $
+              "Float literal " <> pretty (show v)
+              <> " overflows Float64 (|x| > 1.8e308)"
+checkRealBounds _ _ _ = return ()
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
@@ -599,6 +678,12 @@ exprToJson (LoadX schema child) =
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
     ]
+exprToJson (OptX schema child) =
+  jsonObj
+    [ ("tag", jsonStr "container")
+    , ("schema", jsonStr schema)
+    , ("elements", jsonArr [exprToJson child])
+    ]
 exprToJson (PatX schema (PatternText p ps)) =
   jsonObj
     [ ("tag", jsonStr "interpolation")
@@ -838,10 +923,18 @@ generate cs rASTs = do
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
+  -- In eval mode the source module is always synthesized as `main`, so a
+  -- shared `exe/main` directory would collide across distinct `--save NAME`
+  -- invocations. Use the outfile name (which carries --save NAME) to give
+  -- each saved eval program its own install directory.
+  installName <-
+    if stateEvalMode st
+      then MM.getOutfileName
+      else return programName
   buildDir <-
     if stateInstall st
       then do
-        let installDir = configHome config </> "exe" </> programName
+        let installDir = configHome config </> "exe" </> installName
         CMS.modify (\s -> s {stateInstallDir = Just installDir})
         return installDir
       else liftIO Dir.getCurrentDirectory

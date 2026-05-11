@@ -92,14 +92,8 @@ thread_local std::vector<ShmEntry> _shm_tracker;
 static void _flush_shm_tracker() {
     for (auto& e : _shm_tracker) {
         char* err = NULL;
-        // Only do recursive sub-freeing if we have a schema and this is
-        // the last reference. NULL schema entries (from foreign_call result
-        // tracking) just decrement the refcount.
-        block_header_t* blk = (block_header_t*)((char*)e.ptr - sizeof(block_header_t));
-        if (e.schema && blk->reference_count <= 1) {
-            shfree_by_schema(e.ptr, e.schema, &err);
-            if (err) { free(err); err = NULL; }
-        }
+        // shfree decrements the refcount and zeros the block on final
+        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
         shfree(e.ptr, &err);
         if (err) { free(err); }
     }
@@ -149,10 +143,9 @@ uint8_t* _put_value(const T& value, Schema* schema) {
                 // SHM referenced by packet -- track for deferred cleanup
                 _shm_tracker.push_back({(absptr_t)voidstar, schema});
             } else {
-                // Data inlined in packet -- free SHM immediately
+                // Data inlined in packet -- free SHM immediately. shfree
+                // zeros the block on final ref-drop.
                 char* free_err = NULL;
-                shfree_by_schema((absptr_t)voidstar, schema, &free_err);
-                if (free_err) { free(free_err); free_err = NULL; }
                 shfree((absptr_t)voidstar, &free_err);
                 if (free_err) { free(free_err); }
             }

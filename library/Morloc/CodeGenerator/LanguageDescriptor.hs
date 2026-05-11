@@ -84,6 +84,12 @@ data LangDescriptor = LangDescriptor
     ldBoolTrue :: !Text
   , ldBoolFalse :: !Text
   , ldNullLiteral :: !Text
+  , -- Non-finite Real literals: idiomatic source-level expressions for
+    -- +Inf, -Inf, and NaN in the target language. Used by IRealLit
+    -- printing when the literal payload is non-finite.
+    ldRealPosInf :: !Text
+  , ldRealNegInf :: !Text
+  , ldRealNaN :: !Text
   , -- Constructors
     ldListStyle :: !ListStyle
   , ldTupleConstructor :: !Text -- "tuple" or "list" or ""
@@ -227,6 +233,9 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (ins "ldRunCommand") runCmdVal
             . maybe id (ins "ldIsCompiled") isCompiledVal
             . ins "ldCodegenCommand" Y.Null
+            . ins "ldRealPosInf" (Y.String "")
+            . ins "ldRealNegInf" (Y.String "")
+            . ins "ldRealNaN" (Y.String "")
             . ins "ldIntLiteralSuffix" (Y.String "")
             . ins "ldIntrinsicPrefix" (Y.String "")
             . ins "ldRemoteCallFn" (Y.String "")
@@ -292,6 +301,9 @@ defaultLangDescriptor name ext =
     , ldBoolTrue = "True"
     , ldBoolFalse = "False"
     , ldNullLiteral = "None"
+    , ldRealPosInf = "float('inf')"
+    , ldRealNegInf = "float('-inf')"
+    , ldRealNaN = "float('nan')"
     , ldListStyle = BracketList
     , ldTupleConstructor = ""
     , ldRecordConstructor = "dict"

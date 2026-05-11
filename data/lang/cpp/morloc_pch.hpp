@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
+#include <cmath>
 #include <stdexcept>
 #include <system_error>
 

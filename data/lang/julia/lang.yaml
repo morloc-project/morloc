@@ -18,6 +18,9 @@ ldExtension: jl
 ldBoolTrue: "true"
 ldBoolFalse: "false"
 ldNullLiteral: "nothing"
+ldRealPosInf: "Inf"
+ldRealNegInf: "-Inf"
+ldRealNaN: "NaN"
 
 # Constructors
 ldListStyle: bracket

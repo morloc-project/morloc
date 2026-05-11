@@ -1,3 +1,13 @@
-[true,true,true,true,true]
-[true,true,true,true,true]
-[true,true,true,true,true]
+[true,true,true,true,true,true,true]
+[true,true,true,true,true,true,true]
+[true,true,true,true,true,true,true]
+[1,3]
+[1,2,3]
+"Jim"
+[2,1]
+["Jim",69]
+2
+3
+[7,8]
+7
+7

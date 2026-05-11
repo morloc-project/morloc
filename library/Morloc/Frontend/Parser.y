@@ -18,6 +18,7 @@ import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
 import Morloc.Frontend.Lexer (lexMorloc, showLexError)
 import Morloc.Frontend.CST
+import qualified Morloc.Frontend.CST as CST
 import Morloc.Frontend.Desugar (DState(..), D, ParseError(..), showParseError, desugarProgram, desugarExpr)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
@@ -49,7 +50,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 86
+%expect 92
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -101,6 +102,9 @@ import qualified Morloc.BaseTypes as BT
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
   'Null'     { Located _ TokNull _ }
+  INF        { Located _ TokInf _ }
+  NEGINF     { Located _ TokNegInf _ }
+  NAN        { Located _ TokNaN _ }
   LOWER      { Located _ (TokLowerName _) _ }
   UPPER      { Located _ (TokUpperName _) _ }
   '+'        { Located _ (TokOperator "+") _ }
@@ -180,8 +184,11 @@ sig_or_ass :: { [Loc CstExpr] }
       { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $5 $6)] }
 
 guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
-  : guard_clause                    { [$1] }
-  | guard_clauses guard_clause      { $1 ++ [$2] }
+  : guard_clause                          { [$1] }
+  | guard_clauses guard_clause            { $1 ++ [$2] }
+  -- Absorb layout-inserted VSEMIs between aligned `?`-clauses, e.g. when a
+  -- multi-line guard appears as a do-stmt at the do-block's indent column.
+  | guard_clauses VSEMI guard_clause      { $1 ++ [$3] }
 
 guard_clause :: { (Loc CstExpr, Loc CstExpr) }
   : '?' expr '=' expr              { ($2, $4) }
@@ -211,6 +218,7 @@ module_comp :: { Text }
 exports :: { CstExport }
   : '*'                     { CstExportAll }
   | export_list             { CstExportMany $1 }
+  | {- empty -}             { CstExportMany [] }
 
 export_list :: { [Located] }
   : export_item                      { [$1] }
@@ -283,13 +291,13 @@ typedef_decl :: { Loc CstExpr }
   | 'type' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
-      { at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5)) }
+      {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }
   | nam_type typedef_term '=' nam_constructor opt_nam_entries
-      { at (fst $1) (CTypE (CstNamTypeLegacy Nothing (snd $1) $2 $4 $5)) }
+      {% checkRecordTypeKeysLegacy (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeLegacy Nothing (snd $1) $2 $4 $5))) }
   | nam_type UPPER '=>' typedef_term '=' nam_constructor opt_nam_entries
-      { at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7)) }
+      {% checkRecordTypeKeysLegacy (fst $1) $7 >> return (at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7))) }
   | nam_type LOWER '=>' typedef_term '=' nam_constructor opt_nam_entries
-      { at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7)) }
+      {% checkRecordTypeKeysLegacy (fst $1) $7 >> return (at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7))) }
 
 nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
@@ -514,6 +522,10 @@ expr :: { Loc CstExpr }
 guard_expr :: { Loc CstExpr }
   : guard_clauses ':' expr
       { Loc (fst (head $1) <-> $3) (CGuardExprE $1 $3) }
+  -- Absorb a layout-inserted VSEMI between the last `?`-clause and the `:`
+  -- branch when both are at the same indent inside a do-block (or let).
+  | guard_clauses VSEMI ':' expr
+      { Loc (fst (head $1) <-> $4) (CGuardExprE $1 $4) }
 
 let_expr :: { Loc CstExpr }
   : 'let' VLBRACE let_bindings VRBRACE 'in' expr
@@ -554,8 +566,12 @@ infix_expr :: { Loc CstExpr }
 
 operand :: { Loc CstExpr }
   : app_expr                 { $1 }
-  | '-' INTEGER              { at $1 (CIntE (negate (getInt $2))) }
-  | '-' FLOAT                { at $1 (CRealE (DS.fromFloatDigits (negate (getFloat $2)))) }
+  -- Prefix unary minus: -x, -(1+x), -(f x) etc. desugar to `negate _`.
+  -- Literal forms like -1 are produced as atomic numeric tokens by the lexer
+  -- in unary positions, so they do not reach this production. The form `- 1`
+  -- (with whitespace between dash and digit) routes through here as well and
+  -- becomes `negate 1`.
+  | '-' app_expr             { at $1 (CAppE (at $1 (CVarE (EV "negate"))) [$2]) }
 
 app_expr :: { Loc CstExpr }
   : force_expr                     { $1 }
@@ -611,7 +627,7 @@ expr_list1 :: { [Loc CstExpr] }
   | expr_list1 ',' expr        { $1 ++ [$3] }
 
 record_expr :: { Loc CstExpr }
-  : '{' record_entries '}'    { Loc ($1 <-> $3) (CNamE $2) }
+  : '{' record_entries '}'    {% checkRecordKeys $2 >> return (Loc ($1 <-> $3) (CNamE $2)) }
 
 record_entries :: { [(Key, Loc CstExpr)] }
   : record_entry                         { [$1] }
@@ -675,7 +691,10 @@ bool_expr :: { Loc CstExpr }
 
 num_expr :: { Loc CstExpr }
   : INTEGER                    { at $1 (CIntE (getInt $1)) }
-  | FLOAT                      { at $1 (CRealE (DS.fromFloatDigits (getFloat $1))) }
+  | FLOAT                      { at $1 (CRealE (RealFinite (getFloat $1))) }
+  | INF                        { at $1 (CRealE RealPosInf) }
+  | NEGINF                     { at $1 (CRealE RealNegInf) }
+  | NAN                        { at $1 (CRealE RealNaN) }
 
 string_expr :: { Loc CstExpr }
   : STRING                     { at $1 (CStrE (getString $1)) }
@@ -900,7 +919,7 @@ getInt :: Located -> Integer
 getInt (Located _ (TokInteger n) _) = n
 getInt _ = 0
 
-getFloat :: Located -> Double
+getFloat :: Located -> DS.Scientific
 getFloat (Located _ (TokFloat d) _) = d
 getFloat _ = 0
 
@@ -981,6 +1000,49 @@ parseError ([], expected) = do
 parseError (Located pos tok _ : _, expected) = do
   srcLines <- State.gets psSourceLines
   State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines))
+
+-- Reject duplicate field names in a record literal. Caret on the second
+-- occurrence's value position.
+checkRecordKeys :: [(Key, Loc CstExpr)] -> P ()
+checkRecordKeys = go Set.empty
+  where
+    go :: Set.Set Key -> [(Key, Loc CstExpr)] -> P ()
+    go _ [] = return ()
+    go seen ((k, e) : rest)
+      | Set.member k seen = do
+          srcLines <- State.gets psSourceLines
+          State.lift (Left (ParseError (CST.startPos e)
+            ("duplicate field in record literal: " ++ T.unpack (unKey k)) [] srcLines))
+      | otherwise = go (Set.insert k seen) rest
+
+-- Reject duplicate field names in `record T where ...` and `object T where ...`
+-- declarations. Caret on the second occurrence's identifier token.
+checkRecordTypeKeys :: Located -> [(Located, Key, TypeU)] -> P ()
+checkRecordTypeKeys _ = go Set.empty
+  where
+    go :: Set.Set Key -> [(Located, Key, TypeU)] -> P ()
+    go _ [] = return ()
+    go seen ((tok, k, _) : rest)
+      | Set.member k seen = do
+          srcLines <- State.gets psSourceLines
+          State.lift (Left (ParseError (locPos tok)
+            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
+      | otherwise = go (Set.insert k seen) rest
+
+-- Same check for the positionless legacy form (`record T = MkT { ... }`).
+-- Falls back to the declaration-keyword position since per-entry positions
+-- are not preserved by the legacy grammar rule.
+checkRecordTypeKeysLegacy :: Located -> [(Key, TypeU)] -> P ()
+checkRecordTypeKeysLegacy declTok = go Set.empty
+  where
+    go :: Set.Set Key -> [(Key, TypeU)] -> P ()
+    go _ [] = return ()
+    go seen ((k, _) : rest)
+      | Set.member k seen = do
+          srcLines <- State.gets psSourceLines
+          State.lift (Left (ParseError (locPos declTok)
+            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
+      | otherwise = go (Set.insert k seen) rest
 
 --------------------------------------------------------------------
 -- Desugar bridge

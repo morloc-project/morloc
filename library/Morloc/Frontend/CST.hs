@@ -29,10 +29,9 @@ module Morloc.Frontend.CST
   , valOf
   ) where
 
-import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Morloc.Frontend.Token (Located (..), Pos (..))
-import Morloc.Namespace.Expr (Associativity (..), Import (..))
+import Morloc.Namespace.Expr (Associativity (..), Import (..), RealLit (..))
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type (Constraint (..), NamType (..), TypeU (..))
 
@@ -101,7 +100,7 @@ data CstExpr
   | CLabeledVarE Text EVar  -- label:var (e.g., large:mean)
   | CVarE EVar
   | CIntE Integer
-  | CRealE Scientific
+  | CRealE RealLit
   | CStrE Text
   | CLogE Bool
   | CUniE

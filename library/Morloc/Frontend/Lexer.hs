@@ -20,6 +20,7 @@ module Morloc.Frontend.Lexer
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, isLower, isOctDigit, isUpper)
 import qualified Data.Map.Strict as Map
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.Frontend.Token
@@ -255,12 +256,46 @@ lexOne st@(LexState input pos toks) = case input of
         len = 1 + length word
      in Right st { lsInput = rest', lsPos = advanceCol pos len
                  , lsTokens = Located pos (TokIntrinsic name) (T.cons '@' name) : toks }
+  -- Negative numeric literal: '-' immediately followed by a digit, in unary
+  -- position. Unary position means: no previous token (start of input), or the
+  -- previous significant token is non-operand-finishing (e.g., '(', '[', ',',
+  -- '=', operator, keyword), or there is whitespace between the previous token
+  -- and this dash. Examples that lex as a single negative number token:
+  --   -1            (start of input)
+  --   f -1          (whitespace before dash)
+  --   1 + -2        (operator before, whitespace separated)
+  --   (-1) [-1,-2]  (open delimiter or comma before)
+  -- Examples that fall through to TokMinus (binary or section context):
+  --   f-1   x-1     (operand-finishing prev, no whitespace before dash)
+  --   f - 1         (whitespace AFTER dash, so next char isn't a digit)
+  '-' : c : rest
+    | isDigit c, isUnaryDashPosition pos toks ->
+        lexNegativeNumber pos (c : rest) st
+  -- Atomic non-finite literals: `-Inf` / `-NaN` in unary dash position
+  -- behave like `-1.5` -- a single token rather than `negate(Inf)`. This
+  -- keeps non-finite literals usable from pure morloc, where `negate` is
+  -- not in scope. NaN sign is collapsed (our wire format has a single
+  -- "nan" form), so `-NaN` produces TokNaN identical to bare `NaN`.
+  '-' : 'I' : 'n' : 'f' : rest
+    | isUnaryDashPosition pos toks
+    , not (isIdentBodyChar rest) ->
+        Right st
+          { lsInput = rest
+          , lsPos = advanceCol pos 4
+          , lsTokens = Located pos TokNegInf "-Inf" : toks
+          }
+  '-' : 'N' : 'a' : 'N' : rest
+    | isUnaryDashPosition pos toks
+    , not (isIdentBodyChar rest) ->
+        Right st
+          { lsInput = rest
+          , lsPos = advanceCol pos 4
+          , lsTokens = Located pos TokNaN "-NaN" : toks
+          }
   -- Operators and reserved operator sequences
   c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
   -- Identifiers and keywords
   c : rest | isAlpha c -> lexIdent pos (c : rest) st
-  -- Negative numbers: sign directly attached
-  -- This is handled in the parser by parsing - as a unary operator
 
   -- Unknown character
   c : _ -> Left (LexError pos ("unexpected character: " ++ show c))
@@ -352,6 +387,8 @@ classifyWord "let" = TokLet
 classifyWord "in" = TokIn
 classifyWord "do" = TokDo
 classifyWord "Null" = TokNull
+classifyWord "Inf" = TokInf
+classifyWord "NaN" = TokNaN
 classifyWord t
   | isUpper (T.head t) = TokUpperName t
   | otherwise = TokLowerName t
@@ -417,14 +454,14 @@ lexDoubleString start input st = go (advanceCol start 1) input []
               { lsTokens = Located (advanceCol pos 0) TokInterpOpen "#{" : Located start tok prefixTxt : lsTokens st
               }
             start
-    go pos ('\\' : c : rest) acc =
-      let escaped = case c of
-            'n' -> '\n'
-            't' -> '\t'
-            '\\' -> '\\'
-            '"' -> '"'
-            _ -> c
-       in go (advanceCol pos 2) rest (escaped : acc)
+    go pos ('\\' : c : rest) acc = case c of
+      'n'  -> go (advanceCol pos 2) rest ('\n' : acc)
+      't'  -> go (advanceCol pos 2) rest ('\t' : acc)
+      'r'  -> go (advanceCol pos 2) rest ('\r' : acc)
+      '0'  -> go (advanceCol pos 2) rest ('\0' : acc)
+      '\\' -> go (advanceCol pos 2) rest ('\\' : acc)
+      '"'  -> go (advanceCol pos 2) rest ('"'  : acc)
+      _    -> Left (LexError pos ("invalid escape sequence \\" ++ [c]))
     go pos ('\n' : _) _ = Left (LexError pos "unterminated string literal (use triple quotes for multi-line strings)")
     go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
     go pos [] _ = Left (LexError pos "unterminated string literal")
@@ -496,14 +533,14 @@ lexStringAfterInterp pos input st _ = go pos input []
             1
             st {lsTokens = Located p TokInterpOpen "#{" : Located pos (TokStringMid txt) "" : lsTokens st}
             pos
-    go p ('\\' : c : rest) acc =
-      let escaped = case c of
-            'n' -> '\n'
-            't' -> '\t'
-            '\\' -> '\\'
-            '"' -> '"'
-            _ -> c
-       in go (advanceCol p 2) rest (escaped : acc)
+    go p ('\\' : c : rest) acc = case c of
+      'n'  -> go (advanceCol p 2) rest ('\n' : acc)
+      't'  -> go (advanceCol p 2) rest ('\t' : acc)
+      'r'  -> go (advanceCol p 2) rest ('\r' : acc)
+      '0'  -> go (advanceCol p 2) rest ('\0' : acc)
+      '\\' -> go (advanceCol p 2) rest ('\\' : acc)
+      '"'  -> go (advanceCol p 2) rest ('"'  : acc)
+      _    -> Left (LexError p ("invalid escape sequence \\" ++ [c]))
     go p ('\n' : _) _ = Left (LexError p "unterminated string literal")
     go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
     go p [] _ = Left (LexError p "unterminated string literal")
@@ -539,15 +576,15 @@ lexMultilineString start delim input st = go (advanceCol start 3) input []
             st {lsTokens = Located pos TokInterpOpen "#{" : Located start tok "" : lsTokens st}
             start
             delim
-    go pos ('\\' : c : rest) acc =
-      let escaped = case c of
-            'n' -> '\n'
-            't' -> '\t'
-            '\\' -> '\\'
-            '\'' -> '\''
-            '"' -> '"'
-            _ -> c
-       in go (advanceCol pos 2) rest (escaped : acc)
+    go pos ('\\' : c : rest) acc = case c of
+      'n'  -> go (advanceCol pos 2) rest ('\n' : acc)
+      't'  -> go (advanceCol pos 2) rest ('\t' : acc)
+      'r'  -> go (advanceCol pos 2) rest ('\r' : acc)
+      '0'  -> go (advanceCol pos 2) rest ('\0' : acc)
+      '\\' -> go (advanceCol pos 2) rest ('\\' : acc)
+      '\'' -> go (advanceCol pos 2) rest ('\'' : acc)
+      '"'  -> go (advanceCol pos 2) rest ('"'  : acc)
+      _    -> Left (LexError pos ("invalid escape sequence \\" ++ [c]))
     go pos ('\n' : rest) acc = go (nextLine pos) rest ('\n' : acc)
     go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
     go pos [] _ = Left (LexError pos "unterminated multiline string literal")
@@ -599,22 +636,100 @@ lexMultilineAfterInterp pos input st _ delim = go pos input []
     go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
     go p [] _ = Left (LexError p "unterminated multiline string literal")
 
+-- | True when the next char in @input@ would extend an identifier (i.e. the
+-- previous keyword/identifier match is not yet at a word boundary). Used to
+-- guard atomic `-Inf` / `-NaN` lexing so `-Information` stays as TokMinus +
+-- TokUpperName "Information".
+isIdentBodyChar :: String -> Bool
+isIdentBodyChar (c : _) = isAlphaNum c || c == '_' || c == '\''
+isIdentBodyChar [] = False
+
+-- | Decide whether a '-' at @dashPos@ should be lexed as part of a negative
+-- numeric literal rather than as a TokMinus operator. See the call site in
+-- 'lexOne' for the rule rationale.
+isUnaryDashPosition :: Pos -> [Located] -> Bool
+isUnaryDashPosition dashPos toks = case prevSignificantToken toks of
+  Nothing -> True
+  Just (prev, prevEnd) -> prevEnd /= dashPos || not (isOperandFinishing prev)
+
+-- | The most recent token, skipping docstrings and group annotations. Returns
+-- the token plus the position of the character immediately after its text.
+prevSignificantToken :: [Located] -> Maybe (Token, Pos)
+prevSignificantToken [] = Nothing
+prevSignificantToken (Located _ TokDocLine{} _ : rest) = prevSignificantToken rest
+prevSignificantToken (Located _ TokGroupLine{} _ : rest) = prevSignificantToken rest
+prevSignificantToken (Located p tok txt : _) =
+  Just (tok, advanceCol p (T.length txt))
+
+-- | True for tokens that finish an operand (a complete sub-expression). After
+-- such a token, a '-' with no preceding whitespace is binary subtraction.
+isOperandFinishing :: Token -> Bool
+isOperandFinishing TokInteger{} = True
+isOperandFinishing TokFloat{} = True
+isOperandFinishing TokString{} = True
+isOperandFinishing TokStringEnd{} = True
+isOperandFinishing TokLowerName{} = True
+isOperandFinishing TokUpperName{} = True
+isOperandFinishing TokTickName{} = True
+isOperandFinishing TokIntrinsic{} = True
+isOperandFinishing TokRParen = True
+isOperandFinishing TokRBracket = True
+isOperandFinishing TokRBrace = True
+isOperandFinishing TokRAngle = True
+isOperandFinishing TokTrue = True
+isOperandFinishing TokFalse = True
+isOperandFinishing TokNull = True
+isOperandFinishing TokUnderscore = True
+isOperandFinishing _ = False
+
+-- | Lex a negative numeric literal. The leading '-' has been peeked but not
+-- yet consumed. @input@ is the post-dash text starting with a digit. Dispatches
+-- to the standard number lexers from the position of the first digit, then
+-- post-processes the emitted token to negate its value, prepend '-' to its
+-- text, and shift its position back to the dash.
+lexNegativeNumber :: Pos -> String -> LexState -> Either LexError LexState
+lexNegativeNumber dashPos input st = do
+  let digitPos = advanceCol dashPos 1
+      stAtDigit = st { lsPos = digitPos, lsInput = input }
+  st' <- dispatchNumber digitPos input stAtDigit
+  case lsTokens st' of
+    Located _ tok txt : restToks ->
+      let tok' = case tok of
+            TokInteger v -> TokInteger (negate v)
+            TokFloat v -> TokFloat (negate v)
+            other -> other
+          txt' = T.cons '-' txt
+       in Right st' { lsTokens = Located dashPos tok' txt' : restToks }
+    [] -> Left (LexError dashPos "internal: number lexer emitted no token")
+  where
+    dispatchNumber p inp s = case inp of
+      '0' : 'x' : rest -> lexHexNumber p rest s
+      '0' : 'X' : rest -> lexHexNumber p rest s
+      '0' : 'o' : rest -> lexOctalNumber p rest s
+      '0' : 'O' : rest -> lexOctalNumber p rest s
+      '0' : 'b' : rest -> lexBinaryNumber p rest s
+      '0' : 'B' : rest -> lexBinaryNumber p rest s
+      _ -> lexDecNumber p inp s
+
 -- | Lex a hexadecimal number after 0x prefix
 lexHexNumber :: Pos -> String -> LexState -> Either LexError LexState
 lexHexNumber pos input st =
   let (digits, rest) = span isHexDigit input
-   in if null digits
-        then Left (LexError pos "expected hexadecimal digits after 0x")
-        else
-          let val = foldl (\n d -> n * 16 + fromIntegral (hexVal d)) 0 digits
-              len = 2 + length digits
-              txt = T.pack ("0x" ++ digits)
-           in Right
-                st
-                  { lsInput = rest
-                  , lsPos = advanceCol pos len
-                  , lsTokens = Located pos (TokInteger val) txt : lsTokens st
-                  }
+      (junk, _)      = span isNumLitTail rest
+   in if not (null junk)
+        then Left (LexError pos ("malformed hexadecimal literal: 0x" ++ digits ++ junk))
+        else if null digits
+          then Left (LexError pos "expected hexadecimal digits after 0x")
+          else
+            let val = foldl (\n d -> n * 16 + fromIntegral (hexVal d)) 0 digits
+                len = 2 + length digits
+                txt = T.pack ("0x" ++ digits)
+             in Right
+                  st
+                    { lsInput = rest
+                    , lsPos = advanceCol pos len
+                    , lsTokens = Located pos (TokInteger val) txt : lsTokens st
+                    }
   where
     hexVal c
       | c >= '0' && c <= '9' = fromEnum c - fromEnum '0'
@@ -622,39 +737,52 @@ lexHexNumber pos input st =
       | c >= 'A' && c <= 'F' = fromEnum c - fromEnum 'A' + 10
       | otherwise = 0
 
+-- | Characters that cannot legally follow a numeric literal without an
+-- intervening boundary. Used to detect malformed prefixed integers like
+-- @0xFOOD@ or @0b2@, where the trailing run would otherwise be silently
+-- re-tokenized as an identifier.
+isNumLitTail :: Char -> Bool
+isNumLitTail c = isAlphaNum c || c == '_'
+
 -- | Lex an octal number after 0o prefix
 lexOctalNumber :: Pos -> String -> LexState -> Either LexError LexState
 lexOctalNumber pos input st =
   let (digits, rest) = span isOctDigit input
-   in if null digits
-        then Left (LexError pos "expected octal digits after 0o")
-        else
-          let val = foldl (\n d -> n * 8 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
-              len = 2 + length digits
-              txt = T.pack ("0o" ++ digits)
-           in Right
-                st
-                  { lsInput = rest
-                  , lsPos = advanceCol pos len
-                  , lsTokens = Located pos (TokInteger val) txt : lsTokens st
-                  }
+      (junk, _)      = span isNumLitTail rest
+   in if not (null junk)
+        then Left (LexError pos ("malformed octal literal: 0o" ++ digits ++ junk))
+        else if null digits
+          then Left (LexError pos "expected octal digits after 0o")
+          else
+            let val = foldl (\n d -> n * 8 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
+                len = 2 + length digits
+                txt = T.pack ("0o" ++ digits)
+             in Right
+                  st
+                    { lsInput = rest
+                    , lsPos = advanceCol pos len
+                    , lsTokens = Located pos (TokInteger val) txt : lsTokens st
+                    }
 
 -- | Lex a binary number after 0b prefix
 lexBinaryNumber :: Pos -> String -> LexState -> Either LexError LexState
 lexBinaryNumber pos input st =
   let (digits, rest) = span (\c -> c == '0' || c == '1') input
-   in if null digits
-        then Left (LexError pos "expected binary digits after 0b")
-        else
-          let val = foldl (\n d -> n * 2 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
-              len = 2 + length digits
-              txt = T.pack ("0b" ++ digits)
-           in Right
-                st
-                  { lsInput = rest
-                  , lsPos = advanceCol pos len
-                  , lsTokens = Located pos (TokInteger val) txt : lsTokens st
-                  }
+      (junk, _)      = span isNumLitTail rest
+   in if not (null junk)
+        then Left (LexError pos ("malformed binary literal: 0b" ++ digits ++ junk))
+        else if null digits
+          then Left (LexError pos "expected binary digits after 0b")
+          else
+            let val = foldl (\n d -> n * 2 + fromIntegral (fromEnum d - fromEnum '0')) 0 digits
+                len = 2 + length digits
+                txt = T.pack ("0b" ++ digits)
+             in Right
+                  st
+                    { lsInput = rest
+                    , lsPos = advanceCol pos len
+                    , lsTokens = Located pos (TokInteger val) txt : lsTokens st
+                    }
 
 -- | Lex a decimal integer or float, with optional scientific notation
 lexDecNumber :: Pos -> String -> LexState -> Either LexError LexState
@@ -667,7 +795,7 @@ lexDecNumber pos input st =
               let (fracPart, rest3) = span isDigit (c : rest2)
                   (expPart, rest4) = lexExponent rest3
                   numStr = intPart ++ "." ++ fracPart ++ expPart
-                  val = read numStr :: Double
+                  val = read numStr :: Scientific
                   len = length numStr
                in Right
                     st
@@ -682,7 +810,7 @@ lexDecNumber pos input st =
                 then mkInt intPart rest1
                 else
                   let numStr = intPart ++ expPart
-                      val = read numStr :: Double
+                      val = read numStr :: Scientific
                       len = length numStr
                    in Right
                         st
@@ -696,7 +824,7 @@ lexDecNumber pos input st =
                 then mkInt intPart rest1
                 else
                   let numStr = intPart ++ expPart
-                      val = read numStr :: Double
+                      val = read numStr :: Scientific
                       len = length numStr
                    in Right
                         st
@@ -888,6 +1016,13 @@ insertLayout toks = beginTopLevel toks
       Located (locPos eof) TokVLBrace ""
         : Located (locPos eof) TokVRBrace ""
         : closingBraces ctxs [eof]
+    -- Empty body immediately followed by another module declaration:
+    -- synthesize an empty VLBRACE/VRBRACE pair and process the next
+    -- 'module' keyword in the outer context (no new IndentCtx).
+    startLayoutCtx _ ctxs (t@(Located _ TokModule _) : rest) =
+      Located (locPos t) TokVLBrace ""
+        : Located (locPos t) TokVRBrace ""
+        : emitToken ctxs t rest
     -- Explicit brace after layout keyword: skip virtual layout, let the
     -- brace be handled as an explicit context by emitToken/process.
     startLayoutCtx _ ctxs (t@(Located _ TokLBrace _) : rest) =

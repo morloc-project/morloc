@@ -365,6 +365,38 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::nul
     return dest;
 }
 
+// Range-check a value before narrowing to a fixed-width wire integer.
+// Catches the case where a C++ source produces a value too large for the
+// declared morloc type (e.g. `int` returning 200 declared as `Int8`),
+// which would otherwise truncate silently into the wire payload.
+template<typename Wire, typename Src>
+Wire checkRangeNarrow(const Src& data, const char* name) {
+    if constexpr (std::is_arithmetic_v<Src>) {
+        using SLim = std::numeric_limits<Wire>;
+        if constexpr (std::is_signed_v<Src>) {
+            int64_t v = static_cast<int64_t>(data);
+            int64_t lo = static_cast<int64_t>(SLim::min());
+            int64_t hi = static_cast<int64_t>(SLim::max());
+            if (v < lo || v > hi) {
+                std::ostringstream oss;
+                oss << "Integer overflow: value " << v << " out of range for "
+                    << name << " (range " << lo << " to " << hi << ")";
+                throw std::overflow_error(oss.str());
+            }
+        } else {
+            uint64_t v = static_cast<uint64_t>(data);
+            uint64_t hi = static_cast<uint64_t>(SLim::max());
+            if (v > hi) {
+                std::ostringstream oss;
+                oss << "Integer overflow: value " << v << " out of range for "
+                    << name << " (range 0 to " << hi << ")";
+                throw std::overflow_error(oss.str());
+            }
+        }
+    }
+    return static_cast<Wire>(data);
+}
+
 // Primitives — always write at schema width so the wire format matches
 // the morloc type regardless of the C++ concrete type width.
 // Also instantiated for record types (which fall through to default).
@@ -372,14 +404,14 @@ template<typename Primitive>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
     if constexpr (std::is_arithmetic_v<Primitive>) {
         switch(schema->type) {
-            case MORLOC_SINT8:   *(int8_t*)dest   = static_cast<int8_t>(data);   break;
-            case MORLOC_SINT16:  *(int16_t*)dest  = static_cast<int16_t>(data);  break;
-            case MORLOC_SINT32:  *(int32_t*)dest  = static_cast<int32_t>(data);  break;
-            case MORLOC_SINT64:  *(int64_t*)dest  = static_cast<int64_t>(data);  break;
-            case MORLOC_UINT8:   *(uint8_t*)dest  = static_cast<uint8_t>(data);  break;
-            case MORLOC_UINT16:  *(uint16_t*)dest = static_cast<uint16_t>(data); break;
-            case MORLOC_UINT32:  *(uint32_t*)dest = static_cast<uint32_t>(data); break;
-            case MORLOC_UINT64:  *(uint64_t*)dest = static_cast<uint64_t>(data); break;
+            case MORLOC_SINT8:   *(int8_t*)dest   = checkRangeNarrow<int8_t>(data, "Int8");    break;
+            case MORLOC_SINT16:  *(int16_t*)dest  = checkRangeNarrow<int16_t>(data, "Int16");  break;
+            case MORLOC_SINT32:  *(int32_t*)dest  = checkRangeNarrow<int32_t>(data, "Int32");  break;
+            case MORLOC_SINT64:  *(int64_t*)dest  = static_cast<int64_t>(data);   break;
+            case MORLOC_UINT8:   *(uint8_t*)dest  = checkRangeNarrow<uint8_t>(data, "UInt8");   break;
+            case MORLOC_UINT16:  *(uint16_t*)dest = checkRangeNarrow<uint16_t>(data, "UInt16"); break;
+            case MORLOC_UINT32:  *(uint32_t*)dest = checkRangeNarrow<uint32_t>(data, "UInt32"); break;
+            case MORLOC_UINT64:  *(uint64_t*)dest = static_cast<uint64_t>(data);  break;
             case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
             case MORLOC_INT: {

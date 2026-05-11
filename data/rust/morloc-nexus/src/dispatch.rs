@@ -37,6 +37,7 @@ pub enum OutputFormat {
 pub struct NexusConfig {
     pub help_flag: bool,
     pub print_flag: bool,
+    pub keep_null: bool,
     pub packet_path: Option<String>,
     pub socket_base: Option<String>,
     pub output_path: Option<String>,
@@ -55,6 +56,7 @@ impl Default for NexusConfig {
         NexusConfig {
             help_flag: false,
             print_flag: false,
+            keep_null: false,
             packet_path: None,
             socket_base: None,
             output_path: None,
@@ -119,6 +121,10 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
             }
             "-p" | "--print" => {
                 config.print_flag = true;
+                i += 1;
+            }
+            "--keep-null" => {
+                config.keep_null = true;
                 i += 1;
             }
             "-c" | "--call-packet" => {
@@ -219,8 +225,13 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
     i
 }
 
-/// Extract daemon/server long options from argv in single-command mode.
-/// Removes matched options from the args vector.
+/// Extract nexus-level long options from argv in single-command mode.
+/// Removes matched options from the args vector. In single-command mode
+/// the subcommand is optional, so nexus options and program arguments
+/// share an argv. To avoid stealing common short flags from the program
+/// (e.g. -o, -p, -f), only long forms (--print, --output-file, etc.)
+/// are recognized as nexus options here. Short flags pass through to
+/// the pool's argument parser.
 pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) {
     let mut i = 1;
     while i < args.len() {
@@ -232,20 +243,28 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
         let mut consumed = 1;
 
         match args[i].as_str() {
+            "--help" => {
+                config.help_flag = true;
+                matched = true;
+            }
             "--daemon" => {
                 config.daemon_flag = true;
                 matched = true;
             }
-            "--print" | "-p" => {
+            "--print" => {
                 config.print_flag = true;
                 matched = true;
             }
-            "--output-form" | "-f" if i + 1 < args.len() => {
+            "--keep-null" => {
+                config.keep_null = true;
+                matched = true;
+            }
+            "--output-form" if i + 1 < args.len() => {
                 config.output_format = parse_output_format(&args[i + 1]);
                 consumed = 2;
                 matched = true;
             }
-            "--output-file" | "-o" if i + 1 < args.len() => {
+            "--output-file" if i + 1 < args.len() => {
                 config.output_path = Some(args[i + 1].clone());
                 consumed = 2;
                 matched = true;
@@ -474,6 +493,10 @@ fn parse_command_args(
             if let Some(eq_pos) = arg.find('=') {
                 let key = &arg[2..eq_pos];
                 let val = &arg[eq_pos + 1..];
+                if !is_known_long_opt(cmd, key) {
+                    eprintln!("Error: unknown option --{}", key);
+                    process::clean_exit(1);
+                }
                 opt_values.insert(key.to_string(), val.to_string());
                 i += 1;
             } else {
@@ -487,6 +510,9 @@ fn parse_command_args(
                         flag_values.insert(orig, flag_reverse_value_by_rev(cmd, key));
                     }
                     i += 1;
+                } else if !is_known_long_opt(cmd, key) {
+                    eprintln!("Error: unknown option --{}", key);
+                    process::clean_exit(1);
                 } else if i + 1 < args.len() {
                     opt_values.insert(key.to_string(), args[i + 1].clone());
                     i += 2;
@@ -503,6 +529,9 @@ fn parse_command_args(
                     flag_forward_value_by_short(cmd, ch),
                 );
                 i += 1;
+            } else if !is_known_short_opt(cmd, ch) {
+                eprintln!("Error: unknown option -{}", ch);
+                process::clean_exit(1);
             } else if i + 1 < args.len() {
                 opt_values.insert(
                     short_to_long(cmd, ch).unwrap_or_else(|| ch.to_string()),
@@ -632,7 +661,7 @@ fn run_remote_command(
     config: &NexusConfig,
 ) {
     use morloc_runtime::packet;
-    use morloc_runtime::schema::{parse_schema, SerialType};
+    use morloc_runtime::schema::parse_schema;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -869,11 +898,11 @@ fn run_remote_command(
     // Check if response is Arrow format
     let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
 
-    // Print using the C library for correct output.
-    // Suppress "null" for Unit-returning commands (CLI convention).
-    if return_schema.serial_type != SerialType::Nil {
-        print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
-    }
+    // Print using the C library for correct output. Top-level null-ish
+    // suppression (Unit and Optional-None producing empty stdout) lives
+    // inside the JSON path; binary formats always emit a well-formed
+    // stream so downstream consumers see the expected bytes.
+    print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
     unsafe { morloc_runtime::cschema::CSchema::free(c_schema) };
 }
 
@@ -889,11 +918,13 @@ fn print_result_c(
         fn print_voidstar(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime::cschema::CSchema,
+            keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> bool;
         fn pretty_print_voidstar(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime::cschema::CSchema,
+            keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> bool;
         fn print_arrow_as_json(
@@ -923,9 +954,9 @@ fn print_result_c(
                 } else if is_arrow {
                     print_arrow_as_json(ptr as *const std::ffi::c_void, &mut errmsg)
                 } else if config.print_flag {
-                    pretty_print_voidstar(ptr as *const std::ffi::c_void, schema, &mut errmsg)
+                    pretty_print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
                 } else {
-                    print_voidstar(ptr as *const std::ffi::c_void, schema, &mut errmsg)
+                    print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
                 }
             };
             if !ok {
@@ -1067,65 +1098,33 @@ fn print_result_c(
     process::clean_exit(0);
 }
 
-/// Print using Rust-native functions (kept for reference, currently unused).
-#[allow(dead_code)]
-fn print_result(
-    ptr: morloc_runtime::shm::AbsPtr,
-    schema: &morloc_runtime::Schema,
-    config: &NexusConfig,
-) {
-    use morloc_runtime::{json, mpack};
-
-    match config.output_format {
-        OutputFormat::Json => {
-            if config.print_flag {
-                if let Err(e) = json::pretty_print_voidstar(ptr, schema) {
-                    eprintln!("Error: {}", e);
-                    process::clean_exit(1);
-                }
-            } else {
-                if let Err(e) = json::print_voidstar(ptr, schema) {
-                    eprintln!("Error: {}", e);
-                    process::clean_exit(1);
-                }
-            }
-        }
-        OutputFormat::MessagePack => {
-            let mpk = match mpack::pack_with_schema(ptr, schema) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    process::clean_exit(1);
-                }
-            };
-            if config.print_flag {
-                // Hex dump for human-readable msgpack
-                for (i, byte) in mpk.iter().enumerate() {
-                    if i > 0 && i % 16 == 0 {
-                        println!();
-                    }
-                    print!("{:02x} ", byte);
-                }
-                println!();
-            } else {
-                use std::io::Write;
-                let stdout = std::io::stdout();
-                let mut handle = stdout.lock();
-                let _ = handle.write_all(&mpk);
-            }
-        }
-        OutputFormat::VoidStar | OutputFormat::Packet
-        | OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
-            eprintln!("Error: voidstar/packet/arrow/parquet/csv output not supported in Rust-native print path");
-            process::clean_exit(1);
-        }
-    }
-    process::clean_exit(0);
-}
-
 /// Execute a pure command by evaluating the expression via C library.
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
-    use morloc_runtime::schema::{parse_schema, SerialType};
+    use morloc_runtime::schema::parse_schema;
+
+    // Open a per-eval SHM arena. Every shm::shmalloc that fires while
+    // this guard is alive (CLI arg ingress via msgpack/voidstar unpack,
+    // morloc_eval intermediates, the result tree) is tracked and
+    // released when the guard drops at the end of this function. Result
+    // serialization (print_result_c -> voidstar_to_json_string) reads
+    // SHM and writes a libc-allocated JSON string, which survives the
+    // drop. For one-shot CLI this is functionally a no-op (the process
+    // exits and atexit's shclose unlinks the volumes anyway), but the
+    // explicit lifetime keeps nexus and daemon symmetric and protects
+    // any future repeated-call use of run_pure_command.
+    //
+    // Note: error branches below call process::clean_exit(1) which does
+    // NOT run Rust destructors; the arena guard's drop is skipped on
+    // those paths. That's acceptable here because clean_exit also tears
+    // down the whole process via atexit shclose. No additional handling
+    // is needed.
+    let _arena = match morloc_runtime::eval_arena::enter() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Error: eval arena could not be opened: {}", e);
+            process::clean_exit(1);
+        }
+    };
 
     extern "C" {
         fn build_manifest_expr(
@@ -1272,9 +1271,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     // Extract voidstar value from the result packet
     let result_ptr = unsafe { get_morloc_data_packet_value(pkt_bytes.as_ptr(), c_return_schema, &mut errmsg) };
 
-    if return_schema.serial_type != SerialType::Nil {
-        print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
-    }
+    print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
     // Cleanup
     for cs in &c_arg_schemas {
@@ -1420,6 +1417,40 @@ fn is_short_flag(cmd: &Command, ch: char) -> bool {
         }
         _ => false,
     })
+}
+
+/// True when `name` is a long option declared by the command (as an
+/// `Optional`, `Flag` long_opt, `Flag` long_rev, or a `Group`'s
+/// group_opt). Used to reject unknown `--foo` rather than silently
+/// absorbing them as opt-with-value.
+fn is_known_long_opt(cmd: &Command, name: &str) -> bool {
+    let matches_arg = |arg: &Arg| -> bool {
+        match arg {
+            Arg::Optional { long_opt, .. } => long_opt.as_deref() == Some(name),
+            Arg::Flag { long_opt, long_rev, .. } => {
+                long_opt.as_deref() == Some(name) || long_rev.as_deref() == Some(name)
+            }
+            _ => false,
+        }
+    };
+    cmd.args.iter().any(|a| match a {
+        Arg::Group { entries, group_opt, .. } => {
+            let go_match = group_opt
+                .as_ref()
+                .and_then(|g| g.long_opt.as_deref())
+                == Some(name);
+            go_match || entries.iter().any(|e| matches_arg(&e.arg))
+        }
+        _ => matches_arg(a),
+    })
+}
+
+/// True when `ch` is a short option declared by the command. Short
+/// flags and short Optionals share this lookup; the body reuses
+/// `short_to_long` which already walks Group entries and both Arg
+/// variants that carry a short_opt.
+fn is_known_short_opt(cmd: &Command, ch: char) -> bool {
+    short_to_long(cmd, ch).is_some()
 }
 
 fn short_to_long(cmd: &Command, ch: char) -> Option<String> {

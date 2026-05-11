@@ -258,6 +258,16 @@ assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
     Left e -> error $ show e
     Right g -> assertEqual "" gs2 (MTI.gammaContextList g)
 
+-- | Assert that a subtype check is rejected. Used to lock in negative
+-- rules (e.g. effect narrowing) where the absence of an error would
+-- previously have been a silent soundness hole.
+assertSubtypeBad :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
+assertSubtypeBad msg gs a b = testCase msg $ do
+  let g0 = listToGamma gs
+  case MTI.subtype Map.empty a b g0 of
+    Left _ -> return ()
+    Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
+
 -- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
 -- Uses slot spacing of 256 to match production code.
 listToGamma :: [GammaIndex] -> Gamma
@@ -1927,6 +1937,98 @@ unitValuecheckTests =
            f xs = [1, sum xs]
            f xs = [2, sum xs]
       |]
+      , -- non-export terms must also be value-checked
+        valuecheckFail
+          "non-export term value contradiction"
+          [r|
+         module foo (a)
+           a = y
+           y = 1
+           y = 2
+      |]
+      , valuecheckFail
+          "where-clause value contradiction"
+          [r|
+         module foo (a)
+           a = y where
+             y = 1
+             y = 2
+      |]
+      , valuecheckFail
+          "where-clause contradiction inside lambda body"
+          [r|
+         module foo (f)
+           f x = [x, y] where
+             y = 1
+             y = 2
+      |]
+      , valuecheckPass
+          "where with equivalent values is legal"
+          [r|
+         module foo (a)
+           a = y where
+             y = 1
+             y = 1
+      |]
+      , -- self-referential / cyclic bindings without concrete sources
+        valuecheckFail
+          "direct self-referential binding"
+          [r|
+         module foo (omega)
+           omega = omega
+      |]
+      , valuecheckFail
+          "mutual self-reference cycle"
+          [r|
+         module foo (a)
+           a = b
+           b = a
+      |]
+      , valuecheckFail
+          "three-cycle self-reference"
+          [r|
+         module foo (a)
+           a = b
+           b = c
+           c = a
+      |]
+      , -- duplicate record fields (caught at parse time)
+        valuecheckFail
+          "duplicate record field literal"
+          [r|
+         module foo (r)
+           r = {a = 1, b = 2, a = 3}
+      |]
+      , valuecheckPass
+          "distinct record fields are legal"
+          [r|
+         module foo (r)
+           r = {a = 1, b = 2, c = 3}
+      |]
+      , valuecheckFail
+          "duplicate field in record type (where form)"
+          [r|
+         module foo (Foo)
+           record Foo where
+             a :: Int
+             b :: Bool
+             a :: Real
+      |]
+      , valuecheckFail
+          "duplicate field in record type (legacy form)"
+          [r|
+         module foo (Foo)
+           record Foo = MkFoo {a :: Int, b :: Bool, a :: Real}
+      |]
+      , valuecheckPass
+          "distinct fields in record type (where form)"
+          [r|
+         module foo (Foo)
+           record Foo where
+             a :: Int
+             b :: Bool
+             c :: Real
+      |]
       ]
 
 {- | Tests for infix operator functionality
@@ -2645,48 +2747,135 @@ complexityRegressionTests =
           bool
       ]
 
--- Effect type helpers
+-- Effect type helpers used throughout the effect test groups.
 ioEff :: TypeU -> TypeU
 ioEff = EffectU ioEffectSet
 
-_errEff :: TypeU -> TypeU
-_errEff = EffectU (EffectSet (Set.singleton "Error"))
+errEff :: TypeU -> TypeU
+errEff = EffectU (EffectSet (Set.singleton "Error"))
+
+ioErrEff :: TypeU -> TypeU
+ioErrEff = EffectU (EffectSet (Set.fromList ["IO", "Error"]))
+
+randEff :: TypeU -> TypeU
+randEff = EffectU (EffectSet (Set.singleton "Rand"))
 
 emptyEff :: TypeU -> TypeU
 emptyEff = EffectU emptyEffectSet
 
+-- | An effect set containing an unsolved EffectVar.  EffectVars are
+-- introduced internally by the typechecker when forcing non-final
+-- statements of a do-block and are not yet solved; subtyping defers
+-- judgement in their presence rather than rejecting outright.
+effVar :: MT.Text -> TypeU -> TypeU
+effVar v = EffectU (EffectVar (TV v))
+
+-- | Effect subtyping covers four cases the spec lays out
+-- ('spec/types/effects.md' under "Subtyping" and "Effect Checking"):
+--
+--   1. Widening accepted: fewer effects can be used where more are
+--      expected.  This is the one direction the rule permits.
+--   2. Narrowing rejected: a value with more effects cannot satisfy a
+--      slot with fewer.  Previously this was silently accepted; the
+--      stricter rule turns it into a hard subtype error.
+--   3. Effectful-to-pure rejected: an effectful type cannot satisfy a
+--      pure slot.  Effects do not silently drop.
+--   4. EffectVar deferral: when either side mentions an unsolved
+--      EffectVar, judgement is deferred (the variable may later be
+--      solved to anything).  This is a known TODO; the deferral is
+--      tested here so the loophole is visible.
 effectSubtypeTests :: TestTree
 effectSubtypeTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
     testGroup
       "Effect subtype tests"
-      [ -- identical effect sets are subtypes of each other
-        assertSubtypeGamma "<IO> A <: <IO> A" [] (ioEff a) (ioEff a) []
-      , -- fewer effects is a subtype (IO subset of {IO,Error})
-        assertSubtypeGamma "<IO> A <: <IO,Error> A"
-          [] (ioEff a) (EffectU (EffectSet (Set.fromList ["IO", "Error"])) a) []
-      , -- empty effect set is subtype of any effect set
-        assertSubtypeGamma "<> A <: <IO> A" [] (emptyEff a) (ioEff a) []
-      , -- superset effects currently accepted (permissive behavior)
-        assertSubtypeGamma "<IO,Error> A <: <IO> A (permissive)"
-          [] (EffectU (EffectSet (Set.fromList ["IO", "Error"])) a) (ioEff a) []
-      , -- effect subtyping with function inner types
-        assertSubtypeGamma "<IO> (A -> B) <: <IO> (A -> B)"
+      [ -- === Reflexivity ===
+        -- A type is always a subtype of itself, regardless of its effect set.
+        assertSubtypeGamma "reflex: <IO> A <: <IO> A"
+          [] (ioEff a) (ioEff a) []
+      , assertSubtypeGamma "reflex: <> A <: <> A"
+          [] (emptyEff a) (emptyEff a) []
+      , assertSubtypeGamma "reflex: <IO,Error> A <: <IO,Error> A"
+          [] (ioErrEff a) (ioErrEff a) []
+
+        -- === Widening accepted (covariant subset) ===
+        -- A value producing fewer effects may be used where more are
+        -- expected.  This is the only allowed direction.
+      , assertSubtypeGamma "widening: <IO> A <: <IO,Error> A"
+          [] (ioEff a) (ioErrEff a) []
+      , assertSubtypeGamma "widening: <> A <: <IO> A"
+          [] (emptyEff a) (ioEff a) []
+      , assertSubtypeGamma "widening: <> A <: <IO,Error> A"
+          [] (emptyEff a) (ioErrEff a) []
+      , assertSubtypeGamma "widening: <Error> A <: <IO,Error> A"
+          [] (errEff a) (ioErrEff a) []
+
+        -- === Narrowing rejected ===
+        -- The signature `a :: <IO> Int = (rint :: <IO,Error> Int)`
+        -- previously compiled, silently losing the Error tag.  The new
+        -- rule rejects it as a subtype error.
+      , assertSubtypeBad "narrowing: <IO,Error> A </: <IO> A"
+          [] (ioErrEff a) (ioEff a)
+      , assertSubtypeBad "narrowing: <IO> A </: <Error> A"
+          [] (ioEff a) (errEff a)
+      , assertSubtypeBad "narrowing: <IO> A </: <> A"
+          [] (ioEff a) (emptyEff a)
+      , assertSubtypeBad "narrowing: <IO,Error> A </: <Rand> A (disjoint)"
+          [] (ioErrEff a) (randEff a)
+
+        -- === Effectful-to-pure rejected ===
+        -- Effects do not silently drop.  An effectful value cannot
+        -- inhabit a plain type slot; the caller must declare the
+        -- effect or force it in a do-block.
+      , assertSubtypeBad "drop effect: <IO> A </: A"
+          [] (ioEff a) a
+      , assertSubtypeBad "drop effect: <IO,Error> A </: A"
+          [] (ioErrEff a) a
+      , assertSubtypeBad "drop effect: <> A </: A (empty is still suspended)"
+          [] (emptyEff a) a
+
+        -- === Pure-to-effect handled by coercion, not subtype ===
+        -- The pure-to-effect lift is the responsibility of `tryCoerce`,
+        -- not the subtype relation.  A bare subtype check between a
+        -- pure type and an effectful type should fail; coercion picks
+        -- it up at synthesis sites.  This test pins that boundary.
+      , assertSubtypeBad "pure </: <IO> via subtype alone"
+          [] a (ioEff a)
+
+        -- === Recursion through inner type ===
+        -- The subtype rule recurses on the inner types after the
+        -- effect-subset check passes, so structural mismatches inside
+        -- are caught normally.
+      , assertSubtypeGamma "inner fun: <IO> (A -> B) <: <IO> (A -> B)"
           [] (ioEff (fun [a, b])) (ioEff (fun [a, b])) []
-      , -- effect subtyping solves existentials in inner types
-        assertSubtypeGamma "<a> -| <IO> <a> <: <IO> A |- <a>:A"
-          [eag] (ioEff ea) (ioEff a) [solvedA a]
-      , -- effect subtyping solves existentials (reverse direction)
-        assertSubtypeGamma "<a> -| <IO> A <: <IO> <a> |- <a>:A"
-          [eag] (ioEff a) (ioEff ea) [solvedA a]
-      , -- effects compose with optional inner types
-        assertSubtypeGamma "<IO> ?A <: <IO> ?A"
+      , assertSubtypeGamma "inner optional: <IO> ?A <: <IO> ?A"
           [] (ioEff (OptionalU a)) (ioEff (OptionalU a)) []
-      , -- effects compose with list inner types
-        assertSubtypeGamma "<IO> [A] <: <IO> [A]"
+      , assertSubtypeGamma "inner list: <IO> [A] <: <IO> [A]"
           [] (ioEff (lst a)) (ioEff (lst a)) []
-      , -- empty effects both sides
-        assertSubtypeGamma "<> A <: <> A" [] (emptyEff a) (emptyEff a) []
+      , assertSubtypeBad "inner type mismatch: <IO> A </: <IO> B"
+          [] (ioEff a) (ioEff b)
+
+        -- === Existential solving inside effects ===
+        -- Existentials on either side of the effect wrapper are solved
+        -- by recursing into the inner-type subtype check.  This
+        -- behaviour is unchanged by the strictness fix.
+      , assertSubtypeGamma "existential inside: <a> -| <IO> <a> <: <IO> A |- <a>:A"
+          [eag] (ioEff ea) (ioEff a) [solvedA a]
+      , assertSubtypeGamma "existential inside reverse: <a> -| <IO> A <: <IO> <a> |- <a>:A"
+          [eag] (ioEff a) (ioEff ea) [solvedA a]
+
+        -- === EffectVar deferral (known loophole) ===
+        -- EffectVars are introduced internally when a do-block forces
+        -- a non-final statement.  They are not yet solved, so subtype
+        -- relaxes when either side mentions one rather than rejecting.
+        -- Locking this in keeps the loophole visible; tightening it
+        -- requires implementing effect-variable solving (TODO).
+      , assertSubtypeGamma "deferral: <e1> A <: <IO> A passes (var on left)"
+          [] (effVar "e1" a) (ioEff a) []
+      , assertSubtypeGamma "deferral: <IO> A <: <e1> A passes (var on right)"
+          [] (ioEff a) (effVar "e1" a) []
+      , assertSubtypeGamma "deferral: <IO,Error> A <: <e1> A passes (var on right)"
+          [] (ioErrEff a) (effVar "e1" a) []
       ]
   where
     a = var "A"
@@ -2695,6 +2884,18 @@ effectSubtypeTests =
     eag = ExistG (TV "x1") ([], Open) ([], Open)
     solvedA t = SolvedG (TV "x1") t
 
+-- | Effect synthesis tests verify that the inferred effect set on a
+-- top-level export matches the spec's structural propagation rule
+-- ('spec/types/effects.md' under "Effect Inference"):
+--
+--   * A pure do-block carries an empty effect set.
+--   * Forcing an effectful expression collects that effect.
+--   * Forces nested inside applications, tuples, lists, lets, etc.
+--     bubble their effects up to the enclosing do-block.
+--   * Multiple forces with distinct labels yield an EffectUnion.
+--   * '<-' binds and '!' forces collect effects symmetrically.
+--   * Pure-to-effect coercion lifts a pure body when the signature
+--     declares effects (allowed, may warn in the future).
 effectSynthesisTests :: TestTree
 effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
@@ -2871,34 +3072,165 @@ effectSynthesisTests =
           (ioEff (lst int))
       ]
 
+-- | Program-level effect rejection tests.  Each test is a complete
+-- morloc module that exercises a specific spec rule and asserts the
+-- compiler refuses it.  The structure mirrors the spec subsections:
+--
+--   * Force misuse: '!' applied to a non-suspended value.
+--   * Type mismatch inside a forced expression.
+--   * Effectful value flowing into a pure parameter slot.
+--   * Effect narrowing at a binding boundary (assigning a more-effectful
+--     value to a less-effectful annotation).
+--   * Effect narrowing at an application boundary (passing a more-
+--     effectful argument to a less-effectful parameter).
+--   * Effectful value flowing out of a function with a pure return type.
+--   * Disjoint-effect mismatch (Rand passed where IO expected).
+--
+-- When the inference pass for declared-vs-inferred mismatches lands
+-- (a separate item in the effects plan), additional widening-in-body
+-- tests belong here.
 effectErrorTests :: TestTree
 effectErrorTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
     testGroup
       "Effect error tests"
-      [ -- forcing a non-effectful expression should fail
+      [ -- '!' is only meaningful on a suspended (effectful) value.
+        -- Forcing a plain Int is nonsense and must be rejected.
         exprTestBad
           "force on non-effectful value"
           [r|
         module main (x)
         x = do !(42)
           |]
-      , -- type mismatch inside do-block force should fail
-        exprTestBad
+
+        -- The argument inside a force must still typecheck against
+        -- the forced function's signature.  Here `f` takes Int, not Str.
+      , exprTestBad
           "type mismatch inside do-block force"
           [r|
         module main (x)
         f :: Int -> <IO> Int
         x = do !(f "hello")
           |]
-      , -- effectful type where plain type expected should fail
-        exprTestBad
-          "effectful type where plain type expected"
+
+        -- A function `g :: Int -> Int` requires a pure Int.  Passing
+        -- the effectful application `f 1 :: <IO> Int` directly (no
+        -- force) must be rejected: effects do not silently drop at
+        -- the argument boundary.
+      , exprTestBad
+          "effectful arg passed to pure parameter"
           [r|
         module main (x)
         f :: Int -> <IO> Int
         g :: Int -> Int
         x = g (f 1)
+          |]
+
+        -- Narrowing at a binding: rint produces <IO,Error> Int, but
+        -- the annotation requests <IO> Int.  The Error tag would be
+        -- silently dropped under the old permissive rule.  The strict
+        -- rule rejects.
+      , exprTestBad
+          "narrowing at binding: <IO,Error> bound to <IO>"
+          [r|
+        module main (x)
+        rint :: <IO, Error> Int
+        x :: <IO> Int
+        x = rint
+          |]
+
+        -- Narrowing at a binding to a pure type: dropping all effects
+        -- in one step is rejected for the same reason.
+      , exprTestBad
+          "narrowing at binding: <IO> bound to pure"
+          [r|
+        module main (x)
+        rint :: <IO> Int
+        x :: Int
+        x = rint
+          |]
+
+        -- Narrowing at an application boundary: `consume` accepts an
+        -- <IO> Int parameter; passing an <IO,Error> Int would discard
+        -- the Error effect at the call site.  Rejected.
+      , exprTestBad
+          "narrowing at application: <IO,Error> arg to <IO> param"
+          [r|
+        module main (x)
+        rint :: <IO, Error> Int
+        consume :: <IO> Int -> Int
+        x = consume rint
+          |]
+
+        -- Disjoint effects between argument and parameter.  Rand is
+        -- not a subset of IO; the call cannot be accepted under any
+        -- interpretation of the rule.
+      , exprTestBad
+          "disjoint effects: <Rand> arg to <IO> param"
+          [r|
+        module main (x)
+        rrand :: <Rand> Int
+        consume :: <IO> Int -> Int
+        x = consume rrand
+          |]
+
+        -- === Body-vs-signature effect coverage (the '!' outside do-block case) ===
+        -- The spec's "Effect Checking" rule requires that any effects
+        -- introduced by the body of a definition be declared in its
+        -- signature.  A bare '!' outside a do-block introduces an
+        -- effect into the surrounding term; if the signature does not
+        -- list that effect, it is a widening violation.  The
+        -- structural subtype rule cannot see this directly because
+        -- EvalS strips the effect wrapper from the inner type, so the
+        -- new 'checkEffectCoverage' pass enforces it.
+
+        -- A bare force outside a do-block makes the surrounding term
+        -- carry the forced effect.  Declaring the term as pure Int
+        -- silently dropped that effect before; now it errors.
+      , exprTestBad
+          "widening: force outside do-block in pure term"
+          [r|
+        module main (randPure)
+        rint :: <Rand> Int
+        randPure :: Int
+        randPure = !rint
+          |]
+
+        -- The same rule applies to a function whose return type is
+        -- declared pure but whose body uses a bare force.
+      , exprTestBad
+          "widening: force in pure function body"
+          [r|
+        module main (purePlusEff)
+        rint :: <Rand> Int
+        add :: Int -> Int -> Int
+        purePlusEff :: Int -> Int
+        purePlusEff x = add x !rint
+          |]
+
+        -- Let-binding to a forced value: the let's RHS force escapes
+        -- the surrounding term, so the term must declare the effect.
+      , exprTestBad
+          "widening: let-bound force in pure term"
+          [r|
+        module main (letPureForce)
+        rint :: <Rand> Int
+        letPureForce :: Int
+        letPureForce = let x = !rint
+                       in x
+          |]
+
+        -- Function declared with one effect but body uses a different
+        -- one.  Rand is not a subset of IO, so the body's force does
+        -- not fit the declared signature.
+      , exprTestBad
+          "widening: body force has effect outside declared set"
+          [r|
+        module main (mixedEff)
+        rint :: <Rand> Int
+        ident :: Int -> Int
+        mixedEff :: Int -> <IO> Int
+        mixedEff x = ident !rint
           |]
       ]
 

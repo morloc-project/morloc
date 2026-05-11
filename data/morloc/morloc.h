@@ -680,7 +680,6 @@ void* shmalloc(size_t size, ERRMSG);
 void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
-bool shfree_by_schema(absptr_t ptr, const Schema* schema, ERRMSG);
 void* shcalloc(size_t nmemb, size_t size, ERRMSG);
 void* shrealloc(void* ptr, size_t size, ERRMSG);
 size_t total_shm_size(void);
@@ -790,8 +789,8 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
 // ========================================================================
 
 char* quoted(const char* input);
-bool print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
-bool pretty_print_voidstar(const void* voidstar, const Schema* schema, ERRMSG);
+bool print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
+bool pretty_print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
 bool print_arrow_as_json(const void* data, ERRMSG);
 bool print_arrow_as_table(const void* data, ERRMSG);
 bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG);

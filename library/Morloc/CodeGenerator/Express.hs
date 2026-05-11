@@ -544,13 +544,31 @@ expressPolyExpr
     e2' <- expressPolyExprWrap lang pc e2
     let e = PolyLet letId e1' e2'
     return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS x)) = return $ PolyReal (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS x)) = return $ PolyInt (Idx cidx v) x
+expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS _ x)) = return $ PolyReal (Idx cidx v) x
+expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS _ x)) = return $ PolyInt (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x)) = return $ PolyStr (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx v)
-expressPolyExpr _ _ _ (AnnoS (Idx _ (OptionalT (VarT v))) (Idx cidx _, _) NullS) = return $ PolyNull (Idx cidx v)
-expressPolyExpr _ _ _ (AnnoS _ (Idx cidx _, _) NullS) = return $ PolyNull (Idx cidx (TV "Unit"))
+-- Null carries the type variable name of whatever it stands in for, used
+-- downstream by per-language codegen to look up the concrete null literal
+-- (e.g. None / NULL / std::nullopt). Peel OptionalT wrappers to reach the
+-- underlying TVar so nested optionals (?(?T), ?(?(?T)), ...) resolve
+-- correctly. If no representative TVar can be extracted -- e.g. an
+-- unsolved existential leaked through typecheck and was rendered to UnkT --
+-- raise a sourced error rather than fabricating a placeholder, mirroring
+-- how 'inferConcreteType' handles UnkT in 'Morloc.CodeGenerator.Infer'.
+expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
+  case innerNullVar t of
+    Just v  -> return $ PolyNull (Idx cidx v)
+    Nothing -> MM.throwSourcedError midx $
+      "Cannot infer type variable for Null literal of type"
+      <+> dquotes (pretty t) <> "."
+      <+> "This usually means an unsolved generic term escaped typechecking."
+  where
+    innerNullVar (OptionalT inner) = innerNullVar inner
+    innerNullVar (VarT v)          = Just v
+    innerNullVar (AppT (VarT v) _) = Just v
+    innerNullVar _                 = Nothing
 -- A list literal at type `Foo a1 ... an` has exactly one element-type arg
 -- (the rest, if any, are Nat-kinded phantom dims, e.g. for Vector n a).
 -- Extract the single non-Nat arg for typing children, but PRESERVE the
@@ -719,8 +737,8 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (LstS _) = "LstS"
     tagExpr (TupS _) = "TupS"
     tagExpr (NamS _) = "NamS"
-    tagExpr (RealS _) = "RealS"
-    tagExpr (IntS _) = "IntS"
+    tagExpr (RealS _ _) = "RealS"
+    tagExpr (IntS _ _) = "IntS"
     tagExpr (LogS _) = "LogS"
     tagExpr (StrS _) = "StrS"
     tagExpr (DoBlockS _) = "DoBlockS"

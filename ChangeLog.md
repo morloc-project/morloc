@@ -1,3 +1,44 @@
+0.84.0 [2026-05-10]
+-------------------
+
+Numeric handling
+ * add float Inf/-Inf/NaN support 
+ * add literal int and float overflow error
+ * add proper negation operator
+ * fix silent integer overflow errors
+ * fix errors on illegal hex/oct/bin literals (e.g., "0x4dzzz")
+
+String processing
+ * raise error on illegal string escapes
+
+Modules
+ * fix parser bug preventing multi-module files
+ * allow empty module export lists
+
+SHM
+ * inline small data packets (under 64kb)
+ * fix leaked shm memory on pool crash
+ * in daemon-mode, do full restart of all pools if any crash
+
+Nexus
+ * do not write JSON null for Unit of Optional Nothing
+ * add --keep-null to nexus to print JSON null
+ * fix --output-file argument to properly write files for all output types
+ * reject unknown CLI options
+
+Typechecking
+ * enforce typechecking of effects
+ * propagate effect when `!` is used outside do-block
+
+Other bug fixes
+ * fix segfault in pure morloc @load intrinsic
+ * fix bugs in pure morloc patter getters/setters
+ * fix pure morloc tuple pattern getters
+ * fix guards with mixed effects across branches
+ * fix bug in parsing guards in do-blocks
+ * fix segfault in ?(?x) double optionals
+ * raise error on repeated keys in records
+
 0.83.2 [2026-05-07]
 -------------------
  * add tensor support through Packable class

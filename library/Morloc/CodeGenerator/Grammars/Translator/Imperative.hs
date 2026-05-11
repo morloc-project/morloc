@@ -59,7 +59,6 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
-import Data.Scientific (Scientific)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Grammars.Common
@@ -102,7 +101,7 @@ data IExpr
   | IVar Text
   | IBoolLit Bool
   | IIntLit (Maybe Text) Integer  -- concrete type name (e.g. "int64_t"), Nothing for default
-  | IRealLit (Maybe Text) Scientific  -- concrete type name (e.g. "float"), Nothing for default
+  | IRealLit (Maybe Text) RealLit  -- concrete type name (e.g. "float"), Nothing for default
   | IStrLit (Maybe Text) Text  -- concrete type name (e.g. "bytes"), Nothing for default
   | INullLit (Maybe IType)
   | IListLit [IExpr]

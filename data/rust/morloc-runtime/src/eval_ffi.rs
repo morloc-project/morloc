@@ -115,10 +115,17 @@ pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
 /// Convert a decimal string (possibly with leading '-') to a Vec of uint64
 /// limbs in little-endian order using two's complement for negative values.
 /// For values that fit in i64 (the common case), produces exactly 1 limb.
-pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
+///
+/// Strict: every non-sign byte must be an ASCII digit. The empty string and
+/// `-` alone are rejected. Callers that want lenient parsing should
+/// pre-strip whitespace/quotes themselves.
+pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
     let s = s.trim();
-    if s.is_empty() || s == "0" {
-        return vec![0u64];
+    if s.is_empty() {
+        return Err(MorlocError::Serialization("empty integer literal".into()));
+    }
+    if s == "0" || s == "-0" {
+        return Ok(vec![0u64]);
     }
 
     let (negative, digits) = if let Some(rest) = s.strip_prefix('-') {
@@ -127,10 +134,18 @@ pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
         (false, s)
     };
 
+    if digits.is_empty() {
+        return Err(MorlocError::Serialization("integer literal has no digits".into()));
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(MorlocError::Serialization(format!(
+            "invalid integer literal: {:?} (expected decimal digits)", s
+        )));
+    }
+
     // Parse magnitude into limbs (base 2^64, little-endian)
     let mut limbs: Vec<u64> = vec![0];
     for &b in digits.as_bytes() {
-        if !b.is_ascii_digit() { continue; }
         let d = (b - b'0') as u64;
         let mut carry = d;
         for limb in limbs.iter_mut() {
@@ -163,7 +178,7 @@ pub fn decimal_to_limbs(s: &str) -> Vec<u64> {
         }
     }
 
-    limbs
+    Ok(limbs)
 }
 
 /// Convert BigInt limbs (little-endian, two's complement) back to decimal string.
@@ -269,6 +284,24 @@ unsafe fn convert_keys_to_indices(
     Ok(())
 }
 
+/// Count the number of terminal (End) nodes in a pattern. The return schema
+/// is a tuple-of-terminals only when this count exceeds one; with a single
+/// terminal the return schema IS the terminal's value type, even if that
+/// type is itself a tuple.
+unsafe fn count_pattern_terminals(pattern: *mut MorlocPattern) -> usize {
+    let pat = &*pattern;
+    match pat.ptype {
+        MorlocPatternType::End => 1,
+        MorlocPatternType::ByIndex | MorlocPatternType::ByKey => {
+            let mut total = 0;
+            for i in 0..pat.size {
+                total += count_pattern_terminals(*pat.selectors.add(i));
+            }
+            total
+        }
+    }
+}
+
 /// Extract fields from a voidstar value using a pattern, copying them into dest.
 ///
 /// # Safety
@@ -278,6 +311,7 @@ unsafe fn apply_getter(
     dest: AbsPtr,
     return_index: &mut usize,
     return_schema: *const CSchema,
+    multi_terminal: bool,
     pattern: *mut MorlocPattern,
     value_schema: *const CSchema,
     value: AbsPtr,
@@ -289,7 +323,7 @@ unsafe fn apply_getter(
             for i in 0..pat.size {
                 let idx = *pat.fields.indices.add(i);
                 apply_getter(
-                    dest, return_index, return_schema,
+                    dest, return_index, return_schema, multi_terminal,
                     *pat.selectors.add(i),
                     *(*value_schema).parameters.add(idx),
                     value.add(*(*value_schema).offsets.add(idx)),
@@ -298,10 +332,14 @@ unsafe fn apply_getter(
         }
         MorlocPatternType::ByKey => {
             convert_keys_to_indices(pattern, value_schema)?;
-            return apply_getter(dest, return_index, return_schema, pattern, value_schema, value);
+            return apply_getter(dest, return_index, return_schema, multi_terminal, pattern, value_schema, value);
         }
         MorlocPatternType::End => {
-            let (element_dest, element_width) = if (*return_schema).size > 1 {
+            // With multiple terminals the return schema is a tuple of those
+            // terminal values: write into the slot at `return_index`. With a
+            // single terminal the return schema IS the terminal's value type
+            // (possibly itself a tuple), so write the whole value into dest.
+            let (element_dest, element_width) = if multi_terminal {
                 (dest.add(*(*return_schema).offsets.add(*return_index)),
                  (*(*(*return_schema).parameters.add(*return_index))).width)
             } else {
@@ -480,13 +518,25 @@ unsafe fn morloc_eval_r(
                     let element = *(*data).data.tuple_val.add(i);
                     morloc_eval_r(element, elem_dest, elem_width, bndvars)?;
                 }
+            } else if stype == crate::schema::SerialType::Optional as u32 {
+                // Just-coerce wrapping: tag byte at offset 0, inner value at
+                // offsets[0]. The dest buffer was zero-initialised by shcalloc
+                // (when allocated here) or by an enclosing zeroed parent slot,
+                // so padding between the tag and the inner stays zero without
+                // an explicit memset.
+                *(dest as *mut u8) = 1;
+                let inner_schema = *(*schema).parameters;
+                let inner_width = (*inner_schema).width;
+                let inner_dest = dest.add(*(*schema).offsets);
+                let inner_expr = *(*data).data.tuple_val;
+                morloc_eval_r(inner_expr, inner_dest, inner_width, bndvars)?;
             } else if stype == crate::schema::SerialType::Int as u32 {
                 // Variable-width integer: parse decimal string into inline BigInt
                 let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
                 let decimal = if s.is_null() { "0" } else {
                     std::ffi::CStr::from_ptr(s).to_str().unwrap_or("0")
                 };
-                let limbs = decimal_to_limbs(decimal);
+                let limbs = decimal_to_limbs(decimal)?;
                 let nlimbs = limbs.len();
                 let fields = dest as *mut i64;
                 if nlimbs <= 1 {
@@ -527,8 +577,10 @@ unsafe fn morloc_eval_r(
                 MorlocAppExpressionType::Pattern => {
                     if nargs == 1 {
                         let mut return_index: usize = 0;
+                        let multi_terminal =
+                            count_pattern_terminals((*app).function.pattern) > 1;
                         apply_getter(
-                            dest, &mut return_index, schema,
+                            dest, &mut return_index, schema, multi_terminal,
                             (*app).function.pattern,
                             (*(*(*app).args)).schema,
                             arg_results[0],
@@ -784,10 +836,24 @@ unsafe fn morloc_eval_r(
                 }
                 *opt_dest = 0; // None
             } else {
-                // Copy loaded voidstar data into the optional's inner slot
-                let inner_width = (*inner_schema).width;
-                ptr::copy_nonoverlapping(loaded as *const u8, opt_dest.add(inner_offset), inner_width);
-                libc::free(loaded as *mut c_void);
+                // mlc_load returns SHM but the layout depends on the file
+                // format: msgpack and voidstar pack the wrapper and nested
+                // data into a single block (relptrs reference addresses
+                // inside the block), JSON returns a multi-block tree. A
+                // straight bit-copy of the wrapper would alias the source
+                // block, and libc::free on SHM is undefined (was the cause
+                // of `free(): invalid size` aborts on every nexus-side
+                // @load). Deep-copy into multi-block layout so the result
+                // matches what the rest of the evaluator produces, then
+                // shfree the source block as one allocation.
+                let inner_rs = crate::cschema::CSchema::to_rust(inner_schema);
+                let copy_result = crate::voidstar::deep_copy(
+                    loaded as *const u8,
+                    opt_dest.add(inner_offset),
+                    &inner_rs,
+                );
+                let _ = shm::shfree(loaded as shm::AbsPtr);
+                copy_result?;
                 *opt_dest = 1; // Some
             }
         }

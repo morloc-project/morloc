@@ -18,6 +18,9 @@ preamble:
 ldBoolTrue: "TRUE"
 ldBoolFalse: "FALSE"
 ldNullLiteral: "NULL"
+ldRealPosInf: "Inf"
+ldRealNegInf: "-Inf"
+ldRealNaN: "NaN"
 
 # Constructors
 ldListStyle: type_dependent

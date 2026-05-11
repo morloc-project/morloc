@@ -1,0 +1,19 @@
+-- R-pool SHM-leak regression test program.
+--
+-- Routes a list-of-strings argument through an R function that simply
+-- echoes it back. Each call:
+--   * The daemon allocates SHM for the argument list (~ 250 bytes).
+--   * The R pool serializes the result via morloc_put_value, which
+--     allocates a fresh voidstar and ships it as PACKET_SOURCE_RPTR.
+--   * Pre-fix: the R pool never freed that voidstar; /dev/shm/morloc-*
+--     grew per request.
+--   * Post-fix: the R pool's shm_tracker holds the voidstar until the
+--     next request, then flushes it at run_job_c entry.
+
+module r_shm_leak (echoList)
+
+import root-r
+
+source R from "r-shm-leak.R" ("echoList")
+
+echoList :: [Str] -> [Str]

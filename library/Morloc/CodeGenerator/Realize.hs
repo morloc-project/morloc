@@ -180,8 +180,8 @@ realizeWithRegistry registry s0 = do
         _ -> return (BndS v, zipLang i rstat)
     scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callCost src)])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
-    scoreExpr rstat (RealS x, i) = return (RealS x, zipLang i rstat)
-    scoreExpr rstat (IntS x, i) = return (IntS x, zipLang i rstat)
+    scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
+    scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
     scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
     scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
     scoreExpr rstat (LetS v e1 e2, i) = do
@@ -462,8 +462,8 @@ realizeWithRegistry registry s0 = do
     collapseExpr _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
     collapseExpr _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
     collapseExpr _ lang (NullS, Idx i _) = return (NullS, Idx i lang)
-    collapseExpr _ lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
-    collapseExpr _ lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
+    collapseExpr _ lang (RealS si x, Idx i _) = return (RealS si x, Idx i lang)
+    collapseExpr _ lang (IntS si x, Idx i _) = return (IntS si x, Idx i lang)
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
     collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
     collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
@@ -549,8 +549,8 @@ realizeWithRegistry registry s0 = do
             NullS -> return NullS
             (VarS v (One x)) -> VarS v . One <$> f lang x
             (BndS v) -> return (BndS v)
-            (RealS x) -> return (RealS x)
-            (IntS x) -> return (IntS x)
+            (RealS si x) -> return (RealS si x)
+            (IntS si x) -> return (IntS si x)
             (LogS x) -> return (LogS x)
             (StrS x) -> return (StrS x)
             (ExeS x) -> return (ExeS x)

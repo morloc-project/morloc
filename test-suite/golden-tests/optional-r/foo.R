@@ -28,3 +28,7 @@ optionalList <- function(xs) {
 countNulls <- function(xs) {
     sum(sapply(xs, is.null))
 }
+
+identityNested <- function(x) {
+    return(x)
+}

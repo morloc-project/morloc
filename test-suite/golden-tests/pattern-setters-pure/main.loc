@@ -1,0 +1,32 @@
+module main
+  ( setSingleHet
+  , setTwoHet
+  , setLastHet
+  , setReorderArgs
+  , setMixedNested
+  )
+
+-- Pure-morloc setter exports: each evaluates entirely in the nexus
+-- (no language pool), exercising apply_setter_copy / apply_setter_set
+-- in the Rust runtime. All record literals are heterogeneous so the
+-- on-wire field offsets differ from a same-typed projection.
+
+-- Single key on a heterogeneous record.
+setSingleHet = .(.x = 99) { x = 0, y = "hi", z = 8 }
+
+-- Two keys, both written on a heterogeneous record. Regression for
+-- the foldr / foldl bug in selectorSetter where setTypes were matched
+-- to selectors in reverse order, swapping the inferred field types.
+setTwoHet = .(.x = 99, .y = "world") { x = 0, y = "hi", z = 8 }
+
+-- Setter that writes the last field of a heterogeneous record.
+setLastHet = .(.z = 50) { x = 0, y = "hi", z = 8 }
+
+-- Two setters written in reverse-key order at the source. Catches a
+-- bug where the runtime walk and the typecheck disagreed on whether
+-- selector order or value-list order drives the field/value pairing.
+setReorderArgs = .(.z = 99, .x = "first") { x = "old", y = 1.5, z = 0 }
+
+-- Heterogeneous record containing a tuple field, with one setter on a
+-- scalar key and another via a chained selector into the tuple.
+setMixedNested = .(.x = 42, .y.0 = "rewritten") { x = 0, y = ("orig", 1), z = 3.14 }

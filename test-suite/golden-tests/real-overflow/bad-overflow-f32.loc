@@ -1,0 +1,10 @@
+-- Float literal that fits Float64 but overflows Float32 (max ~3.4e38).
+-- The bound check is per-target-type: 1e100 is a finite Scientific that
+-- becomes +Inf when converted to Float, so checkRealBounds catches it
+-- against the Float32-specific bound. Required generalTypeToSerialAST to
+-- dispatch f32/f64 to SerialFloat32/SerialFloat64 (previously both
+-- collapsed to SerialReal and only the Float64 path was checked).
+module badF32 (tooBigF32)
+
+tooBigF32 :: Float32
+tooBigF32 = 1e100

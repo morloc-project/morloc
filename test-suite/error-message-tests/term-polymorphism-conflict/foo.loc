@@ -1,0 +1,10 @@
+-- Two definitions of the same term with the same type but conflicting
+-- literal values. The value checker should reject this and caret on the
+-- offending literals (lines 7 and 10), not on the export reference.
+module main (foo)
+
+foo :: Int
+foo = 1
+
+foo :: Int
+foo = 2
