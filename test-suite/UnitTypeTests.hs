@@ -1969,8 +1969,8 @@ unitValuecheckTests =
              y = 1
              y = 2
       |]
-      , valuecheckPass
-          "where with equivalent values is legal"
+      , valuecheckFail
+          "where with equivalent values is illegal (duplicate binding)"
           [r|
          module foo (a)
            a = y where
