@@ -35,6 +35,7 @@ module Morloc.Namespace.Type
   , emptyEffectSet
   , ioEffectSet
   , effectSubsetOf
+  , effectSetHasVar
 
     -- * Docstring related types
   , CliOpt (..)
@@ -107,6 +108,14 @@ ioEffectSet = EffectSet (Set.singleton "IO")
 -- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
 effectSubsetOf :: EffectSet -> EffectSet -> Bool
 effectSubsetOf e1 e2 = Set.isSubsetOf (resolveEffectSet e1) (resolveEffectSet e2)
+
+-- | Does an effect set mention any unsolved EffectVar? Subtyping rules
+-- that would otherwise reject a non-subset relation may need to defer
+-- judgement until the variable is solved.
+effectSetHasVar :: EffectSet -> Bool
+effectSetHasVar (EffectVar _) = True
+effectSetHasVar (EffectSet _) = False
+effectSetHasVar (EffectUnion a b) = effectSetHasVar a || effectSetHasVar b
 
 ---- Type definitions
 

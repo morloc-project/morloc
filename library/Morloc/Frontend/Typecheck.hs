@@ -391,7 +391,16 @@ checkG g (AnnoS i j e) t = do
     (Just annType) -> do
       gAnn <- subtype' i annType t g
       checkE' i gAnn e t
-  return (g', t', AnnoS (Idx i t') j e')
+  let annotatedBody = AnnoS (Idx i t') j e'
+  -- When the user declared a signature at this site, verify that the
+  -- body's evaluation-time effects are a subset of those the signature
+  -- permits.  See spec/types/effects.md "Effect Checking".  Inner
+  -- positions without an annotation flow through ordinary structural
+  -- subtyping, which already rejects narrowing on EffectU types.
+  case Map.lookup j annotation of
+    Just annType -> checkEffectCoverage i (apply g' annType) annotatedBody
+    Nothing -> return ()
+  return (g', t', annotatedBody)
 
 synthG ::
   Gamma ->
@@ -406,7 +415,14 @@ synthG g (AnnoS gi ci e) = do
   (g', t, e') <- case Map.lookup ci annotation of
     Nothing -> synthE' gi g e
     (Just annType) -> checkE' gi g e annType
-  return (g', t, AnnoS (Idx gi t) ci e')
+  let annotatedBody = AnnoS (Idx gi t) ci e'
+  -- Mirror the body-effect check from 'checkG'.  When a signature is
+  -- attached at this synthesis site, verify the body's evaluation
+  -- effects against it.
+  case Map.lookup ci annotation of
+    Just annType -> checkEffectCoverage gi (apply g' annType) annotatedBody
+    Nothing -> return ()
+  return (g', t, annotatedBody)
 
 synthE ::
   Int ->
@@ -618,7 +634,7 @@ synthE _ g0 (NamS rs) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
+synthE varIdx g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- Rename type AND constraints together so primitive constraints
   -- (CMember / CSubset / CDisjoint) reference the same fresh-name
   -- variables that the type uses. The renamed constraints are queued
@@ -653,6 +669,12 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
         }
       g1' = g1Cs ++> [AnnG v t1]
   (g2, t2, xs1) <- foldCheck g1' xs0 t1
+  -- Verify the body's evaluation-time effects fit within the declared
+  -- signature.  Catches forces outside do-blocks (e.g. `f = !rint`)
+  -- that the structural subtype rule cannot see, because EvalS strips
+  -- the effect wrapper from the inner type.  See
+  -- spec/types/effects.md "Effect Checking".
+  mapM_ (checkEffectCoverage varIdx (apply g2 t1)) xs1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -1402,6 +1424,101 @@ collectDoEffects = go
       | b == emptyEffectSet = a
       | a == b = a
       | otherwise = EffectUnion a b
+
+-- | Compute the set of effects produced when an expression is evaluated.
+--
+-- Evaluation-time effects fire at every 'EvalS' (force) node that is
+-- reachable from the root WITHOUT crossing a thunk boundary.  Thunks
+-- (lambdas and do-blocks) carry their inner effects in their TYPE, so
+-- those effects do not fire when the surrounding expression is reduced;
+-- only forcing the thunk later via 'EvalS' would trigger them.
+--
+-- This is the inference half of the rule in 'spec/types/effects.md'
+-- under "Effect Inference".  The companion check
+-- 'checkEffectCoverage' verifies that the inferred set is a subset of
+-- the declared effect set on the surrounding signature.
+inferExprEffects :: AnnoS (Indexed TypeU) f c -> EffectSet
+inferExprEffects = go
+  where
+    go (AnnoS _ _ expr) = case expr of
+      EvalS e -> effectOfAnno e `effUnion` go e
+      LetS _ e1 e2 -> go e1 `effUnion` go e2
+      AppS f args -> unions (go f : map go args)
+      TupS es -> unions (map go es)
+      LstS es -> unions (map go es)
+      NamS rs -> unions (map (go . snd) rs)
+      IfS c t e -> go c `effUnion` go t `effUnion` go e
+      CoerceS _ e -> go e
+      IntrinsicS _ es -> unions (map go es)
+      -- Thunk boundaries: their effects live in the type, not in the
+      -- evaluation of the surrounding expression.
+      DoBlockS _ -> emptyEffectSet
+      LamS _ _ -> emptyEffectSet
+      _ -> emptyEffectSet
+
+    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
+    effectOfAnno _ = emptyEffectSet
+
+    unions = foldl effUnion emptyEffectSet
+
+    effUnion a b
+      | a == emptyEffectSet = b
+      | b == emptyEffectSet = a
+      | a == b = a
+      | otherwise = EffectUnion a b
+
+-- | Strip lambda layers from the body in lockstep with function-arrow
+-- layers on the expected type.  Returns the innermost expected return
+-- type and the innermost body (after lambdas are peeled).  Used to
+-- locate the "actual return position" where evaluation-time effects
+-- of the function body must be covered.
+--
+-- A function whose declared type has N argument arrows and whose body
+-- is a single LamS binding N parameters peels cleanly.  Anything else
+-- (point-free, partial lambda, mismatched arity) returns as-is and
+-- relies on the surrounding structural check to have rejected the
+-- shape.
+peelLambdaLayers
+  :: TypeU
+  -> AnnoS (Indexed TypeU) f c
+  -> (TypeU, AnnoS (Indexed TypeU) f c)
+peelLambdaLayers (FunU args ret) body@(AnnoS _ _ (LamS vs inner))
+  | length args == length vs = peelLambdaLayers ret inner
+  | otherwise = (FunU args ret, body)
+peelLambdaLayers t body = (t, body)
+
+-- | After structural typechecking, verify that the evaluation-time
+-- effects of a function body are a subset of the effects the declared
+-- return type permits.  Fires the widening-rule rejection described in
+-- 'spec/types/effects.md' under "Effect Checking".
+--
+-- Catches forces that escape do-blocks, the case the type-level
+-- subtype rule cannot see because EvalS strips the effect wrapper
+-- from the inner type.  Pointing the diagnostic at the surrounding
+-- annotation index ('idx') keeps the caret on the user-visible
+-- signature rather than on a deeply nested sub-expression.
+checkEffectCoverage
+  :: Int
+  -> TypeU
+  -> AnnoS (Indexed TypeU) f c
+  -> MorlocMonad ()
+checkEffectCoverage idx declared body = do
+  let (innerDecl, innerBody) = peelLambdaLayers declared body
+      declEffs = case innerDecl of
+        EffectU effs _ -> resolveEffectSet effs
+        _ -> Set.empty
+      inferred = resolveEffectSet (inferExprEffects innerBody)
+      uncovered = Set.difference inferred declEffs
+  if Set.null uncovered
+    then return ()
+    else MM.throwSourcedError idx $
+      "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
+        <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
+        <+> "Either add the effect to the signature or sequence the operation in a do-block."
+  where
+    renderEffectLabels s
+      | Set.null s = "<>"
+      | otherwise = "<" <> hcat (punctuate ", " (map pretty (Set.toList s))) <> ">"
 
 -- helpers
 

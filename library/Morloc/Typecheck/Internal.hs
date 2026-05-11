@@ -860,9 +860,26 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- EffectU: covariant subtyping with effect row subsumption.
 -- <E1> T1 <: <E2> T2 when E1 is a subset of E2 and T1 <: T2.
 -- Fewer effects can be used where more effects are expected.
-subtype scope (EffectU e1 t1) (EffectU e2 t2) g
-  | effectSubsetOf e1 e2 = subtype scope t1 t2 g
-  | otherwise = subtype scope t1 t2 g -- permissive for now: EffectVar not yet solved
+-- An effectful type cannot be narrowed to a type with fewer effects: this
+-- is the narrowing check the user-facing rules call out. When either side
+-- has an unsolved EffectVar we defer (effect inference does not yet solve
+-- effect variables); for concrete sets the subset check is strict.
+subtype scope t1@(EffectU e1 i1) t2@(EffectU e2 i2) g
+  | effectSubsetOf e1 e2 = subtype scope i1 i2 g
+  | effectSetHasVar e1 || effectSetHasVar e2 = subtype scope i1 i2 g
+  | otherwise = subtypeError t1 t2 "effect set on left is not a subset of effect set on right"
+-- Effectful type on the left, non-effectful on the right.
+-- Effects do not silently drop; the surrounding term must declare them.
+-- This catches e.g. `rint :: <Rand> Int` bound to `a :: Int`.
+-- ExistU and ForallU on the right fall through to their own rules below
+-- so that polymorphism and existential solving still work uniformly.
+subtype _ t1@(EffectU _ _) t2 _
+  | not (isAbsorbing t2) =
+      subtypeError t1 t2 "cannot discard effects when matching pure type"
+  where
+    isAbsorbing (ForallU _ _)  = True
+    isAbsorbing (ExistU _ _ _) = True
+    isAbsorbing _              = False
 -- OptionalU: covariant subtyping
 subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 --  g1 |- B1 <: A1 -| g2

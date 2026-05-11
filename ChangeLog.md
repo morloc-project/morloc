@@ -26,6 +26,10 @@ Nexus
  * fix --output-file argument to properly write files for all output types
  * reject unknown CLI options
 
+Typechecking
+ * enforce typechecking of effects
+ * propagate effect when `!` is used outside do-block
+
 Other bug fixes
  * fix segfault in pure morloc @load intrinsic
  * fix bugs in pure morloc patter getters/setters
