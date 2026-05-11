@@ -26,6 +26,7 @@ main = do
       , orderInvarianceTests
       , whitespaceTests
       , infixOperatorTests
+      , recordLiteralOrderTests
       , substituteTVarTests
       , subtypeTests
       , complexityRegressionTests
@@ -304,6 +305,7 @@ main = do
       , golden "records-complex-2" "records-complex-2"
       , golden "records-nested" "records-nested"
       , golden "records-alias" "records-alias"
+      , golden "record-literal-ordering" "record-literal-ordering"
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"

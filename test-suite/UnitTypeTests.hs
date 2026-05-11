@@ -20,6 +20,7 @@ module UnitTypeTests
   , orderInvarianceTests
   , whitespaceTests
   , infixOperatorTests
+  , recordLiteralOrderTests
   , complexityRegressionTests
   , effectSubtypeTests
   , effectSynthesisTests
@@ -2606,6 +2607,76 @@ infixOperatorTests =
           infixl 100 +
           (+) :: Int -> Int -> Int
           z = 1 + 2
+        |]
+      ]
+
+{- | C3: Record literal field order is by-name. Permuted literals must
+typecheck against the declared record type, while literals with mismatched
+key sets (missing / unknown fields) must be rejected.
+-}
+recordLiteralOrderTests :: TestTree
+recordLiteralOrderTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout
+    testGroup
+      "Record literal field-order tests"
+      [ assertGeneralType
+          "permuted literal (mixed types) typechecks against declared record"
+          [r|
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { age = 30, name = "Alice" }
+          b
+        |]
+          (record' "Person" [(Key "name", str), (Key "age", int)])
+      , assertGeneralType
+          "permuted literal (same-typed fields) typechecks"
+          [r|
+          record Point = Point { x :: Int, y :: Int }
+          p :: Point
+          p = { y = 2, x = 1 }
+          p
+        |]
+          (record' "Point" [(Key "x", int), (Key "y", int)])
+      , assertGeneralType
+          "fully-reversed literal typechecks"
+          [r|
+          record T = T { a :: Int, b :: Int, c :: Int }
+          v :: T
+          v = { c = 3, b = 2, a = 1 }
+          v
+        |]
+          (record' "T" [(Key "a", int), (Key "b", int), (Key "c", int)])
+      , exprTestBad
+          "literal missing a declared field is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { name = "Alice" }
+        |]
+      , exprTestBad
+          "literal with extra unknown field is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { name = "Alice", age = 30, weight = 65 }
+        |]
+      , exprTestBad
+          "literal with completely disjoint keys is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { foo = "x", bar = 1 }
+        |]
+      , exprTestBad
+          "literal with one matching and one wrong key is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { name = "Alice", years = 30 }
         |]
       ]
 

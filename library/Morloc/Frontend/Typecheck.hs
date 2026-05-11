@@ -123,7 +123,22 @@ typecheck = mapM run
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
 resolveTypes (AnnoS (Idx i t) ci e) =
-  AnnoS (Idx i (typeOf t)) ci (f e)
+  let t' = typeOf t
+      -- C3: canonicalise NamS field order against the resolved record
+      -- type. checkE handles top-level and nested-NamS positions, but
+      -- records appearing inside tuples / lists / polymorphic arg
+      -- positions can skip the checkE rule and reach here in source
+      -- order. Reordering against the annotation guarantees every
+      -- downstream NamS sees declared order.
+      e' = case (t', e) of
+        (NamT _ _ _ declared, NamS rs)
+          | not (null declared)
+          , let declKeys = map fst declared
+          , Set.fromList declKeys == Set.fromList (map fst rs) ->
+              let rsMap = Map.fromList rs
+               in NamS [(k, rsMap Map.! k) | k <- declKeys]
+        _ -> e
+   in AnnoS (Idx i t') ci (f e')
   where
     f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
     f (BndS x) = BndS x
@@ -1253,6 +1268,48 @@ checkE i g1 e1@(LstS _) b = do
 -- standalone base types rather than aliases of Int. Type aliases are
 -- expanded through the scope so that user-defined names like
 -- `type Char = UInt8` also accept integer literals directly.
+-- C3: Record literal {k1=v1, ...} checked against a declared record type
+-- NamU. Reorder the literal's fields to match declared field order, reject
+-- literals whose key set differs from the declaration, and propagate
+-- check direction into each field value so nested record literals
+-- (e.g. {outer={inner={...}}}) also get reordered.
+checkE i g (NamS rs) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const (apply g t)) id (TE.evaluateType scope (apply g t))
+  case tEval of
+    NamU _ _ _ declared | not (null declared) -> do
+      let litKeys = map fst rs
+          declKeys = map fst declared
+          litSet = Set.fromList litKeys
+          declSet = Set.fromList declKeys
+      if litSet == declSet
+        then do
+          let rsMap = Map.fromList rs
+              triples = [(k, rsMap Map.! k, fieldT) | (k, fieldT) <- declared]
+          -- Recurse with check-direction so nested records get reordered.
+          let go gAcc acc [] = return (gAcc, reverse acc)
+              go gAcc acc ((k, v, fieldT) : rest) = do
+                (gNext, _, v') <- checkG gAcc v fieldT
+                go gNext ((k, v') : acc) rest
+          (gFinal, fields) <- go g [] triples
+          return (gFinal, apply gFinal tEval, NamS fields)
+        else
+          let missing = Set.toList (Set.difference declSet litSet)
+              extra = Set.toList (Set.difference litSet declSet)
+              missingPart =
+                if null missing
+                  then mempty
+                  else line <> "  missing field(s):"
+                    <+> hsep (punctuate "," (map pretty missing))
+              extraPart =
+                if null extra
+                  then mempty
+                  else line <> "  unknown field(s):"
+                    <+> hsep (punctuate "," (map pretty extra))
+           in MM.throwSourcedError i $
+                "Record literal does not match declared type"
+                <+> prettyTypeU tEval <> ":" <> missingPart <> extraPart
+    _ -> checkEFallback i g (NamS rs) t
 checkE i g (IntS si x) t = do
   scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
