@@ -101,11 +101,42 @@ pub struct DaemonConfig {
     pub eval_timeout: i32,
 }
 
-/// Matches daemon_response_t from daemon.h
+/// Error classification for a daemon dispatch failure.
+///
+/// `success = true` -> `error_kind = OK`. On failure, the kind drives
+/// HTTP status mapping in `handle_http_connection` (and in the router's
+/// equivalent). Unix/TCP clients keep reading the `success` boolean and
+/// the `{"status":"error","error":"..."}` JSON envelope; they don't see
+/// the kind on the wire today.
+pub const DAEMON_ERROR_OK:          i32 = 0;
+pub const DAEMON_ERROR_BAD_REQUEST: i32 = 1;
+pub const DAEMON_ERROR_NOT_FOUND:   i32 = 2;
+pub const DAEMON_ERROR_TIMEOUT:     i32 = 3;
+pub const DAEMON_ERROR_RECOVERING:  i32 = 4;
+pub const DAEMON_ERROR_INTERNAL:    i32 = 5;
+
+/// Translate a `DAEMON_ERROR_*` kind to its HTTP status code.
+pub fn daemon_error_kind_to_http_status(kind: i32, success: bool) -> i32 {
+    if success {
+        return 200;
+    }
+    match kind {
+        DAEMON_ERROR_BAD_REQUEST => 400,
+        DAEMON_ERROR_NOT_FOUND   => 404,
+        DAEMON_ERROR_TIMEOUT     => 408,
+        DAEMON_ERROR_RECOVERING  => 503,
+        // OK with success=false shouldn't happen, but treat as internal.
+        _ => 500,
+    }
+}
+
+/// Matches daemon_response_t from daemon.h. `error_kind` is one of the
+/// `DAEMON_ERROR_*` constants above; see `daemon_error_kind_to_http_status`.
 #[repr(C)]
 pub struct DaemonResponse {
     pub id: *mut c_char,
     pub success: bool,
+    pub error_kind: i32,
     pub result_json: *mut c_char,
     pub error: *mut c_char,
 }
@@ -483,6 +514,15 @@ pub unsafe extern "C" fn daemon_parse_response(
         .as_deref()
         .map(|s| s == "ok")
         .unwrap_or(false);
+    // The wire JSON envelope does not carry error_kind, so a parsed
+    // error response defaults to INTERNAL. Callers that received a real
+    // dispatch response (not a re-parse) will already have the correct
+    // kind set directly on DaemonResponse.
+    (*resp).error_kind = if (*resp).success {
+        DAEMON_ERROR_OK
+    } else {
+        DAEMON_ERROR_INTERNAL
+    };
 
     if let Some(result) = &parsed.result {
         let s = serde_json::to_string(result).unwrap_or_default();
@@ -615,6 +655,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     let mut stderr_pipe = [0i32; 2];
     if libc::pipe(stdout_pipe.as_mut_ptr()) != 0 || libc::pipe(stderr_pipe.as_mut_ptr()) != 0 {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
         let c = CString::new(format!("Failed to create pipes for {}", subcmd)).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
@@ -623,6 +664,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     let pid = libc::fork();
     if pid < 0 {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
         let c = CString::new(format!("Failed to fork for {}", subcmd)).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
         libc::close(stdout_pipe[0]);
@@ -690,6 +732,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         (*resp).result_json = libc::strdup(c.as_ptr());
     } else {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
         let errmsg = if !stderr_buf.is_empty() {
             String::from_utf8_lossy(&stderr_buf).into_owned()
         } else if libc::WIFSIGNALED(status) {
@@ -748,6 +791,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     // into `"status":"error"`, which a polling loop can wait on.
     if is_recovering() {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_RECOVERING;
         let c = CString::new(
             "Daemon recovering from a pool process crash; please retry."
         ).unwrap();
@@ -777,6 +821,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         DaemonMethod::Eval => {
             if (*request).expr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing 'expr' field in eval request").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -803,6 +848,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         DaemonMethod::Typecheck => {
             if (*request).expr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing 'expr' field in typecheck request").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -817,12 +863,14 @@ pub unsafe extern "C" fn daemon_dispatch(
         DaemonMethod::Bind => {
             if (*request).expr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing 'expr' field in bind request").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
             }
             if G_BINDING_STORE.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 let c = CString::new("Binding store not initialized").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -858,6 +906,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 }
                 None => {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     let c =
                         CString::new("Failed to compile and bind expression").unwrap_or_default();
                     (*resp).error = libc::strdup(c.as_ptr());
@@ -886,12 +935,14 @@ pub unsafe extern "C" fn daemon_dispatch(
             };
             if name_ptr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing binding name").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
             }
             if G_BINDING_STORE.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 let c = CString::new("Binding store not initialized").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -904,6 +955,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).result_json = libc::strdup(c.as_ptr());
             } else {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_NOT_FOUND;
                 let c = CString::new(format!("Binding not found: {}", name)).unwrap_or_default();
                 (*resp).error = libc::strdup(c.as_ptr());
             }
@@ -917,6 +969,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     // DAEMON_CALL
     if (*request).command.is_null() {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
         let c = CString::new("Missing 'command' field in call request").unwrap();
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
@@ -989,6 +1042,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
     if cmd.is_null() {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_NOT_FOUND;
         let msg = format!(
             "Unknown command: {}",
             command_name.to_string_lossy()
@@ -1012,6 +1066,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             Ok(v) => v,
             Err(e) => {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new(format!("Failed to parse args: {}", e)).unwrap_or_default();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -1020,6 +1075,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
         if parsed_args.len() != expected_nargs {
             (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
             let c = CString::new(format!(
                 "Expected {} arguments, got {}",
                 expected_nargs,
@@ -1048,6 +1104,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             // Check if any are positional (required)
             // For simplicity, match the C behavior: require args if n_args > 0
             (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
             let c = CString::new("Missing 'args' field in call request").unwrap();
             (*resp).error = libc::strdup(c.as_ptr());
             return resp;
@@ -1101,6 +1158,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             Ok(g) => Some(g),
             Err(e) => {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 let msg = CString::new(format!("eval arena error: {}", e))
                     .unwrap_or_default();
                 (*resp).error = libc::strdup(msg.as_ptr());
@@ -1115,6 +1173,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                     cleanup_and_fail = true;
                     break;
@@ -1128,6 +1187,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 );
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     (*resp).error = err;
                     cleanup_and_fail = true;
                     break;
@@ -1140,6 +1200,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 );
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     (*resp).error = err;
                     cleanup_and_fail = true;
                     break;
@@ -1151,6 +1212,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             let return_schema = parse_schema(cmd.ret.schema, &mut err);
             if !err.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
                 let result_abs = morloc_eval(
@@ -1163,6 +1225,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 );
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                 } else {
                     let json = voidstar_to_json_string(
@@ -1172,6 +1235,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                     );
                     if !err.is_null() {
                         (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                         (*resp).error = err;
                     } else {
                         (*resp).success = true;
@@ -1236,6 +1300,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                             lang, p
                         );
                         (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                         let c = CString::new(msg).unwrap_or_default();
                         (*resp).error = libc::strdup(c.as_ptr());
                         // Cleanup the args array allocated above.
@@ -1281,6 +1346,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         libc::free(arg_schemas_flat as *mut c_void);
         if !err.is_null() {
             (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
             (*resp).error = err;
         } else {
             let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
@@ -1290,22 +1356,26 @@ pub unsafe extern "C" fn daemon_dispatch(
 
             if !err.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
                 let packet_error =
                     get_morloc_data_packet_error_message(result_packet, &mut err);
                 if !packet_error.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = libc::strdup(packet_error);
                     libc::free(result_packet as *mut c_void);
                 } else if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                     libc::free(result_packet as *mut c_void);
                 } else {
                     let return_schema = parse_schema(cmd.ret.schema, &mut err);
                     if !err.is_null() {
                         (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                         (*resp).error = err;
                         libc::free(result_packet as *mut c_void);
                     } else {
@@ -1316,6 +1386,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                         );
                         if !err.is_null() {
                             (*resp).success = false;
+                            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                             (*resp).error = err;
                         } else {
                             let json = voidstar_to_json_string(
@@ -1325,6 +1396,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                             );
                             if !err.is_null() {
                                 (*resp).success = false;
+                                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                                 (*resp).error = err;
                             } else {
                                 (*resp).success = true;
@@ -1511,6 +1583,7 @@ unsafe fn handle_lp_connection(
     if !errmsg.is_null() {
         let mut err_resp: DaemonResponse = std::mem::zeroed();
         err_resp.success = false;
+        err_resp.error_kind = DAEMON_ERROR_BAD_REQUEST;
         err_resp.error = errmsg;
         let mut resp_len: usize = 0;
         let resp_json = daemon_serialize_response(&mut err_resp, &mut resp_len);
@@ -1563,6 +1636,7 @@ unsafe fn handle_http_connection(
         fn http_to_daemon_request(
             req: *mut HttpRequest,
             errmsg: *mut *mut c_char,
+            error_kind: *mut i32,
         ) -> *mut DaemonRequest;
     }
 
@@ -1583,16 +1657,27 @@ unsafe fn handle_http_connection(
         return;
     }
 
-    let req = http_to_daemon_request(http_req, &mut errmsg);
+    let mut route_kind: i32 = DAEMON_ERROR_BAD_REQUEST;
+    let req = http_to_daemon_request(http_req, &mut errmsg, &mut route_kind);
     if !errmsg.is_null() {
-        let body = b"{\"status\":\"error\",\"error\":\"Invalid request\"}\0";
+        // Build the error body from the actual errmsg so unknown-endpoint
+        // and missing-field cases get distinguishable messages, and use
+        // the kind that http_to_daemon_request returned so 404 vs 400
+        // routes correctly.
+        let err_str = CStr::from_ptr(errmsg).to_string_lossy();
+        let body = format!(
+            "{{\"status\":\"error\",\"error\":{}}}\n",
+            serde_json::Value::String(err_str.into_owned())
+        );
+        let body_c = CString::new(body.as_str()).unwrap_or_default();
+        let status = daemon_error_kind_to_http_status(route_kind, false);
         let ct = b"application/json\0";
         http_write_response(
             client_fd,
-            400,
+            status,
             ct.as_ptr() as *const c_char,
-            body.as_ptr() as *const c_char,
-            body.len() - 1,
+            body_c.as_ptr(),
+            body.len(),
         );
         http_free_request(http_req);
         libc::free(errmsg as *mut c_void);
@@ -1612,7 +1697,9 @@ unsafe fn handle_http_connection(
     *resp_body.add(resp_len) = b'\n';
     *resp_body.add(resp_len + 1) = 0;
 
-    let status = if (*resp).success { 200 } else { 500 };
+    let status = daemon_error_kind_to_http_status(
+        (*resp).error_kind, (*resp).success,
+    );
     let ct = b"application/json\0";
     http_write_response(
         client_fd,

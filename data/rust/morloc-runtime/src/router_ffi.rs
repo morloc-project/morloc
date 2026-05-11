@@ -1273,7 +1273,9 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     let resp = daemon_dispatch(ptr::null_mut(), dreq, ptr::null_mut(), ptr::null());
                     let mut resp_len: usize = 0;
                     let resp_json = daemon_serialize_response(resp, &mut resp_len);
-                    let status = if (*resp).success { 200 } else { 500 };
+                    let status = crate::daemon_ffi::daemon_error_kind_to_http_status(
+                        (*resp).error_kind, (*resp).success,
+                    );
                     resp_status = status;
                     http_write_response(
                         client_fd,
@@ -1388,7 +1390,9 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                 } else {
                     let mut resp_len: usize = 0;
                     let resp_json = daemon_serialize_response(resp, &mut resp_len);
-                    let status = if (*resp).success { 200 } else { 500 };
+                    let status = crate::daemon_ffi::daemon_error_kind_to_http_status(
+                        (*resp).error_kind, (*resp).success,
+                    );
                     resp_status = status;
                     http_write_response(
                         client_fd,

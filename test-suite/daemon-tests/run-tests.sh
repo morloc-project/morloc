@@ -405,18 +405,65 @@ if should_run "http"; then
     val=$(json_field "$result" "result")
     assert_test "POST /call/add [1.5,2.5] result=4" "4" "$val"
 
-    # Error: unknown command
+    # Error: unknown command (JSON envelope)
     result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/nonexistent" \
         -H "Content-Type: application/json" -d '[1]')
     status=$(json_field "$result" "status")
     assert_test "POST /call/nonexistent returns error" "error" "$status"
 
-    # Error: unknown endpoint
-    assert_http_status "GET /bogus returns 400" "400" "http://127.0.0.1:${HTTP_PORT}/bogus"
-
-    # CORS preflight
+    # CORS preflight (Stage 3 changes this to 204)
     assert_http_status "OPTIONS returns 200" "200" "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -X OPTIONS
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1b: HTTP status codes
+#
+# Every daemon-dispatch failure used to map to 500 Internal Server Error
+# regardless of cause. After Stage 2, client errors (unknown command,
+# unknown endpoint, missing field, malformed args, wrong arity) map to
+# 4xx; only genuinely-server-side failures remain 500.
+# ======================================================================
+
+if should_run "http-status"; then
+    echo "${BOLD}[http-status] HTTP status code classification${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    # 200 happy path (regression guard).
+    assert_http_status "GET  /health           -> 200" "200" \
+        "http://127.0.0.1:${HTTP_PORT}/health"
+    assert_http_status "POST /call/add [1,2]   -> 200" "200" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST -d '[1,2]'
+
+    # 404: unknown HTTP endpoint and unknown command.
+    assert_http_status "GET  /nope             -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/nope"
+    assert_http_status "POST /call/doesNotExist -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/call/doesNotExist" \
+        -X POST -d '[]'
+
+    # 400: missing required field, malformed args, wrong arity.
+    assert_http_status "POST /eval {}          -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -X POST -d '{}'
+    assert_http_status "POST /call/add [1,2,3] -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST -d '[1,2,3]'
+    assert_http_status "POST /call/add (no body) -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST
+
+    # The JSON envelope still carries status:"error" alongside the HTTP code.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/doesNotExist" -d '[]')
+    status=$(json_field "$result" "status")
+    assert_test "404 body still has status:error" "error" "$status"
 
     stop_daemon "$LAST_DAEMON_PID"
     echo ""

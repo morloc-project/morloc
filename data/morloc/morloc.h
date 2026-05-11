@@ -567,9 +567,23 @@ typedef struct daemon_request_s {
     char* name;
 } daemon_request_t;
 
+// Error classification for daemon failures. On success, error_kind is
+// DAEMON_ERROR_OK (0). On failure, it drives HTTP status mapping in
+// handle_http_connection (BAD_REQUEST -> 400, NOT_FOUND -> 404,
+// TIMEOUT -> 408, RECOVERING -> 503, INTERNAL -> 500). Unix/TCP clients
+// read `success` and the {"status":"error","error":"..."} envelope and
+// do not see error_kind on the wire today.
+#define DAEMON_ERROR_OK          0
+#define DAEMON_ERROR_BAD_REQUEST 1
+#define DAEMON_ERROR_NOT_FOUND   2
+#define DAEMON_ERROR_TIMEOUT     3
+#define DAEMON_ERROR_RECOVERING  4
+#define DAEMON_ERROR_INTERNAL    5
+
 typedef struct daemon_response_s {
     char* id;
     bool success;
+    int error_kind;
     char* result_json;
     char* error;
 } daemon_response_t;
@@ -877,7 +891,10 @@ void binding_store_free(binding_store_t* store);
 http_request_t* http_parse_request(int fd, ERRMSG);
 bool http_write_response(int fd, int status, const char* content_type,
                          const char* body, size_t body_len);
-daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG);
+// `error_kind_out` (nullable) receives DAEMON_ERROR_BAD_REQUEST for
+// malformed body / missing fields and DAEMON_ERROR_NOT_FOUND for an
+// unknown route.
+daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG, int* error_kind_out);
 void http_free_request(http_request_t* req);
 
 // ========================================================================

@@ -192,10 +192,13 @@ pub unsafe extern "C" fn http_free_request(req: *mut HttpRequest) {
 fn http_status_text(status: i32) -> &'static str {
     match status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Unknown",
     }
 }
@@ -270,12 +273,23 @@ fn extract_json_string(body: &str, key: &str) -> Option<String> {
     Some(result)
 }
 
+/// Translate a parsed HTTP request into a daemon request. On failure,
+/// `errmsg` carries the human-readable cause and `error_kind` carries the
+/// classification (DAEMON_ERROR_BAD_REQUEST for malformed body / missing
+/// fields, DAEMON_ERROR_NOT_FOUND for an unrecognized route). `error_kind`
+/// may be NULL if the caller doesn't care.
 #[no_mangle]
 pub unsafe extern "C" fn http_to_daemon_request(
     req: *mut HttpRequest,
     errmsg: *mut *mut c_char,
+    error_kind: *mut i32,
 ) -> *mut DaemonRequest {
     clear_errmsg(errmsg);
+    // Default classification for any failure below is BAD_REQUEST; the
+    // unknown-endpoint branch promotes to NOT_FOUND explicitly.
+    if !error_kind.is_null() {
+        *error_kind = crate::daemon_ffi::DAEMON_ERROR_BAD_REQUEST;
+    }
 
     let dreq = libc::calloc(1, std::mem::size_of::<DaemonRequest>()) as *mut DaemonRequest;
     if dreq.is_null() {
@@ -438,6 +452,9 @@ pub unsafe extern "C" fn http_to_daemon_request(
         HttpMethod::Delete => "DELETE",
         HttpMethod::Options => "OPTIONS",
     };
+    if !error_kind.is_null() {
+        *error_kind = crate::daemon_ffi::DAEMON_ERROR_NOT_FOUND;
+    }
     set_errmsg(errmsg, &MorlocError::Other(format!("Unknown HTTP endpoint: {} {}", method_str, path)));
     ptr::null_mut()
 }
