@@ -84,9 +84,21 @@ pub struct MorlocPattern {
     pub selectors: *mut *mut MorlocPattern,
 }
 
+// Length-aware string literal payload. The `data` buffer is NOT
+// NUL-terminated and may contain interior NULs. Mirrors C
+// `morloc_string_t` in data/morloc/morloc.h.
+#[repr(C)]
+pub struct MorlocString {
+    pub data: *mut c_char,
+    pub size: usize,
+}
+
 #[repr(C)]
 pub union Primitive {
+    // BigInt "j" decimal-string only (no interior NUL, plain C-string).
     pub s: *mut c_char,
+    // Str literals carry length explicitly to preserve interior NULs.
+    pub str: *mut MorlocString,
     pub z: u8,
     pub b: bool,
     pub i1: i8,
@@ -128,7 +140,10 @@ pub struct MorlocData {
 pub union AppFunction {
     pub pattern: *mut MorlocPattern,
     pub lambda: *mut MorlocLamExpression,
-    pub fmt: *mut *mut c_char,
+    // Length-aware literal pieces for string interpolation. Aliases
+    // ExprUnion.interpolation, which carries the same MorlocString**
+    // layout from the Fmt expression node.
+    pub fmt: *mut *mut MorlocString,
 }
 
 #[repr(C)]
@@ -158,7 +173,8 @@ pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
     pub lam_expr: *mut MorlocLamExpression,
     pub bnd_expr: *mut c_char,
-    pub interpolation: *mut *mut c_char,
+    // Length-aware literal pieces for string interpolation.
+    pub interpolation: *mut *mut MorlocString,
     pub pattern_expr: *mut MorlocPattern,
     pub data_expr: *mut MorlocData,
     pub unary_expr: *mut MorlocExpression,
@@ -213,6 +229,11 @@ pub struct ManifestPool {
     pub socket: *mut c_char,
     /// JSON-encoded pool-level metadata. Reserved.
     pub metadata_json: *mut c_char,
+    /// Whether this pool's language can carry a Str with interior NUL
+    /// bytes. False means the runtime rejects NUL-bearing Strs at the
+    /// boundary into this pool with a clear error. See lang.yaml's
+    /// `allow_string_null` field for the canonical source.
+    pub allow_string_null: bool,
 }
 
 #[repr(C)]
@@ -322,6 +343,9 @@ pub struct Manifest {
     pub n_groups: usize,
     pub service: *mut ManifestService,
     pub metadata_json: *mut c_char,
+    /// When true, skip the runtime NUL-in-Str scan at cross-pool
+    /// boundaries. Set by `morloc make --unsafe-skip-null-check`.
+    pub unsafe_skip_null_check: bool,
 }
 
 impl ManifestCommand {
@@ -372,6 +396,39 @@ unsafe fn c_strdup(s: &str) -> *mut c_char {
         Ok(cs) => libc::strdup(cs.as_ptr()),
         Err(_) => ptr::null_mut(),
     }
+}
+
+// Allocate a length-aware MorlocString carrying a copy of `s`. Unlike
+// c_strdup this does not stop at interior NULs: every byte of the &str is
+// copied verbatim and the size is recorded explicitly. The buffer is
+// libc-malloc'd; the caller (eventually the MorlocExpression teardown path)
+// owns it.
+unsafe fn alloc_morloc_string(s: &str) -> *mut MorlocString {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let ms = libc::malloc(std::mem::size_of::<MorlocString>()) as *mut MorlocString;
+    if ms.is_null() {
+        return ptr::null_mut();
+    }
+    // libc::malloc(0) is implementation-defined; route empty strings to
+    // a non-null sentinel so consumers can always read `data` (size 0
+    // means "do not dereference").
+    let buf = if n == 0 {
+        libc::malloc(1) as *mut c_char
+    } else {
+        let b = libc::malloc(n) as *mut c_char;
+        if !b.is_null() {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), b as *mut u8, n);
+        }
+        b
+    };
+    if buf.is_null() {
+        libc::free(ms as *mut c_void);
+        return ptr::null_mut();
+    }
+    (*ms).data = buf;
+    (*ms).size = n;
+    ms
 }
 
 unsafe fn nullable_strdup(s: Option<&str>) -> *mut c_char {
@@ -476,8 +533,15 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "str" => {
             let schema = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let val = je.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            // Use a length-aware MorlocString so interior NUL bytes survive.
+            // c_strdup (used by other lit tags) silently drops NUL strings.
             let mut prim: Primitive = std::mem::zeroed();
-            prim.s = c_strdup(val);
+            prim.str = alloc_morloc_string(val);
+            if prim.str.is_null() {
+                return Err(MorlocError::Other(
+                    "Failed to allocate string literal".into(),
+                ));
+            }
             let c_schema = CString::new(schema).unwrap_or_default();
             let result = make_morloc_literal(c_schema.as_ptr(), prim, &mut err);
             if !err.is_null() {
@@ -684,10 +748,15 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 return Err(MorlocError::Other(msg));
             }
 
-            let strings = libc::calloc(n + 1, std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+            // Length-aware literal pieces: each entry preserves interior
+            // NULs that c_strdup would have silently dropped.
+            let strings = libc::calloc(
+                n + 1,
+                std::mem::size_of::<*mut MorlocString>(),
+            ) as *mut *mut MorlocString;
             if let Some(jstrs) = jstrs {
                 for (i, s) in jstrs.iter().enumerate() {
-                    *strings.add(i) = c_strdup(s.as_str().unwrap_or(""));
+                    *strings.add(i) = alloc_morloc_string(s.as_str().unwrap_or(""));
                 }
             }
 
@@ -995,6 +1064,7 @@ unsafe fn populate_pool(dst: *mut ManifestPool, src: &morloc_manifest::Pool) {
     *(*dst).exec.add(n) = ptr::null_mut();
     (*dst).socket = c_strdup(&src.socket);
     (*dst).metadata_json = populate_metadata(&src.metadata);
+    (*dst).allow_string_null = src.allow_string_null;
 }
 
 unsafe fn populate_cmd_group(dst: *mut ManifestCmdGroup, src: &morloc_manifest::CmdGroup) {
@@ -1093,6 +1163,7 @@ pub unsafe extern "C" fn parse_manifest(
     }
 
     (*m).metadata_json = populate_metadata(&parsed.metadata);
+    (*m).unsafe_skip_null_check = parsed.unsafe_skip_null_check;
 
     m
 }

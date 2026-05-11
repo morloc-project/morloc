@@ -1,0 +1,17 @@
+module main (rEcho)
+
+-- The CLI argument is a Str, dispatched into an R-sourced identity
+-- function. R cannot represent embedded NUL bytes in its native
+-- character type (allow_string_null = false in lang.yaml), so the
+-- morloc runtime should reject the call at the cross-pool boundary
+-- before the R pool sees the value. This locks in the runtime guard's
+-- failure mode.
+
+source R from "helper.R" ("identity" as rId)
+
+type R => Str = "character"
+
+rId :: Str -> Str
+
+rEcho :: Str -> Str
+rEcho s = rId s

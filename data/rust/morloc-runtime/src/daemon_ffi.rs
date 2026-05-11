@@ -1199,7 +1199,52 @@ pub unsafe extern "C" fn daemon_dispatch(
         // the flat view; the outer pointer array is owned by us and
         // freed below, but the inner C strings remain owned by the
         // ManifestArg objects.
-        //
+
+        // NUL-in-Str guard. If the target pool's language does not
+        // support embedded NULs (e.g. R), reject the call cleanly here
+        // before any pool I/O. We scan the JSON args because at this
+        // point that's the most accessible representation; serde_json
+        // has already decoded ` ` escapes into actual NUL bytes in
+        // any Rust String values, so a contains(&0) check is sufficient.
+        // The check is bypassed when the env var or the program-wide
+        // --unsafe-skip-null-check flag is set.
+        let target_pool = &*(*mv).pools.add(cmd.pool_index);
+        let skip = (*mv).unsafe_skip_null_check
+            || crate::null_check::env_skip_null_check();
+        if !skip && !target_pool.allow_string_null {
+            if !(*request).args_json.is_null() {
+                let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
+                if let Ok(parsed) =
+                    serde_json::from_str::<serde_json::Value>(&args_str)
+                {
+                    if let Some(p) = crate::null_check::first_null_in_json(&parsed) {
+                        let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
+                        let msg = format!(
+                            "{} does not support embedded NUL bytes in strings (at {})",
+                            lang, p
+                        );
+                        (*resp).success = false;
+                        let c = CString::new(msg).unwrap_or_default();
+                        (*resp).error = libc::strdup(c.as_ptr());
+                        // Cleanup the args array allocated above.
+                        if !args.is_null() {
+                            let mut i = 0;
+                            loop {
+                                let p = *args.add(i);
+                                if p.is_null() {
+                                    break;
+                                }
+                                free_argument_t(p);
+                                i += 1;
+                            }
+                            libc::free(args as *mut c_void);
+                        }
+                        return resp;
+                    }
+                }
+            }
+        }
+
         // Open a per-eval SHM arena for the duration of this remote call.
         // make_call_packet_from_cli -> parse_cli_data_argument allocates
         // SHM blocks for non-trivial args (these are referenced by relptr

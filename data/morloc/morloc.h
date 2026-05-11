@@ -286,8 +286,18 @@ typedef struct morloc_lam_expression_s morloc_lam_expression_t;
 typedef struct morloc_data_s morloc_data_t;
 typedef struct morloc_pattern_s morloc_pattern_t;
 
+// Length-aware string literal payload. Used wherever the nexus expression
+// tree carries a morloc Str: the `data` buffer is NOT NUL-terminated and may
+// contain interior NUL bytes. The companion `s` member of primitive_t below
+// is reserved for BigInt decimal literals, which are always plain C-strings.
+typedef struct morloc_string_s {
+    char*  data;
+    size_t size;
+} morloc_string_t;
+
 typedef union primitive_u {
-    char*    s;
+    char*            s;    // BigInt "j" decimal-string only (no interior NUL)
+    morloc_string_t* str;  // Str literals (NUL-safe)
     uint8_t  z;
     bool     b;
     int8_t   i1;
@@ -323,7 +333,9 @@ typedef struct morloc_app_expression_s {
     union {
         morloc_pattern_t* pattern;
         morloc_lam_expression_t* lambda;
-        char** fmt;
+        // Length-aware literal pieces for string interpolation; aliases
+        // morloc_expression_t.expr.interpolation on the wrapped Fmt node.
+        morloc_string_t** fmt;
     } function;
     morloc_expression_t** args;
     size_t nargs;
@@ -352,7 +364,9 @@ typedef struct morloc_expression_s {
         morloc_app_expression_t* app_expr;
         morloc_lam_expression_t* lam_expr;
         char* bnd_expr;
-        char** interpolation;
+        // Length-aware array of literal pieces for string interpolation
+        // (Fmt expressions). Each piece may contain interior NULs.
+        morloc_string_t** interpolation;
         morloc_pattern_t* pattern_expr;
         morloc_data_t* data_expr;
         morloc_expression_t* unary_expr;
@@ -365,8 +379,10 @@ typedef struct morloc_expression_s {
 
 typedef struct {
     char* lang;
-    char** exec;      // NULL-terminated array
-    char* socket;     // socket basename
+    char** exec;             // NULL-terminated array
+    char* socket;            // socket basename
+    char* metadata_json;     // reserved
+    bool  allow_string_null; // whether the pool's language can carry interior-NUL Str
 } manifest_pool_t;
 
 typedef enum {
@@ -440,6 +456,10 @@ typedef struct {
     manifest_cmd_group_t* groups;
     size_t n_groups;
     manifest_service_t* service;
+    char* metadata_json;        // reserved
+    // When true, skip the runtime NUL-in-Str scan at cross-pool
+    // boundaries; set via `morloc make --unsafe-skip-null-check`.
+    bool unsafe_skip_null_check;
 } manifest_t;
 
 // ========================================================================

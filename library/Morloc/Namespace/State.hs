@@ -132,6 +132,10 @@ data MorlocState = MorlocState
   -- ^ Project root directory (directory of the entry-point file)
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
+  , stateUnsafeSkipNullCheck :: Bool
+  -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
+  -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
+  -- from this; the runtime then skips the boundary NUL scan.
   , stateModuleDoc :: [Text]
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
@@ -363,6 +367,7 @@ instance Defaultable MorlocState where
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
       , stateEvalMode = False
+      , stateUnsafeSkipNullCheck = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
       }

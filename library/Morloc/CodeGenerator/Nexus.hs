@@ -791,8 +791,9 @@ buildManifest ::
   Map.Map Text [Text] ->
   [Text] ->
   [[Text]] ->
+  Bool ->
   Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues =
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck =
   jsonObj
     [ ("name", jsonStr (MT.pack programName))
     , ("build", buildJson)
@@ -801,6 +802,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     , ("groups", jsonArr (map groupJson (Map.toList groupDescs)))
     , ("desc", jsonStrArr moduleDoc)
     , ("epilogues", jsonArr (map jsonStrArr moduleEpilogues))
+    , ("unsafe_skip_null_check", jsonBool unsafeSkipNullCheck)
     , ("metadata", metadataEmpty)
     ]
   where
@@ -821,6 +823,8 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         [ ("lang", jsonStr (ML.showLangName lang))
         , ("exec", jsonStrArr (map MT.pack (makeExecArgs lang)))
         , ("socket", jsonStr ("pipe-" <> ML.showLangName lang))
+        , ("allow_string_null",
+            jsonBool (LR.registryAllowStringNull registry (ML.langName lang)))
         , ("metadata", metadataEmpty)
         ]
 
@@ -1005,6 +1009,7 @@ generate cs rASTs = do
 
   moduleDoc <- MM.gets stateModuleDoc
   moduleEpilogues <- MM.gets stateModuleEpilogues
+  unsafeSkipNullCheck <- MM.gets stateUnsafeSkipNullCheck
 
   let manifestJson =
         buildManifest
@@ -1021,6 +1026,7 @@ generate cs rASTs = do
           groupDescs
           moduleDoc
           moduleEpilogues
+          unsafeSkipNullCheck
       wrapperScript = makeWrapperScript manifestJson
 
   return $

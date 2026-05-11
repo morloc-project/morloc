@@ -24,9 +24,12 @@ module Morloc.Data.Doc
   , integer
   , block
   , format
+  , utf8Length
   ) where
 
+import qualified Data.ByteString as BS
 import qualified Data.Text as DT
+import qualified Data.Text.Encoding as DTE
 import Prettyprinter hiding (annotate, (<>))
 import Prettyprinter.Render.Text
 
@@ -65,10 +68,12 @@ escapeStringLit = DT.concatMap escapeChar
     escapeChar '\n' = "\\n"
     escapeChar '\t' = "\\t"
     escapeChar '\r' = "\\r"
-    -- A literal NUL byte in generated source files would either be a
-    -- syntax error or terminate the string early at the backend level.
-    -- Use the 3-digit octal form so adjacent digit characters do not
-    -- extend the escape (C, C++, and Python all cap octal escapes at 3).
+    -- Morloc Str values may contain interior NUL bytes (rejected only at
+    -- boundaries into languages that opt out via allow_string_null=false).
+    -- Emit the 3-digit octal form so adjacent digit characters do not
+    -- extend the escape; C, C++, and Python all cap octal escapes at 3.
+    -- The receiving constructor (e.g. std::string(p, n)) must use the
+    -- length-aware form so the decoded NUL survives.
     escapeChar '\0' = "\\000"
     escapeChar c = DT.singleton c
 
@@ -79,6 +84,12 @@ escapeQuotes terminator escaped = DT.replace terminator escaped
 -- | Render a 'DT.Text' literal as a double-quoted, escaped 'Doc'
 textEsc' :: DT.Text -> Doc ann
 textEsc' = dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit
+
+-- | Byte length of a 'DT.Text' under UTF-8 encoding. Used when emitting a
+-- string literal alongside an explicit byte count (e.g. C++ @std::string(p, n)@)
+-- so that interior NUL bytes do not silently truncate the value.
+utf8Length :: DT.Text -> Int
+utf8Length = BS.length . DTE.encodeUtf8
 
 -- | Template substitution: split @fmtstr@ on @breaker@ and interleave @replacements@
 format ::

@@ -9,6 +9,8 @@ is_compiled: false
 run_command: ["julia"]
 serial_type: "bytes"
 cost: 5
+# Julia String wraps a length-prefixed byte vector and accepts interior NULs.
+allow_string_null: true
 
 # Descriptor identity (kept for compatibility with generic translator)
 ldName: julia

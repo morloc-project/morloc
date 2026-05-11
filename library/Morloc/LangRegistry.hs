@@ -25,6 +25,7 @@ module Morloc.LangRegistry
   , registrySerialType
   , registryIsCompiled
   , registryRunCommand
+  , registryAllowStringNull
   , registryMakeExtension
   , registryMakeExecutablePoolName
   , registryMakeSourcePoolName
@@ -60,6 +61,11 @@ data LangRegistryEntry = LangRegistryEntry
   , lreSerialType :: !Text
   , lreCost :: !Int
   , lrePreamble :: ![Text]
+  -- | Whether the language can carry a Str with interior NUL bytes.
+  -- False means the morloc runtime rejects NUL-bearing Strs at the
+  -- boundary into a pool of this language. Defaults to True so older
+  -- lang.yaml files without the key keep their permissive behaviour.
+  , lreAllowStringNull :: !Bool
   }
   deriving (Show)
 
@@ -141,6 +147,15 @@ registryRunCommand reg name = case Map.lookup name (lrEntries reg) of
   Just entry -> lreRunCommand entry
   Nothing -> []
 
+-- | True if the language can carry a Str with interior NUL bytes. The
+-- runtime uses this to decide whether to scan inbound/outbound Str
+-- payloads at every cross-pool boundary. Unknown languages default to
+-- True (permissive) so adding a new language is opt-in for restriction.
+registryAllowStringNull :: LangRegistry -> Text -> Bool
+registryAllowStringNull reg name = case Map.lookup name (lrEntries reg) of
+  Just entry -> lreAllowStringNull entry
+  Nothing -> True
+
 registryMakeExtension :: LangRegistry -> Text -> String
 registryMakeExtension reg name = case Map.lookup name (lrEntries reg) of
   Just entry -> lreExtension entry
@@ -167,6 +182,7 @@ data LangYamlMeta = LangYamlMeta
   , lymSerialType :: Text
   , lymCost :: Int
   , lymPreamble :: [Text]
+  , lymAllowStringNull :: Bool
   }
   deriving (Show)
 
@@ -181,6 +197,7 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "serial_type" .!= "bytes"
       <*> o .:? "cost" .!= 5
       <*> o .:? "preamble" .!= []
+      <*> o .:? "allow_string_null" .!= True
 
 data LanguagesYaml = LanguagesYaml
   { lysSameLangCosts :: Map Text Int
@@ -213,6 +230,7 @@ entryFromYaml ly =
     , lreSerialType = lymSerialType ly
     , lreCost = lymCost ly
     , lrePreamble = lymPreamble ly
+    , lreAllowStringNull = lymAllowStringNull ly
     }
 
 -- | Parse a lang.yaml file from the filesystem, returning (canonical name, extension)

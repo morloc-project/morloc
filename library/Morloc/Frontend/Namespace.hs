@@ -108,6 +108,7 @@ copyState oldIndex newIndex = do
       , stateManifoldEffects = stateManifoldEffects s
       , stateProjectRoot = stateProjectRoot s
       , stateEvalMode = stateEvalMode s
+      , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
       }

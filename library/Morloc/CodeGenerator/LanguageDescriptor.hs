@@ -123,6 +123,13 @@ data LangDescriptor = LangDescriptor
   , -- Execution
     ldRunCommand :: ![Text] -- command to run pool, e.g. ["python3"]
   , ldIsCompiled :: !Bool
+  , -- NUL-in-Str policy. False means the morloc runtime rejects any
+    -- attempt to send a Str containing an interior NUL byte across the
+    -- boundary into a pool of this language. Languages whose native
+    -- string type is length-prefixed (Python, C++, Julia) set this to
+    -- True; languages where strings are NUL-terminated by convention
+    -- (C) or whose stdlib refuses NUL strings (R) set it to False.
+    ldAllowStringNull :: !Bool
   , -- External codegen (optional)
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- == Template fields (Layer 1 & 2) ==
@@ -221,17 +228,26 @@ instance Y.FromJSON PatternStyle where
 instance Y.FromJSON LangDescriptor where
   parseJSON = Y.withObject "LangDescriptor" $ \obj -> do
     let ins k v = KM.insertWith (\_ old -> old) (AesonKey.fromText k) v
+        -- Unconditional insert: always overwrites. Use for remapping
+        -- a yaml field name (e.g. "allow_string_null") to its Haskell
+        -- field name ("ldAllowStringNull"). Must run BEFORE the
+        -- defaulting `ins` for the same key so the user-supplied value
+        -- wins.
+        setK k v = KM.insert (AesonKey.fromText k) v
         -- Map registry metadata fields to descriptor fields if not already present
         nameVal = KM.lookup (AesonKey.fromText "name") obj
         extVal = KM.lookup (AesonKey.fromText "extension") obj
         runCmdVal = KM.lookup (AesonKey.fromText "run_command") obj
         isCompiledVal = KM.lookup (AesonKey.fromText "is_compiled") obj
+        allowNullVal = KM.lookup (AesonKey.fromText "allow_string_null") obj
         -- ins keeps old value if key exists, so insert specific overrides first
         withDefaults =
           maybe id (ins "ldName") nameVal
             . maybe id (ins "ldExtension") extVal
             . maybe id (ins "ldRunCommand") runCmdVal
             . maybe id (ins "ldIsCompiled") isCompiledVal
+            . maybe id (setK "ldAllowStringNull") allowNullVal
+            . ins "ldAllowStringNull" (Y.Bool True)
             . ins "ldCodegenCommand" Y.Null
             . ins "ldRealPosInf" (Y.String "")
             . ins "ldRealNegInf" (Y.String "")
@@ -327,6 +343,7 @@ defaultLangDescriptor name ext =
     , ldCommentMarker = "#"
     , ldRunCommand = []
     , ldIsCompiled = False
+    , ldAllowStringNull = True
     , ldCodegenCommand = Nothing
     , -- Template fields
       ldAssignOp = "="

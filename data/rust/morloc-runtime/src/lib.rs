@@ -29,6 +29,7 @@ pub mod arrow_ipc_reader;
 pub mod pool_ffi;
 pub mod daemon_ffi;
 pub mod router_ffi;
+pub mod null_check;
 pub mod cli;
 
 /// Shared test SHM initialization. Call from all test modules.

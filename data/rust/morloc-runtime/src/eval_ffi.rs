@@ -478,11 +478,21 @@ unsafe fn morloc_eval_r(
 
             let stype = (*schema).serial_type;
             if stype == crate::schema::SerialType::String as u32 {
-                // String: allocate in SHM
-                let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
-                let str_size = if s.is_null() { 0 } else { libc::strlen(s) };
+                // String: allocate in SHM. Str literals are stored in the
+                // length-aware `str` field of Primitive so that interior
+                // NUL bytes survive (strlen would truncate at the first
+                // NUL). The BigInt "j" path still uses `s` as a C-string;
+                // see the Int branch below.
+                let ms = std::mem::ManuallyDrop::into_inner(
+                    ptr::read(&(*data).data.lit_val)
+                ).str;
+                let (str_size, str_ptr) = if ms.is_null() {
+                    (0usize, ptr::null::<u8>())
+                } else {
+                    ((*ms).size, (*ms).data as *const u8)
+                };
                 let str_relptr: RelPtr = if str_size > 0 {
-                    let abs = shm::shmemcpy(s as *const u8, str_size)?;
+                    let abs = shm::shmemcpy(str_ptr, str_size)?;
                     shm::abs2rel(abs)?
                 } else {
                     -1isize as RelPtr
@@ -623,14 +633,16 @@ unsafe fn morloc_eval_r(
                 }
 
                 MorlocAppExpressionType::Format => {
+                    // Literal pieces are length-aware MorlocStrings so
+                    // interior NULs survive. Previously this branch used
+                    // libc::strlen, which truncated literals like "a\0b".
                     let strings = (*app).function.fmt;
                     let mut result_size: usize = 0;
-                    let mut string_lengths: Vec<usize> = Vec::with_capacity(nargs + 1);
-
                     for i in 0..=nargs {
-                        let len = libc::strlen(*strings.add(i));
-                        string_lengths.push(len);
-                        result_size += len;
+                        let ms = *strings.add(i);
+                        if !ms.is_null() {
+                            result_size += (*ms).size;
+                        }
                     }
                     for i in 0..nargs {
                         let arr = &*(arg_results[i] as *const shm::Array);
@@ -644,8 +656,15 @@ unsafe fn morloc_eval_r(
 
                     let mut cursor = new_string;
                     for i in 0..=nargs {
-                        ptr::copy_nonoverlapping(*strings.add(i) as *const u8, cursor, string_lengths[i]);
-                        cursor = cursor.add(string_lengths[i]);
+                        let ms = *strings.add(i);
+                        if !ms.is_null() && (*ms).size > 0 {
+                            ptr::copy_nonoverlapping(
+                                (*ms).data as *const u8,
+                                cursor,
+                                (*ms).size,
+                            );
+                            cursor = cursor.add((*ms).size);
+                        }
                         if i < nargs {
                             let arr = &*(arg_results[i] as *const shm::Array);
                             if arr.size > 0 {

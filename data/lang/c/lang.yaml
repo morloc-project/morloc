@@ -6,3 +6,5 @@ is_compiled: true
 run_command: []
 serial_type: ""
 cost: 1
+# C strings are NUL-terminated; interior NUL bytes are rejected at the boundary.
+allow_string_null: false

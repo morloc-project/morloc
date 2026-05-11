@@ -595,9 +595,9 @@ genericPrintExpr desc = go
     go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)
     go (IRealLit _ RealNegInf) = pretty (ldRealNegInf desc)
     go (IRealLit _ RealNaN)    = pretty (ldRealNaN desc)
-    go (IStrLit Nothing s) = textEsc' s
+    go (IStrLit Nothing s) = checkNul s `seq` textEsc' s
     go (IStrLit (Just t) s) = case Map.lookup t (ldStrLiteralMap desc) of
-      Just prefix -> pretty prefix <> textEsc' s
+      Just prefix -> checkNul s `seq` pretty prefix <> textEsc' s
       Nothing -> error $ "Cannot render string literal with concrete type "
         ++ show t ++ " in language " ++ show (ldName desc)
         ++ ". Add an entry to ldStrLiteralMap in lang.yaml."
@@ -670,6 +670,29 @@ genericPrintExpr desc = go
       ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
       OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
       OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+
+    -- Languages that opt out of NUL-in-Str (allow_string_null = false)
+    -- cannot represent a `\0` inside a source-level string literal: R
+    -- refuses to parse `"\000"` at all, and the pool would die before
+    -- any runtime guard can fire. Catch the situation at codegen time
+    -- and emit a clear compile error. Runtime-borne NUL strings
+    -- (arriving via FFI from another pool or the nexus) are caught
+    -- separately by the runtime null_check.
+    checkNul :: Text -> ()
+    checkNul s
+      | ldAllowStringNull desc = ()
+      | T.any (== '\0') s =
+          error $
+            "Embedded NUL byte in a Str literal destined for the "
+              ++ show (ldName desc)
+              ++ " pool. The "
+              ++ show (ldName desc)
+              ++ " language cannot represent NUL bytes in its native "
+              ++ "string type. Move the literal to a language that "
+              ++ "supports it (Python, C++, Julia, or the nexus itself), "
+              ++ "or remove the NUL byte. (See lang.yaml's "
+              ++ "allow_string_null field.)"
+      | otherwise = ()
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc

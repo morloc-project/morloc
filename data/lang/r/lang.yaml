@@ -9,6 +9,9 @@ is_compiled: false
 run_command: ["Rscript"]
 serial_type: "character"
 cost: 4
+# Base R (nchar, paste, regex, jsonlite, etc.) raises "embedded nul in string"
+# on NUL-bearing CHARSXPs. The morloc runtime rejects NULs at the R boundary.
+allow_string_null: false
 preamble:
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
   - '.morloc.srcdir <- normalizePath(file.path(dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1])), "..", ".."), mustWork=FALSE)'

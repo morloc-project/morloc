@@ -451,6 +451,41 @@ pub fn dispatch_command(
     if cmd.is_pure() {
         run_pure_command(cmd, &parsed_args, config);
     } else {
+        // NUL-in-Str guard. If the target pool's language opts out of
+        // interior-NUL strings (e.g. R), scan every parsed arg for an
+        // embedded NUL and fail fast with a clean morloc-level
+        // diagnostic before invoking the pool. Bypassed when the
+        // program-level --unsafe-skip-null-check was set or when the
+        // env var MORLOC_SKIP_NULL_CHECK=1 is in effect.
+        let target_pool = &manifest.pools[cmd.pool_index];
+        let skip = manifest.unsafe_skip_null_check
+            || morloc_runtime::null_check::env_skip_null_check();
+        if !skip && !target_pool.allow_string_null {
+            for (i, av) in parsed_args.iter().enumerate() {
+                let payload = match av {
+                    ArgValue::Value(s) => Some(s.as_str()),
+                    _ => None,
+                };
+                if let Some(s) = payload {
+                    // The CLI ArgValue contains JSON-quoted form for
+                    // strings (e.g. `"abc def"`). Decode via
+                    // serde_json so any   escapes become real NUL
+                    // bytes; non-JSON values just fail to parse and
+                    // are skipped.
+                    if let Ok(jv) = serde_json::from_str::<serde_json::Value>(s) {
+                        if let Some(p) =
+                            morloc_runtime::null_check::first_null_in_json(&jv)
+                        {
+                            eprintln!(
+                                "Error: {} does not support embedded NUL bytes in strings (at args[{}]{})",
+                                target_pool.lang, i, p
+                            );
+                            process::clean_exit(1);
+                        }
+                    }
+                }
+            }
+        }
         run_remote_command(cmd, &parsed_args, sockets, config);
     }
 }
