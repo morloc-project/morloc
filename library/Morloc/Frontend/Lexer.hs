@@ -133,7 +133,10 @@ lexOne st@(LexState input pos toks) = case input of
             , lsPos = advanceCol pos len
             , lsTokens = Located pos (TokDocLine txt) (T.pack ("--'" ++ line)) : toks
             }
-  -- Line comments: -- (but not --' or --^)
+  -- Line comments: -- always starts a comment, no matter what follows.
+  -- Some "--"-prefixed sequences have special internal meaning (--' for
+  -- docstrings handled earlier, --* for doc groups handled earlier,
+  -- --^ reserved and rejected below). Operators cannot begin with "--".
   '-' : '-' : rest
     | not (null rest) && head rest `elem` ['\'', '^'] ->
         Left (LexError pos "unexpected docstring marker")
