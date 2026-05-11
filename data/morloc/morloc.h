@@ -522,10 +522,25 @@ typedef struct binding_store_s {
 typedef void (*pool_check_fn_t)(morloc_socket_t* sockets, size_t n_pools);
 typedef bool (*pool_alive_fn_t)(size_t pool_index);
 
+// Port sentinel convention:
+//   tcp_port / http_port == -1  -> listener not configured
+//   tcp_port / http_port ==  0  -> bind ephemeral (OS picks the port);
+//                                  daemon_run reads it back with
+//                                  getsockname() and emits an stderr
+//                                  ready line plus an entry in the
+//                                  optional port_file_path JSON.
+//   0..=65535 otherwise         -> bind that specific port.
+//
+// port_file_path is optional. When non-NULL, daemon_run writes a JSON
+// document of shape {"http":N|null,"tcp":N|null,"unix":"PATH"|null}
+// atomically (tmp + rename) after all listeners are bound. This is the
+// race-free discovery channel for orchestrators spawning many daemons
+// in parallel.
 typedef struct daemon_config_s {
     const char* unix_socket_path;
     int tcp_port;
     int http_port;
+    const char* port_file_path;
     pool_check_fn_t pool_check_fn;
     pool_alive_fn_t pool_alive_fn;
     size_t n_pools;

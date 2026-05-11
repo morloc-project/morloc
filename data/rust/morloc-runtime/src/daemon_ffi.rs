@@ -77,12 +77,24 @@ pub struct MorlocSocket {
     pub pid: i32,
 }
 
-/// Matches daemon_config_t from daemon.h
+/// Matches daemon_config_t from daemon.h.
+///
+/// Port sentinel convention:
+/// - `tcp_port` / `http_port` == -1 -> listener not configured.
+/// - `tcp_port` / `http_port` ==  0 -> bind ephemeral; OS picks a port.
+/// - 0..=65535 otherwise -> bind that specific port.
+///
+/// `port_file_path` is optional; when non-null, daemon_run writes a JSON
+/// blob `{"http": N|null, "tcp": N|null, "unix": "PATH"|null}` to that
+/// path (atomically via rename) after all listeners are bound. This is
+/// the race-free orchestration channel for harnesses spawning many
+/// daemons in parallel.
 #[repr(C)]
 pub struct DaemonConfig {
     pub unix_socket_path: *const c_char,
     pub tcp_port: i32,
     pub http_port: i32,
+    pub port_file_path: *const c_char,
     pub pool_check_fn: Option<unsafe extern "C" fn(*mut MorlocSocket, usize)>,
     pub pool_alive_fn: Option<unsafe extern "C" fn(usize) -> bool>,
     pub n_pools: usize,
@@ -1669,6 +1681,92 @@ fn set_socket_timeouts(fd: i32, timeout_sec: i32) {
 
 const MAX_LISTENERS: usize = 3;
 
+/// Crate-public alias of `getsockname_port` for use by router_ffi.
+pub(crate) unsafe fn getsockname_port_pub(fd: i32) -> Option<u16> {
+    getsockname_port(fd)
+}
+
+/// Crate-public alias of `write_port_file_atomic` for use by router_ffi.
+pub(crate) fn write_port_file_atomic_pub(
+    path: &str,
+    http_port: Option<u16>,
+    tcp_port: Option<u16>,
+    unix_path: Option<&str>,
+) -> std::io::Result<()> {
+    write_port_file_atomic(path, http_port, tcp_port, unix_path)
+}
+
+/// Read the port a TCP socket was bound to. Necessary when the caller
+/// passed port 0 (bind ephemeral; OS picks the port). Returns None on
+/// any getsockname or socket-family mismatch.
+unsafe fn getsockname_port(fd: i32) -> Option<u16> {
+    let mut addr: libc::sockaddr_in = std::mem::zeroed();
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    if libc::getsockname(
+        fd,
+        &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr,
+        &mut len,
+    ) < 0
+    {
+        return None;
+    }
+    if addr.sin_family != libc::AF_INET as libc::sa_family_t {
+        return None;
+    }
+    Some(u16::from_be(addr.sin_port))
+}
+
+/// Render the port-file JSON and write it atomically (tmp + rename).
+/// Always emits all three keys; missing listeners are null. Path string
+/// escaping is intentionally minimal -- the unix socket path is a
+/// filesystem path under the caller's control, and we only need to
+/// escape `\` and `"` to keep the JSON well-formed.
+fn write_port_file_atomic(
+    path: &str,
+    http_port: Option<u16>,
+    tcp_port: Option<u16>,
+    unix_path: Option<&str>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut body = String::new();
+    body.push('{');
+    body.push_str("\"http\":");
+    match http_port {
+        Some(p) => body.push_str(&p.to_string()),
+        None => body.push_str("null"),
+    }
+    body.push_str(",\"tcp\":");
+    match tcp_port {
+        Some(p) => body.push_str(&p.to_string()),
+        None => body.push_str("null"),
+    }
+    body.push_str(",\"unix\":");
+    match unix_path {
+        Some(s) => {
+            body.push('"');
+            for c in s.chars() {
+                match c {
+                    '\\' => body.push_str("\\\\"),
+                    '"' => body.push_str("\\\""),
+                    _ => body.push(c),
+                }
+            }
+            body.push('"');
+        }
+        None => body.push_str("null"),
+    }
+    body.push('}');
+    body.push('\n');
+
+    let tmp = format!("{}.tmp", path);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn daemon_run(
     config: *mut DaemonConfig,
@@ -1708,6 +1806,13 @@ pub unsafe extern "C" fn daemon_run(
     let mut fd_types = [0i32; MAX_LISTENERS]; // 0=unix, 1=tcp, 2=http
     let mut nfds: usize = 0;
 
+    // Bound listener metadata collected during bind, used to print one
+    // stderr ready line per listener and to render the optional
+    // --port-file JSON.
+    let mut bound_unix_path: Option<String> = None;
+    let mut bound_tcp_port: Option<u16> = None;
+    let mut bound_http_port: Option<u16> = None;
+
     // Unix socket
     if !(*config).unix_socket_path.is_null() {
         let sock_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
@@ -1740,10 +1845,17 @@ pub unsafe extern "C" fn daemon_run(
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 0;
         nfds += 1;
+        let unix_path = CStr::from_ptr((*config).unix_socket_path)
+            .to_string_lossy()
+            .into_owned();
+        eprintln!("morloc-daemon: listening on unix://{}", unix_path);
+        bound_unix_path = Some(unix_path);
     }
 
-    // TCP
-    if (*config).tcp_port > 0 {
+    // TCP. Configured iff tcp_port >= 0. tcp_port == 0 means "bind
+    // ephemeral; OS picks the port"; getsockname() reads it back.
+    if (*config).tcp_port >= 0 {
+        let requested = (*config).tcp_port as u16;
         let tcp_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if tcp_fd < 0 {
             eprintln!("daemon: failed to create tcp socket");
@@ -1760,29 +1872,30 @@ pub unsafe extern "C" fn daemon_run(
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
         addr.sin_addr.s_addr = u32::from_be(0x7f000001); // INADDR_LOOPBACK
-        addr.sin_port = ((*config).tcp_port as u16).to_be();
+        addr.sin_port = requested.to_be();
         if libc::bind(
             tcp_fd,
             &addr as *const libc::sockaddr_in as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!(
-                "daemon: failed to bind tcp port {}",
-                (*config).tcp_port
-            );
+            eprintln!("daemon: failed to bind tcp port {}", requested);
             libc::close(tcp_fd);
             return;
         }
+        let actual = getsockname_port(tcp_fd).unwrap_or(requested);
         libc::listen(tcp_fd, 64);
         fds[nfds].fd = tcp_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 1;
         nfds += 1;
+        eprintln!("morloc-daemon: listening on tcp://127.0.0.1:{}", actual);
+        bound_tcp_port = Some(actual);
     }
 
-    // HTTP
-    if (*config).http_port > 0 {
+    // HTTP. Same sentinel convention as TCP.
+    if (*config).http_port >= 0 {
+        let requested = (*config).http_port as u16;
         let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
             eprintln!("daemon: failed to create http socket");
@@ -1801,25 +1914,44 @@ pub unsafe extern "C" fn daemon_run(
         // HTTP router is externally reachable; bind to all interfaces so that
         // container port mappings (docker -p) can reach it.
         addr.sin_addr.s_addr = libc::INADDR_ANY.to_be();
-        addr.sin_port = ((*config).http_port as u16).to_be();
+        addr.sin_port = requested.to_be();
         if libc::bind(
             http_fd,
             &addr as *const libc::sockaddr_in as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!(
-                "daemon: failed to bind http port {}",
-                (*config).http_port
-            );
+            eprintln!("daemon: failed to bind http port {}", requested);
             libc::close(http_fd);
             return;
         }
+        let actual = getsockname_port(http_fd).unwrap_or(requested);
         libc::listen(http_fd, 64);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 2;
         nfds += 1;
+        eprintln!("morloc-daemon: listening on http://0.0.0.0:{}", actual);
+        bound_http_port = Some(actual);
+    }
+
+    // Optional port-file output. Written atomically via rename so a
+    // stat-waiting orchestrator never sees a partial file. Schema is
+    // fixed: every key is always present; missing listeners are null.
+    if !(*config).port_file_path.is_null() {
+        let path = CStr::from_ptr((*config).port_file_path)
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = write_port_file_atomic(
+            &path,
+            bound_http_port,
+            bound_tcp_port,
+            bound_unix_path.as_deref(),
+        ) {
+            eprintln!("daemon: failed to write port file {}: {}", path, e);
+            // non-fatal; the stderr ready lines above still convey the
+            // bound ports.
+        }
     }
 
     if nfds == 0 {

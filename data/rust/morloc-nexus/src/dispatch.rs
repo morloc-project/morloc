@@ -47,6 +47,7 @@ pub struct NexusConfig {
     pub unix_socket_path: Option<String>,
     pub tcp_port: Option<i32>,
     pub http_port: Option<i32>,
+    pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
 }
@@ -66,8 +67,26 @@ impl Default for NexusConfig {
             unix_socket_path: None,
             tcp_port: None,
             http_port: None,
+            port_file_path: None,
             fdb_path: None,
             eval_timeout: 30,
+        }
+    }
+}
+
+/// Parse a CLI port argument. Accepts 0..=65535 (0 = bind-ephemeral; the
+/// OS picks an unused port and the daemon reports it back via the stderr
+/// ready line and the optional --port-file). Anything else (negative,
+/// >65535, non-numeric) exits the process with a clear error message.
+fn parse_port_arg(flag: &str, raw: &str) -> i32 {
+    match raw.parse::<i64>() {
+        Ok(n) if (0..=65535).contains(&n) => n as i32,
+        _ => {
+            eprintln!(
+                "error: {} expects an integer in 0..=65535 (0 = ephemeral), got '{}'",
+                flag, raw
+            );
+            std::process::exit(2);
         }
     }
 }
@@ -191,14 +210,21 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
             "--port" => {
                 i += 1;
                 if i < args.len() {
-                    config.tcp_port = args[i].parse().ok();
+                    config.tcp_port = Some(parse_port_arg("--port", &args[i]));
                     i += 1;
                 }
             }
             "--http-port" => {
                 i += 1;
                 if i < args.len() {
-                    config.http_port = args[i].parse().ok();
+                    config.http_port = Some(parse_port_arg("--http-port", &args[i]));
+                    i += 1;
+                }
+            }
+            "--port-file" => {
+                i += 1;
+                if i < args.len() {
+                    config.port_file_path = Some(args[i].clone());
                     i += 1;
                 }
             }
@@ -222,10 +248,13 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
                     config.unix_socket_path = Some(val.to_string());
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--port=") {
-                    config.tcp_port = val.parse().ok();
+                    config.tcp_port = Some(parse_port_arg("--port", val));
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--http-port=") {
-                    config.http_port = val.parse().ok();
+                    config.http_port = Some(parse_port_arg("--http-port", val));
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--port-file=") {
+                    config.port_file_path = Some(val.to_string());
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--fdb=") {
                     config.fdb_path = Some(val.to_string());
@@ -293,12 +322,17 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 matched = true;
             }
             "--port" if i + 1 < args.len() => {
-                config.tcp_port = args[i + 1].parse().ok();
+                config.tcp_port = Some(parse_port_arg("--port", &args[i + 1]));
                 consumed = 2;
                 matched = true;
             }
             "--http-port" if i + 1 < args.len() => {
-                config.http_port = args[i + 1].parse().ok();
+                config.http_port = Some(parse_port_arg("--http-port", &args[i + 1]));
+                consumed = 2;
+                matched = true;
+            }
+            "--port-file" if i + 1 < args.len() => {
+                config.port_file_path = Some(args[i + 1].clone());
                 consumed = 2;
                 matched = true;
             }
@@ -324,10 +358,13 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                     config.unix_socket_path = Some(val.to_string());
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--port=") {
-                    config.tcp_port = val.parse().ok();
+                    config.tcp_port = Some(parse_port_arg("--port", val));
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--http-port=") {
-                    config.http_port = val.parse().ok();
+                    config.http_port = Some(parse_port_arg("--http-port", val));
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--port-file=") {
+                    config.port_file_path = Some(val.to_string());
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--fdb=") {
                     config.fdb_path = Some(val.to_string());

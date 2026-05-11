@@ -996,8 +996,13 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
 
     let ct = b"application/json\0";
 
-    // HTTP listener
-    if (*config).http_port > 0 {
+    let mut bound_unix_path: Option<String> = None;
+    let mut bound_http_port: Option<u16> = None;
+
+    // HTTP listener. Configured iff http_port >= 0; port 0 means bind
+    // ephemeral (OS picks the port).
+    if (*config).http_port >= 0 {
+        let requested = (*config).http_port as u16;
         let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
             eprintln!("router: failed to create http socket");
@@ -1014,25 +1019,24 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
         addr.sin_addr.s_addr = libc::INADDR_ANY;
-        addr.sin_port = ((*config).http_port as u16).to_be();
+        addr.sin_port = requested.to_be();
         if libc::bind(
             http_fd,
             &addr as *const libc::sockaddr_in as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!(
-                "router: failed to bind http port {}",
-                (*config).http_port
-            );
+            eprintln!("router: failed to bind http port {}", requested);
             libc::close(http_fd);
             return;
         }
+        let actual = crate::daemon_ffi::getsockname_port_pub(http_fd).unwrap_or(requested);
         libc::listen(http_fd, 16);
-        eprintln!("router: listening on http port {}", (*config).http_port);
+        eprintln!("morloc-router: listening on http://0.0.0.0:{}", actual);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         nfds += 1;
+        bound_http_port = Some(actual);
     }
 
     // Unix socket
@@ -1063,18 +1067,35 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             return;
         }
         libc::listen(sock_fd, 16);
-        eprintln!(
-            "router: listening on unix socket {}",
-            CStr::from_ptr((*config).unix_socket_path).to_string_lossy()
-        );
+        let unix_path = CStr::from_ptr((*config).unix_socket_path)
+            .to_string_lossy()
+            .into_owned();
+        eprintln!("morloc-router: listening on unix://{}", unix_path);
         fds[nfds].fd = sock_fd;
         fds[nfds].events = libc::POLLIN as i16;
         nfds += 1;
+        bound_unix_path = Some(unix_path);
     }
 
     if nfds == 0 {
         eprintln!("router: no listeners configured");
         return;
+    }
+
+    // Optional port-file output. The router has no TCP listener, so tcp
+    // is always null in the JSON.
+    if !(*config).port_file_path.is_null() {
+        let path = CStr::from_ptr((*config).port_file_path)
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = crate::daemon_ffi::write_port_file_atomic_pub(
+            &path,
+            bound_http_port,
+            None,
+            bound_unix_path.as_deref(),
+        ) {
+            eprintln!("router: failed to write port file {}: {}", path, e);
+        }
     }
 
     // Eagerly start all program daemons so /health reports ok immediately

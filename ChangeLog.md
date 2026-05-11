@@ -6,6 +6,7 @@
  * Fix bug in nested record patterns
  * Fix missing valuecheck in where blocks
  * Raise error is where block shadows an input parameter
+ * Support ephemeral daemon ports (port=0) and the --port-file option 
 
 Strings
  * accept NUL as \000 instead of emitting a raw NUL byte

@@ -572,6 +572,176 @@ if should_run "tcp"; then
 fi
 
 # ======================================================================
+# Test Group 5b: Port CLI validation
+#
+# `--port` / `--http-port` accept 0..=65535 (0 = bind ephemeral, OS picks
+# the port). Anything else -- negative, >65535, non-numeric -- must exit
+# non-zero with a clear stderr message. Pre-fix behaviour silently
+# swallowed parse errors and truncated out-of-range values via `as u16`.
+# ======================================================================
+
+if should_run "port-cli"; then
+    echo "${BOLD}[port-cli] Port argument validation${RESET}"
+
+    # Wrap nexus invocations so failures don't trip `set -e`.
+    run_nexus() {
+        ( cd "$ARITH_DIR" && ./nexus --daemon "$@" 2>"$ARITH_DIR/port-cli.err" )
+        local ec=$?
+        LAST_NEXUS_ERR=$(cat "$ARITH_DIR/port-cli.err" 2>/dev/null)
+        return $ec
+    }
+
+    # --http-port out of u16 range
+    run_nexus --http-port 99999 || true
+    assert_test "--http-port 99999 exits non-zero" "2" "$?"
+    assert_contains "--http-port 99999 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    # --http-port negative
+    run_nexus --http-port -1 || true
+    assert_test "--http-port -1 exits non-zero" "2" "$?"
+    assert_contains "--http-port -1 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    # --http-port non-numeric
+    run_nexus --http-port abc || true
+    assert_test "--http-port abc exits non-zero" "2" "$?"
+    assert_contains "--http-port abc stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    # --http-port=VAL long-equals form
+    run_nexus --http-port=99999 || true
+    assert_test "--http-port=99999 exits non-zero" "2" "$?"
+
+    # TCP --port same validation
+    run_nexus --port 99999 || true
+    assert_test "--port 99999 exits non-zero" "2" "$?"
+    assert_contains "--port 99999 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    run_nexus --port abc || true
+    assert_test "--port abc exits non-zero" "2" "$?"
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 5c: Ephemeral port binding (port 0)
+#
+# `--http-port 0` and `--port 0` ask the kernel to assign a free port.
+# The daemon reads it back via getsockname() and emits one stderr line
+# per listener in URL form (`morloc-daemon: listening on http://...`).
+# ======================================================================
+
+if should_run "port-ephemeral"; then
+    echo "${BOLD}[port-ephemeral] Bind ephemeral (port 0)${RESET}"
+
+    start_daemon "$ARITH_DIR" --http-port 0 --port 0
+
+    # Wait up to 5s for both ready lines to appear in stderr.
+    waited=0
+    while [ "$waited" -lt 50 ]; do
+        if grep -q "listening on http://" "$LAST_DAEMON_LOG" 2>/dev/null \
+           && grep -q "listening on tcp://"  "$LAST_DAEMON_LOG" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
+    tcp_line=$(grep "listening on tcp://"  "$LAST_DAEMON_LOG" | head -1 || true)
+
+    assert_contains "http ready line is URL form"  "http://0.0.0.0:"   "$http_line"
+    assert_contains "tcp  ready line is URL form"  "tcp://127.0.0.1:"  "$tcp_line"
+
+    # Extract the assigned ports.
+    HTTP_PORT=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+    TCP_PORT=$( echo "$tcp_line"  | sed -n 's#.*tcp://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
+
+    # Both should be in the ephemeral range (>1024) and not be 0.
+    assert_test "http port is non-zero" "1" "$([ -n "$HTTP_PORT" ] && [ "$HTTP_PORT" -gt 0 ] && echo 1 || echo 0)"
+    assert_test "tcp  port is non-zero" "1" "$([ -n "$TCP_PORT" ]  && [ "$TCP_PORT"  -gt 0 ] && echo 1 || echo 0)"
+
+    # The assigned ports should actually work.
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s "http://127.0.0.1:${HTTP_PORT}/health")
+    status=$(json_field "$result" "status")
+    assert_test "ephemeral http /health responds ok" "ok" "$status"
+
+    result=$(lp_request "127.0.0.1:${TCP_PORT}" '{"method":"call","command":"add","args":[2,3]}')
+    val=$(json_field "$result" "result")
+    assert_test "ephemeral tcp call add [2,3]=5" "5" "$val"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 5d: --port-file (atomic port discovery)
+#
+# After all listeners bind, the daemon writes
+#   {"http": N|null, "tcp": N|null, "unix": "PATH"|null}
+# to the --port-file path, atomically (tmp + rename). Fixed schema: every
+# key is always present (null when the listener isn't configured).
+# ======================================================================
+
+if should_run "port-file"; then
+    echo "${BOLD}[port-file] --port-file output${RESET}"
+
+    # Case A: only --http-port 0 -> http populated, tcp/unix null.
+    PORT_FILE="$ARITH_DIR/port-a.json"
+    rm -f "$PORT_FILE"
+    start_daemon "$ARITH_DIR" --http-port 0 --port-file "$PORT_FILE"
+
+    # Wait for file to appear (it's written after bind completes).
+    waited=0
+    while [ "$waited" -lt 50 ] && [ ! -f "$PORT_FILE" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    assert_test "port-file (http only) was written" "1" "$([ -f "$PORT_FILE" ] && echo 1 || echo 0)"
+
+    pf=$(cat "$PORT_FILE" 2>/dev/null)
+    http_val=$(json_field "$pf" "http")
+    tcp_val=$( json_field "$pf" "tcp")
+    unix_val=$(json_field "$pf" "unix")
+    assert_test "port-file http is numeric" "1" "$([ -n "$http_val" ] && [ "$http_val" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+    assert_test "port-file tcp  is null"    "" "$tcp_val"
+    assert_test "port-file unix is null"    "" "$unix_val"
+
+    # The advertised port should actually work.
+    wait_for_http "$http_val" 10
+    result=$(curl -s "http://127.0.0.1:${http_val}/health")
+    status=$(json_field "$result" "status")
+    assert_test "port-file http port serves /health" "ok" "$status"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # Case B: all three listeners -> all three keys populated.
+    SOCK_PATH="/tmp/morloc-test-port-file-$$.sock"
+    SOCKET_FILES+=("$SOCK_PATH")
+    PORT_FILE="$ARITH_DIR/port-b.json"
+    rm -f "$PORT_FILE"
+    start_daemon "$ARITH_DIR" \
+        --http-port 0 --port 0 --socket "$SOCK_PATH" --port-file "$PORT_FILE"
+
+    waited=0
+    while [ "$waited" -lt 50 ] && [ ! -f "$PORT_FILE" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    assert_test "port-file (all three) was written" "1" "$([ -f "$PORT_FILE" ] && echo 1 || echo 0)"
+
+    pf=$(cat "$PORT_FILE" 2>/dev/null)
+    http_val=$(json_field "$pf" "http")
+    tcp_val=$( json_field "$pf" "tcp")
+    unix_val=$(json_field "$pf" "unix")
+    assert_test "port-file http is numeric" "1" "$([ -n "$http_val" ] && [ "$http_val" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+    assert_test "port-file tcp  is numeric" "1" "$([ -n "$tcp_val" ]  && [ "$tcp_val"  -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+    assert_test "port-file unix is socket path" "$SOCK_PATH" "$unix_val"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 6: Multiple listeners simultaneously
 # ======================================================================
 

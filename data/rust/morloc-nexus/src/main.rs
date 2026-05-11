@@ -351,12 +351,17 @@ fn run_daemon(
         _keepalive.push(vec![lang_c, socket_c]);
     }
 
-    // Build C DaemonConfig (matches daemon_ffi::DaemonConfig layout)
+    // Build C DaemonConfig (matches daemon_ffi::DaemonConfig layout).
+    // Port sentinel: -1 = listener not configured; 0..=65535 = configured
+    // (0 means bind ephemeral). The pre-ephemeral code used 0 as "not
+    // configured", which conflicts with the standard "0 = OS picks port"
+    // idiom.
     #[repr(C)]
     struct CDaemonConfig {
         unix_socket_path: *const c_char,
         tcp_port: i32,
         http_port: i32,
+        port_file_path: *const c_char,
         pool_check_fn: *const c_void,   // Option<fn> as null
         pool_alive_fn: *const c_void,   // Option<fn> as null
         n_pools: usize,
@@ -365,12 +370,16 @@ fn run_daemon(
 
     let unix_socket_cstr = config.unix_socket_path.as_ref()
         .map(|p| CString::new(p.as_str()).unwrap());
+    let port_file_cstr = config.port_file_path.as_ref()
+        .map(|p| CString::new(p.as_str()).unwrap());
 
     let mut daemon_config = CDaemonConfig {
         unix_socket_path: unix_socket_cstr.as_ref()
             .map_or(ptr::null(), |c| c.as_ptr()),
-        tcp_port: config.tcp_port.unwrap_or(0),
-        http_port: config.http_port.unwrap_or(0),
+        tcp_port: config.tcp_port.unwrap_or(-1),
+        http_port: config.http_port.unwrap_or(-1),
+        port_file_path: port_file_cstr.as_ref()
+            .map_or(ptr::null(), |c| c.as_ptr()),
         pool_check_fn: process::pool_check_and_recover_ptr(),
         pool_alive_fn: process::pool_is_alive_ptr(),
         n_pools,
@@ -438,12 +447,14 @@ fn run_router(config: &dispatch::NexusConfig) {
         std::process::exit(1);
     }
 
-    // Build DaemonConfig for the router
+    // Build DaemonConfig for the router. Port sentinel: -1 = not
+    // configured; 0..=65535 = configured (0 means ephemeral).
     #[repr(C)]
     struct CDaemonConfig {
         unix_socket_path: *const c_char,
         tcp_port: i32,
         http_port: i32,
+        port_file_path: *const c_char,
         pool_check_fn: *const c_void,
         pool_alive_fn: *const c_void,
         n_pools: usize,
@@ -452,11 +463,15 @@ fn run_router(config: &dispatch::NexusConfig) {
 
     let unix_cstr = config.unix_socket_path.as_ref()
         .map(|p| CString::new(p.as_str()).unwrap());
+    let port_file_cstr = config.port_file_path.as_ref()
+        .map(|p| CString::new(p.as_str()).unwrap());
 
     let mut dc = CDaemonConfig {
         unix_socket_path: unix_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
-        tcp_port: config.tcp_port.unwrap_or(0),
-        http_port: config.http_port.unwrap_or(0),
+        tcp_port: config.tcp_port.unwrap_or(-1),
+        http_port: config.http_port.unwrap_or(-1),
+        port_file_path: port_file_cstr.as_ref()
+            .map_or(ptr::null(), |c| c.as_ptr()),
         pool_check_fn: ptr::null(),
         pool_alive_fn: ptr::null(),
         n_pools: 0,
