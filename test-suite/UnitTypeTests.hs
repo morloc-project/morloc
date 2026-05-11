@@ -2036,6 +2036,40 @@ unitValuecheckTests =
              b :: Bool
              c :: Real
       |]
+      , -- let blocks intentionally allow shadowing (non-recursive sequential
+        -- let): `let { x = 1 ; x = 2 } in x` is the layout-free spelling of
+        -- `let x = 1 in let x = 2 in x` and returns 2. Only where-clauses
+        -- (which are order-invariant) reject duplicates.
+        valuecheckPass
+          "nested let shadowing is legal"
+          [r|
+         module foo (a)
+           a = let x = 1 in let x = 2 in x
+      |]
+      , valuecheckPass
+          "multi-binding let with same name shadows (sequential)"
+          [r|
+         module foo (a)
+           a = let { x = 1 ; x = 2 } in x
+      |]
+      , -- where-clause shadows function parameter
+        expectError
+          "where-clause binding shadows parameter"
+          [r|
+         module foo (g)
+           g x = y where
+             x = 100
+             y = x + 1
+      |]
+      , -- duplicate names in a single where-clause
+        expectError
+          "duplicate where-clause binding"
+          [r|
+         module foo (g)
+           g n = y where
+             y = n + 1
+             y = n + 2
+      |]
       ]
 
 {- | Tests for infix operator functionality

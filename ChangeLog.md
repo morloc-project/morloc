@@ -4,6 +4,8 @@
  * Add support for all intrinsics to pure morloc code
  * Stricter rule for conflicting instances (same lang, diff source)
  * Fix bug in nested record patterns
+ * Fix missing valuecheck in where blocks
+ * Raise error is where block shadows an input parameter
 
 Strings
  * accept NUL as \000 instead of emitting a raw NUL byte

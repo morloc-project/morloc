@@ -12,6 +12,18 @@ When a term has multiple implementations (e.g. a declaration and a source,
 or multiple sources), this module checks that they are not provably
 contradictory. For instance, two constant expressions that return different
 literal values for the same type are flagged as errors.
+
+Note: pure scope/binding-sanity checks (the same name appearing twice in
+the same syntactic scope) live earlier in the pipeline because the
+relevant syntactic shape is gone by the time the value-checker runs:
+
+  * duplicate fields in a record literal/type   -> Parser.y  checkRecordKeys
+  * duplicate where-bindings, where vs. param   -> Desugar.hs checkWhereScope
+
+Let-blocks are intentionally NOT checked here: morloc's let is non-recursive
+sequential, so `let { x = 1 ; x = 2 } in x` is the layout-free spelling of
+`let x = 1 in let x = 2 in x` and shadows to 2. Where-clauses are
+order-invariant, so duplicates there are real ambiguity errors.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair) where
 

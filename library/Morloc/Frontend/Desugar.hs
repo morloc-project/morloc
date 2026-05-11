@@ -1058,6 +1058,7 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
+  checkWhereScope params whereDecls
   captureDeclDocs (startPos sp) name
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
@@ -1068,6 +1069,7 @@ desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
 desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
+  checkWhereScope params whereDecls
   captureDeclDocs (startPos sp) name
   body' <- desugarGuards sp guards defaultExpr
   whereDecls' <- concatMapM desugarTopLevel whereDecls
@@ -1111,6 +1113,30 @@ desugarTopLevel (Loc _ (CInlineE inner)) = do
 desugarTopLevel node = do
   e <- desugarExpr node
   return [e]
+
+-- Reject where-clause bindings that shadow a function parameter or
+-- duplicate a sibling where-binding. Only inspects value bindings
+-- (CAssE/CGuardedAssE); type signatures (CSigE) may legally repeat the
+-- term name. Underscore (_) bindings are skipped.
+checkWhereScope :: [Text] -> [Loc CstExpr] -> D ()
+checkWhereScope params decls = go (Set.fromList params) Set.empty decls
+  where
+    go :: Set.Set Text -> Set.Set Text -> [Loc CstExpr] -> D ()
+    go _ _ [] = return ()
+    go ps seen (d : rest) = case bindingName d of
+      Nothing -> go ps seen rest
+      Just (n, _) | n == "_" -> go ps seen rest
+      Just (n, pos)
+        | Set.member n ps ->
+            dfail pos ("where-clause binding shadows function parameter: " ++ T.unpack n)
+        | Set.member n seen ->
+            dfail pos ("duplicate binding in where-clause: " ++ T.unpack n)
+        | otherwise -> go ps (Set.insert n seen) rest
+
+    bindingName :: Loc CstExpr -> Maybe (Text, Pos)
+    bindingName d@(Loc _ (CAssE (EV n) _ _ _)) = Just (n, startPos d)
+    bindingName d@(Loc _ (CGuardedAssE (EV n) _ _ _ _)) = Just (n, startPos d)
+    bindingName _ = Nothing
 
 --------------------------------------------------------------------
 -- Guard desugaring
