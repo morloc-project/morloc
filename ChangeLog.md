@@ -1,3 +1,8 @@
+0.85.0 [2026-05-xx]
+-------------------
+
+ * Add support for all intrinsics to pure morloc code
+
 0.84.0 [2026-05-10]
 -------------------
 

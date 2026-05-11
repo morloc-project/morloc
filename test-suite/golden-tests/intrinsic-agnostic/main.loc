@@ -1,12 +1,20 @@
 module main (test)
 
 -- Test intrinsics in a language-independent (nexus-only) context.
--- No language-specific root imports — all evaluation happens in the nexus.
+-- No language-specific root imports -- all evaluation happens in the nexus.
+--
+-- @hash    : runtime, dispatched via HashX in the nexus
+-- @lang    : compile-time constant "morloc" in pure morloc
+-- @typeof  : compile-time constant from the argument's general type
+-- @schema  : compile-time constant, hint-free msgpack schema of the arg type
 
 test = do
   let y = ( @hash "hello"
           , @hash 42
           , @hash (1, 2, 3)
+          , @lang
+          , @typeof "hello"
+          , @schema "hello"
           )
   @savej y "obs-saved.txt"
   y

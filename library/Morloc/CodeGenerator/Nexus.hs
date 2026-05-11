@@ -37,6 +37,7 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
 import qualified System.Directory as Dir
+import System.FilePath ((</>))
 
 -- ======================================================================
 -- Data types
@@ -385,6 +386,26 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       SaveX "json" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
       LoadX <$> type2schema t <*> toNexusExpr path
+    -- @lang in a language-independent context is always "morloc"; the
+    -- nexus has no pool dispatch here.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLang _)) =
+      StrX <$> type2schema t <*> pure "morloc"
+    -- @schema arg: emit the hint-free msgpack schema of the argument's
+    -- general type. type2schema already produces the same string the
+    -- @save* / @load paths use, so the value is well-defined here.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSchema [AnnoS (Idx _ argT) _ _])) = do
+      s <- type2schema argT
+      StrX <$> type2schema t <*> pure s
+    -- @typeof arg: emit the user-facing general type name from the
+    -- argument's type annotation, matching what the user wrote.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTypeof [AnnoS (Idx _ argT) _ _])) =
+      StrX <$> type2schema t <*> pure (render (pretty argT))
+    -- @datafile path: resolve a literal path string against the install
+    -- directory. Mirrors Reduce.hs:68-78 for the pool side; a non-literal
+    -- path arg yields the same fallback sentinel as the pool path.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrDatafile [pathExpr])) = do
+      resolved <- resolveDatafilePath pathExpr
+      StrX <$> type2schema t <*> pure resolved
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -443,8 +464,23 @@ resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versio
 resolveCompileTimeIntrinsic IntrCompiled = do
   now <- liftIO Data.Time.Clock.getCurrentTime
   return . MT.pack $ Data.Time.Format.formatTime Data.Time.Format.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
+-- Any intrinsic reaching this point lacks a dedicated nexus case above.
+-- That is a compiler bug, not a user error: every Intrinsic constructor
+-- should be resolved either inline in toNexusExpr or here.
 resolveCompileTimeIntrinsic intr =
-  MM.throwSystemError $ "@" <> pretty (intrinsicName intr) <> " cannot be used in a language-independent context"
+  MM.throwSystemError $ "Compiler bug: @" <> pretty (intrinsicName intr) <> " has no nexus-side handler"
+
+-- Resolve a @datafile path expression in the nexus. Mirrors
+-- Reduce.hs::reduceNativeExpr IntrDatafile: a literal Str argument is
+-- joined with stateInstallDir; anything else gets the same sentinel
+-- string the pool side emits.
+resolveDatafilePath :: AnnoS (Indexed Type) One () -> MorlocMonad Text
+resolveDatafilePath (AnnoS _ _ (StrS rel)) = do
+  mInstallDir <- MM.gets stateInstallDir
+  return $ case mInstallDir of
+    Just dir -> MT.pack (dir </> MT.unpack rel)
+    Nothing -> rel
+resolveDatafilePath _ = return "<datafile: could not resolve path>"
 
 -- ======================================================================
 -- CLI argument serialization
