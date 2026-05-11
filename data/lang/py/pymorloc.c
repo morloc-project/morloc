@@ -323,7 +323,6 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     for (size_t i = 0; i < array->size; i++) {
                         PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
-                            Py_XDECREF(item);
                             PyRAISE("Failed to access element in list")
                         }
                     }
@@ -357,11 +356,8 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
                         PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
-                        if (!item) {
-                            Py_XDECREF(item);
-                            PyRAISE("Failed to access element in list")
-                        } else if (PyList_SetItem(obj, i, item) < 0) {
-                            PyRAISE("Failed to access element in list")
+                        if (!item || PyList_SetItem(obj, i, item) < 0) {
+                            PyRAISE("Failed to access element in list");
                         }
                     }
                 }
@@ -379,7 +375,6 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                 void* item_ptr = (char*)data + schema->offsets[i];
                 PyObject* item = fromAnything(schema->parameters[i], item_ptr, base_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
-                    Py_XDECREF(item);
                     PyRAISE("Failed to access tuple element");
                 }
             }
