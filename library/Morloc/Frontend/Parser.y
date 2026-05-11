@@ -442,11 +442,11 @@ instance_item :: { [Loc CstExpr] }
 
 fixity_decl :: { Loc CstExpr }
   : 'infixl' INTEGER operator_names
-      { at $1 (CFixE InfixL (fromInteger (getInt $2)) $3) }
+      {% checkFixityPrecedence $2 >> return (at $1 (CFixE InfixL (fromInteger (getInt $2)) $3)) }
   | 'infixr' INTEGER operator_names
-      { at $1 (CFixE InfixR (fromInteger (getInt $2)) $3) }
+      {% checkFixityPrecedence $2 >> return (at $1 (CFixE InfixR (fromInteger (getInt $2)) $3)) }
   | 'infix' INTEGER operator_names
-      { at $1 (CFixE InfixN (fromInteger (getInt $2)) $3) }
+      {% checkFixityPrecedence $2 >> return (at $1 (CFixE InfixN (fromInteger (getInt $2)) $3)) }
 
 operator_names :: { [EVar] }
   : operator_ref                         { [$1] }
@@ -1000,6 +1000,17 @@ parseError ([], expected) = do
 parseError (Located pos tok _ : _, expected) = do
   srcLines <- State.gets psSourceLines
   State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines))
+
+-- Reject infix precedence outside [0,9]. Caret on the INTEGER token.
+checkFixityPrecedence :: Located -> P ()
+checkFixityPrecedence tok =
+  let n = getInt tok
+   in if n < 0 || n > 9
+        then do
+          srcLines <- State.gets psSourceLines
+          State.lift (Left (ParseError (locPos tok)
+            ("infix precedence must be in [0,9], got " ++ show n) [] srcLines))
+        else return ()
 
 -- Reject duplicate field names in a record literal. Caret on the second
 -- occurrence's value position.

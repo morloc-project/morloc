@@ -2566,6 +2566,47 @@ infixOperatorTests =
           xs
         |]
           (lst int)
+      , -- C7: infix precedence must be in [0,9]
+        exprTestBad
+          "infixl negative precedence is rejected"
+          [r|
+          module main (z)
+          infixl -1 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infixr negative precedence is rejected"
+          [r|
+          module main (z)
+          infixr -3 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infix (non-associative) negative precedence is rejected"
+          [r|
+          module main (z)
+          infix -1 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infix precedence above 9 is rejected"
+          [r|
+          module main (z)
+          infixl 10 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infix precedence far above 9 is rejected"
+          [r|
+          module main (z)
+          infixl 100 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
       ]
 
 {- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
