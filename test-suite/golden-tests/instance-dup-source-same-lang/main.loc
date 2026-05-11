@@ -1,0 +1,11 @@
+module main (testFoo)
+
+import root-py
+
+source Py from "a.py" ("foo")
+source Py from "b.py" ("foo")
+
+foo :: Int -> Int
+
+testFoo :: Int
+testFoo = foo 1

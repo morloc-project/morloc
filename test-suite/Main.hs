@@ -341,6 +341,7 @@ main = do
       , golden "module-form-n00" "module-form-n00"
       , golden "module-form-n01" "module-form-n01"
       , golden "module-form-n10" "module-form-n10"
+      , golden "instance-dup-source-same-lang" "instance-dup-source-same-lang"
       , -- tests of serialization
         -- , golden "c  S" "serial-form-1-c"
         -- , golden "py S" "serial-form-1-py"

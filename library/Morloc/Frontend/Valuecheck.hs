@@ -295,14 +295,26 @@ checkPair i e1@(LitP _ x) e2@(LitP _ y)
 -- It should not be possible to reach this case, should it?
 checkPair i e1 e2 = valueError i e1 e2 "Non-equivalent forms"
 
--- Currently we do not check the equivalence of sourced terms
+-- Compare two sourced declarations bound to the same morloc name at the
+-- same specialized type.
 --
--- This is the function to implement when we decided to start
--- checking source code
---
--- This operation may be expensive (if we are doing it right)
+-- We cannot inspect the foreign code to prove behavioural equivalence, but
+-- we can refuse the unambiguous bug: two source declarations of the same
+-- target language disagreeing on srcName/srcPath give the realizer no rule
+-- to choose between them, so the result would silently depend on
+-- declaration order. Different source languages are legitimate alternatives
+-- (e.g. mempty from root-py and root-cpp) - the language-cost optimizer
+-- picks per call site - so they pass through here unchanged.
 compareForeignFunctions :: Int -> Type -> Source -> Source -> MorlocMonad ()
-compareForeignFunctions _ _ _ _ = return ()
+compareForeignFunctions i _ src1 src2
+  | src1 == src2 = return ()
+  | srcLang src1 /= srcLang src2 = return ()
+  | otherwise =
+      MM.throwSourcedError i $
+        "Ambiguous source declarations for"
+          <+> squotes (pretty (srcAlias src1))
+          <> ":" <> line <> indent 2 (pretty src1)
+          <> line <> indent 2 (pretty src2)
 
 valueError :: Int -> E -> E -> MDoc -> MorlocMonad ()
 valueError i e1 e2 msg = MM.throwUnificationError (indexOfE e1) (indexOfE e2) i ("Error in value checker:" <+> msg)

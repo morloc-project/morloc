@@ -2,6 +2,7 @@
 -------------------
 
  * Add support for all intrinsics to pure morloc code
+ * Stricter rule for conflicting instances (same lang, diff source)
 
 0.84.0 [2026-05-10]
 -------------------

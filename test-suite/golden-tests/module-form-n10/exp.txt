@@ -1,1 +1,1 @@
--2
+Ambiguous source declarations for 'foo':
