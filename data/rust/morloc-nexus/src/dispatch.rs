@@ -72,6 +72,24 @@ impl Default for NexusConfig {
     }
 }
 
+/// Collapse runs of adjacent identical lines in an error message.
+///
+/// When an error bubbles up through deep recursion across pool boundaries,
+/// each layer may prepend the same wrapper string to the inner cause. The
+/// result is N copies of the same line burying the root cause. This pass
+/// keeps the first occurrence of each adjacent duplicate and drops the rest.
+/// Non-adjacent duplicates are preserved (they may be legitimate repeats).
+fn collapse_duplicate_lines(msg: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for line in msg.split_inclusive('\n') {
+        if out.last().map_or(false, |prev| *prev == line) {
+            continue;
+        }
+        out.push(line);
+    }
+    out.concat()
+}
+
 /// Emit a uniform error when pool communication fails, then exit.
 ///
 /// The pool's stderr was inherited by the nexus, so any traceback the pool
@@ -866,7 +884,7 @@ fn run_remote_command(
     // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
-            eprintln!("Error: run failed\n{}", err_msg);
+            eprintln!("Error: run failed\n{}", collapse_duplicate_lines(&err_msg));
             process::clean_exit(1);
         }
         Ok(None) => {}
@@ -1487,4 +1505,35 @@ fn short_to_long(cmd: &Command, ch: char) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_drops_adjacent_duplicates() {
+        assert_eq!(collapse_duplicate_lines("A\nA\nB\nA\n"), "A\nB\nA\n");
+    }
+
+    #[test]
+    fn collapse_preserves_non_adjacent() {
+        assert_eq!(collapse_duplicate_lines("A\nB\nA\n"), "A\nB\nA\n");
+    }
+
+    #[test]
+    fn collapse_collapses_long_run() {
+        let input = "boom\n".repeat(20);
+        assert_eq!(collapse_duplicate_lines(&input), "boom\n");
+    }
+
+    #[test]
+    fn collapse_handles_no_trailing_newline() {
+        assert_eq!(collapse_duplicate_lines("A\nA"), "A\nA");
+    }
+
+    #[test]
+    fn collapse_handles_empty() {
+        assert_eq!(collapse_duplicate_lines(""), "");
+    }
 }

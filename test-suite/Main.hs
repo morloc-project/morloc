@@ -598,6 +598,18 @@ main = do
         --   reports it as unsolved with a copy-pasteable form
         --   naming the offending function.
         golden "constraint-missing-error" "constraint-missing-error"
+      , -- Error-quality regressions: locked-in diagnostics for the
+        --   seven bug reports C5/C10/C14/C20/C24/C26/D4. Each test
+        --   pinpoints the specific user-visible improvement (clear
+        --   diagnostic text, correct caret line, no OOM, etc.) so a
+        --   future refactor cannot silently regress the wording or
+        --   the failure point.
+        golden "self-import" "self-import"
+      , golden "caret-position-typeerror" "caret-position-typeerror"
+      , golden "tuple-getter-out-of-bounds" "tuple-getter-out-of-bounds"
+      , golden "getter-on-list-rejected" "getter-on-list-rejected"
+      , golden "source-missing-file" "source-missing-file"
+      , golden "valuecheck-literal-mismatch" "valuecheck-literal-mismatch"
       , -- Stage 9.5 singleton-Str lifting. An f:Str signature label
         --   introduces `f` as a Str-kinded type-level variable. At the
         --   call site a Str literal gets lifted into the type, driving

@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 Module      : Morloc.Frontend.API
 Description : Entry point for the frontend pipeline (parse, typecheck, valuecheck)
@@ -99,6 +101,8 @@ parse f (Code code) = do
           ws -> MM.tell ws
         return d
       ((mainModule, importedModule) : _) -> do
+        when (mainModule == importedModule) . MM.throwSystemError $
+          "Module" <+> pretty importedModule <+> "imports itself"
         importPath <- case Map.lookup mainModule m of
           (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
           Nothing -> Mod.findModule (Nothing, mainModule) importedModule

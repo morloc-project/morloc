@@ -295,6 +295,13 @@ debugLog d = do
 
 translateSource :: LangDescriptor -> Path -> MorlocMonad MDoc
 translateSource desc p = do
+  -- Reject early if the file is missing. The path is what the user
+  -- wrote in `from "..."`; it must exist somewhere the build can see.
+  -- Without this, a missing source surfaces as a confusing runtime
+  -- ImportError / module-not-found inside the pool.
+  exists <- liftIO $ Dir.doesFileExist p
+  unless exists . MM.throwSystemError $
+    "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
       p'' = if ldIncludeRelToFile desc then "../" <> p' else p'
   if ldQualifiedImports desc

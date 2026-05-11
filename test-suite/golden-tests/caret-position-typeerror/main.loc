@@ -1,0 +1,10 @@
+module foo (val)
+
+type Py => Str = "str"
+
+source Py from "imp.py" ("readFile")
+
+readFile :: Str -> <IO> Str
+
+val :: Str
+val = readFile "hi"

@@ -1,0 +1,4 @@
+module main (badGetter)
+
+badGetter :: Int
+badGetter = .0 [1, 2, 3]

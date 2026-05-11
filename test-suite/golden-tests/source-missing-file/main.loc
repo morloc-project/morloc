@@ -1,0 +1,7 @@
+module main (foo)
+
+type Py => Int = "int"
+
+source Py from "no-such-file.py" ("foo")
+
+foo :: Int -> Int

@@ -285,8 +285,8 @@ checkPair i e1@(LitP _ x) e2@(LitP _ y)
   | x == y = return ()
   | otherwise =
       valueError i e1 e2 $
-        "Cannot equate non-equal primitives:\n"
-          <> "a:" <+> pretty x
+        "Cannot equate non-equal primitives (the two operands disagree):" <> line
+          <> "a:" <+> pretty x <> line
           <> "b:" <+> pretty y
 -- All other cases should fail.
 --

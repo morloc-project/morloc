@@ -962,6 +962,13 @@ subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
   | pc1 == Open && length ps1 < length ps2 = do
       let (ps1', _) = extendList ps1 ps2
       subtype scope (ExistU v1 (ps1', pc1) rs) t2 g1
+  -- existential built by selectorType (`_pattern_*`) has one slot per
+  -- selector index, so this mismatch means an index getter overran the
+  -- tuple it was applied to.
+  | length ps1 > length ps2
+  , MT.isPrefixOf "_pattern_" (unTVar v1) =
+      subtypeError t1 t2 $ "tuple arity" <+> pretty (length ps2)
+        <+> "required, index" <+> pretty (length ps1 - 1) <+> "given"
   | length ps1 > length ps2 =
       subtypeError t1 t2 "InstantiateL - too many parameters in left existential"
   -- otherwise, do the thing

@@ -375,6 +375,22 @@ compatibleTypeU = go Set.empty Set.empty
 throwTypeError :: Int -> MDoc -> MorlocMonad a
 throwTypeError i msg = MM.throwSourcedError i ("General type error:" <+> msg)
 
+-- A selector pattern (e.g. .0, .field) targets tuples and records only.
+-- The selectorType existential unifies with List<a> by accident (both are
+-- single-parameter AppU), but at runtime the pool reads garbage. Reject
+-- the application here with a clear message and a hint.
+rejectListSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
+rejectListSelectorTarget i s t = do
+  scope <- MM.getGeneralScope i
+  let t' = either (const t) id (TE.evaluateType scope t)
+  case t' of
+    AppU (VarU (TV "List")) _ ->
+      MM.throwSourcedError i $
+        "Index getter" <+> pretty s
+          <+> "requires a tuple or record, got a list."
+          <+> "Use 'head' or '!!' for list access."
+    _ -> return ()
+
 checkG ::
   Gamma ->
   AnnoS Int ManyPoly Int ->
@@ -386,11 +402,14 @@ checkG ::
     )
 checkG g (AnnoS i j e) t = do
   annotation <- MM.gets stateAnnotations
+  -- Use the body's concrete index (j) for error caret positions: i is
+  -- often the variable-reference / export-list site and would mis-locate
+  -- body errors.
   (g', t', e') <- case Map.lookup j annotation of
-    Nothing -> checkE' i g e t
+    Nothing -> checkE' j g e t
     (Just annType) -> do
-      gAnn <- subtype' i annType t g
-      checkE' i gAnn e t
+      gAnn <- subtype' j annType t g
+      checkE' j gAnn e t
   let annotatedBody = AnnoS (Idx i t') j e'
   -- When the user declared a signature at this site, verify that the
   -- body's evaluation-time effects are a subset of those the signature
@@ -398,7 +417,7 @@ checkG g (AnnoS i j e) t = do
   -- positions without an annotation flow through ordinary structural
   -- subtyping, which already rejects narrowing on EffectU types.
   case Map.lookup j annotation of
-    Just annType -> checkEffectCoverage i (apply g' annType) annotatedBody
+    Just annType -> checkEffectCoverage j (apply g' annType) annotatedBody
     Nothing -> return ()
   return (g', t', annotatedBody)
 
@@ -412,15 +431,18 @@ synthG ::
     )
 synthG g (AnnoS gi ci e) = do
   annotation <- MM.gets stateAnnotations
+  -- Use the body's concrete index (ci) for error caret positions: gi
+  -- is often the variable-reference / export-list site (e.g. the term
+  -- name in `module Foo (val)`) and would mis-locate body errors.
   (g', t, e') <- case Map.lookup ci annotation of
-    Nothing -> synthE' gi g e
-    (Just annType) -> checkE' gi g e annType
+    Nothing -> synthE' ci g e
+    (Just annType) -> checkE' ci g e annType
   let annotatedBody = AnnoS (Idx gi t) ci e'
   -- Mirror the body-effect check from 'checkG'.  When a signature is
   -- attached at this synthesis site, verify the body's evaluation
   -- effects against it.
   case Map.lookup ci annotation of
-    Just annType -> checkEffectCoverage gi (apply g' annType) annotatedBody
+    Just annType -> checkEffectCoverage ci (apply g' annType) annotatedBody
     Nothing -> return ()
   return (g', t, annotatedBody)
 
@@ -497,6 +519,11 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
   -- use selector-derived type to update context and data expression
   (g2, _, e') <- checkG g1 e0 datType
 
+  -- Reject getter/selector pattern applied to a list. The selector
+  -- existential unifies with List<a> as a single-slot tuple, producing
+  -- garbage at runtime. Tuple/record getters only.
+  rejectListSelectorTarget fgidx s (apply g2 datType)
+
   let f1 = (AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s))))
 
   return (g2, apply g2 retType, AppS f1 [e'])
@@ -510,6 +537,8 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
   (g2, outputType) <- selectorType g1 s |>> second (selectorSetter setTypes s)
 
   (g3, datType, e1) <- checkG g2 e0 outputType
+
+  rejectListSelectorTarget fgidx s (apply g3 datType)
 
   let patternType = apply g3 $ FunU (datType : setTypes) outputType
       f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))

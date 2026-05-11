@@ -785,6 +785,9 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
       libFlags <- lookupLib base
       absDir <- liftIO $ MS.canonicalizePath dir
       absPath <- liftIO $ MS.canonicalizePath p
+      exists <- liftIO $ MS.doesFileExist absPath
+      unless exists . MM.throwSystemError $
+        "Source file not found:" <+> pretty absPath
       return (src {srcPath = Just absPath}, libFlags, Just absDir)
   where
     lookupHeader :: String -> MorlocMonad Path
