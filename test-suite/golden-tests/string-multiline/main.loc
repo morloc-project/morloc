@@ -1,4 +1,4 @@
-module main (s1, s2, s3, s4, s5, s6, s7, s8)
+module main (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10)
 
 s1 =
   """
@@ -27,3 +27,10 @@ s7 = '''bar - 'foo''''
 
 -- seven single quotes: ''' + ' + ''' -> content is '
 s8 = '''''''
+
+-- single-line triple-quoted is identical to single-quoted: no reindent,
+-- no blank-line stripping, leading/trailing whitespace preserved
+s9 = """   hello   """
+
+-- mixed-quote variant of s9
+s10 = '''   hello   '''

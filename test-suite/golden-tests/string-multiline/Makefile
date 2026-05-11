@@ -9,6 +9,8 @@ all:
 	./nexus s6 2>> obs.err  >> obs.txt
 	./nexus s7 2>> obs.err  >> obs.txt
 	./nexus s8 2>> obs.err  >> obs.txt
+	./nexus s9 2>> obs.err  >> obs.txt
+	./nexus s10 2>> obs.err >> obs.txt
 
 clean:
 	rm -rf nexus pools

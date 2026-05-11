@@ -65,6 +65,11 @@ escapeStringLit = DT.concatMap escapeChar
     escapeChar '\n' = "\\n"
     escapeChar '\t' = "\\t"
     escapeChar '\r' = "\\r"
+    -- A literal NUL byte in generated source files would either be a
+    -- syntax error or terminate the string early at the backend level.
+    -- Use the 3-digit octal form so adjacent digit characters do not
+    -- extend the escape (C, C++, and Python all cap octal escapes at 3).
+    escapeChar '\0' = "\\000"
     escapeChar c = DT.singleton c
 
 -- | Replace occurrences of a quote terminator with its escaped form.

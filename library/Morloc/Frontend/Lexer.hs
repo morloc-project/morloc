@@ -589,21 +589,32 @@ lexMultilineString start delim input st = go (advanceCol start 3) input []
     go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
     go pos [] _ = Left (LexError pos "unterminated multiline string literal")
 
--- | Lex interpolation body inside a multiline string
+-- | Lex interpolation body inside a multiline string. Mirrors
+-- 'lexInterpBody': tracks brace depth so nested @{...}@ inside the splice
+-- does not close it prematurely, and threads the original string start
+-- position and delimiter through every recursive call so
+-- 'lexMultilineAfterInterp' can still find the matching @"""@ / @'''@.
 lexMultilineInterpBody ::
   Pos -> String -> Int -> LexState -> Pos -> String -> Either LexError LexState
 lexMultilineInterpBody pos ('}' : rest) 1 st strStartPos delim =
   -- end of interpolation, resume multiline string
   let st' = st {lsTokens = Located pos TokInterpClose "}" : lsTokens st}
    in lexMultilineAfterInterp (advanceCol pos 1) rest st' strStartPos delim
-lexMultilineInterpBody pos input _ st _ _ = do
+lexMultilineInterpBody pos ('}' : rest) depth st strStartPos delim =
+  lexMultilineInterpBody (advanceCol pos 1) rest (depth - 1) st strStartPos delim
+lexMultilineInterpBody pos ('{' : rest) depth st strStartPos delim =
+  lexMultilineInterpBody (advanceCol pos 1) rest (depth + 1) st strStartPos delim
+lexMultilineInterpBody pos input depth st strStartPos delim = do
   st' <- lexOne st {lsInput = input, lsPos = pos}
   case lsInput st' of
     [] -> Left (LexError pos "unterminated string interpolation")
-    ('}' : rest) ->
-      let st'' = st' {lsTokens = Located (lsPos st') TokInterpClose "}" : lsTokens st'}
-       in lexMultilineAfterInterp (advanceCol (lsPos st') 1) rest st'' pos ""
-    _ -> lexMultilineInterpBody (lsPos st') (lsInput st') 1 st' pos ""
+    _ -> case lsTokens st' of
+      (Located _ TokEOF _ : _) -> Left (LexError pos "unterminated string interpolation")
+      _ ->
+        let consumed = length input - length (lsInput st')
+            braceChange =
+              foldl (\n c -> case c of '{' -> n + 1; '}' -> n - 1; _ -> n) 0 (take consumed input)
+         in lexMultilineInterpBody (lsPos st') (lsInput st') (depth + braceChange) st' strStartPos delim
 
 -- | Resume multiline string after interpolation
 lexMultilineAfterInterp :: Pos -> String -> LexState -> Pos -> String -> Either LexError LexState
@@ -885,9 +896,15 @@ lexExponent rest = ("", rest)
 lines and remove common indentation.
 -}
 processMultilineString :: Text -> Text
-processMultilineString txt =
-  let stripped = removeTrailingSpace (removeLeadingSpace txt)
-   in reindent stripped
+processMultilineString txt
+  -- Single-line triple-quoted strings must behave identically to single-
+  -- quoted strings (apart from allowing inner quotes), so skip the
+  -- blank-line and reindent rules unless the raw text actually spans
+  -- multiple lines.
+  | not (T.any (== '\n') txt) = txt
+  | otherwise =
+      let stripped = removeTrailingSpace (removeLeadingSpace txt)
+       in reindent stripped
   where
     removeLeadingSpace :: Text -> Text
     removeLeadingSpace s = case T.lines s of

@@ -4,6 +4,11 @@
  * Add support for all intrinsics to pure morloc code
  * Stricter rule for conflicting instances (same lang, diff source)
 
+Strings
+ * accept NUL as \000 instead of emitting a raw NUL byte
+ * do not trim space in triple-quoted strings
+ * fixed multi-line strings in recursive cases
+
 0.84.0 [2026-05-10]
 -------------------
 

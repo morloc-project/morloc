@@ -1,4 +1,4 @@
-module main (sr, spy, scpp, escR, escPy, escCpp)
+module main (sr, spy, scpp, escR, escPy, escCpp, trpR, trpPy, trpCpp)
 
 import root
 import root-r
@@ -23,3 +23,15 @@ escPy x = "a\t\"\"\"#{idpy x}\nb"
 
 escCpp :: Str -> Str
 escCpp x = "a\t\"#{idcpp x}\nb"
+
+-- triple-quoted strings must support #{...} interpolation just like
+-- single-quoted ones (regression for C17). The result must match the
+-- corresponding sr/spy/scpp output exactly.
+trpR :: Str -> Str -> Str
+trpR x y = """x=#{idr x};y=#{idr y};"""
+
+trpPy :: Str -> Str -> Str
+trpPy x y = """x=#{idpy x};y=#{idpy y};"""
+
+trpCpp :: Str -> Str -> Str
+trpCpp x y = """x=#{idcpp x};y=#{idcpp y};"""
