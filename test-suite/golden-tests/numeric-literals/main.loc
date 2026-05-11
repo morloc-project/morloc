@@ -2,7 +2,7 @@ module main (test)
 
 test = (testInts, testBigInts, testHugeInts, testFloats)
 
-testInts = [-42, 42, 0x2a, 0X2a, 0o755, 0O755, 0b0001, 0B0001]
+testInts = [-42, 42, 0x2a, 0X2a, 0o755, 0O755, 0b0001, 0B0001, -0x2a, -0X2a, -0o755, -0O755, -0b0001, -0B0001]
 
 testBigInts = [0xDEADBEEF, 4294967295, 9223372036854775807, -9223372036854775808]
 
