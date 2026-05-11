@@ -411,8 +411,8 @@ if should_run "http"; then
     status=$(json_field "$result" "status")
     assert_test "POST /call/nonexistent returns error" "error" "$status"
 
-    # CORS preflight (Stage 3 changes this to 204)
-    assert_http_status "OPTIONS returns 200" "200" "http://127.0.0.1:${HTTP_PORT}/call/add" \
+    # CORS preflight: 204 No Content with CORS headers, no dispatch.
+    assert_http_status "OPTIONS returns 204" "204" "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -X OPTIONS
 
     stop_daemon "$LAST_DAEMON_PID"
@@ -466,6 +466,104 @@ if should_run "http-status"; then
     assert_test "404 body still has status:error" "error" "$status"
 
     stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1c: OPTIONS preflight short-circuit
+#
+# CORS preflight requests must get 204 No Content with the standard
+# Access-Control-Allow-* headers, and must NOT invoke the Health
+# pipeline (which would also hit the pool-crash recovery gate).
+# ======================================================================
+
+if should_run "http-options"; then
+    echo "${BOLD}[http-options] CORS preflight short-circuit${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    headers=$(curl -s -i -o /dev/null -D - -X OPTIONS \
+        "http://127.0.0.1:${HTTP_PORT}/call/add")
+
+    assert_contains "OPTIONS status line is 204"             "204" "$headers"
+    assert_contains "OPTIONS sets Access-Control-Allow-Origin"  "Access-Control-Allow-Origin: *" "$headers"
+    assert_contains "OPTIONS sets Access-Control-Allow-Methods" "Access-Control-Allow-Methods"   "$headers"
+    assert_contains "OPTIONS sets Access-Control-Allow-Headers" "Access-Control-Allow-Headers"   "$headers"
+
+    # Body is empty for 204.
+    body=$(curl -s -o - -X OPTIONS "http://127.0.0.1:${HTTP_PORT}/call/add")
+    assert_test "OPTIONS body is empty" "" "$body"
+
+    # OPTIONS to nonsense paths also returns 204; preflight is a
+    # browser concern, not a routing decision.
+    assert_http_status "OPTIONS /nope returns 204" "204" \
+        "http://127.0.0.1:${HTTP_PORT}/nope" -X OPTIONS
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1d: Recovery gate -> 503 + Retry-After
+#
+# When a pool process dies, the daemon kills all pools, drops SHM, and
+# respawns. Any request landing in that window returns 503 Service
+# Unavailable with Retry-After: 1 so HTTP clients with retry middleware
+# (curl --retry, axios-retry, hyper-retry) back off correctly.
+# ======================================================================
+
+if should_run "http-recovery-503"; then
+    echo "${BOLD}[http-recovery-503] 503 + Retry-After during recovery${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    RECOVERY_DAEMON_PID=$LAST_DAEMON_PID
+
+    # Pre-flight: confirm /health is normal before the kill.
+    pre_status=$(curl -s -o /dev/null -w "%{http_code}" \
+        "http://127.0.0.1:${HTTP_PORT}/health")
+    assert_test "pre-kill /health -> 200" "200" "$pre_status"
+
+    # Kill all child pool processes to trigger the recovery gate.
+    pool_pids=$(pgrep -P "$RECOVERY_DAEMON_PID" 2>/dev/null) || pool_pids=""
+    if [ -z "$pool_pids" ]; then
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "recovery: no pool children to kill"
+        printf "%sSKIP%s\n" "$YELLOW" "$RESET"
+        PASSED=$((PASSED + 1))
+    else
+        for ppid in $pool_pids; do
+            kill -9 "$ppid" 2>/dev/null || true
+        done
+
+        # Race: probe /health rapidly trying to land inside the recovery
+        # window. Daemon detects the death on its 1s poll cycle and the
+        # recovery window lasts long enough for several requests.
+        found_503=0
+        found_retry_after=0
+        for attempt in $(seq 1 100); do
+            hdr=$(curl -s --max-time 2 -D - -o /dev/null \
+                "http://127.0.0.1:${HTTP_PORT}/health" 2>/dev/null) || hdr=""
+            first=$(echo "$hdr" | head -n 1)
+            if echo "$first" | grep -q " 503 "; then
+                found_503=1
+                if echo "$hdr" | grep -qi "^Retry-After: 1"; then
+                    found_retry_after=1
+                fi
+                break
+            fi
+        done
+
+        assert_test "recovery window returns 503"           "1" "$found_503"
+        assert_test "503 carries Retry-After: 1"            "1" "$found_retry_after"
+    fi
+
+    # Let recovery finish so cleanup is clean.
+    sleep 4
+    stop_daemon "$RECOVERY_DAEMON_PID"
     echo ""
 fi
 

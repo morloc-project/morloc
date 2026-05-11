@@ -211,10 +211,30 @@ pub unsafe extern "C" fn http_write_response(
     body: *const c_char,
     body_len: usize,
 ) -> bool {
+    http_write_response_ex(fd, status, content_type, body, body_len, ptr::null())
+}
+
+/// Same as `http_write_response`, plus an optional `extra_headers` block
+/// (one or more `Name: value\r\n` lines, NUL-terminated, may be NULL).
+/// Used for adding `Retry-After: 1` on 503 responses.
+#[no_mangle]
+pub unsafe extern "C" fn http_write_response_ex(
+    fd: i32,
+    status: i32,
+    content_type: *const c_char,
+    body: *const c_char,
+    body_len: usize,
+    extra_headers: *const c_char,
+) -> bool {
     let ct = if content_type.is_null() {
         "application/json"
     } else {
         std::ffi::CStr::from_ptr(content_type).to_str().unwrap_or("application/json")
+    };
+    let extra = if extra_headers.is_null() {
+        ""
+    } else {
+        std::ffi::CStr::from_ptr(extra_headers).to_str().unwrap_or("")
     };
 
     let header = format!(
@@ -225,8 +245,8 @@ pub unsafe extern "C" fn http_write_response(
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
          Access-Control-Allow-Headers: Content-Type\r\n\
-         \r\n",
-        status, http_status_text(status), ct, body_len
+         {}\r\n",
+        status, http_status_text(status), ct, body_len, extra
     );
 
     let n = libc::send(fd, header.as_ptr() as *const c_void, header.len(), crate::utility::SEND_NOSIGNAL);
@@ -439,11 +459,10 @@ pub unsafe extern "C" fn http_to_daemon_request(
         return dreq;
     }
 
-    // OPTIONS (CORS preflight)
-    if method == HttpMethod::Options {
-        (*dreq).method = DaemonMethod::Health;
-        return dreq;
-    }
+    // OPTIONS preflight is short-circuited to 204 No Content by
+    // handle_http_connection before this function is reached. If an
+    // OPTIONS request somehow falls through here, treat it as an
+    // unknown endpoint (NOT_FOUND below).
 
     libc::free(dreq as *mut c_void);
     let method_str = match method {

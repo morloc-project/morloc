@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::hash;
-use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpRequest};
+use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
 
 // -- Constants ----------------------------------------------------------------
 
@@ -1633,6 +1633,14 @@ unsafe fn handle_http_connection(
             body: *const c_char,
             body_len: usize,
         ) -> bool;
+        fn http_write_response_ex(
+            fd: i32,
+            status: i32,
+            content_type: *const c_char,
+            body: *const c_char,
+            body_len: usize,
+            extra_headers: *const c_char,
+        ) -> bool;
         fn http_to_daemon_request(
             req: *mut HttpRequest,
             errmsg: *mut *mut c_char,
@@ -1653,6 +1661,24 @@ unsafe fn handle_http_connection(
             body.len() - 1,
         );
         libc::free(errmsg as *mut c_void);
+        libc::close(client_fd);
+        return;
+    }
+
+    // CORS preflight short-circuit. Browser-issued OPTIONS requests
+    // should get 204 No Content with the standard CORS headers, never
+    // reaching daemon_dispatch (which would otherwise process them
+    // through the Health pipeline -- including the recovery gate).
+    if (*http_req).method == HttpMethod::Options {
+        let ct = b"application/json\0";
+        http_write_response(
+            client_fd,
+            204,
+            ct.as_ptr() as *const c_char,
+            ptr::null(),
+            0,
+        );
+        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
@@ -1701,13 +1727,28 @@ unsafe fn handle_http_connection(
         (*resp).error_kind, (*resp).success,
     );
     let ct = b"application/json\0";
-    http_write_response(
-        client_fd,
-        status,
-        ct.as_ptr() as *const c_char,
-        resp_body as *const c_char,
-        resp_len + 1,
-    );
+    // 503 carries Retry-After: 1 so HTTP clients with automatic-retry
+    // middleware (curl --retry, axios-retry, etc.) back off appropriately
+    // during the brief pool-crash recovery window.
+    if status == 503 {
+        let extra = b"Retry-After: 1\r\n\0";
+        http_write_response_ex(
+            client_fd,
+            status,
+            ct.as_ptr() as *const c_char,
+            resp_body as *const c_char,
+            resp_len + 1,
+            extra.as_ptr() as *const c_char,
+        );
+    } else {
+        http_write_response(
+            client_fd,
+            status,
+            ct.as_ptr() as *const c_char,
+            resp_body as *const c_char,
+            resp_len + 1,
+        );
+    }
 
     libc::free(resp_body as *mut c_void);
     libc::free(resp_json as *mut c_void);

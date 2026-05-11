@@ -891,6 +891,12 @@ void binding_store_free(binding_store_t* store);
 http_request_t* http_parse_request(int fd, ERRMSG);
 bool http_write_response(int fd, int status, const char* content_type,
                          const char* body, size_t body_len);
+// Like http_write_response, but appends `extra_headers` (one or more
+// `Name: value\r\n` lines, NUL-terminated, may be NULL) to the response
+// header block. Used for `Retry-After: 1` on 503 responses.
+bool http_write_response_ex(int fd, int status, const char* content_type,
+                            const char* body, size_t body_len,
+                            const char* extra_headers);
 // `error_kind_out` (nullable) receives DAEMON_ERROR_BAD_REQUEST for
 // malformed body / missing fields and DAEMON_ERROR_NOT_FOUND for an
 // unknown route.

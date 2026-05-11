@@ -926,11 +926,9 @@ unsafe fn router_http_to_request(
         }
     }
 
-    // OPTIONS (CORS)
-    if method == HttpMethod::Options {
-        (*dreq).method = DaemonMethod::Health;
-        return dreq;
-    }
+    // OPTIONS preflight is short-circuited to 204 No Content by the
+    // router event loop before this function is reached. If an OPTIONS
+    // request somehow falls through, treat it as an unknown endpoint.
 
     libc::free(dreq as *mut c_void);
     let method_str = match method {
@@ -1197,6 +1195,27 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             };
             let log_path_cstr = CStr::from_ptr((*http_req).path.as_ptr());
             let log_path = log_path_cstr.to_str().unwrap_or("???").to_string();
+
+            // CORS preflight short-circuit: 204 No Content with the
+            // standard CORS headers, no daemon dispatch.
+            if (*http_req).method == HttpMethod::Options {
+                http_write_response(
+                    client_fd,
+                    204,
+                    ct.as_ptr() as *const c_char,
+                    ptr::null(),
+                    0,
+                );
+                http_free_request(http_req);
+                let elapsed = req_start.elapsed();
+                eprintln!(
+                    "router: OPTIONS {} -> 204 ({:.1}ms)",
+                    log_path,
+                    elapsed.as_secs_f64() * 1000.0
+                );
+                libc::close(client_fd);
+                continue;
+            }
 
             let mut target_program: *mut c_char = ptr::null_mut();
             let dreq = router_http_to_request(http_req, &mut target_program, &mut err);
