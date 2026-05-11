@@ -1,0 +1,96 @@
+module main
+  ( testListMixed
+  , testListAllNull
+  , testListEmpty
+  , testListNested
+  , testListReal
+  , testRecordNullField
+  , testRecordSomeField
+  , testTupleNulls
+  , testNestedOptCollapseNull
+  , testNestedOptCollapseSome
+  , testRecordNestedOpt
+  , testRoundtripDouble
+  , testRoundtripCount
+  , testRoundtripIdentity
+  )
+
+type Py => Int = "int"
+type Py => Real = "float"
+type Py => Str = "str"
+type Py => List a = "list" a
+type Py => Tuple2 a b = "tuple" a b
+
+record R = R { x :: ?Int, y :: Str }
+record Py => R = "dict"
+
+record S = S { a :: ?(?Int) }
+record Py => S = "dict"
+
+source Py from "foo.py" ("doubleAll", "countNonNull", "identityList")
+
+doubleAll :: [?Int] -> [Int]
+countNonNull :: [?Int] -> Int
+identityList :: [?Int] -> [?Int]
+
+-- Mixed literal Null inside [?Int]; before the fix this aborted with
+-- "Unexpected data size" because the bare NullS literal carries a width-1
+-- 'z' schema that does not fit the optional's wider slot.
+testListMixed :: [?Int]
+testListMixed = [1, Null, 3]
+
+testListAllNull :: [?Int]
+testListAllNull = [Null, Null, Null]
+
+testListEmpty :: [?Int]
+testListEmpty = []
+
+-- List of lists of optionals: nesting must propagate the per-slot width
+-- through the inner SerialList as well.
+testListNested :: [[?Int]]
+testListNested = [[1, Null], [Null, Null], [], [2, 3]]
+
+-- Same pattern with a wider primitive (Real is 8 bytes vs Int's 8 bytes,
+-- but exercises the float branch in the runtime).
+testListReal :: [?Real]
+testListReal = [1.5, Null, 2.5]
+
+-- Record literal with a bare Null in an optional field. Records were
+-- "working" only when Null arrived via a function call; the same
+-- width-mismatch bug fires for literal-Null record fields too.
+testRecordNullField :: R
+testRecordNullField = { x = Null, y = "hi" }
+
+testRecordSomeField :: R
+testRecordSomeField = { x = 42, y = "bye" }
+
+-- Tuple literal entirely of Nulls. (A mixed Int/Null tuple like
+-- (1, Null, 3) at type (Int, ?Int, ?Int) is rejected at typecheck because
+-- tuple synthesis does not currently propagate the ascribed element types
+-- back to each element; that is a separate pre-existing limitation.)
+testTupleNulls :: (?Int, ?Int)
+testTupleNulls = (Null, Null)
+
+-- ?(?Int) is intentionally idempotent: nested ? collapses to a single
+-- null layer. Verify both branches reach the wire format unchanged.
+testNestedOptCollapseNull :: ?(?Int)
+testNestedOptCollapseNull = Null
+
+testNestedOptCollapseSome :: ?(?Int)
+testNestedOptCollapseSome = 7
+
+-- ?(?Int) inside a record field; literal Null again exercises the fix.
+testRecordNestedOpt :: S
+testRecordNestedOpt = { a = Null }
+
+-- Roundtrip the literal list through a Python source: confirms each Null
+-- arrives as Python None on the pool side (not garbage bytes).
+testRoundtripDouble :: [Int]
+testRoundtripDouble = doubleAll [1, Null, 3, Null, 5]
+
+testRoundtripCount :: Int
+testRoundtripCount = countNonNull [1, Null, 3, Null, 5]
+
+-- Identity roundtrip: the list must come back with the same shape.
+testRoundtripIdentity :: [?Int]
+testRoundtripIdentity = identityList [Null, 2, Null, 4, Null]

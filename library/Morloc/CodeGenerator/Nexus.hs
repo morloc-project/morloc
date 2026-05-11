@@ -85,6 +85,9 @@ data NexusExpr
   | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
                           -- (Just-coerce: at runtime sets tag=1 and writes
                           -- the child into the optional's inner slot).
+  | OptNullX Text         -- absent ?T: at runtime sets tag=0 and leaves the
+                          -- inner slot zero. Schema is the outer ?T schema so
+                          -- the slot has the right width inside arrays/records.
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -351,7 +354,14 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
-    toNexusExpr (AnnoS _ _ NullS) = return $ LitX NullX "0"
+    -- A bare NullS lowers to a width-1 'z' literal. When the surrounding type
+    -- is a (possibly Effect-wrapped) Optional, that 1-byte schema does not fit
+    -- the optional's wider tag+inner slot, which corrupts list/record/tuple
+    -- evaluation in the runtime. Emit OptNullX with the outer ?T schema so
+    -- the slot has the correct width.
+    toNexusExpr (AnnoS (Idx _ t) _ NullS) = case stripEffect t of
+      OptionalT _ -> OptNullX <$> type2schema t
+      _           -> return $ LitX NullX "0"
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
     toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
@@ -581,6 +591,13 @@ stripSurface (OptionalT t) = stripSurface t
 stripSurface (EffectT _ t) = stripSurface t
 stripSurface t             = t
 
+-- | Peel only the 'EffectT' wrappers, leaving any 'OptionalT' visible.
+-- Used by the bare-Null lowering to detect when a 'NullS' literal sits in
+-- an optional position (and therefore needs the wider OptNullX layout).
+stripEffect :: Type -> Type
+stripEffect (EffectT _ t) = stripEffect t
+stripEffect t             = t
+
 -- | If a type's surface form is a named type, return its 'NamType' tag.
 -- Otherwise Nothing. Single source of the @kind@ constraint.
 surfaceNamKind :: Type -> Maybe NamType
@@ -719,6 +736,12 @@ exprToJson (OptX schema child) =
     [ ("tag", jsonStr "container")
     , ("schema", jsonStr schema)
     , ("elements", jsonArr [exprToJson child])
+    ]
+exprToJson (OptNullX schema) =
+  jsonObj
+    [ ("tag", jsonStr "container")
+    , ("schema", jsonStr schema)
+    , ("elements", jsonArr [])
     ]
 exprToJson (PatX schema (PatternText p ps)) =
   jsonObj

@@ -585,8 +585,18 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 (*data).data.array_val = arr;
             } else if schema_type == 15 || schema_type == 16 { // Tuple or Map
                 (*data).data.tuple_val = values;
-            } else if schema_type == 17 { // Optional (Just-coerce: one inner element)
-                (*data).data.tuple_val = values;
+            } else if schema_type == 17 { // Optional
+                // Two shapes for an Optional container:
+                //   elements = [child]  -> Just-coerce: one inner element
+                //   elements = []       -> Nothing: tuple_val left null so the
+                //                          eval path knows to write tag=0 and
+                //                          skip the inner-value recursion.
+                if n == 0 {
+                    if !values.is_null() { libc::free(values as *mut c_void); }
+                    (*data).data.tuple_val = ptr::null_mut();
+                } else {
+                    (*data).data.tuple_val = values;
+                }
             } else {
                 libc::free(values as *mut c_void);
                 libc::free(data as *mut c_void);

@@ -548,17 +548,23 @@ unsafe fn morloc_eval_r(
                     morloc_eval_r(element, elem_dest, elem_width, bndvars)?;
                 }
             } else if stype == crate::schema::SerialType::Optional as u32 {
-                // Just-coerce wrapping: tag byte at offset 0, inner value at
-                // offsets[0]. The dest buffer was zero-initialised by shcalloc
-                // (when allocated here) or by an enclosing zeroed parent slot,
-                // so padding between the tag and the inner stays zero without
-                // an explicit memset.
-                *(dest as *mut u8) = 1;
-                let inner_schema = *(*schema).parameters;
-                let inner_width = (*inner_schema).width;
-                let inner_dest = dest.add(*(*schema).offsets);
-                let inner_expr = *(*data).data.tuple_val;
-                morloc_eval_r(inner_expr, inner_dest, inner_width, bndvars)?;
+                // Optional wrapping: tag byte at offset 0, inner value at
+                // offsets[0]. Two shapes:
+                //   tuple_val == null  -> Nothing: tag=0, leave inner zero
+                //                         (shcalloc / enclosing zeroed parent
+                //                         already cleared the slot).
+                //   tuple_val != null  -> Just: tag=1, recurse on inner.
+                let tv = (*data).data.tuple_val;
+                if tv.is_null() {
+                    *(dest as *mut u8) = 0;
+                } else {
+                    *(dest as *mut u8) = 1;
+                    let inner_schema = *(*schema).parameters;
+                    let inner_width = (*inner_schema).width;
+                    let inner_dest = dest.add(*(*schema).offsets);
+                    let inner_expr = *tv;
+                    morloc_eval_r(inner_expr, inner_dest, inner_width, bndvars)?;
+                }
             } else if stype == crate::schema::SerialType::Int as u32 {
                 // Variable-width integer: parse decimal string into inline BigInt
                 let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;

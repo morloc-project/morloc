@@ -448,6 +448,8 @@ main = do
       , golden "optional-records-py" "optional-records-py"
       , golden "optional-records-cpp" "optional-records-cpp"
       , golden "optional-records-r" "optional-records-r"
+      , -- literal Null inside lists / tuples / records / nested optionals
+        golden "optional-null-literal-py" "optional-null-literal-py"
       , -- optional coercion tests (a -> ?a)
         golden "optional-coerce-py" "optional-coerce-py"
       , golden "optional-coerce-cpp" "optional-coerce-cpp"
