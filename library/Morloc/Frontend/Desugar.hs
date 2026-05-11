@@ -364,10 +364,10 @@ extractLabels = go
     stripLabels (NamU o v ps rs) = NamU o v (map stripLabels ps) [(k, stripLabels t) | (k, t) <- rs]
     stripLabels (EffectU effs t) = EffectU effs (stripLabels t)
     stripLabels (OptionalU t) = OptionalU (stripLabels t)
-    stripLabels (NatAddU a b) = NatAddU (stripLabels a) (stripLabels b)
-    stripLabels (NatMulU a b) = NatMulU (stripLabels a) (stripLabels b)
-    stripLabels (NatSubU a b) = NatSubU (stripLabels a) (stripLabels b)
-    stripLabels (NatDivU a b) = NatDivU (stripLabels a) (stripLabels b)
+    stripLabels (OpU op args) = OpU op (map stripLabels args)
+    stripLabels (LitU (LRec fs)) = LitU (LRec [(k, stripLabels v) | (k, v) <- fs])
+    stripLabels (LitU (LList es)) = LitU (LList (map stripLabels es))
+    stripLabels (LitU (LSet es)) = LitU (LSet (map stripLabels es))
     stripLabels (ExistU v (ps, pc) (rs, rc)) = ExistU v (map stripLabels ps, pc) (map (second stripLabels) rs, rc)
     stripLabels t = t
 
@@ -387,20 +387,16 @@ quantifyType t =
     collectGenVars (VarU v@(TV name))
       | not (T.null name), isLower (T.head name) = [v]
       | otherwise = []
-    collectGenVars (NatVarU _) = []
-    collectGenVars (StrVarU _) = []
     collectGenVars (ForallU v inner) = filter (/= v) (collectGenVars inner)
     collectGenVars (AppU f args) = collectGenVars f ++ concatMap collectGenVars args
     collectGenVars (FunU args ret) = concatMap collectGenVars args ++ collectGenVars ret
     collectGenVars (NamU _ _ ts entries) = concatMap collectGenVars ts ++ concatMap (collectGenVars . snd) entries
     collectGenVars (EffectU _ inner) = collectGenVars inner
     collectGenVars (OptionalU inner) = collectGenVars inner
-    collectGenVars (NatLitU _) = []
-    collectGenVars (NatAddU a b) = collectGenVars a ++ collectGenVars b
-    collectGenVars (NatMulU a b) = collectGenVars a ++ collectGenVars b
-    collectGenVars (NatSubU a b) = collectGenVars a ++ collectGenVars b
-    collectGenVars (NatDivU a b) = collectGenVars a ++ collectGenVars b
-    collectGenVars (StrConcatU a b) = collectGenVars a ++ collectGenVars b
+    collectGenVars (OpU _ args) = concatMap collectGenVars args
+    collectGenVars (LitU (LRec fs)) = concatMap (collectGenVars . snd) fs
+    collectGenVars (LitU (LList es)) = concatMap collectGenVars es
+    collectGenVars (LitU (LSet es)) = concatMap collectGenVars es
     collectGenVars (LabeledU _ inner) = collectGenVars inner
     collectGenVars _ = []
 
@@ -479,168 +475,37 @@ quantifyType t =
         go inRec (LabeledU _ inner) = go inRec inner
         go _ _ = Set.empty
 
--- | Promote VarU to NatVarU for variables identified as nat-kinded
+-- | Generic VarU -> kind-specific variable promotion. The 'lift' callback
+-- replaces a matching 'VarU' with the kind-specific carrier; all other
+-- forms recurse uniformly.
+promoteVars :: (TVar -> TypeU) -> Set.Set TVar -> TypeU -> TypeU
+promoteVars lift vars = go
+  where
+    go (VarU v)
+      | Set.member v vars = lift v
+      | otherwise = VarU v
+    go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
+    go (ForallU v t) = ForallU v (go t)
+    go (FunU ts t) = FunU (map go ts) (go t)
+    go (AppU t ts) = AppU (go t) (map go ts)
+    go (NamU o n ps rs) = NamU o n (map go ps) [(k, go t) | (k, t) <- rs]
+    go (EffectU effs t) = EffectU effs (go t)
+    go (OptionalU t) = OptionalU (go t)
+    go (OpU op args) = OpU op (map go args)
+    go (LitU (LRec fs)) = LitU (LRec [(k, go v) | (k, v) <- fs])
+    go (LitU (LList es)) = LitU (LList (map go es))
+    go (LitU (LSet es)) = LitU (LSet (map go es))
+    go (LabeledU n t) = LabeledU n (go t)
+    go t = t  -- inert: kind-specific vars/voids, LNat, LStr
+
 promoteNatVars :: Set.Set TVar -> TypeU -> TypeU
-promoteNatVars natVars = go
-  where
-    go (VarU v)
-      | Set.member v natVars = NatVarU v
-      | otherwise = VarU v
-    go t@(NatVarU _) = t
-    go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
-    go (ForallU v t) = ForallU v (go t)
-    go (FunU ts t) = FunU (map go ts) (go t)
-    go (AppU t ts) = AppU (go t) (map go ts)
-    go (NamU o n ps rs) = NamU o n (map go ps) [(k, go t) | (k, t) <- rs]
-    go (EffectU effs t) = EffectU effs (go t)
-    go (OptionalU t) = OptionalU (go t)
-    go t@(NatLitU _) = t
-    go (NatAddU a b) = NatAddU (go a) (go b)
-    go (NatMulU a b) = NatMulU (go a) (go b)
-    go (NatSubU a b) = NatSubU (go a) (go b)
-    go (NatDivU a b) = NatDivU (go a) (go b)
-    go t@NatVoidU = t
-    -- Str/Rec-kinded constructs are not promoted by promoteNatVars (they
-    -- have their own kind classifiers). Pass through unchanged.
-    go t@(StrVarU _) = t
-    go t@(StrLitU _) = t
-    go (StrConcatU a b) = StrConcatU (go a) (go b)
-    go t@StrVoidU = t
-    go t@(RecVarU _) = t
-    go t@RecEmptyU = t
-    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
-    go (RecUnionU a b) = RecUnionU (go a) (go b)
-    go (RecDiffU a ks) = RecDiffU (go a) ks
-    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
-    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
-    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
-    go t@RecVoidU = t
-    -- List / Set constructors are not promoted by promoteNatVars but
-    -- recursion into their operand subterms is required so any nested
-    -- Type-kinded subexpressions still see the substitution.
-    go t@(ListVarU _) = t
-    go (ListLitU es) = ListLitU (map go es)
-    go (ListAppU a b) = ListAppU (go a) (go b)
-    go t@ListVoidU = t
-    go t@(SetVarU _) = t
-    go t@SetEmptyU = t
-    go (SetLitU es) = SetLitU (map go es)
-    go (SetUnionU a b) = SetUnionU (go a) (go b)
-    go (SetInterU a b) = SetInterU (go a) (go b)
-    go (SetDiffU a b) = SetDiffU (go a) (go b)
-    go t@SetVoidU = t
-    go (KeysU r) = KeysU (go r)
-    go (ListToSetU l) = ListToSetU (go l)
-    go (SizeU c) = SizeU (go c)
-    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
-    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
-    go (LabeledU n t) = LabeledU n (go t)
+promoteNatVars = promoteVars NatVarU
 
--- | Promote VarU to RecVarU for variables identified as rec-kinded.
--- Mirrors promoteNatVars / promoteStrVars. See plans/tables/10-rec-solver-decidability.md.
 promoteRecVars :: Set.Set TVar -> TypeU -> TypeU
-promoteRecVars recVars = go
-  where
-    go (VarU v)
-      | Set.member v recVars = RecVarU v
-      | otherwise = VarU v
-    go t@(RecVarU _) = t
-    go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
-    go (ForallU v t) = ForallU v (go t)
-    go (FunU ts t) = FunU (map go ts) (go t)
-    go (AppU t ts) = AppU (go t) (map go ts)
-    go (NamU o n ps rs) = NamU o n (map go ps) [(k, go t) | (k, t) <- rs]
-    go (EffectU effs t) = EffectU effs (go t)
-    go (OptionalU t) = OptionalU (go t)
-    go t@(NatVarU _) = t
-    go t@(NatLitU _) = t
-    go (NatAddU a b) = NatAddU (go a) (go b)
-    go (NatMulU a b) = NatMulU (go a) (go b)
-    go (NatSubU a b) = NatSubU (go a) (go b)
-    go (NatDivU a b) = NatDivU (go a) (go b)
-    go t@NatVoidU = t
-    go t@(StrVarU _) = t
-    go t@(StrLitU _) = t
-    go (StrConcatU a b) = StrConcatU (go a) (go b)
-    go t@StrVoidU = t
-    go t@RecEmptyU = t
-    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
-    go (RecUnionU a b) = RecUnionU (go a) (go b)
-    go (RecDiffU a ks) = RecDiffU (go a) ks
-    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
-    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
-    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
-    go t@RecVoidU = t
-    go t@(ListVarU _) = t
-    go (ListLitU es) = ListLitU (map go es)
-    go (ListAppU a b) = ListAppU (go a) (go b)
-    go t@ListVoidU = t
-    go t@(SetVarU _) = t
-    go t@SetEmptyU = t
-    go (SetLitU es) = SetLitU (map go es)
-    go (SetUnionU a b) = SetUnionU (go a) (go b)
-    go (SetInterU a b) = SetInterU (go a) (go b)
-    go (SetDiffU a b) = SetDiffU (go a) (go b)
-    go t@SetVoidU = t
-    go (KeysU r) = KeysU (go r)
-    go (ListToSetU l) = ListToSetU (go l)
-    go (SizeU c) = SizeU (go c)
-    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
-    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
-    go (LabeledU n t) = LabeledU n (go t)
+promoteRecVars = promoteVars RecVarU
 
--- | Promote VarU to StrVarU for variables identified as str-kinded.
--- Mirrors promoteNatVars. See plans/tables/04-str-solver-scope.md.
 promoteStrVars :: Set.Set TVar -> TypeU -> TypeU
-promoteStrVars strVars = go
-  where
-    go (VarU v)
-      | Set.member v strVars = StrVarU v
-      | otherwise = VarU v
-    go t@(StrVarU _) = t
-    go (ExistU v (ps, pc) (rs, rc)) = ExistU v (map go ps, pc) (map (second go) rs, rc)
-    go (ForallU v t) = ForallU v (go t)
-    go (FunU ts t) = FunU (map go ts) (go t)
-    go (AppU t ts) = AppU (go t) (map go ts)
-    go (NamU o n ps rs) = NamU o n (map go ps) [(k, go t) | (k, t) <- rs]
-    go (EffectU effs t) = EffectU effs (go t)
-    go (OptionalU t) = OptionalU (go t)
-    go t@(NatVarU _) = t
-    go t@(NatLitU _) = t
-    go (NatAddU a b) = NatAddU (go a) (go b)
-    go (NatMulU a b) = NatMulU (go a) (go b)
-    go (NatSubU a b) = NatSubU (go a) (go b)
-    go (NatDivU a b) = NatDivU (go a) (go b)
-    go t@NatVoidU = t
-    go t@(StrLitU _) = t
-    go (StrConcatU a b) = StrConcatU (go a) (go b)
-    go t@StrVoidU = t
-    go t@(RecVarU _) = t
-    go t@RecEmptyU = t
-    go (RecExtendU k a b) = RecExtendU k (go a) (go b)
-    go (RecUnionU a b) = RecUnionU (go a) (go b)
-    go (RecDiffU a ks) = RecDiffU (go a) ks
-    go (RecIntersectU a b) = RecIntersectU (go a) (go b)
-    go (RecRestrictU a b) = RecRestrictU (go a) (go b)
-    go (RecDiffListU a b) = RecDiffListU (go a) (go b)
-    go t@RecVoidU = t
-    go t@(ListVarU _) = t
-    go (ListLitU es) = ListLitU (map go es)
-    go (ListAppU a b) = ListAppU (go a) (go b)
-    go t@ListVoidU = t
-    go t@(SetVarU _) = t
-    go t@SetEmptyU = t
-    go (SetLitU es) = SetLitU (map go es)
-    go (SetUnionU a b) = SetUnionU (go a) (go b)
-    go (SetInterU a b) = SetInterU (go a) (go b)
-    go (SetDiffU a b) = SetDiffU (go a) (go b)
-    go t@SetVoidU = t
-    go (KeysU r) = KeysU (go r)
-    go (ListToSetU l) = ListToSetU (go l)
-    go (SizeU c) = SizeU (go c)
-    go (ProjectFieldU r f) = ProjectFieldU (go r) (go f)
-    go (RecSingletonU k v) = RecSingletonU (go k) (go v)
-    go (LabeledU n t) = LabeledU n (go t)
+promoteStrVars = promoteVars StrVarU
 
 parseLang :: Located -> D Lang
 parseLang tok = do

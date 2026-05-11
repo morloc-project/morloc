@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
@@ -20,13 +21,68 @@ module Morloc.Namespace.Type
   ( -- * Types
     NamType (..)
   , Type (..)
-  , TypeU (..)
+    -- Pattern synonyms for migrated kind constructors are bundled with
+    -- 'TypeU' so importers using @TypeU (..)@ pick them up as if they
+    -- were real constructors.
+  , TypeU
+      ( ..
+      , NatLitU
+      , NatAddU
+      , NatSubU
+      , NatMulU
+      , NatDivU
+      , StrLitU
+      , StrConcatU
+      , ListLitU
+      , ListAppU
+      , SetEmptyU
+      , SetLitU
+      , SetUnionU
+      , SetInterU
+      , SetDiffU
+      , RecEmptyU
+      , RecExtendU
+      , RecUnionU
+      , RecIntersectU
+      , RecRestrictU
+      , RecDiffU
+      , RecDiffListU
+      , KeysU
+      , ListToSetU
+      , SizeU
+      , ProjectFieldU
+      , RecSingletonU
+      )
   , OpenOrClosed (..)
+  , OpTag (..)
+  , TyLit (..)
   , extractKey
   , collectExtends
   , type2typeu
   , EType (..)
   , unresolvedType2type
+
+    -- * Smart constructors for kind operators
+  , opArity
+  , mkOp
+  , mkNatAdd
+  , mkNatSub
+  , mkNatMul
+  , mkNatDiv
+  , mkStrConcat
+  , mkRecUnion
+  , mkRecIntersect
+  , mkRecRestrict
+  , mkRecDiffList
+  , mkRecSingleton
+  , mkListApp
+  , mkSetUnion
+  , mkSetInter
+  , mkSetDiff
+  , mkKeys
+  , mkListToSet
+  , mkSize
+  , mkProjectField
 
     -- * Effect types
   , EffectLabel
@@ -170,6 +226,35 @@ data Type
 data OpenOrClosed = Open | Closed
   deriving (Show, Ord, Eq)
 
+-- | Tags for kind-arithmetic operators carried by 'OpU' on 'TypeU'.
+-- Arity is fixed per tag (see 'opArity'); smart constructors enforce it
+-- at construction. Introduced in the kind-system cleanup; coexists with
+-- the per-kind 'NatAddU'/'StrConcatU'/etc. constructors until migration
+-- finishes.
+data OpTag
+  = OpNatAdd | OpNatSub | OpNatMul | OpNatDiv     -- arity 2
+  | OpStrConcat                                    -- arity 2
+  | OpRecExtend                                    -- arity 3: [LitU (LStr k), value, rest]
+  | OpRecUnion | OpRecIntersect | OpRecRestrict
+  | OpRecDiffList | OpRecSingleton                 -- arity 2
+  | OpListApp                                      -- arity 2
+  | OpSetUnion | OpSetInter | OpSetDiff            -- arity 2
+  | OpKeys | OpListToSet | OpSize                  -- arity 1
+  | OpProjectField                                 -- arity 2
+  deriving (Show, Ord, Eq)
+
+-- | Kind-tagged type-level literal values carried by 'LitU' on 'TypeU'.
+-- Subsumes 'NatLitU' / 'StrLitU' / 'RecEmptyU' + 'RecExtendU' chain /
+-- 'ListLitU' / 'SetEmptyU' + 'SetLitU' under one constructor. Named with
+-- the 'Ty' prefix to disambiguate from term-level 'Morloc.Namespace.Expr.Lit'.
+data TyLit
+  = LNat Integer              -- ^ Nat literal: 0, 1, 2, ...
+  | LStr Text                 -- ^ Str literal: "x", "y", ...
+  | LRec [(Text, TypeU)]      -- ^ Rec literal: flat list of (field, type)
+  | LList [TypeU]             -- ^ List literal: element types in order
+  | LSet [TypeU]              -- ^ Set literal: canonical-form element types
+  deriving (Show, Ord, Eq)
+
 {- | Full type with quantifiers. 'ExistU' represents existential variables
 (solved during unification), 'ForallU' represents universally quantified
 variables. This is the primary type representation during typechecking.
@@ -187,11 +272,8 @@ data TypeU
   | NamU NamType TVar [TypeU] [(Key, TypeU)]
   | EffectU EffectSet TypeU
   | OptionalU TypeU
-  | NatLitU Integer
-  | NatAddU TypeU TypeU
-  | NatMulU TypeU TypeU
-  | NatSubU TypeU TypeU
-  | NatDivU TypeU TypeU
+  -- Nat-kind operators and literal are now pattern synonyms over 'OpU' /
+  -- 'LitU' (see below).
   | NatVoidU  -- ^ Erased phantom Nat slot. Substituted in for missing
               -- Nat-kinded args (kind realignment in expandHeadOnly), or
               -- when a NatVar / NatAdd / unresolved variable is reduced
@@ -201,19 +283,15 @@ data TypeU
               -- can tell phantoms apart from real measurements.
   | StrVarU TVar -- ^ Str-kinded variable, never quantified by ForallU.
                  -- Mirrors NatVarU. See plans/tables/04-str-solver-scope.md.
-  | StrLitU Text -- ^ Type-level Str literal (column name etc).
-  | StrConcatU TypeU TypeU  -- ^ Type-level Str concatenation.
+  -- Str-kind literal and concat are now pattern synonyms over 'LitU' /
+  -- 'OpU' (see below).
   | StrVoidU -- ^ Erased phantom Str slot. Mirrors NatVoidU.
   -- Rec-kinded constructs (Stage 3 of the tables refactor). See
   -- plans/tables/10-rec-solver-decidability.md.
   | RecVarU TVar -- ^ Rec-kinded row variable, never quantified by ForallU.
-  | RecEmptyU -- ^ Type-level empty record `{}`.
-  | RecExtendU Text TypeU TypeU
-                 -- ^ Single-field row extension: name, field type, rest. The
-                 -- internal canonical form for `r + f=a` is iterated extension.
-  | RecUnionU TypeU TypeU -- ^ Disjoint union of two Recs (the surface `+`).
-  | RecDiffU TypeU [Text] -- ^ Drop these keys from a Rec (no-op if absent).
-  | RecIntersectU TypeU TypeU -- ^ Intersection of two Recs (surface `&`).
+  -- All Rec operators (empty, extend, union, intersect, restrict,
+  -- diff-list, diff-by-Text-list) are now pattern synonyms over 'LitU' /
+  -- 'OpU' (see below).
   | RecVoidU -- ^ Erased phantom Rec slot. Mirrors NatVoidU / StrVoidU.
   -- List-kinded constructs (Stage 8 of the tables refactor). Lists are
   -- ordered, position-preserving sequences; equality is element-wise.
@@ -221,46 +299,145 @@ data TypeU
   -- TypeU level does not track it.
   | ListVarU TVar -- ^ List-kinded variable, never quantified by ForallU.
                   -- Mirrors NatVarU / StrVarU / RecVarU.
-  | ListLitU [TypeU] -- ^ Type-level list literal `[a, b, c]`. Empty list is `ListLitU []`.
-  | ListAppU TypeU TypeU -- ^ Type-level list append (surface `+` for List).
+  -- List-kind literal and append are now pattern synonyms over 'LitU' /
+  -- 'OpU' (see below).
   | ListVoidU -- ^ Erased phantom List slot. Mirrors NatVoidU / RecVoidU.
   -- Set-kinded constructs (Stage 8 of the tables refactor). Sets are
   -- order/duplicate-insensitive; canonical form is sorted dedup.
   | SetVarU TVar -- ^ Set-kinded variable, never quantified by ForallU.
-  | SetEmptyU -- ^ Type-level empty set `{}` (kind-dispatched away from empty Rec).
-  | SetLitU [TypeU] -- ^ Internal canonical form for a ground set. Not parser-
-                    -- produced -- emerges from ListToSet of a ground list,
-                    -- Keys of a ground Rec, etc. Element order is the
-                    -- canonical-sort order from SetSolver.
-  | SetUnionU TypeU TypeU -- ^ Set union (surface `+` for Set).
-  | SetInterU TypeU TypeU -- ^ Set intersection (surface `&`).
-  | SetDiffU TypeU TypeU -- ^ Set difference (surface `-` between two Sets).
-  | SetVoidU -- ^ Erased phantom Set slot. Distinct from SetEmptyU.
-  -- Cross-kind functions (Stage 9 of the tables refactor). Each has a
-  -- reduction rule keyed on the operand's kind: when the operand is
-  -- ground, the function reduces to a value of the result kind.
-  | KeysU TypeU                 -- ^ Rec -> Set Str. Extract field names of a Rec.
-  | ListToSetU TypeU            -- ^ List k -> Set k. Drop order and duplicates.
-  | SizeU TypeU                 -- ^ List k / Set k / Rec -> Nat. Kind-dispatched
-                                -- size: list length, set cardinality, Rec field count.
-  | ProjectFieldU TypeU TypeU   -- ^ Rec -> Str -> Type. Lookup a field type.
-                                -- Partial; absent key contradicts at the constraint level.
-  | RecSingletonU TypeU TypeU   -- ^ Str -> Type -> Rec. Build a one-field Rec from a
-                                -- Str-kinded key (literal or variable) and a Type-kinded
-                                -- value. Reduces to RecExtendU when the key is ground.
-                                -- Lets `f:Str` parameters appear as record keys at the
-                                -- type level, e.g. @r + Singleton f a@.
-  -- Rec ⊕ List operators (Stage 10 of the tables refactor). Surface
-  -- syntax `r # l` (restrict) and `r - l` for ground or polymorphic
-  -- list-keyed Rec algebra.
-  | RecRestrictU TypeU TypeU    -- ^ Rec -> List Str -> Rec. Project the Rec to fields
-                                -- whose names are in the list. Generates an implicit
-                                -- KeysSubset constraint.
-  | RecDiffListU TypeU TypeU    -- ^ Rec -> List Str -> Rec. Drop fields whose names
-                                -- are in the list. Drop-of-absent is benign (no
-                                -- constraint required).
+  -- Set-kind empty/literal and union/inter/diff are now pattern synonyms
+  -- over 'LitU' / 'OpU' (see below).
+  | SetVoidU -- ^ Erased phantom Set slot. Distinct from empty set literal.
+  -- Cross-kind functions (KeysU, ListToSetU, SizeU, ProjectFieldU,
+  -- RecSingletonU) are now pattern synonyms over 'OpU' (see below).
+  -- Rec/List operators 'RecRestrictU' and 'RecDiffListU' are also pattern
+  -- synonyms.
+  -- Unified carriers (kind-system cleanup, Stage 1). 'OpU' subsumes every
+  -- kind-arithmetic operator above (NatAdd/NatSub/.../KeysU/.../etc); 'LitU'
+  -- subsumes every kind literal (NatLit/StrLit/RecEmpty+RecExtend/ListLit/
+  -- SetLit). Both coexist with the per-kind constructors until migration
+  -- finishes; arity for 'OpU' is fixed by 'opArity' and enforced by smart
+  -- constructors ('mkNatAdd', ...).
+  | OpU OpTag [TypeU]
+  | LitU TyLit
   | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
+
+-- Pattern synonyms for the migrated Nat-kind constructors. These are
+-- drop-in replacements for the removed 'NatLitU' / 'NatAddU' / ...
+-- constructors: every existing call site (in this module or any other)
+-- continues to work in both pattern and expression position.
+pattern NatLitU :: Integer -> TypeU
+pattern NatLitU n = LitU (LNat n)
+
+pattern NatAddU :: TypeU -> TypeU -> TypeU
+pattern NatAddU a b = OpU OpNatAdd [a, b]
+
+pattern NatSubU :: TypeU -> TypeU -> TypeU
+pattern NatSubU a b = OpU OpNatSub [a, b]
+
+pattern NatMulU :: TypeU -> TypeU -> TypeU
+pattern NatMulU a b = OpU OpNatMul [a, b]
+
+pattern NatDivU :: TypeU -> TypeU -> TypeU
+pattern NatDivU a b = OpU OpNatDiv [a, b]
+
+pattern StrLitU :: Text -> TypeU
+pattern StrLitU s = LitU (LStr s)
+
+pattern StrConcatU :: TypeU -> TypeU -> TypeU
+pattern StrConcatU a b = OpU OpStrConcat [a, b]
+
+pattern ListLitU :: [TypeU] -> TypeU
+pattern ListLitU es = LitU (LList es)
+
+pattern ListAppU :: TypeU -> TypeU -> TypeU
+pattern ListAppU a b = OpU OpListApp [a, b]
+
+pattern SetEmptyU :: TypeU
+pattern SetEmptyU = LitU (LSet [])
+
+pattern SetLitU :: [TypeU] -> TypeU
+pattern SetLitU es = LitU (LSet es)
+
+pattern SetUnionU :: TypeU -> TypeU -> TypeU
+pattern SetUnionU a b = OpU OpSetUnion [a, b]
+
+pattern SetInterU :: TypeU -> TypeU -> TypeU
+pattern SetInterU a b = OpU OpSetInter [a, b]
+
+pattern SetDiffU :: TypeU -> TypeU -> TypeU
+pattern SetDiffU a b = OpU OpSetDiff [a, b]
+
+pattern RecEmptyU :: TypeU
+pattern RecEmptyU = LitU (LRec [])
+
+-- Single-field Rec extension. The label is carried as a 'LitU (LStr k)'
+-- in the first operand position so 'OpU OpRecExtend' has uniform shape
+-- (no per-op data in 'OpTag'). The pattern synonym is bidirectional and
+-- only matches when the label slot holds a literal Str.
+pattern RecExtendU :: Text -> TypeU -> TypeU -> TypeU
+pattern RecExtendU k v rest = OpU OpRecExtend [LitU (LStr k), v, rest]
+
+pattern RecUnionU :: TypeU -> TypeU -> TypeU
+pattern RecUnionU a b = OpU OpRecUnion [a, b]
+
+pattern RecIntersectU :: TypeU -> TypeU -> TypeU
+pattern RecIntersectU a b = OpU OpRecIntersect [a, b]
+
+pattern RecRestrictU :: TypeU -> TypeU -> TypeU
+pattern RecRestrictU a b = OpU OpRecRestrict [a, b]
+
+pattern RecDiffListU :: TypeU -> TypeU -> TypeU
+pattern RecDiffListU a b = OpU OpRecDiffList [a, b]
+
+-- | Drop a fixed set of named fields from a record. The 'Text' name list
+-- is encoded as a 'LitU (LList ...)' of 'LitU (LStr _)' so it folds into
+-- the existing 'OpRecDiffList' op. The pattern only matches when every
+-- list element is a literal Str.
+pattern RecDiffU :: TypeU -> [Text] -> TypeU
+pattern RecDiffU r ks <- OpU OpRecDiffList [r, (recDiffKeys -> Just ks)]
+  where RecDiffU r ks = OpU OpRecDiffList [r, LitU (LList (map (LitU . LStr) ks))]
+
+recDiffKeys :: TypeU -> Maybe [Text]
+recDiffKeys (LitU (LList items)) = traverse extractStr items
+  where
+    extractStr (LitU (LStr s)) = Just s
+    extractStr _ = Nothing
+recDiffKeys _ = Nothing
+
+pattern KeysU :: TypeU -> TypeU
+pattern KeysU r = OpU OpKeys [r]
+
+pattern ListToSetU :: TypeU -> TypeU
+pattern ListToSetU l = OpU OpListToSet [l]
+
+pattern SizeU :: TypeU -> TypeU
+pattern SizeU c = OpU OpSize [c]
+
+pattern ProjectFieldU :: TypeU -> TypeU -> TypeU
+pattern ProjectFieldU r f = OpU OpProjectField [r, f]
+
+pattern RecSingletonU :: TypeU -> TypeU -> TypeU
+pattern RecSingletonU k v = OpU OpRecSingleton [k, v]
+
+-- | The pattern synonyms above plus the kind-specific carriers
+-- exhaustively cover 'TypeU'. GHC's exhaustiveness checker cannot infer
+-- this on its own (especially because 'RecDiffU' uses a view pattern and
+-- 'RecExtendU' requires a specific shape in slot 0), so we assert it
+-- explicitly.
+{-# COMPLETE
+    VarU, NatVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
+    NatVoidU, StrVarU, StrVoidU, RecVarU, RecVoidU,
+    ListVarU, ListVoidU, SetVarU, SetVoidU, LabeledU,
+    NatLitU, NatAddU, NatSubU, NatMulU, NatDivU,
+    StrLitU, StrConcatU,
+    ListLitU, ListAppU,
+    SetEmptyU, SetLitU, SetUnionU, SetInterU, SetDiffU,
+    RecEmptyU, RecExtendU, RecUnionU, RecIntersectU,
+    RecRestrictU, RecDiffListU, RecDiffU, RecSingletonU,
+    KeysU, ListToSetU, SizeU, ProjectFieldU
+  #-}
 
 {- | Extended Type that may represent a language specific type as well as sets
 of properties and constrains.
@@ -423,15 +600,8 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = EffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
-  typeOf (NatLitU n) = NatLitT n
-  typeOf (NatAddU a b) = NatAddT (typeOf a) (typeOf b)
-  typeOf (NatMulU a b) = NatMulT (typeOf a) (typeOf b)
-  typeOf (NatSubU a b) = NatSubT (typeOf a) (typeOf b)
-  typeOf (NatDivU a b) = NatDivT (typeOf a) (typeOf b)
   typeOf NatVoidU = NatVoidT
   typeOf (StrVarU _) = StrVoidT  -- free Str var erases to StrVoidT at ground level
-  typeOf (StrLitU s) = StrLitT s
-  typeOf (StrConcatU a b) = StrConcatT (typeOf a) (typeOf b)
   typeOf StrVoidU = StrVoidT
   -- Rec-kinded constructs collapse to NatVoidT when polymorphic (free row
   -- variable somewhere in the chain). A fully ground RecExtend chain
@@ -439,41 +609,36 @@ instance Typelike TypeU where
   -- layer can read the column schema (used for Arrow Tables in
   -- nexus IO). See plans/tables/10-rec-solver-decidability.md.
   typeOf (RecVarU _) = NatVoidT
-  typeOf RecEmptyU = NamT NamRecord (TV "Rec") [] []
   typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
     Just fs -> NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
     Nothing -> NatVoidT
-  typeOf (RecUnionU _ _) = NatVoidT
-  typeOf (RecDiffU _ _) = NatVoidT
-  typeOf (RecIntersectU _ _) = NatVoidT
-  typeOf (RecRestrictU _ _) = NatVoidT
-  typeOf (RecDiffListU _ _) = NatVoidT
   typeOf RecVoidU = NatVoidT
   -- List- and Set-kinded constructs are entirely phantom at the ground
   -- level; they contribute no runtime type information. They erase to
   -- NatVoidT for the same reason Rec polymorphic forms do: the codegen
   -- layer doesn't have a List/Set ground type to map to.
   typeOf (ListVarU _) = NatVoidT
-  typeOf (ListLitU _) = NatVoidT
-  typeOf (ListAppU _ _) = NatVoidT
   typeOf ListVoidU = NatVoidT
   typeOf (SetVarU _) = NatVoidT
-  typeOf SetEmptyU = NatVoidT
-  typeOf (SetLitU _) = NatVoidT
-  typeOf (SetUnionU _ _) = NatVoidT
-  typeOf (SetInterU _ _) = NatVoidT
-  typeOf (SetDiffU _ _) = NatVoidT
   typeOf SetVoidU = NatVoidT
-  -- Cross-kind functions: most reduce to ground forms only after solver
-  -- normalisation. At the Type ADT level they all erase to NatVoidT
-  -- (phantom). The exception is ProjectFieldU which, when ground, names
-  -- a real Type-kinded result; we still erase here because typeOf is
-  -- the runtime-erasure path. Solver-level reduction returns a TypeU.
-  typeOf (KeysU _) = NatVoidT
-  typeOf (ListToSetU _) = NatVoidT
-  typeOf (SizeU _) = NatVoidT
-  typeOf (ProjectFieldU _ _) = NatVoidT
-  typeOf (RecSingletonU _ _) = NatVoidT
+  -- Cross-kind functions are now pattern synonyms over 'OpU'; their
+  -- typeOf is dispatched via the unified 'OpU _ _' fallback below
+  -- (erase to NatVoidT). The Nat / Str cases reduce to ground forms
+  -- through the kind-specific OpU clauses.
+  -- Unified carriers: behave identically to the per-kind constructors.
+  -- Stage-1 coexistence; once per-kind constructors are removed these
+  -- become the only path.
+  typeOf (OpU OpNatAdd [a, b]) = NatAddT (typeOf a) (typeOf b)
+  typeOf (OpU OpNatSub [a, b]) = NatSubT (typeOf a) (typeOf b)
+  typeOf (OpU OpNatMul [a, b]) = NatMulT (typeOf a) (typeOf b)
+  typeOf (OpU OpNatDiv [a, b]) = NatDivT (typeOf a) (typeOf b)
+  typeOf (OpU OpStrConcat [a, b]) = StrConcatT (typeOf a) (typeOf b)
+  typeOf (OpU _ _) = NatVoidT  -- Rec/List/Set/cross-kind ops erase to phantom
+  typeOf (LitU (LNat n)) = NatLitT n
+  typeOf (LitU (LStr s)) = StrLitT s
+  typeOf (LitU (LRec fs)) = NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
+  typeOf (LitU (LList _)) = NatVoidT
+  typeOf (LitU (LSet _)) = NatVoidT
   typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
@@ -486,47 +651,30 @@ instance Typelike TypeU where
   free (NamU _ _ ps rs) = Set.unions $ map free (map snd rs <> ps)
   free (EffectU _ t) = free t
   free (OptionalU t) = free t
-  free (NatLitU _) = Set.empty
-  free (NatAddU a b) = Set.union (free a) (free b)
-  free (NatMulU a b) = Set.union (free a) (free b)
-  free (NatSubU a b) = Set.union (free a) (free b)
-  free (NatDivU a b) = Set.union (free a) (free b)
   free NatVoidU = Set.empty
   -- Str-kinded constructs are implicitly forall-quantified (like NatVarU);
   -- they contribute no free type variables. See plans/tables/04-str-solver-scope.md.
   free (StrVarU _) = Set.empty
-  free (StrLitU _) = Set.empty
-  free (StrConcatU a b) = Set.union (free a) (free b)
   free StrVoidU = Set.empty
   free (RecVarU _) = Set.empty
-  free RecEmptyU = Set.empty
-  free (RecExtendU _ a b) = Set.union (free a) (free b)
-  free (RecUnionU a b) = Set.union (free a) (free b)
-  free (RecDiffU a _) = free a
-  free (RecIntersectU a b) = Set.union (free a) (free b)
-  free (RecRestrictU a b) = Set.union (free a) (free b)
-  free (RecDiffListU a b) = Set.union (free a) (free b)
   free RecVoidU = Set.empty
   -- List- and Set-kinded vars are implicitly forall-quantified (like Nat,
   -- Str, Rec vars); they contribute no free Type-kinded variables.
   free (ListVarU _) = Set.empty
-  free (ListLitU es) = Set.unions (map free es)
-  free (ListAppU a b) = Set.union (free a) (free b)
   free ListVoidU = Set.empty
   free (SetVarU _) = Set.empty
-  free SetEmptyU = Set.empty
-  free (SetLitU es) = Set.unions (map free es)
-  free (SetUnionU a b) = Set.union (free a) (free b)
-  free (SetInterU a b) = Set.union (free a) (free b)
-  free (SetDiffU a b) = Set.union (free a) (free b)
   free SetVoidU = Set.empty
-  -- Cross-kind functions: recurse into operands so any nested
-  -- Type-kinded variables are still tracked.
-  free (KeysU r) = free r
-  free (ListToSetU l) = free l
-  free (SizeU c) = free c
-  free (ProjectFieldU r f) = Set.union (free r) (free f)
-  free (RecSingletonU k v) = Set.union (free k) (free v)
+  -- Cross-kind functions are pattern synonyms over 'OpU'; their
+  -- recursion is handled by the unified 'OpU _ args' clause below.
+  -- Unified carriers: 'OpU' is uniform structural recursion across all
+  -- operators (no per-op logic needed). Literals are inert except for
+  -- recursive payloads in LRec/LList/LSet.
+  free (OpU _ args) = Set.unions (map free args)
+  free (LitU (LNat _)) = Set.empty
+  free (LitU (LStr _)) = Set.empty
+  free (LitU (LRec fs)) = Set.unions (map (free . snd) fs)
+  free (LitU (LList es)) = Set.unions (map free es)
+  free (LitU (LSet es)) = Set.unions (map free es)
   free (LabeledU _ t) = free t
 
   substituteTVar v (ForallU q r) t =
@@ -553,50 +701,32 @@ instance Typelike TypeU where
       sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
       sub (EffectU effs t) = EffectU effs (sub t)
       sub (OptionalU t) = OptionalU (sub t)
-      sub t@(NatLitU _) = t
-      sub (NatAddU a b) = NatAddU (sub a) (sub b)
-      sub (NatMulU a b) = NatMulU (sub a) (sub b)
-      sub (NatSubU a b) = NatSubU (sub a) (sub b)
-      sub (NatDivU a b) = NatDivU (sub a) (sub b)
       sub t@NatVoidU = t
       -- Str-kinded constructs: substitution does not touch them (parallel to
-      -- NatVarU). Concat recurses to substitute inside its operands.
+      -- NatVarU). Concat recurses inside via the OpU clause below.
       sub t@(StrVarU _) = t
-      sub t@(StrLitU _) = t
-      sub (StrConcatU a b) = StrConcatU (sub a) (sub b)
       sub t@StrVoidU = t
       -- Rec-kinded constructs: same pattern. Variables and the empty record
       -- are inert; operators recurse into their operands so type-level vars
       -- inside Rec field-types still see substitutions.
       sub t@(RecVarU _) = t
-      sub t@RecEmptyU = t
-      sub (RecExtendU k a b) = RecExtendU k (sub a) (sub b)
-      sub (RecUnionU a b) = RecUnionU (sub a) (sub b)
-      sub (RecDiffU a ks) = RecDiffU (sub a) ks
-      sub (RecIntersectU a b) = RecIntersectU (sub a) (sub b)
-      sub (RecRestrictU a b) = RecRestrictU (sub a) (sub b)
-      sub (RecDiffListU a b) = RecDiffListU (sub a) (sub b)
       sub t@RecVoidU = t
       -- List- and Set-kinded constructs: variables and empty/void are
       -- inert; operators recurse into their operands.
       sub t@(ListVarU _) = t
-      sub (ListLitU es) = ListLitU (map sub es)
-      sub (ListAppU a b) = ListAppU (sub a) (sub b)
       sub t@ListVoidU = t
       sub t@(SetVarU _) = t
-      sub t@SetEmptyU = t
-      sub (SetLitU es) = SetLitU (map sub es)
-      sub (SetUnionU a b) = SetUnionU (sub a) (sub b)
-      sub (SetInterU a b) = SetInterU (sub a) (sub b)
-      sub (SetDiffU a b) = SetDiffU (sub a) (sub b)
       sub t@SetVoidU = t
-      -- Cross-kind functions recurse into their operand subterms so
-      -- that any nested Type-kinded variables receive substitutions.
-      sub (KeysU r) = KeysU (sub r)
-      sub (ListToSetU l) = ListToSetU (sub l)
-      sub (SizeU c) = SizeU (sub c)
-      sub (ProjectFieldU r f) = ProjectFieldU (sub r) (sub f)
-      sub (RecSingletonU k v) = RecSingletonU (sub k) (sub v)
+      -- Cross-kind functions are pattern synonyms over 'OpU'; their
+      -- substitution is handled by the unified 'OpU op args' clause below.
+      -- Unified carriers: uniform structural recursion. Lit payloads recurse
+      -- through their type-carrying sub-parts.
+      sub (OpU op args) = OpU op (map sub args)
+      sub (LitU (LNat n)) = LitU (LNat n)
+      sub (LitU (LStr s)) = LitU (LStr s)
+      sub (LitU (LRec fs)) = LitU (LRec [(k, sub t) | (k, t) <- fs])
+      sub (LitU (LList es)) = LitU (LList (map sub es))
+      sub (LitU (LSet es)) = LitU (LSet (map sub es))
       sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
@@ -606,11 +736,13 @@ instance Typelike TypeU where
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType (EffectU effs t) = EffectU effs (normalizeType t)
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
-  normalizeType (NatAddU a b) = NatAddU (normalizeType a) (normalizeType b)
-  normalizeType (NatMulU a b) = NatMulU (normalizeType a) (normalizeType b)
-  normalizeType (NatSubU a b) = NatSubU (normalizeType a) (normalizeType b)
-  normalizeType (NatDivU a b) = NatDivU (normalizeType a) (normalizeType b)
   normalizeType t@(NatVarU _) = t
+  -- Unified carriers: recurse into payload so nested forms are normalized.
+  normalizeType (OpU op args) = OpU op (map normalizeType args)
+  normalizeType (LitU (LRec fs)) = LitU (LRec [(k, normalizeType t) | (k, t) <- fs])
+  normalizeType (LitU (LList es)) = LitU (LList (map normalizeType es))
+  normalizeType (LitU (LSet es)) = LitU (LSet (map normalizeType es))
+  normalizeType t@(LitU _) = t
   normalizeType (LabeledU n t) = LabeledU n (normalizeType t)
   normalizeType t = t
 
@@ -639,28 +771,24 @@ instance P.PartialOrd TypeU where
     o1 == o2 && n1 == n2 && length ps1 == length ps2
   (<=) (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && t1 P.<= t2
   (<=) (OptionalU t1) (OptionalU t2) = t1 P.<= t2
-  (<=) (NatLitU n1) (NatLitU n2) = n1 == n2
-  (<=) (NatAddU a1 b1) (NatAddU a2 b2) = a1 P.<= a2 && b1 P.<= b2
-  (<=) (NatMulU a1 b1) (NatMulU a2 b2) = a1 P.<= a2 && b1 P.<= b2
-  (<=) (NatSubU a1 b1) (NatSubU a2 b2) = a1 P.<= a2 && b1 P.<= b2
-  (<=) (NatDivU a1 b1) (NatDivU a2 b2) = a1 P.<= a2 && b1 P.<= b2
   -- NatVoid is wildcard-compatible with any Nat: erased phantoms compare
-  -- as equal to any real (or other erased) Nat slot. This preserves the
-  -- pre-existing behavior where NatLitU 0 was used as an "any Nat"
-  -- placeholder.
-  (<=) NatVoidU (NatLitU _) = True
-  (<=) (NatLitU _) NatVoidU = True
-  (<=) NatVoidU (NatAddU _ _) = True
-  (<=) (NatAddU _ _) NatVoidU = True
-  (<=) NatVoidU (NatMulU _ _) = True
-  (<=) (NatMulU _ _) NatVoidU = True
-  (<=) NatVoidU (NatSubU _ _) = True
-  (<=) (NatSubU _ _) NatVoidU = True
-  (<=) NatVoidU (NatDivU _ _) = True
-  (<=) (NatDivU _ _) NatVoidU = True
+  -- as equal to any real (or other erased) Nat slot. Nat-op and Nat-lit
+  -- wildcards are now handled below via the unified-carrier rules.
   (<=) NatVoidU (NatVarU _) = True
   (<=) (NatVarU _) NatVoidU = True
   (<=) NatVoidU NatVoidU = True
+  -- Unified-carrier subtyping: structural for matching tags; NatVoid
+  -- wildcards extend to OpU Nat-ops and LitU LNat so the new forms are
+  -- interchangeable with NatAddU/NatLitU/etc at the subtype level.
+  (<=) (OpU op1 args1) (OpU op2 args2) =
+    op1 == op2
+      && length args1 == length args2
+      && and (zipWith (P.<=) args1 args2)
+  (<=) (LitU l1) (LitU l2) = l1 == l2
+  (<=) NatVoidU (OpU op _) = isNatOpTag op
+  (<=) (OpU op _) NatVoidU = isNatOpTag op
+  (<=) NatVoidU (LitU (LNat _)) = True
+  (<=) (LitU (LNat _)) NatVoidU = True
   (<=) (LabeledU _ t1) t2 = t1 P.<= t2
   (<=) t1 (LabeledU _ t2) = t1 P.<= t2
   (<=) _ _ = False
@@ -701,10 +829,24 @@ findFirst v = f
         _ -> Nothing
     f (EffectU _ t1) (EffectU _ t2) = f t1 t2
     f (OptionalU t1) (OptionalU t2) = f t1 t2
-    f (NatAddU a1 b1) (NatAddU a2 b2) = firstOf (f a1 a2) (f b1 b2)
-    f (NatMulU a1 b1) (NatMulU a2 b2) = firstOf (f a1 a2) (f b1 b2)
-    f (NatSubU a1 b1) (NatSubU a2 b2) = firstOf (f a1 a2) (f b1 b2)
-    f (NatDivU a1 b1) (NatDivU a2 b2) = firstOf (f a1 a2) (f b1 b2)
+    -- Unified-carrier matching: same op + same arity recurses pairwise.
+    -- LRec recurses on field values when keys agree in order.
+    f (OpU op1 args1) (OpU op2 args2)
+      | op1 == op2 && length args1 == length args2 =
+          foldl firstOf Nothing (zipWith f args1 args2)
+      | otherwise = Nothing
+    f (LitU (LRec fs1)) (LitU (LRec fs2))
+      | map fst fs1 == map fst fs2 =
+          foldl firstOf Nothing (zipWith f (map snd fs1) (map snd fs2))
+      | otherwise = Nothing
+    f (LitU (LList es1)) (LitU (LList es2))
+      | length es1 == length es2 =
+          foldl firstOf Nothing (zipWith f es1 es2)
+      | otherwise = Nothing
+    f (LitU (LSet es1)) (LitU (LSet es2))
+      | length es1 == length es2 =
+          foldl firstOf Nothing (zipWith f es1 es2)
+      | otherwise = Nothing
     f (LabeledU _ t1) t2 = f t1 t2
     f t1 (LabeledU _ t2) = f t1 t2
     f _ _ = Nothing
@@ -755,43 +897,112 @@ extractKey (NamU _ v _ _) = v
 extractKey (ExistU v _ _) = v
 extractKey (EffectU _ t) = extractKey t
 extractKey (OptionalU t) = extractKey t
-extractKey (NatLitU _) = TV "Nat"
-extractKey (NatAddU _ _) = TV "Nat"
-extractKey (NatMulU _ _) = TV "Nat"
-extractKey (NatSubU _ _) = TV "Nat"
-extractKey (NatDivU _ _) = TV "Nat"
 extractKey NatVoidU = TV "Nat"
 extractKey (StrVarU _) = TV "Str"
-extractKey (StrLitU _) = TV "Str"
-extractKey (StrConcatU _ _) = TV "Str"
 extractKey StrVoidU = TV "Str"
 extractKey (RecVarU _) = TV "Rec"
-extractKey RecEmptyU = TV "Rec"
-extractKey (RecExtendU _ _ _) = TV "Rec"
-extractKey (RecUnionU _ _) = TV "Rec"
-extractKey (RecDiffU _ _) = TV "Rec"
-extractKey (RecIntersectU _ _) = TV "Rec"
-extractKey (RecRestrictU _ _) = TV "Rec"
-extractKey (RecDiffListU _ _) = TV "Rec"
 extractKey RecVoidU = TV "Rec"
 extractKey (ListVarU _) = TV "List"
-extractKey (ListLitU _) = TV "List"
-extractKey (ListAppU _ _) = TV "List"
 extractKey ListVoidU = TV "List"
 extractKey (SetVarU _) = TV "Set"
-extractKey SetEmptyU = TV "Set"
-extractKey (SetLitU _) = TV "Set"
-extractKey (SetUnionU _ _) = TV "Set"
-extractKey (SetInterU _ _) = TV "Set"
-extractKey (SetDiffU _ _) = TV "Set"
 extractKey SetVoidU = TV "Set"
-extractKey (KeysU _) = TV "Set"
-extractKey (ListToSetU _) = TV "Set"
-extractKey (SizeU _) = TV "Nat"
-extractKey (ProjectFieldU _ _) = TV "Type"
-extractKey (RecSingletonU _ _) = TV "Rec"
+extractKey (OpU op _) = opKeyTag op
+extractKey (LitU (LNat _)) = TV "Nat"
+extractKey (LitU (LStr _)) = TV "Str"
+extractKey (LitU (LRec _)) = TV "Rec"
+extractKey (LitU (LList _)) = TV "List"
+extractKey (LitU (LSet _)) = TV "Set"
 extractKey (LabeledU _ t) = extractKey t
 extractKey t = error $ "Cannot currently handle functional type imports: " <> show t
+
+-- | Result-kind tag for each operator, used by 'extractKey' for
+-- instance-resolution lookup. Mirrors the per-kind constructor mapping
+-- (NatAddU -> "Nat", KeysU -> "Set", etc).
+opKeyTag :: OpTag -> TVar
+opKeyTag OpNatAdd = TV "Nat"
+opKeyTag OpNatSub = TV "Nat"
+opKeyTag OpNatMul = TV "Nat"
+opKeyTag OpNatDiv = TV "Nat"
+opKeyTag OpStrConcat = TV "Str"
+opKeyTag OpRecExtend = TV "Rec"
+opKeyTag OpRecUnion = TV "Rec"
+opKeyTag OpRecIntersect = TV "Rec"
+opKeyTag OpRecRestrict = TV "Rec"
+opKeyTag OpRecDiffList = TV "Rec"
+opKeyTag OpRecSingleton = TV "Rec"
+opKeyTag OpListApp = TV "List"
+opKeyTag OpSetUnion = TV "Set"
+opKeyTag OpSetInter = TV "Set"
+opKeyTag OpSetDiff = TV "Set"
+opKeyTag OpKeys = TV "Set"
+opKeyTag OpListToSet = TV "Set"
+opKeyTag OpSize = TV "Nat"
+opKeyTag OpProjectField = TV "Type"
+
+-- | Expected arity of a kind operator. The smart constructors below
+-- enforce this at construction time so downstream code can rely on
+-- well-formed 'OpU' nodes.
+opArity :: OpTag -> Int
+opArity OpKeys = 1
+opArity OpListToSet = 1
+opArity OpSize = 1
+opArity OpRecExtend = 3
+opArity _ = 2
+
+-- | Whether an operator produces a Nat-kinded result. Used by the
+-- partial-order 'NatVoidU' wildcard rules so erased phantoms remain
+-- compatible with the unified-carrier Nat-op forms.
+isNatOpTag :: OpTag -> Bool
+isNatOpTag OpNatAdd = True
+isNatOpTag OpNatSub = True
+isNatOpTag OpNatMul = True
+isNatOpTag OpNatDiv = True
+isNatOpTag OpSize = True
+isNatOpTag _ = False
+
+-- | Generic smart constructor; validates arity. Production callers should
+-- prefer the named helpers ('mkNatAdd', ...) for arity-correct-by-shape.
+mkOp :: OpTag -> [TypeU] -> TypeU
+mkOp op args
+  | length args == opArity op = OpU op args
+  | otherwise =
+      error $ "mkOp: arity mismatch for " <> show op
+           <> "; expected " <> show (opArity op)
+           <> " got " <> show (length args)
+
+-- Named smart constructors. Arity is encoded in the function signature.
+mkNatAdd, mkNatSub, mkNatMul, mkNatDiv :: TypeU -> TypeU -> TypeU
+mkNatAdd a b = OpU OpNatAdd [a, b]
+mkNatSub a b = OpU OpNatSub [a, b]
+mkNatMul a b = OpU OpNatMul [a, b]
+mkNatDiv a b = OpU OpNatDiv [a, b]
+
+mkStrConcat :: TypeU -> TypeU -> TypeU
+mkStrConcat a b = OpU OpStrConcat [a, b]
+
+mkRecUnion, mkRecIntersect, mkRecRestrict, mkRecDiffList, mkRecSingleton
+  :: TypeU -> TypeU -> TypeU
+mkRecUnion a b = OpU OpRecUnion [a, b]
+mkRecIntersect a b = OpU OpRecIntersect [a, b]
+mkRecRestrict a b = OpU OpRecRestrict [a, b]
+mkRecDiffList a b = OpU OpRecDiffList [a, b]
+mkRecSingleton k v = OpU OpRecSingleton [k, v]
+
+mkListApp :: TypeU -> TypeU -> TypeU
+mkListApp a b = OpU OpListApp [a, b]
+
+mkSetUnion, mkSetInter, mkSetDiff :: TypeU -> TypeU -> TypeU
+mkSetUnion a b = OpU OpSetUnion [a, b]
+mkSetInter a b = OpU OpSetInter [a, b]
+mkSetDiff a b = OpU OpSetDiff [a, b]
+
+mkKeys, mkListToSet, mkSize :: TypeU -> TypeU
+mkKeys r = OpU OpKeys [r]
+mkListToSet l = OpU OpListToSet [l]
+mkSize c = OpU OpSize [c]
+
+mkProjectField :: TypeU -> TypeU -> TypeU
+mkProjectField r f = OpU OpProjectField [r, f]
 
 type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
@@ -821,48 +1032,34 @@ unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedTy
 unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
 unresolvedType2type (EffectU effs t) = EffectT (resolveEffectSet effs) (unresolvedType2type t)
 unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
-unresolvedType2type (NatLitU n) = NatLitT n
-unresolvedType2type (NatAddU a b) = NatAddT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (NatMulU a b) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (NatSubU a b) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (NatDivU a b) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type NatVoidU = NatVoidT
 unresolvedType2type (StrVarU _) = StrVoidT
-unresolvedType2type (StrLitU s) = StrLitT s
-unresolvedType2type (StrConcatU a b) = StrConcatT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type StrVoidU = StrVoidT
 -- Rec-kinded constructs: erase to NatVoidT at the ground type level. The
 -- Type ADT does not represent Rec separately. See Stage 3 design memos.
 unresolvedType2type (RecVarU _) = NatVoidT
-unresolvedType2type RecEmptyU = NatVoidT
-unresolvedType2type (RecExtendU _ _ _) = NatVoidT
-unresolvedType2type (RecUnionU _ _) = NatVoidT
-unresolvedType2type (RecDiffU _ _) = NatVoidT
-unresolvedType2type (RecIntersectU _ _) = NatVoidT
-unresolvedType2type (RecRestrictU _ _) = NatVoidT
-unresolvedType2type (RecDiffListU _ _) = NatVoidT
 unresolvedType2type RecVoidU = NatVoidT
 -- List- and Set-kinded constructs erase to NatVoidT at the ground type
 -- level. The Type ADT does not represent List or Set separately.
 unresolvedType2type (ListVarU _) = NatVoidT
-unresolvedType2type (ListLitU _) = NatVoidT
-unresolvedType2type (ListAppU _ _) = NatVoidT
 unresolvedType2type ListVoidU = NatVoidT
 unresolvedType2type (SetVarU _) = NatVoidT
-unresolvedType2type SetEmptyU = NatVoidT
-unresolvedType2type (SetLitU _) = NatVoidT
-unresolvedType2type (SetUnionU _ _) = NatVoidT
-unresolvedType2type (SetInterU _ _) = NatVoidT
-unresolvedType2type (SetDiffU _ _) = NatVoidT
 unresolvedType2type SetVoidU = NatVoidT
--- Cross-kind functions: erase to NatVoidT (phantom). Solver-level
--- reduction returns the proper TypeU; ground forms are folded into
--- their result kinds before this lowering runs.
-unresolvedType2type (KeysU _) = NatVoidT
-unresolvedType2type (ListToSetU _) = NatVoidT
-unresolvedType2type (SizeU _) = NatVoidT
-unresolvedType2type (ProjectFieldU _ _) = NatVoidT
-unresolvedType2type (RecSingletonU _ _) = NatVoidT
+-- Cross-kind functions are pattern synonyms over 'OpU'; their lowering
+-- is handled by the unified 'OpU _ _' clause below (erase to NatVoidT).
+-- Unified carriers: mirror typeOf above. Only Nat-op forms have ground
+-- Type-level counterparts; everything else erases to NatVoidT.
+unresolvedType2type (OpU OpNatAdd [a, b]) = NatAddT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (OpU OpNatSub [a, b]) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (OpU OpNatMul [a, b]) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (OpU OpNatDiv [a, b]) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (OpU OpStrConcat [a, b]) = StrConcatT (unresolvedType2type a) (unresolvedType2type b)
+unresolvedType2type (OpU _ _) = NatVoidT
+unresolvedType2type (LitU (LNat n)) = NatLitT n
+unresolvedType2type (LitU (LStr s)) = StrLitT s
+unresolvedType2type (LitU (LRec _)) = NatVoidT
+unresolvedType2type (LitU (LList _)) = NatVoidT
+unresolvedType2type (LitU (LSet _)) = NatVoidT
 unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | get a fresh variable name that is not used in t1 or t2
@@ -884,10 +1081,12 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars (NatVarU v) = Set.singleton (NatVarU v)
     allVars (EffectU _ t) = allVars t
     allVars (OptionalU t) = allVars t
-    allVars (NatAddU a b) = Set.union (allVars a) (allVars b)
-    allVars (NatMulU a b) = Set.union (allVars a) (allVars b)
-    allVars (NatSubU a b) = Set.union (allVars a) (allVars b)
-    allVars (NatDivU a b) = Set.union (allVars a) (allVars b)
+    -- Unified carriers: recurse into payload via allVars so nested
+    -- bound-quantified vars are still collected.
+    allVars (OpU _ args) = Set.unions (map allVars args)
+    allVars (LitU (LRec fs)) = Set.unions (map (allVars . snd) fs)
+    allVars (LitU (LList es)) = Set.unions (map allVars es)
+    allVars (LitU (LSet es)) = Set.unions (map allVars es)
     allVars (LabeledU _ t) = allVars t
     allVars t = free t
 
@@ -992,18 +1191,10 @@ instance Pretty TypeU where
               then "{" <> f True t <> "}"
               else "<" <> hcat (punctuate "," (map pretty (Set.toList labels))) <> ">" <+> f False t
       f _ (OptionalU t) = "?" <> f False t
-      f _ (NatLitU n) = pretty n
-      f _ (NatAddU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
-      f _ (NatMulU a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
-      f _ (NatSubU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
-      f _ (NatDivU a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
       f _ NatVoidU = "_"
       f _ (StrVarU v) = pretty v
-      f _ (StrLitU s) = dquotes (pretty s)
-      f _ (StrConcatU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
       f _ StrVoidU = "_"
       f _ (RecVarU v) = pretty v
-      f _ RecEmptyU = "{}"
       f _ rec@(RecExtendU _ _ _)
         -- Render iterated extensions ending in RecEmptyU as `{k1=t1, k2=t2}`.
         -- A non-empty tail (RecVarU or another operator) renders as
@@ -1012,29 +1203,42 @@ instance Pretty TypeU where
             braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fields]))
         | (fields, tl) <- collectExtends rec =
             "(" <> f True tl <+> hsep ["+" <+> pretty k <> "=" <> f False t | (k, t) <- fields] <> ")"
-      f _ (RecUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
       f _ (RecDiffU a ks) = "(" <> f True a <+> "-" <+> braces (hcat (punctuate "," (map pretty ks))) <> ")"
-      f _ (RecIntersectU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
-      f _ (RecRestrictU a b) = "(" <> f True a <+> "#" <+> f True b <> ")"
-      f _ (RecDiffListU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ RecVoidU = "_"
       -- List- and Set-kinded constructs.
       f _ (ListVarU v) = pretty v
-      f _ (ListLitU es) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
-      f _ (ListAppU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
       f _ ListVoidU = "_"
       f _ (SetVarU v) = pretty v
-      f _ SetEmptyU = "{}"
-      f _ (SetLitU es) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
-      f _ (SetUnionU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
-      f _ (SetInterU a b) = "(" <> f True a <+> "&" <+> f True b <> ")"
-      f _ (SetDiffU a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ SetVoidU = "_"
-      f _ (KeysU r) = "Keys" <+> f False r
-      f _ (ListToSetU l) = "ListToSet" <+> f False l
-      f _ (SizeU c) = "Size" <+> f False c
-      f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
-      f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
+      -- Cross-kind functions are pattern synonyms over 'OpU'; rendering
+      -- is dispatched by the unified 'OpU OpKeys / OpListToSet / OpSize /
+      -- OpProjectField / OpRecSingleton' clauses below.
+      -- Unified carriers: render identically to their per-kind counterparts.
+      f _ (OpU OpNatAdd [a, b]) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (OpU OpNatSub [a, b]) = "(" <> f True a <+> "-" <+> f True b <> ")"
+      f _ (OpU OpNatMul [a, b]) = "(" <> f True a <+> "*" <+> f True b <> ")"
+      f _ (OpU OpNatDiv [a, b]) = "(" <> f True a <+> "/" <+> f True b <> ")"
+      f _ (OpU OpStrConcat [a, b]) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (OpU OpRecUnion [a, b]) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (OpU OpRecIntersect [a, b]) = "(" <> f True a <+> "&" <+> f True b <> ")"
+      f _ (OpU OpRecRestrict [a, b]) = "(" <> f True a <+> "#" <+> f True b <> ")"
+      f _ (OpU OpRecDiffList [a, b]) = "(" <> f True a <+> "-" <+> f True b <> ")"
+      f _ (OpU OpRecSingleton [k, v]) = "Singleton" <+> f False k <+> f False v
+      f _ (OpU OpListApp [a, b]) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (OpU OpSetUnion [a, b]) = "(" <> f True a <+> "+" <+> f True b <> ")"
+      f _ (OpU OpSetInter [a, b]) = "(" <> f True a <+> "&" <+> f True b <> ")"
+      f _ (OpU OpSetDiff [a, b]) = "(" <> f True a <+> "-" <+> f True b <> ")"
+      f _ (OpU OpKeys [r]) = "Keys" <+> f False r
+      f _ (OpU OpListToSet [l]) = "ListToSet" <+> f False l
+      f _ (OpU OpSize [c]) = "Size" <+> f False c
+      f _ (OpU OpProjectField [r, fld]) = f False r <> "." <> f False fld
+      f _ (OpU op args) = pretty (DT.pack (show op)) <> tupled (map (f True) args)  -- malformed; debug fallback
+      f _ (LitU (LNat n)) = pretty n
+      f _ (LitU (LStr s)) = dquotes (pretty s)
+      f _ (LitU (LRec [])) = "{}"
+      f _ (LitU (LRec fs)) = braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fs]))
+      f _ (LitU (LList es)) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
+      f _ (LitU (LSet es)) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
       f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
