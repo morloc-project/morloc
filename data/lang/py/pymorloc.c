@@ -357,8 +357,10 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
                         PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
-                        if (!item || PyList_SetItem(obj, i, item) < 0) {
+                        if (!item) {
                             Py_XDECREF(item);
+                            PyRAISE("Failed to access element in list")
+                        } else if (PyList_SetItem(obj, i, item) < 0) {
                             PyRAISE("Failed to access element in list")
                         }
                     }
