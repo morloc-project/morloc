@@ -732,19 +732,54 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         (*resp).result_json = libc::strdup(c.as_ptr());
     } else {
         (*resp).success = false;
-        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-        let errmsg = if !stderr_buf.is_empty() {
-            String::from_utf8_lossy(&stderr_buf).into_owned()
-        } else if libc::WIFSIGNALED(status) {
-            format!("morloc {} killed by signal {}", subcmd, libc::WTERMSIG(status))
+        // Classify by exit cause. SIGXCPU means the child blew the
+        // RLIMIT_CPU budget (the --eval-timeout guard) -> TIMEOUT (408).
+        // Other fatal signals (SIGKILL, SIGSEGV, ...) are server-side
+        // failures -> INTERNAL (500). Anything else (non-zero exit, no
+        // signal) is "your expression didn't compile / had a runtime
+        // error" -> BAD_REQUEST (400). Note: --eval-timeout only
+        // bounds /eval and /typecheck (this fork_morloc_command path);
+        // /call/<command> dispatches into a pre-compiled pool worker
+        // and is not subject to this rlimit.
+        let (errmsg, kind) = if libc::WIFSIGNALED(status) {
+            let sig = libc::WTERMSIG(status);
+            if sig == libc::SIGXCPU {
+                (
+                    format!(
+                        "morloc {} exceeded CPU budget ({}s); see --eval-timeout",
+                        subcmd,
+                        G_EVAL_TIMEOUT.load(Ordering::Relaxed),
+                    ),
+                    DAEMON_ERROR_TIMEOUT,
+                )
+            } else if !stderr_buf.is_empty() {
+                (
+                    String::from_utf8_lossy(&stderr_buf).into_owned(),
+                    DAEMON_ERROR_INTERNAL,
+                )
+            } else {
+                (
+                    format!("morloc {} killed by signal {}", subcmd, sig),
+                    DAEMON_ERROR_INTERNAL,
+                )
+            }
+        } else if !stderr_buf.is_empty() {
+            (
+                String::from_utf8_lossy(&stderr_buf).into_owned(),
+                DAEMON_ERROR_BAD_REQUEST,
+            )
         } else {
             let code = if libc::WIFEXITED(status) {
                 libc::WEXITSTATUS(status)
             } else {
                 -1
             };
-            format!("morloc {} exited with code {}", subcmd, code)
+            (
+                format!("morloc {} exited with code {}", subcmd, code),
+                DAEMON_ERROR_BAD_REQUEST,
+            )
         };
+        (*resp).error_kind = kind;
         let c = CString::new(errmsg).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
     }
@@ -1572,7 +1607,7 @@ unsafe fn handle_lp_connection(
     let msg = read_lp_message(client_fd, &mut msg_len, &mut errmsg);
     if !errmsg.is_null() {
         let err_str = CStr::from_ptr(errmsg).to_string_lossy();
-        eprintln!("daemon: read error: {}", err_str);
+        eprintln!("morloc-daemon: read error: {}", err_str);
         libc::free(errmsg as *mut c_void);
         libc::close(client_fd);
         return;
@@ -1607,7 +1642,7 @@ unsafe fn handle_lp_connection(
     write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
     if !write_err.is_null() {
         let err_str = CStr::from_ptr(write_err).to_string_lossy();
-        eprintln!("daemon: write error: {}", err_str);
+        eprintln!("morloc-daemon: write error: {}", err_str);
         libc::free(write_err as *mut c_void);
     }
 
@@ -1945,7 +1980,7 @@ pub unsafe extern "C" fn daemon_run(
     if !(*config).unix_socket_path.is_null() {
         let sock_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
         if sock_fd < 0 {
-            eprintln!("daemon: failed to create unix socket");
+            eprintln!("morloc-daemon: failed to create unix socket");
             return;
         }
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
@@ -1964,7 +1999,7 @@ pub unsafe extern "C" fn daemon_run(
             std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!("daemon: failed to bind unix socket");
+            eprintln!("morloc-daemon: failed to bind unix socket");
             libc::close(sock_fd);
             return;
         }
@@ -1986,7 +2021,7 @@ pub unsafe extern "C" fn daemon_run(
         let requested = (*config).tcp_port as u16;
         let tcp_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if tcp_fd < 0 {
-            eprintln!("daemon: failed to create tcp socket");
+            eprintln!("morloc-daemon: failed to create tcp socket");
             return;
         }
         let opt: i32 = 1;
@@ -2007,7 +2042,7 @@ pub unsafe extern "C" fn daemon_run(
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!("daemon: failed to bind tcp port {}", requested);
+            eprintln!("morloc-daemon: failed to bind tcp port {}", requested);
             libc::close(tcp_fd);
             return;
         }
@@ -2026,7 +2061,7 @@ pub unsafe extern "C" fn daemon_run(
         let requested = (*config).http_port as u16;
         let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
-            eprintln!("daemon: failed to create http socket");
+            eprintln!("morloc-daemon: failed to create http socket");
             return;
         }
         let opt: i32 = 1;
@@ -2049,7 +2084,7 @@ pub unsafe extern "C" fn daemon_run(
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!("daemon: failed to bind http port {}", requested);
+            eprintln!("morloc-daemon: failed to bind http port {}", requested);
             libc::close(http_fd);
             return;
         }
@@ -2076,14 +2111,14 @@ pub unsafe extern "C" fn daemon_run(
             bound_tcp_port,
             bound_unix_path.as_deref(),
         ) {
-            eprintln!("daemon: failed to write port file {}: {}", path, e);
+            eprintln!("morloc-daemon: failed to write port file {}: {}", path, e);
             // non-fatal; the stderr ready lines above still convey the
             // bound ports.
         }
     }
 
     if nfds == 0 {
-        eprintln!("daemon: no listeners configured, exiting");
+        eprintln!("morloc-daemon: no listeners configured, exiting");
         return;
     }
 
@@ -2114,7 +2149,7 @@ pub unsafe extern "C" fn daemon_run(
             if crate::utility::errno_val() == libc::EINTR {
                 continue;
             }
-            eprintln!("daemon: poll error");
+            eprintln!("morloc-daemon: poll error");
             break;
         }
 
@@ -2138,7 +2173,7 @@ pub unsafe extern "C" fn daemon_run(
                 {
                     continue;
                 }
-                eprintln!("daemon: accept error");
+                eprintln!("morloc-daemon: accept error");
                 continue;
             }
             crate::utility::set_nosigpipe(client_fd);

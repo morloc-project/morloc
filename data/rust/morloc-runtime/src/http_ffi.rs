@@ -423,36 +423,46 @@ pub unsafe extern "C" fn http_to_daemon_request(
         let c = std::ffi::CString::new(cmd_name).unwrap_or_default();
         (*dreq).command = libc::strdup(c.as_ptr());
 
-        // Parse body
+        // Parse body. Accepts either a bare JSON array (`[arg1, arg2]`)
+        // or an object with an `args` array (`{"args": [...]}`).
+        // serde_json correctly handles string escapes and nested
+        // brackets, replacing the previous bracket-counting parser that
+        // misclassified `]` characters inside string fields as array
+        // terminators.
         let trimmed = body_str.trim();
-        if trimmed.starts_with('[') {
-            let c = std::ffi::CString::new(trimmed).unwrap_or_default();
-            (*dreq).args_json = libc::strdup(c.as_ptr());
-        } else if trimmed.starts_with('{') {
-            // Extract "args" array
-            if let Some(args_pos) = trimmed.find("\"args\"") {
-                let after = &trimmed[args_pos + 6..];
-                let after = after.trim_start().strip_prefix(':').unwrap_or(after).trim_start();
-                if after.starts_with('[') {
-                    // Find matching ]
-                    let mut depth = 0i32;
-                    let mut in_string = false;
-                    let mut end = 0;
-                    for (i, ch) in after.chars().enumerate() {
-                        if in_string {
-                            if ch == '\\' { continue; }
-                            if ch == '"' { in_string = false; }
-                        } else {
-                            if ch == '"' { in_string = true; }
-                            else if ch == '[' { depth += 1; }
-                            else if ch == ']' { depth -= 1; if depth == 0 { end = i + 1; break; } }
+        if !trimmed.is_empty() {
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(serde_json::Value::Array(_)) => {
+                    // The whole body is the args array.
+                    let c = std::ffi::CString::new(trimmed).unwrap_or_default();
+                    (*dreq).args_json = libc::strdup(c.as_ptr());
+                }
+                Ok(serde_json::Value::Object(map)) => {
+                    if let Some(args) = map.get("args") {
+                        if args.is_array() {
+                            let s = args.to_string();
+                            let c = std::ffi::CString::new(s).unwrap_or_default();
+                            (*dreq).args_json = libc::strdup(c.as_ptr());
                         }
                     }
-                    if end > 0 {
-                        let arr = &after[..end];
-                        let c = std::ffi::CString::new(arr).unwrap_or_default();
-                        (*dreq).args_json = libc::strdup(c.as_ptr());
-                    }
+                }
+                Ok(_) => {
+                    // JSON parsed but isn't an array or object; treat as
+                    // missing args (downstream will emit BAD_REQUEST).
+                }
+                Err(e) => {
+                    // Malformed JSON. Fail fast with a clear message
+                    // rather than letting it fall through as "missing
+                    // args" (which was the previous misleading default).
+                    libc::free(dreq as *mut c_void);
+                    set_errmsg(
+                        errmsg,
+                        &MorlocError::Other(format!(
+                            "Malformed JSON in /call body: {}",
+                            e
+                        )),
+                    );
+                    return ptr::null_mut();
                 }
             }
         }
