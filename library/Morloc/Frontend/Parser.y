@@ -774,6 +774,7 @@ rec_entries :: { [(Text, TypeU)] }
 
 rec_entry :: { (Text, TypeU) }
   : LOWER '=' non_fun_type                 { (getName $1, $3) }
+  | LOWER '::' non_fun_type                {% recLiteralColonColonError $1 }
 
 type_list1 :: { [TypeU] }
   : type                      { [$1] }
@@ -1039,6 +1040,19 @@ checkRecordTypeKeys _ = go Set.empty
           State.lift (Left (ParseError (locPos tok)
             ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
       | otherwise = go (Set.insert k seen) rest
+
+-- Reject `{x :: T}` inside type-level record literals. The literal form
+-- binds fields with `=` (mirroring morloc's term-level `{x = 3}` record
+-- syntax); `::` is reserved for declarations (top-level sigs, named
+-- record fields). The caret falls on the field-name token so the error
+-- points to the offending entry.
+recLiteralColonColonError :: Located -> P a
+recLiteralColonColonError nameTok = do
+  srcLines <- State.gets psSourceLines
+  let msg = "type-level record literals use `=` to bind fields, not `::`\n"
+         ++ "  try: {" ++ T.unpack (getName nameTok) ++ " = <type>, ...}\n"
+         ++ "  `::` is for declarations (e.g. `x :: Int`, `record R where { x :: Int }`)"
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
 
 -- Same check for the positionless legacy form (`record T = MkT { ... }`).
 -- Falls back to the declaration-keyword position since per-entry positions

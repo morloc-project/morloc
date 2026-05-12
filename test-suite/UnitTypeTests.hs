@@ -732,6 +732,24 @@ typeAliasTests =
              f :: Foo X Y -> Z
         |]
           (fun [tuple [var "X", var "Y"], var "Z"])
+      -- Type-level record literals use `=` to bind fields (mirroring
+      -- morloc's term-level `{x = 3, y = "a"}` syntax). Mistakenly using
+      -- `::` (the declaration separator) raises a specific parser error
+      -- rather than a generic 'unexpected ::'.
+      , expectError
+          "type-level record literal: `{x :: Int}` raises a parse error"
+          [r|
+        module main (f)
+        type R = {x :: Int, y :: Str}
+        f :: R -> R
+        |]
+      , expectError
+          "type-level record literal: `::` inside a tuple type annotation"
+          [r|
+        module main (c)
+        c :: ({x :: Int, y :: Int}, Int)
+        c = undefined
+        |]
       ]
 
 -- | Tests for integer/real literal defaulting through type aliases.
