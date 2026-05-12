@@ -34,12 +34,14 @@ module UnitTypeTests
   , natDimTests
   , letBindingTests
   , aliasConstructorTests
+  , typedefKindVarTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 import qualified Morloc.Typecheck.Internal as MTI
 import qualified Morloc.Typecheck.NatSolver as NS
 import qualified System.Directory as SD
@@ -3925,6 +3927,213 @@ natArithTests =
       x :: SizedList 5 Int
       x = split a
         |]
+    ]
+
+-- | Tests that typedef expansion correctly substitutes kind-specific
+-- variables (NatVarU/StrVarU/RecVarU/ListVarU/SetVarU) into the body.
+-- Regression coverage for the parsub fix: previously parsub treated
+-- these as inert (parallel to its NatVarU base case), so typedefs of
+-- the form @type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int@ would
+-- leave the body's promoted Nat variables unbound after expansion. The
+-- function-call substitution path (Internal.apply / gammaNatSubs) was
+-- unaffected, which is why polymorphic function signatures worked but
+-- typedef-style nat arithmetic did not.
+typedefKindVarTests :: TestTree
+typedefKindVarTests =
+  testGroup
+    "typedef expansion substitutes kind-specific variables"
+    [ -- === Direct evaluateType tests (no morloc source, no frontend) ===
+      testCase "evaluateType: Nat typedef param substitutes NatLitU into NatAddU" $
+        -- Scope: type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 3, NatLitU 2]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatLitU 3) (NatLitU 2), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param leaves unrelated NatVarU intact" $
+        -- type Foo (n :: Nat) = Vector (k + n) Int
+        -- Foo 3 should give Vector (k + 3) Int (k stays NatVarU)
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "k")) (NatVarU (TV "n")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 3]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatVarU (TV "k")) (NatLitU 3), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param substitutes through NatSubU" $
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatSubU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 5, NatLitU 3]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatSubU (NatLitU 5) (NatLitU 3), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param substitutes through NatMulU" $
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatMulU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 3, NatLitU 2]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatMulU (NatLitU 3) (NatLitU 2), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param substitutes through NatDivU" $
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatDivU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 6, NatLitU 2]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatDivU (NatLitU 6) (NatLitU 2), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Str typedef param substitutes through StrConcatU" $
+        let bodyT = StrConcatU (StrVarU (TV "s")) (StrLitU "_suffix")
+            params = [Left (TV "s", KindStr)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [StrLitU "prefix"]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (StrConcatU (StrLitU "prefix") (StrLitU "_suffix"))
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: substitution at one position does NOT leak to other vars" $
+        -- type Foo (n :: Nat) = Vector (n + n) Int
+        -- Foo 4 should give Vector (4 + 4) Int (both occurrences substituted)
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "n")) (NatVarU (TV "n")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 4]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatLitU 4) (NatLitU 4), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: mixed Type and Nat typedef params" $
+        -- type Foo (n :: Nat) a = Vector (n + 1) a
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "n")) (NatLitU 1), VarU (TV "a")]
+            params = [Left (TV "n", KindNat), Left (TV "a", KindType)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 4, VarU (TV "Int")]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatLitU 4) (NatLitU 1), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+
+      -- === End-to-end morloc-source tests ===
+      -- The user's original reproducer: typechecking succeeds when the
+      -- typedef-parameter substitution correctly threads through Nat ops.
+    , assertGeneralType
+        "Foo n m = Vector (n + m) Int; Foo 3 2 = [1..5]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+      x :: Foo 3 2
+      x = [1, 2, 3, 4, 5]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Foo n m = Vector (n - m) Int; Foo 5 3 = [1, 2]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n - m) Int
+      x :: Foo 5 3
+      x = [1, 2]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Foo n m = Vector (n * m) Int; Foo 3 2 = [1..6]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n * m) Int
+      x :: Foo 3 2
+      x = [1, 2, 3, 4, 5, 6]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Foo n m = Vector (n / m) Int; Foo 6 2 = [1..3]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n / m) Int
+      x :: Foo 6 2
+      x = [1, 2, 3]
+        |]
+        (lst (var "Int"))
+    , expectError
+        "Foo n m = Vector (n + m) Int; Foo 3 2 with wrong-length value fails"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+      x :: Foo 3 2
+      x = [1, 2, 3, 4, 5, 6]
+        |]
+    , assertGeneralType
+        "Mixed Type/Nat params: Foo (n :: Nat) a = Vector (n + 1) a; Foo 4 Int = [1..5]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) a = Vector (n + 1) a
+      x :: Foo 4 Int
+      x = [1, 2, 3, 4, 5]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Repeated Nat param: Foo (n :: Nat) = Vector (n + n) Int; Foo 3 = [1..6]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) = Vector (n + n) Int
+      x :: Foo 3
+      x = [1, 2, 3, 4, 5, 6]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Single Nat param: Foo (n :: Nat) = Vector (n + 1) Int; Foo 4 = [1..5]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) = Vector (n + 1) Int
+      x :: Foo 4
+      x = [1, 2, 3, 4, 5]
+        |]
+        (lst (var "Int"))
     ]
 
 natLabelTests :: TestTree

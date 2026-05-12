@@ -40,6 +40,7 @@ main = do
       , natLabelTests
       , natKindPromotionTests
       , natDimTests
+      , typedefKindVarTests
       , letBindingTests
       , aliasConstructorTests
       , morlocDepsTests

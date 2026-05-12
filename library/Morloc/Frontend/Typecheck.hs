@@ -1171,11 +1171,19 @@ checkE ::
     , TypeU
     , ExprS (Indexed TypeU) ManyPoly Int
     )
-checkE i g1 (LstS (e : es)) (AppU v [t]) = do
-  (g2, t2, e') <- checkG g1 e t
-  -- LstS [] will go to the normal Sub case
-  (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU v [t2])
-  return (g3, t3, LstS (map (applyGen g3) (e' : es')))
+-- The single-arg form (e.g. `List Int`) treats the arg as the element
+-- type. Guard against firing when the arg is non-Type-kinded (e.g.
+-- `Foo (n :: Nat) = ...` instantiated as `Foo 3` -- here `3` is a Nat
+-- dimension, not an element type, and forcing list elements to subtype
+-- it produces a confusing kind mismatch). Falls through to the LstS
+-- catch-all (line ~1230) which handles dimension checking via getNatArgs.
+checkE i g1 (LstS (e : es)) (AppU v [t])
+  | not (isNatExpr t || isStrExpr t || isRecExpr t
+         || isListExpr t || isSetExpr t) = do
+      (g2, t2, e') <- checkG g1 e t
+      -- LstS [] will go to the normal Sub case
+      (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU v [t2])
+      return (g3, t3, LstS (map (applyGen g3) (e' : es')))
 checkE i g0 e0@(LamS vs body) t@(FunU as b)
   | length vs == length as = do
       let g1 = g0 ++> zipWith AnnG vs as
@@ -1397,11 +1405,26 @@ subtype' i a b g = do
 -- | Extract nat-kinded argument values from a type, given the Scope.
 -- For Matrix 2 4 Int with alias params [(m, KindNat), (n, KindNat), (a, KindType)]
 -- and args [NatLitU 2, NatLitU 4, VarU Int], returns [NatLitU 2, NatLitU 4].
+--
+-- When a typedef wraps its Nat params via a body expression (e.g.
+-- `type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int`), the surface
+-- args of Foo do not match what the list value should be dimensioned
+-- against -- the actual dimension lives at the Vector level as `(n+m)`.
+-- So follow the typedef reduction chain and return the Nat args from
+-- the DEEPEST level whose reduction still yields Nat args. This works
+-- because reducing past the last Nat-parameterized typedef (e.g. into
+-- `List a`) drops Nat info, while staying too shallow misses
+-- intermediate wrapping.
 getNatArgs :: Scope -> TypeU -> [TypeU]
 getNatArgs scope (AppU (VarU v) args) =
   case Map.lookup v scope of
     Just ((params, _, _, _) : _) ->
-      [arg | (Left (_, KindNat), arg) <- zip params args]
+      let myNatArgs = [arg | (Left (_, KindNat), arg) <- zip params args]
+      in case TE.reduceType scope (AppU (VarU v) args) of
+           Just t' -> case getNatArgs scope t' of
+             [] -> myNatArgs   -- the reduction dropped Nat info; keep ours
+             nas -> nas        -- recursion found a deeper Nat layer; use it
+           Nothing -> myNatArgs
     _ -> []
 getNatArgs _ _ = []
 

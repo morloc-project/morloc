@@ -43,6 +43,11 @@ module Morloc.Typecheck.Internal
   , renameEType
   , cleanTypeName
   , prettyTypeU
+  , isNatExpr
+  , isStrExpr
+  , isRecExpr
+  , isListExpr
+  , isSetExpr
   , prettyConstraint
   , occursCheck
   , toExistential
@@ -1208,7 +1213,7 @@ instantiate scope ta@(ExistU _ _ _) (ForallU v2 t2) g1 =
 -- you really know what you are doing and have tests to confirm it.
 instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) (rs2, rc2)) g1 = do
   -- check and expand open parameters
-  (ps1', ps2') <- case (pc1, pc2, compare (length ps1) (length ps2)) of
+  (ps1', _) <- case (pc1, pc2, compare (length ps1) (length ps2)) of
     (_, _, EQ) -> Right (ps1, ps2)
     (Closed, Closed, _) -> subtypeError ta tb "Unequal parameter length for closed existentials"
     (Closed, Open, GT) -> Right $ extendList ps1 ps2
@@ -1221,7 +1226,7 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
   let keyset2 = Set.fromList (map fst rs2)
 
   -- check and expand open records
-  (g2, rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
+  (g2, rs1', _) <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
     (Closed, Closed, False, _) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
     (Closed, Closed, _, False) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
     (Closed, Open, a, False) ->
