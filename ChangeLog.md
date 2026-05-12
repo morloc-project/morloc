@@ -23,6 +23,7 @@ Bug fixes
 
 Shm
  * Fix bug in volume growth algorithm - now back to geometric growth
+ * Fix shm memory leaks on foreign calls
 
 0.84.0 [2026-05-10]
 -------------------

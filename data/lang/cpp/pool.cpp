@@ -100,6 +100,26 @@ static void _flush_shm_tracker() {
     _shm_tracker.clear();
 }
 
+// Release one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used to drop a _put_value-tracked arg's
+// ref as soon as a foreign_call returns, rather than letting it linger
+// until the next dispatch flush.
+static bool _shm_tracker_release_one(absptr_t ptr) {
+    for (size_t i = 0; i < _shm_tracker.size(); i++) {
+        if (_shm_tracker[i].ptr == ptr) {
+            Schema* schema = _shm_tracker[i].schema;
+            _shm_tracker[i] = _shm_tracker.back();
+            _shm_tracker.pop_back();
+            char* err = NULL;
+            shfree(ptr, &err);
+            if (err) { free(err); }
+            if (schema) { free_schema(schema); }
+            return true;
+        }
+    }
+    return false;
+}
+
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 uint8_t* _put_value(const T& value, Schema* schema) {
@@ -362,6 +382,26 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     if (errmsg != NULL) {
         free(args_array);
         PROPAGATE_ERROR(errmsg)
+    }
+
+    // Release SHM owned by RPTR-tagged input args. The callee has finished
+    // reading them by the time foreign_call returns and shincref'd any
+    // refs it still needs, so the caller's _put_value-pushed tracker entry
+    // can be dropped now. Without this, every _put_value-driven SHM
+    // allocation made inside a manifold's foreign-call loop accumulates
+    // in the tracker until the outer dispatch ends.
+    for (size_t k = 0; k < nargs; k++) {
+        const morloc_packet_header_t* arg_hdr =
+            (const morloc_packet_header_t*)args_array[k];
+        if (arg_hdr->command.data.source != PACKET_SOURCE_RPTR) continue;
+        size_t arg_relptr = *(size_t*)(args_array[k]
+            + sizeof(morloc_packet_header_t) + arg_hdr->offset);
+        char* arg_resolve_err = NULL;
+        void* arg_voidstar = rel2abs(arg_relptr, &arg_resolve_err);
+        if (arg_resolve_err) { free(arg_resolve_err); arg_resolve_err = NULL; }
+        if (arg_voidstar) {
+            _shm_tracker_release_one((absptr_t)arg_voidstar);
+        }
     }
 
     // Incref the result's SHM so the callee's tracker flush won't destroy
