@@ -21,6 +21,9 @@ Bug fixes
  * fix kind-specific variable substitution in typedef expansion
  * fixed multi-line strings in recursive cases
 
+Shm
+ * Fix bug in volume growth algorithm - now back to geometric growth
+
 0.84.0 [2026-05-10]
 -------------------
 

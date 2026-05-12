@@ -62,6 +62,7 @@ main = do
         golden "bug-load-type-infer" "bug-load-type-infer"
       , golden "bug-intrinsic-schema-crash" "bug-intrinsic-schema-crash"
 
+      , golden "shm-volume-growth-py" "shm-volume-growth-py"
       , golden "thunk-basic" "thunk-basic"
       , golden "thunk-effects" "thunk-effects"
       , golden "thunk-do" "thunk-do"

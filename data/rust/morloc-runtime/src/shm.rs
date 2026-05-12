@@ -781,9 +781,24 @@ fn find_free_block(
     for i in 0..MAX_VOLUME_NUMBER {
         let shm = vols[i].ptr();
         if shm.is_null() {
-            // Create a new volume
+            // Grow each new volume to K x the previous volume's size, but at
+            // least large enough to fit the requesting allocation plus its
+            // BlockHeader. Geometric growth means total capacity expands
+            // exponentially with volume count, so MAX_VOLUME_NUMBER is not
+            // reached after only a handful of fresh volumes.
+            const VOLUME_GROWTH_FACTOR: usize = 2;
+            let prev_volume_size = if i > 0 && !vols[i - 1].is_null() {
+                // SAFETY: vols[i-1] is a valid mmap'd ShmHeader held under the
+                // VOLUMES lock for the duration of this read.
+                unsafe { (*vols[i - 1].ptr()).volume_size }
+            } else {
+                0xffff
+            };
+            let new_size = std::cmp::max(
+                size.saturating_add(std::mem::size_of::<BlockHeader>()),
+                prev_volume_size.saturating_mul(VOLUME_GROWTH_FACTOR),
+            );
             drop(vols);
-            let new_size = std::cmp::max(size * 2, 0xffff);
             let basename = {
                 let cb = COMMON_BASENAME.lock().unwrap();
                 get_cstr_buf(&cb).to_string()

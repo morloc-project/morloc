@@ -1,0 +1,12 @@
+module main (foo)
+
+import root-py
+import root-cpp
+
+source Py from "main.py" ("pywrap")
+source Cpp from "main.hpp" ("crun")
+
+pywrap :: Int -> Int -> (Str -> UInt64) -> UInt64
+crun :: Str -> UInt64
+
+foo strLen arrLen = pywrap strLen arrLen crun
