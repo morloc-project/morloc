@@ -414,6 +414,7 @@ genericLowerConfig desc srcNamer = cfg
         , lcRemoteCall = genericRemoteCall desc
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
+        , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeDoBlock = \_ stmts expr ->
             let suspendBlock = ldDoBlockBlock desc
@@ -575,12 +576,19 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolExpr = v
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
+      , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       }
 
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-  let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
-   in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+genericMakeLet desc namer i p1 p2 =
+  let rs = poolPriorLines p1 ++ [namer i <+> pretty (ldAssignOp desc) <+> poolExpr p1] ++ poolPriorLines p2
+   in PoolDocs
+        { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
+        , poolExpr = poolExpr p2
+        , poolPriorLines = rs
+        , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
+        , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+        }
 
 -- | Generic expression printer driven by descriptor
 genericPrintExpr :: LangDescriptor -> IExpr -> MDoc

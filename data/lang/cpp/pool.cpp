@@ -100,10 +100,10 @@ static void _flush_shm_tracker() {
     _shm_tracker.clear();
 }
 
-// Release one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used to drop a _put_value-tracked arg's
-// ref as soon as a foreign_call returns, rather than letting it linger
-// until the next dispatch flush.
+// Drop one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used by _release_packet_shm to free
+// a _put_value-tracked packet's SHM as soon as its codegen-determined
+// scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
     for (size_t i = 0; i < _shm_tracker.size(); i++) {
         if (_shm_tracker[i].ptr == ptr) {
@@ -118,6 +118,24 @@ static bool _shm_tracker_release_one(absptr_t ptr) {
         }
     }
     return false;
+}
+
+// Release the SHM ref owned by a _put_value-produced packet. The codegen
+// inserts this call at the end of a serialize let's scope so the tracker
+// entry is dropped as soon as the packet is no longer needed. No-op for
+// inline (non-RPTR) packets, so callers can invoke unconditionally.
+static void _release_packet_shm(const uint8_t* packet) {
+    if (packet == nullptr) return;
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) return;
+    size_t relptr = *(size_t*)(packet
+        + sizeof(morloc_packet_header_t) + hdr->offset);
+    char* resolve_err = NULL;
+    void* voidstar = rel2abs(relptr, &resolve_err);
+    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+    if (voidstar) {
+        _shm_tracker_release_one((absptr_t)voidstar);
+    }
 }
 
 // Transforms a serialized value into a message ready for the socket
@@ -382,26 +400,6 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     if (errmsg != NULL) {
         free(args_array);
         PROPAGATE_ERROR(errmsg)
-    }
-
-    // Release SHM owned by RPTR-tagged input args. The callee has finished
-    // reading them by the time foreign_call returns and shincref'd any
-    // refs it still needs, so the caller's _put_value-pushed tracker entry
-    // can be dropped now. Without this, every _put_value-driven SHM
-    // allocation made inside a manifold's foreign-call loop accumulates
-    // in the tracker until the outer dispatch ends.
-    for (size_t k = 0; k < nargs; k++) {
-        const morloc_packet_header_t* arg_hdr =
-            (const morloc_packet_header_t*)args_array[k];
-        if (arg_hdr->command.data.source != PACKET_SOURCE_RPTR) continue;
-        size_t arg_relptr = *(size_t*)(args_array[k]
-            + sizeof(morloc_packet_header_t) + arg_hdr->offset);
-        char* arg_resolve_err = NULL;
-        void* arg_voidstar = rel2abs(arg_relptr, &arg_resolve_err);
-        if (arg_resolve_err) { free(arg_resolve_err); arg_resolve_err = NULL; }
-        if (arg_voidstar) {
-            _shm_tracker_release_one((absptr_t)arg_voidstar);
-        }
     }
 
     // Incref the result's SHM so the callee's tracker flush won't destroy

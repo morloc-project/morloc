@@ -259,6 +259,13 @@ data LowerConfig m = LowerConfig
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
+  , lcReleaseStmt :: Text -> MDoc
+  -- ^ Produce a statement releasing the SHM owned by a serialize-let-bound
+  -- packet variable. Called at the end of a serialize let's body so the
+  -- per-call SHM tracker entry can be dropped as soon as the body finishes
+  -- using the packet, rather than accumulating until the next dispatch flush.
+  -- For inline packets (no SHM), the runtime function this targets is a
+  -- no-op, so emitting the call unconditionally is safe.
   , lcReturn :: MDoc -> MDoc
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
@@ -392,7 +399,23 @@ lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
-lowerSerialExpr cfg _ (ReturnS_ x) = return $ x {poolExpr = lcReturn cfg (poolExpr x)}
+lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
+lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
+  -- The let RHS is a SerializeS, so the bound variable owns a put_value
+  -- tracker entry. Wrap the body to bind its result to a temp helper var,
+  -- emit a release call against the let-bound variable, and expose the
+  -- temp as the new pool expression. This makes the SHM ref's lifetime
+  -- end exactly at the body's last use of the bound variable rather than
+  -- carrying it to the outer dispatch boundary.
+  letResult <- lcMakeLet cfg svarNamer i Nothing e1 e2
+  tmpIdx <- lcNewIndex cfg
+  let releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+      releaseBody =
+        defaultValue
+          { poolExpr = helperNamer tmpIdx
+          , poolPriorLines = [releaseLine]
+          }
+  lcMakeLet cfg helperNamer tmpIdx Nothing letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
   lcMakeLet cfg svarNamer i Nothing e1 e2
 lowerSerialExpr cfg (NativeLetS _ (typeFof -> t) _) (NativeLetS_ i e1 e2) =
@@ -432,14 +455,34 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
       , poolExpr = patResult
       , poolPriorLines = concatMap poolPriorLines es
       , poolPriorExprs = concatMap poolPriorExprs es
+      , poolReturnFlag = any poolReturnFlag es
       }
 lowerNativeExpr _ _ (AppExeN_ _ (LocalCallP idx) (map snd -> es)) = do
   return $ mergePoolDocs ((<>) (nvarNamer idx) . tupled) es
 lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid _) (map snd -> es)) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerNativeExpr _ _ (ManN_ call) = return call
-lowerNativeExpr cfg _ (ReturnN_ x) =
-  return $ x {poolExpr = lcReturn cfg (poolExpr x)}
+lowerNativeExpr _ _ (ReturnN_ x) =
+  return $ x {poolReturnFlag = True}
+lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) = do
+  -- Same shape as the SerialLetS-with-SerializeS case in lowerSerialExpr:
+  -- the let-bound variable owns a put_value tracker entry, so wrap the
+  -- body's result with a temp and emit a release call once the body
+  -- finishes using the bound variable. This branch covers inner (native-
+  -- returning) manifolds whose put_value let-bindings live in NativeExpr
+  -- via SerialLetN -- e.g., the m1417-style wrapper around a foreign call.
+  -- The body is a NativeExpr, so the temp's declared type must match it
+  -- (rather than falling back to the serial type used for SerialLetS).
+  letResult <- lcMakeLet cfg svarNamer i Nothing x1 x2
+  tmpIdx <- lcNewIndex cfg
+  let bodyT = typeFof body
+      releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+      releaseBody =
+        defaultValue
+          { poolExpr = helperNamer tmpIdx
+          , poolPriorLines = [releaseLine]
+          }
+  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) letResult releaseBody
 lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing x1 x2
 lowerNativeExpr cfg (NativeLetN _ (typeFof -> t) _) (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i (Just t) x1 x2
 lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing x1 x2
@@ -569,8 +612,15 @@ lowerManifold ::
   TypeM ->
   PoolDocs ->
   m PoolDocs
-lowerManifold cfg m form headForm manifoldType (PoolDocs completeManifolds body priorLines priorExprs) = do
-  let args = typeMofForm form
+lowerManifold cfg m form headForm manifoldType bodyPool = do
+  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag = bodyPool
+      -- Apply lcReturn at the manifold boundary if a nested ReturnS_/ReturnN_
+      -- set the return flag. Deferring lcReturn to here lets intermediate
+      -- handlers (notably the serialize-let-wrap that rebinds the body
+      -- expression to a temp before emitting a release call) keep
+      -- poolExpr as a value rather than a return statement.
+      body = if retFlag then lcReturn cfg bodyExpr else bodyExpr
+      args = typeMofForm form
       mname = manNamer m
   maybeNewManifold <- lcMakeFunction cfg mname args manifoldType priorLines body headForm
   let call = case form of
@@ -588,6 +638,7 @@ lowerManifold cfg m form headForm manifoldType (PoolDocs completeManifolds body 
       , poolExpr = call
       , poolPriorLines = []
       , poolPriorExprs = priorExprs
+      , poolReturnFlag = False
       }
 
 -- | Bundle all six fold callbacks into a single FoldWithManifoldM record.

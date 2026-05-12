@@ -38,6 +38,7 @@ ldFieldAccess: dot
 # Serialize/deserialize function names (from juliamorloc.jl)
 ldSerializeFn: "MorlocRuntime.put_value"
 ldDeserializeFn: "MorlocRuntime.get_value"
+ldReleasePacketFn: "MorlocRuntime.release_packet_shm"
 ldIntrinsicPrefix: "MorlocRuntime."
 
 # Foreign call

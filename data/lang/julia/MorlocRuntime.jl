@@ -189,6 +189,18 @@ end
 # -- Foreign call --
 
 """
+    release_packet_shm(packet) -> Nothing
+
+Drop the SHM ref owned by a serialize-let-bound packet. Julia's put_value
+serializes to msgpack inline rather than allocating SHM, so this is a no-op;
+the function exists only so codegen can emit a uniform release call regardless
+of which language a manifold runs in.
+"""
+function release_packet_shm(_packet)
+    nothing
+end
+
+"""
     foreign_call(tmpdir, socket_name, mid, args) -> Ptr{UInt8}
 
 Call another pool (cross-language IPC). args is a vector of packet pointers.

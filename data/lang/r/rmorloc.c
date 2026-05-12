@@ -87,10 +87,11 @@ static void flush_shm_tracker(void) {
     shm_tracker_count = 0;
 }
 
-// Release one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used to drop a morloc_put_value-tracked
-// arg's ref as soon as a foreign_call returns, rather than letting it
-// linger until the next dispatch flush.
+// Drop one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used by morloc_release_packet_shm to
+// free a morloc_put_value-tracked packet's SHM as soon as its
+// codegen-determined scope ends, rather than waiting for the next
+// dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
@@ -1683,26 +1684,6 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         packet
     );
 
-    // Release SHM owned by RPTR-tagged input args. The callee has finished
-    // reading them by the time foreign_call returns and shincref'd any
-    // refs it still needs, so the caller's morloc_put_value-pushed tracker
-    // entry can be dropped now. Without this, every put_value-driven SHM
-    // allocation made inside a manifold's foreign-call loop accumulates
-    // in the tracker until the outer dispatch ends.
-    for (size_t k = 0; k < nargs; k++) {
-        const morloc_packet_header_t* arg_hdr =
-            (const morloc_packet_header_t*)arg_packets[k];
-        if (arg_hdr->command.data.source != PACKET_SOURCE_RPTR) continue;
-        size_t arg_relptr = *(size_t*)(arg_packets[k]
-            + sizeof(morloc_packet_header_t) + arg_hdr->offset);
-        char* arg_resolve_err = NULL;
-        void* arg_voidstar = rel2abs(arg_relptr, &arg_resolve_err);
-        if (arg_resolve_err) { free(arg_resolve_err); arg_resolve_err = NULL; }
-        if (arg_voidstar) {
-            shm_tracker_release_one((absptr_t)arg_voidstar);
-        }
-    }
-
     // Get result size
     size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);
 
@@ -1782,6 +1763,36 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 
     UNPROTECT(1);
     return packet_r;
+}
+
+
+// Release the SHM ref owned by a morloc_put_value-produced packet. The
+// codegen inserts this call at the end of a serialize let's scope so
+// the tracker entry is dropped as soon as the packet is no longer
+// needed. No-op for inline (non-RPTR) packets, so callers can invoke
+// unconditionally.
+SEXP morloc_release_packet_shm(SEXP packet_r) {
+    if (TYPEOF(packet_r) != RAWSXP) {
+        return R_NilValue;
+    }
+    R_xlen_t packet_size = LENGTH(packet_r);
+    if ((size_t)packet_size < sizeof(morloc_packet_header_t)) {
+        return R_NilValue;
+    }
+    const uint8_t* packet = (const uint8_t*)RAW(packet_r);
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+        return R_NilValue;
+    }
+    size_t relptr = *(size_t*)(packet
+        + sizeof(morloc_packet_header_t) + hdr->offset);
+    char* resolve_err = NULL;
+    void* voidstar = rel2abs(relptr, &resolve_err);
+    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+    if (voidstar) {
+        shm_tracker_release_one((absptr_t)voidstar);
+    }
+    return R_NilValue;
 }
 
 
@@ -2251,6 +2262,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_remote_call", (DL_FUNC) &morloc_remote_call, 5},
         {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
         {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
+        {"morloc_release_packet_shm", (DL_FUNC) &morloc_release_packet_shm, 1},
         {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
         {"morloc_socketpair", (DL_FUNC) &morloc_socketpair, 0},
         {"morloc_fork", (DL_FUNC) &morloc_fork, 0},

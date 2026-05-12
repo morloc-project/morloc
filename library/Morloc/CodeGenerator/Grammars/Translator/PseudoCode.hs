@@ -132,9 +132,15 @@ prettyFoldManifold =
        in "lambda" <+> tupled boundArgs <> ":" <+> functionCall
 
     makeLet :: (Int -> MDoc) -> MDoc -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet letNamer letStr i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-      let rs = rs1 ++ [letStr <+> letNamer i <+> "=" <+> e1'] ++ rs2
-       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+    makeLet letNamer letStr i p1 p2 =
+      let rs = poolPriorLines p1 ++ [letStr <+> letNamer i <+> "=" <+> poolExpr p1] ++ poolPriorLines p2
+       in PoolDocs
+            { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
+            , poolExpr = poolExpr p2
+            , poolPriorLines = rs
+            , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
+            , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+            }
 
     letNamerS :: Int -> MDoc
     letNamerS i = "letSvar_" <> pretty i
@@ -161,8 +167,9 @@ pseudoManifold ::
   Maybe HeadManifoldForm ->
   PoolDocs ->
   PoolDocs
-pseudoManifold makeFunc makeLam m form headForm (PoolDocs completeManifolds body priorLines priorExprs) =
-  let args = typeMofForm form
+pseudoManifold makeFunc makeLam m form headForm bodyPool =
+  let PoolDocs completeManifolds body priorLines priorExprs _ = bodyPool
+      args = typeMofForm form
       mname = manNamer m
       newManifold = makeFunc mname args priorLines body headForm
       call = case form of
@@ -178,6 +185,7 @@ pseudoManifold makeFunc makeLam m form headForm (PoolDocs completeManifolds body
         , poolExpr = call
         , poolPriorLines = []
         , poolPriorExprs = priorExprs
+        , poolReturnFlag = False
         }
 
 prettyThing :: (p -> MI.Identity PoolDocs) -> p -> Doc ()

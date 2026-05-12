@@ -48,10 +48,10 @@ static void flush_shm_tracker(void) {
     shm_tracker_count = 0;
 }
 
-// Release one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used to drop a put_value-tracked arg's
-// ref as soon as a foreign_call returns, rather than letting it linger
-// until the next dispatch flush.
+// Drop one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used by release_packet_shm to free
+// a put_value-tracked packet's SHM as soon as its codegen-determined
+// scope ends, rather than waiting for the next dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
@@ -1353,6 +1353,44 @@ static PyObject* pybinding__flush_shm_tracker(PyObject* self, PyObject* args) {
 }
 
 
+// Release the SHM ref owned by a put_value-produced packet. The codegen
+// inserts this call at the end of a serialize let's scope so the tracker
+// entry is dropped as soon as the packet is no longer needed, instead of
+// accumulating until the dispatch boundary. No-op for inline packets
+// (those don't carry an SHM relptr), so callers can invoke unconditionally.
+static PyObject* pybinding__release_packet_shm(PyObject* self, PyObject* args) { MAYFAIL
+    const char* packet;
+    Py_ssize_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    if ((size_t)packet_size < sizeof(morloc_packet_header_t)) {
+        Py_RETURN_NONE;
+    }
+
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+        Py_RETURN_NONE;
+    }
+
+    size_t relptr = *(size_t*)((const uint8_t*)packet
+        + sizeof(morloc_packet_header_t) + hdr->offset);
+    char* resolve_err = NULL;
+    void* voidstar = rel2abs(relptr, &resolve_err);
+    if (resolve_err) { free(resolve_err); }
+    if (voidstar) {
+        shm_tracker_release_one((absptr_t)voidstar);
+    }
+
+    Py_RETURN_NONE;
+
+error:
+    return NULL;
+}
+
+
 // Make a foreign call
 //
 // Arguments:
@@ -1403,32 +1441,12 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
 
     packet = PyTRY(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
+    free(arg_packets);
+    arg_packets = NULL;
+
     result = PyTRY(send_and_receive_over_socket, socket_path, packet);
     free(packet);
     packet = NULL;
-
-    // Release SHM owned by RPTR-tagged input args. The callee has finished
-    // reading them by the time foreign_call returns and shincref'd any
-    // refs it still needs, so the caller's put_value-pushed tracker entry
-    // can be dropped now. Without this, every put_value-driven SHM
-    // allocation made inside a manifold's foreign-call loop accumulates
-    // in the tracker until the outer dispatch ends.
-    for (Py_ssize_t k = 0; k < nargs; k++) {
-        const morloc_packet_header_t* arg_hdr =
-            (const morloc_packet_header_t*)arg_packets[k];
-        if (arg_hdr->command.data.source != PACKET_SOURCE_RPTR) continue;
-        size_t arg_relptr = *(size_t*)(arg_packets[k]
-            + sizeof(morloc_packet_header_t) + arg_hdr->offset);
-        char* arg_resolve_err = NULL;
-        void* arg_voidstar = rel2abs(arg_relptr, &arg_resolve_err);
-        if (arg_resolve_err) { free(arg_resolve_err); }
-        if (arg_voidstar) {
-            shm_tracker_release_one((absptr_t)arg_voidstar);
-        }
-    }
-
-    free(arg_packets);
-    arg_packets = NULL;
 
     // Incref the result's SHM so the callee's tracker flush won't destroy
     // data we may still need (e.g. forwarded result packets).
@@ -1958,6 +1976,7 @@ static PyMethodDef Methods[] = {
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"flush_shm_tracker", pybinding__flush_shm_tracker, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
+    {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
