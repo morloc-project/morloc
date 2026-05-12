@@ -43,6 +43,11 @@ module Morloc.Typecheck.Internal
   , renameEType
   , cleanTypeName
   , prettyTypeU
+  , isNatExpr
+  , isStrExpr
+  , isRecExpr
+  , isListExpr
+  , isSetExpr
   , prettyConstraint
   , occursCheck
   , toExistential
@@ -962,6 +967,13 @@ subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
   | pc1 == Open && length ps1 < length ps2 = do
       let (ps1', _) = extendList ps1 ps2
       subtype scope (ExistU v1 (ps1', pc1) rs) t2 g1
+  -- existential built by selectorType (`_pattern_*`) has one slot per
+  -- selector index, so this mismatch means an index getter overran the
+  -- tuple it was applied to.
+  | length ps1 > length ps2
+  , MT.isPrefixOf "_pattern_" (unTVar v1) =
+      subtypeError t1 t2 $ "tuple arity" <+> pretty (length ps2)
+        <+> "required, index" <+> pretty (length ps1 - 1) <+> "given"
   | length ps1 > length ps2 =
       subtypeError t1 t2 "InstantiateL - too many parameters in left existential"
   -- otherwise, do the thing
@@ -1201,7 +1213,7 @@ instantiate scope ta@(ExistU _ _ _) (ForallU v2 t2) g1 =
 -- you really know what you are doing and have tests to confirm it.
 instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) (rs2, rc2)) g1 = do
   -- check and expand open parameters
-  (ps1', ps2') <- case (pc1, pc2, compare (length ps1) (length ps2)) of
+  (ps1', _) <- case (pc1, pc2, compare (length ps1) (length ps2)) of
     (_, _, EQ) -> Right (ps1, ps2)
     (Closed, Closed, _) -> subtypeError ta tb "Unequal parameter length for closed existentials"
     (Closed, Open, GT) -> Right $ extendList ps1 ps2
@@ -1214,7 +1226,7 @@ instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) 
   let keyset2 = Set.fromList (map fst rs2)
 
   -- check and expand open records
-  (g2, rs1', rs2') <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
+  (g2, rs1', _) <- case (rc1, rc2, Set.isSubsetOf keyset1 keyset2, Set.isSubsetOf keyset2 keyset1) of
     (Closed, Closed, False, _) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
     (Closed, Closed, _, False) -> subtypeError ta tb "Right closed existential contains keys missing in left closed existential"
     (Closed, Open, a, False) ->

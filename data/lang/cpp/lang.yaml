@@ -6,3 +6,5 @@ is_compiled: true
 run_command: []
 serial_type: "uint8_t*"
 cost: 0
+# std::string is length-prefixed and supports interior NUL bytes.
+allow_string_null: true

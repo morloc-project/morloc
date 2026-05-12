@@ -87,6 +87,27 @@ static void flush_shm_tracker(void) {
     shm_tracker_count = 0;
 }
 
+// Drop one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used by morloc_release_packet_shm to
+// free a morloc_put_value-tracked packet's SHM as soon as its
+// codegen-determined scope ends, rather than waiting for the next
+// dispatch flush.
+static bool shm_tracker_release_one(absptr_t ptr) {
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        if (shm_tracker[i].ptr == ptr) {
+            Schema* schema = shm_tracker[i].schema;
+            shm_tracker[i] = shm_tracker[shm_tracker_count - 1];
+            shm_tracker_count--;
+            char* err = NULL;
+            shfree(ptr, &err);
+            if (err) { free(err); }
+            if (schema) { free_schema(schema); }
+            return true;
+        }
+    }
+    return false;
+}
+
 /// }}}
 
 // {{{ to_voidstar
@@ -1745,6 +1766,36 @@ SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
 }
 
 
+// Release the SHM ref owned by a morloc_put_value-produced packet. The
+// codegen inserts this call at the end of a serialize let's scope so
+// the tracker entry is dropped as soon as the packet is no longer
+// needed. No-op for inline (non-RPTR) packets, so callers can invoke
+// unconditionally.
+SEXP morloc_release_packet_shm(SEXP packet_r) {
+    if (TYPEOF(packet_r) != RAWSXP) {
+        return R_NilValue;
+    }
+    R_xlen_t packet_size = LENGTH(packet_r);
+    if ((size_t)packet_size < sizeof(morloc_packet_header_t)) {
+        return R_NilValue;
+    }
+    const uint8_t* packet = (const uint8_t*)RAW(packet_r);
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+        return R_NilValue;
+    }
+    size_t relptr = *(size_t*)(packet
+        + sizeof(morloc_packet_header_t) + hdr->offset);
+    char* resolve_err = NULL;
+    void* voidstar = rel2abs(relptr, &resolve_err);
+    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+    if (voidstar) {
+        shm_tracker_release_one((absptr_t)voidstar);
+    }
+    return R_NilValue;
+}
+
+
 SEXP extract_element_by_name(SEXP list, const char* key) {
   // Ensure inputs are correct types
   if (TYPEOF(list) != VECSXP) MORLOC_ERROR("Input must be a list");
@@ -2211,6 +2262,7 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_remote_call", (DL_FUNC) &morloc_remote_call, 5},
         {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
         {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
+        {"morloc_release_packet_shm", (DL_FUNC) &morloc_release_packet_shm, 1},
         {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
         {"morloc_socketpair", (DL_FUNC) &morloc_socketpair, 0},
         {"morloc_fork", (DL_FUNC) &morloc_fork, 0},

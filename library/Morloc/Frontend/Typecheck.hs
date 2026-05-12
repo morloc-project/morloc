@@ -123,7 +123,22 @@ typecheck = mapM run
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
 resolveTypes (AnnoS (Idx i t) ci e) =
-  AnnoS (Idx i (typeOf t)) ci (f e)
+  let t' = typeOf t
+      -- C3: canonicalise NamS field order against the resolved record
+      -- type. checkE handles top-level and nested-NamS positions, but
+      -- records appearing inside tuples / lists / polymorphic arg
+      -- positions can skip the checkE rule and reach here in source
+      -- order. Reordering against the annotation guarantees every
+      -- downstream NamS sees declared order.
+      e' = case (t', e) of
+        (NamT _ _ _ declared, NamS rs)
+          | not (null declared)
+          , let declKeys = map fst declared
+          , Set.fromList declKeys == Set.fromList (map fst rs) ->
+              let rsMap = Map.fromList rs
+               in NamS [(k, rsMap Map.! k) | k <- declKeys]
+        _ -> e
+   in AnnoS (Idx i t') ci (f e')
   where
     f :: ExprS (Indexed TypeU) Many Int -> ExprS (Indexed Type) Many Int
     f (BndS x) = BndS x
@@ -375,6 +390,22 @@ compatibleTypeU = go Set.empty Set.empty
 throwTypeError :: Int -> MDoc -> MorlocMonad a
 throwTypeError i msg = MM.throwSourcedError i ("General type error:" <+> msg)
 
+-- A selector pattern (e.g. .0, .field) targets tuples and records only.
+-- The selectorType existential unifies with List<a> by accident (both are
+-- single-parameter AppU), but at runtime the pool reads garbage. Reject
+-- the application here with a clear message and a hint.
+rejectListSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
+rejectListSelectorTarget i s t = do
+  scope <- MM.getGeneralScope i
+  let t' = either (const t) id (TE.evaluateType scope t)
+  case t' of
+    AppU (VarU (TV "List")) _ ->
+      MM.throwSourcedError i $
+        "Index getter" <+> pretty s
+          <+> "requires a tuple or record, got a list."
+          <+> "Use 'head' or '!!' for list access."
+    _ -> return ()
+
 checkG ::
   Gamma ->
   AnnoS Int ManyPoly Int ->
@@ -386,11 +417,14 @@ checkG ::
     )
 checkG g (AnnoS i j e) t = do
   annotation <- MM.gets stateAnnotations
+  -- Use the body's concrete index (j) for error caret positions: i is
+  -- often the variable-reference / export-list site and would mis-locate
+  -- body errors.
   (g', t', e') <- case Map.lookup j annotation of
-    Nothing -> checkE' i g e t
+    Nothing -> checkE' j g e t
     (Just annType) -> do
-      gAnn <- subtype' i annType t g
-      checkE' i gAnn e t
+      gAnn <- subtype' j annType t g
+      checkE' j gAnn e t
   let annotatedBody = AnnoS (Idx i t') j e'
   -- When the user declared a signature at this site, verify that the
   -- body's evaluation-time effects are a subset of those the signature
@@ -398,7 +432,7 @@ checkG g (AnnoS i j e) t = do
   -- positions without an annotation flow through ordinary structural
   -- subtyping, which already rejects narrowing on EffectU types.
   case Map.lookup j annotation of
-    Just annType -> checkEffectCoverage i (apply g' annType) annotatedBody
+    Just annType -> checkEffectCoverage j (apply g' annType) annotatedBody
     Nothing -> return ()
   return (g', t', annotatedBody)
 
@@ -412,15 +446,18 @@ synthG ::
     )
 synthG g (AnnoS gi ci e) = do
   annotation <- MM.gets stateAnnotations
+  -- Use the body's concrete index (ci) for error caret positions: gi
+  -- is often the variable-reference / export-list site (e.g. the term
+  -- name in `module Foo (val)`) and would mis-locate body errors.
   (g', t, e') <- case Map.lookup ci annotation of
-    Nothing -> synthE' gi g e
-    (Just annType) -> checkE' gi g e annType
+    Nothing -> synthE' ci g e
+    (Just annType) -> checkE' ci g e annType
   let annotatedBody = AnnoS (Idx gi t) ci e'
   -- Mirror the body-effect check from 'checkG'.  When a signature is
   -- attached at this synthesis site, verify the body's evaluation
   -- effects against it.
   case Map.lookup ci annotation of
-    Just annType -> checkEffectCoverage gi (apply g' annType) annotatedBody
+    Just annType -> checkEffectCoverage ci (apply g' annType) annotatedBody
     Nothing -> return ()
   return (g', t, annotatedBody)
 
@@ -497,6 +534,11 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
   -- use selector-derived type to update context and data expression
   (g2, _, e') <- checkG g1 e0 datType
 
+  -- Reject getter/selector pattern applied to a list. The selector
+  -- existential unifies with List<a> as a single-slot tuple, producing
+  -- garbage at runtime. Tuple/record getters only.
+  rejectListSelectorTarget fgidx s (apply g2 datType)
+
   let f1 = (AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s))))
 
   return (g2, apply g2 retType, AppS f1 [e'])
@@ -510,6 +552,8 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
   (g2, outputType) <- selectorType g1 s |>> second (selectorSetter setTypes s)
 
   (g3, datType, e1) <- checkG g2 e0 outputType
+
+  rejectListSelectorTarget fgidx s (apply g3 datType)
 
   let patternType = apply g3 $ FunU (datType : setTypes) outputType
       f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
@@ -1127,11 +1171,19 @@ checkE ::
     , TypeU
     , ExprS (Indexed TypeU) ManyPoly Int
     )
-checkE i g1 (LstS (e : es)) (AppU v [t]) = do
-  (g2, t2, e') <- checkG g1 e t
-  -- LstS [] will go to the normal Sub case
-  (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU v [t2])
-  return (g3, t3, LstS (map (applyGen g3) (e' : es')))
+-- The single-arg form (e.g. `List Int`) treats the arg as the element
+-- type. Guard against firing when the arg is non-Type-kinded (e.g.
+-- `Foo (n :: Nat) = ...` instantiated as `Foo 3` -- here `3` is a Nat
+-- dimension, not an element type, and forcing list elements to subtype
+-- it produces a confusing kind mismatch). Falls through to the LstS
+-- catch-all (line ~1230) which handles dimension checking via getNatArgs.
+checkE i g1 (LstS (e : es)) (AppU v [t])
+  | not (isNatExpr t || isStrExpr t || isRecExpr t
+         || isListExpr t || isSetExpr t) = do
+      (g2, t2, e') <- checkG g1 e t
+      -- LstS [] will go to the normal Sub case
+      (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU v [t2])
+      return (g3, t3, LstS (map (applyGen g3) (e' : es')))
 checkE i g0 e0@(LamS vs body) t@(FunU as b)
   | length vs == length as = do
       let g1 = g0 ++> zipWith AnnG vs as
@@ -1224,6 +1276,48 @@ checkE i g1 e1@(LstS _) b = do
 -- standalone base types rather than aliases of Int. Type aliases are
 -- expanded through the scope so that user-defined names like
 -- `type Char = UInt8` also accept integer literals directly.
+-- C3: Record literal {k1=v1, ...} checked against a declared record type
+-- NamU. Reorder the literal's fields to match declared field order, reject
+-- literals whose key set differs from the declaration, and propagate
+-- check direction into each field value so nested record literals
+-- (e.g. {outer={inner={...}}}) also get reordered.
+checkE i g (NamS rs) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const (apply g t)) id (TE.evaluateType scope (apply g t))
+  case tEval of
+    NamU _ _ _ declared | not (null declared) -> do
+      let litKeys = map fst rs
+          declKeys = map fst declared
+          litSet = Set.fromList litKeys
+          declSet = Set.fromList declKeys
+      if litSet == declSet
+        then do
+          let rsMap = Map.fromList rs
+              triples = [(k, rsMap Map.! k, fieldT) | (k, fieldT) <- declared]
+          -- Recurse with check-direction so nested records get reordered.
+          let go gAcc acc [] = return (gAcc, reverse acc)
+              go gAcc acc ((k, v, fieldT) : rest) = do
+                (gNext, _, v') <- checkG gAcc v fieldT
+                go gNext ((k, v') : acc) rest
+          (gFinal, fields) <- go g [] triples
+          return (gFinal, apply gFinal tEval, NamS fields)
+        else
+          let missing = Set.toList (Set.difference declSet litSet)
+              extra = Set.toList (Set.difference litSet declSet)
+              missingPart =
+                if null missing
+                  then mempty
+                  else line <> "  missing field(s):"
+                    <+> hsep (punctuate "," (map pretty missing))
+              extraPart =
+                if null extra
+                  then mempty
+                  else line <> "  unknown field(s):"
+                    <+> hsep (punctuate "," (map pretty extra))
+           in MM.throwSourcedError i $
+                "Record literal does not match declared type"
+                <+> prettyTypeU tEval <> ":" <> missingPart <> extraPart
+    _ -> checkEFallback i g (NamS rs) t
 checkE i g (IntS si x) t = do
   scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
@@ -1311,11 +1405,26 @@ subtype' i a b g = do
 -- | Extract nat-kinded argument values from a type, given the Scope.
 -- For Matrix 2 4 Int with alias params [(m, KindNat), (n, KindNat), (a, KindType)]
 -- and args [NatLitU 2, NatLitU 4, VarU Int], returns [NatLitU 2, NatLitU 4].
+--
+-- When a typedef wraps its Nat params via a body expression (e.g.
+-- `type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int`), the surface
+-- args of Foo do not match what the list value should be dimensioned
+-- against -- the actual dimension lives at the Vector level as `(n+m)`.
+-- So follow the typedef reduction chain and return the Nat args from
+-- the DEEPEST level whose reduction still yields Nat args. This works
+-- because reducing past the last Nat-parameterized typedef (e.g. into
+-- `List a`) drops Nat info, while staying too shallow misses
+-- intermediate wrapping.
 getNatArgs :: Scope -> TypeU -> [TypeU]
 getNatArgs scope (AppU (VarU v) args) =
   case Map.lookup v scope of
     Just ((params, _, _, _) : _) ->
-      [arg | (Left (_, KindNat), arg) <- zip params args]
+      let myNatArgs = [arg | (Left (_, KindNat), arg) <- zip params args]
+      in case TE.reduceType scope (AppU (VarU v) args) of
+           Just t' -> case getNatArgs scope t' of
+             [] -> myNatArgs   -- the reduction dropped Nat info; keep ours
+             nas -> nas        -- recursion found a deeper Nat layer; use it
+           Nothing -> myNatArgs
     _ -> []
 getNatArgs _ _ = []
 

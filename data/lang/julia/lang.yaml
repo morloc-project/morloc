@@ -9,6 +9,8 @@ is_compiled: false
 run_command: ["julia"]
 serial_type: "bytes"
 cost: 5
+# Julia String wraps a length-prefixed byte vector and accepts interior NULs.
+allow_string_null: true
 
 # Descriptor identity (kept for compatibility with generic translator)
 ldName: julia
@@ -36,6 +38,7 @@ ldFieldAccess: dot
 # Serialize/deserialize function names (from juliamorloc.jl)
 ldSerializeFn: "MorlocRuntime.put_value"
 ldDeserializeFn: "MorlocRuntime.get_value"
+ldReleasePacketFn: "MorlocRuntime.release_packet_shm"
 ldIntrinsicPrefix: "MorlocRuntime."
 
 # Foreign call

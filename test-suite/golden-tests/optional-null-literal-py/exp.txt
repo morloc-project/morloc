@@ -1,0 +1,14 @@
+[1,null,3]
+[null,null,null]
+[]
+[[1,null],[null,null],[],[2,3]]
+[1.5,null,2.5]
+{"x":null,"y":"hi"}
+{"x":42,"y":"bye"}
+[null,null]
+null
+7
+{"a":null}
+[2,0,6,0,10]
+3
+[null,2,null,4,null]

@@ -100,6 +100,44 @@ static void _flush_shm_tracker() {
     _shm_tracker.clear();
 }
 
+// Drop one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used by _release_packet_shm to free
+// a _put_value-tracked packet's SHM as soon as its codegen-determined
+// scope ends, rather than waiting for the next dispatch flush.
+static bool _shm_tracker_release_one(absptr_t ptr) {
+    for (size_t i = 0; i < _shm_tracker.size(); i++) {
+        if (_shm_tracker[i].ptr == ptr) {
+            Schema* schema = _shm_tracker[i].schema;
+            _shm_tracker[i] = _shm_tracker.back();
+            _shm_tracker.pop_back();
+            char* err = NULL;
+            shfree(ptr, &err);
+            if (err) { free(err); }
+            if (schema) { free_schema(schema); }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Release the SHM ref owned by a _put_value-produced packet. The codegen
+// inserts this call at the end of a serialize let's scope so the tracker
+// entry is dropped as soon as the packet is no longer needed. No-op for
+// inline (non-RPTR) packets, so callers can invoke unconditionally.
+static void _release_packet_shm(const uint8_t* packet) {
+    if (packet == nullptr) return;
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) return;
+    size_t relptr = *(size_t*)(packet
+        + sizeof(morloc_packet_header_t) + hdr->offset);
+    char* resolve_err = NULL;
+    void* voidstar = rel2abs(relptr, &resolve_err);
+    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+    if (voidstar) {
+        _shm_tracker_release_one((absptr_t)voidstar);
+    }
+}
+
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 uint8_t* _put_value(const T& value, Schema* schema) {

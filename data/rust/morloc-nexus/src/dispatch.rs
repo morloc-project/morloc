@@ -47,6 +47,7 @@ pub struct NexusConfig {
     pub unix_socket_path: Option<String>,
     pub tcp_port: Option<i32>,
     pub http_port: Option<i32>,
+    pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
 }
@@ -66,10 +67,77 @@ impl Default for NexusConfig {
             unix_socket_path: None,
             tcp_port: None,
             http_port: None,
+            port_file_path: None,
             fdb_path: None,
             eval_timeout: 30,
         }
     }
+}
+
+/// Parse a CLI port argument. Accepts 0..=65535 (0 = bind-ephemeral; the
+/// OS picks an unused port and the daemon reports it back via the stderr
+/// ready line and the optional --port-file). Anything else (negative,
+/// >65535, non-numeric) exits the process with a clear error message.
+fn parse_port_arg(flag: &str, raw: &str) -> i32 {
+    match raw.parse::<i64>() {
+        Ok(n) if (0..=65535).contains(&n) => n as i32,
+        _ => {
+            eprintln!(
+                "error: {} expects an integer in 0..=65535 (0 = ephemeral), got '{}'",
+                flag, raw
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Reject a duplicate port assignment. A daemon has at most one HTTP /
+/// one TCP listener; specifying the same flag twice is almost always a
+/// script bug (e.g., a wrapper appending an extra --http-port from a
+/// stale env var). Fail loudly rather than silently picking one.
+fn reject_duplicate_port(flag: &str, existing: &Option<i32>) {
+    if existing.is_some() {
+        eprintln!(
+            "error: {} given more than once; specify it only once",
+            flag
+        );
+        std::process::exit(2);
+    }
+}
+
+/// Parse a CLI eval-timeout argument. Accepts a positive integer
+/// (seconds of CPU budget for the /eval and /typecheck child process).
+/// Anything else exits the process with a clear error message; the
+/// previous .parse().unwrap_or(30) silently substituted the default.
+fn parse_timeout_arg(flag: &str, raw: &str) -> i32 {
+    match raw.parse::<i32>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            eprintln!(
+                "error: {} expects a positive integer (seconds), got '{}'",
+                flag, raw
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Collapse runs of adjacent identical lines in an error message.
+///
+/// When an error bubbles up through deep recursion across pool boundaries,
+/// each layer may prepend the same wrapper string to the inner cause. The
+/// result is N copies of the same line burying the root cause. This pass
+/// keeps the first occurrence of each adjacent duplicate and drops the rest.
+/// Non-adjacent duplicates are preserved (they may be legitimate repeats).
+fn collapse_duplicate_lines(msg: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for line in msg.split_inclusive('\n') {
+        if out.last().map_or(false, |prev| *prev == line) {
+            continue;
+        }
+        out.push(line);
+    }
+    out.concat()
 }
 
 /// Emit a uniform error when pool communication fails, then exit.
@@ -173,14 +241,23 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
             "--port" => {
                 i += 1;
                 if i < args.len() {
-                    config.tcp_port = args[i].parse().ok();
+                    reject_duplicate_port("--port", &config.tcp_port);
+                    config.tcp_port = Some(parse_port_arg("--port", &args[i]));
                     i += 1;
                 }
             }
             "--http-port" => {
                 i += 1;
                 if i < args.len() {
-                    config.http_port = args[i].parse().ok();
+                    reject_duplicate_port("--http-port", &config.http_port);
+                    config.http_port = Some(parse_port_arg("--http-port", &args[i]));
+                    i += 1;
+                }
+            }
+            "--port-file" => {
+                i += 1;
+                if i < args.len() {
+                    config.port_file_path = Some(args[i].clone());
                     i += 1;
                 }
             }
@@ -194,7 +271,7 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
             "--eval-timeout" => {
                 i += 1;
                 if i < args.len() {
-                    config.eval_timeout = args[i].parse().unwrap_or(30);
+                    config.eval_timeout = parse_timeout_arg("--eval-timeout", &args[i]);
                     i += 1;
                 }
             }
@@ -204,16 +281,21 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
                     config.unix_socket_path = Some(val.to_string());
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--port=") {
-                    config.tcp_port = val.parse().ok();
+                    reject_duplicate_port("--port", &config.tcp_port);
+                    config.tcp_port = Some(parse_port_arg("--port", val));
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--http-port=") {
-                    config.http_port = val.parse().ok();
+                    reject_duplicate_port("--http-port", &config.http_port);
+                    config.http_port = Some(parse_port_arg("--http-port", val));
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--port-file=") {
+                    config.port_file_path = Some(val.to_string());
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--fdb=") {
                     config.fdb_path = Some(val.to_string());
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--eval-timeout=") {
-                    config.eval_timeout = val.parse().unwrap_or(30);
+                    config.eval_timeout = parse_timeout_arg("--eval-timeout", val);
                     i += 1;
                 } else {
                     // Not a nexus option - stop parsing
@@ -275,12 +357,19 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 matched = true;
             }
             "--port" if i + 1 < args.len() => {
-                config.tcp_port = args[i + 1].parse().ok();
+                reject_duplicate_port("--port", &config.tcp_port);
+                config.tcp_port = Some(parse_port_arg("--port", &args[i + 1]));
                 consumed = 2;
                 matched = true;
             }
             "--http-port" if i + 1 < args.len() => {
-                config.http_port = args[i + 1].parse().ok();
+                reject_duplicate_port("--http-port", &config.http_port);
+                config.http_port = Some(parse_port_arg("--http-port", &args[i + 1]));
+                consumed = 2;
+                matched = true;
+            }
+            "--port-file" if i + 1 < args.len() => {
+                config.port_file_path = Some(args[i + 1].clone());
                 consumed = 2;
                 matched = true;
             }
@@ -290,7 +379,7 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 matched = true;
             }
             "--eval-timeout" if i + 1 < args.len() => {
-                config.eval_timeout = args[i + 1].parse().unwrap_or(30);
+                config.eval_timeout = parse_timeout_arg("--eval-timeout", &args[i + 1]);
                 consumed = 2;
                 matched = true;
             }
@@ -306,16 +395,21 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                     config.unix_socket_path = Some(val.to_string());
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--port=") {
-                    config.tcp_port = val.parse().ok();
+                    reject_duplicate_port("--port", &config.tcp_port);
+                    config.tcp_port = Some(parse_port_arg("--port", val));
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--http-port=") {
-                    config.http_port = val.parse().ok();
+                    reject_duplicate_port("--http-port", &config.http_port);
+                    config.http_port = Some(parse_port_arg("--http-port", val));
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--port-file=") {
+                    config.port_file_path = Some(val.to_string());
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--fdb=") {
                     config.fdb_path = Some(val.to_string());
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--eval-timeout=") {
-                    config.eval_timeout = val.parse().unwrap_or(30);
+                    config.eval_timeout = parse_timeout_arg("--eval-timeout", val);
                     matched = true;
                 }
             }
@@ -433,6 +527,41 @@ pub fn dispatch_command(
     if cmd.is_pure() {
         run_pure_command(cmd, &parsed_args, config);
     } else {
+        // NUL-in-Str guard. If the target pool's language opts out of
+        // interior-NUL strings (e.g. R), scan every parsed arg for an
+        // embedded NUL and fail fast with a clean morloc-level
+        // diagnostic before invoking the pool. Bypassed when the
+        // program-level --unsafe-skip-null-check was set or when the
+        // env var MORLOC_SKIP_NULL_CHECK=1 is in effect.
+        let target_pool = &manifest.pools[cmd.pool_index];
+        let skip = manifest.unsafe_skip_null_check
+            || morloc_runtime::null_check::env_skip_null_check();
+        if !skip && !target_pool.allow_string_null {
+            for (i, av) in parsed_args.iter().enumerate() {
+                let payload = match av {
+                    ArgValue::Value(s) => Some(s.as_str()),
+                    _ => None,
+                };
+                if let Some(s) = payload {
+                    // The CLI ArgValue contains JSON-quoted form for
+                    // strings (e.g. `"abc def"`). Decode via
+                    // serde_json so any   escapes become real NUL
+                    // bytes; non-JSON values just fail to parse and
+                    // are skipped.
+                    if let Ok(jv) = serde_json::from_str::<serde_json::Value>(s) {
+                        if let Some(p) =
+                            morloc_runtime::null_check::first_null_in_json(&jv)
+                        {
+                            eprintln!(
+                                "Error: {} does not support embedded NUL bytes in strings (at args[{}]{})",
+                                target_pool.lang, i, p
+                            );
+                            process::clean_exit(1);
+                        }
+                    }
+                }
+            }
+        }
         run_remote_command(cmd, &parsed_args, sockets, config);
     }
 }
@@ -866,7 +995,7 @@ fn run_remote_command(
     // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
-            eprintln!("Error: run failed\n{}", err_msg);
+            eprintln!("Error: run failed\n{}", collapse_duplicate_lines(&err_msg));
             process::clean_exit(1);
         }
         Ok(None) => {}
@@ -1487,4 +1616,35 @@ fn short_to_long(cmd: &Command, ch: char) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_drops_adjacent_duplicates() {
+        assert_eq!(collapse_duplicate_lines("A\nA\nB\nA\n"), "A\nB\nA\n");
+    }
+
+    #[test]
+    fn collapse_preserves_non_adjacent() {
+        assert_eq!(collapse_duplicate_lines("A\nB\nA\n"), "A\nB\nA\n");
+    }
+
+    #[test]
+    fn collapse_collapses_long_run() {
+        let input = "boom\n".repeat(20);
+        assert_eq!(collapse_duplicate_lines(&input), "boom\n");
+    }
+
+    #[test]
+    fn collapse_handles_no_trailing_newline() {
+        assert_eq!(collapse_duplicate_lines("A\nA"), "A\nA");
+    }
+
+    #[test]
+    fn collapse_handles_empty() {
+        assert_eq!(collapse_duplicate_lines(""), "");
+    }
 }

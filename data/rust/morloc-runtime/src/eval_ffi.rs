@@ -240,6 +240,14 @@ type BndVars<'a> = HashMap<&'a str, AbsPtr>;
 
 /// Convert key-based pattern selectors to index-based using the schema's key names.
 ///
+/// Walks top-down so that each child pattern is recursed with the schema
+/// it actually corresponds to (`schema.parameters[converted_index]`),
+/// rather than with the schema parameter at the *pattern's* positional
+/// index. The latter was the pre-fix behaviour and silently mismatched
+/// child schemas in chained nested patterns like `.a.b r`, dereferencing
+/// a null `keys` pointer when the wrong child schema was a primitive
+/// (e.g. Str) whose `keys` field is null.
+///
 /// # Safety
 /// `pattern` and `schema` must be valid, non-null pointers to C-allocated structures.
 /// `schema` keys array must have `schema.size` entries.
@@ -250,15 +258,10 @@ unsafe fn convert_keys_to_indices(
     let pat = &mut *pattern;
     let n_params = (*schema).size;
 
-    if n_params > 1 {
-        for i in 0..pat.size {
-            let child_schema = *(*schema).parameters.add(i);
-            convert_keys_to_indices(*pat.selectors.add(i), child_schema)?;
-        }
-    }
-
+    // Convert THIS level's keys to indices first, so child recursion below
+    // can pick the correct child schema from `schema.parameters`.
     if pat.ptype == MorlocPatternType::ByKey {
-        let indices = libc::calloc(n_params, std::mem::size_of::<usize>()) as *mut usize;
+        let indices = libc::calloc(pat.size, std::mem::size_of::<usize>()) as *mut usize;
         for i in 0..pat.size {
             let key = CStr::from_ptr(*pat.fields.keys.add(i)).to_str().unwrap_or("");
             let mut found = false;
@@ -279,6 +282,22 @@ unsafe fn convert_keys_to_indices(
         pat.ptype = MorlocPatternType::ByIndex;
         libc::free(pat.fields.keys as *mut c_void);
         pat.fields.indices = indices;
+    }
+
+    // Now recurse into each child using the *converted* index to pick
+    // the right child schema (instead of `parameters.add(i)`, which would
+    // index by pattern position).
+    if pat.ptype == MorlocPatternType::ByIndex {
+        for i in 0..pat.size {
+            let idx = *pat.fields.indices.add(i);
+            if idx >= n_params {
+                return Err(MorlocError::Other(format!(
+                    "Pattern child index {} out of range for schema size {}", idx, n_params
+                )));
+            }
+            let child_schema = *(*schema).parameters.add(idx);
+            convert_keys_to_indices(*pat.selectors.add(i), child_schema)?;
+        }
     }
 
     Ok(())
@@ -478,11 +497,21 @@ unsafe fn morloc_eval_r(
 
             let stype = (*schema).serial_type;
             if stype == crate::schema::SerialType::String as u32 {
-                // String: allocate in SHM
-                let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
-                let str_size = if s.is_null() { 0 } else { libc::strlen(s) };
+                // String: allocate in SHM. Str literals are stored in the
+                // length-aware `str` field of Primitive so that interior
+                // NUL bytes survive (strlen would truncate at the first
+                // NUL). The BigInt "j" path still uses `s` as a C-string;
+                // see the Int branch below.
+                let ms = std::mem::ManuallyDrop::into_inner(
+                    ptr::read(&(*data).data.lit_val)
+                ).str;
+                let (str_size, str_ptr) = if ms.is_null() {
+                    (0usize, ptr::null::<u8>())
+                } else {
+                    ((*ms).size, (*ms).data as *const u8)
+                };
                 let str_relptr: RelPtr = if str_size > 0 {
-                    let abs = shm::shmemcpy(s as *const u8, str_size)?;
+                    let abs = shm::shmemcpy(str_ptr, str_size)?;
                     shm::abs2rel(abs)?
                 } else {
                     -1isize as RelPtr
@@ -519,17 +548,23 @@ unsafe fn morloc_eval_r(
                     morloc_eval_r(element, elem_dest, elem_width, bndvars)?;
                 }
             } else if stype == crate::schema::SerialType::Optional as u32 {
-                // Just-coerce wrapping: tag byte at offset 0, inner value at
-                // offsets[0]. The dest buffer was zero-initialised by shcalloc
-                // (when allocated here) or by an enclosing zeroed parent slot,
-                // so padding between the tag and the inner stays zero without
-                // an explicit memset.
-                *(dest as *mut u8) = 1;
-                let inner_schema = *(*schema).parameters;
-                let inner_width = (*inner_schema).width;
-                let inner_dest = dest.add(*(*schema).offsets);
-                let inner_expr = *(*data).data.tuple_val;
-                morloc_eval_r(inner_expr, inner_dest, inner_width, bndvars)?;
+                // Optional wrapping: tag byte at offset 0, inner value at
+                // offsets[0]. Two shapes:
+                //   tuple_val == null  -> Nothing: tag=0, leave inner zero
+                //                         (shcalloc / enclosing zeroed parent
+                //                         already cleared the slot).
+                //   tuple_val != null  -> Just: tag=1, recurse on inner.
+                let tv = (*data).data.tuple_val;
+                if tv.is_null() {
+                    *(dest as *mut u8) = 0;
+                } else {
+                    *(dest as *mut u8) = 1;
+                    let inner_schema = *(*schema).parameters;
+                    let inner_width = (*inner_schema).width;
+                    let inner_dest = dest.add(*(*schema).offsets);
+                    let inner_expr = *tv;
+                    morloc_eval_r(inner_expr, inner_dest, inner_width, bndvars)?;
+                }
             } else if stype == crate::schema::SerialType::Int as u32 {
                 // Variable-width integer: parse decimal string into inline BigInt
                 let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
@@ -623,14 +658,16 @@ unsafe fn morloc_eval_r(
                 }
 
                 MorlocAppExpressionType::Format => {
+                    // Literal pieces are length-aware MorlocStrings so
+                    // interior NULs survive. Previously this branch used
+                    // libc::strlen, which truncated literals like "a\0b".
                     let strings = (*app).function.fmt;
                     let mut result_size: usize = 0;
-                    let mut string_lengths: Vec<usize> = Vec::with_capacity(nargs + 1);
-
                     for i in 0..=nargs {
-                        let len = libc::strlen(*strings.add(i));
-                        string_lengths.push(len);
-                        result_size += len;
+                        let ms = *strings.add(i);
+                        if !ms.is_null() {
+                            result_size += (*ms).size;
+                        }
                     }
                     for i in 0..nargs {
                         let arr = &*(arg_results[i] as *const shm::Array);
@@ -644,8 +681,15 @@ unsafe fn morloc_eval_r(
 
                     let mut cursor = new_string;
                     for i in 0..=nargs {
-                        ptr::copy_nonoverlapping(*strings.add(i) as *const u8, cursor, string_lengths[i]);
-                        cursor = cursor.add(string_lengths[i]);
+                        let ms = *strings.add(i);
+                        if !ms.is_null() && (*ms).size > 0 {
+                            ptr::copy_nonoverlapping(
+                                (*ms).data as *const u8,
+                                cursor,
+                                (*ms).size,
+                            );
+                            cursor = cursor.add((*ms).size);
+                        }
                         if i < nargs {
                             let arr = &*(arg_results[i] as *const shm::Array);
                             if arr.size > 0 {

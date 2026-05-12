@@ -51,7 +51,10 @@ printExpr (IRealLit Nothing r) = renderRealLit r
 printExpr (IRealLit (Just t) r)
   | t == "double" = renderRealLit r
   | otherwise = "static_cast<" <> pretty t <> ">(" <> renderRealLit r <> ")"
-printExpr (IStrLit _ s) = [idoc|std::string(#{textEsc' s})|]
+-- Use the (ptr, size) std::string constructor so embedded NUL bytes in the
+-- literal survive. The one-argument form interprets the buffer as a C-string
+-- and would truncate at the first NUL.
+printExpr (IStrLit _ s) = [idoc|std::string(#{textEsc' s}, #{pretty (utf8Length s)})|]
 printExpr (IListLit es) = encloseSep "{" "}" "," (map printExpr es)
 printExpr (ITupleLit es) = "std::make_tuple" <> tupled (map printExpr es)
 printExpr (IRecordLit _ _ entries) =

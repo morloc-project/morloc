@@ -20,6 +20,7 @@ module UnitTypeTests
   , orderInvarianceTests
   , whitespaceTests
   , infixOperatorTests
+  , recordLiteralOrderTests
   , complexityRegressionTests
   , effectSubtypeTests
   , effectSynthesisTests
@@ -33,12 +34,14 @@ module UnitTypeTests
   , natDimTests
   , letBindingTests
   , aliasConstructorTests
+  , typedefKindVarTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 import qualified Morloc.Typecheck.Internal as MTI
 import qualified Morloc.Typecheck.NatSolver as NS
 import qualified System.Directory as SD
@@ -729,6 +732,24 @@ typeAliasTests =
              f :: Foo X Y -> Z
         |]
           (fun [tuple [var "X", var "Y"], var "Z"])
+      -- Type-level record literals use `=` to bind fields (mirroring
+      -- morloc's term-level `{x = 3, y = "a"}` syntax). Mistakenly using
+      -- `::` (the declaration separator) raises a specific parser error
+      -- rather than a generic 'unexpected ::'.
+      , expectError
+          "type-level record literal: `{x :: Int}` raises a parse error"
+          [r|
+        module main (f)
+        type R = {x :: Int, y :: Str}
+        f :: R -> R
+        |]
+      , expectError
+          "type-level record literal: `::` inside a tuple type annotation"
+          [r|
+        module main (c)
+        c :: ({x :: Int, y :: Int}, Int)
+        c = undefined
+        |]
       ]
 
 -- | Tests for integer/real literal defaulting through type aliases.
@@ -1155,6 +1176,12 @@ unitTypeTests =
       , -- other primitives
         assertGeneralType "primitive boolean" "True" bool
       , assertGeneralType "primitive string" "\"this is a string literal\"" str
+      , -- The `\0` escape is intentionally legal at the source-level so
+        --   that NUL-tolerant pools (Python, C++, Julia) and the pure
+        --   morloc nexus can carry interior NULs. The dispatch-layer
+        --   guard rejects NUL-bearing values only at boundaries into
+        --   NUL-intolerant languages (R, C). See features-strings.asc.
+        assertGeneralType "string with embedded NUL escape" "\"abc\\0def\"" str
       , assertGeneralType "primitive integer annotation" "42 :: Int" int
       , assertGeneralType "primitive boolean annotation" "True :: Bool" bool
       , assertGeneralType "primitive double annotation" "4.2 :: Real" real
@@ -1962,8 +1989,8 @@ unitValuecheckTests =
              y = 1
              y = 2
       |]
-      , valuecheckPass
-          "where with equivalent values is legal"
+      , valuecheckFail
+          "where with equivalent values is illegal (duplicate binding)"
           [r|
          module foo (a)
            a = y where
@@ -2028,6 +2055,40 @@ unitValuecheckTests =
              a :: Int
              b :: Bool
              c :: Real
+      |]
+      , -- let blocks intentionally allow shadowing (non-recursive sequential
+        -- let): `let { x = 1 ; x = 2 } in x` is the layout-free spelling of
+        -- `let x = 1 in let x = 2 in x` and returns 2. Only where-clauses
+        -- (which are order-invariant) reject duplicates.
+        valuecheckPass
+          "nested let shadowing is legal"
+          [r|
+         module foo (a)
+           a = let x = 1 in let x = 2 in x
+      |]
+      , valuecheckPass
+          "multi-binding let with same name shadows (sequential)"
+          [r|
+         module foo (a)
+           a = let { x = 1 ; x = 2 } in x
+      |]
+      , -- where-clause shadows function parameter
+        expectError
+          "where-clause binding shadows parameter"
+          [r|
+         module foo (g)
+           g x = y where
+             x = 100
+             y = x + 1
+      |]
+      , -- duplicate names in a single where-clause
+        expectError
+          "duplicate where-clause binding"
+          [r|
+         module foo (g)
+           g n = y where
+             y = n + 1
+             y = n + 2
       |]
       ]
 
@@ -2566,6 +2627,117 @@ infixOperatorTests =
           xs
         |]
           (lst int)
+      , -- C7: infix precedence must be in [0,9]
+        exprTestBad
+          "infixl negative precedence is rejected"
+          [r|
+          module main (z)
+          infixl -1 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infixr negative precedence is rejected"
+          [r|
+          module main (z)
+          infixr -3 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infix (non-associative) negative precedence is rejected"
+          [r|
+          module main (z)
+          infix -1 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infix precedence above 9 is rejected"
+          [r|
+          module main (z)
+          infixl 10 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      , exprTestBad
+          "infix precedence far above 9 is rejected"
+          [r|
+          module main (z)
+          infixl 100 +
+          (+) :: Int -> Int -> Int
+          z = 1 + 2
+        |]
+      ]
+
+{- | C3: Record literal field order is by-name. Permuted literals must
+typecheck against the declared record type, while literals with mismatched
+key sets (missing / unknown fields) must be rejected.
+-}
+recordLiteralOrderTests :: TestTree
+recordLiteralOrderTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout
+    testGroup
+      "Record literal field-order tests"
+      [ assertGeneralType
+          "permuted literal (mixed types) typechecks against declared record"
+          [r|
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { age = 30, name = "Alice" }
+          b
+        |]
+          (record' "Person" [(Key "name", str), (Key "age", int)])
+      , assertGeneralType
+          "permuted literal (same-typed fields) typechecks"
+          [r|
+          record Point = Point { x :: Int, y :: Int }
+          p :: Point
+          p = { y = 2, x = 1 }
+          p
+        |]
+          (record' "Point" [(Key "x", int), (Key "y", int)])
+      , assertGeneralType
+          "fully-reversed literal typechecks"
+          [r|
+          record T = T { a :: Int, b :: Int, c :: Int }
+          v :: T
+          v = { c = 3, b = 2, a = 1 }
+          v
+        |]
+          (record' "T" [(Key "a", int), (Key "b", int), (Key "c", int)])
+      , exprTestBad
+          "literal missing a declared field is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { name = "Alice" }
+        |]
+      , exprTestBad
+          "literal with extra unknown field is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { name = "Alice", age = 30, weight = 65 }
+        |]
+      , exprTestBad
+          "literal with completely disjoint keys is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { foo = "x", bar = 1 }
+        |]
+      , exprTestBad
+          "literal with one matching and one wrong key is rejected"
+          [r|
+          module main (b)
+          record Person = Person { name :: Str, age :: Int }
+          b :: Person
+          b = { name = "Alice", years = 30 }
+        |]
       ]
 
 {- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
@@ -3773,6 +3945,213 @@ natArithTests =
       x :: SizedList 5 Int
       x = split a
         |]
+    ]
+
+-- | Tests that typedef expansion correctly substitutes kind-specific
+-- variables (NatVarU/StrVarU/RecVarU/ListVarU/SetVarU) into the body.
+-- Regression coverage for the parsub fix: previously parsub treated
+-- these as inert (parallel to its NatVarU base case), so typedefs of
+-- the form @type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int@ would
+-- leave the body's promoted Nat variables unbound after expansion. The
+-- function-call substitution path (Internal.apply / gammaNatSubs) was
+-- unaffected, which is why polymorphic function signatures worked but
+-- typedef-style nat arithmetic did not.
+typedefKindVarTests :: TestTree
+typedefKindVarTests =
+  testGroup
+    "typedef expansion substitutes kind-specific variables"
+    [ -- === Direct evaluateType tests (no morloc source, no frontend) ===
+      testCase "evaluateType: Nat typedef param substitutes NatLitU into NatAddU" $
+        -- Scope: type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 3, NatLitU 2]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatLitU 3) (NatLitU 2), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param leaves unrelated NatVarU intact" $
+        -- type Foo (n :: Nat) = Vector (k + n) Int
+        -- Foo 3 should give Vector (k + 3) Int (k stays NatVarU)
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "k")) (NatVarU (TV "n")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 3]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatVarU (TV "k")) (NatLitU 3), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param substitutes through NatSubU" $
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatSubU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 5, NatLitU 3]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatSubU (NatLitU 5) (NatLitU 3), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param substitutes through NatMulU" $
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatMulU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 3, NatLitU 2]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatMulU (NatLitU 3) (NatLitU 2), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Nat typedef param substitutes through NatDivU" $
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatDivU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 6, NatLitU 2]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatDivU (NatLitU 6) (NatLitU 2), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: Str typedef param substitutes through StrConcatU" $
+        let bodyT = StrConcatU (StrVarU (TV "s")) (StrLitU "_suffix")
+            params = [Left (TV "s", KindStr)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [StrLitU "prefix"]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (StrConcatU (StrLitU "prefix") (StrLitU "_suffix"))
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: substitution at one position does NOT leak to other vars" $
+        -- type Foo (n :: Nat) = Vector (n + n) Int
+        -- Foo 4 should give Vector (4 + 4) Int (both occurrences substituted)
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "n")) (NatVarU (TV "n")), VarU (TV "Int")]
+            params = [Left (TV "n", KindNat)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 4]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatLitU 4) (NatLitU 4), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+    , testCase "evaluateType: mixed Type and Nat typedef params" $
+        -- type Foo (n :: Nat) a = Vector (n + 1) a
+        let bodyT = AppU (VarU (TV "Vector"))
+                      [NatAddU (NatVarU (TV "n")) (NatLitU 1), VarU (TV "a")]
+            params = [Left (TV "n", KindNat), Left (TV "a", KindType)]
+            scope = Map.singleton (TV "Foo")
+                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+            input = AppU (VarU (TV "Foo")) [NatLitU 4, VarU (TV "Int")]
+        in case TE.evaluateType scope input of
+             Right t -> assertEqual ""
+                          (AppU (VarU (TV "Vector"))
+                            [NatAddU (NatLitU 4) (NatLitU 1), VarU (TV "Int")])
+                          t
+             Left e -> assertFailure $ "Expected expansion, got: " ++ show e
+
+      -- === End-to-end morloc-source tests ===
+      -- The user's original reproducer: typechecking succeeds when the
+      -- typedef-parameter substitution correctly threads through Nat ops.
+    , assertGeneralType
+        "Foo n m = Vector (n + m) Int; Foo 3 2 = [1..5]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+      x :: Foo 3 2
+      x = [1, 2, 3, 4, 5]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Foo n m = Vector (n - m) Int; Foo 5 3 = [1, 2]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n - m) Int
+      x :: Foo 5 3
+      x = [1, 2]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Foo n m = Vector (n * m) Int; Foo 3 2 = [1..6]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n * m) Int
+      x :: Foo 3 2
+      x = [1, 2, 3, 4, 5, 6]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Foo n m = Vector (n / m) Int; Foo 6 2 = [1..3]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n / m) Int
+      x :: Foo 6 2
+      x = [1, 2, 3]
+        |]
+        (lst (var "Int"))
+    , expectError
+        "Foo n m = Vector (n + m) Int; Foo 3 2 with wrong-length value fails"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+      x :: Foo 3 2
+      x = [1, 2, 3, 4, 5, 6]
+        |]
+    , assertGeneralType
+        "Mixed Type/Nat params: Foo (n :: Nat) a = Vector (n + 1) a; Foo 4 Int = [1..5]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) a = Vector (n + 1) a
+      x :: Foo 4 Int
+      x = [1, 2, 3, 4, 5]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Repeated Nat param: Foo (n :: Nat) = Vector (n + n) Int; Foo 3 = [1..6]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) = Vector (n + n) Int
+      x :: Foo 3
+      x = [1, 2, 3, 4, 5, 6]
+        |]
+        (lst (var "Int"))
+    , assertGeneralType
+        "Single Nat param: Foo (n :: Nat) = Vector (n + 1) Int; Foo 4 = [1..5]"
+        [r|
+      module main (x)
+      type Vector (n :: Nat) a = List a
+      type Foo (n :: Nat) = Vector (n + 1) Int
+      x :: Foo 4
+      x = [1, 2, 3, 4, 5]
+        |]
+        (lst (var "Int"))
     ]
 
 natLabelTests :: TestTree

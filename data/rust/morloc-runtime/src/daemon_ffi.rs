@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::hash;
-use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpRequest};
+use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
 
 // -- Constants ----------------------------------------------------------------
 
@@ -77,23 +77,66 @@ pub struct MorlocSocket {
     pub pid: i32,
 }
 
-/// Matches daemon_config_t from daemon.h
+/// Matches daemon_config_t from daemon.h.
+///
+/// Port sentinel convention:
+/// - `tcp_port` / `http_port` == -1 -> listener not configured.
+/// - `tcp_port` / `http_port` ==  0 -> bind ephemeral; OS picks a port.
+/// - 0..=65535 otherwise -> bind that specific port.
+///
+/// `port_file_path` is optional; when non-null, daemon_run writes a JSON
+/// blob `{"http": N|null, "tcp": N|null, "unix": "PATH"|null}` to that
+/// path (atomically via rename) after all listeners are bound. This is
+/// the race-free orchestration channel for harnesses spawning many
+/// daemons in parallel.
 #[repr(C)]
 pub struct DaemonConfig {
     pub unix_socket_path: *const c_char,
     pub tcp_port: i32,
     pub http_port: i32,
+    pub port_file_path: *const c_char,
     pub pool_check_fn: Option<unsafe extern "C" fn(*mut MorlocSocket, usize)>,
     pub pool_alive_fn: Option<unsafe extern "C" fn(usize) -> bool>,
     pub n_pools: usize,
     pub eval_timeout: i32,
 }
 
-/// Matches daemon_response_t from daemon.h
+/// Error classification for a daemon dispatch failure.
+///
+/// `success = true` -> `error_kind = OK`. On failure, the kind drives
+/// HTTP status mapping in `handle_http_connection` (and in the router's
+/// equivalent). Unix/TCP clients keep reading the `success` boolean and
+/// the `{"status":"error","error":"..."}` JSON envelope; they don't see
+/// the kind on the wire today.
+pub const DAEMON_ERROR_OK:          i32 = 0;
+pub const DAEMON_ERROR_BAD_REQUEST: i32 = 1;
+pub const DAEMON_ERROR_NOT_FOUND:   i32 = 2;
+pub const DAEMON_ERROR_TIMEOUT:     i32 = 3;
+pub const DAEMON_ERROR_RECOVERING:  i32 = 4;
+pub const DAEMON_ERROR_INTERNAL:    i32 = 5;
+
+/// Translate a `DAEMON_ERROR_*` kind to its HTTP status code.
+pub fn daemon_error_kind_to_http_status(kind: i32, success: bool) -> i32 {
+    if success {
+        return 200;
+    }
+    match kind {
+        DAEMON_ERROR_BAD_REQUEST => 400,
+        DAEMON_ERROR_NOT_FOUND   => 404,
+        DAEMON_ERROR_TIMEOUT     => 408,
+        DAEMON_ERROR_RECOVERING  => 503,
+        // OK with success=false shouldn't happen, but treat as internal.
+        _ => 500,
+    }
+}
+
+/// Matches daemon_response_t from daemon.h. `error_kind` is one of the
+/// `DAEMON_ERROR_*` constants above; see `daemon_error_kind_to_http_status`.
 #[repr(C)]
 pub struct DaemonResponse {
     pub id: *mut c_char,
     pub success: bool,
+    pub error_kind: i32,
     pub result_json: *mut c_char,
     pub error: *mut c_char,
 }
@@ -471,6 +514,15 @@ pub unsafe extern "C" fn daemon_parse_response(
         .as_deref()
         .map(|s| s == "ok")
         .unwrap_or(false);
+    // The wire JSON envelope does not carry error_kind, so a parsed
+    // error response defaults to INTERNAL. Callers that received a real
+    // dispatch response (not a re-parse) will already have the correct
+    // kind set directly on DaemonResponse.
+    (*resp).error_kind = if (*resp).success {
+        DAEMON_ERROR_OK
+    } else {
+        DAEMON_ERROR_INTERNAL
+    };
 
     if let Some(result) = &parsed.result {
         let s = serde_json::to_string(result).unwrap_or_default();
@@ -603,6 +655,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     let mut stderr_pipe = [0i32; 2];
     if libc::pipe(stdout_pipe.as_mut_ptr()) != 0 || libc::pipe(stderr_pipe.as_mut_ptr()) != 0 {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
         let c = CString::new(format!("Failed to create pipes for {}", subcmd)).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
@@ -611,6 +664,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     let pid = libc::fork();
     if pid < 0 {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
         let c = CString::new(format!("Failed to fork for {}", subcmd)).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
         libc::close(stdout_pipe[0]);
@@ -678,18 +732,54 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         (*resp).result_json = libc::strdup(c.as_ptr());
     } else {
         (*resp).success = false;
-        let errmsg = if !stderr_buf.is_empty() {
-            String::from_utf8_lossy(&stderr_buf).into_owned()
-        } else if libc::WIFSIGNALED(status) {
-            format!("morloc {} killed by signal {}", subcmd, libc::WTERMSIG(status))
+        // Classify by exit cause. SIGXCPU means the child blew the
+        // RLIMIT_CPU budget (the --eval-timeout guard) -> TIMEOUT (408).
+        // Other fatal signals (SIGKILL, SIGSEGV, ...) are server-side
+        // failures -> INTERNAL (500). Anything else (non-zero exit, no
+        // signal) is "your expression didn't compile / had a runtime
+        // error" -> BAD_REQUEST (400). Note: --eval-timeout only
+        // bounds /eval and /typecheck (this fork_morloc_command path);
+        // /call/<command> dispatches into a pre-compiled pool worker
+        // and is not subject to this rlimit.
+        let (errmsg, kind) = if libc::WIFSIGNALED(status) {
+            let sig = libc::WTERMSIG(status);
+            if sig == libc::SIGXCPU {
+                (
+                    format!(
+                        "morloc {} exceeded CPU budget ({}s); see --eval-timeout",
+                        subcmd,
+                        G_EVAL_TIMEOUT.load(Ordering::Relaxed),
+                    ),
+                    DAEMON_ERROR_TIMEOUT,
+                )
+            } else if !stderr_buf.is_empty() {
+                (
+                    String::from_utf8_lossy(&stderr_buf).into_owned(),
+                    DAEMON_ERROR_INTERNAL,
+                )
+            } else {
+                (
+                    format!("morloc {} killed by signal {}", subcmd, sig),
+                    DAEMON_ERROR_INTERNAL,
+                )
+            }
+        } else if !stderr_buf.is_empty() {
+            (
+                String::from_utf8_lossy(&stderr_buf).into_owned(),
+                DAEMON_ERROR_BAD_REQUEST,
+            )
         } else {
             let code = if libc::WIFEXITED(status) {
                 libc::WEXITSTATUS(status)
             } else {
                 -1
             };
-            format!("morloc {} exited with code {}", subcmd, code)
+            (
+                format!("morloc {} exited with code {}", subcmd, code),
+                DAEMON_ERROR_BAD_REQUEST,
+            )
         };
+        (*resp).error_kind = kind;
         let c = CString::new(errmsg).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
     }
@@ -736,6 +826,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     // into `"status":"error"`, which a polling loop can wait on.
     if is_recovering() {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_RECOVERING;
         let c = CString::new(
             "Daemon recovering from a pool process crash; please retry."
         ).unwrap();
@@ -765,6 +856,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         DaemonMethod::Eval => {
             if (*request).expr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing 'expr' field in eval request").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -791,6 +883,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         DaemonMethod::Typecheck => {
             if (*request).expr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing 'expr' field in typecheck request").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -805,12 +898,14 @@ pub unsafe extern "C" fn daemon_dispatch(
         DaemonMethod::Bind => {
             if (*request).expr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing 'expr' field in bind request").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
             }
             if G_BINDING_STORE.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 let c = CString::new("Binding store not initialized").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -846,6 +941,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 }
                 None => {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     let c =
                         CString::new("Failed to compile and bind expression").unwrap_or_default();
                     (*resp).error = libc::strdup(c.as_ptr());
@@ -874,12 +970,14 @@ pub unsafe extern "C" fn daemon_dispatch(
             };
             if name_ptr.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new("Missing binding name").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
             }
             if G_BINDING_STORE.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 let c = CString::new("Binding store not initialized").unwrap();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -892,6 +990,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).result_json = libc::strdup(c.as_ptr());
             } else {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_NOT_FOUND;
                 let c = CString::new(format!("Binding not found: {}", name)).unwrap_or_default();
                 (*resp).error = libc::strdup(c.as_ptr());
             }
@@ -905,6 +1004,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     // DAEMON_CALL
     if (*request).command.is_null() {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
         let c = CString::new("Missing 'command' field in call request").unwrap();
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
@@ -977,6 +1077,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
     if cmd.is_null() {
         (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_NOT_FOUND;
         let msg = format!(
             "Unknown command: {}",
             command_name.to_string_lossy()
@@ -1000,6 +1101,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             Ok(v) => v,
             Err(e) => {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 let c = CString::new(format!("Failed to parse args: {}", e)).unwrap_or_default();
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
@@ -1008,6 +1110,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
         if parsed_args.len() != expected_nargs {
             (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
             let c = CString::new(format!(
                 "Expected {} arguments, got {}",
                 expected_nargs,
@@ -1036,6 +1139,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             // Check if any are positional (required)
             // For simplicity, match the C behavior: require args if n_args > 0
             (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
             let c = CString::new("Missing 'args' field in call request").unwrap();
             (*resp).error = libc::strdup(c.as_ptr());
             return resp;
@@ -1089,6 +1193,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             Ok(g) => Some(g),
             Err(e) => {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 let msg = CString::new(format!("eval arena error: {}", e))
                     .unwrap_or_default();
                 (*resp).error = libc::strdup(msg.as_ptr());
@@ -1103,6 +1208,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                     cleanup_and_fail = true;
                     break;
@@ -1116,6 +1222,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 );
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     (*resp).error = err;
                     cleanup_and_fail = true;
                     break;
@@ -1128,6 +1235,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 );
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     (*resp).error = err;
                     cleanup_and_fail = true;
                     break;
@@ -1139,6 +1247,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             let return_schema = parse_schema(cmd.ret.schema, &mut err);
             if !err.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
                 let result_abs = morloc_eval(
@@ -1151,6 +1260,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 );
                 if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                 } else {
                     let json = voidstar_to_json_string(
@@ -1160,6 +1270,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                     );
                     if !err.is_null() {
                         (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                         (*resp).error = err;
                     } else {
                         (*resp).success = true;
@@ -1199,7 +1310,53 @@ pub unsafe extern "C" fn daemon_dispatch(
         // the flat view; the outer pointer array is owned by us and
         // freed below, but the inner C strings remain owned by the
         // ManifestArg objects.
-        //
+
+        // NUL-in-Str guard. If the target pool's language does not
+        // support embedded NULs (e.g. R), reject the call cleanly here
+        // before any pool I/O. We scan the JSON args because at this
+        // point that's the most accessible representation; serde_json
+        // has already decoded ` ` escapes into actual NUL bytes in
+        // any Rust String values, so a contains(&0) check is sufficient.
+        // The check is bypassed when the env var or the program-wide
+        // --unsafe-skip-null-check flag is set.
+        let target_pool = &*(*mv).pools.add(cmd.pool_index);
+        let skip = (*mv).unsafe_skip_null_check
+            || crate::null_check::env_skip_null_check();
+        if !skip && !target_pool.allow_string_null {
+            if !(*request).args_json.is_null() {
+                let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
+                if let Ok(parsed) =
+                    serde_json::from_str::<serde_json::Value>(&args_str)
+                {
+                    if let Some(p) = crate::null_check::first_null_in_json(&parsed) {
+                        let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
+                        let msg = format!(
+                            "{} does not support embedded NUL bytes in strings (at {})",
+                            lang, p
+                        );
+                        (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+                        let c = CString::new(msg).unwrap_or_default();
+                        (*resp).error = libc::strdup(c.as_ptr());
+                        // Cleanup the args array allocated above.
+                        if !args.is_null() {
+                            let mut i = 0;
+                            loop {
+                                let p = *args.add(i);
+                                if p.is_null() {
+                                    break;
+                                }
+                                free_argument_t(p);
+                                i += 1;
+                            }
+                            libc::free(args as *mut c_void);
+                        }
+                        return resp;
+                    }
+                }
+            }
+        }
+
         // Open a per-eval SHM arena for the duration of this remote call.
         // make_call_packet_from_cli -> parse_cli_data_argument allocates
         // SHM blocks for non-trivial args (these are referenced by relptr
@@ -1224,6 +1381,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         libc::free(arg_schemas_flat as *mut c_void);
         if !err.is_null() {
             (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
             (*resp).error = err;
         } else {
             let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
@@ -1233,22 +1391,26 @@ pub unsafe extern "C" fn daemon_dispatch(
 
             if !err.is_null() {
                 (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
                 let packet_error =
                     get_morloc_data_packet_error_message(result_packet, &mut err);
                 if !packet_error.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = libc::strdup(packet_error);
                     libc::free(result_packet as *mut c_void);
                 } else if !err.is_null() {
                     (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                     libc::free(result_packet as *mut c_void);
                 } else {
                     let return_schema = parse_schema(cmd.ret.schema, &mut err);
                     if !err.is_null() {
                         (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                         (*resp).error = err;
                         libc::free(result_packet as *mut c_void);
                     } else {
@@ -1259,6 +1421,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                         );
                         if !err.is_null() {
                             (*resp).success = false;
+                            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                             (*resp).error = err;
                         } else {
                             let json = voidstar_to_json_string(
@@ -1268,6 +1431,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                             );
                             if !err.is_null() {
                                 (*resp).success = false;
+                                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                                 (*resp).error = err;
                             } else {
                                 (*resp).success = true;
@@ -1443,7 +1607,7 @@ unsafe fn handle_lp_connection(
     let msg = read_lp_message(client_fd, &mut msg_len, &mut errmsg);
     if !errmsg.is_null() {
         let err_str = CStr::from_ptr(errmsg).to_string_lossy();
-        eprintln!("daemon: read error: {}", err_str);
+        eprintln!("morloc-daemon: read error: {}", err_str);
         libc::free(errmsg as *mut c_void);
         libc::close(client_fd);
         return;
@@ -1454,6 +1618,7 @@ unsafe fn handle_lp_connection(
     if !errmsg.is_null() {
         let mut err_resp: DaemonResponse = std::mem::zeroed();
         err_resp.success = false;
+        err_resp.error_kind = DAEMON_ERROR_BAD_REQUEST;
         err_resp.error = errmsg;
         let mut resp_len: usize = 0;
         let resp_json = daemon_serialize_response(&mut err_resp, &mut resp_len);
@@ -1477,7 +1642,7 @@ unsafe fn handle_lp_connection(
     write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
     if !write_err.is_null() {
         let err_str = CStr::from_ptr(write_err).to_string_lossy();
-        eprintln!("daemon: write error: {}", err_str);
+        eprintln!("morloc-daemon: write error: {}", err_str);
         libc::free(write_err as *mut c_void);
     }
 
@@ -1503,9 +1668,18 @@ unsafe fn handle_http_connection(
             body: *const c_char,
             body_len: usize,
         ) -> bool;
+        fn http_write_response_ex(
+            fd: i32,
+            status: i32,
+            content_type: *const c_char,
+            body: *const c_char,
+            body_len: usize,
+            extra_headers: *const c_char,
+        ) -> bool;
         fn http_to_daemon_request(
             req: *mut HttpRequest,
             errmsg: *mut *mut c_char,
+            error_kind: *mut i32,
         ) -> *mut DaemonRequest;
     }
 
@@ -1526,16 +1700,45 @@ unsafe fn handle_http_connection(
         return;
     }
 
-    let req = http_to_daemon_request(http_req, &mut errmsg);
-    if !errmsg.is_null() {
-        let body = b"{\"status\":\"error\",\"error\":\"Invalid request\"}\0";
+    // CORS preflight short-circuit. Browser-issued OPTIONS requests
+    // should get 204 No Content with the standard CORS headers, never
+    // reaching daemon_dispatch (which would otherwise process them
+    // through the Health pipeline -- including the recovery gate).
+    if (*http_req).method == HttpMethod::Options {
         let ct = b"application/json\0";
         http_write_response(
             client_fd,
-            400,
+            204,
             ct.as_ptr() as *const c_char,
-            body.as_ptr() as *const c_char,
-            body.len() - 1,
+            ptr::null(),
+            0,
+        );
+        http_free_request(http_req);
+        libc::close(client_fd);
+        return;
+    }
+
+    let mut route_kind: i32 = DAEMON_ERROR_BAD_REQUEST;
+    let req = http_to_daemon_request(http_req, &mut errmsg, &mut route_kind);
+    if !errmsg.is_null() {
+        // Build the error body from the actual errmsg so unknown-endpoint
+        // and missing-field cases get distinguishable messages, and use
+        // the kind that http_to_daemon_request returned so 404 vs 400
+        // routes correctly.
+        let err_str = CStr::from_ptr(errmsg).to_string_lossy();
+        let body = format!(
+            "{{\"status\":\"error\",\"error\":{}}}\n",
+            serde_json::Value::String(err_str.into_owned())
+        );
+        let body_c = CString::new(body.as_str()).unwrap_or_default();
+        let status = daemon_error_kind_to_http_status(route_kind, false);
+        let ct = b"application/json\0";
+        http_write_response(
+            client_fd,
+            status,
+            ct.as_ptr() as *const c_char,
+            body_c.as_ptr(),
+            body.len(),
         );
         http_free_request(http_req);
         libc::free(errmsg as *mut c_void);
@@ -1555,15 +1758,32 @@ unsafe fn handle_http_connection(
     *resp_body.add(resp_len) = b'\n';
     *resp_body.add(resp_len + 1) = 0;
 
-    let status = if (*resp).success { 200 } else { 500 };
-    let ct = b"application/json\0";
-    http_write_response(
-        client_fd,
-        status,
-        ct.as_ptr() as *const c_char,
-        resp_body as *const c_char,
-        resp_len + 1,
+    let status = daemon_error_kind_to_http_status(
+        (*resp).error_kind, (*resp).success,
     );
+    let ct = b"application/json\0";
+    // 503 carries Retry-After: 1 so HTTP clients with automatic-retry
+    // middleware (curl --retry, axios-retry, etc.) back off appropriately
+    // during the brief pool-crash recovery window.
+    if status == 503 {
+        let extra = b"Retry-After: 1\r\n\0";
+        http_write_response_ex(
+            client_fd,
+            status,
+            ct.as_ptr() as *const c_char,
+            resp_body as *const c_char,
+            resp_len + 1,
+            extra.as_ptr() as *const c_char,
+        );
+    } else {
+        http_write_response(
+            client_fd,
+            status,
+            ct.as_ptr() as *const c_char,
+            resp_body as *const c_char,
+            resp_len + 1,
+        );
+    }
 
     libc::free(resp_body as *mut c_void);
     libc::free(resp_json as *mut c_void);
@@ -1624,6 +1844,92 @@ fn set_socket_timeouts(fd: i32, timeout_sec: i32) {
 
 const MAX_LISTENERS: usize = 3;
 
+/// Crate-public alias of `getsockname_port` for use by router_ffi.
+pub(crate) unsafe fn getsockname_port_pub(fd: i32) -> Option<u16> {
+    getsockname_port(fd)
+}
+
+/// Crate-public alias of `write_port_file_atomic` for use by router_ffi.
+pub(crate) fn write_port_file_atomic_pub(
+    path: &str,
+    http_port: Option<u16>,
+    tcp_port: Option<u16>,
+    unix_path: Option<&str>,
+) -> std::io::Result<()> {
+    write_port_file_atomic(path, http_port, tcp_port, unix_path)
+}
+
+/// Read the port a TCP socket was bound to. Necessary when the caller
+/// passed port 0 (bind ephemeral; OS picks the port). Returns None on
+/// any getsockname or socket-family mismatch.
+unsafe fn getsockname_port(fd: i32) -> Option<u16> {
+    let mut addr: libc::sockaddr_in = std::mem::zeroed();
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    if libc::getsockname(
+        fd,
+        &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr,
+        &mut len,
+    ) < 0
+    {
+        return None;
+    }
+    if addr.sin_family != libc::AF_INET as libc::sa_family_t {
+        return None;
+    }
+    Some(u16::from_be(addr.sin_port))
+}
+
+/// Render the port-file JSON and write it atomically (tmp + rename).
+/// Always emits all three keys; missing listeners are null. Path string
+/// escaping is intentionally minimal -- the unix socket path is a
+/// filesystem path under the caller's control, and we only need to
+/// escape `\` and `"` to keep the JSON well-formed.
+fn write_port_file_atomic(
+    path: &str,
+    http_port: Option<u16>,
+    tcp_port: Option<u16>,
+    unix_path: Option<&str>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut body = String::new();
+    body.push('{');
+    body.push_str("\"http\":");
+    match http_port {
+        Some(p) => body.push_str(&p.to_string()),
+        None => body.push_str("null"),
+    }
+    body.push_str(",\"tcp\":");
+    match tcp_port {
+        Some(p) => body.push_str(&p.to_string()),
+        None => body.push_str("null"),
+    }
+    body.push_str(",\"unix\":");
+    match unix_path {
+        Some(s) => {
+            body.push('"');
+            for c in s.chars() {
+                match c {
+                    '\\' => body.push_str("\\\\"),
+                    '"' => body.push_str("\\\""),
+                    _ => body.push(c),
+                }
+            }
+            body.push('"');
+        }
+        None => body.push_str("null"),
+    }
+    body.push('}');
+    body.push('\n');
+
+    let tmp = format!("{}.tmp", path);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn daemon_run(
     config: *mut DaemonConfig,
@@ -1663,11 +1969,18 @@ pub unsafe extern "C" fn daemon_run(
     let mut fd_types = [0i32; MAX_LISTENERS]; // 0=unix, 1=tcp, 2=http
     let mut nfds: usize = 0;
 
+    // Bound listener metadata collected during bind, used to print one
+    // stderr ready line per listener and to render the optional
+    // --port-file JSON.
+    let mut bound_unix_path: Option<String> = None;
+    let mut bound_tcp_port: Option<u16> = None;
+    let mut bound_http_port: Option<u16> = None;
+
     // Unix socket
     if !(*config).unix_socket_path.is_null() {
         let sock_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
         if sock_fd < 0 {
-            eprintln!("daemon: failed to create unix socket");
+            eprintln!("morloc-daemon: failed to create unix socket");
             return;
         }
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
@@ -1686,7 +1999,7 @@ pub unsafe extern "C" fn daemon_run(
             std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!("daemon: failed to bind unix socket");
+            eprintln!("morloc-daemon: failed to bind unix socket");
             libc::close(sock_fd);
             return;
         }
@@ -1695,13 +2008,20 @@ pub unsafe extern "C" fn daemon_run(
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 0;
         nfds += 1;
+        let unix_path = CStr::from_ptr((*config).unix_socket_path)
+            .to_string_lossy()
+            .into_owned();
+        eprintln!("morloc-daemon: listening on unix://{}", unix_path);
+        bound_unix_path = Some(unix_path);
     }
 
-    // TCP
-    if (*config).tcp_port > 0 {
+    // TCP. Configured iff tcp_port >= 0. tcp_port == 0 means "bind
+    // ephemeral; OS picks the port"; getsockname() reads it back.
+    if (*config).tcp_port >= 0 {
+        let requested = (*config).tcp_port as u16;
         let tcp_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if tcp_fd < 0 {
-            eprintln!("daemon: failed to create tcp socket");
+            eprintln!("morloc-daemon: failed to create tcp socket");
             return;
         }
         let opt: i32 = 1;
@@ -1715,32 +2035,33 @@ pub unsafe extern "C" fn daemon_run(
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
         addr.sin_addr.s_addr = u32::from_be(0x7f000001); // INADDR_LOOPBACK
-        addr.sin_port = ((*config).tcp_port as u16).to_be();
+        addr.sin_port = requested.to_be();
         if libc::bind(
             tcp_fd,
             &addr as *const libc::sockaddr_in as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!(
-                "daemon: failed to bind tcp port {}",
-                (*config).tcp_port
-            );
+            eprintln!("morloc-daemon: failed to bind tcp port {}", requested);
             libc::close(tcp_fd);
             return;
         }
+        let actual = getsockname_port(tcp_fd).unwrap_or(requested);
         libc::listen(tcp_fd, 64);
         fds[nfds].fd = tcp_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 1;
         nfds += 1;
+        eprintln!("morloc-daemon: listening on tcp://127.0.0.1:{}", actual);
+        bound_tcp_port = Some(actual);
     }
 
-    // HTTP
-    if (*config).http_port > 0 {
+    // HTTP. Same sentinel convention as TCP.
+    if (*config).http_port >= 0 {
+        let requested = (*config).http_port as u16;
         let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
-            eprintln!("daemon: failed to create http socket");
+            eprintln!("morloc-daemon: failed to create http socket");
             return;
         }
         let opt: i32 = 1;
@@ -1756,29 +2077,48 @@ pub unsafe extern "C" fn daemon_run(
         // HTTP router is externally reachable; bind to all interfaces so that
         // container port mappings (docker -p) can reach it.
         addr.sin_addr.s_addr = libc::INADDR_ANY.to_be();
-        addr.sin_port = ((*config).http_port as u16).to_be();
+        addr.sin_port = requested.to_be();
         if libc::bind(
             http_fd,
             &addr as *const libc::sockaddr_in as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!(
-                "daemon: failed to bind http port {}",
-                (*config).http_port
-            );
+            eprintln!("morloc-daemon: failed to bind http port {}", requested);
             libc::close(http_fd);
             return;
         }
+        let actual = getsockname_port(http_fd).unwrap_or(requested);
         libc::listen(http_fd, 64);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 2;
         nfds += 1;
+        eprintln!("morloc-daemon: listening on http://0.0.0.0:{}", actual);
+        bound_http_port = Some(actual);
+    }
+
+    // Optional port-file output. Written atomically via rename so a
+    // stat-waiting orchestrator never sees a partial file. Schema is
+    // fixed: every key is always present; missing listeners are null.
+    if !(*config).port_file_path.is_null() {
+        let path = CStr::from_ptr((*config).port_file_path)
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = write_port_file_atomic(
+            &path,
+            bound_http_port,
+            bound_tcp_port,
+            bound_unix_path.as_deref(),
+        ) {
+            eprintln!("morloc-daemon: failed to write port file {}: {}", path, e);
+            // non-fatal; the stderr ready lines above still convey the
+            // bound ports.
+        }
     }
 
     if nfds == 0 {
-        eprintln!("daemon: no listeners configured, exiting");
+        eprintln!("morloc-daemon: no listeners configured, exiting");
         return;
     }
 
@@ -1809,7 +2149,7 @@ pub unsafe extern "C" fn daemon_run(
             if crate::utility::errno_val() == libc::EINTR {
                 continue;
             }
-            eprintln!("daemon: poll error");
+            eprintln!("morloc-daemon: poll error");
             break;
         }
 
@@ -1833,7 +2173,7 @@ pub unsafe extern "C" fn daemon_run(
                 {
                     continue;
                 }
-                eprintln!("daemon: accept error");
+                eprintln!("morloc-daemon: accept error");
                 continue;
             }
             crate::utility::set_nosigpipe(client_fd);

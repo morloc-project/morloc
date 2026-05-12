@@ -192,10 +192,13 @@ pub unsafe extern "C" fn http_free_request(req: *mut HttpRequest) {
 fn http_status_text(status: i32) -> &'static str {
     match status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Unknown",
     }
 }
@@ -208,10 +211,30 @@ pub unsafe extern "C" fn http_write_response(
     body: *const c_char,
     body_len: usize,
 ) -> bool {
+    http_write_response_ex(fd, status, content_type, body, body_len, ptr::null())
+}
+
+/// Same as `http_write_response`, plus an optional `extra_headers` block
+/// (one or more `Name: value\r\n` lines, NUL-terminated, may be NULL).
+/// Used for adding `Retry-After: 1` on 503 responses.
+#[no_mangle]
+pub unsafe extern "C" fn http_write_response_ex(
+    fd: i32,
+    status: i32,
+    content_type: *const c_char,
+    body: *const c_char,
+    body_len: usize,
+    extra_headers: *const c_char,
+) -> bool {
     let ct = if content_type.is_null() {
         "application/json"
     } else {
         std::ffi::CStr::from_ptr(content_type).to_str().unwrap_or("application/json")
+    };
+    let extra = if extra_headers.is_null() {
+        ""
+    } else {
+        std::ffi::CStr::from_ptr(extra_headers).to_str().unwrap_or("")
     };
 
     let header = format!(
@@ -222,8 +245,8 @@ pub unsafe extern "C" fn http_write_response(
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
          Access-Control-Allow-Headers: Content-Type\r\n\
-         \r\n",
-        status, http_status_text(status), ct, body_len
+         {}\r\n",
+        status, http_status_text(status), ct, body_len, extra
     );
 
     let n = libc::send(fd, header.as_ptr() as *const c_void, header.len(), crate::utility::SEND_NOSIGNAL);
@@ -270,12 +293,23 @@ fn extract_json_string(body: &str, key: &str) -> Option<String> {
     Some(result)
 }
 
+/// Translate a parsed HTTP request into a daemon request. On failure,
+/// `errmsg` carries the human-readable cause and `error_kind` carries the
+/// classification (DAEMON_ERROR_BAD_REQUEST for malformed body / missing
+/// fields, DAEMON_ERROR_NOT_FOUND for an unrecognized route). `error_kind`
+/// may be NULL if the caller doesn't care.
 #[no_mangle]
 pub unsafe extern "C" fn http_to_daemon_request(
     req: *mut HttpRequest,
     errmsg: *mut *mut c_char,
+    error_kind: *mut i32,
 ) -> *mut DaemonRequest {
     clear_errmsg(errmsg);
+    // Default classification for any failure below is BAD_REQUEST; the
+    // unknown-endpoint branch promotes to NOT_FOUND explicitly.
+    if !error_kind.is_null() {
+        *error_kind = crate::daemon_ffi::DAEMON_ERROR_BAD_REQUEST;
+    }
 
     let dreq = libc::calloc(1, std::mem::size_of::<DaemonRequest>()) as *mut DaemonRequest;
     if dreq.is_null() {
@@ -389,47 +423,56 @@ pub unsafe extern "C" fn http_to_daemon_request(
         let c = std::ffi::CString::new(cmd_name).unwrap_or_default();
         (*dreq).command = libc::strdup(c.as_ptr());
 
-        // Parse body
+        // Parse body. Accepts either a bare JSON array (`[arg1, arg2]`)
+        // or an object with an `args` array (`{"args": [...]}`).
+        // serde_json correctly handles string escapes and nested
+        // brackets, replacing the previous bracket-counting parser that
+        // misclassified `]` characters inside string fields as array
+        // terminators.
         let trimmed = body_str.trim();
-        if trimmed.starts_with('[') {
-            let c = std::ffi::CString::new(trimmed).unwrap_or_default();
-            (*dreq).args_json = libc::strdup(c.as_ptr());
-        } else if trimmed.starts_with('{') {
-            // Extract "args" array
-            if let Some(args_pos) = trimmed.find("\"args\"") {
-                let after = &trimmed[args_pos + 6..];
-                let after = after.trim_start().strip_prefix(':').unwrap_or(after).trim_start();
-                if after.starts_with('[') {
-                    // Find matching ]
-                    let mut depth = 0i32;
-                    let mut in_string = false;
-                    let mut end = 0;
-                    for (i, ch) in after.chars().enumerate() {
-                        if in_string {
-                            if ch == '\\' { continue; }
-                            if ch == '"' { in_string = false; }
-                        } else {
-                            if ch == '"' { in_string = true; }
-                            else if ch == '[' { depth += 1; }
-                            else if ch == ']' { depth -= 1; if depth == 0 { end = i + 1; break; } }
+        if !trimmed.is_empty() {
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(serde_json::Value::Array(_)) => {
+                    // The whole body is the args array.
+                    let c = std::ffi::CString::new(trimmed).unwrap_or_default();
+                    (*dreq).args_json = libc::strdup(c.as_ptr());
+                }
+                Ok(serde_json::Value::Object(map)) => {
+                    if let Some(args) = map.get("args") {
+                        if args.is_array() {
+                            let s = args.to_string();
+                            let c = std::ffi::CString::new(s).unwrap_or_default();
+                            (*dreq).args_json = libc::strdup(c.as_ptr());
                         }
                     }
-                    if end > 0 {
-                        let arr = &after[..end];
-                        let c = std::ffi::CString::new(arr).unwrap_or_default();
-                        (*dreq).args_json = libc::strdup(c.as_ptr());
-                    }
+                }
+                Ok(_) => {
+                    // JSON parsed but isn't an array or object; treat as
+                    // missing args (downstream will emit BAD_REQUEST).
+                }
+                Err(e) => {
+                    // Malformed JSON. Fail fast with a clear message
+                    // rather than letting it fall through as "missing
+                    // args" (which was the previous misleading default).
+                    libc::free(dreq as *mut c_void);
+                    set_errmsg(
+                        errmsg,
+                        &MorlocError::Other(format!(
+                            "Malformed JSON in /call body: {}",
+                            e
+                        )),
+                    );
+                    return ptr::null_mut();
                 }
             }
         }
         return dreq;
     }
 
-    // OPTIONS (CORS preflight)
-    if method == HttpMethod::Options {
-        (*dreq).method = DaemonMethod::Health;
-        return dreq;
-    }
+    // OPTIONS preflight is short-circuited to 204 No Content by
+    // handle_http_connection before this function is reached. If an
+    // OPTIONS request somehow falls through here, treat it as an
+    // unknown endpoint (NOT_FOUND below).
 
     libc::free(dreq as *mut c_void);
     let method_str = match method {
@@ -438,6 +481,9 @@ pub unsafe extern "C" fn http_to_daemon_request(
         HttpMethod::Delete => "DELETE",
         HttpMethod::Options => "OPTIONS",
     };
+    if !error_kind.is_null() {
+        *error_kind = crate::daemon_ffi::DAEMON_ERROR_NOT_FOUND;
+    }
     set_errmsg(errmsg, &MorlocError::Other(format!("Unknown HTTP endpoint: {} {}", method_str, path)));
     ptr::null_mut()
 }

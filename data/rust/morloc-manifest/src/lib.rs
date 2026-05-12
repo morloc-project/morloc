@@ -89,6 +89,12 @@ pub struct Manifest {
     /// Epilogue blocks shown at the end of top-level help output.
     #[serde(default)]
     pub epilogues: Vec<Vec<String>>,
+    /// When true, suppress the runtime NUL-in-Str scan that normally
+    /// fires at every cross-pool boundary into a language with
+    /// `allow_string_null = false`. Set via `morloc make
+    /// --unsafe-skip-null-check`. Default false: checks enabled.
+    #[serde(default)]
+    pub unsafe_skip_null_check: bool,
     /// **Reserved.** User-sourced free-form annotations on the module.
     /// Always emitted as `{}` today. Distinct from `build` (which is
     /// compiler-sourced).
@@ -131,12 +137,22 @@ pub struct Pool {
     pub exec: Vec<String>,
     /// Unix domain socket basename (under tmpdir) for IPC.
     pub socket: String,
+    /// Whether the pool's language can represent a Str value containing
+    /// an interior NUL byte. When `false`, the runtime rejects any
+    /// inbound or outbound Str carrying a NUL with a clear morloc-level
+    /// error rather than letting it crash downstream (e.g. base R's
+    /// `embedded nul in string`). Defaults to `true` so older manifests
+    /// without the field stay permissive.
+    #[serde(default = "default_allow_string_null")]
+    pub allow_string_null: bool,
     /// **Reserved.** Per-pool metadata. Future slots: `resource`
     /// (cpu/memory limits), `env` (environment variables),
     /// `startup_timeout`, `health_check`.
     #[serde(default)]
     pub metadata: Metadata,
 }
+
+fn default_allow_string_null() -> bool { true }
 
 // -- Commands -----------------------------------------------------------------
 

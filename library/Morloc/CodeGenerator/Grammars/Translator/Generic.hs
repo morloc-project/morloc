@@ -295,6 +295,13 @@ debugLog d = do
 
 translateSource :: LangDescriptor -> Path -> MorlocMonad MDoc
 translateSource desc p = do
+  -- Reject early if the file is missing. The path is what the user
+  -- wrote in `from "..."`; it must exist somewhere the build can see.
+  -- Without this, a missing source surfaces as a confusing runtime
+  -- ImportError / module-not-found inside the pool.
+  exists <- liftIO $ Dir.doesFileExist p
+  unless exists . MM.throwSystemError $
+    "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
       p'' = if ldIncludeRelToFile desc then "../" <> p' else p'
   if ldQualifiedImports desc
@@ -407,6 +414,7 @@ genericLowerConfig desc srcNamer = cfg
         , lcRemoteCall = genericRemoteCall desc
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
+        , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeDoBlock = \_ stmts expr ->
             let suspendBlock = ldDoBlockBlock desc
@@ -568,12 +576,19 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolExpr = v
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
+      , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       }
 
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
-genericMakeLet desc namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-  let rs = rs1 ++ [namer i <+> pretty (ldAssignOp desc) <+> e1'] ++ rs2
-   in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
+genericMakeLet desc namer i p1 p2 =
+  let rs = poolPriorLines p1 ++ [namer i <+> pretty (ldAssignOp desc) <+> poolExpr p1] ++ poolPriorLines p2
+   in PoolDocs
+        { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
+        , poolExpr = poolExpr p2
+        , poolPriorLines = rs
+        , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
+        , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+        }
 
 -- | Generic expression printer driven by descriptor
 genericPrintExpr :: LangDescriptor -> IExpr -> MDoc
@@ -588,9 +603,9 @@ genericPrintExpr desc = go
     go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)
     go (IRealLit _ RealNegInf) = pretty (ldRealNegInf desc)
     go (IRealLit _ RealNaN)    = pretty (ldRealNaN desc)
-    go (IStrLit Nothing s) = textEsc' s
+    go (IStrLit Nothing s) = checkNul s `seq` textEsc' s
     go (IStrLit (Just t) s) = case Map.lookup t (ldStrLiteralMap desc) of
-      Just prefix -> pretty prefix <> textEsc' s
+      Just prefix -> checkNul s `seq` pretty prefix <> textEsc' s
       Nothing -> error $ "Cannot render string literal with concrete type "
         ++ show t ++ " in language " ++ show (ldName desc)
         ++ ". Add an entry to ldStrLiteralMap in lang.yaml."
@@ -663,6 +678,29 @@ genericPrintExpr desc = go
       ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
       OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
       OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+
+    -- Languages that opt out of NUL-in-Str (allow_string_null = false)
+    -- cannot represent a `\0` inside a source-level string literal: R
+    -- refuses to parse `"\000"` at all, and the pool would die before
+    -- any runtime guard can fire. Catch the situation at codegen time
+    -- and emit a clear compile error. Runtime-borne NUL strings
+    -- (arriving via FFI from another pool or the nexus) are caught
+    -- separately by the runtime null_check.
+    checkNul :: Text -> ()
+    checkNul s
+      | ldAllowStringNull desc = ()
+      | T.any (== '\0') s =
+          error $
+            "Embedded NUL byte in a Str literal destined for the "
+              ++ show (ldName desc)
+              ++ " pool. The "
+              ++ show (ldName desc)
+              ++ " language cannot represent NUL bytes in its native "
+              ++ "string type. Move the literal to a language that "
+              ++ "supports it (Python, C++, Julia, or the nexus itself), "
+              ++ "or remove the NUL byte. (See lang.yaml's "
+              ++ "allow_string_null field.)"
+      | otherwise = ()
 
 -- | Generic statement printer driven by descriptor
 genericPrintStmt :: LangDescriptor -> IStmt -> MDoc

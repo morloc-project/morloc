@@ -21,10 +21,11 @@ pub fn print_nexus_usage(prog_name: &str) -> ! {
     eprintln!();
     eprintln!("Daemon mode:");
     eprintln!("  --daemon             Run as a long-lived daemon");
-    eprintln!("  --http-port PORT     Listen on HTTP port");
-    eprintln!("  --port PORT          Listen on TCP port");
+    eprintln!("  --http-port PORT     Listen on HTTP port (0 = ephemeral; specify only once)");
+    eprintln!("  --port PORT          Listen on TCP port  (0 = ephemeral; specify only once)");
     eprintln!("  --socket PATH        Listen on Unix socket");
-    eprintln!("  --eval-timeout SECS  Timeout for /eval requests (default: 30)");
+    eprintln!("  --port-file PATH     Write bound ports to PATH as JSON");
+    eprintln!("  --eval-timeout SECS  CPU budget for /eval and /typecheck (default: 30; positive integer)");
     eprintln!();
     eprintln!("Router mode:");
     eprintln!("  --router             Run as a multi-program router");
@@ -55,9 +56,10 @@ pub fn print_usage(prog_name: &str, manifest: &Manifest) -> ! {
     eprintln!();
     eprintln!("Daemon mode:");
     eprintln!("  --daemon             Run as a long-lived daemon");
-    eprintln!("  --http-port PORT     Listen on HTTP port");
-    eprintln!("  --port PORT          Listen on TCP port");
+    eprintln!("  --http-port PORT     Listen on HTTP port (0 = ephemeral; specify only once)");
+    eprintln!("  --port PORT          Listen on TCP port  (0 = ephemeral; specify only once)");
     eprintln!("  --socket PATH        Listen on Unix socket");
+    eprintln!("  --port-file PATH     Write bound ports to PATH as JSON");
     eprintln!();
 
     // Ungrouped commands
@@ -188,9 +190,10 @@ pub fn print_command_help_single(prog_name: &str, cmd: &Command) -> ! {
     eprintln!("  --keep-null      Print top-level () or None as 'null' (default: empty)");
     eprintln!("\nDaemon mode:");
     eprintln!("  --daemon         Run as a long-lived daemon");
-    eprintln!("  --http-port PORT Listen on HTTP port");
-    eprintln!("  --port PORT      Listen on TCP port");
+    eprintln!("  --http-port PORT Listen on HTTP port (0 = ephemeral; specify only once)");
+    eprintln!("  --port PORT      Listen on TCP port  (0 = ephemeral; specify only once)");
     eprintln!("  --socket PATH    Listen on UNIX socket");
+    eprintln!("  --port-file PATH Write bound ports to PATH as JSON");
 
     print_args_body(cmd);
     print_type_definitions(cmd);

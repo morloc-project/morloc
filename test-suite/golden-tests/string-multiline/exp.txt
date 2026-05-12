@@ -6,3 +6,5 @@
 "\""
 "bar - 'foo'"
 "'"
+"   hello   "
+"   hello   "

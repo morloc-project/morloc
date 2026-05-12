@@ -1,0 +1,4 @@
+module main (badGetter)
+
+badGetter :: Int
+badGetter = .5 (1, 2)

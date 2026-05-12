@@ -439,6 +439,7 @@ PROPAGATE_ERROR(errmsg)|]
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
         return $ makeLet namer letIndex typestr e1 e2
+    , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
     , lcReturn = \e -> "return(" <> e <> ");"
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
@@ -463,6 +464,7 @@ PROPAGATE_ERROR(errmsg)|]
           , poolExpr = v
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
+          , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
           }
     , lcMakeDoBlock = \t stmts expr ->
         let isUnit = case t of
@@ -528,14 +530,15 @@ PROPAGATE_ERROR(errmsg)|]
     rawTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
 
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr (PoolDocs ms1 e1 rs1 pes1) (PoolDocs ms2 e2 rs2 pes2) =
-      let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{e1};|]
-          rs = rs1 <> [letAssignment] <> rs2
+    makeLet namer letIndex typestr p1 p2 =
+      let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
+          rs = poolPriorLines p1 <> [letAssignment] <> poolPriorLines p2
        in PoolDocs
-            { poolCompleteManifolds = ms1 <> ms2
-            , poolExpr = e2
+            { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
+            , poolExpr = poolExpr p2
             , poolPriorLines = rs
-            , poolPriorExprs = pes1 <> pes2
+            , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
+            , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             }
 
     mnameExt :: Maybe HeadManifoldForm -> MDoc
@@ -562,6 +565,7 @@ serialize v s = do
       , poolExpr = CP.printExpr expr
       , poolPriorLines = map CP.printStmt stmts
       , poolPriorExprs = []
+      , poolReturnFlag = False
       }
 
 -- reverse of serialize, parameters are the same
@@ -785,6 +789,9 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
       libFlags <- lookupLib base
       absDir <- liftIO $ MS.canonicalizePath dir
       absPath <- liftIO $ MS.canonicalizePath p
+      exists <- liftIO $ MS.doesFileExist absPath
+      unless exists . MM.throwSystemError $
+        "Source file not found:" <+> pretty absPath
       return (src {srcPath = Just absPath}, libFlags, Just absDir)
   where
     lookupHeader :: String -> MorlocMonad Path

@@ -1,16 +1,21 @@
-module main (pyQ, cppQ, rQ, pyAll, cppAll, rAll, pureQ, pureAll)
+module main (pyQ, cppQ, rQ, pyAll, cppAll, rAll, pureQ, pureAll, pyNul, cppNul, pyNulLen, cppNulLen, pureNul)
 
-source Py from "helper.py" ("identity" as pyId)
-source Cpp from "helper.hpp" ("identity" as cppId)
+source Py from "helper.py" ("identity" as pyId, "slen" as pyLen)
+source Cpp from "helper.hpp" ("identity" as cppId, "slen" as cppLen)
 source R from "helper.R" ("identity" as rId)
 
 pyId :: Str -> Str
 cppId :: Str -> Str
 rId :: Str -> Str
 
+pyLen :: Str -> Int
+cppLen :: Str -> Int
+
 type Py => Str = "str"
 type Cpp => Str = "std::string"
 type R => Str = "character"
+type Py => Int = "int"
+type Cpp => Int = "int"
 
 -- embedded double quotes
 pyQ :: Str
@@ -38,3 +43,23 @@ pureQ = "he said \"hi\""
 
 pureAll :: Str
 pureAll = "q:\" bs:\\ nl:\n tab:\t end"
+
+-- NUL-byte round-trip (regression for C11). The NUL must survive round
+-- tripping through generated Python/C++ source: the previous bug emitted
+-- a raw NUL byte into pool.py / pool.cpp, which most tooling treats as
+-- a syntax error or truncates the literal.
+pyNul :: Str
+pyNul = pyId "abc\0def"
+
+cppNul :: Str
+cppNul = cppId "abc\0def"
+
+-- length probes verify the NUL is preserved, not truncated
+pyNulLen :: Int
+pyNulLen = pyLen "abc\0def"
+
+cppNulLen :: Int
+cppNulLen = cppLen "abc\0def"
+
+pureNul :: Str
+pureNul = "abc\0def"

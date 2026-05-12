@@ -72,6 +72,7 @@ data MakeCommand = MakeCommand
   , makeInstall :: Bool
   , makeForce :: Bool
   , makeInclude :: [String]
+  , makeUnsafeSkipNullCheck :: Bool
   , makeScript :: String
   }
 
@@ -86,6 +87,7 @@ makeCommandParser =
     <*> optMakeInstall
     <*> optMakeForce
     <*> optMakeInclude
+    <*> optUnsafeSkipNullCheck
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -394,6 +396,19 @@ optMakeInclude =
             <> metavar "PATTERN"
             <> help "File pattern to include in install"
         )
+    )
+
+optUnsafeSkipNullCheck :: Parser Bool
+optUnsafeSkipNullCheck =
+  switch
+    ( long "unsafe-skip-null-check"
+        <> help
+            ( "Disable the runtime scan that rejects Str values with "
+                ++ "embedded NUL bytes at boundaries into languages that "
+                ++ "cannot represent them (e.g. R). Unsafe: a NUL passing "
+                ++ "into R may crash inside user code instead of being "
+                ++ "diagnosed cleanly at the FFI boundary."
+            )
     )
 
 optScript :: Parser String

@@ -1,0 +1,63 @@
+-- C3 regression: record literal field order is by-name, not positional.
+--
+-- Before the fix, a literal like {age = 30, name = "Alice"} against the
+-- declaration record Person { name :: Str, age :: Int } produced garbage
+-- because values were slotted positionally against the declared type.
+-- This test exercises:
+--   - permuted mixed-type literal (the original bug)
+--   - permuted same-typed fields (silent-failure case; types alone don't
+--     reveal the bug, only the JSON values do)
+--   - fully-reversed literal of a three-field record
+--   - nested record with permutation at outer and inner levels
+--   - records inside a tuple (exercises Express.hs polymorphic path)
+--   - a record literal as an argument to a function (also polymorphic
+--     path) that just returns it
+module main
+  ( mixed
+  , sameTyped
+  , reversed
+  , nested
+  , tupled
+  , argApplied
+  )
+
+record Person = Person { name :: Str, age :: Int }
+record Point  = Point  { x :: Int, y :: Int }
+record Triple = Triple { a :: Int, b :: Int, c :: Int }
+record Inner  = Inner  { p :: Int, q :: Int, r :: Int }
+record Outer  = Outer  { label :: Str, inner :: Inner, count :: Int }
+
+-- Mixed-type permuted: name+age swapped in literal vs declaration.
+mixed :: Person
+mixed = { age = 30, name = "Alice" }
+
+-- Same-typed permuted: types alone can't catch this; relies on by-name
+-- binding. JSON must be {"x":1,"y":2}, not {"x":2,"y":1}.
+sameTyped :: Point
+sameTyped = { y = 2, x = 1 }
+
+-- Fully reversed three-field record.
+reversed :: Triple
+reversed = { c = 3, b = 2, a = 1 }
+
+-- Nested record with permutation at both levels.
+nested :: Outer
+nested =
+  { count = 7
+  , inner = { r = 30, p = 10, q = 20 }
+  , label = "outer"
+  }
+
+-- Records inside a tuple: exercises the polymorphic Express.hs path
+-- (line 588) in addition to the top-level core path (line 157).
+-- All-Int fields to avoid the unrelated null-string serialization bug.
+tupled :: (Point, Inner, Triple)
+tupled = ({ y = 7, x = 5 }, { r = 300, q = 200, p = 100 }, { c = 30, b = 20, a = 10 })
+
+-- Record literal passed through an identity-like wrapper to exercise
+-- the literal in argument position rather than top-level return.
+wrap :: Person -> Person
+wrap p = p
+
+argApplied :: Person
+argApplied = wrap { age = 42, name = "Carol" }

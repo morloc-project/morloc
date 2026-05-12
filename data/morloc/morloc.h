@@ -286,8 +286,18 @@ typedef struct morloc_lam_expression_s morloc_lam_expression_t;
 typedef struct morloc_data_s morloc_data_t;
 typedef struct morloc_pattern_s morloc_pattern_t;
 
+// Length-aware string literal payload. Used wherever the nexus expression
+// tree carries a morloc Str: the `data` buffer is NOT NUL-terminated and may
+// contain interior NUL bytes. The companion `s` member of primitive_t below
+// is reserved for BigInt decimal literals, which are always plain C-strings.
+typedef struct morloc_string_s {
+    char*  data;
+    size_t size;
+} morloc_string_t;
+
 typedef union primitive_u {
-    char*    s;
+    char*            s;    // BigInt "j" decimal-string only (no interior NUL)
+    morloc_string_t* str;  // Str literals (NUL-safe)
     uint8_t  z;
     bool     b;
     int8_t   i1;
@@ -323,7 +333,9 @@ typedef struct morloc_app_expression_s {
     union {
         morloc_pattern_t* pattern;
         morloc_lam_expression_t* lambda;
-        char** fmt;
+        // Length-aware literal pieces for string interpolation; aliases
+        // morloc_expression_t.expr.interpolation on the wrapped Fmt node.
+        morloc_string_t** fmt;
     } function;
     morloc_expression_t** args;
     size_t nargs;
@@ -352,7 +364,9 @@ typedef struct morloc_expression_s {
         morloc_app_expression_t* app_expr;
         morloc_lam_expression_t* lam_expr;
         char* bnd_expr;
-        char** interpolation;
+        // Length-aware array of literal pieces for string interpolation
+        // (Fmt expressions). Each piece may contain interior NULs.
+        morloc_string_t** interpolation;
         morloc_pattern_t* pattern_expr;
         morloc_data_t* data_expr;
         morloc_expression_t* unary_expr;
@@ -365,8 +379,10 @@ typedef struct morloc_expression_s {
 
 typedef struct {
     char* lang;
-    char** exec;      // NULL-terminated array
-    char* socket;     // socket basename
+    char** exec;             // NULL-terminated array
+    char* socket;            // socket basename
+    char* metadata_json;     // reserved
+    bool  allow_string_null; // whether the pool's language can carry interior-NUL Str
 } manifest_pool_t;
 
 typedef enum {
@@ -440,6 +456,10 @@ typedef struct {
     manifest_cmd_group_t* groups;
     size_t n_groups;
     manifest_service_t* service;
+    char* metadata_json;        // reserved
+    // When true, skip the runtime NUL-in-Str scan at cross-pool
+    // boundaries; set via `morloc make --unsafe-skip-null-check`.
+    bool unsafe_skip_null_check;
 } manifest_t;
 
 // ========================================================================
@@ -502,10 +522,25 @@ typedef struct binding_store_s {
 typedef void (*pool_check_fn_t)(morloc_socket_t* sockets, size_t n_pools);
 typedef bool (*pool_alive_fn_t)(size_t pool_index);
 
+// Port sentinel convention:
+//   tcp_port / http_port == -1  -> listener not configured
+//   tcp_port / http_port ==  0  -> bind ephemeral (OS picks the port);
+//                                  daemon_run reads it back with
+//                                  getsockname() and emits an stderr
+//                                  ready line plus an entry in the
+//                                  optional port_file_path JSON.
+//   0..=65535 otherwise         -> bind that specific port.
+//
+// port_file_path is optional. When non-NULL, daemon_run writes a JSON
+// document of shape {"http":N|null,"tcp":N|null,"unix":"PATH"|null}
+// atomically (tmp + rename) after all listeners are bound. This is the
+// race-free discovery channel for orchestrators spawning many daemons
+// in parallel.
 typedef struct daemon_config_s {
     const char* unix_socket_path;
     int tcp_port;
     int http_port;
+    const char* port_file_path;
     pool_check_fn_t pool_check_fn;
     pool_alive_fn_t pool_alive_fn;
     size_t n_pools;
@@ -532,9 +567,23 @@ typedef struct daemon_request_s {
     char* name;
 } daemon_request_t;
 
+// Error classification for daemon failures. On success, error_kind is
+// DAEMON_ERROR_OK (0). On failure, it drives HTTP status mapping in
+// handle_http_connection (BAD_REQUEST -> 400, NOT_FOUND -> 404,
+// TIMEOUT -> 408, RECOVERING -> 503, INTERNAL -> 500). Unix/TCP clients
+// read `success` and the {"status":"error","error":"..."} envelope and
+// do not see error_kind on the wire today.
+#define DAEMON_ERROR_OK          0
+#define DAEMON_ERROR_BAD_REQUEST 1
+#define DAEMON_ERROR_NOT_FOUND   2
+#define DAEMON_ERROR_TIMEOUT     3
+#define DAEMON_ERROR_RECOVERING  4
+#define DAEMON_ERROR_INTERNAL    5
+
 typedef struct daemon_response_s {
     char* id;
     bool success;
+    int error_kind;
     char* result_json;
     char* error;
 } daemon_response_t;
@@ -842,7 +891,16 @@ void binding_store_free(binding_store_t* store);
 http_request_t* http_parse_request(int fd, ERRMSG);
 bool http_write_response(int fd, int status, const char* content_type,
                          const char* body, size_t body_len);
-daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG);
+// Like http_write_response, but appends `extra_headers` (one or more
+// `Name: value\r\n` lines, NUL-terminated, may be NULL) to the response
+// header block. Used for `Retry-After: 1` on 503 responses.
+bool http_write_response_ex(int fd, int status, const char* content_type,
+                            const char* body, size_t body_len,
+                            const char* extra_headers);
+// `error_kind_out` (nullable) receives DAEMON_ERROR_BAD_REQUEST for
+// malformed body / missing fields and DAEMON_ERROR_NOT_FOUND for an
+// unknown route.
+daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG, int* error_kind_out);
 void http_free_request(http_request_t* req);
 
 // ========================================================================

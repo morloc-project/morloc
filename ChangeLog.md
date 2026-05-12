@@ -1,3 +1,30 @@
+0.85.0 [2026-05-xx]
+-------------------
+
+New behavior:
+ * add support for all intrinsics to pure morloc code
+ * support ephemeral daemon ports (port=0) and the --port-file option 
+ * clearer daemon exit codes
+
+String issues
+ * accept NUL as \000 instead of emitting a raw NUL byte
+ * allow NUL support to be specified in language yaml files
+ * allow NUL checks to be skipped with --unsafe-skip-null-check flag
+ * do not trim space in triple-quoted strings
+
+Bug fixes
+ * fix bug in nested record patterns
+ * fix missing valuecheck in where blocks
+ * raise error is where block shadows an input parameter
+ * stricter rule for conflicting instances (same lang, diff source)
+ * fix representation of `[?a]`
+ * fix kind-specific variable substitution in typedef expansion
+ * fixed multi-line strings in recursive cases
+
+Shm
+ * Fix bug in volume growth algorithm - now back to geometric growth
+ * Fix shm memory leaks on foreign calls
+
 0.84.0 [2026-05-10]
 -------------------
 

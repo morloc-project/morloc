@@ -65,6 +65,13 @@ data PoolDocs = PoolDocs
   , poolPriorExprs :: [MDoc]
   -- ^ expressions that should precede this manifold, may include helper
   -- functions or imports
+  , poolReturnFlag :: Bool
+  -- ^ True when this pool's expression is at the manifold's return
+  -- position. ReturnS_/ReturnN_ handlers set this rather than applying
+  -- lcReturn directly, so that intermediate constructs (let-wrappers
+  -- that rebind the body's expression to a temp) can still treat the
+  -- expression as a value. lowerManifold applies lcReturn when the
+  -- flag is set, right before passing the body to lcMakeFunction.
   }
 
 instance Defaultable PoolDocs where
@@ -74,6 +81,7 @@ instance Defaultable PoolDocs where
       , poolExpr = ""
       , poolPriorLines = []
       , poolPriorExprs = []
+      , poolReturnFlag = False
       }
 
 {- | Merge a series of pools, keeping prior lines, expression and manifolds, but
@@ -87,6 +95,7 @@ mergePoolDocs f ms =
     , poolExpr = f (map poolExpr ms)
     , poolPriorLines = concatMap poolPriorLines ms
     , poolPriorExprs = concatMap poolPriorExprs ms
+    , poolReturnFlag = any poolReturnFlag ms
     }
 
 provideClosure :: Source -> [MDoc] -> [[MDoc]]

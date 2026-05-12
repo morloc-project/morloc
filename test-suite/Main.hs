@@ -26,6 +26,7 @@ main = do
       , orderInvarianceTests
       , whitespaceTests
       , infixOperatorTests
+      , recordLiteralOrderTests
       , substituteTVarTests
       , subtypeTests
       , complexityRegressionTests
@@ -39,6 +40,7 @@ main = do
       , natLabelTests
       , natKindPromotionTests
       , natDimTests
+      , typedefKindVarTests
       , letBindingTests
       , aliasConstructorTests
       , morlocDepsTests
@@ -60,6 +62,7 @@ main = do
         golden "bug-load-type-infer" "bug-load-type-infer"
       , golden "bug-intrinsic-schema-crash" "bug-intrinsic-schema-crash"
 
+      , golden "shm-volume-growth-py" "shm-volume-growth-py"
       , golden "thunk-basic" "thunk-basic"
       , golden "thunk-effects" "thunk-effects"
       , golden "thunk-do" "thunk-do"
@@ -172,6 +175,9 @@ main = do
       , golden "string-multiline" "string-multiline"
       , golden "string-interpolation" "string-interpolation"
       , golden "string-escape" "string-escape"
+      , golden "string-nul-interop" "string-nul-interop"
+      , golden "string-nul-r-rejects" "string-nul-r-rejects"
+      , golden "string-nul-skip-check" "string-nul-skip-check"
       , golden "string-pretty" "string-pretty"
       , golden "unicode-source" "unicode-source"
       , golden "unicode-source-cpp" "unicode-source-cpp"
@@ -304,6 +310,8 @@ main = do
       , golden "records-complex-2" "records-complex-2"
       , golden "records-nested" "records-nested"
       , golden "records-alias" "records-alias"
+      , golden "record-literal-ordering" "record-literal-ordering"
+      , golden "record-nested-getter-chain" "record-nested-getter-chain"
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"
@@ -341,6 +349,7 @@ main = do
       , golden "module-form-n00" "module-form-n00"
       , golden "module-form-n01" "module-form-n01"
       , golden "module-form-n10" "module-form-n10"
+      , golden "instance-dup-source-same-lang" "instance-dup-source-same-lang"
       , -- tests of serialization
         -- , golden "c  S" "serial-form-1-c"
         -- , golden "py S" "serial-form-1-py"
@@ -441,6 +450,8 @@ main = do
       , golden "optional-records-py" "optional-records-py"
       , golden "optional-records-cpp" "optional-records-cpp"
       , golden "optional-records-r" "optional-records-r"
+      , -- literal Null inside lists / tuples / records / nested optionals
+        golden "optional-null-literal-py" "optional-null-literal-py"
       , -- optional coercion tests (a -> ?a)
         golden "optional-coerce-py" "optional-coerce-py"
       , golden "optional-coerce-cpp" "optional-coerce-cpp"
@@ -597,6 +608,18 @@ main = do
         --   reports it as unsolved with a copy-pasteable form
         --   naming the offending function.
         golden "constraint-missing-error" "constraint-missing-error"
+      , -- Error-quality regressions: locked-in diagnostics for the
+        --   seven bug reports C5/C10/C14/C20/C24/C26/D4. Each test
+        --   pinpoints the specific user-visible improvement (clear
+        --   diagnostic text, correct caret line, no OOM, etc.) so a
+        --   future refactor cannot silently regress the wording or
+        --   the failure point.
+        golden "self-import" "self-import"
+      , golden "caret-position-typeerror" "caret-position-typeerror"
+      , golden "tuple-getter-out-of-bounds" "tuple-getter-out-of-bounds"
+      , golden "getter-on-list-rejected" "getter-on-list-rejected"
+      , golden "source-missing-file" "source-missing-file"
+      , golden "valuecheck-literal-mismatch" "valuecheck-literal-mismatch"
       , -- Stage 9.5 singleton-Str lifting. An f:Str signature label
         --   introduces `f` as a Str-kinded type-level variable. At the
         --   call site a Str literal gets lifted into the type, driving

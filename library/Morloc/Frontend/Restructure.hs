@@ -96,7 +96,6 @@ checkForSelfRecursion d = do
     -- check if a given term appears in a type
     hasTerm :: TVar -> TypeU -> Bool
     hasTerm v (VarU v') = v == v'
-    hasTerm _ (NatVarU _) = False
     hasTerm v (ForallU _ t) = hasTerm v t
     hasTerm v (FunU (t1 : rs) t2) = hasTerm v t1 || hasTerm v (FunU rs t2)
     hasTerm v (FunU [] t) = hasTerm v t
@@ -107,43 +106,15 @@ checkForSelfRecursion d = do
     hasTerm _ (NamU _ _ [] []) = False
     hasTerm v (EffectU _ t) = hasTerm v t
     hasTerm v (OptionalU t) = hasTerm v t
-    hasTerm _ (NatLitU _) = False
-    hasTerm v (NatAddU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (NatMulU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (NatSubU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (NatDivU a b) = hasTerm v a || hasTerm v b
-    hasTerm _ NatVoidU = False
-    hasTerm _ (StrVarU _) = False
-    hasTerm _ (StrLitU _) = False
-    hasTerm v (StrConcatU a b) = hasTerm v a || hasTerm v b
-    hasTerm _ StrVoidU = False
-    hasTerm _ (RecVarU _) = False
-    hasTerm _ RecEmptyU = False
-    hasTerm v (RecExtendU _ a b) = hasTerm v a || hasTerm v b
-    hasTerm v (RecUnionU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (RecDiffU a _) = hasTerm v a
-    hasTerm v (RecIntersectU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (RecRestrictU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (RecDiffListU a b) = hasTerm v a || hasTerm v b
-    hasTerm _ RecVoidU = False
-    hasTerm _ (ListVarU _) = False
-    hasTerm v (ListLitU es) = any (hasTerm v) es
-    hasTerm v (ListAppU a b) = hasTerm v a || hasTerm v b
-    hasTerm _ ListVoidU = False
-    hasTerm _ (SetVarU _) = False
-    hasTerm _ SetEmptyU = False
-    hasTerm v (SetLitU es) = any (hasTerm v) es
-    hasTerm v (SetUnionU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (SetInterU a b) = hasTerm v a || hasTerm v b
-    hasTerm v (SetDiffU a b) = hasTerm v a || hasTerm v b
-    hasTerm _ SetVoidU = False
-    hasTerm v (KeysU r) = hasTerm v r
-    hasTerm v (ListToSetU l) = hasTerm v l
-    hasTerm v (SizeU c) = hasTerm v c
-    hasTerm v (ProjectFieldU r f) = hasTerm v r || hasTerm v f
-    hasTerm v (RecSingletonU k v') = hasTerm v k || hasTerm v v'
+    -- Unified carriers: uniform recursion across all operators and literal payloads.
+    hasTerm v (OpU _ args) = any (hasTerm v) args
+    hasTerm v (LitU (LRec fs)) = any (hasTerm v . snd) fs
+    hasTerm v (LitU (LList es)) = any (hasTerm v) es
+    hasTerm v (LitU (LSet es)) = any (hasTerm v) es
     hasTerm v (LabeledU _ t) = hasTerm v t
     hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
+    -- Inert: kind-specific vars/voids and Nat/Str literals.
+    hasTerm _ _ = False
 
 {- | Use export/import information to find which terms are imported into each module
 * reduces the Import edge type to an alias map.
@@ -842,28 +813,11 @@ refineKinds dag = do
           ExistU v (map goRW ts, tc) ([(k, goRW t) | (k, t) <- rs], rc)
         goRW (EffectU effs t) = EffectU effs (goRW t)
         goRW (OptionalU t) = OptionalU (goRW t)
-        goRW (NatAddU a b) = NatAddU (goRW a) (goRW b)
-        goRW (NatMulU a b) = NatMulU (goRW a) (goRW b)
-        goRW (NatSubU a b) = NatSubU (goRW a) (goRW b)
-        goRW (NatDivU a b) = NatDivU (goRW a) (goRW b)
-        goRW (StrConcatU a b) = StrConcatU (goRW a) (goRW b)
-        goRW (RecExtendU k a b) = RecExtendU k (goRW a) (goRW b)
-        goRW (RecUnionU a b) = RecUnionU (goRW a) (goRW b)
-        goRW (RecDiffU a ks) = RecDiffU (goRW a) ks
-        goRW (RecIntersectU a b) = RecIntersectU (goRW a) (goRW b)
-        goRW (RecRestrictU a b) = RecRestrictU (goRW a) (goRW b)
-        goRW (RecDiffListU a b) = RecDiffListU (goRW a) (goRW b)
-        goRW (ListLitU es) = ListLitU (map goRW es)
-        goRW (ListAppU a b) = ListAppU (goRW a) (goRW b)
-        goRW (SetLitU es) = SetLitU (map goRW es)
-        goRW (SetUnionU a b) = SetUnionU (goRW a) (goRW b)
-        goRW (SetInterU a b) = SetInterU (goRW a) (goRW b)
-        goRW (SetDiffU a b) = SetDiffU (goRW a) (goRW b)
-        goRW (KeysU r) = KeysU (goRW r)
-        goRW (ListToSetU l) = ListToSetU (goRW l)
-        goRW (SizeU c) = SizeU (goRW c)
-        goRW (ProjectFieldU r f) = ProjectFieldU (goRW r) (goRW f)
-        goRW (RecSingletonU k v) = RecSingletonU (goRW k) (goRW v)
+        -- Unified carriers: uniform recursion across all operators and literal payloads.
+        goRW (OpU op args) = OpU op (map goRW args)
+        goRW (LitU (LRec fs)) = LitU (LRec [(k, goRW v) | (k, v) <- fs])
+        goRW (LitU (LList es)) = LitU (LList (map goRW es))
+        goRW (LitU (LSet es)) = LitU (LSet (map goRW es))
         goRW (LabeledU n t) = LabeledU n (goRW t)
         goRW t = t
 

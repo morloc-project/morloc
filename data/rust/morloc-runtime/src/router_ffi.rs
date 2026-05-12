@@ -128,7 +128,7 @@ pub unsafe extern "C" fn router_init(
         if !child_err.is_null() {
             let err_str = CStr::from_ptr(child_err).to_string_lossy();
             let path_str = CStr::from_ptr(prog.manifest_path).to_string_lossy();
-            eprintln!("router: warning: failed to parse {}: {}", path_str, err_str);
+            eprintln!("morloc-router: warning: failed to parse {}: {}", path_str, err_str);
             libc::free(child_err as *mut c_void);
             libc::free(prog.name as *mut c_void);
             libc::free(prog.manifest_path as *mut c_void);
@@ -307,7 +307,7 @@ pub unsafe extern "C" fn router_start_program(
         let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
             .to_string_lossy();
         eprintln!(
-            "router: failed to exec morloc-nexus for {}: {}",
+            "morloc-router: failed to exec morloc-nexus for {}: {}",
             prog_name, errno_msg
         );
         libc::_exit(1);
@@ -448,7 +448,7 @@ pub unsafe extern "C" fn router_forward(
         if result == (*prog).daemon_pid || result < 0 {
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
             eprintln!(
-                "router: daemon for '{}' exited (status {}), will restart",
+                "morloc-router: daemon for '{}' exited (status {}), will restart",
                 prog_name, status
             );
             (*prog).daemon_pid = 0;
@@ -926,11 +926,9 @@ unsafe fn router_http_to_request(
         }
     }
 
-    // OPTIONS (CORS)
-    if method == HttpMethod::Options {
-        (*dreq).method = DaemonMethod::Health;
-        return dreq;
-    }
+    // OPTIONS preflight is short-circuited to 204 No Content by the
+    // router event loop before this function is reached. If an OPTIONS
+    // request somehow falls through, treat it as an unknown endpoint.
 
     libc::free(dreq as *mut c_void);
     let method_str = match method {
@@ -961,6 +959,14 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             content_type: *const c_char,
             body: *const c_char,
             body_len: usize,
+        ) -> bool;
+        fn http_write_response_ex(
+            fd: i32,
+            status: i32,
+            content_type: *const c_char,
+            body: *const c_char,
+            body_len: usize,
+            extra_headers: *const c_char,
         ) -> bool;
         fn daemon_dispatch(
             manifest: *mut c_void,
@@ -996,11 +1002,16 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
 
     let ct = b"application/json\0";
 
-    // HTTP listener
-    if (*config).http_port > 0 {
+    let mut bound_unix_path: Option<String> = None;
+    let mut bound_http_port: Option<u16> = None;
+
+    // HTTP listener. Configured iff http_port >= 0; port 0 means bind
+    // ephemeral (OS picks the port).
+    if (*config).http_port >= 0 {
+        let requested = (*config).http_port as u16;
         let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
-            eprintln!("router: failed to create http socket");
+            eprintln!("morloc-router: failed to create http socket");
             return;
         }
         let opt: i32 = 1;
@@ -1014,32 +1025,31 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
         addr.sin_addr.s_addr = libc::INADDR_ANY;
-        addr.sin_port = ((*config).http_port as u16).to_be();
+        addr.sin_port = requested.to_be();
         if libc::bind(
             http_fd,
             &addr as *const libc::sockaddr_in as *const libc::sockaddr,
             std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!(
-                "router: failed to bind http port {}",
-                (*config).http_port
-            );
+            eprintln!("morloc-router: failed to bind http port {}", requested);
             libc::close(http_fd);
             return;
         }
+        let actual = crate::daemon_ffi::getsockname_port_pub(http_fd).unwrap_or(requested);
         libc::listen(http_fd, 16);
-        eprintln!("router: listening on http port {}", (*config).http_port);
+        eprintln!("morloc-router: listening on http://0.0.0.0:{}", actual);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         nfds += 1;
+        bound_http_port = Some(actual);
     }
 
     // Unix socket
     if !(*config).unix_socket_path.is_null() {
         let sock_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
         if sock_fd < 0 {
-            eprintln!("router: failed to create unix socket");
+            eprintln!("morloc-router: failed to create unix socket");
             return;
         }
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
@@ -1058,23 +1068,40 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
         ) < 0
         {
-            eprintln!("router: failed to bind unix socket");
+            eprintln!("morloc-router: failed to bind unix socket");
             libc::close(sock_fd);
             return;
         }
         libc::listen(sock_fd, 16);
-        eprintln!(
-            "router: listening on unix socket {}",
-            CStr::from_ptr((*config).unix_socket_path).to_string_lossy()
-        );
+        let unix_path = CStr::from_ptr((*config).unix_socket_path)
+            .to_string_lossy()
+            .into_owned();
+        eprintln!("morloc-router: listening on unix://{}", unix_path);
         fds[nfds].fd = sock_fd;
         fds[nfds].events = libc::POLLIN as i16;
         nfds += 1;
+        bound_unix_path = Some(unix_path);
     }
 
     if nfds == 0 {
-        eprintln!("router: no listeners configured");
+        eprintln!("morloc-router: no listeners configured");
         return;
+    }
+
+    // Optional port-file output. The router has no TCP listener, so tcp
+    // is always null in the JSON.
+    if !(*config).port_file_path.is_null() {
+        let path = CStr::from_ptr((*config).port_file_path)
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = crate::daemon_ffi::write_port_file_atomic_pub(
+            &path,
+            bound_http_port,
+            None,
+            bound_unix_path.as_deref(),
+        ) {
+            eprintln!("morloc-router: failed to write port file {}: {}", path, e);
+        }
     }
 
     // Eagerly start all program daemons so /health reports ok immediately
@@ -1084,7 +1111,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             let mut child_err: *mut c_char = ptr::null_mut();
             if router_start_program(prog, &mut child_err) {
                 eprintln!(
-                    "router: started daemon for '{}'",
+                    "morloc-router: started daemon for '{}'",
                     CStr::from_ptr((*prog).name).to_string_lossy()
                 );
             } else {
@@ -1096,7 +1123,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     "unknown error".to_string()
                 };
                 eprintln!(
-                    "router: warning: failed to start daemon for '{}': {}",
+                    "morloc-router: warning: failed to start daemon for '{}': {}",
                     CStr::from_ptr((*prog).name).to_string_lossy(),
                     err_msg
                 );
@@ -1110,7 +1137,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             if crate::utility::errno_val() == libc::EINTR {
                 continue;
             }
-            eprintln!("router: poll error");
+            eprintln!("morloc-router: poll error");
             break;
         }
         if ready == 0 {
@@ -1162,7 +1189,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                 );
                 libc::free(err as *mut c_void);
                 let elapsed = req_start.elapsed();
-                eprintln!("router: ??? ??? -> 400 ({:.1}ms)", elapsed.as_secs_f64() * 1000.0);
+                eprintln!("morloc-router: ??? ??? -> 400 ({:.1}ms)", elapsed.as_secs_f64() * 1000.0);
                 libc::close(client_fd);
                 continue;
             }
@@ -1176,6 +1203,27 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             };
             let log_path_cstr = CStr::from_ptr((*http_req).path.as_ptr());
             let log_path = log_path_cstr.to_str().unwrap_or("???").to_string();
+
+            // CORS preflight short-circuit: 204 No Content with the
+            // standard CORS headers, no daemon dispatch.
+            if (*http_req).method == HttpMethod::Options {
+                http_write_response(
+                    client_fd,
+                    204,
+                    ct.as_ptr() as *const c_char,
+                    ptr::null(),
+                    0,
+                );
+                http_free_request(http_req);
+                let elapsed = req_start.elapsed();
+                eprintln!(
+                    "morloc-router: OPTIONS {} -> 204 ({:.1}ms)",
+                    log_path,
+                    elapsed.as_secs_f64() * 1000.0
+                );
+                libc::close(client_fd);
+                continue;
+            }
 
             let mut target_program: *mut c_char = ptr::null_mut();
             let dreq = router_http_to_request(http_req, &mut target_program, &mut err);
@@ -1193,7 +1241,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                 );
                 libc::free(err as *mut c_void);
                 let elapsed = req_start.elapsed();
-                eprintln!("router: {} {} -> 404 ({:.1}ms)", log_method, log_path, elapsed.as_secs_f64() * 1000.0);
+                eprintln!("morloc-router: {} {} -> 404 ({:.1}ms)", log_method, log_path, elapsed.as_secs_f64() * 1000.0);
                 libc::close(client_fd);
                 continue;
             }
@@ -1229,13 +1277,27 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     let status_code = if all_ok { 200 } else { 503 };
                     resp_status = status_code;
                     let c = CString::new(body.as_str()).unwrap_or_default();
-                    http_write_response(
-                        client_fd,
-                        status_code,
-                        ct.as_ptr() as *const c_char,
-                        c.as_ptr(),
-                        body.len(),
-                    );
+                    if status_code == 503 {
+                        // Some pools are down; the router is degraded.
+                        // Hint clients to retry shortly.
+                        let extra = b"Retry-After: 1\r\n\0";
+                        http_write_response_ex(
+                            client_fd,
+                            status_code,
+                            ct.as_ptr() as *const c_char,
+                            c.as_ptr(),
+                            body.len(),
+                            extra.as_ptr() as *const c_char,
+                        );
+                    } else {
+                        http_write_response(
+                            client_fd,
+                            status_code,
+                            ct.as_ptr() as *const c_char,
+                            c.as_ptr(),
+                            body.len(),
+                        );
+                    }
                 } else if (*dreq).method == DaemonMethod::Discover {
                     let disco = router_build_discovery(router);
                     let disco_len = libc::strlen(disco);
@@ -1252,21 +1314,35 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                     let resp = daemon_dispatch(ptr::null_mut(), dreq, ptr::null_mut(), ptr::null());
                     let mut resp_len: usize = 0;
                     let resp_json = daemon_serialize_response(resp, &mut resp_len);
-                    let status = if (*resp).success { 200 } else { 500 };
-                    resp_status = status;
-                    http_write_response(
-                        client_fd,
-                        status,
-                        ct.as_ptr() as *const c_char,
-                        resp_json,
-                        resp_len,
+                    let status = crate::daemon_ffi::daemon_error_kind_to_http_status(
+                        (*resp).error_kind, (*resp).success,
                     );
+                    resp_status = status;
+                    if status == 503 {
+                        let extra = b"Retry-After: 1\r\n\0";
+                        http_write_response_ex(
+                            client_fd,
+                            status,
+                            ct.as_ptr() as *const c_char,
+                            resp_json,
+                            resp_len,
+                            extra.as_ptr() as *const c_char,
+                        );
+                    } else {
+                        http_write_response(
+                            client_fd,
+                            status,
+                            ct.as_ptr() as *const c_char,
+                            resp_json,
+                            resp_len,
+                        );
+                    }
                     libc::free(resp_json as *mut c_void);
                     daemon_free_response(resp);
                 }
                 daemon_free_request(dreq);
                 let elapsed = req_start.elapsed();
-                eprintln!("router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
+                eprintln!("morloc-router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
                 libc::close(client_fd);
                 continue;
             }
@@ -1367,15 +1443,29 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
                 } else {
                     let mut resp_len: usize = 0;
                     let resp_json = daemon_serialize_response(resp, &mut resp_len);
-                    let status = if (*resp).success { 200 } else { 500 };
-                    resp_status = status;
-                    http_write_response(
-                        client_fd,
-                        status,
-                        ct.as_ptr() as *const c_char,
-                        resp_json,
-                        resp_len,
+                    let status = crate::daemon_ffi::daemon_error_kind_to_http_status(
+                        (*resp).error_kind, (*resp).success,
                     );
+                    resp_status = status;
+                    if status == 503 {
+                        let extra = b"Retry-After: 1\r\n\0";
+                        http_write_response_ex(
+                            client_fd,
+                            status,
+                            ct.as_ptr() as *const c_char,
+                            resp_json,
+                            resp_len,
+                            extra.as_ptr() as *const c_char,
+                        );
+                    } else {
+                        http_write_response(
+                            client_fd,
+                            status,
+                            ct.as_ptr() as *const c_char,
+                            resp_json,
+                            resp_len,
+                        );
+                    }
                     libc::free(resp_json as *mut c_void);
                     daemon_free_response(resp);
                 }
@@ -1384,7 +1474,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             libc::free(target_program as *mut c_void);
             daemon_free_request(dreq);
             let elapsed = req_start.elapsed();
-            eprintln!("router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
+            eprintln!("morloc-router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
             libc::close(client_fd);
         }
     }

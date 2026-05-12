@@ -37,6 +37,7 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
 import qualified System.Directory as Dir
+import System.FilePath ((</>))
 
 -- ======================================================================
 -- Data types
@@ -84,6 +85,9 @@ data NexusExpr
   | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
                           -- (Just-coerce: at runtime sets tag=1 and writes
                           -- the child into the optional's inner slot).
+  | OptNullX Text         -- absent ?T: at runtime sets tag=0 and leaves the
+                          -- inner slot zero. Schema is the outer ?T schema so
+                          -- the slot has the right width inside arrays/records.
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -350,7 +354,14 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
-    toNexusExpr (AnnoS _ _ NullS) = return $ LitX NullX "0"
+    -- A bare NullS lowers to a width-1 'z' literal. When the surrounding type
+    -- is a (possibly Effect-wrapped) Optional, that 1-byte schema does not fit
+    -- the optional's wider tag+inner slot, which corrupts list/record/tuple
+    -- evaluation in the runtime. Emit OptNullX with the outer ?T schema so
+    -- the slot has the correct width.
+    toNexusExpr (AnnoS (Idx _ t) _ NullS) = case stripEffect t of
+      OptionalT _ -> OptNullX <$> type2schema t
+      _           -> return $ LitX NullX "0"
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
     toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
@@ -385,6 +396,26 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       SaveX "json" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
       LoadX <$> type2schema t <*> toNexusExpr path
+    -- @lang in a language-independent context is always "morloc"; the
+    -- nexus has no pool dispatch here.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLang _)) =
+      StrX <$> type2schema t <*> pure "morloc"
+    -- @schema arg: emit the hint-free msgpack schema of the argument's
+    -- general type. type2schema already produces the same string the
+    -- @save* / @load paths use, so the value is well-defined here.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSchema [AnnoS (Idx _ argT) _ _])) = do
+      s <- type2schema argT
+      StrX <$> type2schema t <*> pure s
+    -- @typeof arg: emit the user-facing general type name from the
+    -- argument's type annotation, matching what the user wrote.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTypeof [AnnoS (Idx _ argT) _ _])) =
+      StrX <$> type2schema t <*> pure (render (pretty argT))
+    -- @datafile path: resolve a literal path string against the install
+    -- directory. Mirrors Reduce.hs:68-78 for the pool side; a non-literal
+    -- path arg yields the same fallback sentinel as the pool path.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrDatafile [pathExpr])) = do
+      resolved <- resolveDatafilePath pathExpr
+      StrX <$> type2schema t <*> pure resolved
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -443,8 +474,23 @@ resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versio
 resolveCompileTimeIntrinsic IntrCompiled = do
   now <- liftIO Data.Time.Clock.getCurrentTime
   return . MT.pack $ Data.Time.Format.formatTime Data.Time.Format.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
+-- Any intrinsic reaching this point lacks a dedicated nexus case above.
+-- That is a compiler bug, not a user error: every Intrinsic constructor
+-- should be resolved either inline in toNexusExpr or here.
 resolveCompileTimeIntrinsic intr =
-  MM.throwSystemError $ "@" <> pretty (intrinsicName intr) <> " cannot be used in a language-independent context"
+  MM.throwSystemError $ "Compiler bug: @" <> pretty (intrinsicName intr) <> " has no nexus-side handler"
+
+-- Resolve a @datafile path expression in the nexus. Mirrors
+-- Reduce.hs::reduceNativeExpr IntrDatafile: a literal Str argument is
+-- joined with stateInstallDir; anything else gets the same sentinel
+-- string the pool side emits.
+resolveDatafilePath :: AnnoS (Indexed Type) One () -> MorlocMonad Text
+resolveDatafilePath (AnnoS _ _ (StrS rel)) = do
+  mInstallDir <- MM.gets stateInstallDir
+  return $ case mInstallDir of
+    Just dir -> MT.pack (dir </> MT.unpack rel)
+    Nothing -> rel
+resolveDatafilePath _ = return "<datafile: could not resolve path>"
 
 -- ======================================================================
 -- CLI argument serialization
@@ -544,6 +590,13 @@ stripSurface :: Type -> Type
 stripSurface (OptionalT t) = stripSurface t
 stripSurface (EffectT _ t) = stripSurface t
 stripSurface t             = t
+
+-- | Peel only the 'EffectT' wrappers, leaving any 'OptionalT' visible.
+-- Used by the bare-Null lowering to detect when a 'NullS' literal sits in
+-- an optional position (and therefore needs the wider OptNullX layout).
+stripEffect :: Type -> Type
+stripEffect (EffectT _ t) = stripEffect t
+stripEffect t             = t
 
 -- | If a type's surface form is a named type, return its 'NamType' tag.
 -- Otherwise Nothing. Single source of the @kind@ constraint.
@@ -684,6 +737,12 @@ exprToJson (OptX schema child) =
     , ("schema", jsonStr schema)
     , ("elements", jsonArr [exprToJson child])
     ]
+exprToJson (OptNullX schema) =
+  jsonObj
+    [ ("tag", jsonStr "container")
+    , ("schema", jsonStr schema)
+    , ("elements", jsonArr [])
+    ]
 exprToJson (PatX schema (PatternText p ps)) =
   jsonObj
     [ ("tag", jsonStr "interpolation")
@@ -755,8 +814,9 @@ buildManifest ::
   Map.Map Text [Text] ->
   [Text] ->
   [[Text]] ->
+  Bool ->
   Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues =
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck =
   jsonObj
     [ ("name", jsonStr (MT.pack programName))
     , ("build", buildJson)
@@ -765,6 +825,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     , ("groups", jsonArr (map groupJson (Map.toList groupDescs)))
     , ("desc", jsonStrArr moduleDoc)
     , ("epilogues", jsonArr (map jsonStrArr moduleEpilogues))
+    , ("unsafe_skip_null_check", jsonBool unsafeSkipNullCheck)
     , ("metadata", metadataEmpty)
     ]
   where
@@ -785,6 +846,8 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         [ ("lang", jsonStr (ML.showLangName lang))
         , ("exec", jsonStrArr (map MT.pack (makeExecArgs lang)))
         , ("socket", jsonStr ("pipe-" <> ML.showLangName lang))
+        , ("allow_string_null",
+            jsonBool (LR.registryAllowStringNull registry (ML.langName lang)))
         , ("metadata", metadataEmpty)
         ]
 
@@ -969,6 +1032,7 @@ generate cs rASTs = do
 
   moduleDoc <- MM.gets stateModuleDoc
   moduleEpilogues <- MM.gets stateModuleEpilogues
+  unsafeSkipNullCheck <- MM.gets stateUnsafeSkipNullCheck
 
   let manifestJson =
         buildManifest
@@ -985,6 +1049,7 @@ generate cs rASTs = do
           groupDescs
           moduleDoc
           moduleEpilogues
+          unsafeSkipNullCheck
       wrapperScript = makeWrapperScript manifestJson
 
   return $

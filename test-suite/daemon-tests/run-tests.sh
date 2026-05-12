@@ -192,18 +192,25 @@ else:
 " "$json" "$field"
 }
 
-# Wait for a daemon to be ready (checks stderr log for "daemon: ready")
+# Wait for a daemon to be ready by watching its stderr log for the
+# URL-form ready line ("morloc-daemon: listening on ...") that every
+# listener emits once it has bound and called listen(). For HTTP-only
+# daemons prefer wait_for_http (active probe); this helper is the
+# TCP/unix equivalent where active-probing is more involved.
 wait_for_daemon() {
     local log_file="$1"
     local max_wait="${2:-$DAEMON_STARTUP_WAIT}"
-    local elapsed=0
+    local i=0
+    local step_ms=200
+    local max_steps=$(( max_wait * 1000 / step_ms ))
 
-    while [ "$elapsed" -lt "$max_wait" ]; do
-        if grep -q "ready" "$log_file" 2>/dev/null; then
+    while [ "$i" -lt "$max_steps" ]; do
+        if grep -q "morloc-daemon: listening on" "$log_file" 2>/dev/null \
+           || grep -q "morloc-router: listening on" "$log_file" 2>/dev/null; then
             return 0
         fi
-        sleep 0.2
-        elapsed=$((elapsed + 1))
+        sleep 0."$step_ms"
+        i=$((i + 1))
     done
 
     echo "Daemon did not become ready within ${max_wait}s" >&2
@@ -405,20 +412,272 @@ if should_run "http"; then
     val=$(json_field "$result" "result")
     assert_test "POST /call/add [1.5,2.5] result=4" "4" "$val"
 
-    # Error: unknown command
+    # Error: unknown command (JSON envelope)
     result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/nonexistent" \
         -H "Content-Type: application/json" -d '[1]')
     status=$(json_field "$result" "status")
     assert_test "POST /call/nonexistent returns error" "error" "$status"
 
-    # Error: unknown endpoint
-    assert_http_status "GET /bogus returns 400" "400" "http://127.0.0.1:${HTTP_PORT}/bogus"
-
-    # CORS preflight
-    assert_http_status "OPTIONS returns 200" "200" "http://127.0.0.1:${HTTP_PORT}/call/add" \
+    # CORS preflight: 204 No Content with CORS headers, no dispatch.
+    assert_http_status "OPTIONS returns 204" "204" "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -X OPTIONS
 
     stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1b: HTTP status codes
+#
+# Every daemon-dispatch failure used to map to 500 Internal Server Error
+# regardless of cause. After Stage 2, client errors (unknown command,
+# unknown endpoint, missing field, malformed args, wrong arity) map to
+# 4xx; only genuinely-server-side failures remain 500.
+# ======================================================================
+
+if should_run "http-status"; then
+    echo "${BOLD}[http-status] HTTP status code classification${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    # 200 happy path (regression guard).
+    assert_http_status "GET  /health           -> 200" "200" \
+        "http://127.0.0.1:${HTTP_PORT}/health"
+    assert_http_status "POST /call/add [1,2]   -> 200" "200" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST -d '[1,2]'
+
+    # 404: unknown HTTP endpoint and unknown command.
+    assert_http_status "GET  /nope             -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/nope"
+    assert_http_status "POST /call/doesNotExist -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/call/doesNotExist" \
+        -X POST -d '[]'
+
+    # 400: missing required field, malformed args, wrong arity.
+    assert_http_status "POST /eval {}          -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -X POST -d '{}'
+    assert_http_status "POST /call/add [1,2,3] -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST -d '[1,2,3]'
+    assert_http_status "POST /call/add (no body) -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST
+
+    # The JSON envelope still carries status:"error" alongside the HTTP code.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/doesNotExist" -d '[]')
+    status=$(json_field "$result" "status")
+    assert_test "404 body still has status:error" "error" "$status"
+
+    # Malformed JSON body returns 400 with a clear message. The
+    # previous hand-rolled args parser would fall through to a
+    # generic "missing args" error on garbage input; the serde_json
+    # swap (issue 5) catches it at parse time.
+    assert_http_status "POST /call/add 'not json' -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -X POST -d 'not json'
+
+    # Object-wrapped args ({"args": [...]}) and bare-array forms both
+    # work. This was the existing behavior; regression guard for the
+    # serde_json swap.
+    obj_result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Content-Type: application/json" -d '{"args":[3,4]}')
+    val=$(json_field "$obj_result" "result")
+    assert_test "POST /call/add {args:[3,4]} via object form" "7" "$val"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1f: 408 Request Timeout on /eval CPU budget
+#
+# /eval and /typecheck fork a `morloc eval`/`typecheck` subprocess
+# under RLIMIT_CPU = G_EVAL_TIMEOUT seconds. When the CPU budget is
+# exceeded the kernel sends SIGXCPU; the daemon now classifies that
+# as DAEMON_ERROR_TIMEOUT and emits HTTP 408 (was 400).
+#
+# Note: this test is intrinsically environment-sensitive. It uses a
+# 1-second --eval-timeout and an expression that should comfortably
+# exceed it (50M-element list traversal). If /eval is not exercised
+# in the testing environment, the test is a no-op skip.
+# ======================================================================
+
+if should_run "http-eval-timeout"; then
+    echo "${BOLD}[http-eval-timeout] /eval CPU budget -> 408${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval-timeout 1
+    wait_for_http "$HTTP_PORT" 10
+
+    # Submit an expression heavy enough to blow the 1-second CPU
+    # budget. Any non-trivial /eval path will do — most of the time
+    # is the morloc compile cycle plus pool startup, both CPU-bound.
+    body='{"expr": "import root-py; length [1..50000000]"}'
+    status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+        -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Content-Type: application/json" -d "$body") \
+        || status="000"
+
+    assert_test "POST /eval CPU bomb -> 408" "408" "$status"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1e: Structured JSON args (issue 5 regression guard)
+#
+# The hand-rolled args parser counted brackets without respecting
+# string escapes, so a string field containing `]` would terminate
+# the array prematurely. The serde_json swap fixes this. There is
+# no morloc command in arithmetic.loc that takes a structured-string
+# arg, so this group uses the strings program and verifies that
+# string args containing ']', '[', '}', '{' characters round-trip
+# without truncation.
+# ======================================================================
+
+if should_run "http-json-args"; then
+    echo "${BOLD}[http-json-args] Structured JSON args${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$STRINGS_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    # A string containing every character the old bracket counter
+    # would have miscounted. The serde_json parser sees them as
+    # string content; the old code would have closed the array on
+    # the first `]`.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/strlen" \
+        -H "Content-Type: application/json" \
+        -d '["a]b[c}d{e"]')
+    val=$(json_field "$result" "result")
+    assert_test "strlen of 'a]b[c}d{e' -> 9 (with bracket-counter, would have been 1)" \
+        "9" "$val"
+
+    # Same payload through the object-wrapped form.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/strlen" \
+        -H "Content-Type: application/json" \
+        -d '{"args":["a]b[c}d{e"]}')
+    val=$(json_field "$result" "result")
+    assert_test "strlen of 'a]b[c}d{e' (object form) -> 9" "9" "$val"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1c: OPTIONS preflight short-circuit
+#
+# CORS preflight requests must get 204 No Content with the standard
+# Access-Control-Allow-* headers, and must NOT invoke the Health
+# pipeline (which would also hit the pool-crash recovery gate).
+# ======================================================================
+
+if should_run "http-options"; then
+    echo "${BOLD}[http-options] CORS preflight short-circuit${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    headers=$(curl -s -i -o /dev/null -D - -X OPTIONS \
+        "http://127.0.0.1:${HTTP_PORT}/call/add")
+
+    assert_contains "OPTIONS status line is 204"             "204" "$headers"
+    assert_contains "OPTIONS sets Access-Control-Allow-Origin"  "Access-Control-Allow-Origin: *" "$headers"
+    assert_contains "OPTIONS sets Access-Control-Allow-Methods" "Access-Control-Allow-Methods"   "$headers"
+    assert_contains "OPTIONS sets Access-Control-Allow-Headers" "Access-Control-Allow-Headers"   "$headers"
+
+    # Body is empty for 204.
+    body=$(curl -s -o - -X OPTIONS "http://127.0.0.1:${HTTP_PORT}/call/add")
+    assert_test "OPTIONS body is empty" "" "$body"
+
+    # OPTIONS to nonsense paths also returns 204; preflight is a
+    # browser concern, not a routing decision.
+    assert_http_status "OPTIONS /nope returns 204" "204" \
+        "http://127.0.0.1:${HTTP_PORT}/nope" -X OPTIONS
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1d: Recovery gate -> 503 + Retry-After
+#
+# When a pool process dies, the daemon kills all pools, drops SHM, and
+# respawns. Any request landing in that window returns 503 Service
+# Unavailable with Retry-After: 1 so HTTP clients with retry middleware
+# (curl --retry, axios-retry, hyper-retry) back off correctly.
+# ======================================================================
+
+if should_run "http-recovery-503"; then
+    echo "${BOLD}[http-recovery-503] 503 + Retry-After during recovery${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    RECOVERY_DAEMON_PID=$LAST_DAEMON_PID
+
+    # Pre-flight: confirm /health is normal before the kill.
+    pre_status=$(curl -s -o /dev/null -w "%{http_code}" \
+        "http://127.0.0.1:${HTTP_PORT}/health")
+    assert_test "pre-kill /health -> 200" "200" "$pre_status"
+
+    # Kill all child pool processes to trigger the recovery gate.
+    pool_pids=$(pgrep -P "$RECOVERY_DAEMON_PID" 2>/dev/null) || pool_pids=""
+    if [ -z "$pool_pids" ]; then
+        TOTAL=$((TOTAL + 1))
+        printf "  %-50s " "recovery: no pool children to kill"
+        printf "%sSKIP%s\n" "$YELLOW" "$RESET"
+        PASSED=$((PASSED + 1))
+    else
+        for ppid in $pool_pids; do
+            kill -9 "$ppid" 2>/dev/null || true
+        done
+
+        # Race: probe /health rapidly trying to land inside the recovery
+        # window. Daemon detects the death on its 1s poll cycle and the
+        # recovery window lasts long enough for several requests.
+        found_503=0
+        found_retry_after=0
+        for attempt in $(seq 1 100); do
+            hdr=$(curl -s --max-time 2 -D - -o /dev/null \
+                "http://127.0.0.1:${HTTP_PORT}/health" 2>/dev/null) || hdr=""
+            first=$(echo "$hdr" | head -n 1)
+            if echo "$first" | grep -q " 503 "; then
+                found_503=1
+                if echo "$hdr" | grep -qi "^Retry-After: 1"; then
+                    found_retry_after=1
+                fi
+                break
+            fi
+        done
+
+        assert_test "recovery window returns 503"           "1" "$found_503"
+        assert_test "503 carries Retry-After: 1"            "1" "$found_retry_after"
+
+        # Invariant (issue 10): OPTIONS preflight is short-circuited
+        # before daemon_dispatch is even called, so it must NEVER hit
+        # the recovery gate. Fire OPTIONS during the same window and
+        # assert 204. If the OPTIONS short-circuit ever regresses
+        # back into the dispatch path, this assertion catches it.
+        if [ "$found_503" = "1" ]; then
+            opt_status=$(curl -s --max-time 2 -o /dev/null \
+                -w "%{http_code}" -X OPTIONS \
+                "http://127.0.0.1:${HTTP_PORT}/call/add" 2>/dev/null) \
+                || opt_status="000"
+            assert_test "OPTIONS during recovery -> 204" \
+                "204" "$opt_status"
+        fi
+    fi
+
+    # Let recovery finish so cleanup is clean.
+    sleep 4
+    stop_daemon "$RECOVERY_DAEMON_PID"
     echo ""
 fi
 
@@ -567,6 +826,238 @@ if should_run "tcp"; then
     val=$(json_field "$result" "result")
     assert_test "tcp call square [9] result=81" "81" "$val"
 
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 5b: Port CLI validation
+#
+# `--port` / `--http-port` accept 0..=65535 (0 = bind ephemeral, OS picks
+# the port). Anything else -- negative, >65535, non-numeric -- must exit
+# non-zero with a clear stderr message. Pre-fix behaviour silently
+# swallowed parse errors and truncated out-of-range values via `as u16`.
+# ======================================================================
+
+if should_run "port-cli"; then
+    echo "${BOLD}[port-cli] Port argument validation${RESET}"
+
+    # Wrap nexus invocations so failures don't trip `set -e`.
+    run_nexus() {
+        ( cd "$ARITH_DIR" && ./nexus --daemon "$@" 2>"$ARITH_DIR/port-cli.err" )
+        local ec=$?
+        LAST_NEXUS_ERR=$(cat "$ARITH_DIR/port-cli.err" 2>/dev/null)
+        return $ec
+    }
+
+    # --http-port out of u16 range
+    run_nexus --http-port 99999 || true
+    assert_test "--http-port 99999 exits non-zero" "2" "$?"
+    assert_contains "--http-port 99999 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    # --http-port negative
+    run_nexus --http-port -1 || true
+    assert_test "--http-port -1 exits non-zero" "2" "$?"
+    assert_contains "--http-port -1 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    # --http-port non-numeric
+    run_nexus --http-port abc || true
+    assert_test "--http-port abc exits non-zero" "2" "$?"
+    assert_contains "--http-port abc stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    # --http-port=VAL long-equals form
+    run_nexus --http-port=99999 || true
+    assert_test "--http-port=99999 exits non-zero" "2" "$?"
+
+    # TCP --port same validation
+    run_nexus --port 99999 || true
+    assert_test "--port 99999 exits non-zero" "2" "$?"
+    assert_contains "--port 99999 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
+
+    run_nexus --port abc || true
+    assert_test "--port abc exits non-zero" "2" "$?"
+
+    # Duplicate port flags are rejected (issue 9). The previous "last
+    # wins" behavior silently absorbed script bugs that appended a
+    # stray --http-port from a stale env var.
+    run_nexus --http-port 8080 --http-port 9090 || true
+    assert_test "--http-port given twice exits non-zero" "2" "$?"
+    assert_contains "duplicate --http-port stderr is clear" "given more than once" "$LAST_NEXUS_ERR"
+
+    run_nexus --port 8080 --port 9090 || true
+    assert_test "--port given twice exits non-zero" "2" "$?"
+
+    # --eval-timeout strict parse (issue 6). The previous
+    # .parse().unwrap_or(30) silently substituted 30 on any parse error.
+    run_nexus --eval-timeout abc || true
+    assert_test "--eval-timeout abc exits non-zero" "2" "$?"
+    assert_contains "--eval-timeout abc stderr is clear" "positive integer" "$LAST_NEXUS_ERR"
+
+    run_nexus --eval-timeout 0 || true
+    assert_test "--eval-timeout 0 exits non-zero" "2" "$?"
+
+    run_nexus --eval-timeout -5 || true
+    assert_test "--eval-timeout -5 exits non-zero" "2" "$?"
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 5c: Ephemeral port binding (port 0)
+#
+# `--http-port 0` and `--port 0` ask the kernel to assign a free port.
+# The daemon reads it back via getsockname() and emits one stderr line
+# per listener in URL form (`morloc-daemon: listening on http://...`).
+# ======================================================================
+
+if should_run "port-ephemeral"; then
+    echo "${BOLD}[port-ephemeral] Bind ephemeral (port 0)${RESET}"
+
+    start_daemon "$ARITH_DIR" --http-port 0 --port 0
+
+    # Wait up to 5s for both ready lines to appear in stderr.
+    waited=0
+    while [ "$waited" -lt 50 ]; do
+        if grep -q "listening on http://" "$LAST_DAEMON_LOG" 2>/dev/null \
+           && grep -q "listening on tcp://"  "$LAST_DAEMON_LOG" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
+    tcp_line=$(grep "listening on tcp://"  "$LAST_DAEMON_LOG" | head -1 || true)
+
+    assert_contains "http ready line is URL form"  "http://0.0.0.0:"   "$http_line"
+    assert_contains "tcp  ready line is URL form"  "tcp://127.0.0.1:"  "$tcp_line"
+
+    # Extract the assigned ports.
+    HTTP_PORT=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+    TCP_PORT=$( echo "$tcp_line"  | sed -n 's#.*tcp://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
+
+    # Both should be in the ephemeral range (>1024) and not be 0.
+    assert_test "http port is non-zero" "1" "$([ -n "$HTTP_PORT" ] && [ "$HTTP_PORT" -gt 0 ] && echo 1 || echo 0)"
+    assert_test "tcp  port is non-zero" "1" "$([ -n "$TCP_PORT" ]  && [ "$TCP_PORT"  -gt 0 ] && echo 1 || echo 0)"
+
+    # The assigned ports should actually work.
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s "http://127.0.0.1:${HTTP_PORT}/health")
+    status=$(json_field "$result" "status")
+    assert_test "ephemeral http /health responds ok" "ok" "$status"
+
+    result=$(lp_request "127.0.0.1:${TCP_PORT}" '{"method":"call","command":"add","args":[2,3]}')
+    val=$(json_field "$result" "result")
+    assert_test "ephemeral tcp call add [2,3]=5" "5" "$val"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 5d: --port-file (atomic port discovery)
+#
+# After all listeners bind, the daemon writes
+#   {"http": N|null, "tcp": N|null, "unix": "PATH"|null}
+# to the --port-file path, atomically (tmp + rename). Fixed schema: every
+# key is always present (null when the listener isn't configured).
+# ======================================================================
+
+if should_run "port-file"; then
+    echo "${BOLD}[port-file] --port-file output${RESET}"
+
+    # Case A: only --http-port 0 -> http populated, tcp/unix null.
+    PORT_FILE="$ARITH_DIR/port-a.json"
+    rm -f "$PORT_FILE"
+    start_daemon "$ARITH_DIR" --http-port 0 --port-file "$PORT_FILE"
+
+    # Wait for file to appear (it's written after bind completes).
+    waited=0
+    while [ "$waited" -lt 50 ] && [ ! -f "$PORT_FILE" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    assert_test "port-file (http only) was written" "1" "$([ -f "$PORT_FILE" ] && echo 1 || echo 0)"
+
+    pf=$(cat "$PORT_FILE" 2>/dev/null)
+    http_val=$(json_field "$pf" "http")
+    tcp_val=$( json_field "$pf" "tcp")
+    unix_val=$(json_field "$pf" "unix")
+    assert_test "port-file http is numeric" "1" "$([ -n "$http_val" ] && [ "$http_val" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+    assert_test "port-file tcp  is null"    "" "$tcp_val"
+    assert_test "port-file unix is null"    "" "$unix_val"
+
+    # The advertised port should actually work.
+    wait_for_http "$http_val" 10
+    result=$(curl -s "http://127.0.0.1:${http_val}/health")
+    status=$(json_field "$result" "status")
+    assert_test "port-file http port serves /health" "ok" "$status"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # Case B: all three listeners -> all three keys populated.
+    SOCK_PATH="/tmp/morloc-test-port-file-$$.sock"
+    SOCKET_FILES+=("$SOCK_PATH")
+    PORT_FILE="$ARITH_DIR/port-b.json"
+    rm -f "$PORT_FILE"
+    start_daemon "$ARITH_DIR" \
+        --http-port 0 --port 0 --socket "$SOCK_PATH" --port-file "$PORT_FILE"
+
+    waited=0
+    while [ "$waited" -lt 50 ] && [ ! -f "$PORT_FILE" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    assert_test "port-file (all three) was written" "1" "$([ -f "$PORT_FILE" ] && echo 1 || echo 0)"
+
+    pf=$(cat "$PORT_FILE" 2>/dev/null)
+    http_val=$(json_field "$pf" "http")
+    tcp_val=$( json_field "$pf" "tcp")
+    unix_val=$(json_field "$pf" "unix")
+    assert_test "port-file http is numeric" "1" "$([ -n "$http_val" ] && [ "$http_val" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+    assert_test "port-file tcp  is numeric" "1" "$([ -n "$tcp_val" ]  && [ "$tcp_val"  -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+    assert_test "port-file unix is socket path" "$SOCK_PATH" "$unix_val"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # Case C: unwritable --port-file path. The write is non-fatal --
+    # bind continues, stderr logs a warning, and the daemon still
+    # serves traffic. Pins the contract that --port-file failure does
+    # not prevent daemon startup (issue 7).
+    UNWRITABLE_DIR=$(mktemp -d)
+    WORK_DIRS+=("$UNWRITABLE_DIR")
+    chmod 555 "$UNWRITABLE_DIR"
+    UNWRITABLE_FILE="$UNWRITABLE_DIR/cannot-write.json"
+    start_daemon "$ARITH_DIR" --http-port 0 --port-file "$UNWRITABLE_FILE"
+
+    # Wait for the ready line so we know bind completed.
+    waited=0
+    while [ "$waited" -lt 50 ]; do
+        if grep -q "listening on http://" "$LAST_DAEMON_LOG" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
+    HTTP_PORT_C=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+
+    assert_test "unwritable port-file: daemon still binds"   "1" \
+        "$([ -n "$HTTP_PORT_C" ] && [ "$HTTP_PORT_C" -gt 0 ] && echo 1 || echo 0)"
+    assert_test "unwritable port-file: file not written"     "1" \
+        "$([ ! -f "$UNWRITABLE_FILE" ] && echo 1 || echo 0)"
+    assert_contains "unwritable port-file: stderr logs failure" \
+        "failed to write port file" \
+        "$(cat "$LAST_DAEMON_LOG")"
+
+    if [ -n "$HTTP_PORT_C" ]; then
+        result=$(curl -s "http://127.0.0.1:${HTTP_PORT_C}/health")
+        status=$(json_field "$result" "status")
+        assert_test "unwritable port-file: /health still works" "ok" "$status"
+    fi
+
+    chmod 755 "$UNWRITABLE_DIR"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -845,6 +1336,23 @@ with open(sys.argv[1], 'w') as f:
         result=$(curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/bogus/add" \
             -H "Content-Type: application/json" -d '[1,2]' 2>/dev/null) || result=""
         assert_contains "router unknown program returns error" "error" "$result"
+
+        # HTTP status code parity with the daemon (issue 11). The
+        # router has its own routing layer and could regress
+        # independently of daemon-side coverage.
+        assert_http_status "router GET  /nope        -> 404" "404" \
+            "http://127.0.0.1:${ROUTER_PORT}/nope"
+        assert_http_status "router POST /call/bogus/add -> 404 (unknown program)" "404" \
+            "http://127.0.0.1:${ROUTER_PORT}/call/bogus/add" \
+            -X POST -d '[1,2]'
+        assert_http_status "router GET  /discover/bogus -> 404" "404" \
+            "http://127.0.0.1:${ROUTER_PORT}/discover/bogus"
+        assert_http_status "router OPTIONS /discover  -> 204" "204" \
+            "http://127.0.0.1:${ROUTER_PORT}/discover" \
+            -X OPTIONS
+        assert_http_status "router POST /call/arithmetic/add 200 happy" "200" \
+            "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add" \
+            -X POST -d '[1,2]'
 
         # Shutdown router
         stop_daemon "$ROUTER_PID"

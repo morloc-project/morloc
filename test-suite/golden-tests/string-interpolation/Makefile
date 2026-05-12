@@ -7,6 +7,9 @@ all:
 	./nexus escR   '"hi"' 2>> obs.err >> obs.txt
 	./nexus escPy  '"hi"' 2>> obs.err >> obs.txt
 	./nexus escCpp '"hi"' 2>> obs.err >> obs.txt
+	./nexus trpR   '"Alice"' '"Bob"' 2>> obs.err >> obs.txt
+	./nexus trpPy  '"Alice"' '"Bob"' 2>> obs.err >> obs.txt
+	./nexus trpCpp '"Alice"' '"Bob"' 2>> obs.err >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

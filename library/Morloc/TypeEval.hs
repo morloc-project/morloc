@@ -229,41 +229,23 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
     f _ t@(NatVarU _) = return t  -- nat vars are not type aliases
-    f _ t@(NatLitU _) = return t
-    f bnd (NatAddU a b) = NatAddU <$> recurse bnd a <*> recurse bnd b
-    f bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
-    f bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
-    f bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
     f _ t@NatVoidU = return t
     f _ t@(StrVarU _) = return t
-    f _ t@(StrLitU _) = return t
-    f bnd (StrConcatU a b) = StrConcatU <$> recurse bnd a <*> recurse bnd b
     f _ t@StrVoidU = return t
     f _ t@(RecVarU _) = return t
-    f _ t@RecEmptyU = return t
-    f bnd (RecExtendU k a b) = RecExtendU k <$> recurse bnd a <*> recurse bnd b
-    f bnd (RecUnionU a b) = RecUnionU <$> recurse bnd a <*> recurse bnd b
-    f bnd (RecDiffU a ks) = RecDiffU <$> recurse bnd a <*> pure ks
-    f bnd (RecIntersectU a b) = RecIntersectU <$> recurse bnd a <*> recurse bnd b
-    f bnd (RecRestrictU a b) = RecRestrictU <$> recurse bnd a <*> recurse bnd b
-    f bnd (RecDiffListU a b) = RecDiffListU <$> recurse bnd a <*> recurse bnd b
     f _ t@RecVoidU = return t
     f _ t@(ListVarU _) = return t
-    f bnd (ListLitU es) = ListLitU <$> mapM (recurse bnd) es
-    f bnd (ListAppU a b) = ListAppU <$> recurse bnd a <*> recurse bnd b
     f _ t@ListVoidU = return t
     f _ t@(SetVarU _) = return t
-    f _ t@SetEmptyU = return t
-    f bnd (SetLitU es) = SetLitU <$> mapM (recurse bnd) es
-    f bnd (SetUnionU a b) = SetUnionU <$> recurse bnd a <*> recurse bnd b
-    f bnd (SetInterU a b) = SetInterU <$> recurse bnd a <*> recurse bnd b
-    f bnd (SetDiffU a b) = SetDiffU <$> recurse bnd a <*> recurse bnd b
     f _ t@SetVoidU = return t
-    f bnd (KeysU r) = KeysU <$> recurse bnd r
-    f bnd (ListToSetU l) = ListToSetU <$> recurse bnd l
-    f bnd (SizeU c) = SizeU <$> recurse bnd c
-    f bnd (ProjectFieldU r fld) = ProjectFieldU <$> recurse bnd r <*> recurse bnd fld
-    f bnd (RecSingletonU k v) = RecSingletonU <$> recurse bnd k <*> recurse bnd v
+    -- Unified carriers: uniform recursion across all operators and literal
+    -- payloads.
+    f bnd (OpU op args) = OpU op <$> mapM (recurse bnd) args
+    f _ t@(LitU (LNat _)) = return t
+    f _ t@(LitU (LStr _)) = return t
+    f bnd (LitU (LRec fs)) = LitU . LRec <$> mapM (\(k, v) -> fmap ((,) k) (recurse bnd v)) fs
+    f bnd (LitU (LList es)) = LitU . LList <$> mapM (recurse bnd) es
+    f bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
@@ -279,41 +261,22 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate _ t@(NatVarU _) = return t
     terminate bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     terminate bnd (OptionalU t) = OptionalU <$> recurse bnd t
-    terminate _ t@(NatLitU _) = return t
-    terminate bnd (NatAddU a b) = NatAddU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (NatMulU a b) = NatMulU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (NatSubU a b) = NatSubU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (NatDivU a b) = NatDivU <$> recurse bnd a <*> recurse bnd b
     terminate _ t@NatVoidU = return t
     terminate _ t@(StrVarU _) = return t
-    terminate _ t@(StrLitU _) = return t
-    terminate bnd (StrConcatU a b) = StrConcatU <$> recurse bnd a <*> recurse bnd b
     terminate _ t@StrVoidU = return t
     terminate _ t@(RecVarU _) = return t
-    terminate _ t@RecEmptyU = return t
-    terminate bnd (RecExtendU k a b) = RecExtendU k <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (RecUnionU a b) = RecUnionU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (RecDiffU a ks) = RecDiffU <$> recurse bnd a <*> pure ks
-    terminate bnd (RecIntersectU a b) = RecIntersectU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (RecRestrictU a b) = RecRestrictU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (RecDiffListU a b) = RecDiffListU <$> recurse bnd a <*> recurse bnd b
     terminate _ t@RecVoidU = return t
     terminate _ t@(ListVarU _) = return t
-    terminate bnd (ListLitU es) = ListLitU <$> mapM (recurse bnd) es
-    terminate bnd (ListAppU a b) = ListAppU <$> recurse bnd a <*> recurse bnd b
     terminate _ t@ListVoidU = return t
     terminate _ t@(SetVarU _) = return t
-    terminate _ t@SetEmptyU = return t
-    terminate bnd (SetLitU es) = SetLitU <$> mapM (recurse bnd) es
-    terminate bnd (SetUnionU a b) = SetUnionU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (SetInterU a b) = SetInterU <$> recurse bnd a <*> recurse bnd b
-    terminate bnd (SetDiffU a b) = SetDiffU <$> recurse bnd a <*> recurse bnd b
     terminate _ t@SetVoidU = return t
-    terminate bnd (KeysU r) = KeysU <$> recurse bnd r
-    terminate bnd (ListToSetU l) = ListToSetU <$> recurse bnd l
-    terminate bnd (SizeU c) = SizeU <$> recurse bnd c
-    terminate bnd (ProjectFieldU r fld) = ProjectFieldU <$> recurse bnd r <*> recurse bnd fld
-    terminate bnd (RecSingletonU k v) = RecSingletonU <$> recurse bnd k <*> recurse bnd v
+    -- Unified carriers: uniform recursion.
+    terminate bnd (OpU op args) = OpU op <$> mapM (recurse bnd) args
+    terminate _ t@(LitU (LNat _)) = return t
+    terminate _ t@(LitU (LStr _)) = return t
+    terminate bnd (LitU (LRec fs)) = LitU . LRec <$> mapM (\(k, v) -> fmap ((,) k) (recurse bnd v)) fs
+    terminate bnd (LitU (LList es)) = LitU . LList <$> mapM (recurse bnd) es
+    terminate bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     renameTypedefs ::
@@ -410,7 +373,27 @@ parsub :: (TVar, TypeU) -> TypeU -> TypeU
 parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
-parsub _ t@(NatVarU _) = t
+-- Kind-specific variables (NatVarU/StrVarU/RecVarU/ListVarU/SetVarU) are
+-- substituted exactly like VarU when the typedef parameter name matches.
+-- Without this, typedef bodies that use a kind-promoted variable inside an
+-- arithmetic / operator expression (e.g. `type Foo (n :: Nat) (m :: Nat) =
+-- Vector (n + m) Int`) would expand to a body that still references the
+-- unbound NatVarU, leaving the Nat solver unable to reduce the result.
+parsub (v, t2) t1@(NatVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(StrVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(RecVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(ListVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(SetVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
 parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (zip (map fst rs) (map (parsub pair . snd) rs), rc)
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
@@ -418,41 +401,18 @@ parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
 parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair t) | (k', t) <- rs]
 parsub pair (EffectU effs t) = EffectU effs (parsub pair t)
 parsub pair (OptionalU t) = OptionalU (parsub pair t)
-parsub _ t@(NatLitU _) = t
-parsub pair (NatAddU a b) = NatAddU (parsub pair a) (parsub pair b)
-parsub pair (NatMulU a b) = NatMulU (parsub pair a) (parsub pair b)
-parsub pair (NatSubU a b) = NatSubU (parsub pair a) (parsub pair b)
-parsub pair (NatDivU a b) = NatDivU (parsub pair a) (parsub pair b)
 parsub _ t@NatVoidU = t
-parsub _ t@(StrVarU _) = t
-parsub _ t@(StrLitU _) = t
-parsub pair (StrConcatU a b) = StrConcatU (parsub pair a) (parsub pair b)
 parsub _ t@StrVoidU = t
-parsub _ t@(RecVarU _) = t
-parsub _ t@RecEmptyU = t
-parsub pair (RecExtendU k a b) = RecExtendU k (parsub pair a) (parsub pair b)
-parsub pair (RecUnionU a b) = RecUnionU (parsub pair a) (parsub pair b)
-parsub pair (RecDiffU a ks) = RecDiffU (parsub pair a) ks
-parsub pair (RecIntersectU a b) = RecIntersectU (parsub pair a) (parsub pair b)
-parsub pair (RecRestrictU a b) = RecRestrictU (parsub pair a) (parsub pair b)
-parsub pair (RecDiffListU a b) = RecDiffListU (parsub pair a) (parsub pair b)
 parsub _ t@RecVoidU = t
-parsub _ t@(ListVarU _) = t
-parsub pair (ListLitU es) = ListLitU (map (parsub pair) es)
-parsub pair (ListAppU a b) = ListAppU (parsub pair a) (parsub pair b)
 parsub _ t@ListVoidU = t
-parsub _ t@(SetVarU _) = t
-parsub _ t@SetEmptyU = t
-parsub pair (SetLitU es) = SetLitU (map (parsub pair) es)
-parsub pair (SetUnionU a b) = SetUnionU (parsub pair a) (parsub pair b)
-parsub pair (SetInterU a b) = SetInterU (parsub pair a) (parsub pair b)
-parsub pair (SetDiffU a b) = SetDiffU (parsub pair a) (parsub pair b)
 parsub _ t@SetVoidU = t
-parsub pair (KeysU r) = KeysU (parsub pair r)
-parsub pair (ListToSetU l) = ListToSetU (parsub pair l)
-parsub pair (SizeU c) = SizeU (parsub pair c)
-parsub pair (ProjectFieldU r fld) = ProjectFieldU (parsub pair r) (parsub pair fld)
-parsub pair (RecSingletonU k v) = RecSingletonU (parsub pair k) (parsub pair v)
+-- Unified carriers: uniform recursion across all operators and literal payloads.
+parsub pair (OpU op args) = OpU op (map (parsub pair) args)
+parsub _ t@(LitU (LNat _)) = t
+parsub _ t@(LitU (LStr _)) = t
+parsub pair (LitU (LRec fs)) = LitU (LRec [(k, parsub pair v) | (k, v) <- fs])
+parsub pair (LitU (LList es)) = LitU (LList (map (parsub pair) es))
+parsub pair (LitU (LSet es)) = LitU (LSet (map (parsub pair) es))
 parsub pair (LabeledU n t) = LabeledU n (parsub pair t)
 
 -- | Expand the outermost type alias one step. Substitutes the alias body's

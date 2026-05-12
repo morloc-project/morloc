@@ -210,16 +210,21 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
 
     buildModuleExecutable locFile _name verbosity' config buildConfig' forceOverwrite = do
       code <- MT.readFile locFile
-      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite
+      -- `morloc install --build` re-enters the make pipeline. The
+      -- --unsafe-skip-null-check flag is a `morloc make` opt-in only,
+      -- so default to False here (safer).
+      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite False
 
 -- | Compile a morloc program and optionally install it.
 -- Shared by `morloc make --install` and `morloc install --build`.
 makeAndInstall ::
   Maybe Path -> Maybe String -> Code -> [T.Text] -> Int ->
-  Config.Config -> BuildConfig -> Bool -> IO Bool
-makeAndInstall path outfile code extraIncludes verbosity config buildConfig force = do
+  Config.Config -> BuildConfig -> Bool -> Bool -> IO Bool
+makeAndInstall path outfile code extraIncludes verbosity config buildConfig force unsafeSkipNullCheck = do
   let action = do
-        MM.modify (\s -> s {stateInstall = True, stateInstallForce = force})
+        MM.modify (\s -> s {stateInstall = True
+                          , stateInstallForce = force
+                          , stateUnsafeSkipNullCheck = unsafeSkipNullCheck})
         M.writeProgram translator path code
   result <- MM.runMorlocMonad outfile verbosity config buildConfig action
   passed <- MM.writeMorlocReturn result
@@ -281,10 +286,12 @@ cmdMake args verbosity config buildConfig = do
   if makeInstall args
     then
       makeAndInstall path outfile code
-        (map T.pack (makeInclude args)) verbosity config buildConfig (makeForce args)
+        (map T.pack (makeInclude args)) verbosity config buildConfig
+        (makeForce args) (makeUnsafeSkipNullCheck args)
     else do
       let action = do
-            MM.modify (\s -> s {stateInstall = False})
+            MM.modify (\s -> s {stateInstall = False
+                              , stateUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args})
             M.writeProgram translator path code
       result <- MM.runMorlocMonad outfile verbosity config buildConfig action
       passed <- MM.writeMorlocReturn result

@@ -29,6 +29,21 @@ import qualified Morloc.TypeEval as TE
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
 
+-- C3 invariant: the record literal's key order must match the declared
+-- schema's key order. The bidirectional checkE rule in
+-- Frontend/Typecheck.hs reorders NamS against the declared NamU; this
+-- assertion catches any future regression of that pass and turns a
+-- silent wire-format corruption into a sourced compiler-internal error.
+assertRecordKeyOrder ::
+  Int -> [(Key, a)] -> [(Key, b)] -> MorlocMonad ()
+assertRecordKeyOrder midx entries rs
+  | map fst entries == map fst rs = return ()
+  | otherwise = MM.throwSourcedError midx $
+      "Compiler-internal error: record literal key order does not match"
+      <+> "declared schema order (C3 invariant violated)."
+      <+> "Literal keys:" <+> hsep (punctuate "," (map (pretty . fst) entries))
+      <> "; declared keys:" <+> hsep (punctuate "," (map (pretty . fst) rs))
+
 setManifoldConfig ::
   Int ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
@@ -156,6 +171,11 @@ expressCore (AnnoS t@(Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS x
 expressCore (AnnoS g _ (TupS _)) = error $ "Invalid tuple form: " <> show g
 expressCore (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   MM.sayVVV $ "express NamT:" <+> pretty t
+  -- C3 invariant: the literal's key order must equal the declared
+  -- schema's key order. Typecheck.hs reorders NamS against the
+  -- declared NamU; if that ever regresses, this assertion catches the
+  -- mis-zip at the point where it would corrupt the wire format.
+  assertRecordKeyOrder midx entries rs
   let idxTypes = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTypes (map snd entries)
   let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
@@ -586,6 +606,8 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
   let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
   return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
+  -- C3 invariant: see comment at expressCore NamT above.
+  assertRecordKeyOrder midx entries rs
   let tsIdx = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) tsIdx (map snd entries)
   let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))

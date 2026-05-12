@@ -48,6 +48,26 @@ static void flush_shm_tracker(void) {
     shm_tracker_count = 0;
 }
 
+// Drop one tracker entry matching ptr (swap-with-last), shfree the
+// block, and free its schema. Used by release_packet_shm to free
+// a put_value-tracked packet's SHM as soon as its codegen-determined
+// scope ends, rather than waiting for the next dispatch flush.
+static bool shm_tracker_release_one(absptr_t ptr) {
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        if (shm_tracker[i].ptr == ptr) {
+            Schema* schema = shm_tracker[i].schema;
+            shm_tracker[i] = shm_tracker[shm_tracker_count - 1];
+            shm_tracker_count--;
+            char* err = NULL;
+            shfree(ptr, &err);
+            if (err) { free(err); }
+            if (schema) { free_schema(schema); }
+            return true;
+        }
+    }
+    return false;
+}
+
 #define NOTHING
 
 #define MAYFAIL \
@@ -1333,6 +1353,44 @@ static PyObject* pybinding__flush_shm_tracker(PyObject* self, PyObject* args) {
 }
 
 
+// Release the SHM ref owned by a put_value-produced packet. The codegen
+// inserts this call at the end of a serialize let's scope so the tracker
+// entry is dropped as soon as the packet is no longer needed, instead of
+// accumulating until the dispatch boundary. No-op for inline packets
+// (those don't carry an SHM relptr), so callers can invoke unconditionally.
+static PyObject* pybinding__release_packet_shm(PyObject* self, PyObject* args) { MAYFAIL
+    const char* packet;
+    Py_ssize_t packet_size;
+
+    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
+        PyRAISE("Failed to parse arguments");
+    }
+
+    if ((size_t)packet_size < sizeof(morloc_packet_header_t)) {
+        Py_RETURN_NONE;
+    }
+
+    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
+    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
+        Py_RETURN_NONE;
+    }
+
+    size_t relptr = *(size_t*)((const uint8_t*)packet
+        + sizeof(morloc_packet_header_t) + hdr->offset);
+    char* resolve_err = NULL;
+    void* voidstar = rel2abs(relptr, &resolve_err);
+    if (resolve_err) { free(resolve_err); }
+    if (voidstar) {
+        shm_tracker_release_one((absptr_t)voidstar);
+    }
+
+    Py_RETURN_NONE;
+
+error:
+    return NULL;
+}
+
+
 // Make a foreign call
 //
 // Arguments:
@@ -1918,6 +1976,7 @@ static PyMethodDef Methods[] = {
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"flush_shm_tracker", pybinding__flush_shm_tracker, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
+    {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},

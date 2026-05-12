@@ -6,4 +6,9 @@
 "q:\" bs:\\ nl:\n tab:\t end"
 "he said \"hi\""
 "q:\" bs:\\ nl:\n tab:\t end"
+"abc\u0000def"
+"abc\u0000def"
+7
+7
+"abc\u0000def"
 bad.loc:4:13: invalid escape sequence \q
