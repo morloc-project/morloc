@@ -373,7 +373,27 @@ parsub :: (TVar, TypeU) -> TypeU -> TypeU
 parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
-parsub _ t@(NatVarU _) = t
+-- Kind-specific variables (NatVarU/StrVarU/RecVarU/ListVarU/SetVarU) are
+-- substituted exactly like VarU when the typedef parameter name matches.
+-- Without this, typedef bodies that use a kind-promoted variable inside an
+-- arithmetic / operator expression (e.g. `type Foo (n :: Nat) (m :: Nat) =
+-- Vector (n + m) Int`) would expand to a body that still references the
+-- unbound NatVarU, leaving the Nat solver unable to reduce the result.
+parsub (v, t2) t1@(NatVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(StrVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(RecVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(ListVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(SetVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
 parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (zip (map fst rs) (map (parsub pair . snd) rs), rc)
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
@@ -382,13 +402,9 @@ parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair
 parsub pair (EffectU effs t) = EffectU effs (parsub pair t)
 parsub pair (OptionalU t) = OptionalU (parsub pair t)
 parsub _ t@NatVoidU = t
-parsub _ t@(StrVarU _) = t
 parsub _ t@StrVoidU = t
-parsub _ t@(RecVarU _) = t
 parsub _ t@RecVoidU = t
-parsub _ t@(ListVarU _) = t
 parsub _ t@ListVoidU = t
-parsub _ t@(SetVarU _) = t
 parsub _ t@SetVoidU = t
 -- Unified carriers: uniform recursion across all operators and literal payloads.
 parsub pair (OpU op args) = OpU op (map (parsub pair) args)

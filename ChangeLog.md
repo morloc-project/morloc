@@ -1,13 +1,14 @@
 0.85.0 [2026-05-xx]
 -------------------
 
- * Add support for all intrinsics to pure morloc code
- * Stricter rule for conflicting instances (same lang, diff source)
- * Fix bug in nested record patterns
- * Fix missing valuecheck in where blocks
- * Raise error is where block shadows an input parameter
- * Support ephemeral daemon ports (port=0) and the --port-file option 
- * Fix representation of `[?a]`
+ * add support for all intrinsics to pure morloc code
+ * stricter rule for conflicting instances (same lang, diff source)
+ * fix bug in nested record patterns
+ * fix missing valuecheck in where blocks
+ * raise error is where block shadows an input parameter
+ * support ephemeral daemon ports (port=0) and the --port-file option 
+ * fix representation of `[?a]`
+ * fix kind-specifc variable substitution in typedef expansion
 
 Strings
  * accept NUL as \000 instead of emitting a raw NUL byte
