@@ -216,6 +216,10 @@ data PackageMeta
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
   , packageMorlocDependencies :: [(Text, Text)]
+  -- | Optional path (relative to the module root) to a shell script that
+  -- runs once during `morloc install`, after the source is on disk and
+  -- after morloc deps are installed. Non-zero exit fails the install.
+  , packageSetup :: !(Maybe FilePath)
   }
   deriving (Show, Ord, Eq)
 
@@ -390,6 +394,7 @@ instance Defaultable PackageMeta where
       , packageDependencies = []
       , packageInclude = Nothing
       , packageMorlocDependencies = []
+      , packageSetup = Nothing
       }
 
 instance FromJSON Config where
@@ -434,6 +439,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "dependencies" .!= []
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
+      <*> o .:? "setup"
     where
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
         (,) <$> od Aeson..: "name" <*> od Aeson..: "git-hash"

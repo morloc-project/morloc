@@ -59,6 +59,7 @@ morlocDepsTests =
     "morloc-dependencies"
     [ packageYamlParserTests
     , resolverTests
+    , packageSetupParserTests
     ]
 
 -- ---------------------------------------------------------------------------
@@ -199,4 +200,29 @@ resolverTests =
     , testCase "reconcileOverwrite preserves explicit ForceOverwrite" $ do
         reconcileOverwrite ForceOverwrite Nothing Nothing
           @?= ForceOverwrite
+    ]
+
+-- ---------------------------------------------------------------------------
+-- package.yaml :: setup field parser tests
+-- ---------------------------------------------------------------------------
+
+packageSetupParserTests :: TestTree
+packageSetupParserTests =
+  testGroup
+    "package.yaml :: setup parser"
+    [ testCase "missing field defaults to Nothing" $ do
+        let yamlText = "name: foo\nversion: 0.1.0\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageSetup pm @?= Nothing
+    , testCase "string value parses as Just" $ do
+        let yamlText = "name: foo\nsetup: setup.sh\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageSetup pm @?= Just "setup.sh"
+    , testCase "nested path parses as Just" $ do
+        let yamlText = "name: foo\nsetup: scripts/install.sh\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageSetup pm @?= Just "scripts/install.sh"
     ]
