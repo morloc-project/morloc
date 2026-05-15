@@ -965,6 +965,8 @@ data LayoutContext
     LetCtx !Int
   | -- | real {, no indentation tracking
     ExplicitCtx
+  | -- | open ( or [, no indentation tracking; closed by the matching ) or ]
+    ParenCtx
   deriving (Show, Eq)
 
 -- | Is the token a layout keyword (introduces an indented block)?
@@ -1078,6 +1080,14 @@ insertLayout toks = beginTopLevel toks
     processToken ctxs tok rest
       -- EOF: close all contexts
       | locToken tok == TokEOF = closingBraces ctxs [tok]
+      -- Closing bracket: force-close any layout block (do/let) opened
+      -- inside the matching ( or [. Routed here, before indentCheck, so
+      -- the bracket itself never triggers a spurious VSEMI. Without this a
+      -- do-block used as a parenthesised argument never receives its
+      -- virtual close brace and fails to parse.
+      | (locToken tok == TokRParen || locToken tok == TokRBracket)
+          && ParenCtx `elem` ctxs =
+          closeToParen ctxs tok rest
       -- Regular token: check indentation first (may emit VSEMI/VRBRACE)
       | otherwise = indentCheck ctxs tok rest
 
@@ -1085,6 +1095,8 @@ insertLayout toks = beginTopLevel toks
     indentCheck :: [LayoutContext] -> Located -> [Located] -> [Located]
     indentCheck [] tok rest = emitToken [] tok rest
     indentCheck (ExplicitCtx : ctxs) tok rest = emitToken (ExplicitCtx : ctxs) tok rest
+    -- Inside ( or [ with no active layout block: not indentation-sensitive
+    indentCheck (ParenCtx : ctxs) tok rest = emitToken (ParenCtx : ctxs) tok rest
     -- 'in' immediately closes a LetCtx regardless of indentation
     indentCheck (LetCtx _ : cs) tok rest
       | locToken tok == TokIn =
@@ -1141,6 +1153,10 @@ insertLayout toks = beginTopLevel toks
       -- Explicit close brace
       | locToken tok == TokRBrace =
           closeToExplicit ctxs tok rest
+      -- Open bracket: track nesting so the matching ) or ] can force-close
+      -- any layout block opened inside it
+      | locToken tok == TokLParen || locToken tok == TokLBracket =
+          tok : process (ParenCtx : ctxs) rest
       -- Prefix pragma: suppress VSEMI before the next token
       | locToken tok == TokPragmaInline =
           tok : case rest of
@@ -1157,13 +1173,36 @@ insertLayout toks = beginTopLevel toks
       Located (locPos tok) TokVRBrace "" : closeToExplicit ctxs tok rest
     closeToExplicit (LetCtx _ : ctxs) tok rest =
       Located (locPos tok) TokVRBrace "" : closeToExplicit ctxs tok rest
+    closeToExplicit (ParenCtx : ctxs) tok rest =
+      -- a } before the matching ) or ]; drop the bracket marker and keep
+      -- looking for the explicit-brace context, let the parser report it
+      closeToExplicit ctxs tok rest
     closeToExplicit [] tok rest =
       -- unbalanced }, let the parser report the error
+      tok : process [] rest
+
+    -- Close layout contexts until we reach the ParenCtx opened by the
+    -- matching ( or [. Mirrors closeToExplicit for explicit braces.
+    closeToParen :: [LayoutContext] -> Located -> [Located] -> [Located]
+    closeToParen (ParenCtx : ctxs) tok rest =
+      tok : process ctxs rest
+    closeToParen (IndentCtx _ : ctxs) tok rest =
+      Located (locPos tok) TokVRBrace "" : closeToParen ctxs tok rest
+    closeToParen (LetCtx _ : ctxs) tok rest =
+      Located (locPos tok) TokVRBrace "" : closeToParen ctxs tok rest
+    closeToParen (ExplicitCtx : ctxs) tok rest =
+      -- a } is missing inside the brackets; let the parser report it
+      tok : process ctxs rest
+    closeToParen [] tok rest =
+      -- unbalanced ) or ], let the parser report the error
       tok : process [] rest
 
     -- Emit closing braces for all remaining contexts
     closingBraces :: [LayoutContext] -> [Located] -> [Located]
     closingBraces [] rest = rest
+    -- A ParenCtx left open at EOF is an unbalanced ( or [; emit no virtual
+    -- brace and let the parser report the unbalanced bracket.
+    closingBraces (ParenCtx : cs) rest = closingBraces cs rest
     closingBraces (_ : cs) rest =
       let p = case rest of
             (Located pp _ _ : _) -> pp
