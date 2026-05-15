@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -530,7 +529,7 @@ realizeWithRegistry registry s0 = do
       AnnoS (Indexed Type) One (Indexed (Maybe Lang)) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
     propagateDown (AnnoS _ (Idx i Nothing) _) =
-      MM.throwSourcedError i $ "Compiler bug: (__FILE__:__LINE__) - Unexpected Nothing"
+      MM.throwCompilerBugAt i "language not resolved for this node (unexpected Nothing in propagateDown)"
     propagateDown e@(AnnoS _ (Idx _ (Just lang0)) _) = f lang0 e
       where
         f ::

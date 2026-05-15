@@ -1,0 +1,7 @@
+-- The chosen output name collides with an existing directory. The
+-- build must fail with an actionable message that names the conflict
+-- and points at the -o flag -- it must NOT leak a raw Haskell IOError
+-- such as "withFile: inappropriate type (Is a directory)".
+module main (foo)
+foo :: Int
+foo = 42

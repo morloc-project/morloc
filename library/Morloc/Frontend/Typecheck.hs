@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -678,7 +677,7 @@ synthE _ g0 (NamS rs) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE varIdx g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
+synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- Rename type AND constraints together so primitive constraints
   -- (CMember / CSubset / CDisjoint) reference the same fresh-name
   -- variables that the type uses. The renamed constraints are queued
@@ -717,8 +716,11 @@ synthE varIdx g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- signature.  Catches forces outside do-blocks (e.g. `f = !rint`)
   -- that the structural subtype rule cannot see, because EvalS strips
   -- the effect wrapper from the inner type.  See
-  -- spec/types/effects.md "Effect Checking".
-  mapM_ (checkEffectCoverage varIdx (apply g2 t1)) xs1
+  -- spec/types/effects.md "Effect Checking".  The body's own concrete
+  -- index (ci) localises the diagnostic to the definition: this
+  -- clause's index argument is the variable-reference / export-list
+  -- site and would mis-point the caret at the module declaration.
+  mapM_ (\x@(AnnoS _ ci _) -> checkEffectCoverage ci (apply g2 t1) x) xs1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -1148,7 +1150,7 @@ zipCheck i g0 (x0 : xs0) (t0 : ts0) = do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i _ _ [] = MM.throwSourcedError i "Compiler bug (__FILE__:__LINE__): too many arguments in zipCheck"
+zipCheck i _ _ [] = MM.throwCompilerBugAt i "too many arguments in zipCheck"
 
 foldCheck ::
   Gamma ->
@@ -1603,13 +1605,13 @@ peelLambdaLayers t body = (t, body)
 --
 -- Catches forces that escape do-blocks, the case the type-level
 -- subtype rule cannot see because EvalS strips the effect wrapper
--- from the inner type.  Pointing the diagnostic at the surrounding
--- annotation index ('idx') keeps the caret on the user-visible
--- signature rather than on a deeply nested sub-expression.
+-- from the inner type.  The caret is placed on the force ('!') that
+-- produced the uncovered effect; only when no single node can be
+-- blamed does it fall back to the surrounding index ('idx').
 checkEffectCoverage
   :: Int
   -> TypeU
-  -> AnnoS (Indexed TypeU) f c
+  -> AnnoS (Indexed TypeU) f Int
   -> MorlocMonad ()
 checkEffectCoverage idx declared body = do
   let (innerDecl, innerBody) = peelLambdaLayers declared body
@@ -1620,14 +1622,46 @@ checkEffectCoverage idx declared body = do
       uncovered = Set.difference inferred declEffs
   if Set.null uncovered
     then return ()
-    else MM.throwSourcedError idx $
-      "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
-        <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
-        <+> "Either add the effect to the signature or sequence the operation in a do-block."
+    else
+      let blameIdx = case uncoveredEvalIdxs uncovered innerBody of
+            (i : _) -> i
+            [] -> idx
+       in MM.throwSourcedError blameIdx $
+            "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
+              <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
+              <+> "Either add the effect to the signature or sequence the operation in a do-block."
   where
     renderEffectLabels s
       | Set.null s = "<>"
       | otherwise = "<" <> hcat (punctuate ", " (map pretty (Set.toList s))) <> ">"
+
+-- | Concrete indices of the force ('EvalS') nodes whose forced
+-- expression carries an effect in the uncovered set, in pre-order.
+-- Traverses only the nodes 'inferExprEffects' counts as
+-- evaluation-time (thunk boundaries -- lambdas and do-blocks -- are
+-- not crossed), so the first result is the force the user must fix.
+uncoveredEvalIdxs
+  :: Set.Set EffectLabel
+  -> AnnoS (Indexed TypeU) f Int
+  -> [Int]
+uncoveredEvalIdxs uncovered = go
+  where
+    go (AnnoS _ ci expr) = case expr of
+      EvalS e
+        | not (Set.null (Set.intersection (effLabels e) uncovered)) -> [ci]
+        | otherwise -> go e
+      LetS _ e1 e2 -> go e1 ++ go e2
+      AppS f' args -> go f' ++ concatMap go args
+      TupS es -> concatMap go es
+      LstS es -> concatMap go es
+      NamS rs -> concatMap (go . snd) rs
+      IfS c t e -> go c ++ go t ++ go e
+      CoerceS _ e -> go e
+      IntrinsicS _ es -> concatMap go es
+      _ -> []
+
+    effLabels (AnnoS (Idx _ (EffectU effs _)) _ _) = resolveEffectSet effs
+    effLabels _ = Set.empty
 
 -- helpers
 

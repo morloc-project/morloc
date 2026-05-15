@@ -37,7 +37,6 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
 import qualified System.Directory as Dir
-import System.FilePath ((</>))
 
 -- ======================================================================
 -- Data types

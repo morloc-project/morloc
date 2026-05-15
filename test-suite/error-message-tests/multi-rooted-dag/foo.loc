@@ -1,0 +1,13 @@
+-- One file declaring two modules where neither imports the other
+-- yields a multi-rooted module DAG. This trips an internal "Compiler
+-- bug" path. The diagnostic must report the real Haskell source
+-- location and a link to the issue tracker -- it must NOT contain the
+-- literal C-preprocessor tokens "(__FILE__:__LINE__)", which never
+-- expand inside Haskell string literals.
+module main (foo)
+foo :: Int
+foo = 42
+
+module myinstances (bar)
+bar :: Int
+bar = 1

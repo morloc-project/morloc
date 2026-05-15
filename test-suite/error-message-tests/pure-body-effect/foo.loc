@@ -1,0 +1,12 @@
+-- A pure function whose body forces an effectful value with `!`.
+-- The effect-coverage check must reject this and place the caret on
+-- the offending `!` force on the definition line below -- NOT on the
+-- module declaration / export-list reference on line 7.
+module main (randPure)
+
+source Py from "foo.py" ("rint")
+
+rint :: <IO> Int
+
+randPure :: Int
+randPure = !rint

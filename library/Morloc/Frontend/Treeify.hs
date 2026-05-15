@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -67,7 +66,7 @@ treeify d
       [k] -> do
         case DAG.lookupNode k d of
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
-          Nothing -> MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): Module DAG is missing key" <+> pretty k
+          Nothing -> MM.throwCompilerBug $ "module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols groups)) -> do
             d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
@@ -123,8 +122,8 @@ treeify d
       -- multiple projects in parallel with potentially shared information and
       -- constraints could be valuable.
       roots ->
-        MM.throwSystemError $
-          "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:"
+        MM.throwCompilerBug $
+          "unsupported multi-rooted module DAG:"
             <+> tupled (map pretty roots)
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI

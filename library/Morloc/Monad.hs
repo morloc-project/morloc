@@ -69,6 +69,8 @@ module Morloc.Monad
   , throwSystemError
   , throwSourcedError
   , throwUnificationError
+  , throwCompilerBug
+  , throwCompilerBugAt
 
     -- * naming helpers
   , getModuleName
@@ -105,6 +107,7 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 import qualified Morloc.System as MS
+import GHC.Stack (CallStack, HasCallStack, callStack, getCallStack, srcLocFile, srcLocStartLine)
 import qualified System.Exit as SE
 import System.IO (stderr)
 import qualified System.Process as SP
@@ -320,6 +323,30 @@ throwSourcedError i = throwError . SourcedError i
 
 throwUnificationError :: (MonadError MorlocError m) => Int -> Int -> Int -> MDoc -> m a
 throwUnificationError lhs rhs context msg = throwError $ UnificationError lhs rhs context msg
+
+-- | Raise an internal-compiler-error ("this should never happen") with the real
+-- source location of the throw site and a pointer to the issue
+-- tracker. 'HasCallStack' supplies the accurate, non-rotting location
+-- automatically.
+throwCompilerBug :: (HasCallStack, MonadError MorlocError m) => MDoc -> m a
+throwCompilerBug = throwError . SystemError . compilerBugMsg callStack
+
+-- | As 'throwCompilerBug', but tied to an AST node index so the user
+-- still sees the offending source snippet.
+throwCompilerBugAt :: (HasCallStack, MonadError MorlocError m) => Int -> MDoc -> m a
+throwCompilerBugAt i = throwError . SourcedError i . compilerBugMsg callStack
+
+compilerBugMsg :: CallStack -> MDoc -> MDoc
+compilerBugMsg cs msg =
+  "Compiler bug at" <+> pretty bugLoc <> ":" <+> msg
+    <> line
+    <> "This is an internal compiler error; please report it at"
+    <+> "https://github.com/morloc-project/morloc/issues"
+  where
+    bugLoc :: String
+    bugLoc = case getCallStack cs of
+      ((_, sl) : _) -> srcLocFile sl <> ":" <> show (srcLocStartLine sl)
+      [] -> "<unknown location>"
 
 systemCallError :: Text -> Text -> String -> MorlocMonad a
 systemCallError cmd loc msg =

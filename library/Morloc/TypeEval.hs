@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -120,7 +119,7 @@ resolveIgnore ::
   Either MorlocError TypeU
 resolveIgnore f bnd (AppU (VarU v) ts) = AppU (VarU v) <$> mapM (f bnd) ts
 resolveIgnore _ _ t@(VarU _) = return t
-resolveIgnore _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
+resolveIgnore _ _ _ = MM.throwCompilerBug "resolveIgnore reached an unexpected branch"
 
 resolveFail ::
   (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
@@ -135,7 +134,7 @@ resolveFail _ _ (VarU v) =
   MM.throwSystemError $
     "Could not resolve type for variable" <+> squotes (pretty v)
       <> ". You may be missing a language-specific type definition."
-resolveFail _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
+resolveFail _ _ _ = MM.throwCompilerBug "resolveFail reached an unexpected branch"
 
 generalTransformType ::
   Set.Set TVar ->
