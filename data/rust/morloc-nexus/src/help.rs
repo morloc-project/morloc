@@ -15,7 +15,7 @@ pub fn print_nexus_usage(prog_name: &str) -> ! {
     eprintln!("  -h, --help           Print this help message");
     eprintln!("  -p, --print          Pretty-print output for human consumption");
     eprintln!("  -o, --output-file    Print to this file instead of STDOUT");
-    eprintln!("  -f, --output-format  Output format [json|mpk|voidstar]");
+    eprintln!("  -f, --output-form    Output format [json|mpk|voidstar]");
     eprintln!("      --keep-null      Print top-level () or None as 'null'");
     eprintln!("                       (default: produce empty output)");
     eprintln!();
@@ -50,7 +50,7 @@ pub fn print_usage(prog_name: &str, manifest: &Manifest) -> ! {
     eprintln!("  -h, --help           Print this help message");
     eprintln!("  -p, --print          Pretty-print output for human consumption");
     eprintln!("  -o, --output-file    Print to this file instead of STDOUT");
-    eprintln!("  -f, --output-format  Output format [json|mpk|voidstar]");
+    eprintln!("  -f, --output-form    Output format [json|mpk|voidstar]");
     eprintln!("      --keep-null      Print top-level () or None as 'null'");
     eprintln!("                       (default: produce empty output)");
     eprintln!();
