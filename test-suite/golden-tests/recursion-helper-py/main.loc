@@ -1,4 +1,4 @@
-module main (fact)
+module main (fact, factAlias, ackAlias)
 
 import root-py
 
@@ -10,3 +10,22 @@ factHelper :: Int -> Int -> Int
 factHelper n acc
   ? n == 0 = acc
   : factHelper (n - 1) (acc * n)
+
+-- point-free export aliasing a non-exported recursive helper
+factAlias :: Int -> Int
+factAlias = factSingle
+
+factSingle :: Int -> Int
+factSingle n
+  ? n == 0 = 1
+  : n * factSingle (n - 1)
+
+-- point-free export aliasing a multi-arg non-exported recursive helper
+ackAlias :: Int -> Int -> Int
+ackAlias = ackHelper
+
+ackHelper :: Int -> Int -> Int
+ackHelper m n
+  ? m == 0 = n + 1
+  ? n == 0 = ackHelper (m - 1) 1
+  : ackHelper (m - 1) (ackHelper m (n - 1))

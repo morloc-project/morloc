@@ -149,6 +149,29 @@ expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) =
     . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
     $ PolyApp (PolyExe (Idx midx c) exe') lambdaVals
+-- Point-free export aliasing a recursive function. extractRecursiveHelpers
+-- has pulled the helper into its own manifold and left a bare CallS back-edge
+-- at the export root. Eta-expand here so the PolyHead carries the function's
+-- arity; otherwise the export manifold would be emitted with zero args while
+-- the nexus manifest correctly records the type-driven arity.
+expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) = do
+  MM.sayVVV $ "express top-level CallS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
+  (mid, crossLang) <- lookupRecursiveTarget lang v
+  ids <- MM.takeFromCounter (length inputs)
+  let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
+      headArgs = [Arg i None | i <- ids]
+  case out of
+    EffectT effs innerOut ->
+      return
+        . PolyHead lang midx headArgs
+        . PolyReturn
+        . PolyDoBlock (Idx cidx (EffectT effs innerOut))
+        $ PolyApp (PolyExe (Idx midx (FunT inputs innerOut)) (RecCallP mid crossLang)) lambdaVals
+    _ ->
+      return
+        . PolyHead lang midx headArgs
+        . PolyReturn
+        $ PolyApp (PolyExe (Idx midx c) (RecCallP mid crossLang)) lambdaVals
 expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
   MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   setManifoldConfig midx e

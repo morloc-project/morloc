@@ -5,6 +5,13 @@ all:
 	./nexus fact 1 >> obs.txt 2>> obs.err
 	./nexus fact 5 >> obs.txt 2>> obs.err
 	./nexus fact 10 >> obs.txt 2>> obs.err
+	./nexus factAlias 0 >> obs.txt 2>> obs.err
+	./nexus factAlias 1 >> obs.txt 2>> obs.err
+	./nexus factAlias 5 >> obs.txt 2>> obs.err
+	./nexus factAlias 10 >> obs.txt 2>> obs.err
+	./nexus ackAlias 0 0 >> obs.txt 2>> obs.err
+	./nexus ackAlias 2 3 >> obs.txt 2>> obs.err
+	./nexus ackAlias 3 3 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *err
