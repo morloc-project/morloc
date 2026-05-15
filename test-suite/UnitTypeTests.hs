@@ -2090,6 +2090,39 @@ unitValuecheckTests =
              y = n + 1
              y = n + 2
       |]
+      , -- A polymorphic export that reaches a typeclass method backed by
+        -- instances with differing literal bodies (e.g. Integral Int zero=0
+        -- vs Integral Real zero=0.0). The instances are type-disjoint and
+        -- never co-selected, so this must not be flagged as a value conflict.
+        valuecheckPass
+          "polymorphic export through multi-instance typeclass with literal bodies"
+          [r|
+         module foo (f)
+           class Foo a where
+             bar :: a
+           instance Foo Int where
+             bar = 5
+           instance Foo Real where
+             bar = 5.0
+           f :: Foo a => a
+           f = bar
+      |]
+      , -- Conflicting bodies for the SAME instance type must still fail:
+        -- type-disjointness is the only thing that licenses skipping the
+        -- comparison, and here both alternatives are Int.
+        valuecheckFail
+          "duplicate same-type instance bodies still flagged"
+          [r|
+         module foo (f)
+           class Foo a where
+             bar :: a
+           instance Foo Int where
+             bar = 5
+           instance Foo Int where
+             bar = 6
+           f :: Foo a => a
+           f = bar
+      |]
       ]
 
 {- | Tests for infix operator functionality

@@ -84,6 +84,23 @@ indexOfE (EvalP (Idx i _) _) = i
 indexOfE (CoerceP _ (Idx i _) _) = i
 indexOfE (IntrinsicP (Idx i _) _ _) = i
 
+typeOfE :: E -> Type
+typeOfE (BndP (Idx _ t) _) = t
+typeOfE (VarP (Idx _ t) _ _) = t
+typeOfE (AppP (Idx _ t) _ _) = t
+typeOfE (LamP (Idx _ t) _ _) = t
+typeOfE (LstP (Idx _ t) _) = t
+typeOfE (TupP (Idx _ t) _) = t
+typeOfE (NamP (Idx _ t) _) = t
+typeOfE (LitP (Idx _ t) _) = t
+typeOfE (SrcP (Idx _ t) _) = t
+typeOfE (PatP (Idx _ t) _) = t
+typeOfE (IfP (Idx _ t) _ _ _) = t
+typeOfE (DoBlockP (Idx _ t) _) = t
+typeOfE (EvalP (Idx _ t) _) = t
+typeOfE (CoerceP _ (Idx _ t) _) = t
+typeOfE (IntrinsicP (Idx _ t) _ _) = t
+
 -- Check the harmony of typed implementations.
 --
 -- A naive implementation of this functions (and mine is naive as heck) will run
@@ -141,7 +158,14 @@ hasGround (AnnoS _ _ e) = case e of
 -- compare all pairs of implementations
 check :: E -> MorlocMonad ()
 check (VarP (Idx i _) _ es) = do
-  mapM_ (uncurry (checkPair i)) (pairwise es)
+  -- Alternatives reach the same VarP via polymorphic resolution
+  -- (Typecheck.resolveInstances). When the call site's general type is
+  -- unbound (e.g. a top-level export `sum :: Integral a => [a] -> a`),
+  -- every matching instance survives into a single Many. Only one instance
+  -- is selected per runtime call site, so alternatives with distinct ground
+  -- types are never co-applicable and must not be value-equated.
+  let typedPairs = [(a, b) | (a, b) <- pairwise es, typeOfE a == typeOfE b]
+  mapM_ (uncurry (checkPair i)) typedPairs
   -- recurse into each alternative so nested VarPs (e.g. non-export terms
   -- referenced from the export, or where-bound terms) are also checked
   mapM_ check es
