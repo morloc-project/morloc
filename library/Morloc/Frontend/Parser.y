@@ -255,6 +255,7 @@ import_module_name :: { Text }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
+  | '(' ')'                                { Just [] }
   | '(' import_items ')'                   { Just $2 }
 
 import_items :: { [AliasedSymbol] }

@@ -3475,6 +3475,20 @@ namespaceErrorTests =
         x :: Int
         x = double 5
           |]
+      , -- typeclass methods are not exported as standalone symbols and
+        -- cannot be selectively imported; this should raise an error
+        -- (the test asserts only the presence of an error, not its text)
+        exprTestBad
+          "typeclass method cannot be selectively imported"
+          [r|
+        module eq (*)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        module main (test)
+        import eq ((==))
+        test :: Bool
+        test = True
+          |]
       ]
 
 typeclassTests :: TestTree

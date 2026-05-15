@@ -1,0 +1,17 @@
+module main (test)
+
+-- (==) is a method of the Eq typeclass defined in eq.loc.
+-- Typeclass methods are not exported as named symbols, so they
+-- cannot be selectively imported. The supported way to bring an
+-- instance into scope without name pollution is to use an empty
+-- import list: `import .eq ()`.
+--
+-- Importing the class explicitly is also fine:
+import .eq (Eq)
+
+-- ... but selectively importing the method itself is illegal and
+-- triggers the typeclass-bad-import diagnostic:
+import .eq ((==))
+
+test :: Bool
+test = (3 :: Int) == (3 :: Int)

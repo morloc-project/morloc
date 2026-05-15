@@ -1,0 +1,7 @@
+module eq (*)
+
+class Eq a where
+  (==) :: a -> a -> Bool
+
+instance Eq Int where
+  source Py from "core.py" ("morloc_eq" as (==))

@@ -127,6 +127,18 @@ resolveImports d0 =
   DAG.synthesize resolveExports resolveEdge d0
     >>= maybe (MM.throwSystemError "Cyclical import dependency in resolveImports") return
   where
+    -- Map every typeclass method name in the DAG to the class that owns it.
+    -- Used to produce a targeted diagnostic when a user attempts to selectively
+    -- import a method; method names are never exported as standalone symbols.
+    classMethods :: Map EVar ClassName
+    classMethods = foldr (Map.union . findClassMethodsInExpr) Map.empty (DAG.nodes d0)
+
+    findClassMethodsInExpr :: ExprI -> Map EVar ClassName
+    findClassMethodsInExpr (ExprI _ (ModE _ es)) = Map.unions (map findClassMethodsInExpr es)
+    findClassMethodsInExpr (ExprI _ (ClsE (Typeclass _ cls _ sigs))) =
+      Map.fromList [(name, cls) | Signature name _ _ <- sigs]
+    findClassMethodsInExpr _ = Map.empty
+
     -- Collect all exported terms from a module (including those imported
     -- without qualification. Then update the ExpE term
     resolveExports :: MVar -> ExprI -> [(MVar, Import, ExprI)] -> MorlocMonad ExprI
@@ -241,14 +253,7 @@ resolveImports d0 =
     filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) Nothing) (ExportMany exports gs) =
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
-        (missing, _) ->
-          MM.throwSystemError $
-            "The terms imported from"
-              <+> squotes (pretty m1)
-              <+> "are not exported from module"
-              <+> squotes (pretty m2)
-              <> ":\n"
-                <+> indent 2 (vsep (map pretty missing))
+        (missing, _) -> throwMissingImportError m1 m2 missing
       where
         allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
@@ -265,14 +270,7 @@ resolveImports d0 =
     filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) (Just (EV ns))) (ExportMany exports gs) =
       case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
         ([], imps) -> return $ Set.fromList imps
-        (missing, _) ->
-          MM.throwSystemError $
-            "The terms imported from"
-              <+> squotes (pretty m1)
-              <+> "are not exported from module"
-              <+> squotes (pretty m2)
-              <> ":\n"
-                <+> indent 2 (vsep (map pretty missing))
+        (missing, _) -> throwMissingImportError m1 m2 missing
       where
         allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
         exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
@@ -286,6 +284,48 @@ resolveImports d0 =
               (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
               (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
     filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
+
+    -- Build the diagnostic for a failed selective import. Names that resolve
+    -- to a typeclass method get a dedicated message explaining that methods
+    -- are not nameable in import lists; truly absent names get the generic
+    -- "not exported" message. If both are present, both sections appear.
+    throwMissingImportError :: MVar -> MVar -> [Text] -> MorlocMonad a
+    throwMissingImportError m1 m2 missing =
+      let (methods, notExported) = partitionMissing missing
+       in MM.throwSystemError $ vsep (methodSection methods m1 m2 ++ notExportedSection notExported m1 m2)
+
+    methodSection :: [(Text, ClassName)] -> MVar -> MVar -> [MDoc]
+    methodSection [] _ _ = []
+    methodSection methods m1 m2 =
+      [ "The following terms imported from"
+          <+> squotes (pretty m1)
+          <+> "are typeclass methods reachable from"
+          <+> squotes (pretty m2)
+          <> ", which cannot be imported by name:\n"
+          <+> indent 2 (vsep [pretty name <+> "(method of class" <+> squotes (pretty cls) <> ")" | (name, cls) <- methods])
+          <> "\n  Use an empty import list to bring instances into scope implicitly:"
+          <+> squotes ("import" <+> pretty m2 <+> "()")
+          <> "."
+      ]
+
+    notExportedSection :: [Text] -> MVar -> MVar -> [MDoc]
+    notExportedSection [] _ _ = []
+    notExportedSection names m1 m2 =
+      [ "The terms imported from"
+          <+> squotes (pretty m1)
+          <+> "are not exported from module"
+          <+> squotes (pretty m2)
+          <> ":\n"
+          <+> indent 2 (vsep (map pretty names))
+      ]
+
+    partitionMissing :: [Text] -> ([(Text, ClassName)], [Text])
+    partitionMissing = foldr step ([], [])
+      where
+        step name (methods, notExported) =
+          case Map.lookup (EV name) classMethods of
+            Just cls -> ((name, cls) : methods, notExported)
+            Nothing -> (methods, name : notExported)
 
     prefixSymbol :: Text -> Symbol -> Symbol
     prefixSymbol ns (TermSymbol (EV name)) = TermSymbol (EV (ns <> "." <> name))
