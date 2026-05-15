@@ -5,8 +5,8 @@ import root-py
 
 -- Multi-label effect annotation
 testMulti :: <IO, Error> Int
-testMulti = 42
+testMulti = do 42
 
 -- Single-label effect annotation (for comparison)
 testSingle :: <IO> Int
-testSingle = 10 + 20
+testSingle = do 10 + 20

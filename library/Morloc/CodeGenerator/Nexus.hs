@@ -373,14 +373,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     -- CoerceToOptional changes the value's runtime layout (tag byte + inner
     -- slot), so at the pure-nexus level we must materialize the wrapping
-    -- explicitly. CoerceToEffect is purely a type-level lift (effects are
-    -- runtime side-effects of function calls, not part of value layout) and
-    -- can still be stripped here.
+    -- explicitly.
     toNexusExpr (AnnoS (Idx _ t) _ (CoerceS CoerceToOptional e)) = do
       outerSchema <- type2schema t
       childX <- toNexusExpr e
       return $ OptX outerSchema childX
-    toNexusExpr (AnnoS _ _ (CoerceS _ e)) = toNexusExpr e
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =

@@ -877,8 +877,9 @@ synthE i g (DoBlockS e) = do
       let collected = collectDoEffects e1'
       return (g1, EffectU collected iT, DoBlockS e1')
     bareT -> do
-      -- Pure final: leave body as-is; tryCoerce CoerceToEffect will lift
-      -- against an effectful expected type at the use site.
+      -- Pure final: the block's type is <collected> bareT. An empty or
+      -- smaller effect set is a subtype of any expected effect set, so no
+      -- pure-to-effect lift is needed at the use site.
       let collected = collectDoEffects e1
       return (g1, EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
@@ -1450,13 +1451,6 @@ tryCoerce scope a (OptionalU b) g =
     Right g' -> Just ([CoerceToOptional], g')
     Left _ -> case tryCoerce scope a b g of
       Just (cs, g') -> Just (CoerceToOptional : cs, g')
-      Nothing -> Nothing
--- Coerce a pure value to an effectful type: a -> <E> a
-tryCoerce scope a (EffectU effs b) g =
-  case subtype scope a b g of
-    Right g' -> Just ([CoerceToEffect (resolveEffectSet effs)], g')
-    Left _ -> case tryCoerce scope a b g of
-      Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
 

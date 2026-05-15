@@ -873,18 +873,17 @@ subtype scope t1@(EffectU e1 i1) t2@(EffectU e2 i2) g
   | effectSubsetOf e1 e2 = subtype scope i1 i2 g
   | effectSetHasVar e1 || effectSetHasVar e2 = subtype scope i1 i2 g
   | otherwise = subtypeError t1 t2 "effect set on left is not a subset of effect set on right"
--- Effectful type on the left, non-effectful on the right.
--- Effects do not silently drop; the surrounding term must declare them.
--- This catches e.g. `rint :: <Rand> Int` bound to `a :: Int`.
--- ExistU and ForallU on the right fall through to their own rules below
--- so that polymorphism and existential solving still work uniformly.
-subtype _ t1@(EffectU _ _) t2 _
-  | not (isAbsorbing t2) =
-      subtypeError t1 t2 "cannot discard effects when matching pure type"
-  where
-    isAbsorbing (ForallU _ _)  = True
-    isAbsorbing (ExistU _ _ _) = True
-    isAbsorbing _              = False
+-- Effectful type on the left, non-effectful on the right. An effect type
+-- never satisfies a non-effect expected type and never instantiates a type
+-- variable (no ExistU/ForallU escape): an effectful computation must be run
+-- in a do-block and its pure result used instead. This is what makes the
+-- effect coloring sound -- a thunk (a function) can never reach a pure or
+-- polymorphic position, where the cross-language runtime cannot serialize it.
+subtype _ t1@(EffectU _ _) t2 _ =
+  subtypeError t1 t2 $
+    "an effectful value cannot be used where a non-effectful type is"
+      <+> "expected; run it in a do-block first (x <- e) and use the"
+      <+> "bound value"
 -- OptionalU: covariant subtyping
 subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 --  g1 |- B1 <: A1 -| g2

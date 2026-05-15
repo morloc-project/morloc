@@ -3108,7 +3108,7 @@ effectSynthesisTests =
       "Effect synthesis tests"
       [ -- pure do-block with no effects infers empty effect set
         assertGeneralType
-          "pure do-block infers empty effects"
+          "pure do-block"
           [r|
         module main (x)
         x = do 42
@@ -3116,56 +3116,25 @@ effectSynthesisTests =
           (emptyEff int)
       , -- force operator collects effect from forced expression
         assertGeneralType
-          "do-block with force collects IO effect"
+          "do-block with with one function call"
           [r|
         module main (x)
         f :: Int -> <IO> Int
-        x = do !(f 1)
+        x = do { f 1 }
           |]
           (ioEff int)
       , -- force in tuple: effects collected, tuple gets plain inner types
         assertGeneralType
-          "do-block with tuple of forces"
+          "do-block with tuple of effectful elements"
           [r|
         module main (x)
         f :: Int -> <IO> Int
-        x = do (!(f 1), !(f 2))
+        x = do
+          x <- f 1
+          y <- f 2
+          (x, y)
           |]
           (ioEff (tuple [int, int]))
-      , -- force in function args: effects bubble up, function sees plain args
-        assertGeneralType
-          "do-block with forces in function args"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        add :: Int -> Int -> Int
-        x = do add !(f 1) !(f 2)
-          |]
-          (ioEff int)
-      , -- bind extracts value from effectful expr, adds effect to block
-        assertGeneralType
-          "do-block with bind"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        x = do
-            y <- f 1
-            y
-          |]
-          (ioEff int)
-      , -- multiple binds collect effects from all bound expressions
-        assertGeneralType
-          "do-block with chained binds"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        add :: Int -> Int -> Int
-        x = do
-            a <- f 1
-            b <- f 2
-            add a b
-          |]
-          (ioEff int)
       , -- let with pure RHS in do-block infers empty effect
         assertGeneralType
           "do-block with pure let binding"
@@ -3189,15 +3158,6 @@ effectSynthesisTests =
             z
           |]
           (ioEff int)
-      , -- pure value auto-coerces to effectful when annotation demands it
-        assertGeneralType
-          "pure value coerces to effectful via annotation"
-          [r|
-        module main (x)
-        x :: <IO> Int
-        x = 42
-          |]
-          (ioEff int)
       , -- pure expression in do-block produces empty effects
         assertGeneralType
           "pure expression in do-block"
@@ -3216,21 +3176,12 @@ effectSynthesisTests =
         f :: Int -> <IO> Int
         g :: Int -> <Error> Int
         add :: Int -> Int -> Int
-        x = do add !(f 1) !(g 2)
+        x = do
+          x <- f 1
+          y <- g 2
+          add x y
           |]
           (EffectU (EffectUnion (EffectSet (Set.singleton "IO")) (EffectSet (Set.singleton "Error"))) int)
-      , -- bind and force mix in same do-block, effects combine
-        assertGeneralType
-          "do-block mixing bind and force"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        add :: Int -> Int -> Int
-        x = do
-            y <- f 1
-            add y !(f 2)
-          |]
-          (ioEff int)
       , -- chained binds feeding results forward
         assertGeneralType
           "do-block with chained dependent binds"
@@ -3263,7 +3214,8 @@ effectSynthesisTests =
         module main (x)
         f :: Int -> <IO> Int
         id :: a -> a
-        x = do !(f (id 42))
+        x = do
+          f (id 42)
           |]
           (ioEff int)
       , -- do-block returning a list with forces
@@ -3272,7 +3224,10 @@ effectSynthesisTests =
           [r|
         module main (x)
         f :: Int -> <IO> Int
-        x = do [!(f 1), !(f 2)]
+        x = do
+          x <- f 1
+          y <- f 2
+          [x, y]
           |]
           (ioEff (lst int))
       ]
@@ -3719,7 +3674,8 @@ typeclassTests =
         instance Default Int where
           def = 0
         f :: Int -> <IO> Int
-        x = do !(f def)
+        x = do
+          f def
           |]
           (ioEff int)
 

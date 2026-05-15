@@ -532,9 +532,6 @@ lowerNativeExpr cfg _ (DoBlockN_ t x) =
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional is a noop in all target languages: T is a valid ?T
 lowerNativeExpr _ _ (CoerceN_ CoerceToOptional _ x) = return x
--- CoerceToEffect wraps the value in a suspend (thunk/lambda)
-lowerNativeExpr cfg _ (CoerceN_ (CoerceToEffect _) _ x) =
-  return $ x {poolExpr = lcPrintExpr cfg (IDoBlock (IRawExpr (render (poolExpr x))))}
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do

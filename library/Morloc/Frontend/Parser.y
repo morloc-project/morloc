@@ -45,12 +45,10 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from guard_clauses ('?' could start guard or be part of next decl)
 -- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
 -- - 4 from optional type syntax ('?' could start optional type or guard)
--- Note: force_expr (!) re-added for inline effect forcing in do-blocks
--- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 92
+%expect 90
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -575,16 +573,12 @@ operand :: { Loc CstExpr }
   | '-' app_expr             { at $1 (CAppE (at $1 (CVarE (EV "negate"))) [$2]) }
 
 app_expr :: { Loc CstExpr }
-  : force_expr                     { $1 }
-  | force_expr atom_exprs1         { Loc ($1 <-> last $2) (CAppE $1 $2) }
-
-force_expr :: { Loc CstExpr }
-  : '!' atom_expr                  { Loc ($1 <-> $2) (CForceE $2) }
-  | atom_expr                      { $1 }
+  : atom_expr                      { $1 }
+  | atom_expr atom_exprs1          { Loc ($1 <-> last $2) (CAppE $1 $2) }
 
 atom_exprs1 :: { [Loc CstExpr] }
-  : force_expr                     { [$1] }
-  | atom_exprs1 force_expr         { $1 ++ [$2] }
+  : atom_expr                      { [$1] }
+  | atom_exprs1 atom_expr          { $1 ++ [$2] }
 
 atom_expr :: { Loc CstExpr }
   : paren_expr                { $1 }

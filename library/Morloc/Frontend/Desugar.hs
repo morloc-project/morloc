@@ -705,8 +705,9 @@ mergeSelectors sels =
 -- Desugar a do-block to a let-chain. Non-final bare statements and <- binds
 -- are wrapped in EvalE so the typechecker sees them as forced effects (pure
 -- non-finals are therefore rejected). The final bare statement is returned
--- unwrapped so synthE DoBlockS can flatten it (if effectful) or let tryCoerce
--- lift it (if pure).
+-- unwrapped: synthE DoBlockS flattens it when effectful, otherwise the block
+-- type is <collected-effects> (type-of-final) and an empty effect set is a
+-- subtype of any expected effect set.
 desugarDo :: Span -> [CstDoStmt] -> D ExprI
 desugarDo sp [] = dfail (startPos sp) "empty do block"
 desugarDo _sp [CstDoBare e] = desugarExpr e
@@ -833,9 +834,6 @@ desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
-desugarExpr (Loc sp (CForceE e)) = do
-  e' <- desugarExpr e
-  freshExprSpan sp (EvalE e')
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"

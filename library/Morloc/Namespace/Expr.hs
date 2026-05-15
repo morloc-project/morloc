@@ -368,20 +368,16 @@ data E
 -- Extensible: future coercions (e.g., numeric widening) add constructors here.
 data Coercion
   = CoerceToOptional
-  | CoerceToEffect (Set.Set EffectLabel)
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.
 applyCoercion :: Coercion -> TypeU -> TypeU
 applyCoercion CoerceToOptional t = OptionalU t
-applyCoercion (CoerceToEffect effs) t = EffectU (EffectSet effs) t
 
 -- | Invert a coercion on a resolved Type.
 unapplyCoercion :: Coercion -> Type -> Type
 unapplyCoercion CoerceToOptional (OptionalT t) = t
 unapplyCoercion CoerceToOptional t = t  -- defensive fallback
-unapplyCoercion (CoerceToEffect _) (EffectT _ t) = t
-unapplyCoercion (CoerceToEffect _) t = t  -- defensive fallback
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
   deriving (Ord, Eq, Show)
