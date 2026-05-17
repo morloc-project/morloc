@@ -33,6 +33,7 @@ module Morloc.CodeGenerator.Namespace
   , isNatTypeT
   , nullifyNatKindsF
   , nullifyNatKindsT
+  , mkEffectF
   , listElemTypeF
   , listElemTypeT
 
@@ -172,6 +173,16 @@ data TypeF
   | StrLitF Text -- ^ Type-level Str literal at the codegen level (kind-Str ground form)
   | StrVoidF -- ^ Erased phantom Str slot. Mirrors NatVoidF.
   deriving (Show, Ord, Eq)
+
+-- | Codegen-level companion to 'mkEffectU' / 'mkEffectT'. The empty
+-- effect set is the monoid identity (@<> A == A@) so a provably-empty
+-- label set returns the inner type; nested 'EffectF' are merged.
+mkEffectF :: Set.Set EffectLabel -> TypeF -> TypeF
+mkEffectF ls t
+  | Set.null ls = t
+  | otherwise = case t of
+      EffectF ls2 t2 -> mkEffectF (Set.union ls ls2) t2
+      _ -> EffectF ls t
 
 -- | True iff a TypeF is a Nat-kinded entry: a real Nat literal, or the
 -- erased-phantom sentinel 'NatVoidF'.

@@ -1,5 +1,7 @@
 module (roll, choose)
 
+effect Rand
+
 import root-py
 
 source Py from "util.py"

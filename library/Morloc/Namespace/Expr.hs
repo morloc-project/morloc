@@ -258,6 +258,7 @@ data Expr
   = ModE MVar [ExprI]
   | ClsE (Typeclass Signature)
   | IstE ClassName [TypeU] [ExprI]
+  | EffE EffectLabel Bool  -- ^ effect declaration: label, isEscapable
   | TypE ExprTypeE
   | ImpE Import
   | ExpE Export
@@ -658,6 +659,7 @@ instance Pretty Expr where
         [c] -> pretty c <+> "=> "
         _ -> tupled (map pretty constraints) <+> "=> "
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
+  pretty (EffE lbl esc) = (if esc then "escapable effect" else "effect") <+> pretty lbl
   pretty (TypE (ExprTypeE lang v vs t _)) =
     "type" <+> pretty lang
       <> "@"

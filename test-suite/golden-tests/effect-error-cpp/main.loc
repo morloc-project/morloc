@@ -6,6 +6,8 @@ module main (riskyCall, safeCall)
 
 import root-cpp
 
+effect Error
+
 source Cpp from "foo.hpp" ("riskyAdd", "safeAdd")
 
 riskyAdd :: Int -> Int -> <Error> Int

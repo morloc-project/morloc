@@ -121,6 +121,10 @@ data MorlocState = MorlocState
   , stateInstallForce :: Bool
   , stateInstallDir :: Maybe Path
   , stateClassDefs :: Map ClassName [Constraint]
+  , stateEffects :: Map.Map EffectLabel Bool
+  -- ^ Declared effects: label -> isEscapable (True = escapable). The
+  -- compiler hardcodes none; all entries come from `effect` /
+  -- `escapable effect` declarations.
   , stateLangRegistry :: LangRegistry
   , stateExportGroups :: Map Text ([Text], [Int])
   -- ^ Map from group name to (description lines, member export indices)
@@ -269,6 +273,10 @@ data Gamma = Gamma
   , gammaListSubs :: Map TVar TypeU
   -- | Solutions for SetVarU variables from set constraint solving (Stage 8).
   , gammaSetSubs :: Map TVar TypeU
+  -- | Solutions for effect-row tail variables ('EffectVar') from
+  -- effect-row unification. A separate namespace for the implicitly
+  -- universally-quantified effect variables, mirroring gammaNatSubs.
+  , gammaEffSubs :: Map TVar EffectSet
   -- | Generic primitive constraints (Member / Subset / Disjoint) waiting for
   -- enough information to discharge. Stage 9 of the tables refactor. The
   -- 'Constraint' values carried here are the same as the ones the
@@ -365,6 +373,7 @@ instance Defaultable MorlocState where
       , stateInstallForce = False
       , stateInstallDir = Nothing
       , stateClassDefs = Map.empty
+      , stateEffects = Map.empty
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty

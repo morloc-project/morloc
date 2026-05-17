@@ -92,6 +92,14 @@ module Morloc.Namespace.Type
   , ioEffectSet
   , effectSubsetOf
   , effectSetHasVar
+  , effectSetParts
+  , effectSetVars
+  , isEmptyEffectSet
+  , normalizeEffectSet
+  , unionEffectSet
+  , mkEffectU
+  , mkEffectT
+  , prettyEffectSet
 
     -- * Docstring related types
   , CliOpt (..)
@@ -172,6 +180,50 @@ effectSetHasVar :: EffectSet -> Bool
 effectSetHasVar (EffectVar _) = True
 effectSetHasVar (EffectSet _) = False
 effectSetHasVar (EffectUnion a b) = effectSetHasVar a || effectSetHasVar b
+
+-- | Decompose an effect set into its concrete labels and its set of
+-- effect variables (flattening unions). Labels are concrete effects;
+-- variables are unsolved row tails. The two are separate namespaces.
+effectSetParts :: EffectSet -> (Set.Set EffectLabel, Set.Set TVar)
+effectSetParts = go
+  where
+    go (EffectSet ls) = (ls, Set.empty)
+    go (EffectVar v) = (Set.empty, Set.singleton v)
+    go (EffectUnion a b) =
+      let (la, va) = go a
+          (lb, vb) = go b
+       in (Set.union la lb, Set.union va vb)
+
+-- | The effect variables mentioned by an effect set (for renaming and
+-- occurs checks). Effect variables live in their own implicitly
+-- universally-quantified namespace, like NatVarU / StrVarU.
+effectSetVars :: EffectSet -> [TVar]
+effectSetVars = Set.toList . snd . effectSetParts
+
+-- | An effect set is provably empty when it has no concrete labels and
+-- no (unsolved) effect variables. The empty set is the monoid identity:
+-- @<> A == A@.
+isEmptyEffectSet :: EffectSet -> Bool
+isEmptyEffectSet es =
+  let (ls, vs) = effectSetParts es
+   in Set.null ls && Set.null vs
+
+-- | Canonical form: concrete labels merged into a single 'EffectSet',
+-- the effect variables appended as a deterministic union chain. Keeps
+-- the derived Eq/Ord stable so equal rows compare equal regardless of
+-- how they were built.
+normalizeEffectSet :: EffectSet -> EffectSet
+normalizeEffectSet es =
+  let (ls, vs) = effectSetParts es
+   in case (Set.null ls, Set.toList vs) of
+        (True, []) -> EffectSet Set.empty
+        (False, []) -> EffectSet ls
+        (True, [v]) -> EffectVar v
+        (_, vlist) -> foldl EffectUnion (EffectSet ls) (map EffectVar vlist)
+
+-- | Union of two effect sets, normalized.
+unionEffectSet :: EffectSet -> EffectSet -> EffectSet
+unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
 
 ---- Type definitions
 
@@ -598,7 +650,7 @@ instance Typelike TypeU where
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
-  typeOf (EffectU effs t) = EffectT (resolveEffectSet effs) (typeOf t)
+  typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
   typeOf NatVoidU = NatVoidT
   typeOf (StrVarU _) = StrVoidT  -- free Str var erases to StrVoidT at ground level
@@ -699,7 +751,7 @@ instance Typelike TypeU where
       sub (FunU ts t) = FunU (map sub ts) (sub t)
       sub (AppU t ts) = AppU (sub t) (map sub ts)
       sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
-      sub (EffectU effs t) = EffectU effs (sub t)
+      sub (EffectU effs t) = mkEffectU effs (sub t)
       sub (OptionalU t) = OptionalU (sub t)
       sub t@NatVoidU = t
       -- Str-kinded constructs: substitution does not touch them (parallel to
@@ -734,7 +786,7 @@ instance Typelike TypeU where
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
-  normalizeType (EffectU effs t) = EffectU effs (normalizeType t)
+  normalizeType (EffectU effs t) = mkEffectU effs (normalizeType t)
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t@(NatVarU _) = t
   -- Unified carriers: recurse into payload so nested forms are normalized.
@@ -1004,13 +1056,35 @@ mkSize c = OpU OpSize [c]
 mkProjectField :: TypeU -> TypeU -> TypeU
 mkProjectField r f = OpU OpProjectField [r, f]
 
+-- | Smart constructor for an effectful type. The empty effect set is the
+-- monoid identity (@<> A == A@) so a provably-empty set returns the inner
+-- type directly. Nested effectful types are flattened so the invariant
+-- "an EffectU never directly wraps another EffectU" holds everywhere.
+mkEffectU :: EffectSet -> TypeU -> TypeU
+mkEffectU es t =
+  let es' = normalizeEffectSet es
+   in if isEmptyEffectSet es'
+        then t
+        else case t of
+               EffectU es2 t2 -> mkEffectU (unionEffectSet es' es2) t2
+               _ -> EffectU es' t
+
+-- | Ground-level companion to 'mkEffectU'. An empty label set collapses
+-- to the inner type; nested 'EffectT' are merged.
+mkEffectT :: Set.Set EffectLabel -> Type -> Type
+mkEffectT ls t
+  | Set.null ls = t
+  | otherwise = case t of
+      EffectT ls2 t2 -> mkEffectT (Set.union ls ls2) t2
+      _ -> EffectT ls t
+
 type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
 type2typeu (UnkT v) = ForallU v (VarU v)
 type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
 type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
-type2typeu (EffectT effs t) = EffectU (EffectSet effs) (type2typeu t)
+type2typeu (EffectT effs t) = mkEffectU (EffectSet effs) (type2typeu t)
 type2typeu (OptionalT t) = OptionalU (type2typeu t)
 type2typeu (NatLitT n) = NatLitU n
 type2typeu (NatAddT a b) = NatAddU (type2typeu a) (type2typeu b)
@@ -1030,7 +1104,7 @@ unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
 unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
 unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
-unresolvedType2type (EffectU effs t) = EffectT (resolveEffectSet effs) (unresolvedType2type t)
+unresolvedType2type (EffectU effs t) = mkEffectT (resolveEffectSet effs) (unresolvedType2type t)
 unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
 unresolvedType2type NatVoidU = NatVoidT
 unresolvedType2type (StrVarU _) = StrVoidT
@@ -1134,9 +1208,10 @@ instance Pretty Type where
       f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (EffectT effs t)
-        | Set.null effs = "{" <> f True t <> "}"
-        | otherwise = "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> f False t
+      f _ (EffectT effs t) =
+        -- mkEffectT collapses an empty label set to the inner type, so a
+        -- surviving EffectT always carries at least one label.
+        "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> f False t
       f _ (OptionalT t) = "?" <> f False t
       f _ (NatLitT n) = pretty n
       f _ (NatAddT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
@@ -1171,12 +1246,22 @@ collectExtends = go []
     go acc (RecExtendU k t rest) = go ((k, t) : acc) rest
     go acc t = (reverse acc, t)
 
+-- | Render an effect row as @\<L1,...,Ln, e\>@: concrete labels first
+-- (sorted), then any effect variables. The angle-bracket form is the
+-- only effect syntax; the empty row never reaches here because
+-- 'mkEffectU' collapses it to the inner type.
+prettyEffectSet :: EffectSet -> Doc ann
+prettyEffectSet effs =
+  let (ls, vs) = effectSetParts effs
+      parts = map pretty (Set.toList ls) ++ map pretty (Set.toList vs)
+   in "<" <> hcat (punctuate "," parts) <> ">"
+
 instance Pretty TypeU where
   pretty t0 = f True t0
     where
       f _ (VarU v) = pretty v
       f _ (NatVarU v) = pretty v
-      f _ (ExistU v ([], _) ([], _)) = angles $ pretty v
+      f _ (ExistU v ([], _) ([], _)) = "*" <> pretty v
       f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
       f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
@@ -1185,11 +1270,7 @@ instance Pretty TypeU where
       f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (EffectU effs t) =
-        let labels = resolveEffectSet effs
-         in if Set.null labels
-              then "{" <> f True t <> "}"
-              else "<" <> hcat (punctuate "," (map pretty (Set.toList labels))) <> ">" <+> f False t
+      f _ (EffectU effs t) = prettyEffectSet effs <+> f False t
       f _ (OptionalU t) = "?" <> f False t
       f _ NatVoidU = "_"
       f _ (StrVarU v) = pretty v
@@ -1242,8 +1323,8 @@ instance Pretty TypeU where
       f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
-        angles $
-          pretty v
+        "*"
+          <> pretty v
             <+> list (map (f False) ts)
             <+> list (map ((\(x, y) -> tupled [x, y]) . bimap pretty (f True)) rs)
       f _ (FunU [] t) = "() -> " <> f False t

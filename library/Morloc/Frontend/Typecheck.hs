@@ -52,7 +52,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -184,7 +184,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -1599,9 +1599,18 @@ peelLambdaLayers t body = (t, body)
 --
 -- Catches forces that escape do-blocks, the case the type-level
 -- subtype rule cannot see because EvalS strips the effect wrapper
--- from the inner type.  The caret is placed on the force ('!') that
--- produced the uncovered effect; only when no single node can be
--- blamed does it fall back to the surrounding index ('idx').
+-- from the inner type.  The caret is placed on the bound force
+-- ('<-' / EvalS) that produced the uncovered effect; only when no
+-- single node can be blamed does it fall back to the surrounding
+-- index ('idx').
+--
+-- Variable-aware: the call sites pass @apply g' annType@, and 'apply'
+-- substitutes solved effect-row variables ('applyEff', see the
+-- Applicable TypeU instance), so the declared row already reflects any
+-- effect-variable solutions.  The comparison is then a concrete-label
+-- subset: a universally-quantified tail variable contributes no
+-- concrete label and cannot cover an always-performed body effect,
+-- which would unsoundly hide it.
 checkEffectCoverage
   :: Int
   -> TypeU

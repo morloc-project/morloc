@@ -611,7 +611,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -637,7 +637,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -676,7 +676,7 @@ unweaveTypeF (NamF n (FV gv cv) ps rs) =
    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
 unweaveTypeF (EffectF effs t) =
   let (gt, ct) = unweaveTypeF t
-   in (EffectU (EffectSet effs) gt, EffectU (EffectSet effs) ct)
+   in (mkEffectU (EffectSet effs) gt, mkEffectU (EffectSet effs) ct)
 unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
@@ -700,7 +700,7 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
         (map fst rsg)
         (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
-weaveTypeF (EffectU effs gt) (EffectU _ ct) = EffectF (resolveEffectSet effs) (weaveTypeF gt ct)
+weaveTypeF (EffectU effs gt) (EffectU _ ct) = mkEffectF (resolveEffectSet effs) (weaveTypeF gt ct)
 weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n

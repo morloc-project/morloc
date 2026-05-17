@@ -39,6 +39,8 @@ module main
   , loadMissing
   )
 
+effect IO
+
 binInt :: Int -> Str -> <IO> ?Int
 binInt x path = do
   @save x path

@@ -3,6 +3,8 @@
 
 module main (test)
 
+effect Random
+
 import root-py
 
 class Random a where

@@ -1,6 +1,8 @@
 -- Test multi-label effects: <IO, Error> parses and works
 module main (testMulti, testSingle)
 
+effect Error
+
 import root-py
 
 -- Multi-label effect annotation

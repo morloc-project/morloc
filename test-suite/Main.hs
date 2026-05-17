@@ -33,6 +33,7 @@ main = do
       , effectSubtypeTests
       , effectSynthesisTests
       , effectErrorTests
+      , effectEscapabilityTests
       , namespaceErrorTests
       , typeclassTests
       , natErrorTests
@@ -463,6 +464,7 @@ main = do
       , golden "effect-subtype-py" "effect-subtype-py"
       , golden "effect-error-cpp" "effect-error-cpp"
       , golden "effect-accumulate-py" "effect-accumulate-py"
+      , golden "effect-escapable-py" "effect-escapable-py"
       , -- intrinsic tests
         golden "intrinsic-agnostic" "intrinsic-agnostic"
       , golden "intrinsic-hash" "intrinsic-hash"

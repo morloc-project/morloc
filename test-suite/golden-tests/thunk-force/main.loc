@@ -1,5 +1,7 @@
 module main (forceOnce)
 
+effect IO
+
 source Cpp from "foo.hpp" ("sideEffect")
 
 type Cpp => Int = "int"

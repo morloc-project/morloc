@@ -843,6 +843,7 @@ desugarExpr (Loc _ (CAssE {})) = error "desugarExpr: unexpected CAssE in express
 desugarExpr (Loc _ (CTypE {})) = error "desugarExpr: unexpected CTypE in expression position"
 desugarExpr (Loc _ (CClsE {})) = error "desugarExpr: unexpected CClsE in expression position"
 desugarExpr (Loc _ (CIstE {})) = error "desugarExpr: unexpected CIstE in expression position"
+desugarExpr (Loc _ (CEffE {})) = error "desugarExpr: unexpected CEffE in expression position"
 desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in expression position"
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
@@ -951,6 +952,9 @@ desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
 desugarTopLevel (Loc sp (CIstE cn types body)) = do
   bodyExprs <- concatMapM desugarTopLevel body
   e <- freshExprSpan sp (IstE cn (map quantifyType types) bodyExprs)
+  return [e]
+desugarTopLevel (Loc sp (CEffE lbl esc)) = do
+  e <- freshExprSpan sp (EffE lbl esc)
   return [e]
 desugarTopLevel (Loc sp (CFixE assoc prec ops)) = do
   e <- freshExprSpan sp (FixE (Fixity assoc prec ops))

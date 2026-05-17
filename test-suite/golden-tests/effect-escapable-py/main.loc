@@ -1,0 +1,55 @@
+-- Escapable-effect golden: a sourced handler
+--
+--   handleError :: <Error, e> a -> <e> a
+--
+-- must discharge the escapable `Error` effect raised by `foo`
+-- (negative input), substituting the fallback -1.  Because `Error` is
+-- declared `escapable`, the handler's result row legally drops it: a
+-- `<Error> Int` computation becomes a plain `Int`.
+--
+-- The handler is exercised through FOUR argument forms that are all
+-- type-equivalent (each `<Error> Int`):
+--
+--   gDirect  : handleError (foo x)                 -- direct application
+--   gDoWrap  : do { handleError (foo x) }          -- outer do-block (no-op)
+--   gDoForce : handleError (do { v <- foo x ; v }) -- do-block + <- force
+--   gDoBind  : handleError (do { foo x })          -- bare-statement do-block
+--
+-- All four MUST behave identically: success returns foo's value, a
+-- raised Error is discharged to -1.
+module main (gDirect, gDoWrap, gDoForce, gDoBind)
+
+import root-py
+
+escapable effect Error
+
+source Py from "ops.py" ("foo", "handle_error" as handleError)
+
+type Py => Int = "int"
+
+-- negative input raises, so foo carries the Error effect
+foo :: Int -> <Error> Int
+
+-- runs a suspended <Error> computation and discharges the (escapable)
+-- Error effect, returning -1 on failure
+handleError :: <Error, e> a -> <e> a
+
+gDirect :: Int -> Int
+gDirect x = handleError (foo x)
+
+gDoWrap :: Int -> Int
+gDoWrap x = do { handleError (foo x) }
+
+gDoForce :: Int -> Int
+gDoForce x = handleError (do { v <- foo x ; v })
+
+gDoBind :: Int -> Int
+gDoBind x = handleError (do { foo x })
+
+---- this one currently does not typecheck
+-- gMany :: Int -> Int
+-- gMany x =
+--   let y = handleError $ do
+--     z <- foo x
+--     foo z 
+--   in x + 1

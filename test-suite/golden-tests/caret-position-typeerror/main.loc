@@ -1,6 +1,6 @@
 module foo (val)
 
-type Py => Str = "str"
+import root-py
 
 source Py from "imp.py" ("readFile")
 

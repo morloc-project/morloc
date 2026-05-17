@@ -93,6 +93,8 @@ import qualified Morloc.BaseTypes as BT
   'object'   { Located _ TokObject _ }
   'class'    { Located _ TokClass _ }
   'instance' { Located _ TokInstance _ }
+  'effect'   { Located _ TokEffect _ }
+  'escapable' { Located _ TokEscapable _ }
   'infixl'   { Located _ TokInfixl _ }
   'infixr'   { Located _ TokInfixr _ }
   'infix'    { Located _ TokInfix _ }
@@ -167,6 +169,7 @@ top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
+  | effect_decl       { [$1] }
   | instance_decl     { $1 }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
@@ -353,8 +356,7 @@ non_string_type :: { TypeU }
   | non_string_non_fun            { $1 }
 
 non_string_non_fun :: { TypeU }
-  : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
-  | '<' effect_labels '>' non_string_non_fun  { EffectU (EffectSet (Set.fromList $2)) $4 }
+  : '<' effect_row '>' non_string_non_fun  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
   | non_string_add            { $1 }
 
 non_string_add :: { TypeU }
@@ -391,6 +393,16 @@ typeclass_decl :: { Loc CstExpr }
       { at $1 (CClsE $2 $5) }
   | 'class' class_head
       { at $1 (CClsE $2 []) }
+
+-- Effect declarations. An effect is a first-class, declared,
+-- importable/exportable entity (like a type or class name). Default is
+-- inescapable (safe); `escapable` opts a single effect into being
+-- discharge-able by a sourced handler.
+effect_decl :: { Loc CstExpr }
+  : 'effect' UPPER              { at $1 (CEffE (getName $2) False) }
+  | 'escapable' 'effect' UPPER  { at $1 (CEffE (getName $3) True) }
+  | 'effect' LOWER              {% effectNameError $2 }
+  | 'escapable' 'effect' LOWER  {% effectNameError $3 }
 
 class_head :: { CstClassHead }
   : app_type '=>' app_type
@@ -717,8 +729,7 @@ fun_type :: { TypeU }
   : non_fun_type '->' type   { case $3 of { FunU args ret -> FunU ($1 : args) ret; t -> FunU [$1] t } }
 
 non_fun_type :: { TypeU }
-  : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
-  | '<' effect_labels '>' non_fun_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
+  : '<' effect_row '>' non_fun_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
   | add_type                  { $1 }
 
 add_type :: { TypeU }
@@ -779,9 +790,16 @@ types1 :: { [TypeU] }
   : atom_type                  { [$1] }
   | types1 atom_type           { $1 ++ [$2] }
 
-effect_labels :: { [EffectLabel] }
-  : UPPER                       { [getName $1] }
-  | effect_labels ',' UPPER     { $1 ++ [getName $3] }
+-- An effect row: comma-separated UPPER labels plus at most one LOWER
+-- tail variable (validated by 'mkEffectRow'). `<…>` is effects-only;
+-- the bare `<a>` existential-hole syntax was removed.
+effect_row :: { [Either EffectLabel TVar] }
+  : effect_item                     { [$1] }
+  | effect_row ',' effect_item      { $1 ++ [$3] }
+
+effect_item :: { Either EffectLabel TVar }
+  : UPPER    { Left (getName $1) }
+  | LOWER    { Right (TV (getName $1)) }
 
 --------------------------------------------------------------------
 -- Constraints and signature types
@@ -798,8 +816,7 @@ sig_fun_args :: { [(Pos, TypeU)] }
   | pos_non_fun_type                     { [$1] }
 
 pos_non_fun_type :: { (Pos, TypeU) }
-  : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
-  | '<' effect_labels '>' pos_non_fun_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
+  : '<' effect_row '>' pos_non_fun_type  {% mkEffectRow $1 $2 >>= \es -> return (locPos $1, mkEffectU es (snd $4)) }
   | pos_add_type       { $1 }
 
 pos_add_type :: { (Pos, TypeU) }
@@ -1008,6 +1025,32 @@ checkFixityPrecedence tok =
             ("infix precedence must be in [0,9], got " ++ show n) [] srcLines))
         else return ()
 
+-- Build an effect-row 'EffectSet' from parsed items: any number of
+-- UPPER labels plus at most one LOWER tail variable. More than one
+-- effect variable in a row is a parse error (caret on the opening
+-- '<'). Empty / single-variable normalization is handled by
+-- 'mkEffectU' at the use site.
+mkEffectRow :: Located -> [Either EffectLabel TVar] -> P EffectSet
+mkEffectRow ltok items =
+  let labels = Set.fromList [l | Left l <- items]
+      vars = [v | Right v <- items]
+   in case vars of
+        [] -> return (EffectSet labels)
+        [v]
+          | Set.null labels -> return (EffectVar v)
+          | otherwise -> return (EffectUnion (EffectSet labels) (EffectVar v))
+        _ -> do
+          srcLines <- State.gets psSourceLines
+          State.lift
+            ( Left
+                ( ParseError
+                    (locPos ltok)
+                    "an effect row may contain at most one effect variable"
+                    []
+                    srcLines
+                )
+            )
+
 -- Reject duplicate field names in a record literal. Caret on the second
 -- occurrence's value position.
 checkRecordKeys :: [(Key, Loc CstExpr)] -> P ()
@@ -1047,6 +1090,21 @@ recLiteralColonColonError nameTok = do
   let msg = "type-level record literals use `=` to bind fields, not `::`\n"
          ++ "  try: {" ++ T.unpack (getName nameTok) ++ " = <type>, ...}\n"
          ++ "  `::` is for declarations (e.g. `x :: Int`, `record R where { x :: Int }`)"
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
+
+-- Reject an effect declaration whose name is not an uppercase
+-- identifier. An effect name is lexed exactly like a type or class
+-- name: a single identifier token whose first character is uppercase
+-- (and which is not a reserved word). The caret falls on the bad name.
+effectNameError :: Located -> P a
+effectNameError nameTok = do
+  srcLines <- State.gets psSourceLines
+  let nm = getName nameTok
+      nmS = T.unpack nm
+      cap = T.unpack (T.toUpper (T.take 1 nm) <> T.drop 1 nm)
+      msg = "Illegal effect name '" ++ nmS ++ "'\n"
+         ++ "  The first character must be uppercase\n"
+         ++ "  try: `effect " ++ cap ++ "` (or `escapable effect " ++ cap ++ "`)"
   State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
 
 -- Same check for the positionless legacy form (`record T = MkT { ... }`).

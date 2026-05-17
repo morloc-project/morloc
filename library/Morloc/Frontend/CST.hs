@@ -89,6 +89,7 @@ data CstExpr
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
   | CIstE ClassName [TypeU] [Loc CstExpr]
+  | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
   | CSrcOldE Located (Maybe Text) [(Text, Maybe Text)]
   | CSrcNewE Located (Maybe Text) [(Bool, Text, Located)]

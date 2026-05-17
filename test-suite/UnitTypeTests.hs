@@ -25,6 +25,7 @@ module UnitTypeTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
+  , effectEscapabilityTests
   , namespaceErrorTests
   , typeclassTests
   , natErrorTests
@@ -293,6 +294,7 @@ listToGamma gs =
     , gammaRecSubs = Map.empty
     , gammaListSubs = Map.empty
     , gammaSetSubs = Map.empty
+    , gammaEffSubs = Map.empty
     , gammaIntVals = Map.empty
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
@@ -3036,16 +3038,24 @@ effectSubtypeTests =
           [] (ioEff a) a
       , assertSubtypeBad "drop effect: <IO,Error> A </: A"
           [] (ioErrEff a) a
-      , assertSubtypeBad "drop effect: <> A </: A (empty is still suspended)"
-          [] (emptyEff a) a
 
-        -- === Pure-to-effect handled by coercion, not subtype ===
-        -- The pure-to-effect lift is the responsibility of `tryCoerce`,
-        -- not the subtype relation.  A bare subtype check between a
-        -- pure type and an effectful type should fail; coercion picks
-        -- it up at synthesis sites.  This test pins that boundary.
-      , assertSubtypeBad "pure </: <IO> via subtype alone"
-          [] a (ioEff a)
+        -- === Empty effect is the monoid identity: <> A == A ===
+        -- The empty effect set is NOT a suspended computation; it is
+        -- definitionally the inner type.  Effect coercion was removed,
+        -- so this holds through the subtype relation alone, in both
+        -- directions -- there is no `tryCoerce` step to involve.
+      , assertSubtypeGamma "empty effect identity: <> A <: A"
+          [] (emptyEff a) a []
+      , assertSubtypeGamma "empty effect identity: A <: <> A"
+          [] a (emptyEff a) []
+
+        -- === Pure-to-effect is plain subsumption, NOT coercion ===
+        -- The old pure-to-effect lift (`tryCoerce` / CoerceToEffect)
+        -- was removed.  A pure value satisfies an effectful slot
+        -- directly through subtyping: <> A == A and {} is a subset of
+        -- any effect row, so `A <: <IO> A` holds with no coercion step.
+      , assertSubtypeGamma "pure <: <IO> via subsumption (no coercion)"
+          [] a (ioEff a) []
 
         -- === Recursion through inner type ===
         -- The subtype rule recurses on the inner types after the
@@ -3092,15 +3102,6 @@ effectSubtypeTests =
 -- | Effect synthesis tests verify that the inferred effect set on a
 -- top-level export matches the spec's structural propagation rule
 -- ('spec/types/effects.md' under "Effect Inference"):
---
---   * A pure do-block carries an empty effect set.
---   * Forcing an effectful expression collects that effect.
---   * Forces nested inside applications, tuples, lists, lets, etc.
---     bubble their effects up to the enclosing do-block.
---   * Multiple forces with distinct labels yield an EffectUnion.
---   * '<-' binds and '!' forces collect effects symmetrically.
---   * Pure-to-effect coercion lifts a pure body when the signature
---     declares effects (allowed, may warn in the future).
 effectSynthesisTests :: TestTree
 effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
@@ -3113,21 +3114,21 @@ effectSynthesisTests =
         module main (x)
         x = do 42
           |]
-          (emptyEff int)
-      , -- force operator collects effect from forced expression
-        assertGeneralType
+          int
+      , assertGeneralType
           "do-block with with one function call"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x = do { f 1 }
           |]
           (ioEff int)
-      , -- force in tuple: effects collected, tuple gets plain inner types
-        assertGeneralType
+      , assertGeneralType
           "do-block with tuple of effectful elements"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x = do
           x <- f 1
@@ -3144,12 +3145,12 @@ effectSynthesisTests =
             let y = 1
             y
           |]
-          (emptyEff int)
-      , -- let with forced RHS collects effect from the force
-        assertGeneralType
+          int
+      , assertGeneralType
           "do-block with bind and let"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         add :: Int -> Int -> Int
         x = do
@@ -3166,13 +3167,13 @@ effectSynthesisTests =
         add :: Int -> Int -> Int
         x = do add 1 2
           |]
-          (emptyEff int)
-      , -- forces with different effects produce EffectUnion
-        -- (order: IO first because it appears first in the application)
-        assertGeneralType
+          int
+      , assertGeneralType
           "do-block with multiple effect labels"
           [r|
         module main (x)
+        effect IO
+        effect Error
         f :: Int -> <IO> Int
         g :: Int -> <Error> Int
         add :: Int -> Int -> Int
@@ -3181,12 +3182,13 @@ effectSynthesisTests =
           y <- g 2
           add x y
           |]
-          (EffectU (EffectUnion (EffectSet (Set.singleton "IO")) (EffectSet (Set.singleton "Error"))) int)
+          (ioErrEff int)
       , -- chained binds feeding results forward
         assertGeneralType
           "do-block with chained dependent binds"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         add :: Int -> Int -> Int
         x = do
@@ -3200,6 +3202,7 @@ effectSynthesisTests =
           "annotated do-block matches inferred effects"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x :: <IO> Int
         x = do
@@ -3212,6 +3215,7 @@ effectSynthesisTests =
           "polymorphic function in do-block"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         id :: a -> a
         x = do
@@ -3223,6 +3227,7 @@ effectSynthesisTests =
           "do-block returning list"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x = do
           x <- f 1
@@ -3254,33 +3259,15 @@ effectErrorTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
     testGroup
       "Effect error tests"
-      [ -- '!' is only meaningful on a suspended (effectful) value.
-        -- Forcing a plain Int is nonsense and must be rejected.
-        exprTestBad
-          "force on non-effectful value"
-          [r|
-        module main (x)
-        x = do !(42)
-          |]
-
-        -- The argument inside a force must still typecheck against
-        -- the forced function's signature.  Here `f` takes Int, not Str.
-      , exprTestBad
-          "type mismatch inside do-block force"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        x = do !(f "hello")
-          |]
-
-        -- A function `g :: Int -> Int` requires a pure Int.  Passing
+      [ -- A function `g :: Int -> Int` requires a pure Int.  Passing
         -- the effectful application `f 1 :: <IO> Int` directly (no
         -- force) must be rejected: effects do not silently drop at
         -- the argument boundary.
-      , exprTestBad
+        exprTestBad
           "effectful arg passed to pure parameter"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         g :: Int -> Int
         x = g (f 1)
@@ -3294,6 +3281,8 @@ effectErrorTests =
           "narrowing at binding: <IO,Error> bound to <IO>"
           [r|
         module main (x)
+        effect IO
+        effect Error
         rint :: <IO, Error> Int
         x :: <IO> Int
         x = rint
@@ -3305,6 +3294,7 @@ effectErrorTests =
           "narrowing at binding: <IO> bound to pure"
           [r|
         module main (x)
+        effect IO
         rint :: <IO> Int
         x :: Int
         x = rint
@@ -3317,6 +3307,8 @@ effectErrorTests =
           "narrowing at application: <IO,Error> arg to <IO> param"
           [r|
         module main (x)
+        effect IO
+        effect Error
         rint :: <IO, Error> Int
         consume :: <IO> Int -> Int
         x = consume rint
@@ -3329,68 +3321,112 @@ effectErrorTests =
           "disjoint effects: <Rand> arg to <IO> param"
           [r|
         module main (x)
+        effect Rand
+        effect IO
         rrand :: <Rand> Int
         consume :: <IO> Int -> Int
         x = consume rrand
           |]
+      ]
 
-        -- === Body-vs-signature effect coverage (the '!' outside do-block case) ===
-        -- The spec's "Effect Checking" rule requires that any effects
-        -- introduced by the body of a definition be declared in its
-        -- signature.  A bare '!' outside a do-block introduces an
-        -- effect into the surrounding term; if the signature does not
-        -- list that effect, it is a widening violation.  The
-        -- structural subtype rule cannot see this directly because
-        -- EvalS strips the effect wrapper from the inner type, so the
-        -- new 'checkEffectCoverage' pass enforces it.
-
-        -- A bare force outside a do-block makes the surrounding term
-        -- carry the forced effect.  Declaring the term as pure Int
-        -- silently dropped that effect before; now it errors.
-      , exprTestBad
-          "widening: force outside do-block in pure term"
+-- | Escapability tests.  An effect is inescapable by default
+-- (`effect E`); `escapable effect E` opts it into being
+-- discharge-able.  The inescapable-propagation rule (a signature-level
+-- check) requires every inescapable concrete label appearing in a
+-- parameter's effect row to also appear in the result row, so an
+-- inescapable effect can never be silently consumed.  An escapable
+-- label is exempt from that requirement (the only sanctioned place to
+-- discharge it is a sourced handler).  These tests pin both
+-- directions, including the pair that differs only by the `escapable`
+-- keyword.
+effectEscapabilityTests :: TestTree
+effectEscapabilityTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Effect escapability tests"
+      [ -- === Escapable effect may be dropped (accepted) ===
+        -- A handler signature consuming <Error> and returning a pure
+        -- value is legal because Error is declared escapable.
+        assertGeneralType
+          "escapable Error dropped by handler signature"
           [r|
-        module main (randPure)
-        rint :: <Rand> Int
-        randPure :: Int
-        randPure = !rint
+        module main (ok)
+        escapable effect Error
+        recover :: <Error> Int -> Int
+        ok :: Int
+        ok = 42
           |]
-
-        -- The same rule applies to a function whose return type is
-        -- declared pure but whose body uses a bare force.
-      , exprTestBad
-          "widening: force in pure function body"
+          int
+      , -- Tail-variable handler form <Error, e> a -> <e> a: Error is
+        -- discharged, the row variable propagates.
+        assertGeneralType
+          "escapable Error dropped, row variable propagates"
           [r|
-        module main (purePlusEff)
-        rint :: <Rand> Int
-        add :: Int -> Int -> Int
-        purePlusEff :: Int -> Int
-        purePlusEff x = add x !rint
+        module main (ok)
+        escapable effect Error
+        handle :: <Error, e> a -> <e> a
+        ok :: Int
+        ok = 42
           |]
-
-        -- Let-binding to a forced value: the let's RHS force escapes
-        -- the surrounding term, so the term must declare the effect.
-      , exprTestBad
-          "widening: let-bound force in pure term"
+          int
+      , -- An inescapable effect that DOES propagate to the result is
+        -- accepted (propagation, not escape).
+        assertGeneralType
+          "inescapable effect propagated to result is accepted"
           [r|
-        module main (letPureForce)
-        rint :: <Rand> Int
-        letPureForce :: Int
-        letPureForce = let x = !rint
-                       in x
+        module main (ok)
+        effect Cap
+        passt :: <Cap> Int -> <Cap> Int
+        ok :: Int
+        ok = 42
           |]
+          int
 
-        -- Function declared with one effect but body uses a different
-        -- one.  Rand is not a subset of IO, so the body's force does
-        -- not fit the declared signature.
+        -- === Escaping an inescapable effect is rejected ===
       , exprTestBad
-          "widening: body force has effect outside declared set"
+          "inescapable Cap cannot be dropped (pure result)"
           [r|
-        module main (mixedEff)
-        rint :: <Rand> Int
-        ident :: Int -> Int
-        mixedEff :: Int -> <IO> Int
-        mixedEff x = ident !rint
+        module main (ok)
+        effect Cap
+        consume :: <Cap> Int -> Int
+        ok :: Int
+        ok = 42
+          |]
+      , -- The plan's `bad :: <Cap, e> a -> <e> a` -- rejected even
+        -- though it has the shape of a sourced handler.
+        exprTestBad
+          "inescapable Cap cannot be discharged by a handler"
+          [r|
+        module main (ok)
+        effect Cap
+        bad :: <Cap, e> a -> <e> a
+        ok :: Int
+        ok = 42
+          |]
+      , -- Default is inescapable: plain `effect Error` (no
+        -- `escapable`) cannot be dropped.  This module is identical to
+        -- the first accepted test except for the missing `escapable`
+        -- keyword, isolating exactly what escapability controls.
+        exprTestBad
+          "default-inescapable Error cannot be dropped"
+          [r|
+        module main (ok)
+        effect Error
+        recover :: <Error> Int -> Int
+        ok :: Int
+        ok = 42
+          |]
+      , -- Mixed parameter row: the escapable Error may be dropped, but
+        -- the inescapable Cap in the same row still must propagate.
+        exprTestBad
+          "escapable dropped but inescapable in same row still leaks"
+          [r|
+        module main (ok)
+        escapable effect Error
+        effect Cap
+        mixed :: <Error, Cap> Int -> <Error> Int
+        ok :: Int
+        ok = 42
           |]
       ]
 
@@ -3669,6 +3705,7 @@ typeclassTests =
           "typeclass method in effectful do-block"
           [r|
         module main (x)
+        effect IO
         class Default a where
           def :: a
         instance Default Int where
@@ -4580,6 +4617,7 @@ natKindPromotionTests =
         "effectful tensor: <IO> T1 n Real with labeled dim"
         [r|
       module main (x)
+      effect IO
       type T1 (d :: Nat) a = [a]
       ioMake :: n:Int -> <IO> T1 n Real
       x = ioMake 5
@@ -4863,7 +4901,7 @@ letBindingTests =
             let y = 42
             y
           |]
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do-block with multi-binding let (omit repeated let)"
@@ -4874,7 +4912,7 @@ letBindingTests =
                 b = 2
             b
           |]
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do-block with separate let statements"
@@ -4885,12 +4923,13 @@ letBindingTests =
             let b = 2
             b
           |]
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do-block let interleaved with bind"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x = do
             let a = 1
@@ -4905,17 +4944,17 @@ letBindingTests =
       , assertGeneralType
           "do with explicit braces and semicolons"
           "module main (x)\nx = do { 42 }"
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do with explicit braces, let, and semicolons"
           "module main (x)\nx = do { let a = 1; a }"
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do with explicit braces, multiple lets"
           "module main (x)\nx = do { let a = 1; let b = 2; b }"
-          (emptyEff int)
+          int
       ]
 
 -- | Tests for typeclass instance resolution when multiple instances share the

@@ -25,6 +25,7 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Link as MFL
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import Morloc.Typecheck.Internal (collectEffLabels)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -72,6 +73,11 @@ treeify d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
+
+            -- every effect label used in a `<...>` row must be declared
+            -- (the compiler hardcodes none); checked after link populates
+            -- the effect registry
+            checkDeclaredEffects d'
 
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
@@ -125,6 +131,80 @@ treeify d
         MM.throwCompilerBug $
           "unsupported multi-rooted module DAG:"
             <+> tupled (map pretty roots)
+
+-- | Two signature-level effect checks, run after 'MFL.link' has
+-- populated 'stateEffects':
+--
+--  1. Every concrete effect label in a `<...>` row of a signature,
+--     annotation, typedef body, or class-method type must be declared
+--     with `effect` / `escapable effect`. The compiler hardcodes no
+--     effect names, so an undeclared label is always a user error.
+--
+--  2. Inescapable-propagation: every *inescapable* concrete label that
+--     appears in a parameter's effect row must also appear in the
+--     result row. This holds for all functions, sourced or defined --
+--     a sourced handler may discharge an *escapable* effect, but no
+--     function (not even a sourced one) may silently consume an
+--     inescapable one. Effect variables always propagate (they appear
+--     in the result), so they satisfy the rule automatically.
+checkDeclaredEffects :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+checkDeclaredEffects d = do
+  declared <- MM.gets stateEffects
+  mapM_ (AST.checkExprI (checkNode declared)) (DAG.nodes d)
+  where
+    checkNode :: Map.Map EffectLabel Bool -> ExprI -> MorlocMonad ()
+    checkNode declared (ExprI i e) = do
+      let tys = case e of
+            SigE (Signature _ _ et) -> [etype et]
+            AnnE _ t -> [t]
+            TypE (ExprTypeE _ _ _ t _) -> [t]
+            ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
+            _ -> []
+          used = Set.unions (map collectEffLabels tys)
+          undeclared = Set.filter (\l -> not (Map.member l declared)) used
+      case Set.toList undeclared of
+        (lbl0 : rest) ->
+          let plural = not (null rest)
+           in MM.throwSourcedError i $
+                "Undeclared effect"
+                  <> (if plural then "s" else "")
+                  <+> hcat
+                    (punctuate ", " (map (squotes . pretty) (lbl0 : rest)))
+                  <> "."
+                  <+> (if plural then "Declare each" else "Declare it")
+                  <+> "with `effect"
+                  <+> pretty lbl0 <> "`"
+                  <+> "(or `escapable effect"
+                  <+> pretty lbl0 <> "`) and import it."
+        [] -> do
+          let leaked = Set.unions (map inescapableLeak tys)
+          if Set.null leaked
+            then return ()
+            else
+              MM.throwSourcedError i $
+                "Inescapable effect"
+                  <> (if Set.size leaked > 1 then "s" else "")
+                  <+> hcat
+                    (punctuate ", " (map (squotes . pretty) (Set.toList leaked)))
+                  <+> "appear(s) in an argument but not in the result row."
+                  <+> "An inescapable effect performed via an argument must"
+                  <+> "propagate to the result (only a sourced handler may"
+                  <+> "discharge an escapable effect)."
+      where
+        -- Inescapable concrete labels in any parameter row that are
+        -- absent from the result row.
+        inescapableLeak ty =
+          let (params, ret) = uncurryFun ty
+              paramLabels = Set.unions (map collectEffLabels params)
+              inescapable =
+                Set.filter (\l -> Map.lookup l declared == Just False) paramLabels
+           in Set.difference inescapable (collectEffLabels ret)
+
+        -- Peel quantifiers and uncurry to (all parameters, final result).
+        uncurryFun (ForallU _ t) = uncurryFun t
+        uncurryFun (FunU ps r) =
+          let (ps', r') = uncurryFun r in (ps ++ ps', r')
+        uncurryFun t = ([], t)
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f

@@ -102,6 +102,7 @@ copyState oldIndex newIndex = do
       , stateInstallForce = stateInstallForce s
       , stateInstallDir = stateInstallDir s
       , stateClassDefs = stateClassDefs s
+      , stateEffects = stateEffects s
       , stateLangRegistry = stateLangRegistry s
       , stateExportGroups = stateExportGroups s
       , stateManifoldLang = stateManifoldLang s
