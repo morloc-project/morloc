@@ -471,7 +471,7 @@ PROPAGATE_ERROR(errmsg)|]
               EffectF _ (VarF (FV tv _)) -> tv == TV "Unit"
               VarF (FV tv _) -> tv == TV "Unit"
               _ -> False
-        in (,) [] $ case (isUnit, stmts) of
+        in return . (,) [] $ case (isUnit, stmts) of
           (True, []) -> "[&](){" <> expr <> "; return mlc::Unit{};}"
           (True, _) -> "[&](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
           (False, []) -> "[&](){return " <> expr <> ";}"

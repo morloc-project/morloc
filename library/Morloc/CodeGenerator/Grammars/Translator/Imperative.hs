@@ -270,8 +270,11 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> ([MDoc], MDoc)
-  -- ^ prior statements -> return expression -> (hoisted statements, effect expression)
+  , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
+  -- ^ type -> prior statements -> return expression -> (hoisted lines,
+  -- suspended-thunk expression). Monadic so a language whose thunk form
+  -- cannot hold statements (e.g. a Python lambda) can mint a fresh name
+  -- for a hoisted def-thunk.
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   , -- manifold lowering fields
@@ -520,15 +523,15 @@ lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
 lowerNativeExpr cfg _ (NullN_ fv) = do
   mayT <- lcTypeOf cfg (VarF fv)
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
-lowerNativeExpr cfg _ (DoBlockN_ t x) =
-  let (hoisted, effectExpr) = lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
-   in return
-        defaultValue
-          { poolExpr = effectExpr
-          , poolCompleteManifolds = poolCompleteManifolds x
-          , poolPriorLines = hoisted
-          , poolPriorExprs = poolPriorExprs x
-          }
+lowerNativeExpr cfg _ (DoBlockN_ t x) = do
+  (hoisted, effectExpr) <- lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
+  return
+    defaultValue
+      { poolExpr = effectExpr
+      , poolCompleteManifolds = poolCompleteManifolds x
+      , poolPriorLines = hoisted
+      , poolPriorExprs = poolPriorExprs x
+      }
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional is a noop in all target languages: T is a valid ?T
 lowerNativeExpr _ _ (CoerceN_ CoerceToOptional _ x) = return x

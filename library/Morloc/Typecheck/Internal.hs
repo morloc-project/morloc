@@ -969,16 +969,22 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- 'subtypeEffRows'. The empty effect set is the monoid identity (<> A ==
 -- A), so a left side that solves to empty is treated as its inner type.
 subtype scope (EffectU e1 i1) (EffectU e2 i2) g = subtypeEffRows scope e1 e2 i1 i2 g
--- Effectful type on the left, non-effectful on the right. <> A == A: if
--- the left row solves to empty it is just the inner type. Otherwise a
--- genuinely effectful value never satisfies a non-effect expected type
--- and never instantiates a type variable (no ExistU/ForallU escape): an
--- effectful computation must be run in a do-block and its pure result
--- used instead. This is what makes the effect coloring sound -- a thunk
--- (a function) can never reach a pure or polymorphic position, where the
--- cross-language runtime cannot serialize it.
+-- Effectful type on the left, non-effectful on the right. The empty
+-- effect set is the monoid identity (<> A == A), so a left side that
+-- solves to empty is just its inner type. An inferred type variable (a
+-- closed existential) may be solved to the effect type, mirroring the
+-- symmetric ExistU <: EffectU instantiation; this lets a generic
+-- combinator thread an effectful value through a type variable. A
+-- non-serializable value in a type variable is not special-cased here:
+-- soundness is enforced where serialization happens, exactly as for a
+-- function value -- the thunk is realized in its own pool when local, or
+-- forced before a remote boundary (pushForceIntoRemote / makeSerialAST
+-- EffectF). A genuinely effectful value still cannot satisfy a concrete
+-- non-effect expected type.
 subtype scope t1@(EffectU e1 i1) t2 g
   | isEmptyEffectSet (applyEff g e1) = subtype scope i1 t2 g
+  | ExistU _ ([], _) _ <- t2 =
+      occursCheck t2 t1 "InstantiateR" >> instantiate scope t1 t2 g
   | otherwise =
       subtypeError t1 t2 $
         "an effectful value cannot be used where a non-effectful type is"

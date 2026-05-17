@@ -265,6 +265,24 @@ decideRemoteness bconf (Just (ManifoldConfig _ _ (Just res))) l1 l2 =
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
 
+-- Express a function argument. A do-block passed where an effect-typed
+-- (thunk) parameter is expected must be suspended whole -- identically to
+-- a bare effectful application argument -- so the handler receives an
+-- unevaluated thunk. Keep the EffectT on the inner expression so its
+-- source call is auto-suspended (Grammars.Common). The shared DoBlockS
+-- clause still strips EffectT for a return/export-position do-block, which
+-- forceExportThunks / pushForceIntoRemote discharge at the boundary.
+expressPolyArg ::
+  Lang ->
+  Indexed Type ->
+  AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
+  MorlocMonad PolyExpr
+expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _ _)) (Idx cidx lang, args) (DoBlockS x)) = do
+  x' <- expressPolyExprWrap lang (mkIdx x t) x
+  let e = PolyDoBlock (Idx cidx t) x'
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+expressPolyArg l pc e = expressPolyExprWrap l pc e
+
 expressPolyExpr ::
   (Lang -> Lang -> Maybe RemoteForm) ->
   Lang ->
@@ -451,7 +469,7 @@ expressPolyExpr
     )
     | srcInline src && isLocal = do
         propagateScope gidxCall midx
-        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         expressPolyApp parentLang f xsExpr >>= stripPolyReturn
     where
       remote = findRemote parentLang callLang
@@ -476,7 +494,7 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         expressPolyApp parentLang f xsExpr >>= stripPolyReturn
     where
       remote = findRemote parentLang callLang
@@ -494,7 +512,7 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
 
         func <- expressPolyApp parentLang f xsExpr
         return
@@ -503,7 +521,7 @@ expressPolyExpr
     | not isLocal = do
         propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
-        mayXs <- safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
+        mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         func <- expressPolyApp parentLang f (fromJust mayXs)
         return
           . PolyManifold parentLang midx (ManifoldFull (map unvalue args))

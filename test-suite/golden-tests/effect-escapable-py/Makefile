@@ -9,6 +9,8 @@ all:
 	./nexus gDoForce -1 >> obs.txt 2>> obs.err || echo ESCAPED >> obs.txt
 	./nexus gDoBind 21  >> obs.txt 2>> obs.err || echo ESCAPED >> obs.txt
 	./nexus gDoBind -1  >> obs.txt 2>> obs.err || echo ESCAPED >> obs.txt
+	./nexus gMany 5     >> obs.txt 2>> obs.err || echo ESCAPED >> obs.txt
+	./nexus gMany -1    >> obs.txt 2>> obs.err || echo ESCAPED >> obs.txt
 
 clean:
 	rm -rf nexus pools *err

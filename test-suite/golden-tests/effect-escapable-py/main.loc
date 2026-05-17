@@ -17,7 +17,7 @@
 --
 -- All four MUST behave identically: success returns foo's value, a
 -- raised Error is discharged to -1.
-module main (gDirect, gDoWrap, gDoForce, gDoBind)
+module main (gDirect, gDoWrap, gDoForce, gDoBind, gMany)
 
 import root-py
 
@@ -46,10 +46,11 @@ gDoForce x = handleError (do { v <- foo x ; v })
 gDoBind :: Int -> Int
 gDoBind x = handleError (do { foo x })
 
----- this one currently does not typecheck
--- gMany :: Int -> Int
--- gMany x =
---   let y = handleError $ do
---     z <- foo x
---     foo z 
---   in x + 1
+-- a generic combinator ($) threads the effectful do-block through a type
+-- variable; the handler discharges Error, so gMany typechecks as Int->Int
+gMany :: Int -> Int
+gMany x =
+  let y = handleError $ do
+    z <- foo x
+    foo z
+  in x + 1

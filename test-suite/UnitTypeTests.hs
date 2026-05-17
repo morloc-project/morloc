@@ -272,6 +272,17 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Left _ -> return ()
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
+-- | Assert that a subtype check is accepted (dual of assertSubtypeBad).
+-- Used for positive rules whose resulting gamma involves freshly
+-- generated existentials (e.g. effect-row instantiation), where an
+-- exact-context assertion would be brittle.
+assertSubtypeOk :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
+assertSubtypeOk msg gs a b = testCase msg $ do
+  let g0 = listToGamma gs
+  case MTI.subtype Map.empty a b g0 of
+    Left e -> assertFailure $ "Expected subtype acceptance for " <> show a <> " <: " <> show b <> " but got: " <> show e
+    Right _ -> return ()
+
 -- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
 -- Uses slot spacing of 256 to match production code.
 listToGamma :: [GammaIndex] -> Gamma
@@ -3091,6 +3102,21 @@ effectSubtypeTests =
           [] (ioEff a) (effVar "e1" a) []
       , assertSubtypeGamma "deferral: <IO,Error> A <: <e1> A passes (var on right)"
           [] (ioErrEff a) (effVar "e1" a) []
+
+        -- === Effect row may fill an inferred type variable ===
+        -- A non-empty effect row solves a bare existential (mirrors the
+        -- ExistU <: EffectU direction).  This lets a generic combinator
+        -- ($, ., id) thread an effectful value through a type variable;
+        -- the over-broad rejection here previously broke `f $ effExpr`.
+        -- Soundness is enforced where serialization happens, not here.
+      , assertSubtypeOk "effect into tyvar: <a> -| <Error> A <: <a> accepted"
+          [eag] (errEff a) ea
+      , assertSubtypeOk "effect into tyvar: <a> -| <IO,Error> A <: <a> accepted"
+          [eag] (ioErrEff a) ea
+        -- ...but a genuinely effectful value still cannot satisfy a
+        -- concrete non-effect type (that rejection is unchanged).
+      , assertSubtypeBad "effect into concrete still rejected: <Error> A </: A"
+          [] (errEff a) a
       ]
   where
     a = var "A"
@@ -3331,60 +3357,134 @@ effectErrorTests =
 
 -- | Escapability tests.  An effect is inescapable by default
 -- (`effect E`); `escapable effect E` opts it into being
--- discharge-able.  The inescapable-propagation rule (a signature-level
--- check) requires every inescapable concrete label appearing in a
--- parameter's effect row to also appear in the result row, so an
--- inescapable effect can never be silently consumed.  An escapable
--- label is exempt from that requirement (the only sanctioned place to
--- discharge it is a sourced handler).  These tests pin both
--- directions, including the pair that differs only by the `escapable`
--- keyword.
+-- dischargeable.  Two rules interact:
+--   * inescapable-propagation (signature-level): every inescapable
+--     concrete label in a parameter's effect row must also appear in
+--     the result row, so an inescapable effect is never silently
+--     consumed -- not even by a handler-shaped signature.
+--   * sourced-discharge (value-level): an escapable effect is exempt
+--     from propagation, but only a SOURCED handler may actually drop
+--     it; a defined function that carries the effect cannot.
+-- The handlers are APPLIED and the positive cases assert the
+-- discharged/propagated result type, so the assertion itself proves
+-- the rule.  The escapable-keyword contrast is two otherwise-identical
+-- applied programs differing only by the `escapable` keyword.
 effectEscapabilityTests :: TestTree
 effectEscapabilityTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
     testGroup
       "Effect escapability tests"
-      [ -- === Escapable effect may be dropped (accepted) ===
-        -- A handler signature consuming <Error> and returning a pure
-        -- value is legal because Error is declared escapable.
+      [ -- === Escapable effect discharged by a SOURCED handler, applied ===
+        -- foo performs the escapable Error; the sourced handler recover
+        -- consumes <Error> Int and returns a pure Int.  Applying it
+        -- must yield Int -- the assertion itself proves the Error was
+        -- discharged at the call site, not merely that some unrelated
+        -- binding is well typed.
         assertGeneralType
-          "escapable Error dropped by handler signature"
+          "escapable Error discharged by sourced handler (applied)"
           [r|
-        module main (ok)
+        module main (x)
         escapable effect Error
+        source Py ("foo")
+        source Py ("recover")
+        foo :: Int -> <Error> Int
         recover :: <Error> Int -> Int
-        ok :: Int
-        ok = 42
+        x :: Int
+        x = recover (foo 1)
           |]
           int
-      , -- Tail-variable handler form <Error, e> a -> <e> a: Error is
-        -- discharged, the row variable propagates.
+      , -- Tail-variable handler <Error, e> a -> <e> a applied: Error is
+        -- discharged and the row variable solves to the empty row, so
+        -- the applied result reduces to a pure Int.
         assertGeneralType
-          "escapable Error dropped, row variable propagates"
+          "escapable Error discharged, row variable solved (applied)"
           [r|
-        module main (ok)
+        module main (x)
         escapable effect Error
+        source Py ("foo")
+        source Py ("handle")
+        foo :: Int -> <Error> Int
         handle :: <Error, e> a -> <e> a
-        ok :: Int
-        ok = 42
+        x :: Int
+        x = handle (foo 1)
           |]
           int
-      , -- An inescapable effect that DOES propagate to the result is
-        -- accepted (propagation, not escape).
+      , -- An inescapable effect propagates THROUGH application: passt
+        -- keeps Cap in its result, so applying it to an effectful
+        -- argument yields <Cap> Int (the effect is not dropped).
         assertGeneralType
-          "inescapable effect propagated to result is accepted"
+          "inescapable Cap propagates through application"
           [r|
-        module main (ok)
+        module main (x)
         effect Cap
+        source Py ("foo")
+        source Py ("passt")
+        foo :: Int -> <Cap> Int
         passt :: <Cap> Int -> <Cap> Int
-        ok :: Int
-        ok = 42
+        x :: <Cap> Int
+        x = passt (foo 1)
           |]
-          int
+          (EffectU (EffectSet (Set.singleton "Cap")) int)
 
-        -- === Escaping an inescapable effect is rejected ===
+        -- === Escapable-keyword contrast (same applied program) ===
+        -- Identical to the first test EXCEPT `escapable` is dropped, so
+        -- Error is inescapable.  The handler is now rejected by the
+        -- inescapable-propagation rule -- isolating exactly what the
+        -- `escapable` keyword controls, with the handler applied.
       , exprTestBad
-          "inescapable Cap cannot be dropped (pure result)"
+          "inescapable Error: the same applied program is rejected"
+          [r|
+        module main (x)
+        effect Error
+        source Py ("foo")
+        source Py ("recover")
+        foo :: Int -> <Error> Int
+        recover :: <Error> Int -> Int
+        x :: Int
+        x = recover (foo 1)
+          |]
+
+        -- === Only a SOURCED handler may discharge an escapable effect ===
+        -- recover is now DEFINED (recover t = t), not sourced.  Even
+        -- though Error is escapable, a defined function that carries the
+        -- effect cannot claim a pure result -- the discharge privilege
+        -- belongs to sourced handlers alone.
+      , exprTestBad
+          "escapable Error: a defined (non-sourced) handler cannot discharge it"
+          [r|
+        module main (x)
+        escapable effect Error
+        source Py ("foo")
+        foo :: Int -> <Error> Int
+        recover :: <Error> Int -> Int
+        recover t = t
+        x :: Int
+        x = recover (foo 1)
+          |]
+
+        -- === Inescapable effect cannot escape through application ===
+        -- consume takes a pure Int; passing the inescapable effectful
+        -- `foo 1 :: <Cap> Int` would silently drop Cap at the argument
+        -- boundary.  Rejected.
+      , exprTestBad
+          "inescapable Cap cannot escape into a pure parameter (applied)"
+          [r|
+        module main (x)
+        effect Cap
+        source Py ("foo")
+        source Py ("consume")
+        foo :: Int -> <Cap> Int
+        consume :: Int -> Int
+        x :: Int
+        x = consume (foo 1)
+          |]
+
+        -- === Signature-level rejections (illegal before any use) ===
+        -- These declarations are rejected at the point of declaration
+        -- by the inescapable-propagation rule, so no application is
+        -- even reachable.
+      , exprTestBad
+          "signature: inescapable Cap in parameter absent from result"
           [r|
         module main (ok)
         effect Cap
@@ -3392,10 +3492,8 @@ effectEscapabilityTests =
         ok :: Int
         ok = 42
           |]
-      , -- The plan's `bad :: <Cap, e> a -> <e> a` -- rejected even
-        -- though it has the shape of a sourced handler.
-        exprTestBad
-          "inescapable Cap cannot be discharged by a handler"
+      , exprTestBad
+          "signature: handler-shaped <Cap,e> a -> <e> a rejected (Cap inescapable)"
           [r|
         module main (ok)
         effect Cap
@@ -3403,23 +3501,8 @@ effectEscapabilityTests =
         ok :: Int
         ok = 42
           |]
-      , -- Default is inescapable: plain `effect Error` (no
-        -- `escapable`) cannot be dropped.  This module is identical to
-        -- the first accepted test except for the missing `escapable`
-        -- keyword, isolating exactly what escapability controls.
-        exprTestBad
-          "default-inescapable Error cannot be dropped"
-          [r|
-        module main (ok)
-        effect Error
-        recover :: <Error> Int -> Int
-        ok :: Int
-        ok = 42
-          |]
-      , -- Mixed parameter row: the escapable Error may be dropped, but
-        -- the inescapable Cap in the same row still must propagate.
-        exprTestBad
-          "escapable dropped but inescapable in same row still leaks"
+      , exprTestBad
+          "signature: escapable Error droppable but inescapable Cap in same row leaks"
           [r|
         module main (ok)
         escapable effect Error
@@ -3597,7 +3680,7 @@ typeclassTests =
         module main (foo)
         type Py => Int = "int"
         myId :: a -> a
-        source Py ("lambda x: x" as myId)
+        source Py ("myId")
         foo :: Int
         foo = (myId :: Int -> Int) 42
           |]
@@ -3609,7 +3692,7 @@ typeclassTests =
         module main (foo)
         type Py => Real = "float"
         myVal :: a
-        source Py ("lambda: 3.14" as myVal)
+        source Py ("myVal")
         foo :: Real
         foo = myVal :: Real
           |]
