@@ -8,3 +8,6 @@ serial_type: "uint8_t*"
 cost: 0
 # std::string is length-prefixed and supports interior NUL bytes.
 allow_string_null: true
+# A sourced symbol is a C++ identifier (allowing ::) or operator.
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_:]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"

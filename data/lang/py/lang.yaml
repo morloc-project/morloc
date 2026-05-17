@@ -57,6 +57,9 @@ ldQualifiedImports: true
 ldIncludeRelToFile: false
 
 # Template fields
+# A sourced symbol is a Python identifier or operator, emitted verbatim.
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_.]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
 ldAssignOp: "="
 ldLambdaTemplate: "lambda {{args}}: {{body}}"
 ldDoBlockExpr: "(lambda: {{expr}})"

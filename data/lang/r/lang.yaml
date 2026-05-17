@@ -59,6 +59,9 @@ ldQualifiedImports: false
 ldIncludeRelToFile: false
 
 # Template fields
+# A sourced symbol is an R identifier or operator, emitted verbatim.
+ldNamePattern: "[A-Za-z._][A-Za-z0-9._]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
 ldAssignOp: "<-"
 ldLambdaTemplate: "function({{args}}) { {{body}} }"
 ldDoBlockExpr: "(function() {{expr}})"
