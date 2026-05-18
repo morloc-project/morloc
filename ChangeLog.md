@@ -1,4 +1,40 @@
-0.85.0 [2026-05-xx]
+0.86.0 [2026-05-xx]
+-------------------
+
+Updated `eval` subcommand
+ - make script positional and inline use `-e` flag
+ - make `source` fully inaccessible without --allow-local-modules
+
+Error messages
+ - check language-specific legality of sourced terms 
+ - better error when using the "default" docstring on a positional
+ - replace naked `error` calls in Haskell with dedicated throwCompilerBug when
+   presumably unreachable expressions are reached (real compiler bugs)
+ - add clear error for multi-root modules
+ - fix still more error messages that point to the module export line
+
+Effects
+ - require explicit effect declarations
+ - make effects inescapable (effects always propagate to the return value)
+ - allow effects to be explicitly declared as `escapable`
+ - remove effect coercion and explicit forcing (the `!` operator)
+ - fix parsing of do-blocks within parentheses in expressions
+
+Other
+ - allow empty import (e.g., for typeclass instances)
+ - fix value checking across instances 
+ - fix bug in aliased recursive functions
+
+Installation
+ - add a `setup` field to morloc package.yaml files
+ - this calls a bash script in the cwd after a module is installed
+ - script has access to `MORLOC_HOME`, `MORLOC_MODULE_NAME`,
+   `MORLOC_MODULE_VERSION`, `MORLOC_MODULE_DIR`, `MORLOC_PLANE`, and
+   `MORLOC_PLANE_DIR`.
+ - setup script failure always removes the broken module 
+
+
+0.85.0 [2026-05-12]
 -------------------
 
 New behavior:
