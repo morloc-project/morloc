@@ -136,6 +136,10 @@ data MorlocState = MorlocState
   -- ^ Project root directory (directory of the entry-point file)
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
+  , stateAllowLocalModules :: Bool
+  -- ^ When False, import resolution ignores local/project-relative
+  -- modules and resolves only installed (system) modules. False in
+  -- eval mode (the API sandbox boundary) unless --allow-local-modules.
   , stateUnsafeSkipNullCheck :: Bool
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
@@ -380,6 +384,7 @@ instance Defaultable MorlocState where
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
       , stateEvalMode = False
+      , stateAllowLocalModules = True
       , stateUnsafeSkipNullCheck = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []

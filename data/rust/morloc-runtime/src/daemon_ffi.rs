@@ -245,6 +245,9 @@ impl BindingStore {
                 let arg_eval = CString::new("eval").unwrap();
                 let arg_save = CString::new("--save").unwrap();
                 let arg_hex = CString::new(hash_hex.as_str()).unwrap();
+                // `morloc eval` takes a script file by default; the
+                // binding store supplies an inline expression.
+                let arg_dash_e = CString::new("-e").unwrap();
                 let arg_expr = CString::new(expr).unwrap();
                 libc::execlp(
                     cmd.as_ptr(),
@@ -252,6 +255,7 @@ impl BindingStore {
                     arg_eval.as_ptr(),
                     arg_save.as_ptr(),
                     arg_hex.as_ptr(),
+                    arg_dash_e.as_ptr(),
                     arg_expr.as_ptr(),
                     ptr::null::<c_char>(),
                 );
@@ -699,10 +703,14 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
 
         let cmd = CString::new("morloc").unwrap();
         let arg_subcmd = CString::new(subcmd).unwrap();
+        // `morloc eval`/`typecheck` take a script file by default; the
+        // daemon always supplies an inline expression, so pass `-e`.
+        let dash_e = CString::new("-e").unwrap();
         libc::execlp(
             cmd.as_ptr(),
             cmd.as_ptr(),
             arg_subcmd.as_ptr(),
+            dash_e.as_ptr(),
             expr,
             ptr::null::<c_char>(),
         );

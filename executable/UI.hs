@@ -264,6 +264,13 @@ optExpression =
         <> help "Read script as string rather than file"
     )
 
+optAllowLocalModules :: Parser Bool
+optAllowLocalModules =
+  switch
+    ( long "allow-local-modules"
+        <> help "Permit eval to import local-filesystem modules (development only; insecure for server use -- prefer 'morloc make')"
+    )
+
 optVanilla :: Parser Bool
 optVanilla =
   switch
@@ -468,7 +475,9 @@ data EvalCommand = EvalCommand
   , evalVanilla :: Bool
   , evalVerbose :: Int
   , evalSave :: String
-  , evalExpression :: String
+  , evalExpression :: Bool
+  , evalAllowLocalModules :: Bool
+  , evalScript :: String
   , evalArgs :: [String]
   }
 
@@ -479,10 +488,9 @@ evalCommandParser =
     <*> optVanilla
     <*> optVerbose
     <*> optSave
-    <*> strArgument
-      ( metavar "EXPRESSION"
-          <> help "Morloc expression to evaluate"
-      )
+    <*> optExpression
+    <*> optAllowLocalModules
+    <*> optScript
     <*> many (strArgument (metavar "ARGS..." <> help "Extra arguments passed to the compiled program"))
 
 evalSubcommand :: Mod CommandFields CliCommand

@@ -222,6 +222,14 @@ findModule (_, currentModule) importModule
 -- e.g., .foo.bar -> <root>/foo/bar.loc or <root>/foo/bar/main.loc
 findLocalModule :: MVar -> MVar -> MorlocMonad Path
 findLocalModule currentModule importModule = do
+  allowLocal <- MM.gets stateAllowLocalModules
+  if not allowLocal
+    then MM.throwSystemError $
+      "Within module" <+> squotes (pretty currentModule)
+        <> "," <+> "local import" <+> squotes (pretty importModule)
+        <+> "is not permitted in eval mode."
+        <+> "Use 'morloc make' to build with local modules."
+    else return ()
   projectRoot <- MM.gets stateProjectRoot
   case projectRoot of
     Nothing -> MM.throwSystemError $
@@ -251,6 +259,7 @@ findBareModule :: MVar -> MVar -> MorlocMonad Path
 findBareModule currentModule importModule = do
   config <- MM.ask
   projectRoot <- MM.gets stateProjectRoot
+  allowLocal <- MM.gets stateAllowLocalModules
   let lib = Config.configLibrary config
       plane = Config.configPlane config
       planeCore = Config.configPlaneCore config
@@ -279,6 +288,7 @@ findBareModule currentModule importModule = do
             , MS.joinPath (lib : namePath <> ["main.loc"])
             ]
       localPaths
+        | not allowLocal = []  -- eval mode: installed modules only
         | isNamespaced = []  -- namespaced imports are never local
         | otherwise = case projectRoot of
             Just root ->
