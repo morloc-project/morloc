@@ -1,0 +1,147 @@
+-- Direct-literal construction of recursive values. Every recursive
+-- type defined elsewhere in the golden suite is constructed here as
+-- a top-level constant binding with no surrounding function: the RHS
+-- is a fully-inline nested literal.
+--
+-- This separates two concerns:
+--   * `native-recursive-tuple` and friends test recursive-type
+--     CONSTRUCTION via builder FUNCTIONS (the recursive case has a
+--     self-call to the builder, the base case has an inline literal).
+--   * This test exercises CONSTANT BINDINGS whose RHS is the literal
+--     itself, with no surrounding builder function and no
+--     self-recursion to anchor manifold extraction.
+--
+-- The same wire form (JSON) is expected as for the builder-produced
+-- values: the literal and the function form are interchangeable at
+-- the wire level.
+--
+-- LANGUAGE COVERAGE: the *Lit* bindings exercise the literal-as-G-AST
+-- path (constructed in the nexus). The *LangX* bindings substitute
+-- @lang for every payload position and force the literal through each
+-- language pool via @idpy@/@idcpp@/@idr@, so the JSON output proves
+-- which pool actually built the value:
+--
+--   * agnostic (no idX wrapper): every @lang slot reads "morloc"
+--   * idpy   forces routing through Python:    "py"
+--   * idcpp  forces routing through C++:       "cpp"
+--   * idr    forces routing through R:         "r"
+--
+-- KNOWN BUG (kept exposed by this test on purpose): the C++ codegen
+-- does not emit a forward declaration for the recursive position of
+-- a tuple-alias (or for an LL/Tree-shaped record-alias). The
+-- generated @pool.cpp@ refers to an undeclared name and gcc rejects
+-- the file. This is the same gap documented in
+-- @native-recursive-tuple/main.loc@; keeping the @LangCpp@ variants
+-- here as tracked test cases means a fix lands in lockstep with the
+-- equivalent native-construction tests in the recursive-record suite.
+
+module main ( pairLit, btreeLit, pair2Lit
+            , llTupleLit, roseLit, patLit
+            , containerLit
+            , pairLangAgnostic, pairLangPy, pairLangCpp, pairLangR
+            , btreeLangAgnostic, btreeLangPy, btreeLangCpp, btreeLangR
+            , roseLangAgnostic, roseLangPy, roseLangCpp, roseLangR
+            , containerLangAgnostic, containerLangPy
+            )
+
+import root
+import root-py
+import root-cpp
+import root-r
+
+-- Tuple-form recursive aliases (mirrors native-recursive-tuple).
+type Pair a = (a, ?(Pair a))
+type BTree a = (a, ?(BTree a), ?(BTree a))
+type Pair2 a b = (a, b, ?(Pair2 a b))
+
+pairLit :: Pair Int
+pairLit = (42, (7, (99, Null)))
+
+btreeLit :: BTree Int
+btreeLit = (10, (5, Null, Null), (15, Null, Null))
+
+pair2Lit :: Pair2 Int Str
+pair2Lit = (1, "a", (2, "b", (3, "c", Null)))
+
+-- List-guarded recursion (mirrors native-recursive-list).
+type (LL a) = (a, ?(LL a))
+type Rose a = (a, [Rose a])
+type Pat = [Pat]
+
+llTupleLit :: LL Int
+llTupleLit = (42, (7, (99, Null)))
+
+roseLit :: Rose Int
+roseLit = (1, [(2, []), (3, [])])
+
+patLit :: Pat
+patLit = [[], [[], []]]
+
+-- Parameterised record (mirrors native-recursive-record's Container).
+-- Container is Py-only at the concrete level so construction routes
+-- through Python and avoids the C++ struct-layout limitation that
+-- keeps the record-form LL/Tree builders commented out in the
+-- native-recursive-record test.
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+record Py => Container a = "dict"
+
+containerLit :: Container Int
+containerLit = {val = 1, sub = {val = 2, sub = Null}}
+
+-- ==== Language-tagged literals ====
+-- @lang is replaced at codegen time with the string-literal name of
+-- the pool that owns the manifold containing it. By substituting
+-- @lang into every payload slot of a recursive literal, the JSON we
+-- emit directly testifies which language constructed the value.
+
+-- Pair Str -- linear linked-list shape.
+pairLangAgnostic :: Pair Str
+pairLangAgnostic = (@lang, (@lang, Null))
+
+pairLangPy :: Pair Str
+pairLangPy = idpy ((@lang, (@lang, Null)) :: Pair Str)
+
+pairLangCpp :: Pair Str
+pairLangCpp = idcpp ((@lang, (@lang, Null)) :: Pair Str)
+
+pairLangR :: Pair Str
+pairLangR = idr ((@lang, (@lang, Null)) :: Pair Str)
+
+-- BTree Str -- branching recursion, two recursive positions.
+btreeLangAgnostic :: BTree Str
+btreeLangAgnostic = (@lang, (@lang, Null, Null), (@lang, Null, Null))
+
+btreeLangPy :: BTree Str
+btreeLangPy = idpy ((@lang, (@lang, Null, Null), (@lang, Null, Null)) :: BTree Str)
+
+btreeLangCpp :: BTree Str
+btreeLangCpp = idcpp ((@lang, (@lang, Null, Null), (@lang, Null, Null)) :: BTree Str)
+
+btreeLangR :: BTree Str
+btreeLangR = idr ((@lang, (@lang, Null, Null), (@lang, Null, Null)) :: BTree Str)
+
+-- Rose Str -- list-guarded recursion.
+roseLangAgnostic :: Rose Str
+roseLangAgnostic = (@lang, [(@lang, []), (@lang, [])])
+
+roseLangPy :: Rose Str
+roseLangPy = idpy ((@lang, [(@lang, []), (@lang, [])]) :: Rose Str)
+
+roseLangCpp :: Rose Str
+roseLangCpp = idcpp ((@lang, [(@lang, []), (@lang, [])]) :: Rose Str)
+
+roseLangR :: Rose Str
+roseLangR = idr ((@lang, [(@lang, []), (@lang, [])]) :: Rose Str)
+
+-- Container Str -- recursive record. Container is Py-only at the
+-- concrete level, so only Agnostic and Py contexts are reachable;
+-- Cpp/R forcing would fail typecheck because the type has no
+-- concrete representation in those languages.
+containerLangAgnostic :: Container Str
+containerLangAgnostic = {val = @lang, sub = {val = @lang, sub = Null}}
+
+containerLangPy :: Container Str
+containerLangPy = idpy ({val = @lang, sub = {val = @lang, sub = Null}} :: Container Str)

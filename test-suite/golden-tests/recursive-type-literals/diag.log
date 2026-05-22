@@ -1,0 +1,5 @@
+BUG-B-DIAG: about to call Nexus.generate
+BUG-B-DIAG: Nexus.generate entry
+BUG-B-DIAG: Nexus.generate: makeFData
+BUG-B-DIAG: Nexus.generate: getFData
+BUG-B-DIAG: Nexus.generate: annotateGasts

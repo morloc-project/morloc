@@ -1307,6 +1307,23 @@ checkE i g (LetS v e1 e2) t = do
 -- @LL Int = (Int, ?(LL Int))@, which fails at the @LL Int <: ?(LL Int)@
 -- subgoal -- @tryCoerce@ only descends through OptionalU and won't fire
 -- on a tuple-vs-tuple element mismatch from the outside.
+--
+-- C2.opt: compound literal (TupS/NamS) at an Optional expected type.
+-- The literal cannot itself be @Null@, so it is unambiguously the
+-- non-null inner T. Strip the Optional wrapper, recurse at T (which
+-- routes through the regular TupS/NamS rules below), and wrap the
+-- result in @CoerceToOptional@.
+--
+-- Without this, a nested literal like @(42, (7, (99, Null)))@ at type
+-- @LL Int@ would fail: the outer rule expands @LL Int@ to its tuple
+-- body and element-wise checks the inner tuple @(7, (99, Null))@ at
+-- @?(LL Int)@, but the next-level TupS rule only matches
+-- @AppU TupleN@-shaped expected types. The literal would synthesize
+-- as @(Int, (Int, ?ex))@ and the subtype check against @?(LL Int)@
+-- would fall through because @tryCoerce@ only walks Optional layers
+-- at the outermost expression, not inside element checks.
+checkE i g e@(TupS _) (OptionalU innerT) = checkOptionalLit i g e innerT
+checkE i g e@(NamS _) (OptionalU innerT) = checkOptionalLit i g e innerT
 checkE i g (TupS xs) t = do
   scope <- MM.getGeneralScope i
   let tApplied = apply g t
@@ -1452,6 +1469,38 @@ checkEFallback i g1 e1 b = do
           <> line <> "  expected: " <> prettyTypeU b'
           <> line <> "  inferred: " <> prettyTypeU a'
           <> line <> err
+
+-- | Check a compound literal (TupS or NamS) against the inner type of an
+-- Optional expected type, then wrap the result in @CoerceToOptional@.
+-- See the comment at the @checkE _ _ (TupS _) (OptionalU _)@ clause for
+-- the motivating case.
+checkOptionalLit ::
+  Int ->
+  Gamma ->
+  ExprS Int ManyPoly Int ->
+  TypeU ->
+  MorlocMonad
+    ( Gamma
+    , TypeU
+    , ExprS (Indexed TypeU) ManyPoly Int
+    )
+checkOptionalLit i g e innerT = do
+  (g', _, e') <- checkE' i g e innerT
+  idx <- MM.getCounterWithPos i
+  -- Propagate the general-typedef scope from the original index to the
+  -- fresh one. Without this, downstream phases (e.g. Express's
+  -- reduce-and-retry) call @MM.getGeneralScope idx@ and get an empty
+  -- scope, so a type like @Pair Str@ that depends on the alias @Pair@
+  -- being in scope fails to reduce -- surfacing as
+  -- @Expected a tuple type, got: Pair Str@. Mirrors the pattern
+  -- @propagateScope@ uses for concrete typedefs in Express.hs.
+  MM.modify $ \s ->
+    case GMap.yIsX i idx (stateGeneralTypedefs s) of
+      Just g'' -> s { stateGeneralTypedefs = g'' }
+      Nothing -> s
+  let appliedInner = apply g' innerT
+      innerAnno = AnnoS (Idx idx appliedInner) i e'
+  return (g', apply g' (OptionalU innerT), CoerceS CoerceToOptional innerAnno)
 
 -- | Choose the record-shaped type with the most keys. Non-record cases
 -- fall back to the second argument (the standard "return the expected

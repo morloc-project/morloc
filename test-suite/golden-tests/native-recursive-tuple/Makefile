@@ -5,6 +5,9 @@ all:
 	./nexus pairLenPy 5         >  obs.txt 2>  obs.err
 	# Branching BTree at depth 3: 2**4 - 1 == 15 nodes
 	./nexus btreeSizePy 3       >> obs.txt 2>> obs.err
+	# btreeSum at depth 3: leaves carry 1, internals carry 0, so the
+	# total sum equals the leaf count == 2**3 == 8.
+	./nexus btreeSumPy 3        >> obs.txt 2>> obs.err
 	# Two-parameter Pair2 Int Str: length 5
 	./nexus pair2LenPy 5        >> obs.txt 2>> obs.err
 	# Stress: 400-deep right-spined Pair, iteratively built in Py,

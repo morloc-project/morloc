@@ -1,5 +1,5 @@
 === single-language round-trips ===
-"hello world"
+"See you in the stars my friend"
 "hello world"
 "hello world"
 === two-language pipelines ===

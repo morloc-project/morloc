@@ -18,7 +18,7 @@
 -- types. Same codegen gap as in native-recursive-tuple: no forward
 -- declaration is emitted for the recursive position on the C++ side.
 
-module main (roseSizePy, patNodesPy, llLen, llSum, llRange,
+module main (roseSizePy, patNodesPy, llLen, llSum, llRange, roseSum,
              roseBuild, patBuild, roseFromJson, patFromJson)
 
 import root
@@ -72,6 +72,11 @@ roseBuild :: Int -> Rose Int
 roseBuild d ? d <= 0 = (1, [])
             : let sub = roseBuild (d - 1)
               in (0, [sub, sub])
+
+-- Sum every payload of a Rose Int. Uses `fold` from the Foldable
+-- instance for List to combine the children's sums.
+roseSum :: Rose Int -> Int
+roseSum x = .0 x + fold (\acc child -> acc + roseSum child) 0 (.1 x)
 
 -- Pat = [Pat]. The empty-list base case terminates; each level wraps
 -- its children in a fresh list. With no payload, the entire value is

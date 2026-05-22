@@ -1,6 +1,9 @@
 0.86.0 [2026-05-xx]
 -------------------
 
+Type system
+ - allow recursive data types (Rose trees, binary trees, linked lists, etc)
+
 Updated `eval` subcommand
  - make script positional and inline use `-e` flag
  - make `source` fully inaccessible without --allow-local-modules

@@ -1,0 +1,510 @@
+-- tensor-comprehensive: full-cycle, operations, and zero-copy tests for
+-- ranks 2-5 (Matrix, Tensor3, Tensor4, Tensor5).
+--
+-- This test is designed to expose bugs in areas the existing suite does
+-- not cover.
+--
+--   (1) All six language pairs for every rank including Tensor5. The
+--       only existing rank-5 test (tensor-dimensions) is Py->Cpp one-way.
+--
+--   (2) Stdlib operations: matmul, identity, zeros / ones / fill. These
+--       are declared in tensor/main.loc and implemented in the three
+--       backend modules, but only their type signatures are checked
+--       today (nat-typecheck) -- no numeric validation.
+--
+--   (3) Row-major / column-major correctness. R stores column-major
+--       while wire format is row-major. The pack/unpack pair must
+--       reverse axis order. A specific element-position probe (corners
+--       of a Tensor3) catches axis swaps that sums hide.
+--
+--   (4) File IO cycle: @save / @savej / @savem on a Matrix. The wire
+--       form involves nat arithmetic (Vector (d1*d2)) -- not exercised
+--       by the existing intrinsic-load tests.
+--
+--   (5) Element types on matrices across Cpp <-> Py (Int32, Int64,
+--       Float32).
+--
+--   (6) Zero-copy direct assertion. For a Matrix the reshape step
+--       always returns a view (DIRECT=False), so the test reports BOTH
+--       the direct flag AND the OWNDATA of the root buffer in the
+--       base chain. ROOT=False is the witness for SHM-backed transfer.
+
+module main
+  ( -- (1) round-trip across all six pairs, rank 2 through 5
+    cpMat, pcMat, prMat, rpMat, crMat, rcMat
+  , cpT3, pcT3, prT3, rpT3, crT3, rcT3
+  , cpT4, pcT4, prT4, rpT4, crT4, rcT4
+  , cpT5, pcT5, prT5, rpT5, crT5, rcT5
+    -- (2) stdlib operations
+  , mmCpp, mmPy, mmR
+  , idSum3, idSum5
+  , zerosSum, onesSum, fillSum
+    -- (3) row/column-major: 3D corner extraction across pairs
+  , cornersCpToPy, cornersCpToR, cornersRtoCp, cornersPyToR
+    -- (4) file IO for Matrix
+  , matFileBin, matFileJson, matFileMsg
+  , matFileSumBin, matFileSumJson
+    -- (5) Matrix element types
+  , matI32CpPy, matI32PyCp
+  , matI64CpPy, matI64PyCp
+  , matF32CpPy, matF32PyCp
+    -- (6) zero-copy direct assertions on a Matrix
+  , zcMatShmCpToPy, zcMatInlineCpToPy
+  , zcMatShmRToPy
+  , zcT3ShmCpToPy
+  , zcT5ShmCpToPy
+    -- (7) edge case: 1x1 matrix and 1x1x1 tensor
+  , unitMatCross, unitT3Cross
+    -- (8) literal inputs: source literals + CLI literals for Matrix / Tensor3
+  , litSrcMatAnnot, litSrcMatInfer, litSrcMatIntAnnot
+  , litSrcT3Annot, litSrcT3Infer
+  , litCliMat, litCliMatCpp, litCliMatR
+  , litCliMatInt, litCliT3
+  )
+
+effect IO
+
+import root-cpp
+import root-py
+import root-r (Real, Int, Bool)
+import vector-cpp
+import vector-py
+import vector-r
+import tensor-cpp
+import tensor-py
+import tensor-r
+import maybe
+import maybe-cpp
+import maybe-py
+import maybe-r
+
+-- =========================================================================
+-- Sourced helpers
+-- =========================================================================
+
+source Cpp from "src.hpp"
+  ( "cppMakeMat34"      -- Matrix 3 4 Real, values 1..12, sum=78
+  , "cppSumMat34"
+  , "cppMakeT3"         -- Tensor3 2 3 4 Real, values 0..23, sum=276
+  , "cppSumT3"
+  , "cppMakeT4"         -- Tensor4 2 3 2 2 Real, values 0..23, sum=276
+  , "cppSumT4"
+  , "cppMakeT5"         -- Tensor5 2 2 2 2 2 Real, values 0..31, sum=496
+  , "cppSumT5"
+  , "cppMakeA23"        -- Matrix 2 3 Real, values 1..6 (row-major)
+  , "cppMakeB32"        -- Matrix 3 2 Real, B[i,j] = i*2+j+1, so [[1,2],[3,4],[5,6]]
+  , "cppSumMat22"       -- consumer for matmul result (Matrix 2 2 Real)
+  , "cppCornersT3"      -- corners at (0,0,0), (1,0,0), (0,2,3), (1,2,3)
+  , "cppMakeMatI32"     -- Matrix 4 4 Int32 with values 1..16, sum=136
+  , "cppSumMatI32"
+  , "cppMakeMatI64"
+  , "cppSumMatI64"
+  , "cppMakeMatF32"
+  , "cppSumMatF32"
+  , "cppMakeMatBig"     -- Matrix 200 100 Real, all 1.0, sum=20000
+  , "cppMakeT3Big"      -- Tensor3 50 40 30 Real, all 1.0, sum=60000
+  , "cppMakeT5Big"      -- Tensor5 8 8 8 8 8 Real, all 1.0, sum=32768
+  , "cppMakeUnitMat"    -- Matrix 1 1 Real, value 7.0
+  , "cppMakeUnitT3"     -- Tensor3 1 1 1 Real, value 9.0
+  , "cppSumUnitMat"
+  , "cppSumUnitT3"
+  , "cppSumMatPoly"
+  , "cppSumMatI32Poly"
+  , "cppSumT3Poly"
+  )
+
+source Py from "src.py"
+  ( "pyMakeMat34"
+  , "pySumMat34"
+  , "pyMakeT3"
+  , "pySumT3"
+  , "pyMakeT4"
+  , "pySumT4"
+  , "pyMakeT5"
+  , "pySumT5"
+  , "pyMakeA23"
+  , "pyMakeB32"
+  , "pySumMat22"
+  , "pyCornersT3"
+  , "pyMakeMatI32"
+  , "pySumMatI32"
+  , "pyMakeMatI64"
+  , "pySumMatI64"
+  , "pyMakeMatF32"
+  , "pySumMatF32"
+  , "pyOwnDataMat"
+  , "pyOwnDataT3"
+  , "pyOwnDataT5"
+  , "pyMakeUnitMat"
+  , "pySumUnitMat"
+  , "pyMakeUnitT3"
+  , "pySumUnitT3"
+  , "pySumMatPoly"
+  , "pySumMatI32Poly"
+  , "pySumT3Poly"
+  )
+
+source R from "src.R"
+  ( "rMakeMat34"
+  , "rSumMat34"
+  , "rMakeT3"
+  , "rSumT3"
+  , "rMakeT4"
+  , "rSumT4"
+  , "rMakeT5"
+  , "rSumT5"
+  , "rSumMat22"
+  , "rCornersT3"
+  , "rMakeMatBig"
+  , "rSumMatPoly"
+  )
+
+-- =========================================================================
+-- Type signatures
+-- =========================================================================
+
+cppMakeMat34 :: Matrix 3 4 Real
+cppSumMat34  :: Matrix 3 4 Real -> Real
+pyMakeMat34  :: Matrix 3 4 Real
+pySumMat34   :: Matrix 3 4 Real -> Real
+rMakeMat34   :: Matrix 3 4 Real
+rSumMat34    :: Matrix 3 4 Real -> Real
+
+cppMakeT3 :: Tensor3 2 3 4 Real
+cppSumT3  :: Tensor3 2 3 4 Real -> Real
+pyMakeT3  :: Tensor3 2 3 4 Real
+pySumT3   :: Tensor3 2 3 4 Real -> Real
+rMakeT3   :: Tensor3 2 3 4 Real
+rSumT3    :: Tensor3 2 3 4 Real -> Real
+
+cppMakeT4 :: Tensor4 2 3 2 2 Real
+cppSumT4  :: Tensor4 2 3 2 2 Real -> Real
+pyMakeT4  :: Tensor4 2 3 2 2 Real
+pySumT4   :: Tensor4 2 3 2 2 Real -> Real
+rMakeT4   :: Tensor4 2 3 2 2 Real
+rSumT4    :: Tensor4 2 3 2 2 Real -> Real
+
+cppMakeT5 :: Tensor5 2 2 2 2 2 Real
+cppSumT5  :: Tensor5 2 2 2 2 2 Real -> Real
+pyMakeT5  :: Tensor5 2 2 2 2 2 Real
+pySumT5   :: Tensor5 2 2 2 2 2 Real -> Real
+rMakeT5   :: Tensor5 2 2 2 2 2 Real
+rSumT5    :: Tensor5 2 2 2 2 2 Real -> Real
+
+cppMakeA23  :: Matrix 2 3 Real
+cppMakeB32  :: Matrix 3 2 Real
+pyMakeA23   :: Matrix 2 3 Real
+pyMakeB32   :: Matrix 3 2 Real
+cppSumMat22 :: Matrix 2 2 Real -> Real
+pySumMat22  :: Matrix 2 2 Real -> Real
+rSumMat22   :: Matrix 2 2 Real -> Real
+
+-- Corners probe: returns the four values at positions
+-- (0,0,0), (1,0,0), (0,2,3), (1,2,3) of a Tensor3 2 3 4 with row-major
+-- fill 0..23. Expected values: [0, 12, 11, 23]. Any axis swap (e.g. R's
+-- column-major leaking through unfixed) would give a different list.
+cppCornersT3 :: Tensor3 2 3 4 Real -> [Real]
+pyCornersT3  :: Tensor3 2 3 4 Real -> [Real]
+rCornersT3   :: Tensor3 2 3 4 Real -> [Real]
+
+cppMakeMatI32 :: Matrix 4 4 Int32
+cppSumMatI32  :: Matrix 4 4 Int32 -> Int
+pyMakeMatI32  :: Matrix 4 4 Int32
+pySumMatI32   :: Matrix 4 4 Int32 -> Int
+
+cppMakeMatI64 :: Matrix 4 4 Int64
+cppSumMatI64  :: Matrix 4 4 Int64 -> Int
+pyMakeMatI64  :: Matrix 4 4 Int64
+pySumMatI64   :: Matrix 4 4 Int64 -> Int
+
+cppMakeMatF32 :: Matrix 4 4 Float32
+cppSumMatF32  :: Matrix 4 4 Float32 -> Real
+pyMakeMatF32  :: Matrix 4 4 Float32
+pySumMatF32   :: Matrix 4 4 Float32 -> Real
+
+cppMakeMatBig :: Matrix 200 100 Real
+cppMakeT3Big  :: Tensor3 50 40 30 Real
+cppMakeT5Big  :: Tensor5 8 8 8 8 8 Real
+rMakeMatBig   :: Matrix 200 100 Real
+
+-- Polymorphic so the same probe handles both threshold cases (big SHM
+-- vs small inline) without duplicating the Python function or the
+-- morloc signature.
+pyOwnDataMat :: Matrix m n Real -> Str
+pyOwnDataT3  :: Tensor3 d1 d2 d3 Real -> Str
+pyOwnDataT5  :: Tensor5 d1 d2 d3 d4 d5 Real -> Str
+
+cppMakeUnitMat :: Matrix 1 1 Real
+cppSumUnitMat  :: Matrix 1 1 Real -> Real
+pyMakeUnitMat  :: Matrix 1 1 Real
+pySumUnitMat   :: Matrix 1 1 Real -> Real
+cppMakeUnitT3  :: Tensor3 1 1 1 Real
+cppSumUnitT3   :: Tensor3 1 1 1 Real -> Real
+pyMakeUnitT3   :: Tensor3 1 1 1 Real
+pySumUnitT3    :: Tensor3 1 1 1 Real -> Real
+
+-- Polymorphic-in-shape sum helpers for the literal-input tests.
+-- Shape is determined by the literal / CLI input at runtime.
+pySumMatPoly    :: Matrix m n Real -> Real
+cppSumMatPoly   :: Matrix m n Real -> Real
+rSumMatPoly     :: Matrix m n Real -> Real
+pySumMatI32Poly :: Matrix m n Int32 -> Int
+cppSumMatI32Poly :: Matrix m n Int32 -> Int
+pySumT3Poly     :: Tensor3 d1 d2 d3 Real -> Real
+cppSumT3Poly    :: Tensor3 d1 d2 d3 Real -> Real
+
+-- =========================================================================
+-- (1) Round-trip rank 2 through 5 across all six pairs
+-- =========================================================================
+cpMat :: Real
+cpMat = pySumMat34 cppMakeMat34
+pcMat :: Real
+pcMat = cppSumMat34 pyMakeMat34
+prMat :: Real
+prMat = rSumMat34 pyMakeMat34
+rpMat :: Real
+rpMat = pySumMat34 rMakeMat34
+crMat :: Real
+crMat = rSumMat34 cppMakeMat34
+rcMat :: Real
+rcMat = cppSumMat34 rMakeMat34
+
+cpT3 :: Real
+cpT3 = pySumT3 cppMakeT3
+pcT3 :: Real
+pcT3 = cppSumT3 pyMakeT3
+prT3 :: Real
+prT3 = rSumT3 pyMakeT3
+rpT3 :: Real
+rpT3 = pySumT3 rMakeT3
+crT3 :: Real
+crT3 = rSumT3 cppMakeT3
+rcT3 :: Real
+rcT3 = cppSumT3 rMakeT3
+
+cpT4 :: Real
+cpT4 = pySumT4 cppMakeT4
+pcT4 :: Real
+pcT4 = cppSumT4 pyMakeT4
+prT4 :: Real
+prT4 = rSumT4 pyMakeT4
+rpT4 :: Real
+rpT4 = pySumT4 rMakeT4
+crT4 :: Real
+crT4 = rSumT4 cppMakeT4
+rcT4 :: Real
+rcT4 = cppSumT4 rMakeT4
+
+-- Tensor5 round-trip across ALL six pairs (currently a gap: only Py->Cpp
+-- one-way exists in tensor-dimensions).
+cpT5 :: Real
+cpT5 = pySumT5 cppMakeT5
+pcT5 :: Real
+pcT5 = cppSumT5 pyMakeT5
+prT5 :: Real
+prT5 = rSumT5 pyMakeT5
+rpT5 :: Real
+rpT5 = pySumT5 rMakeT5
+crT5 :: Real
+crT5 = rSumT5 cppMakeT5
+rcT5 :: Real
+rcT5 = cppSumT5 rMakeT5
+
+-- =========================================================================
+-- (2) Stdlib operations: matmul, identity, zeros, ones, fill
+--
+-- matmul A B where A = [[1,2,3],[4,5,6]] (2x3), B = [[1,2],[3,4],[5,6]] (3x2).
+-- Expected:
+--   C[0,0]=1+6+15=22, C[0,1]=2+8+18=28
+--   C[1,0]=4+15+30=49, C[1,1]=8+20+36=64
+--   sum = 22+28+49+64 = 163
+-- Three forms exercise routing decisions: when the compiler picks the
+-- matmul implementation language, the result must still round-trip to
+-- the summer in the requested pool.
+-- =========================================================================
+mmCpp :: Real
+mmCpp = cppSumMat22 (matmul cppMakeA23 cppMakeB32)
+mmPy :: Real
+mmPy = pySumMat22 (matmul pyMakeA23 pyMakeB32)
+mmR :: Real
+mmR = rSumMat22 (matmul cppMakeA23 cppMakeB32)
+
+-- identity n is the n x n identity. sum = n.
+idSum3 :: Real
+idSum3 = pySumMat22 (matmul (identity 2) (identity 2))   -- 2x2 identity, sum = 2
+idSum5 :: Real
+idSum5 = cppSumMat22 (matmul (identity 2) (identity 2))  -- same, via Cpp summer
+
+-- zeros / ones / fill probes (rank 2). Trivially-checkable sums.
+zerosSum :: Real
+zerosSum = pySumMat34 (zeros2 3 4)        -- 0
+onesSum :: Real
+onesSum = pySumMat34 (ones2 3 4)          -- 12
+fillSum :: Real
+fillSum = pySumMat34 (fill2 2.5 3 4)      -- 30.0
+
+-- =========================================================================
+-- (3) Row-major / column-major: corner extraction.
+-- Each language's "corners" helper returns [t(0,0,0), t(1,0,0), t(0,2,3), t(1,2,3)]
+-- of a Tensor3 2 3 4 Real with row-major fill 0..23.
+-- Expected: [0, 12, 11, 23].
+-- A R column-major leak would give [0, 1, 9, 23] or similar.
+-- =========================================================================
+cornersCpToPy :: [Real]
+cornersCpToPy = pyCornersT3 cppMakeT3
+cornersCpToR :: [Real]
+cornersCpToR = rCornersT3 cppMakeT3
+cornersRtoCp :: [Real]
+cornersRtoCp = cppCornersT3 rMakeT3
+cornersPyToR :: [Real]
+cornersPyToR = rCornersT3 pyMakeT3
+
+-- =========================================================================
+-- (4) File IO: @save/@savej/@savem of a Matrix. The wire form is
+-- ((Int,Int), Vector (d1*d2) a) which has never been pushed through @save.
+-- =========================================================================
+matFileBin :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileBin path = do
+  @save cppMakeMat34 path
+  @load path
+
+matFileJson :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileJson path = do
+  @savej cppMakeMat34 path
+  @load path
+
+matFileMsg :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileMsg path = do
+  @savem cppMakeMat34 path
+  @load path
+
+matFileSumBin :: Str -> <IO> ?Real
+matFileSumBin path = do
+  @save cppMakeMat34 path
+  m <- @load path
+  mapMaybe pySumMat34 m
+
+matFileSumJson :: Str -> <IO> ?Real
+matFileSumJson path = do
+  @savej cppMakeMat34 path
+  m <- @load path
+  mapMaybe pySumMat34 m
+
+-- =========================================================================
+-- (5) Element types on Matrix. Values 1..16 packed in 4x4. sum:
+--   I32: 136
+--   I64: 136
+--   F32: 136.0 (16 * 17 / 2 = 136)
+-- =========================================================================
+matI32CpPy :: Int
+matI32CpPy = pySumMatI32 cppMakeMatI32
+matI32PyCp :: Int
+matI32PyCp = cppSumMatI32 pyMakeMatI32
+matI64CpPy :: Int
+matI64CpPy = pySumMatI64 cppMakeMatI64
+matI64PyCp :: Int
+matI64PyCp = cppSumMatI64 pyMakeMatI64
+matF32CpPy :: Real
+matF32CpPy = pySumMatF32 cppMakeMatF32
+matF32PyCp :: Real
+matF32PyCp = cppSumMatF32 pyMakeMatF32
+
+-- =========================================================================
+-- (6) Zero-copy direct assertions on a Matrix / Tensor3 / Tensor5.
+--
+-- For ranks >= 2 the user-facing ndarray is the result of reshape() and
+-- ALWAYS has OWNDATA=False (it's a view). The witness for true SHM
+-- zero-copy is the OWNDATA flag of the ROOT of the .base chain. The
+-- Python helper reports both: DIRECT=False,ROOT=False means rooted in
+-- SHM (zero-copy); DIRECT=False,ROOT=True means a memcpy happened at
+-- some point in the unpack chain.
+--
+--   zcMatShmCpToPy:   Matrix 200x100 (160KB > 64KB) Cpp -> Py via SHM
+--   zcMatInlineCpToPy: Matrix 3x4 (96 bytes) Cpp -> Py via inline
+--   zcMatShmRToPy:    Matrix 200x100 R -> Py via SHM
+--   zcT3ShmCpToPy:    Tensor3 50x40x30 (480KB) Cpp -> Py via SHM
+--   zcT5ShmCpToPy:    Tensor5 8x8x8x8x8 (262KB) Cpp -> Py via SHM
+-- =========================================================================
+zcMatShmCpToPy :: Str
+zcMatShmCpToPy = pyOwnDataMat cppMakeMatBig
+zcMatInlineCpToPy :: Str
+zcMatInlineCpToPy = pyOwnDataMat cppMakeMat34
+zcMatShmRToPy :: Str
+zcMatShmRToPy = pyOwnDataMat rMakeMatBig
+zcT3ShmCpToPy :: Str
+zcT3ShmCpToPy = pyOwnDataT3 cppMakeT3Big
+zcT5ShmCpToPy :: Str
+zcT5ShmCpToPy = pyOwnDataT5 cppMakeT5Big
+
+-- =========================================================================
+-- (7) Edge cases: 1x1 matrix and 1x1x1 tensor.
+-- =========================================================================
+unitMatCross :: Real
+unitMatCross = pySumUnitMat cppMakeUnitMat
+unitT3Cross :: Real
+unitT3Cross = pySumUnitT3 cppMakeUnitT3
+
+-- =========================================================================
+-- (8) Literal inputs for Matrix and Tensor3.
+--
+-- Two literal sources, both expected to work:
+--   (a) morloc source literals. Nested list literals must promote to
+--       Matrix / Tensor3 with shapes inferred from nesting depth and
+--       per-axis lengths.
+--   (b) CLI literals. Nexus reads JSON nested arrays and must build
+--       a Matrix / Tensor3 value of the right shape automatically.
+--
+-- Each invocation has a known sum so a wrong shape (e.g. wrong axis
+-- order, missing rows, or list-of-lists interpreted as a flat vector)
+-- shows up as a different number rather than a silent mismatch.
+--
+-- Test fixtures:
+--   Matrix 2 3 [[1,2,3],[4,5,6]]      sum = 21
+--   Matrix 2 3 [[1.5,2.5,3.5],[4.5,5.5,6.5]]  sum = 24
+--   Tensor3 2 2 2 [[[1,2],[3,4]],[[5,6],[7,8]]]  sum = 36
+-- =========================================================================
+
+-- (8a) Source literal with explicit size annotation.
+litSrcMatAnnot :: Real
+litSrcMatAnnot = pySumMatPoly ([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] :: Matrix 2 3 Real)
+
+-- (8b) Source literal with size inferred from literal shape.
+-- Type annotation leaves m and n as type variables; the typechecker
+-- must infer m=2 and n=3 from the literal. If shape inference is not
+-- wired up, this should fail to typecheck.
+litSrcMatInfer :: Real
+litSrcMatInfer = pySumMatPoly ([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] :: Matrix m n Real)
+
+-- (8c) Int32 literal Matrix with explicit annotation.
+litSrcMatIntAnnot :: Int
+litSrcMatIntAnnot = pySumMatI32Poly ([[1, 2, 3], [4, 5, 6]] :: Matrix 2 3 Int32)
+
+-- (8d, 8e) Tensor3 literals.
+litSrcT3Annot :: Real
+litSrcT3Annot = pySumT3Poly
+  ([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]] :: Tensor3 2 2 2 Real)
+
+litSrcT3Infer :: Real
+litSrcT3Infer = pySumT3Poly
+  ([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]] :: Tensor3 d1 d2 d3 Real)
+
+-- (8f-8j) CLI literals.
+--   ./nexus litCliMat     '[[1.5,2.5,3.5],[4.5,5.5,6.5]]'                 -> 24
+--   ./nexus litCliMatCpp  '[[1.5,2.5,3.5],[4.5,5.5,6.5]]'                 -> 24
+--   ./nexus litCliMatR    '[[1.5,2.5,3.5],[4.5,5.5,6.5]]'                 -> 24
+--   ./nexus litCliMatInt  '[[1,2,3],[4,5,6]]'                             -> 21
+--   ./nexus litCliT3      '[[[1,2],[3,4]],[[5,6],[7,8]]]'                 -> 36
+litCliMat :: Matrix m n Real -> Real
+litCliMat m = pySumMatPoly m
+
+litCliMatCpp :: Matrix m n Real -> Real
+litCliMatCpp m = cppSumMatPoly m
+
+litCliMatR :: Matrix m n Real -> Real
+litCliMatR m = rSumMatPoly m
+
+litCliMatInt :: Matrix m n Int32 -> Int
+litCliMatInt m = pySumMatI32Poly m
+
+litCliT3 :: Tensor3 d1 d2 d3 Real -> Real
+litCliT3 t = pySumT3Poly t

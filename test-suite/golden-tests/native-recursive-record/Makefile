@@ -9,6 +9,9 @@ all:
 	./nexus llPy 5             >> obs.txt 2>> obs.err
 	./nexus llCpp 5            >> obs.txt 2>> obs.err
 	./nexus llR 5              >> obs.txt 2>> obs.err
+	# Native morloc llLen over a Py-built LL: same length, exercises
+	# the record-form recursive-record consumer in morloc-native code.
+	./nexus llNative 5         >> obs.txt 2>> obs.err
 	# Py -> Cpp -> Py round-trip on a recursive value, then sum locally
 	./nexus pingPyCpp 4        >> obs.txt 2>> obs.err
 	# Native morloc length over a parameterized recursive record.

@@ -10,6 +10,8 @@ all:
 	# Test recursive functions
 	./nexus llLen '[12,[23,[99,null]]]' >> obs.txt 2>> obs.err
 	./nexus llSum '[12,[23,[99,null]]]' >> obs.txt 2>> obs.err
+	# roseSum: 0 + 1 + 1 == 2
+	./nexus roseSum '[0,[[1,[]],[1,[]]]]' >> obs.txt 2>> obs.err
 	./nexus llRange 3 >> obs.txt 2>> obs.err
 	# Native construction + JSON output for list-guarded shapes.
 	./nexus roseBuild 2 >> obs.txt 2>> obs.err

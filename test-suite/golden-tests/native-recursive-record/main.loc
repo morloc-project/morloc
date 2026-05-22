@@ -36,7 +36,7 @@
 -- ll*, containerLenPy, pingPyCpp paths below) works because no
 -- intermediate copy occurs on the consumer side.
 
-module main (sumPy, sumCpp, sumR, llPy, llCpp, llR, pingPyCpp, containerLenPy
+module main (sumPy, sumCpp, sumR, llPy, llCpp, llR, llNative, pingPyCpp, containerLenPy
             -- , llBuild, treeBuild, containerBuild
             -- , llFromJson, treeFromJson, containerFromJson
             )
@@ -105,6 +105,13 @@ containerLength :: Container a -> Int
 containerLength x ? isNull (.sub x) = 1
                   : 1 + containerLength (require (.sub x))
 
+-- Native morloc llLen over the record-form LL. Same shape as the
+-- tuple-form llLen in the list test, but with the named-field
+-- accessor `.tail x` in place of the positional `.1 x`.
+llLen :: LL -> Int
+llLen x ? isNull (.tail x) = 1
+        : 1 + llLen (require (.tail x))
+
 sumPy depth = sumTreePy (buildTreePy depth)
 sumCpp depth = sumTreeCpp (buildTreePy depth)
 sumR depth = sumTreeR (buildTreePy depth)
@@ -112,6 +119,7 @@ sumR depth = sumTreeR (buildTreePy depth)
 llPy n = llLenPy (buildLLPy n)
 llCpp n = llLenCpp (buildLLPy n)
 llR n = llLenR (buildLLPy n)
+llNative n = llLen (buildLLPy n)
 
 containerLenPy n = containerLength (buildContainerPy n)
 

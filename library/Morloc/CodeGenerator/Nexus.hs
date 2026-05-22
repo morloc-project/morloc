@@ -20,6 +20,8 @@ import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
 import qualified Data.Time.Clock
@@ -192,8 +194,19 @@ makeGastSchemas t = do
   s <- Serial.serialAstToMsgpackSchema . applyNatDimsFromType t <$> generalTypeToSerialAST t
   return (s, [])
 
+-- | Build a SerialAST for a general (nexus-side) type. The Set
+-- parameter tracks alias names currently being expanded so a
+-- recursive alias (e.g. @type Pair a = (a, ?(Pair a))@) emits a
+-- @SerialRec@ back-reference instead of recursing into itself
+-- forever. Mirrors @stateSerialAncestors@ in @Serial.makeSerialAST'@
+-- on the pool side -- the nexus needs the same protection because
+-- top-level constant bindings whose RHS is a recursive-type literal
+-- route through @annotateGasts@ here rather than through a pool.
 generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
-generalTypeToSerialAST (VarT v)
+generalTypeToSerialAST = generalTypeToSerialAST' Set.empty
+
+generalTypeToSerialAST' :: Set TVar -> Type -> MorlocMonad SerialAST
+generalTypeToSerialAST' anc (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
   -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
   -- not SerialReal. checkRealBounds (and any future bound check) keys off
@@ -215,19 +228,28 @@ generalTypeToSerialAST (VarT v)
   | v == MBT.bool = return $ SerialBool (FV v (CV ""))
   | v == MBT.str = return $ SerialString (FV v (CV ""))
   | v == MBT.unit = return $ SerialNull (FV v (CV ""))
+  | Set.member v anc = return $ SerialRec (FV v (CV ""))
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       case Map.lookup v scope of
         (Just [(_, _, _, True)]) -> error "Cannot handle terminal types"
-        (Just [([], t', _, False)]) -> generalTypeToSerialAST (typeOf t')
+        (Just [([], t', _, False)]) -> do
+          -- Same retag-outer rule as in @resolveAliasApp@: the alias's
+          -- body has a different outer constructor (e.g. @List@ for
+          -- @type Pat = [Pat]@), but the @&Pat@/@^Pat@ pair must agree
+          -- on the alias's own name. Retag the outer SerialAST node
+          -- with @v@ after recursing.
+          inner <- generalTypeToSerialAST' (Set.insert v anc) (typeOf t')
+          return $ retagOuterName v inner
         (Just [_]) -> error $ "Cannot currently handle parameterized pure morloc types"
         Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
         x -> error $ "Unexpected scope: " <> show x
-generalTypeToSerialAST (AppT (VarT v) [t])
-  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST t
-  | otherwise = resolveAliasApp v [t]
-generalTypeToSerialAST (AppT (VarT v) ts)
-  | v == (MBT.tuple (length ts)) = SerialTuple (FV v (CV "")) <$> mapM generalTypeToSerialAST ts
+generalTypeToSerialAST' anc (AppT (VarT v) [t])
+  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' anc t
+  | otherwise = resolveAliasApp anc v [t]
+generalTypeToSerialAST' anc (AppT (VarT v) ts)
+  | v == (MBT.tuple (length ts)) =
+      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
   -- @T@ wire token (or @T:K<entries>@ when the row is concrete);
   -- 'Serial.hasArrowHint' identifies these structurally for the
@@ -238,16 +260,23 @@ generalTypeToSerialAST (AppT (VarT v) ts)
             [_, NamT _ _ _ rs] -> rs
             _                  -> []
       in SerialObject NamTable (FV MBT.table (CV "")) []
-           <$> mapM (secondM generalTypeToSerialAST) cols
-  | otherwise = resolveAliasApp v ts
-generalTypeToSerialAST (EffectT _ t) = generalTypeToSerialAST t
-generalTypeToSerialAST (OptionalT t) = do
-  inner <- generalTypeToSerialAST t
+           <$> mapM (secondM (generalTypeToSerialAST' anc)) cols
+  | otherwise = resolveAliasApp anc v ts
+generalTypeToSerialAST' anc (EffectT _ t) = generalTypeToSerialAST' anc t
+generalTypeToSerialAST' anc (OptionalT t) = do
+  inner <- generalTypeToSerialAST' anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
-generalTypeToSerialAST (NamT o v [] rs) =
-  SerialObject o (FV v (CV "")) []
-    <$> mapM (secondM generalTypeToSerialAST) rs
-generalTypeToSerialAST t = MM.throwSystemError $ "cannot serialize this type: " <> pretty (show t)
+generalTypeToSerialAST' anc (NamT o v _ rs) =
+  -- Add @v@ to the ancestor set before recursing into the record's
+  -- fields: a recursive record (e.g. @record Tree where children :: [Tree]@)
+  -- has a field whose type mentions @Tree@ again, which would otherwise
+  -- expand back into the same NamT and loop. Parameter types are
+  -- already substituted into the field types @rs@ by this point, so
+  -- they do not need to appear in the resulting SerialAST.
+  let anc' = Set.insert v anc
+  in SerialObject o (FV v (CV "")) []
+       <$> mapM (secondM (generalTypeToSerialAST' anc')) rs
+generalTypeToSerialAST' _ t = MM.throwSystemError $ "cannot serialize this type: " <> pretty (show t)
 
 -- | Check whether a type contains a function type anywhere in its structure.
 -- Used to detect higher-order functions appearing as arguments or in
@@ -268,15 +297,47 @@ exportHasHigherOrder :: Type -> Bool
 exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
 exportHasHigherOrder t = containsFunT t
 
-resolveAliasApp :: TVar -> [Type] -> MorlocMonad SerialAST
-resolveAliasApp v ts = do
-  scope <- MM.gets stateUniversalGeneralTypedefs
-  case Map.lookup v scope of
-    (Just [(params, body, _, False)]) ->
-      let tvars = [tv | Left (tv, _) <- params]
-          resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
-      in generalTypeToSerialAST resolved
-    _ -> MM.throwSystemError $ "Cannot serialize type: " <> pretty (show (AppT (VarT v) ts))
+resolveAliasApp :: Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp anc v ts
+  -- The same self-recursion cutoff as in the @VarT@ clause above:
+  -- if we encounter an alias we are already expanding, emit a
+  -- @SerialRec@ back-reference instead of recursing into its body.
+  -- The runtime parser resolves @^name@ against the enclosing
+  -- @&name@ that the encoder emits at the outer occurrence.
+  | Set.member v anc = return $ SerialRec (FV v (CV ""))
+  | otherwise = do
+      scope <- MM.gets stateUniversalGeneralTypedefs
+      case Map.lookup v scope of
+        (Just [(params, body, _, False)]) -> do
+          let tvars = [tv | Left (tv, _) <- params]
+              resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
+              anc' = Set.insert v anc
+          inner <- generalTypeToSerialAST' anc' resolved
+          -- The expanded body's outer constructor is the alias's
+          -- underlying shape (e.g. @Tuple2@ for @type Pair a = (a, ?(Pair a))@).
+          -- We must retag the outer SerialAST node with the alias's own
+          -- name so the @&name@ declaration emitted by the schema encoder
+          -- matches the @^name@ back-references inside (which carry the
+          -- alias's name from the @SerialRec@ created by the cutoff
+          -- above). Without this retag, an outer @SerialTuple Tuple2@
+          -- produces no @&Pair@ on the wire and the @^Pair@ inside
+          -- becomes a dangling back-reference.
+          return $ retagOuterName v inner
+        _ -> MM.throwSystemError $ "Cannot serialize type: " <> pretty (show (AppT (VarT v) ts))
+
+-- | Replace the outermost FVar's general name with the alias's name.
+-- Used after expanding an alias body to keep the alias's identity on
+-- the SerialAST's outer node so the @&name@ wire declaration matches
+-- the @^name@ back-references produced by @SerialRec@. Preserves the
+-- concrete-name slot (empty for nexus-side SerialASTs) and the node's
+-- structural shape; primitives and @SerialRec@ pass through unchanged.
+retagOuterName :: TVar -> SerialAST -> SerialAST
+retagOuterName v' s = case s of
+  SerialList     (FV _ cv) d inner -> SerialList     (FV v' cv) d inner
+  SerialTuple    (FV _ cv) xs      -> SerialTuple    (FV v' cv) xs
+  SerialObject o (FV _ cv) ps rs   -> SerialObject o (FV v' cv) ps rs
+  SerialOptional (FV _ cv) inner   -> SerialOptional (FV v' cv) inner
+  _ -> s
 
 -- ======================================================================
 -- Pure expression extraction

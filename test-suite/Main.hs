@@ -64,6 +64,7 @@ main = do
       , golden "native-recursive-list" "native-recursive-list"
       , golden "native-recursive-parameterized" "native-recursive-parameterized"
       , golden "native-recursive-tuple" "native-recursive-tuple"
+      , golden "recursive-type-literals" "recursive-type-literals"
 
       , golden "multiprocessing-py-1" "multiprocessing-py-1"
       , -- bug regression tests from doc-agents code-tester (v0.74.0)
@@ -633,6 +634,10 @@ main = do
         golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"
       , golden "tensor-dimensions" "tensor-dimensions"
+      , -- comprehensive vector + tensor coverage including file IO,
+        -- element-type, zero-copy assertions, and permutation probes
+        golden "vector-comprehensive" "vector-comprehensive"
+      , golden "tensor-comprehensive" "tensor-comprehensive"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
       -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"

@@ -45,7 +45,7 @@
 -- json.rs and renders output JSON back -- so this isolates the JSON
 -- runtime layer from the language pools.
 
-module main (pairLenPy, btreeSizePy, pair2LenPy, pairLenDeepPy,
+module main (pairLenPy, btreeSizePy, btreeSumPy, pair2LenPy, pairLenDeepPy,
              pairBuild, btreeBuild, pair2Build,
              pairFromJson, btreeFromJson, pair2FromJson)
 
@@ -95,8 +95,19 @@ pair2Length :: Pair2 a b -> Int
 pair2Length x ? isNull (.2 x) = 1
               : 1 + pair2Length (require (.2 x))
 
+-- Sum every payload by descending into both subtrees. Factors the
+-- optional-handling into a helper so the recursive function reads as
+-- a structural recursion.
+btreeSum :: BTree Int -> Int
+btreeSum x = .0 x + maybeSum (.1 x) + maybeSum (.2 x)
+
+maybeSum :: ?(BTree Int) -> Int
+maybeSum m ? isNull m = 0
+           : btreeSum (require m)
+
 pairLenPy n     = pairLength (buildPairPy n)
 btreeSizePy d   = btreeSize (buildBTreePy d)
+btreeSumPy d    = btreeSum (buildBTreePy d)
 pair2LenPy n    = pair2Length (buildPair2Py n)
 pairLenDeepPy n = pairLength (buildPairDeepPy n)
 
