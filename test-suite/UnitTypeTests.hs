@@ -985,6 +985,72 @@ numericLiteralAliasTests =
         x :: Char
         x = 1.5
         |]
+        -- Nat-parameterized list aliases: `Vector 4 Int32` reduces via
+        -- `type Vector (n :: Nat) a = List a` to `List Int32`. The list
+        -- literal's elements must take on the reduced element type,
+        -- not synthesize as `Int` and fail the subsequent subtype check.
+        -- This is the user's original reproducer from the bug report.
+      , assertGeneralType
+          "list literal :: Vector 4 Int32  (Vector (n::Nat) a = List a)"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 4 Int32
+        x = [1, 2, 3, 4]
+        |]
+          (lst (var "Int32"))
+      , assertGeneralType
+          "list literal :: Vector 3 Int8  (other fixed-width int)"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 3 Int8
+        x = [1, 2, 3]
+        |]
+          (lst (var "Int8"))
+      , assertGeneralType
+          "list literal :: Vector 2 UInt16  (unsigned fixed-width int)"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 2 UInt16
+        x = [1, 2]
+        |]
+          (lst (var "UInt16"))
+        -- Nested nat-parameterized alias: Matrix m n a = [[a]] requires
+        -- the element-type propagation to recurse through both layers.
+      , assertGeneralType
+          "nested list literal :: Matrix 2 2 Int32"
+          [r|
+        module main (x)
+        type Matrix (m :: Nat) (n :: Nat) a = List (List a)
+        x :: Matrix 2 2 Int32
+        x = [[1, 2], [3, 4]]
+        |]
+          (lst (lst (var "Int32")))
+        -- Real literals through nat-parameterized aliases use the same
+        -- dispatch — confirm the RealS path is unaffected.
+      , assertGeneralType
+          "real list literal :: Vector 2 Float32"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 2 Float32
+        x = [1.5, 2.5]
+        |]
+          (lst (var "Float32"))
+        -- Negative: Nat-dimension mismatch must still fail. The element
+        -- type was successfully propagated (Int32 accepted into the
+        -- literals), but length 3 does not satisfy Nat dimension 4.
+        -- This guards against the fix bypassing the nat-dim check.
+      , expectError
+          "list literal :: Vector 4 Int32 with wrong length must fail"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 4 Int32
+        x = [1, 2, 3]
+        |]
       ]
 
 whereTests :: TestTree

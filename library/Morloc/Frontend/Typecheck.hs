@@ -1237,37 +1237,65 @@ checkE i g (EvalS e) t = do
 checkE i g e t@(ExistU v _ _)
   | Just _ <- lookupU v g
   = checkE' i g e (apply g t)
--- Nat dimension checking for list literals against nat-parameterized aliases
-checkE i g1 e1@(LstS _) b = do
-  (g2, a, e2) <- synthE' i g1 e1
-  let a' = apply g2 a
-      b' = apply g2 b
+-- Nat dimension checking for list literals against nat-parameterized aliases.
+-- A multi-arg AppU like `Vector 4 Int32` (where `type Vector (n :: Nat) a =
+-- List a`) does not match Rule A's single-arg pattern `(AppU v [t])`, so
+-- without help the elements fall to the synth path and freeze as `Int`
+-- before the subtype check, breaking literal defaulting. Before falling
+-- back to synth+subtype, evaluate `b` through the alias scope: if it
+-- reduces to a single-arg list shape `AppU _ [elemT]` whose element type
+-- is a real element type (not Nat/Str/Rec/List/Set-kinded) and is not an
+-- unsolved existential, re-enter the check against the reduced form so
+-- Rule A fires and propagates `elemT` into the literals. Nat dimensions
+-- are then checked against the *original* `b` so that `Vector 4 ...`
+-- still length-checks at 4. Unsolved existentials in the element slot
+-- fall through to the synth path for more flexible inference.
+checkE i g1 e1@(LstS xs) b = do
   scope <- MM.getGeneralScope i
-  case subtype scope a' b' g2 of
-    Right g3 -> do
-      let natArgs = getNatArgs scope b'
-          anno2 = AnnoS (Idx i a') i e2
-      g4 <- checkListNatDims g3 natArgs anno2
-      return (g4, apply g4 b', e2)
-    Left err ->
-      case tryCoerce scope a' b' g2 of
-        Just (coercions, g3) -> do
-          (finalExpr, _) <- foldlM
-            (\(expr, currentType) coercion -> do
-              idx <- MM.getCounterWithPos i
-              let wrappedAnno = AnnoS (Idx idx currentType) i expr
-              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
-            (e2, apply g3 a')
-            coercions
+  let bEval = either (const b) id (TE.evaluateType scope b)
+      canPropagate = case bEval of
+        AppU _ [elemT] ->
+          not (null xs)
+          && not (isNatExpr elemT || isStrExpr elemT || isRecExpr elemT
+                  || isListExpr elemT || isSetExpr elemT)
+          && not (case elemT of { ExistU{} -> True; _ -> False })
+        _ -> False
+  if canPropagate
+    then do
+      (g2, _, e2) <- checkE' i g1 e1 bEval
+      let natArgs = getNatArgs scope b
+          anno = AnnoS (Idx i (apply g2 bEval)) i e2
+      g3 <- checkListNatDims g2 natArgs anno
+      return (g3, apply g3 b, e2)
+    else do
+      (g2, a, e2) <- synthE' i g1 e1
+      let a' = apply g2 a
+          b' = apply g2 b
+      case subtype scope a' b' g2 of
+        Right g3 -> do
           let natArgs = getNatArgs scope b'
-              anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
-          g4 <- checkListNatDims g3 natArgs anno3
-          return (g4, apply g4 b', finalExpr)
-        Nothing -> MM.throwSourcedError i $
-          "Type mismatch:"
-          <> line <> "  expected: " <> prettyTypeU b'
-          <> line <> "  inferred: " <> prettyTypeU a'
-          <> line <> err
+              anno2 = AnnoS (Idx i a') i e2
+          g4 <- checkListNatDims g3 natArgs anno2
+          return (g4, apply g4 b', e2)
+        Left err ->
+          case tryCoerce scope a' b' g2 of
+            Just (coercions, g3) -> do
+              (finalExpr, _) <- foldlM
+                (\(expr, currentType) coercion -> do
+                  idx <- MM.getCounterWithPos i
+                  let wrappedAnno = AnnoS (Idx idx currentType) i expr
+                  return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+                (e2, apply g3 a')
+                coercions
+              let natArgs = getNatArgs scope b'
+                  anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
+              g4 <- checkListNatDims g3 natArgs anno3
+              return (g4, apply g4 b', finalExpr)
+            Nothing -> MM.throwSourcedError i $
+              "Type mismatch:"
+              <> line <> "  expected: " <> prettyTypeU b'
+              <> line <> "  inferred: " <> prettyTypeU a'
+              <> line <> err
 --   Sub (with coercion fallback)
 -- Numeric literal defaulting: an `IntS` checked against any integer base
 -- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
