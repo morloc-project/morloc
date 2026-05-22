@@ -692,6 +692,15 @@ data NativeExpr
   | IntrinsicN TypeF Intrinsic (Maybe Text) [NativeExpr]
   -- ^ The Maybe Text is the precomputed msgpack schema string for the data arg
   -- (Nothing for compile-time intrinsics that are resolved by Reduce)
+  | MapOptionalN TypeF TypeF Source NativeExpr
+  -- ^ Lift a source function through an Optional. First TypeF is the
+  -- result type (the outer optional in user-facing form). Second TypeF
+  -- is the unwrapped wire-form inner type (what the inner NativeExpr
+  -- evaluates to once dereferenced). The Source is the function applied
+  -- to the inner value when present. Mirrors the pack/unpack insertion
+  -- that expandSerialize\/expandDeserialize do for SerialPack inside
+  -- SerialOptional. Used by Serialize.hs to wrap intrinsic results
+  -- (@load) whose user-facing optional type wraps a Packable inner.
   deriving (Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
@@ -743,6 +752,7 @@ foldlNE f b (EvalN_ _ x) = f b x
 foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
+foldlNE f b (MapOptionalN_ _ _ _ x) = f b x
 
 data MonoidFold m a = MonoidFold
   { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
@@ -819,6 +829,7 @@ makeMonoidFoldDefault mempty' mappend' =
       return (foldl mappend' mempty' [a1, a2, a3], IfN t c thenE elseE)
     monoidNativeExpr' (IntrinsicN_ t intr msch (unzip -> (reqs, es))) =
       return (foldl mappend' mempty' reqs, IntrinsicN t intr msch es)
+    monoidNativeExpr' (MapOptionalN_ t wt src (a, ne)) = return (a, MapOptionalN t wt src ne)
 
 -- where
 --  * m - monad
@@ -962,6 +973,7 @@ data NativeExpr_ nm se ne sr nr
   | CoerceN_ Coercion TypeF ne
   | IfN_ TypeF ne ne ne
   | IntrinsicN_ TypeF Intrinsic (Maybe Text) [ne]
+  | MapOptionalN_ TypeF TypeF Source ne
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
 manifoldFoldToFoldWith fm =
@@ -1168,6 +1180,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(IntrinsicN t intr msch nes) = do
       nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
       opFoldWithNativeExprM fm full (IntrinsicN_ t intr msch nes')
+    f full@(MapOptionalN t wt src ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opFoldWithNativeExprM fm full (MapOptionalN_ t wt src ne')
 
 class HasTypeF a where
   typeFof :: a -> TypeF
@@ -1198,6 +1213,7 @@ instance HasTypeF NativeExpr where
   typeFof (CoerceN _ t _) = t
   typeFof (IfN t _ _ _) = t
   typeFof (IntrinsicN t _ _ _) = t
+  typeFof (MapOptionalN t _ _ _) = t
 
 class HasTypeM e where
   typeMof :: e -> TypeM
@@ -1395,6 +1411,7 @@ instance MFunctor NativeExpr where
         (CoerceN c t ne) -> mapNativeExpr f $ CoerceN c t (mgatedMap g f ne)
         (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
         (IntrinsicN t intr msch nes) -> mapNativeExpr f $ IntrinsicN t intr msch (map (mgatedMap g f) nes)
+        (MapOptionalN t wt src ne) -> mapNativeExpr f $ MapOptionalN t wt src (mgatedMap g f ne)
     | otherwise = mapNativeExpr f ne0
 
 instance (Pretty a) => Pretty (Arg a) where

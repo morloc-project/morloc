@@ -129,17 +129,17 @@ all:
 	echo "--- litSrcT3Infer ---" >> obs.txt
 	./nexus litSrcT3Infer >> obs.txt 2>> obs.err
 	echo "--- litCliMat ---" >> obs.txt
-	./nexus litCliMat    '[[1.5,2.5,3.5],[4.5,5.5,6.5]]' >> obs.txt 2>> obs.err
+	./nexus litCliMat    '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]' >> obs.txt 2>> obs.err
 	echo "--- litCliMatCpp ---" >> obs.txt
-	./nexus litCliMatCpp '[[1.5,2.5,3.5],[4.5,5.5,6.5]]' >> obs.txt 2>> obs.err
+	./nexus litCliMatCpp '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]' >> obs.txt 2>> obs.err
 	echo "--- litCliMatR ---" >> obs.txt
-	./nexus litCliMatR   '[[1.5,2.5,3.5],[4.5,5.5,6.5]]' >> obs.txt 2>> obs.err
+	./nexus litCliMatR   '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]' >> obs.txt 2>> obs.err
 	echo "--- litCliMatInt ---" >> obs.txt
-	./nexus litCliMatInt '[[1,2,3],[4,5,6]]' >> obs.txt 2>> obs.err
+	./nexus litCliMatInt '[[2,3],[1,2,3,4,5,6]]' >> obs.txt 2>> obs.err
 	echo "--- litCliT3 ---" >> obs.txt
-	./nexus litCliT3     '[[[1,2],[3,4]],[[5,6],[7,8]]]' >> obs.txt 2>> obs.err
+	./nexus litCliT3     '[[2,2,2],[1,2,3,4,5,6,7,8]]' >> obs.txt 2>> obs.err
 	rm -f /tmp/tensor-comprehensive-*.dat
 
 clean:
-	rm -rf nexus pools __pycache__ *.err obs.txt
+	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/tensor-comprehensive-*.dat

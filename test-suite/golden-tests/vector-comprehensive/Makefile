@@ -145,5 +145,5 @@ all:
 	rm -f /tmp/vector-comprehensive-*.dat
 
 clean:
-	rm -rf nexus pools __pycache__ *.err obs.txt
+	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/vector-comprehensive-*.dat

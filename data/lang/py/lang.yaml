@@ -20,6 +20,7 @@ preamble:
 ldBoolTrue: "True"
 ldBoolFalse: "False"
 ldNullLiteral: "None"
+ldNullCheckTemplate: "{{expr}} is not None"
 ldRealPosInf: "float('inf')"
 ldRealNegInf: "float('-inf')"
 ldRealNaN: "float('nan')"

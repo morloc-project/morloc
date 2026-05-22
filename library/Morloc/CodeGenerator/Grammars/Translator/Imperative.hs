@@ -60,6 +60,7 @@ import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import Data.Text (Text)
+import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Grammars.Common
   ( DispatchEntry (..)
@@ -92,6 +93,14 @@ data IStmt
     -- Semantics: declare resultVar; if cond { thenStmts; resultVar = thenExpr } else { elseStmts; resultVar = elseExpr }
     -- For elif chains, elseStmts contains another IIf and elseExpr is unused (IVar resultVar)
     IIf Text (Maybe IType) IExpr [IStmt] IExpr [IStmt] IExpr
+  | -- | resultVar, resultType (optional<final>), source (optional<raw>),
+    -- unwrappedVar, unwrappedType (raw), bodyStmts, bodyExpr.
+    -- Lifts an inner transformation through an Optional. If source is
+    -- null, resultVar is null; otherwise unwrappedVar is bound to the
+    -- source's contents, bodyStmts run, and resultVar is set to a
+    -- wrapped bodyExpr. Used by SerialOptional in expand{Ser,Deser}ialize
+    -- when the inner SerialAST itself requires statement-level construction.
+    IIfNotNull Text (Maybe IType) IExpr Text (Maybe IType) [IStmt] IExpr
   | IReturn IExpr
   | IExprStmt IExpr
 
@@ -335,6 +344,24 @@ expandSerialize cfg v0 s0 = do
         ( concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))]
         , IVar v'
         )
+    construct v opt@(SerialOptional _ innerS) = do
+      idx <- lcNewIndex cfg
+      resultType <- lcSerialAstType cfg opt
+      -- The unwrapped value is the inner *user-facing* (shallow) type, not
+      -- the wire form: the inner construct (e.g. SerialPack's unpacker)
+      -- consumes the user-facing value and produces the wire form. Using
+      -- lcSerialAstType here would declare u0 as the wire form and then
+      -- pass it to an unpacker expecting the user-facing form, breaking
+      -- compilation. lcDeserialAstType returns the shallow type per the
+      -- C++ translator's `cppTypeOf . shallowType`.
+      unwrappedType <- lcDeserialAstType cfg innerS
+      let v' = render $ helperNamer idx
+          uVar = "u" <> T.pack (show idx)
+      (before, x) <- go (pretty uVar) innerS
+      return
+        ( [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
+        , IVar v'
+        )
     construct _ _ = error "Unreachable in expandSerialize"
 
 {- | Expand deserialization into IR statements.
@@ -384,6 +411,17 @@ expandDeserialize cfg v0 s0
       let v' = render $ helperNamer idx
       return
         (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))])
+    construct v opt@(SerialOptional _ innerS) = do
+      idx <- lcNewIndex cfg
+      resultType <- lcDeserialAstType cfg opt
+      unwrappedType <- lcRawDeserialAstType cfg innerS
+      let v' = render $ helperNamer idx
+          uVar = "u" <> T.pack (show idx)
+      (x, before) <- check (pretty uVar) innerS
+      return
+        ( IVar v'
+        , [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
+        )
     construct _ _ = error "Unreachable in expandDeserialize"
 
 -- | Lower a serial expression to PoolDocs via the IR.
@@ -585,6 +623,28 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
+-- Lift a source function through an Optional. Mirrors how
+-- expandDeserialize's SerialPack arm wraps an inner deserialization
+-- with a packer call, but at the NativeExpr level: the inner
+-- expression evaluates to optional<wireT> (e.g. the wire form returned
+-- by @load), and we produce optional<userT> by applying `src` to the
+-- inner value when present.
+lowerNativeExpr cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
+  idx <- lcNewIndex cfg
+  -- Result type: optional<userT>. origExpr's TypeF is the outer
+  -- optional in user-facing form.
+  resultType <- lcTypeOf cfg (typeFof origExpr)
+  -- Unwrap type: the wire-form inner (what the inner expression's
+  -- optional dereferences to).
+  unwrapType <- lcTypeOf cfg wireTf
+  let v' = render $ helperNamer idx
+      uVar = "u" <> T.pack (show idx)
+      packerCall = ICall (render (lcSrcName cfg src)) Nothing [[IVar uVar]]
+      ifStmt = IIfNotNull v' resultType (IRawExpr (render (poolExpr innerDocs))) uVar unwrapType [] packerCall
+  return $ innerDocs
+    { poolPriorLines = poolPriorLines innerDocs ++ [lcPrintStmt cfg ifStmt]
+    , poolExpr = pretty v'
+    }
 
 {- | Lower a serial manifold to PoolDocs.
 Replaces translateManifold from Common.hs for serial manifolds.

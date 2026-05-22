@@ -447,53 +447,62 @@ unitT3Cross = pySumUnitT3 cppMakeUnitT3
 -- =========================================================================
 -- (8) Literal inputs for Matrix and Tensor3.
 --
--- Two literal sources, both expected to work:
---   (a) morloc source literals. Nested list literals must promote to
---       Matrix / Tensor3 with shapes inferred from nesting depth and
---       per-axis lengths.
---   (b) CLI literals. Nexus reads JSON nested arrays and must build
---       a Matrix / Tensor3 value of the right shape automatically.
+-- The wire form for Matrix d1 d2 a is ((Int, Int), Vector (d1*d2) a)
+-- per its Packable instance; for Tensor3 d1 d2 d3 a it is
+-- ((Int, Int, Int), Vector (d1*d2*d3) a). A type annotation on the
+-- result of pack does not drive instance dispatch -- morloc needs the
+-- INPUT type pinned down (the literal `(2,3)` could otherwise be any
+-- (Int*, Int*) and `[1.0,...]` could be any numeric list). The
+-- canonical form (see phantom-dimension/main.loc) annotates the input:
 --
--- Each invocation has a known sum so a wrong shape (e.g. wrong axis
--- order, missing rows, or list-of-lists interpreted as a flat vector)
--- shows up as a different number rather than a silent mismatch.
+--     pack (((2, 3), [1.0, ..., 6.0]) :: ((Int, Int), Vector 6 Real))
 --
--- Test fixtures:
---   Matrix 2 3 [[1,2,3],[4,5,6]]      sum = 21
---   Matrix 2 3 [[1.5,2.5,3.5],[4.5,5.5,6.5]]  sum = 24
---   Tensor3 2 2 2 [[[1,2],[3,4]],[[5,6],[7,8]]]  sum = 36
+-- The Packable instance then resolves: input pins d1*d2=6 and a=Real;
+-- the consumer's expected Matrix type pins the result's d1 and d2
+-- individually.
+--
+-- For CLI input, the argv is the JSON-serialized wire form. The nexus
+-- accepts `[[d1,d2],[flat...]]` and must dispatch through Packable.
+--
+-- Sums:
+--   Matrix 2 3 ((2,3),[1..6])          sum = 21
+--   Matrix 2 3 ((2,3),[1.5..6.5])      sum = 24
+--   Tensor3 2 2 2 ((2,2,2),[1..8])     sum = 36
 -- =========================================================================
 
--- (8a) Source literal with explicit size annotation.
+-- (8a) Source literal, input annotated with explicit Vector size.
 litSrcMatAnnot :: Real
-litSrcMatAnnot = pySumMatPoly ([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] :: Matrix 2 3 Real)
+litSrcMatAnnot = pySumMatPoly
+  (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector 6 Real)))
 
--- (8b) Source literal with size inferred from literal shape.
--- Type annotation leaves m and n as type variables; the typechecker
--- must infer m=2 and n=3 from the literal. If shape inference is not
--- wired up, this should fail to typecheck.
+-- (8b) Same literal but input Vector size is a type variable: asks
+-- whether morloc can infer the size from the literal's length.
 litSrcMatInfer :: Real
-litSrcMatInfer = pySumMatPoly ([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]] :: Matrix m n Real)
+litSrcMatInfer = pySumMatPoly
+  (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector n Real)))
 
--- (8c) Int32 literal Matrix with explicit annotation.
+-- (8c) Int32 source literal.
 litSrcMatIntAnnot :: Int
-litSrcMatIntAnnot = pySumMatI32Poly ([[1, 2, 3], [4, 5, 6]] :: Matrix 2 3 Int32)
+litSrcMatIntAnnot = pySumMatI32Poly
+  (pack (((2, 3), [1, 2, 3, 4, 5, 6] :: Vector n Int32)) :: Matrix 2 3 Int32)
 
--- (8d, 8e) Tensor3 literals.
+-- (8d, 8e) Tensor3 source literals.
 litSrcT3Annot :: Real
 litSrcT3Annot = pySumT3Poly
-  ([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]] :: Tensor3 2 2 2 Real)
+  (pack (((2, 2, 2), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+         :: ((Int, Int, Int), Vector 8 Real)))
 
 litSrcT3Infer :: Real
 litSrcT3Infer = pySumT3Poly
-  ([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]] :: Tensor3 d1 d2 d3 Real)
+  (pack (((2, 2, 2), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+         :: ((Int, Int, Int), Vector n Real)))
 
--- (8f-8j) CLI literals.
---   ./nexus litCliMat     '[[1.5,2.5,3.5],[4.5,5.5,6.5]]'                 -> 24
---   ./nexus litCliMatCpp  '[[1.5,2.5,3.5],[4.5,5.5,6.5]]'                 -> 24
---   ./nexus litCliMatR    '[[1.5,2.5,3.5],[4.5,5.5,6.5]]'                 -> 24
---   ./nexus litCliMatInt  '[[1,2,3],[4,5,6]]'                             -> 21
---   ./nexus litCliT3      '[[[1,2],[3,4]],[[5,6],[7,8]]]'                 -> 36
+-- (8f-8j) CLI literals -- the wire form arrives as JSON.
+--   ./nexus litCliMat     '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]'  -> 24
+--   ./nexus litCliMatCpp  '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]'  -> 24
+--   ./nexus litCliMatR    '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]'  -> 24
+--   ./nexus litCliMatInt  '[[2,3],[1,2,3,4,5,6]]'              -> 21
+--   ./nexus litCliT3      '[[2,2,2],[1,2,3,4,5,6,7,8]]'        -> 36
 litCliMat :: Matrix m n Real -> Real
 litCliMat m = pySumMatPoly m
 

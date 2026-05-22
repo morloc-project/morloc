@@ -94,6 +94,11 @@ data LangDescriptor = LangDescriptor
     ldBoolTrue :: !Text
   , ldBoolFalse :: !Text
   , ldNullLiteral :: !Text
+  , -- Predicate template for "the expression is not null", with {{expr}}
+    -- placeholder. Used by IIfNotNull when lifting an inner transformation
+    -- through an Optional. Examples: "{{expr}} is not None" (Python),
+    -- "!is.null({{expr}})" (R). C++ handles its own form in CppPrinter.
+    ldNullCheckTemplate :: !Text
   , -- Non-finite Real literals: idiomatic source-level expressions for
     -- +Inf, -Inf, and NaN in the target language. Used by IRealLit
     -- printing when the literal payload is non-finite.
@@ -333,6 +338,7 @@ defaultLangDescriptor name ext =
     , ldBoolTrue = "True"
     , ldBoolFalse = "False"
     , ldNullLiteral = "None"
+    , ldNullCheckTemplate = "{{expr}} is not None"
     , ldRealPosInf = "float('inf')"
     , ldRealNegInf = "float('-inf')"
     , ldRealNaN = "float('nan')"

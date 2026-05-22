@@ -277,16 +277,81 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
-          msch <- intrinsicSchema m intr tf es'
+          es'' <- unpackDataArgIfNeeded m intr es'
+          msch <- intrinsicSchema m intr tf es''
           let innerTf = case tf of
                 EffectF _ inner -> inner
                 other -> other
-          return $ DoBlockN tf (IntrinsicN innerTf intr msch es')
+          mPacker <- loadResultPacker m intr innerTf
+          let rawInnerTf = case mPacker of
+                Just (_, wireTf) -> rebuildOptionalInner innerTf wireTf
+                Nothing -> innerTf
+              raw = IntrinsicN rawInnerTf intr msch es''
+          wrapped <- case mPacker of
+            Just (packerSrc, wireTf) -> return $ MapOptionalN innerTf wireTf packerSrc raw
+            Nothing -> return raw
+          return $ DoBlockN tf wrapped
     nativeExpr m (MonoIntrinsic t intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es
-      msch <- intrinsicSchema m intr tf es'
-      return $ IntrinsicN tf intr msch es'
+      es'' <- unpackDataArgIfNeeded m intr es'
+      msch <- intrinsicSchema m intr tf es''
+      mPacker <- loadResultPacker m intr tf
+      let rawTf = case mPacker of
+            Just (_, wireTf) -> rebuildOptionalInner tf wireTf
+            Nothing -> tf
+          raw = IntrinsicN rawTf intr msch es''
+      case mPacker of
+        Just (packerSrc, wireTf) -> return $ MapOptionalN tf wireTf packerSrc raw
+        Nothing -> return raw
+
+    -- For data-bearing runtime intrinsics (@save/@savej/@savem/@show/@hash),
+    -- the runtime expects the value in *wire form*. The normal cross-pool
+    -- path inserts the unpacker in expandSerialize's SerialPack arm; we
+    -- mirror that here so intrinsics flow through the same pack/unpack
+    -- machinery as ordinary functions instead of feeding the runtime a
+    -- user-side struct it cannot serialize.
+    unpackDataArgIfNeeded ::
+      Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
+    unpackDataArgIfNeeded m intr (dataArg : rest)
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
+          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+          case ast of
+            SerialPack _ (packer, _) -> do
+              let unpackerSrc = typePackerReverse packer
+                  unpackedType = typePackerUnpacked packer
+              return (AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg] : rest)
+            _ -> return (dataArg : rest)
+    unpackDataArgIfNeeded _ _ args = return args
+
+    -- Symmetric to unpackDataArgIfNeeded: @load and @read return optional
+    -- values, and the runtime emits the wire form. When the user-facing
+    -- inner type has a Packable instance, expandDeserialize's SerialPack
+    -- arm inserts the packer; we mirror that here for the intrinsic
+    -- result, lifting the packer through the optional via MapOptionalN.
+    -- Returns the packer source + the wire-form inner type so the caller
+    -- can both rebuild the intrinsic's type with the wire form (so the
+    -- runtime call uses the wire-side template) and wrap the result
+    -- with the packer.
+    loadResultPacker ::
+      Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
+    loadResultPacker m intr resultTf
+      | intr `elem` [IntrLoad, IntrRead] = case resultTf of
+          OptionalF innerT -> do
+            ast <- Serial.makeSerialAST m lang innerT
+            case ast of
+              SerialPack _ (packer, _) ->
+                return $ Just (typePackerForward packer, typePackerUnpacked packer)
+              _ -> return Nothing
+          _ -> return Nothing
+      | otherwise = return Nothing
+
+    -- Replace the inner type of an OptionalF wrapper with a new type.
+    -- Used to swap the intrinsic's user-side optional inner for the
+    -- wire-side inner once the packer wrap is hoisted to MapOptionalN.
+    rebuildOptionalInner :: TypeF -> TypeF -> TypeF
+    rebuildOptionalInner (OptionalF _) newInner = OptionalF newInner
+    rebuildOptionalInner other _ = other
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)

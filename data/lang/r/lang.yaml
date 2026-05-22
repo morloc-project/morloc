@@ -21,6 +21,7 @@ preamble:
 ldBoolTrue: "TRUE"
 ldBoolFalse: "FALSE"
 ldNullLiteral: "NULL"
+ldNullCheckTemplate: "!is.null({{expr}})"
 ldRealPosInf: "Inf"
 ldRealNegInf: "-Inf"
 ldRealNaN: "NaN"

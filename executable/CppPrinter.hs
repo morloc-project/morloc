@@ -147,6 +147,27 @@ printStmt (IIf resultVar resultType condExpr thenStmts thenExpr elseStmts elseEx
     resultDecl = case resultType of
       Just t -> [idoc|#{renderIType t} #{pretty resultVar};|]
       Nothing -> [idoc|auto #{pretty resultVar};|]
+printStmt (IIfNotNull resultVar resultType source unwrapVar unwrapType bodyStmts bodyExpr) =
+  vsep
+    [ srcDecl
+    , resultDecl
+    , block 4 [idoc|if(#{pretty srcVar}.has_value())|]
+        ( vsep
+            ( unwrapDecl
+                : map printStmt bodyStmts
+                ++ [[idoc|#{pretty resultVar} = #{printExpr bodyExpr};|]]
+            )
+        )
+    ]
+  where
+    srcVar = unwrapVar <> "_src"
+    srcDecl = [idoc|auto #{pretty srcVar} = #{printExpr source};|]
+    resultDecl = case resultType of
+      Just t -> [idoc|#{renderIType t} #{pretty resultVar} = std::nullopt;|]
+      Nothing -> [idoc|auto #{pretty resultVar} = std::nullopt;|]
+    unwrapDecl = case unwrapType of
+      Just t -> [idoc|#{renderIType t} #{pretty unwrapVar} = #{pretty srcVar}.value();|]
+      Nothing -> [idoc|auto #{pretty unwrapVar} = #{pretty srcVar}.value();|]
 printStmt (IReturn e) = "return(" <> printExpr e <> ");"
 printStmt (IExprStmt e) = printExpr e <> ";"
 printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for C++ printer"

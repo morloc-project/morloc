@@ -20,6 +20,7 @@ ldExtension: jl
 ldBoolTrue: "true"
 ldBoolFalse: "false"
 ldNullLiteral: "nothing"
+ldNullCheckTemplate: "{{expr}} !== nothing"
 ldRealPosInf: "Inf"
 ldRealNegInf: "-Inf"
 ldRealNaN: "NaN"

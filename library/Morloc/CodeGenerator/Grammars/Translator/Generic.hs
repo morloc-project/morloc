@@ -790,6 +790,43 @@ genericPrintStmt desc = go
                 , indent 4 (vsep (map go elseStmts ++ [printE elseExpr]))
                 , "}"
                 ]
+    go (IIfNotNull resultVar _ source unwrapVar _ bodyStmts bodyExpr) =
+      let srcVar = unwrapVar <> "_src"
+          srcDoc = pretty srcVar
+          srcBind = srcDoc <+> pretty (ldAssignOp desc) <+> printE source
+          condDoc = pretty $ substituteT (ldNullCheckTemplate desc) [("expr", render srcDoc)]
+          bindUnwrap = pretty unwrapVar <+> pretty (ldAssignOp desc) <+> srcDoc
+       in case ldBlockStyle desc of
+            IndentBlock ->
+              vsep
+                [ srcBind
+                , pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc)
+                , nest 4
+                    ( vsep
+                        ( ("if" <+> condDoc <> ":")
+                            : bindUnwrap
+                            : map go bodyStmts
+                            ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE bodyExpr]
+                        )
+                    )
+                ]
+            BraceBlock ->
+              vsep
+                [ srcBind <> ";"
+                , pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc) <> ";"
+                , "if" <+> parens condDoc <+> "{"
+                , indent 4 (vsep (bindUnwrap <> ";" : map go bodyStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE bodyExpr <> ";"]))
+                , "}"
+                ]
+            EndKeywordBlock ->
+              vsep
+                [ srcBind
+                , pretty resultVar <+> "<-" <+> "if" <+> parens condDoc <+> "{"
+                , indent 4 (vsep (bindUnwrap : map go bodyStmts ++ [printE bodyExpr]))
+                , "} else {"
+                , indent 4 (pretty (ldNullLiteral desc))
+                , "}"
+                ]
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"
 
 -- | Assemble a complete pool file from descriptor, template, and IProgram
