@@ -9,8 +9,9 @@
 //! formatting and constructing readers/writers at known-valid offsets.
 
 use crate::error::MorlocError;
+use crate::recur::{self, RecurEnv};
 use crate::schema::{Schema, SerialType};
-use crate::shm::{self, AbsPtr, Array, RELNULL};
+use crate::shm::{self, AbsPtr, Array, RelPtr, RELNULL};
 use indexmap::IndexMap;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
@@ -108,7 +109,8 @@ pub fn read_json_with_schema_dest(
     // silently corrupts BigInt (`Int`) values.
     let rv: Box<RawValue> = serde_json::from_str(json_str)
         .map_err(|e| MorlocError::Serialization(format!("JSON parse error: {}", e)))?;
-    json_to_voidstar(&rv, schema, dest)
+    let mut env: RecurEnv = Vec::new();
+    json_to_voidstar(&rv, schema, dest, &mut env)
 }
 
 fn alloc(dest: Option<AbsPtr>, size: usize) -> Result<ShmWriter, MorlocError> {
@@ -118,7 +120,13 @@ fn alloc(dest: Option<AbsPtr>, size: usize) -> Result<ShmWriter, MorlocError> {
 }
 
 fn json_to_voidstar(
-    rv: &RawValue, schema: &Schema, dest: Option<AbsPtr>,
+    rv: &RawValue, schema: &Schema, dest: Option<AbsPtr>, env: &mut RecurEnv,
+) -> Result<AbsPtr, MorlocError> {
+    recur::with_scope(env, schema, |env| json_to_voidstar_inner(rv, schema, dest, env))
+}
+
+fn json_to_voidstar_inner(
+    rv: &RawValue, schema: &Schema, dest: Option<AbsPtr>, env: &mut RecurEnv,
 ) -> Result<AbsPtr, MorlocError> {
     let text = rv.get();
     match schema.serial_type {
@@ -220,7 +228,7 @@ fn json_to_voidstar(
             for (i, child) in children.iter().enumerate() {
                 // SAFETY: data_ptr + i * ew is within the data allocation
                 let ep = unsafe { data_ptr.add(i * ew) };
-                json_to_voidstar(child, es, Some(ep))?;
+                json_to_voidstar(child, es, Some(ep), env)?;
             }
             hw.write_array_header(0, n, data_rel);
             Ok(hw.as_ptr())
@@ -235,7 +243,7 @@ fn json_to_voidstar(
             w.zero(0, schema.width);
             for (i, (child, fs)) in children.iter().zip(schema.parameters.iter()).enumerate() {
                 let sub = w.sub(schema.offsets[i], fs.width);
-                json_to_voidstar(child, fs, Some(sub.as_ptr()))?;
+                json_to_voidstar(child, fs, Some(sub.as_ptr()), env)?;
             }
             Ok(w.as_ptr())
         }
@@ -252,7 +260,7 @@ fn json_to_voidstar(
                 for (i, (key, fs)) in schema.keys.iter().zip(schema.parameters.iter()).enumerate() {
                     let sub = w.sub(schema.offsets[i], fs.width);
                     match obj.get(key) {
-                        Some(child) => { json_to_voidstar(child, fs, Some(sub.as_ptr()))?; }
+                        Some(child) => { json_to_voidstar(child, fs, Some(sub.as_ptr()), env)?; }
                         // Missing key: synthesize a 'null' RawValue so the
                         // child handler decides whether null is acceptable
                         // (e.g. allowed for Optional, error for non-optional).
@@ -261,7 +269,7 @@ fn json_to_voidstar(
                         None => {
                             let null_rv: Box<RawValue> = serde_json::from_str("null")
                                 .expect("'null' is always valid JSON");
-                            json_to_voidstar(&null_rv, fs, Some(sub.as_ptr()))?;
+                            json_to_voidstar(&null_rv, fs, Some(sub.as_ptr()), env)?;
                         }
                     }
                 }
@@ -272,22 +280,28 @@ fn json_to_voidstar(
                 }
                 for (i, (child, fs)) in children.iter().zip(schema.parameters.iter()).enumerate() {
                     let sub = w.sub(schema.offsets[i], fs.width);
-                    json_to_voidstar(child, fs, Some(sub.as_ptr()))?;
+                    json_to_voidstar(child, fs, Some(sub.as_ptr()), env)?;
                 }
             }
             Ok(w.as_ptr())
         }
 
         SerialType::Optional => {
+            // The Optional slot is a single relptr. Absent → write RELNULL.
+            // Present → allocate the inner T separately and store its
+            // relptr in the slot. Same pattern as Array (which has long
+            // stored its data buffer behind a relptr).
             let inner = schema.parameters.first().ok_or_else(|| err("optional has no inner type"))?;
-            let off = shm::align_up(1, inner.alignment().max(1));
-            let total = off + inner.width;
-            let w = alloc(dest, total)?;
+            let slot_size = std::mem::size_of::<RelPtr>();
+            let w = alloc(dest, slot_size)?;
             if is_null(text) {
-                w.zero(0, total);
+                w.write_val::<RelPtr>(0, RELNULL);
             } else {
-                w.write_val::<u8>(0, 1);
-                json_to_voidstar(rv, inner, Some(w.sub(off, inner.width).as_ptr()))?;
+                let inner_abs = shm::shmalloc(inner.width)?;
+                // SAFETY: inner_abs is freshly allocated with inner.width bytes.
+                unsafe { std::ptr::write_bytes(inner_abs, 0, inner.width) };
+                json_to_voidstar(rv, inner, Some(inner_abs), env)?;
+                w.write_val::<RelPtr>(0, shm::abs2rel(inner_abs)?);
             }
             Ok(w.as_ptr())
         }
@@ -300,6 +314,17 @@ fn json_to_voidstar(
             // loader, which has no Arrow construction logic. Surface a
             // clear error rather than silently corrupt.
             Err(err("Cannot load a Table from generic JSON; use the Arrow CSV/JSON reader path"))
+        }
+        SerialType::Recur => {
+            // Back-reference: resolve to the schema declared at an
+            // ancestor &Name binding site and continue the load under
+            // that schema with the same JSON value. Mirrors mpack's
+            // Recur arm; identical safety story (see recur.rs note).
+            let name = schema.name.as_deref().unwrap_or("");
+            let target_ptr = recur::lookup(env, name)?;
+            // SAFETY: see the to_json Recur arm above.
+            let target = unsafe { &*target_ptr };
+            json_to_voidstar(rv, target, dest, env)
         }
     }
 }
@@ -322,12 +347,13 @@ pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, M
     let mut buf = String::new();
     // SAFETY: ptr from shmalloc/rel2abs — valid SHM
     let r = unsafe { ShmReader::new(ptr) };
-    to_json(&r, schema, &mut buf)?;
+    let mut env: RecurEnv = Vec::new();
+    to_json(&r, schema, &mut buf, &mut env)?;
     Ok(buf)
 }
 
 /// True when the top-level wire value is "null-ish": either Unit (Nil) or
-/// an Optional whose discriminant byte is 0 (None). Nested null inside a
+/// an Optional whose relptr is RELNULL (absent). Nested null inside a
 /// container is not detected here; that would lose structural information.
 pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
     match schema.serial_type {
@@ -336,7 +362,8 @@ pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
             // SAFETY: ptr from shmalloc/rel2abs - same provenance as the
             // reader path used elsewhere in this module.
             let r = unsafe { ShmReader::new(ptr) };
-            r.read_u8(0) == 0
+            let relptr: RelPtr = r.read_val(0);
+            relptr == RELNULL
         }
         _ => false,
     }
@@ -449,7 +476,21 @@ fn push_indent(buf: &mut String, depth: usize) {
     for _ in 0..depth { buf.push_str("  "); }
 }
 
-fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), MorlocError> {
+fn to_json(
+    r: &ShmReader,
+    schema: &Schema,
+    buf: &mut String,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| to_json_inner(r, schema, buf, env))
+}
+
+fn to_json_inner(
+    r: &ShmReader,
+    schema: &Schema,
+    buf: &mut String,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
     match schema.serial_type {
         SerialType::Nil    => buf.push_str("null"),
         SerialType::Bool   => buf.push_str(if r.read_u8(0) != 0 { "true" } else { "false" }),
@@ -504,7 +545,7 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
                     if i > 0 { buf.push(','); }
                     // SAFETY: data + i * es.width within array data block
                     let er = unsafe { ShmReader::new(data.add(i * es.width)) };
-                    to_json(&er, es, buf)?;
+                    to_json(&er, es, buf, env)?;
                 }
             }
             buf.push(']');
@@ -513,7 +554,7 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
             buf.push('[');
             for (i, fs) in schema.parameters.iter().enumerate() {
                 if i > 0 { buf.push(','); }
-                to_json(&r.at(schema.offsets[i]), fs, buf)?;
+                to_json(&r.at(schema.offsets[i]), fs, buf, env)?;
             }
             buf.push(']');
         }
@@ -522,16 +563,22 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
             for (i, fs) in schema.parameters.iter().enumerate() {
                 if i > 0 { buf.push(','); }
                 if i < schema.keys.len() { buf.push('"'); buf.push_str(&schema.keys[i]); buf.push_str("\":"); }
-                to_json(&r.at(schema.offsets[i]), fs, buf)?;
+                to_json(&r.at(schema.offsets[i]), fs, buf, env)?;
             }
             buf.push('}');
         }
         SerialType::Optional => {
-            if r.read_u8(0) == 0 {
+            // The Optional slot is a relptr to the inner T (RELNULL =
+            // absent). Resolve and recurse into T's body when present.
+            let relptr: RelPtr = r.read_val(0);
+            if relptr == RELNULL {
                 buf.push_str("null");
             } else {
                 let inner = &schema.parameters[0];
-                to_json(&r.at(shm::align_up(1, inner.alignment().max(1))), inner, buf)?;
+                let inner_abs = shm::rel2abs(relptr)?;
+                // SAFETY: inner_abs is the SHM address of the inner T's data.
+                let inner_reader = unsafe { ShmReader::new(inner_abs) };
+                to_json(&inner_reader, inner, buf, env)?;
             }
         }
         SerialType::Table => {
@@ -541,6 +588,22 @@ fn to_json(r: &ShmReader, schema: &Schema, buf: &mut String) -> Result<(), Morlo
             // generic JSON serialiser. Surface a clear error rather than
             // emit malformed JSON.
             return Err(err("Cannot render a Table to generic JSON; use the Arrow-to-JSON path"));
+        }
+        SerialType::Recur => {
+            // Back-reference: resolve via the env stack to the schema
+            // declared at an ancestor &Name binding site, then continue
+            // the walk under that schema with the SAME reader (the wire
+            // layout at this position IS the resolved schema's layout).
+            // Mirrors mpack.rs's Recur arm; the only difference is we
+            // emit JSON rather than write to a voidstar buffer.
+            let name = schema.name.as_deref().unwrap_or("");
+            let target_ptr = recur::lookup(env, name)?;
+            // SAFETY: target_ptr came from a recur::with_scope push of a
+            // live &Schema reference whose lifetime spans the entire
+            // top-level walk (the caller's owned Schema tree), so it
+            // remains valid here. See recur.rs's module-level note.
+            let target = unsafe { &*target_ptr };
+            to_json(r, target, buf, env)?;
         }
     }
     Ok(())

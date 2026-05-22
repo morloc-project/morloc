@@ -583,64 +583,8 @@ fn read_voidstar_binary(
     unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), base, blob.len()) };
 
     let base_rel = shm::abs2rel(base)?;
-    adjust_voidstar_relptrs(base, schema, base_rel)?;
+    crate::voidstar::adjust_relptrs(base, schema, base_rel)?;
     Ok(base)
-}
-
-/// Adjust relptrs in a voidstar blob that was copied into SHM.
-/// The blob's internal relptrs are offsets from position 0 of the blob.
-/// Adding `base_rel` converts them to valid SHM relptrs.
-fn adjust_voidstar_relptrs(
-    data: crate::shm::AbsPtr,
-    schema: &crate::Schema,
-    base_rel: crate::shm::RelPtr,
-) -> Result<(), MorlocError> {
-    use crate::schema::SerialType;
-    use crate::shm::{self, Array};
-
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {
-                // Inline BigInt: only adjust relptr when size > 1 (overflow case)
-                let size = *(data as *const usize);
-                if size > 1 {
-                    let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut shm::RelPtr);
-                    *relptr += base_rel;
-                }
-            }
-            SerialType::String | SerialType::Array => {
-                let arr = &mut *(data as *mut Array);
-                arr.data += base_rel;
-                // Recurse into elements if variable-width (strings are always fixed-width bytes)
-                if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
-                    let arr_data = shm::rel2abs(arr.data)?;
-                    let elem_width = schema.parameters[0].width;
-                    for i in 0..arr.size {
-                        let elem = arr_data.add(i * elem_width);
-                        adjust_voidstar_relptrs(elem, &schema.parameters[0], base_rel)?;
-                    }
-                }
-            }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..schema.parameters.len() {
-                    let child = data.add(schema.offsets[i]);
-                    adjust_voidstar_relptrs(child, &schema.parameters[i], base_rel)?;
-                }
-            }
-            SerialType::Optional => {
-                let tag = *data;
-                if tag != 0 {
-                    let inner_offset = schema.offsets.first().copied().unwrap_or(
-                        shm::align_up(1, schema.parameters[0].alignment().max(1)),
-                    );
-                    let child = data.add(inner_offset);
-                    adjust_voidstar_relptrs(child, &schema.parameters[0], base_rel)?;
-                }
-            }
-            _ => {} // Fixed-width primitives: no relptrs to adjust
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

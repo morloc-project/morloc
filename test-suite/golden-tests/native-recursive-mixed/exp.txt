@@ -1,0 +1,6 @@
+16
+6
+{"ident":2,"chain":[2,[1,[0,null]]],"left":{"ident":1,"chain":[2,[1,[0,null]]],"left":{"ident":0,"chain":[2,[1,[0,null]]],"left":null}}}
+[42,{"head":2,"tail":{"head":1,"tail":{"head":0,"tail":null}}}]
+3
+2

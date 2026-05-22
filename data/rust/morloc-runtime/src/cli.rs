@@ -114,75 +114,13 @@ pub unsafe extern "C" fn adjust_voidstar_relptrs(
 ) -> i32 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match adjust_relptrs_inner(data as *mut u8, &rs, base_rel) {
+    match crate::voidstar::adjust_relptrs(data as *mut u8, &rs, base_rel) {
         Ok(_) => 0,
         Err(e) => {
             set_errmsg(errmsg, &e);
             1
         }
     }
-}
-
-fn adjust_relptrs_inner(
-    data: *mut u8,
-    schema: &crate::schema::Schema,
-    base_rel: shm::RelPtr,
-) -> Result<(), MorlocError> {
-    use crate::schema::SerialType;
-
-    // SAFETY: data points to a voidstar blob in SHM. We adjust relptrs in-place;
-    // all pointer arithmetic stays within the blob's bounds as defined by schema.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {
-                // Inline BigInt: only adjust relptr when size > 1
-                let size = *(data as *const usize);
-                if size > 1 {
-                    let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut shm::RelPtr);
-                    *relptr += base_rel;
-                }
-            }
-            SerialType::String | SerialType::Array => {
-                let arr = &mut *(data as *mut shm::Array);
-                arr.data += base_rel;
-                if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
-                    let arr_data = shm::rel2abs(arr.data)?;
-                    let elem_width = schema.parameters[0].width;
-                    for i in 0..arr.size {
-                        adjust_relptrs_inner(
-                            arr_data.add(i * elem_width),
-                            &schema.parameters[0],
-                            base_rel,
-                        )?;
-                    }
-                }
-            }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..schema.parameters.len() {
-                    adjust_relptrs_inner(
-                        data.add(schema.offsets[i]),
-                        &schema.parameters[i],
-                        base_rel,
-                    )?;
-                }
-            }
-            SerialType::Optional => {
-                let tag = *data;
-                if tag != 0 && !schema.parameters.is_empty() {
-                    let inner_offset = schema.offsets.first().copied().unwrap_or(
-                        shm::align_up(1, schema.parameters[0].alignment().max(1)),
-                    );
-                    adjust_relptrs_inner(
-                        data.add(inner_offset),
-                        &schema.parameters[0],
-                        base_rel,
-                    )?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────
@@ -215,7 +153,7 @@ pub unsafe extern "C" fn read_voidstar_binary(
         }
     };
 
-    if let Err(e) = adjust_relptrs_inner(base, &rs, base_rel) {
+    if let Err(e) = crate::voidstar::adjust_relptrs(base, &rs, base_rel) {
         let _ = shm::shfree(base);
         set_errmsg(errmsg, &e);
         return ptr::null_mut();

@@ -30,6 +30,8 @@
 [7,8,9]
 --- rtFixedPair ---
 [42,99]
+--- mixedFixedPair ---
+[42,99]
 --- sumVecArg ---
 7
 --- sumVecZeroArg ---

@@ -1,0 +1,91 @@
+-- Recursive types guarded by LIST: the self-reference lives inside
+-- [_] rather than ?_. Exercises the @AliasIsList@ ancestor path in
+-- Serial.hs (the tuple test only exercises @AliasIsTuple@).
+--
+-- Rose -- payload-carrying rose tree: `(a, [Rose a])`. The recursive
+--         position is a homogeneous list of children. Native morloc
+--         traversal `roseSum` counts all nodes.
+--
+-- Pat  -- pure structural recursion: `[Pat]`. No payload at all; the
+--         only inhabitants are nested empty lists, but that is still a
+--         legitimate fixed point (could encode unlabelled tree topology
+--         for pattern matching, etc.). This is the most degenerate
+--         shape the typechecker is required to accept; it isolates
+--         the list-guarded wire format from any payload-byte
+--         confounders.
+--
+-- NOT TESTED HERE: cross-language traversal of recursive tuple-alias
+-- types. Same codegen gap as in native-recursive-tuple: no forward
+-- declaration is emitted for the recursive position on the C++ side.
+
+module main (roseSizePy, patNodesPy, llLen, llSum, llRange,
+             roseBuild, patBuild, roseFromJson, patFromJson)
+
+import root
+import root-py
+
+type Rose a = (a, [Rose a])
+
+-- Pure structural recursion. The empty list terminates; nesting
+-- carries information solely via the tree shape.
+type Pat = [Pat]
+
+source Py from "foo.py" ("build_rose"  as buildRosePy
+                       , "rose_size"   as roseSizeRaw
+                       , "build_pat"   as buildPatPy
+                       , "pat_nodes"   as patNodesRaw)
+
+buildRosePy  :: Int -> Rose Int
+roseSizeRaw  :: Rose Int -> Int
+buildPatPy   :: Int -> Pat
+patNodesRaw  :: Pat -> Int
+
+-- Nexus entry points: build in Py then count in Py. Even though both
+-- ends are in the same pool, building the program at all requires the
+-- compiler and runtime schema layer to handle the recursive
+-- list-guarded type, which is the primary thing under test here.
+roseSizePy depth = roseSizeRaw (buildRosePy depth)
+patNodesPy depth = patNodesRaw (buildPatPy depth)
+
+
+
+import maybe-py (require, isNull)
+
+type (LL a) = (a, ?(LL a))
+
+llLen :: LL Int -> Int
+llLen x ? isNull (.1 x) = 1
+        : 1 + llLen (require (.1 x))
+
+llSum :: LL Int -> Int
+llSum x ? isNull (.1 x) = .0 x
+        : (.0 x) + llSum (require (.1 x))
+
+llRange :: Int -> LL Int
+llRange n ? n > 0  = (n, llRange (n - 1))
+          : (0, Null)
+
+-- Native construction of list-guarded recursive values. roseBuild
+-- exercises a tuple whose second slot is `[Rose a]`; patBuild
+-- exercises a literal whose top-level value IS a list of self.
+roseBuild :: Int -> Rose Int
+roseBuild d ? d <= 0 = (1, [])
+            : let sub = roseBuild (d - 1)
+              in (0, [sub, sub])
+
+-- Pat = [Pat]. The empty-list base case terminates; each level wraps
+-- its children in a fresh list. With no payload, the entire value is
+-- pure structure.
+patBuild :: Int -> Pat
+patBuild d ? d <= 0 = []
+           : let sub = patBuild (d - 1)
+             in [sub, sub]
+
+-- JSON-input wrappers. Both functions consume a recursive value from
+-- the nexus's JSON input path (json_to_voidstar's Recur arm) and
+-- return an Int summary.
+roseFromJson :: Rose Int -> Int
+roseFromJson x = roseSizeRaw x
+
+patFromJson :: Pat -> Int
+patFromJson x = patNodesRaw x

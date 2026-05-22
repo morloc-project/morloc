@@ -244,6 +244,7 @@ unsafe fn align_batches_to_open_schema(
         hint: None,
         parameters: merged_params,
         keys: merged_keys.clone(),
+        name: None,
     };
 
     // Build the per-batch projected+cast columns. Order matches
@@ -1022,16 +1023,18 @@ fn arrow_dtype_to_serial_type(dt: &arrow_schema::DataType) -> SerialType {
 /// home for the JSON-side helpers; CSV merge logic lives here).
 fn maybe_optional_csv(inner: Schema, nullable: bool) -> Schema {
     if !nullable { return inner; }
-    let inner_align = inner.alignment().max(1);
-    let inner_off = crate::shm::align_up(1, inner_align);
+    // Optional's voidstar slot is a relptr (RELNULL = absent); width
+    // and alignment are pointer-sized. Mirrors schema.rs's
+    // `make_optional_schema`.
     Schema {
         serial_type: SerialType::Optional,
         size: 1,
-        width: inner_off + inner.width,
-        offsets: vec![inner_off],
+        width: std::mem::size_of::<crate::shm::RelPtr>(),
+        offsets: Vec::new(),
         hint: None,
         parameters: vec![inner],
         keys: Vec::new(),
+        name: None,
     }
 }
 
@@ -1097,6 +1100,7 @@ fn merge_table_schema_with_csv_header(
         hint: None,
         parameters: params,
         keys,
+        name: None,
     })
 }
 

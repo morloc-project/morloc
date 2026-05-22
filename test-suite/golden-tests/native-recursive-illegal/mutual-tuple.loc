@@ -1,0 +1,9 @@
+module main (f)
+
+-- Mutual recursion between tuple aliases (not records). Same rule as
+-- record mutual recursion: rejected because the type evaluator's
+-- bound-set termination only protects each typedef's own name.
+type T1 = (Int, T2)
+type T2 = (Str, T1)
+
+f :: T1 -> T1

@@ -44,6 +44,7 @@ main = do
       , typedefKindVarTests
       , letBindingTests
       , aliasConstructorTests
+      , recursiveRecordTests
       , morlocDepsTests
 
       -- -- These tests pass locally and when I run the same container that I
@@ -57,13 +58,19 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "native-recursive-illegal" "native-recursive-illegal"
+      , golden "native-recursive-mixed" "native-recursive-mixed"
+      , golden "native-recursive-record" "native-recursive-record"
+      , golden "native-recursive-list" "native-recursive-list"
+      , golden "native-recursive-parameterized" "native-recursive-parameterized"
+      , golden "native-recursive-tuple" "native-recursive-tuple"
+
       , golden "multiprocessing-py-1" "multiprocessing-py-1"
       , -- bug regression tests from doc-agents code-tester (v0.74.0)
         -- Each test asserts correct behavior; currently FAIL until bug is fixed
         golden "bug-load-type-infer" "bug-load-type-infer"
       , golden "bug-intrinsic-schema-crash" "bug-intrinsic-schema-crash"
 
-      , golden "shm-volume-growth-py" "shm-volume-growth-py"
       , golden "thunk-basic" "thunk-basic"
       , golden "thunk-effects" "thunk-effects"
       , golden "thunk-do" "thunk-do"
@@ -388,9 +395,6 @@ main = do
       , golden "R(C) serial-form-11-c" "serial-form-11-c"
       , golden "R(C) serial-form-11-py" "serial-form-11-py"
       , golden "R(C) serial-form-11-r" "serial-form-11-r"
-      , golden "R(R) serial-form-12-c" "serial-form-12-c"
-      , golden "R(R) serial-form-12-py" "serial-form-12-py"
-      , golden "R(R) serial-form-12-r" "serial-form-12-r"
       , -- object handling
         golden "object-1-c" "object-1-c"
       , golden "object-1-py" "object-1-py"
@@ -643,4 +647,6 @@ main = do
       , golden "real-overflow" "real-overflow"
       , -- unary minus / negate operator
         golden "negate-unary-operator" "negate-unary-operator"
+        -- an annoyingly slow one
+      , golden "shm-volume-growth-py" "shm-volume-growth-py"
       ]

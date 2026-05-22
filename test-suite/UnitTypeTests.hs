@@ -36,6 +36,7 @@ module UnitTypeTests
   , letBindingTests
   , aliasConstructorTests
   , typedefKindVarTests
+  , recursiveRecordTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -344,6 +345,19 @@ expectError msg code =
     case result of
       (Right _) -> assertFailure . MT.unpack $ "Expected failure"
       (Left _) -> return ()
+
+-- Asserts the frontend pipeline (parse, restructure, typecheck, alias
+-- evaluation) completes successfully. Used when the structure of the
+-- resulting type is uninteresting and we only care that no error was
+-- raised and the pipeline did not diverge (the surrounding group's
+-- localOption mkTimeout supplies the divergence guard).
+expectPass :: String -> MT.Text -> TestTree
+expectPass msg code =
+  testCase msg $ do
+    result <- runFront code
+    case result of
+      (Right _) -> return ()
+      (Left e) -> assertFailure $ "Expected pass but got error: " <> show e
 
 testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
 testEqual msg x y =
@@ -5249,4 +5263,169 @@ aliasConstructorTests =
         f :: Int
         f = ("hello" :: Str)
           |]
+      ]
+
+-- Recursive record types. Self-recursive references through @[_]@ or @?_@
+-- are legal (the data is heap-indirected and base-case-terminating).
+-- Bare self-recursion (under tuple, function, named app, or directly) and
+-- any mutual recursion remain illegal. Divergence is treated as failure
+-- via the per-group timeout: if alias expansion or any later phase loops
+-- on a recursive typedef, the offending test fires the timeout.
+--
+-- Syntax notes:
+--   * Record types use @record T where { f :: t; ... }@; type-level
+--     record literals @{f :: t}@ on the RHS of @type ... = ...@ are
+--     rejected by the parser (CLAUDE.md: the @::@-form is reserved for
+--     decls, not literals).
+--   * Self-recursion on a non-record type alias (@type B3 = B3 -> Int@,
+--     @type B2 = (B2, Int)@) parses and is exercised below for the
+--     non-record bare-self cases.
+recursiveRecordTests :: TestTree
+recursiveRecordTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout; divergence appears as failure
+    testGroup
+      "Recursive record types"
+      [
+        -- POSITIVE: guarded self-recursion is accepted
+
+        expectPass
+          "self-recursion through list field"
+          [r|
+        module main (f)
+        record T1 where
+          a :: [T1]
+        f :: T1 -> T1
+        |]
+      , expectPass
+          "self-recursion through optional field"
+          [r|
+        module main (f)
+        record T2 where
+          a :: ?T2
+        f :: T2 -> T2
+        |]
+      , expectPass
+          "self-recursion through optional of list"
+          [r|
+        module main (f)
+        record T3 where
+          a :: ?[T3]
+        f :: T3 -> T3
+        |]
+      , expectPass
+          "self-recursion through list of optional"
+          [r|
+        module main (f)
+        record T4 where
+          a :: [?T4]
+        f :: T4 -> T4
+        |]
+      , expectPass
+          "self-recursion through nested lists"
+          [r|
+        module main (f)
+        record T5 where
+          a :: [[T5]]
+        f :: T5 -> T5
+        |]
+      , expectPass
+          "self-recursion through optional of nested lists"
+          [r|
+        module main (f)
+        record T6 where
+          a :: ?[[T6]]
+        f :: T6 -> T6
+        |]
+      , expectPass
+          "parameterized self-recursion"
+          [r|
+        module main (f)
+        record T7 a where
+          value :: a
+          children :: [T7 a]
+        f :: T7 Int -> T7 Int
+        |]
+
+        -- NEGATIVE: bare self-recursion is rejected
+      , expectError
+          "bare self under record field is rejected"
+          [r|
+        module main (f)
+        record B1 where
+          a :: B1
+        f :: B1 -> B1
+        |]
+      , expectError
+          "bare self under tuple alias is rejected"
+          [r|
+        module main (f)
+        type B2 = (B2, Int)
+        f :: B2 -> B2
+        |]
+      , expectError
+          "bare self under function argument is rejected"
+          [r|
+        module main (f)
+        type B3 = B3 -> Int
+        f :: B3 -> Int
+        |]
+      , expectError
+          "bare self under function return is rejected"
+          [r|
+        module main (f)
+        type B4 = Int -> B4
+        f :: B4
+        |]
+      , expectError
+          "bare self under non-list non-optional app is rejected"
+          [r|
+        module main (f)
+        type Pair a b = (a, b)
+        record B5 where
+          a :: Pair B5 Int
+        f :: B5 -> B5
+        |]
+      , expectError
+          "mixed good-and-bad fields: rejection wins"
+          [r|
+        module main (f)
+        record B6 where
+          ok :: [B6]
+          bad :: B6
+        f :: B6 -> B6
+        |]
+
+        -- NEGATIVE: mutual recursion is rejected (out of scope this pass)
+      , expectError
+          "mutual recursion 2-cycle, unguarded, is rejected"
+          [r|
+        module main (f)
+        record M1 where
+          x :: M2
+        record M2 where
+          y :: M1
+        f :: M1 -> M1
+        |]
+      , expectError
+          "mutual recursion 2-cycle, both sides guarded, is rejected"
+          [r|
+        module main (f)
+        record N1 where
+          x :: [N2]
+        record N2 where
+          y :: [N1]
+        f :: N1 -> N1
+        |]
+      , expectError
+          "mutual recursion 3-cycle is rejected"
+          [r|
+        module main (f)
+        record C1 where
+          x :: C2
+        record C2 where
+          y :: C3
+        record C3 where
+          z :: C1
+        f :: C1 -> C1
+        |]
       ]

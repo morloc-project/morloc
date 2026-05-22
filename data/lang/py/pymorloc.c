@@ -151,6 +151,60 @@ error:
 
 
 
+// ── Recursive-record env (named-schema stack) ─────────────────────────────
+//
+// Schemas built from wire forms like `&4Treem25valuej8childrena^4Tree`
+// carry a `name` on the outer (`Tree`) declaration and on every Recur
+// back-reference. While walking the schema we maintain a stack of
+// (name, schema) entries: push on entering a declaration, pop on exit.
+// A Recur node looks up its target by scanning the stack top-down.
+//
+// __thread keeps the stack per-thread so concurrent walks (e.g. the
+// daemon dispatcher and a foreign-call serializer running on another
+// thread) do not stomp on each other's environments.
+typedef struct {
+    const char* name;
+    const Schema* schema;
+} recur_env_entry_t;
+
+#define RECUR_ENV_MAX 64
+static __thread recur_env_entry_t recur_env_stack[RECUR_ENV_MAX];
+static __thread int recur_env_depth = 0;
+
+static int recur_env_push(const Schema* schema) {
+    // Only schemas with a non-null name and not Recur-typed are
+    // declarations. Recur nodes share the `name` field as a lookup key,
+    // not a binding site.
+    if (schema == NULL || schema->name == NULL || schema->type == MORLOC_RECUR) {
+        return 0;
+    }
+    if (recur_env_depth >= RECUR_ENV_MAX) {
+        // Stack overflow indicates pathological nesting; bail rather
+        // than silently dropping a declaration. The caller will see a
+        // failed lookup downstream.
+        return 0;
+    }
+    recur_env_stack[recur_env_depth].name = schema->name;
+    recur_env_stack[recur_env_depth].schema = schema;
+    recur_env_depth++;
+    return 1;
+}
+
+static void recur_env_pop(int pushed) {
+    if (pushed && recur_env_depth > 0) recur_env_depth--;
+}
+
+static const Schema* recur_env_lookup(const char* name) {
+    if (name == NULL) return NULL;
+    for (int i = recur_env_depth - 1; i >= 0; i--) {
+        const recur_env_entry_t* e = &recur_env_stack[i];
+        if (e->name != NULL && strcmp(e->name, name) == 0) {
+            return e->schema;
+        }
+    }
+    return NULL;
+}
+
 // Map morloc schema element type to numpy type number
 static int schema_to_npy_type(morloc_serial_type type) {
     switch (type) {
@@ -172,8 +226,14 @@ static int schema_to_npy_type(morloc_serial_type type) {
 PyObject* fromAnything(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
 
     PyObject* obj = NULL;
+    // Push the schema's name (if it is a `&<name>X` declaration) onto
+    // the recursive-env stack before descending. Pop on the way out via
+    // the goto-error path or normal return. Recur lookups inside the
+    // body resolve against this stack.
+    int _recur_pushed = recur_env_push(schema);
     switch (schema->type) {
         case MORLOC_NIL:
+            recur_env_pop(_recur_pushed);
             Py_RETURN_NONE;
         case MORLOC_BOOL:
             obj = PyBool_FromLong(*(bool*)data);
@@ -420,13 +480,47 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             break;
         }
         case MORLOC_OPTIONAL: {
-            uint8_t tag = *(const uint8_t*)data;
-            if (tag == 0) {
+            // The Optional slot is a relptr (RELNULL = absent). Resolve and
+            // recurse into the inner T's body when present. base_ptr is
+            // set when the data lives inline in a packet payload (relptrs
+            // are payload-relative); otherwise we go through SHM.
+            relptr_t relptr = *(const relptr_t*)data;
+            if (relptr == RELNULL) {
+                recur_env_pop(_recur_pushed);
                 Py_RETURN_NONE;
             }
-            obj = fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], base_ptr);
+            const void* inner_abs;
+            if (base_ptr) {
+                inner_abs = (const char*)base_ptr + relptr;
+            } else {
+                char* errmsg_resolve = NULL;
+                inner_abs = rel2abs(relptr, &errmsg_resolve);
+                if (errmsg_resolve) {
+                    PyErr_SetString(PyExc_RuntimeError, errmsg_resolve);
+                    free(errmsg_resolve);
+                    goto error;
+                }
+            }
+            obj = fromAnything(schema->parameters[0], inner_abs, base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize optional inner value");
+            }
+            break;
+        }
+        case MORLOC_RECUR: {
+            // Back-reference: resolve to the named declaration on the
+            // env stack and deserialise as if we were already inside
+            // that schema. The data shape at this slot is whatever the
+            // declaration body specifies; the env carries the matching
+            // Schema pointer so the recursive call can navigate.
+            const Schema* target = recur_env_lookup(schema->name);
+            if (target == NULL) {
+                PyRAISE("Recur back-reference to undeclared schema name '%s'",
+                        schema->name ? schema->name : "?");
+            }
+            obj = fromAnything(target, data, base_ptr);
+            if (!obj) {
+                PyRAISE("Failed to deserialize recursive value");
             }
             break;
         }
@@ -434,9 +528,11 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             PyRAISE("Unsupported schema type %d in fromAnything", (int)schema->type);
     }
 
+    recur_env_pop(_recur_pushed);
     return obj;
 
 error:
+    recur_env_pop(_recur_pushed);
     Py_XDECREF(obj);
     return NULL;
 }
@@ -472,7 +568,21 @@ error:
 
 
 
+static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj);
+
+// Wrap get_shm_size_inner so the recursive-env stack is maintained at
+// every entry. Inner code calls get_shm_size (this wrapper), which
+// pushes the schema's declaration name (if any) before delegating to
+// _inner. Recur nodes themselves don't push (recur_env_push skips them)
+// so a back-ref resolution does not pollute the stack.
 ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
+    int pushed = recur_env_push(schema);
+    ssize_t r = get_shm_size_inner(schema, obj);
+    recur_env_pop(pushed);
+    return r;
+}
+
+static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
     switch (schema->type) {
         case MORLOC_NIL:
         case MORLOC_BOOL:
@@ -624,15 +734,34 @@ ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
             }
 
         case MORLOC_OPTIONAL:
+            // Slot is sizeof(relptr) (= schema->width). Absent → just the slot.
+            // Present → slot + worst-case alignment padding for the inner T +
+            // T's own total size (which already includes inner.width and any
+            // variable extras T contributes).
             if (obj == Py_None) {
                 return (ssize_t)schema->width;
             }
             {
                 ssize_t inner_size = get_shm_size(schema->parameters[0], obj);
                 if (inner_size == -1) return -1;
-                ssize_t extra = (inner_size > (ssize_t)schema->parameters[0]->width) ? inner_size - (ssize_t)schema->parameters[0]->width : 0;
-                return (ssize_t)schema->width + extra;
+                size_t inner_align = schema_alignment(schema->parameters[0]);
+                if (inner_align == 0) inner_align = 1;
+                return (ssize_t)schema->width + (ssize_t)(inner_align - 1) + inner_size;
             }
+
+        case MORLOC_RECUR: {
+            // Resolve and recurse on the target. Note this calls the
+            // _inner helper directly so the Recur node itself does not
+            // get pushed (it isn't a declaration); the target's own
+            // declaration is already on the stack from the enclosing
+            // walk.
+            const Schema* target = recur_env_lookup(schema->name);
+            if (target == NULL) {
+                PyRAISE("Recur back-reference to undeclared schema name '%s'",
+                        schema->name ? schema->name : "?");
+            }
+            return get_shm_size_inner(target, obj);
+        }
 
         default:
             PyRAISE("Unsupported schema type %d in calc_required_size", (int)schema->type);
@@ -646,7 +775,19 @@ error:
 
 
 
-int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
+static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj);
+
+// Public entry point: push the schema's declaration name (if any) and
+// delegate to the inner walker. The push/pop discipline lets Recur arms
+// inside the inner walker resolve via the env stack.
+int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+    int pushed = recur_env_push(schema);
+    int r = to_voidstar_r_inner(dest, cursor, schema, obj);
+    recur_env_pop(pushed);
+    return r;
+}
+
+static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
     switch (schema->type) {
         case MORLOC_NIL:
             if (obj != Py_None) {
@@ -889,16 +1030,46 @@ int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj
             break;
 
         case MORLOC_OPTIONAL:
+            // The slot is a relptr. Absent → write RELNULL. Present →
+            // align the cursor for the inner T, write the inner's relptr
+            // into the slot, advance the cursor past T's width, then
+            // recurse to fill T's body (T may push the cursor further
+            // for its own variable-length payload).
             if (obj == Py_None) {
-                *((uint8_t*)dest) = 0;
-                memset((char*)dest + schema->offsets[0], 0, schema->parameters[0]->width);
+                *((relptr_t*)dest) = RELNULL;
             } else {
-                *((uint8_t*)dest) = 1;
-                if (to_voidstar_r((char*)dest + schema->offsets[0], cursor, schema->parameters[0], obj) != 0) {
+                const Schema* inner_schema = schema->parameters[0];
+                size_t inner_align = schema_alignment(inner_schema);
+                if (inner_align == 0) inner_align = 1;
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); goto error; }
+                }
+                void* inner_dest = *cursor;
+                *cursor = (void*)((char*)*cursor + inner_schema->width);
+                if (to_voidstar_r(inner_dest, cursor, inner_schema, obj) != 0) {
                     goto error;
                 }
             }
             break;
+
+        case MORLOC_RECUR: {
+            // Resolve and dispatch on the named declaration. We call
+            // the inner function directly because the Recur node is
+            // not itself a declaration and the target's declaration is
+            // already on the stack from an outer push.
+            const Schema* target = recur_env_lookup(schema->name);
+            if (target == NULL) {
+                PyRAISE("Recur back-reference to undeclared schema name '%s'",
+                        schema->name ? schema->name : "?");
+            }
+            if (to_voidstar_r_inner(dest, cursor, target, obj) != 0) {
+                goto error;
+            }
+            break;
+        }
 
         default:
             PyRAISE("Unsupported schema type %d in to_voidstar_r", (int)schema->type);

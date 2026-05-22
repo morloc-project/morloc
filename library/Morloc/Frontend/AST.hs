@@ -21,6 +21,7 @@ module Morloc.Frontend.AST
   , findSignatures
   , findTypedefs
   , findSignatureTypeTerms
+  , findTypeTerms
   , checkExprI
   , findSources
   , maxIndex

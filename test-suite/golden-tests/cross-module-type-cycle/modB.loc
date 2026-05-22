@@ -1,0 +1,3 @@
+module modB (ABody)
+import .modA
+type ABody = A

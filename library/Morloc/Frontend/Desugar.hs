@@ -22,6 +22,7 @@ module Morloc.Frontend.Desugar
   , showParseError
   ) where
 
+import Control.Monad (when)
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -1054,8 +1055,37 @@ tokToEVar _ = EV "?"
 -- Type definition desugaring
 --------------------------------------------------------------------
 
+-- | True iff the alias body provides no information beyond a
+-- self-reference, optionally wrapped in @?_@. See the call site in
+-- @desugarTypeDef@ for the rationale on which shapes count as vacuous
+-- and why @[X]@-guarded recursion does not.
+isVacuousAlias :: TVar -> [Either (TVar, Kind) TypeU] -> TypeU -> Bool
+isVacuousAlias v vs = go
+  where
+    paramTypes = map (either (VarU . fst) id) vs
+    go (VarU v') = v == v'
+    go (AppU (VarU v') ps) = v == v' && ps == paramTypes
+    go (OptionalU t) = go t
+    go _ = False
+
 desugarTypeDef :: Span -> CstTypeDef -> D [ExprI]
 desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
+  -- Reject vacuous aliases: bodies that are nothing but the alias's own
+  -- self-reference, optionally wrapped in @?_@. The two motivating cases
+  -- are @type X = X@ (pure identity, no fixed point beyond X itself) and
+  -- @type X = ?X@ (collapses to nothing under the @?(?T) == ?T@
+  -- idempotence: every inhabitant is @null@). The parametric forms
+  -- @type Foo a = Foo a@ and @type Foo a = ?(Foo a)@ are the same family.
+  -- This check happens here -- not in @checkForSelfRecursion@ -- because
+  -- by the time we reach Restructure the parser has already lowered
+  -- forward declarations (@type Foo@) to the same @VarU Foo@ body, so
+  -- the two cases are no longer distinguishable. The list-guarded form
+  -- @type X = [X]@ is intentionally accepted: its inhabitants are
+  -- nested empty lists, which is a legitimate (if niche) shape.
+  when (isVacuousAlias v vs t) $
+    dfail (startPos sp) $
+      "Type alias '" ++ T.unpack (unTVar v) ++
+      "' has a vacuous body: it reduces to a self-reference with no payload"
   lang <- case maybeLangTok of
     Nothing -> return Nothing
     Just tok -> do

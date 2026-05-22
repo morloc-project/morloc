@@ -1,0 +1,9 @@
+module main (f)
+
+record N1 where
+  x :: [N2]
+
+record N2 where
+  y :: [N1]
+
+f :: N1 -> N1

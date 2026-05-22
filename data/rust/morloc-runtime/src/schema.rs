@@ -25,6 +25,11 @@ pub enum SerialType {
     Table = 19,     // Arrow IPC primitive. Schema entries (if any) are open
                     // constraints on the buffer's actual schema; the binary
                     // layout is fully described by the Arrow buffer itself.
+    Recur = 20,     // Back-reference to a named schema declared by `&<klen><name>`
+                    // earlier on the path. Carries the referenced name in the
+                    // Schema's `name` field. Recursive records (e.g. Tree with a
+                    // `[Tree]` field) terminate descent here; consumers resolve
+                    // the cycle by walking up to the matching named declaration.
 }
 
 /// Schema character codes for parsing schema strings.
@@ -57,6 +62,19 @@ pub struct Schema {
     pub parameters: Vec<Schema>,
     /// Field names for records (None for non-record types).
     pub keys: Vec<String>,
+    /// Named-schema declaration / back-reference name.
+    ///
+    /// Set in two cases by `parse_schema`:
+    ///   * On the outer schema of a `&<klen><name>X` declaration, carrying
+    ///     the declared name. The body itself is otherwise a normal schema.
+    ///   * On every `Recur` node, carrying the back-referenced name. The
+    ///     name was previously declared on an enclosing schema.
+    ///
+    /// All non-recursive schemas leave this `None`; round-trip preservation
+    /// requires the renderer to emit `&<klen><n>` only when the carrying
+    /// schema is the declaration site (i.e., the named schema's outer
+    /// node), and to emit `^<klen><n>` for `Recur` nodes.
+    pub name: Option<String>,
 }
 
 impl Schema {
@@ -79,6 +97,7 @@ impl Schema {
             hint: None,
             parameters: Vec::new(),
             keys: Vec::new(),
+            name: None,
         }
     }
 
@@ -99,6 +118,9 @@ impl Schema {
             | SerialType::Float64 => true,
             SerialType::Tuple => self.parameters.iter().all(|p| p.is_fixed_width()),
             SerialType::Optional => false,
+            // A Recur back-references a record whose layout includes
+            // variable-length payload; never fixed-width.
+            SerialType::Recur => false,
             _ => false,
         }
     }
@@ -118,6 +140,8 @@ impl Schema {
                 // other indirect types.
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
+            // A back-ref ultimately resolves to a Map, which is pointer-aligned.
+            SerialType::Recur => std::mem::size_of::<usize>(),
             SerialType::Tuple => {
                 self.parameters
                     .iter()
@@ -126,11 +150,8 @@ impl Schema {
                     .unwrap_or(1)
             }
             SerialType::Optional => {
-                if let Some(inner) = self.parameters.first() {
-                    std::cmp::max(1, inner.alignment())
-                } else {
-                    1
-                }
+                // Pointer-aligned because the slot is now a relptr.
+                std::mem::size_of::<usize>()
             }
         }
     }
@@ -173,7 +194,8 @@ impl Schema {
 /// - `<hint>i4` -> Sint32 with hint annotation
 pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
     let bytes = input.as_bytes();
-    let (schema, consumed) = parse_schema_r(bytes, 0)?;
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let (schema, consumed) = parse_schema_r(bytes, 0, &mut declared)?;
     if consumed != bytes.len() {
         return Err(MorlocError::Schema(format!(
             "trailing characters after schema at position {consumed}"
@@ -183,7 +205,17 @@ pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
 }
 
 /// Recursive schema parser matching the C `parse_schema_r` format exactly.
-fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocError> {
+///
+/// `declared` carries the set of names declared via `&<klen><name>` up to
+/// this point in the walk. The set is threaded by mutable reference because
+/// parsing is depth-first and a back-reference must see every declaration
+/// from its enclosing path. Names go in when their declaration is
+/// encountered; nothing is removed (the wire form does not nest scopes).
+fn parse_schema_r(
+    bytes: &[u8],
+    pos: usize,
+    declared: &mut std::collections::HashSet<String>,
+) -> Result<(Schema, usize), MorlocError> {
     if pos >= bytes.len() {
         return Err(MorlocError::Schema("unexpected end of schema".into()));
     }
@@ -195,9 +227,54 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
         b'<' => {
             // Hint: <...> with nesting support, then parse the actual type
             let (hint, after_hint) = parse_hint(bytes, cur)?;
-            let (mut schema, end) = parse_schema_r(bytes, after_hint)?;
+            let (mut schema, end) = parse_schema_r(bytes, after_hint, declared)?;
             schema.hint = Some(hint);
             Ok((schema, end))
+        }
+        b'&' => {
+            // Named-schema declaration: `&<klen><name>X`. Reads the name,
+            // marks it as declared, then parses the body and tags the body's
+            // outer schema with the name. The body itself may contain
+            // `^<klen><name>` back-references to the same name.
+            //
+            // After parsing, every Recur(name) node inside the body is
+            // patched so its `width` matches the declaration's width. The
+            // placeholder width set in `make_recur_schema` is correct for
+            // schema-tree shape but wrong for runtime layout: the wire
+            // form lays out an `Array<Recur(T)>` element as a full
+            // `T`-shaped record, so iterators must step by the named
+            // schema's width, not by a fixed pointer size.
+            let (name, after_name) = parse_named_key(bytes, cur)?;
+            declared.insert(name.clone());
+            let (mut body, end) = parse_schema_r(bytes, after_name, declared)?;
+            // Patch Recur widths and re-flow Tuple/Map widths bottom-up.
+            // A Tuple/Map enclosing a Recur (e.g. `[(Str, X)]`) computed its
+            // width using the placeholder Recur width; after patching, those
+            // widths must be recalculated or Array iteration strides over
+            // partial elements and corrupts inner relptr fields. Fixed-point
+            // iterate: well-formed schemas (Recur behind Array/Optional or
+            // directly as a Map field guarded by `classifyRecursion`) converge
+            // in one round.
+            for _ in 0..16 {
+                let prev = body.width;
+                patch_recur_widths_in(&mut body, &name, prev);
+                recalculate_container_widths(&mut body);
+                if body.width == prev { break; }
+            }
+            body.name = Some(name);
+            Ok((body, end))
+        }
+        b'^' => {
+            // Back-reference: `^<klen><name>`. The name must have been
+            // declared by an enclosing `&<klen><name>` on this walk; a
+            // dangling back-ref is a clean schema error.
+            let (name, after_name) = parse_named_key(bytes, cur)?;
+            if !declared.contains(&name) {
+                return Err(MorlocError::Schema(format!(
+                    "back-reference to undeclared name '{name}'"
+                )));
+            }
+            Ok((make_recur_schema(name), after_name))
         }
         SCHEMA_NIL => Ok((Schema::primitive(SerialType::Nil), cur)),
         SCHEMA_BOOL => Ok((Schema::primitive(SerialType::Bool), cur)),
@@ -212,6 +289,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
                 hint: None,
                 parameters: vec![Schema::primitive(SerialType::Uint8)],
                 keys: Vec::new(),
+                name: None,
             }, cur))
         }
         SCHEMA_SINT => parse_sized_int(bytes, cur, true),
@@ -227,7 +305,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
             } else {
                 0 // unconstrained
             };
-            let (child, end) = parse_schema_r(bytes, cur)?;
+            let (child, end) = parse_schema_r(bytes, cur, declared)?;
             Ok((make_array_schema_with_dim(expected_len, child), end))
         }
         SCHEMA_INT => {
@@ -236,7 +314,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
         }
         SCHEMA_OPTIONAL => {
             // Optional: one child schema follows immediately
-            let (child, end) = parse_schema_r(bytes, cur)?;
+            let (child, end) = parse_schema_r(bytes, cur, declared)?;
             Ok((make_optional_schema(child), end))
         }
         SCHEMA_TUPLE => {
@@ -248,7 +326,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
             let mut params = Vec::with_capacity(n);
             let mut p = cur + 1;
             for _ in 0..n {
-                let (child, end) = parse_schema_r(bytes, p)?;
+                let (child, end) = parse_schema_r(bytes, p, declared)?;
                 params.push(child);
                 p = end;
             }
@@ -279,7 +357,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
                 p += key_len;
                 keys.push(key);
                 // Read value schema
-                let (child, end) = parse_schema_r(bytes, p)?;
+                let (child, end) = parse_schema_r(bytes, p, declared)?;
                 params.push(child);
                 p = end;
             }
@@ -325,7 +403,7 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
                         .to_string();
                     p += key_len;
                     keys.push(key);
-                    let (child, end) = parse_schema_r(bytes, p)?;
+                    let (child, end) = parse_schema_r(bytes, p, declared)?;
                     params.push(child);
                     p = end;
                 }
@@ -342,6 +420,25 @@ fn parse_schema_r(bytes: &[u8], pos: usize) -> Result<(Schema, usize), MorlocErr
 }
 
 /// Parse hint with nested angle bracket support: `<std::vector<$1>>` etc.
+/// Parse a `<klen><name>` length-prefixed identifier, the same syntax used
+/// for record keys but in the slots after `&` and `^` markers. Returns the
+/// name string and the position just past its last byte.
+fn parse_named_key(bytes: &[u8], pos: usize) -> Result<(String, usize), MorlocError> {
+    if pos >= bytes.len() {
+        return Err(MorlocError::Schema("expected name length".into()));
+    }
+    let klen = decode_base62(bytes[pos])?;
+    let start = pos + 1;
+    let end = start + klen;
+    if end > bytes.len() {
+        return Err(MorlocError::Schema("schema name extends past end".into()));
+    }
+    let name = std::str::from_utf8(&bytes[start..end])
+        .map_err(|_| MorlocError::Schema("invalid UTF-8 in schema name".into()))?
+        .to_string();
+    Ok((name, end))
+}
+
 fn parse_hint(bytes: &[u8], pos: usize) -> Result<(String, usize), MorlocError> {
     let mut depth: usize = 1;
     let start = pos;
@@ -457,20 +554,30 @@ fn make_array_schema_with_dim(expected_len: usize, child: Schema) -> Schema {
         hint: None,
         parameters: vec![child],
         keys: Vec::new(),
+        name: None,
     }
 }
 
 fn make_optional_schema(child: Schema) -> Schema {
-    let align = child.alignment().max(1);
-    let inner_offset = crate::shm::align_up(1, align);
+    // Optional's voidstar slot is a single relative pointer: RELNULL
+    // for absent, otherwise the pointer to T's body elsewhere in the
+    // buffer. This is what makes Optional<Recur(T)> work -- the slot
+    // width no longer depends on T.width, so the recursive width
+    // equation has a finite fixed point.
+    //
+    // Trade-off: dense-mostly-present numeric Optionals carry one
+    // indirection per element. The right primitive for that case is a
+    // validity-bitmap-bearing column type (e.g. through Table), not
+    // per-element Optional.
     Schema {
         serial_type: SerialType::Optional,
         size: 1,
-        width: inner_offset + child.width,
-        offsets: vec![inner_offset],
+        width: std::mem::size_of::<crate::shm::RelPtr>(),
+        offsets: Vec::new(),
         hint: None,
         parameters: vec![child],
         keys: Vec::new(),
+        name: None,
     }
 }
 
@@ -485,6 +592,7 @@ fn make_tuple_schema(params: Vec<Schema>) -> Schema {
         hint: None,
         parameters: params,
         keys: Vec::new(),
+        name: None,
     }
 }
 
@@ -499,6 +607,7 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
         hint: None,
         parameters: params,
         keys,
+        name: None,
     }
 }
 
@@ -524,6 +633,62 @@ fn make_table_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
         hint: None,
         parameters: params,
         keys,
+        name: None,
+    }
+}
+
+/// Build a Recur back-reference Schema for the given declared name.
+///
+/// A Recur node is structurally minimal: it carries no parameters or
+/// keys, only the back-referenced name. Width is set to a placeholder
+/// here; `parse_schema` patches it to the resolved declaration's width
+/// once the named schema's body is fully parsed (see
+/// `patch_recur_widths_in`). The placeholder is pointer-sized so the
+/// shape of intermediate width calculations stays sane if patching is
+/// somehow skipped.
+fn make_recur_schema(name: String) -> Schema {
+    Schema {
+        serial_type: SerialType::Recur,
+        size: 0,
+        width: std::mem::size_of::<crate::shm::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: Vec::new(),
+        keys: Vec::new(),
+        name: Some(name),
+    }
+}
+
+/// Walk a parsed schema sub-tree and patch every `Recur(name)` node's
+/// `width` to the supplied value. Called once per `&<name>X`
+/// declaration so the back-reference's runtime layout (used by Array
+/// iteration, Optional indirection, and the C++ allocator) matches the
+/// declaration's own width.
+fn patch_recur_widths_in(schema: &mut Schema, name: &str, width: usize) {
+    for p in &mut schema.parameters {
+        if matches!(p.serial_type, SerialType::Recur) {
+            if let Some(ref n) = p.name {
+                if n == name {
+                    p.width = width;
+                }
+            }
+        }
+        patch_recur_widths_in(p, name, width);
+    }
+}
+
+/// Recompute Tuple and Map widths/offsets bottom-up from current parameter
+/// widths. Used after `patch_recur_widths_in` to propagate the resolved
+/// Recur width into enclosing Tuple/Map layouts. Array and Optional widths
+/// are fixed and need no update; primitives have no children.
+fn recalculate_container_widths(schema: &mut Schema) {
+    for p in &mut schema.parameters {
+        recalculate_container_widths(p);
+    }
+    if matches!(schema.serial_type, SerialType::Tuple | SerialType::Map) {
+        let (w, o) = calculate_tuple_layout(&schema.parameters);
+        schema.width = w;
+        schema.offsets = o;
     }
 }
 
@@ -560,6 +725,18 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         buf.push('<');
         buf.push_str(hint);
         buf.push('>');
+    }
+
+    // Emit `&<klen><n>` for a named-schema declaration. Only the
+    // declaration site carries `name` on a non-Recur node; `Recur`
+    // nodes also carry `name` (the back-ref target) but are emitted as
+    // `^<klen><n>` in their own arm below.
+    if schema.serial_type != SerialType::Recur {
+        if let Some(ref n) = schema.name {
+            buf.push('&');
+            buf.push(encode_base62(n.len()));
+            buf.push_str(n);
+        }
     }
 
     match schema.serial_type {
@@ -628,6 +805,15 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
                     }
                     schema_to_string_inner(p, buf);
                 }
+            }
+        }
+        SerialType::Recur => {
+            // Back-reference: emit `^<klen><name>`. The referenced name is
+            // guaranteed present by the parser (dangling refs are rejected).
+            buf.push('^');
+            if let Some(ref n) = schema.name {
+                buf.push(encode_base62(n.len()));
+                buf.push_str(n);
             }
         }
     }
@@ -716,6 +902,77 @@ mod tests {
         assert_eq!(schema.keys, vec!["name", "info"]);
         let rendered = schema_to_string(&schema);
         assert_eq!(rendered, input);
+    }
+
+    // Recursive schemas: a record that references itself through a list
+    // or optional field. The wire form gets two new tokens,
+    // `&<klen><name>` (declare) and `^<klen><name>` (back-ref). For a
+    // recursive Tree {value::Int, children::[Tree]} the form reads
+    //   &4Treem25valuej8childrena^4Tree
+    //
+    // The parser does NOT materialize the cycle: a `Recur` node carries
+    // the back-referenced name and consumers walk up to the declaration
+    // when they need the body. This keeps the structure finite (no
+    // unbounded expansion at parse time) and round-trip preserves bytes
+    // since each declaration appears exactly once.
+
+    #[test]
+    fn test_parse_recursive_tree_list() {
+        let s = parse_schema("&4Treem25valuej8childrena^4Tree").unwrap();
+        // Top is the named-schema declaration: Map with two fields.
+        assert_eq!(s.serial_type, SerialType::Map);
+        assert_eq!(s.size, 2);
+        assert_eq!(s.keys, vec!["value", "children"]);
+        assert_eq!(s.name.as_deref(), Some("Tree"));
+        // The "children" field is an array whose element schema is a
+        // back-reference to "Tree". The Recur node carries the target
+        // name; consumers resolve it by walking the enclosing path.
+        let children_arr = &s.parameters[1];
+        assert_eq!(children_arr.serial_type, SerialType::Array);
+        let elem = &children_arr.parameters[0];
+        assert_eq!(elem.serial_type, SerialType::Recur);
+        assert_eq!(elem.name.as_deref(), Some("Tree"));
+    }
+
+    #[test]
+    fn test_parse_recursive_ll_optional() {
+        // LL {head::Int, tail::?LL}
+        //   &2LLm24headj4tail?^2LL
+        let s = parse_schema("&2LLm24headj4tail?^2LL").unwrap();
+        assert_eq!(s.serial_type, SerialType::Map);
+        assert_eq!(s.keys, vec!["head", "tail"]);
+        assert_eq!(s.name.as_deref(), Some("LL"));
+        let tail_opt = &s.parameters[1];
+        assert_eq!(tail_opt.serial_type, SerialType::Optional);
+        let inner = &tail_opt.parameters[0];
+        assert_eq!(inner.serial_type, SerialType::Recur);
+        assert_eq!(inner.name.as_deref(), Some("LL"));
+    }
+
+    #[test]
+    fn test_roundtrip_recursive_tree() {
+        // Without materialization the wire form round-trips byte-for-byte.
+        let input = "&4Treem25valuej8childrena^4Tree";
+        let schema = parse_schema(input).unwrap();
+        let rendered = schema_to_string(&schema);
+        assert_eq!(rendered, input, "byte-exact round-trip");
+    }
+
+    #[test]
+    fn test_roundtrip_recursive_ll() {
+        // Optional-guarded recursion also round-trips byte-exactly.
+        let input = "&2LLm24headj4tail?^2LL";
+        let schema = parse_schema(input).unwrap();
+        let rendered = schema_to_string(&schema);
+        assert_eq!(rendered, input, "byte-exact round-trip");
+    }
+
+    #[test]
+    fn test_parse_dangling_backref_rejected() {
+        // A back-ref to an undeclared name must fail cleanly, not
+        // panic or dereference into garbage.
+        let result = parse_schema("^4Tree");
+        assert!(result.is_err(), "dangling back-ref must be rejected");
     }
 }
 

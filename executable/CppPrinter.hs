@@ -41,8 +41,13 @@ printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
 printExpr (IBoolLit True) = "true"
 printExpr (IBoolLit False) = "false"
-printExpr (INullLit (Just t)) = "std::optional<" <> renderIType t <> ">()"
-printExpr (INullLit Nothing) = "std::nullopt"
+-- Emit @std::nullopt@ unconditionally. The hinted-type form
+-- @std::optional<T>()@ would be wrong for recursive-record optionals
+-- where the storage type is @std::optional<std::unique_ptr<T>>@ --
+-- @optional<T>()@ is a different type and the implicit conversion
+-- fails. @std::nullopt@ is the type-agnostic empty marker and converts
+-- to whichever @std::optional<...>@ the surrounding context expects.
+printExpr (INullLit _) = "std::nullopt"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i)
   | t == "int" = viaShow i
@@ -240,6 +245,14 @@ printStructTypedef params rname fields = vsep [template, struct]
         <> ";"
 
 -- | Render a C++ serializer (toAnything) for a struct.
+--
+-- Writes each field directly via per-field toAnything calls instead of
+-- wrapping the whole record in a `std::make_tuple` and re-dispatching to
+-- the tuple overload. The tuple form needed to copy/move every field
+-- into the temporary tuple, which fails to compile when a field is
+-- move-only (e.g. `std::optional<std::unique_ptr<T>>` -- the C++
+-- encoding of a recursive `?T`). The per-field form mirrors the
+-- deserializer and avoids that constraint.
 printSerializer ::
   [MDoc] -> -- template parameters
   MDoc -> -- type of thing being serialized
@@ -250,11 +263,14 @@ printSerializer params rtype fields =
 #{printTemplateHeader params}
 void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
-    return toAnything(dest, cursor, schema, std::make_tuple#{arguments});
+#{block 4 "" (vsep (zipWith assignField [0 ..] (map fst fields)))}
+    return dest;
 }
 |]
   where
-    arguments = tupled ["obj." <> key | (key, _) <- fields]
+    assignField :: Int -> MDoc -> MDoc
+    assignField idx key =
+      [idoc|toAnything((char*)dest + schema->offsets[#{pretty idx}], cursor, schema->parameters[#{pretty idx}], obj.#{key});|]
 
 -- | Render a C++ deserializer (fromAnything + get_shm_size) for a struct.
 printDeserializer ::

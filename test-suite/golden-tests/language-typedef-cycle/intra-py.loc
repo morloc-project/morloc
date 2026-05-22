@@ -1,0 +1,15 @@
+-- Same shape as intra-cpp.loc but in the Python concrete scope.
+-- Per-language SCC: the fix must detect cycles in each language
+-- scope independently, and two languages sharing typedef names
+-- without cycles must NOT raise a false positive.
+module main (ida)
+import root
+
+type A = Int
+type B = Int
+
+type Py => A = "wrap_a" B
+type Py => B = "wrap_b" A
+
+source Py from "ops.py" ("identity" as ida)
+ida :: A -> A

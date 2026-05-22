@@ -548,22 +548,23 @@ unsafe fn morloc_eval_r(
                     morloc_eval_r(element, elem_dest, elem_width, bndvars)?;
                 }
             } else if stype == crate::schema::SerialType::Optional as u32 {
-                // Optional wrapping: tag byte at offset 0, inner value at
-                // offsets[0]. Two shapes:
-                //   tuple_val == null  -> Nothing: tag=0, leave inner zero
-                //                         (shcalloc / enclosing zeroed parent
-                //                         already cleared the slot).
-                //   tuple_val != null  -> Just: tag=1, recurse on inner.
+                // Optional is a single relptr (RELNULL = Nothing).
+                //   tuple_val == null  -> Nothing: write RELNULL into slot.
+                //   tuple_val != null  -> Just: allocate inner T in SHM,
+                //                         recurse to populate it, store the
+                //                         resulting relptr in the slot.
                 let tv = (*data).data.tuple_val;
+                let slot = dest as *mut shm::RelPtr;
                 if tv.is_null() {
-                    *(dest as *mut u8) = 0;
+                    *slot = shm::RELNULL;
                 } else {
-                    *(dest as *mut u8) = 1;
                     let inner_schema = *(*schema).parameters;
                     let inner_width = (*inner_schema).width;
-                    let inner_dest = dest.add(*(*schema).offsets);
+                    let inner_abs = shm::shmalloc(inner_width)?;
+                    ptr::write_bytes(inner_abs, 0, inner_width);
                     let inner_expr = *tv;
-                    morloc_eval_r(inner_expr, inner_dest, inner_width, bndvars)?;
+                    morloc_eval_r(inner_expr, inner_abs, inner_width, bndvars)?;
+                    *slot = shm::abs2rel(inner_abs)?;
                 }
             } else if stype == crate::schema::SerialType::Int as u32 {
                 // Variable-width integer: parse decimal string into inline BigInt
@@ -741,13 +742,19 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Read => {
-            // Deserialize JSON string to typed data, return optional
+            // Deserialize JSON string to typed data, return optional.
+            //
+            // Optional is now a single relptr slot (RELNULL = absent).
+            // Allocate the inner T's body in SHM, parse the JSON into
+            // it, and write the relptr into the slot. Empty string or
+            // parse failure → RELNULL.
             let child = (*expr).expr.unary_expr;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
             let str_arr = &*(child_result as *const shm::Array);
 
-            let opt_dest = dest;
+            let opt_slot = dest as *mut shm::RelPtr;
             let inner_schema = *(*schema).parameters;
+            let inner_width = (*inner_schema).width;
 
             if str_arr.size > 0 {
                 let str_abs = shm::rel2abs(str_arr.data)?;
@@ -761,18 +768,22 @@ unsafe fn morloc_eval_r(
                 extern "C" {
                     fn read_json_with_schema(dest: *mut u8, json: *mut c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
                 }
-                let inner_offset = *(*schema).offsets;
+
+                let inner_abs = shm::shmalloc(inner_width)?;
+                ptr::write_bytes(inner_abs, 0, inner_width);
                 let mut parse_err: *mut c_char = ptr::null_mut();
-                let parsed = read_json_with_schema(opt_dest.add(inner_offset), json_str, inner_schema, &mut parse_err);
+                let parsed = read_json_with_schema(inner_abs, json_str, inner_schema, &mut parse_err);
                 libc::free(json_str as *mut c_void);
-                if !parse_err.is_null() {
+
+                if !parse_err.is_null() || parsed.is_null() {
                     libc::free(parse_err as *mut c_void);
-                    *opt_dest = 0; // None
+                    let _ = shm::shfree(inner_abs);
+                    *opt_slot = shm::RELNULL;
                 } else {
-                    *opt_dest = if parsed.is_null() { 0 } else { 1 };
+                    *opt_slot = shm::abs2rel(inner_abs)?;
                 }
             } else {
-                *opt_dest = 0; // None
+                *opt_slot = shm::RELNULL;
             }
         }
 
@@ -849,7 +860,13 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Load => {
-            // Load data from file, return optional
+            // Load data from file, return optional.
+            //
+            // Optional is now a single relptr slot. On a successful
+            // load we allocate the inner T's body in SHM, deep-copy
+            // the loaded data into it, and store the relptr in the
+            // slot. On failure (file missing, parse error, etc.) the
+            // slot gets RELNULL.
             let child = (*expr).expr.unary_expr;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
 
@@ -866,9 +883,9 @@ unsafe fn morloc_eval_r(
             extern "C" {
                 fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
             }
-            let opt_dest = dest;
+            let opt_slot = dest as *mut shm::RelPtr;
             let inner_schema = *(*schema).parameters;
-            let inner_offset = *(*schema).offsets;
+            let inner_width = (*inner_schema).width;
 
             let mut err: *mut c_char = ptr::null_mut();
             let loaded = mlc_load(path_cstr, inner_schema, &mut err);
@@ -878,27 +895,35 @@ unsafe fn morloc_eval_r(
                 if !err.is_null() {
                     libc::free(err as *mut c_void);
                 }
-                *opt_dest = 0; // None
+                *opt_slot = shm::RELNULL;
             } else {
                 // mlc_load returns SHM but the layout depends on the file
                 // format: msgpack and voidstar pack the wrapper and nested
                 // data into a single block (relptrs reference addresses
                 // inside the block), JSON returns a multi-block tree. A
                 // straight bit-copy of the wrapper would alias the source
-                // block, and libc::free on SHM is undefined (was the cause
-                // of `free(): invalid size` aborts on every nexus-side
-                // @load). Deep-copy into multi-block layout so the result
-                // matches what the rest of the evaluator produces, then
-                // shfree the source block as one allocation.
+                // block, and libc::free on SHM is undefined. Deep-copy
+                // into a fresh inner allocation so the result matches what
+                // the rest of the evaluator produces, then shfree the
+                // source block as one allocation.
                 let inner_rs = crate::cschema::CSchema::to_rust(inner_schema);
+                let inner_abs = shm::shmalloc(inner_width)?;
+                ptr::write_bytes(inner_abs, 0, inner_width);
                 let copy_result = crate::voidstar::deep_copy(
                     loaded as *const u8,
-                    opt_dest.add(inner_offset),
+                    inner_abs,
                     &inner_rs,
                 );
                 let _ = shm::shfree(loaded as shm::AbsPtr);
-                copy_result?;
-                *opt_dest = 1; // Some
+                match copy_result {
+                    Ok(_) => {
+                        *opt_slot = shm::abs2rel(inner_abs)?;
+                    }
+                    Err(e) => {
+                        let _ = shm::shfree(inner_abs);
+                        return Err(e);
+                    }
+                }
             }
         }
 

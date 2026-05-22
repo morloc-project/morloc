@@ -371,9 +371,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
-    -- CoerceToOptional changes the value's runtime layout (tag byte + inner
-    -- slot), so at the pure-nexus level we must materialize the wrapping
-    -- explicitly.
+    -- CoerceToOptional changes the value's runtime layout: the voidstar
+    -- slot becomes a relptr (RELNULL = absent, otherwise points to T's
+    -- body). The eval path allocates T at the cursor and stores the
+    -- relptr; here at the pure-nexus level we just materialize the
+    -- wrapping explicitly so the downstream evaluator sees a real
+    -- Optional node to populate.
     toNexusExpr (AnnoS (Idx _ t) _ (CoerceS CoerceToOptional e)) = do
       outerSchema <- type2schema t
       childX <- toNexusExpr e

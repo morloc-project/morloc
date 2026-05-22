@@ -7,6 +7,11 @@ use std::ptr;
 use crate::schema::{Schema, SerialType};
 
 /// C-compatible Schema struct matching the C `Schema` layout.
+///
+/// `name` is appended at the end of the struct so older C consumers that
+/// only memcpy/sizeof a header up through `keys` keep working; the only
+/// callers that need it are the new recursive-schema paths. The C
+/// `Schema` definition in morloc.h must keep the same field order.
 #[repr(C)]
 pub struct CSchema {
     pub serial_type: u32,
@@ -16,6 +21,10 @@ pub struct CSchema {
     pub hint: *mut c_char,
     pub parameters: *mut *mut CSchema,
     pub keys: *mut *mut c_char,
+    /// Named-schema declaration name (set on the outer node of a
+    /// `&<klen><name>X` form) or back-reference target name (set on
+    /// every Recur node). NULL on all other schemas.
+    pub name: *mut c_char,
 }
 
 impl CSchema {
@@ -60,6 +69,10 @@ impl CSchema {
                 std::mem::forget(ptrs);
                 p
             },
+            name: match &schema.name {
+                Some(s) => CString::new(s.as_str()).unwrap_or_default().into_raw(),
+                None => ptr::null_mut(),
+            },
         });
         Box::into_raw(cs)
     }
@@ -82,7 +95,10 @@ impl CSchema {
         } else {
             let n = match serial_type {
                 SerialType::Tuple | SerialType::Map => cs.size,
-                SerialType::Optional | SerialType::Array => 1,
+                // Optional no longer carries an inner-offset (the slot
+                // is a single relptr). Array keeps one dim-constraint
+                // entry in offsets[0].
+                SerialType::Array => 1,
                 _ => 0,
             };
             if n > 0 {
@@ -118,6 +134,12 @@ impl CSchema {
             Some(CStr::from_ptr(cs.hint).to_string_lossy().into_owned())
         };
 
+        let name = if cs.name.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(cs.name).to_string_lossy().into_owned())
+        };
+
         Schema {
             serial_type,
             size: cs.size,
@@ -126,6 +148,7 @@ impl CSchema {
             hint,
             parameters,
             keys,
+            name,
         }
     }
 
@@ -141,7 +164,10 @@ impl CSchema {
         if !cs.offsets.is_null() {
             let n = match st {
                 SerialType::Tuple | SerialType::Map => cs.size,
-                SerialType::Optional | SerialType::Array => 1,
+                // Optional no longer carries an inner-offset (its slot
+                // is a single relptr). Array keeps one dim-constraint
+                // entry in offsets[0].
+                SerialType::Array => 1,
                 _ => 0,
             };
             if n > 0 { let _ = Vec::from_raw_parts(cs.offsets, n, n); }
@@ -155,5 +181,6 @@ impl CSchema {
             let ptrs = Vec::from_raw_parts(cs.keys, cs.size, cs.size);
             for p in ptrs { if !p.is_null() { let _ = CString::from_raw(p); } }
         }
+        if !cs.name.is_null() { let _ = CString::from_raw(cs.name); }
     }
 }

@@ -110,9 +110,58 @@ static bool shm_tracker_release_one(absptr_t ptr) {
 
 /// }}}
 
+// ── Recursive-record env (named-schema stack) ─────────────────────────────
+//
+// Mirrors the pymorloc.c stack: thread-local push/pop discipline so the
+// schema walkers can resolve MORLOC_RECUR back-references to their
+// declarations on the way in or out.
+typedef struct {
+    const char* name;
+    const Schema* schema;
+} recur_env_entry_t;
+
+#define RECUR_ENV_MAX 64
+static __thread recur_env_entry_t recur_env_stack[RECUR_ENV_MAX];
+static __thread int recur_env_depth = 0;
+
+static int recur_env_push(const Schema* schema) {
+    if (schema == NULL || schema->name == NULL || schema->type == MORLOC_RECUR) return 0;
+    if (recur_env_depth >= RECUR_ENV_MAX) return 0;
+    recur_env_stack[recur_env_depth].name = schema->name;
+    recur_env_stack[recur_env_depth].schema = schema;
+    recur_env_depth++;
+    return 1;
+}
+
+static void recur_env_pop(int pushed) {
+    if (pushed && recur_env_depth > 0) recur_env_depth--;
+}
+
+static const Schema* recur_env_lookup(const char* name) {
+    if (name == NULL) return NULL;
+    for (int i = recur_env_depth - 1; i >= 0; i--) {
+        const recur_env_entry_t* e = &recur_env_stack[i];
+        if (e->name != NULL && strcmp(e->name, name) == 0) {
+            return e->schema;
+        }
+    }
+    return NULL;
+}
+
 // {{{ to_voidstar
 
+static size_t get_shm_size_inner(const Schema* schema, SEXP obj);
+
+// Public wrapper: maintain the recur env stack across the recursive walk
+// so MORLOC_RECUR arms can resolve their back-reference targets.
 static size_t get_shm_size(const Schema* schema, SEXP obj) {
+    int pushed = recur_env_push(schema);
+    size_t r = get_shm_size_inner(schema, obj);
+    recur_env_pop(pushed);
+    return r;
+}
+
+static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
     size_t size = 0;
     switch (schema->type) {
         case MORLOC_NIL:
@@ -239,17 +288,27 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             }
 
         case MORLOC_OPTIONAL:
+            // Slot is sizeof(relptr) (= schema->width). Absent → just the slot.
+            // Present → slot + worst-case alignment padding for the inner T +
+            // T's total size (its own width plus any variable extras).
             if (obj == R_NilValue) {
                 return schema->width;
             }
             {
                 size_t inner_size = get_shm_size(schema->parameters[0], obj);
-                size = schema->width;
-                if (inner_size > schema->parameters[0]->width) {
-                    size += inner_size - schema->parameters[0]->width;
-                }
-                return size;
+                size_t inner_align = schema_alignment(schema->parameters[0]);
+                if (inner_align == 0) inner_align = 1;
+                return schema->width + (inner_align - 1) + inner_size;
             }
+
+        case MORLOC_RECUR: {
+            const Schema* target = recur_env_lookup(schema->name);
+            if (target == NULL) {
+                MORLOC_ERROR("Recur back-reference to undeclared schema name '%s'",
+                             schema->name ? schema->name : "?");
+            }
+            return get_shm_size_inner(target, obj);
+        }
 
         default:
             MORLOC_ERROR("Unhandled schema type %d in get_size_inner", (int)schema->type);
@@ -347,7 +406,19 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
         *(uint64_t*)dest = (uint64_t)value; \
     } while(0)
 
+static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Schema* schema);
+
+// Public entry point: push the schema's declaration name (if any) onto
+// the recur env, dispatch to the inner walker, then pop. Recur arms
+// inside _inner resolve targets via recur_env_lookup.
 static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
+    int pushed = recur_env_push(schema);
+    void* r = to_voidstar_r_inner(dest, cursor, obj, schema);
+    recur_env_pop(pushed);
+    return r;
+}
+
+static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
     MAYFAIL
 
     switch (schema->type) {
@@ -595,14 +666,39 @@ static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* sc
             break;
 
         case MORLOC_OPTIONAL:
+            // The slot is a relptr. Absent → write RELNULL. Present →
+            // align the cursor for the inner T, write the inner's relptr
+            // into the slot, advance the cursor past T's width, then
+            // recurse to fill T's body.
             if (obj == R_NilValue) {
-                *((uint8_t*)dest) = 0;
-                memset((char*)dest + schema->offsets[0], 0, schema->parameters[0]->width);
+                *((relptr_t*)dest) = RELNULL;
             } else {
-                *((uint8_t*)dest) = 1;
-                to_voidstar_r((char*)dest + schema->offsets[0], cursor, obj, schema->parameters[0]);
+                const Schema* inner_schema = schema->parameters[0];
+                size_t inner_align = schema_alignment(inner_schema);
+                if (inner_align == 0) inner_align = 1;
+                *cursor = (void*)(((uintptr_t)*cursor + inner_align - 1) & ~(uintptr_t)(inner_align - 1));
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_OPTIONAL"); }
+                }
+                void* inner_dest = *cursor;
+                *cursor = (void*)((char*)*cursor + inner_schema->width);
+                to_voidstar_r(inner_dest, cursor, obj, inner_schema);
             }
             break;
+
+        case MORLOC_RECUR: {
+            const Schema* target = recur_env_lookup(schema->name);
+            if (target == NULL) {
+                MORLOC_ERROR("Recur back-reference to undeclared schema name '%s'",
+                             schema->name ? schema->name : "?");
+            }
+            // Dispatch directly to _inner so the Recur node itself
+            // does not push its own (lookup-key) name onto the env.
+            to_voidstar_r_inner(dest, cursor, obj, target);
+            break;
+        }
 
         default:
             MORLOC_ERROR("Unhandled schema type %d in to_voidstar_r", (int)schema->type);
@@ -633,7 +729,18 @@ static void* to_voidstar(SEXP obj, const Schema* schema) {
 
 // {{{ from_voidstar
 
+static SEXP from_voidstar_inner(const void* data, const Schema* schema, const void* base_ptr);
+
+// Public entry point: push/pop the recur env around every call so the
+// inner walker can resolve MORLOC_RECUR via recur_env_lookup.
 static SEXP from_voidstar(const void* data, const Schema* schema, const void* base_ptr) {
+    int pushed = recur_env_push(schema);
+    SEXP r = from_voidstar_inner(data, schema, base_ptr);
+    recur_env_pop(pushed);
+    return r;
+}
+
+static SEXP from_voidstar_inner(const void* data, const Schema* schema, const void* base_ptr) {
     MAYFAIL
 
     if(data == NULL){
@@ -1041,16 +1148,16 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
             break;
         }
         case MORLOC_MAP: {
+            // R_NilValue is a legitimate field value: it stands for both
+            // MORLOC_NIL fields and absent MORLOC_OPTIONAL fields (the
+            // recursive `?T` tail of an LL, for instance). Real errors
+            // inside from_voidstar take the R error() longjmp path and
+            // never return, so reaching the return at all means success.
             obj = PROTECT(allocVector(VECSXP, schema->size));
             SEXP names = PROTECT(allocVector(STRSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
                 SEXP value = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
-                if (value == R_NilValue) {
-                    UNPROTECT(2);
-                    obj = R_NilValue;
-                    goto error;
-                }
                 SET_VECTOR_ELT(obj, i, value);
                 SET_STRING_ELT(names, i, mkChar(schema->keys[i]));
             }
@@ -1059,11 +1166,33 @@ static SEXP from_voidstar(const void* data, const Schema* schema, const void* ba
             break;
         }
         case MORLOC_OPTIONAL: {
-            uint8_t tag = *(const uint8_t*)data;
-            if (tag == 0) {
+            // The Optional slot is a relptr (RELNULL = absent). Resolve and
+            // recurse into the inner T's body when present.
+            relptr_t relptr = *(const relptr_t*)data;
+            if (relptr == RELNULL) {
                 return R_NilValue;
             }
-            obj = from_voidstar((const char*)data + schema->offsets[0], schema->parameters[0], base_ptr);
+            const void* inner_abs;
+            if (base_ptr) {
+                inner_abs = (const char*)base_ptr + relptr;
+            } else {
+                char* rel_err = NULL;
+                inner_abs = rel2abs(relptr, &rel_err);
+                if (rel_err) { free(rel_err); MORLOC_ERROR("rel2abs failed in MORLOC_OPTIONAL"); }
+            }
+            obj = from_voidstar(inner_abs, schema->parameters[0], base_ptr);
+            break;
+        }
+        case MORLOC_RECUR: {
+            const Schema* target = recur_env_lookup(schema->name);
+            if (target == NULL) {
+                MORLOC_ERROR("Recur back-reference to undeclared schema name '%s'",
+                             schema->name ? schema->name : "?");
+                goto error;
+            }
+            // Dispatch directly to _inner so the Recur node does not push
+            // its own (lookup-key) name onto the env stack.
+            obj = from_voidstar_inner(data, target, base_ptr);
             break;
         }
         default:

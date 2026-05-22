@@ -1,0 +1,6 @@
+module main (f)
+
+record B1 where
+  a :: B1
+
+f :: B1 -> B1

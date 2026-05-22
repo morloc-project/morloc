@@ -1063,6 +1063,43 @@ subtype scope a b@(ExistU _ ([], _) _) g = occursCheck b a "InstantiateR" >> ins
 --  g1[Ea] |- Ea <: A -| g2
 subtype scope a@(ExistU _ ([], _) _) b g = occursCheck a b "InstantiateL" >> instantiate scope a b g
 subtype scope a@(AppU _ _) b@(ExistU _ _ _) g = subtype scope b a g
+-- ExistU carrying record-key constraints (e.g. from `.field x`) against
+-- a concrete NamU: forward to `instantiate`, which has the
+-- key-matching logic. Without this, the subtype dispatch falls
+-- through to "Type mismatch" whenever a getter is applied to a value
+-- whose type already unfolded to a record (typically after the
+-- alias-reduction clause below fires for `LL a` -> `NamU LL [...]`).
+subtype scope t1@(NamU _ _ _ _) t2@(ExistU _ _ ((_:_), _)) g =
+  occursCheck t1 t2 "InstantiateR" >> instantiate scope t1 t2 g
+subtype scope t1@(ExistU _ _ ((_:_), _)) t2@(NamU _ _ _ _) g =
+  occursCheck t1 t2 "InstantiateL" >> instantiate scope t1 t2 g
+-- If the right side is an applied type alias, reduce it one step
+-- before the arity / record-key rules below try to match against the
+-- raw constructor.
+--
+-- Two recursive-typedef cases want this:
+--
+--   record LL a where { v :: a; tail :: ?LL }       (NamU body)
+--   type LL a = (a, ?LL)                            (tuple body)
+--
+-- Both produce a use site like `x :: LL a` where `.tail x` or `.1 x`
+-- generates an ExistU carrying a field/index constraint. Subtyping
+-- that ExistU against the un-reduced `AppU (VarU "LL") [a]` finds the
+-- alias's parameter list (length 1) doesn't match the
+-- constraint's slot count (2 for a tuple) and the record-keys path
+-- requires an empty rs. After one reduction step `LL a` becomes the
+-- alias body (either a NamU the existing NamU/ExistU instantiate
+-- handles, or a tuple-shaped AppU whose arity matches), and the
+-- pre-existing rules close out the check.
+--
+-- Termination: TE.reduceType returns Nothing when no progress is
+-- possible, and recursive references inside the body are protected by
+-- the bnd-set in TypeEval.generalTransformType. Each call here makes
+-- one step of progress, so this doesn't loop.
+subtype scope t1@(ExistU _ _ _) t2@(AppU (VarU v) _) g1
+  | Map.member v scope
+  , Just t2' <- TE.reduceType scope t2 =
+      subtype scope t1 t2' g1
 subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
   -- if the existential is closed and the parameter length is not equal, die
   | pc1 == Closed && length ps1 /= length ps2 =
@@ -1240,6 +1277,18 @@ instantiate scope ta@(VarU _) tb@(ExistU _ _ (_ : _, _)) g1 = do
   case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
     Nothing -> subtypeError ta tb "Error in VarU versus NamU with existential keys"
+-- AppU vs ExistU(rs): if AppU is an applied alias, reduce one step and
+-- retry. Mirrors the VarU case above but for the parameterized form
+-- (`LL a` rather than bare `LL`). Both record fields (`?LL` inside a
+-- `record LL a where ...`) and recursive type-alias tuples (`type LL a
+-- = (a, ?LL)`) end up here when a selector existential is unified
+-- against the unfolded use site.
+instantiate scope ta@(AppU (VarU v) _) tb@(ExistU _ _ ((_:_), _)) g1
+  | Map.member v scope, Just ta' <- TE.reduceType scope ta =
+      instantiate scope ta' tb g1
+instantiate scope ta@(ExistU _ _ ((_:_), _)) tb@(AppU (VarU v) _) g1
+  | Map.member v scope, Just tb' <- TE.reduceType scope tb =
+      instantiate scope ta tb' g1
 instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
   let keyset1 = Set.fromList $ map fst rs1
       keyset2 = Set.fromList $ map fst rs2

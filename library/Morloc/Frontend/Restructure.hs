@@ -18,6 +18,8 @@ type declarations, and collects type definitions and source mappings into
 -}
 module Morloc.Frontend.Restructure (restructure) where
 
+import qualified Data.Graph as Graph
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -44,7 +46,8 @@ restructure s = do
   -- Since d is the entire tree, the initizalized counter will start at global maximum.
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
-  checkForSelfRecursion s -- currently, do no not allow type self-recursion
+  checkForSelfRecursion s -- bare self-recursion is rejected; guarded forms pass
+    >>= checkMutualRecursion -- non-trivial SCCs over typedef-references are rejected
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
     >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
@@ -57,64 +60,189 @@ restructure s = do
 doM :: (Monad m) => (a -> m ()) -> a -> m a
 doM f x = f x >> return x
 
-{- | Check for infinitely expanding self-recursive types
+-- Recursion-occurrence status for a typedef body. We need three
+-- outcomes, not two: a guarded reference (legal) must dominate an
+-- absent one, and a bare reference (illegal) must dominate everything.
+data RecStatus = Absent | Guarded | Bare
+  deriving (Eq, Show)
 
-There are cases were the defined term may appear on the right. For example:
+instance Semigroup RecStatus where
+  Bare    <> _       = Bare
+  _       <> Bare    = Bare
+  Guarded <> _       = Guarded
+  _       <> Guarded = Guarded
+  _       <> _       = Absent
 
-  type Py (Tree n e l) = "Tree" n e l
+instance Monoid RecStatus where
+  mempty = Absent
 
-Here the general type Tree is mapped to the concrete type "Tree" in Python.
-The fact that the general and concrete names are the same is fine. They are
-different languages. But what about:
+-- | Classify occurrences of @v@ inside a typedef body. The @guarded@
+-- flag flips to True once we descend under an indirection that bounds
+-- the size of the recursive payload at value-level:
+--
+--   * @OptionalU t@ (the @?_@ surface form) -- a recursive reference
+--     inside is heap-indirected via the optional discriminant.
+--   * @AppU (VarU (TV "List")) [t]@ -- a list field is empty-base-cased
+--     and stored via a pointer to a heap region.
+--
+-- Once guarded, the flag stays True for all sub-terms. Any bare
+-- occurrence (@VarU v@ with @guarded == False@) poisons the result
+-- to @Bare@ and the whole typedef is rejected.
+--
+-- This runs BEFORE alias resolution, so we cannot peek through
+-- user-level aliases like @type MyList a = List a@: such aliases are
+-- treated as ordinary type applications and do NOT count as guards.
+classifyRecursion :: TVar -> TypeU -> RecStatus
+classifyRecursion v = go False
+  where
+    go :: Bool -> TypeU -> RecStatus
+    go _ (OptionalU t)                       = go True t
+    go _ (AppU (VarU (TV "List")) [t])       = go True t
+    go g (VarU v') | v == v'                 = if g then Guarded else Bare
+    go _ (VarU _)                            = Absent
+    go g (ForallU _ t)                       = go g t
+    go g (FunU ts r)                         = mconcat (go g r : map (go g) ts)
+    go g (AppU h ts)                         = mconcat (go g h : map (go g) ts)
+    go g (NamU _ _ ps rs)                    = mconcat (map (go g) ps ++ map (go g . snd) rs)
+    go g (EffectU _ t)                       = go g t
+    go g (OpU _ args)                        = mconcat (map (go g) args)
+    go g (LitU (LRec fs))                    = mconcat (map (go g . snd) fs)
+    go g (LitU (LList es))                   = mconcat (map (go g) es)
+    go g (LitU (LSet es))                    = mconcat (map (go g) es)
+    go g (LabeledU _ t)                      = go g t
+    go _ ExistU {} = error "There should not be existentionals in typedefs"
+    -- Inert: kind-specific vars/voids and Nat/Str literals.
+    go _ _                                   = Absent
 
-  type (Tree n) = Node n [Tree n]
+{- | Reject typedefs whose self-recursion would diverge.
 
-This type should be legal, but currently it is not supported. Which
-is why I need to raise an explicit error to avoid infinite loops.
+Self-recursion through @[_]@ or @?_@ is legal: the recursive field is
+heap-indirected and the base case (empty list, @null@) terminates
+expansion. Any other self-reference -- bare under record field, tuple,
+function arrow, or non-list application -- is rejected because such a
+typedef would have unbounded structural size.
+
+Examples:
+
+  type (Tree n) = {value :: n, children :: [Tree n]}  -- legal (list-guarded)
+  type LL = {head :: Int, tail :: ?LL}                 -- legal (option-guarded)
+  type Bad = {a :: Bad}                                -- rejected (bare)
+
+The exemption at the head-application case allows a typedef body to
+mention the type applied to its own parameters, which is the parser's
+shape for parametric existence claims like @type Foo a = Foo a@.
+
+Mutual recursion is NOT diagnosed here; @checkMutualRecursion@ runs
+afterwards and rejects any non-trivial SCC over typedef references.
 -}
 checkForSelfRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
   _ <- DAG.mapNodeM (AST.checkExprI isExprSelfRecursive) d
   return d
   where
-    -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
-    -- Allow general type existence statements without parameters
-    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE Nothing _ [] _ _))) = return ()
-    --  and also with parameters
     isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _)))
+      -- Forward declaration with no body: parser lowers @type Foo@ to a
+      -- body that is just @VarU Foo@ itself. Exempt these along with the
+      -- parametric self-application case @type Foo a = Foo a@.
+      | t == VarU v = return ()
       | t == AppU (VarU v) (map (either (VarU . fst) id) vs) = return ()
-      | hasTerm v t = MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
+      | classifyRecursion v t == Bare =
+          MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
-    -- otherwise disallow self-recursion
     isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _)))
-      | any (hasTerm v) (t : (rights ts)) =
+      -- Language-specific typedefs: the same rule applied to the body
+      -- and any TypeU parameter slots.
+      | any ((== Bare) . classifyRecursion v) (t : rights ts) =
           MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
-    -- check if a given term appears in a type
-    hasTerm :: TVar -> TypeU -> Bool
-    hasTerm v (VarU v') = v == v'
-    hasTerm v (ForallU _ t) = hasTerm v t
-    hasTerm v (FunU (t1 : rs) t2) = hasTerm v t1 || hasTerm v (FunU rs t2)
-    hasTerm v (FunU [] t) = hasTerm v t
-    hasTerm v (AppU t1 (t2 : rs)) = hasTerm v t2 || hasTerm v (AppU t1 rs)
-    hasTerm v (AppU t1 []) = hasTerm v t1
-    hasTerm v (NamU o n ps ((_, t) : rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
-    hasTerm v (NamU o n (p : ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
-    hasTerm _ (NamU _ _ [] []) = False
-    hasTerm v (EffectU _ t) = hasTerm v t
-    hasTerm v (OptionalU t) = hasTerm v t
-    -- Unified carriers: uniform recursion across all operators and literal payloads.
-    hasTerm v (OpU _ args) = any (hasTerm v) args
-    hasTerm v (LitU (LRec fs)) = any (hasTerm v . snd) fs
-    hasTerm v (LitU (LList es)) = any (hasTerm v) es
-    hasTerm v (LitU (LSet es)) = any (hasTerm v) es
-    hasTerm v (LabeledU _ t) = hasTerm v t
-    hasTerm _ ExistU {} = error "There should not be existentionals in typedefs"
-    -- Inert: kind-specific vars/voids and Nat/Str literals.
-    hasTerm _ _ = False
+{- | Reject mutually recursive typedefs.
+
+Self-recursion guarded by @[_]@ or @?_@ is permitted by
+@checkForSelfRecursion@. Mutual recursion -- a cycle of two or more
+typedefs that reference each other -- is not supported, because the
+type-evaluator's bound-set termination only protects each typedef's
+own name; cycles across distinct typedef names would still loop. We
+diagnose them up front here so the compiler does not hang later in
+the reduce-and-retry sites in Realize/Express or in pairEval's alias
+chase.
+
+Algorithm: collect typedefs across ALL modules in the DAG and build a
+single directed graph keyed by @(Maybe Lang, TVar)@ -- the typedef's
+language scope (general = @Nothing@, language-specific = @Just lang@)
+paired with its name. An edge @A -> B@ exists iff @B@ appears
+anywhere in @A@'s body (regardless of guarding); references resolve
+to the same-language entry when one exists, otherwise to the general
+entry. Quotient by SCC via @Data.Graph.stronglyConnComp@. Any cyclic
+SCC of size >= 2 is illegal mutual recursion. Singleton SCCs (with
+or without a self-loop) are passed through: a self-loop indicates a
+self-recursion that @checkForSelfRecursion@ has already either
+permitted (guarded) or rejected (bare).
+
+The check is global rather than per-module because cycles can span
+module boundaries: a module's typedef can reference an imported name
+whose source module's typedef references back into the importer.
+Each module's view looks acyclic in isolation; only the merged
+typedef graph reveals the cycle.
+
+Per-language keying matters because a language-specific cycle
+(e.g. @type Cpp => A = "..." B@ + @type Cpp => B = "..." A@) is
+invisible to a check that only collects general typedefs, even
+though it would hang @pairEval@ when codegen resolves a concrete
+type. It also avoids false positives when two languages happen to
+share typedef names without interacting.
+
+Bound parameter names of a typedef are excluded from the outgoing
+references, so @type Foo a = Foo a@ does not spuriously self-edge
+through the @a@ parameter.
+-}
+checkMutualRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
+checkMutualRecursion d = do
+  let allTypedefs = concatMap collectTypedefs (DAG.nodes d)
+      declared = Set.fromList [(scope, v) | (_, scope, v, _, _) <- allTypedefs]
+      -- Resolve a bare name reference to the right scope-qualified
+      -- key. Same-language scope wins; otherwise fall back to the
+      -- general scope. References to undeclared names (built-ins,
+      -- concrete-name strings) produce no edge.
+      resolveRef scope x
+        | Set.member (scope, x) declared = Just (scope, x)
+        | Set.member (Nothing, x) declared = Just (Nothing, x)
+        | otherwise = Nothing
+      nodes =
+        [ ((i, scope, v), (scope, v), Set.toList outgoing)
+        | (i, scope, v, vs, t) <- allTypedefs
+        , let bound = Set.fromList [p | Left (p, _) <- vs]
+        , let mentioned = Set.fromList (AST.findTypeTerms t) `Set.difference` bound
+        , let outgoing = Set.fromList (mapMaybe (resolveRef scope) (Set.toList mentioned))
+        ]
+      sccs = Graph.stronglyConnComp nodes
+  mapM_ rejectCyclic sccs
+  return d
+  where
+    rejectCyclic :: Graph.SCC (Int, Maybe Lang, TVar) -> MorlocMonad ()
+    rejectCyclic (Graph.CyclicSCC xs@(_:_))
+      | length xs >= 2 =
+          let (firstIdx, scope0, _) = head xs
+              cycleNames = [v | (_, _, v) <- xs]
+              -- An SCC of size >= 2 has all members in the same
+              -- scope: general typedefs never reference
+              -- language-specific names, and language-to-general
+              -- edges are one-way (the general body cannot close
+              -- the cycle back to a language scope).
+              scopeMsg = case scope0 of
+                Nothing -> "type definitions"
+                Just lang -> pretty lang <+> "type definitions"
+          in MM.throwSourcedError firstIdx $
+               "Mutual recursion between" <+> scopeMsg <+> "is not supported." <+>
+               "Cycle:" <+> hsep (punctuate "," (map pretty cycleNames))
+    rejectCyclic _ = return ()
+
+    collectTypedefs :: ExprI -> [(Int, Maybe Lang, TVar, [Either (TVar, Kind) TypeU], TypeU)]
+    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _))) = [(i, fmap fst form, v, vs, t)]
+    collectTypedefs (ExprI _ (ModE _ es)) = concatMap collectTypedefs es
+    collectTypedefs _ = []
 
 {- | Use export/import information to find which terms are imported into each module
 * reduces the Import edge type to an alias map.

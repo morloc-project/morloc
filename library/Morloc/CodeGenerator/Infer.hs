@@ -75,10 +75,20 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
           -- Here the primitive type (e.g., "std::vector<std::tuple<$1,std::string>>" a)
           -- cannot be woven with the `Foo a` type. So `Foo a` needs to be
           -- substituted for [(a, Str)], which can be woven.
+          --
+          -- 'evalGeneralStep' wraps 'TE.evaluateStep' which returns
+          -- @Just t@ even when @t == generalType@ (no progress). For a
+          -- guarded recursive record like @record Tree where children
+          -- :: [Tree]@ the bnd-protected NamU branch in
+          -- 'generalTransformType' returns the same NamU as input, so a
+          -- naive recursion here loops forever. Compare structurally
+          -- before recursing.
           mayReducedGType <- evalGeneralStep i generalType
           case mayReducedGType of
-            (Just reducedGType) -> inferConcreteType lang (Idx i (typeOf reducedGType))
-            Nothing ->
+            (Just reducedGType)
+              | reducedGType /= generalType ->
+                  inferConcreteType lang (Idx i (typeOf reducedGType))
+            _ ->
               MM.throwSourcedError i $
                 "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
@@ -124,7 +134,17 @@ weave gscope = w
   where
     w (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
     w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
-    w (AppU t1 ts1) (AppU t2 ts2) = AppF <$> w t1 t2 <*> weaveArgs ts1 ts2
+    -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
+    -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while
+    -- the concrete-side resolution expanded to @"tuple" [int, ?(...)]@
+    -- with 2 args), fall through to the catch-all @evaluateStep@ retry
+    -- on @t1@. This is the same generalization the catch-all already
+    -- performs for type-level mismatches; we just need to opt the AppU
+    -- branch into it on arg-length failure instead of failing outright.
+    w t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
+      case (AppF <$> w h1 h2 <*> weaveArgs ts1 ts2) of
+        r@(Right _) -> r
+        Left _ -> wStep t1 t2
     w t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
       | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 =
           NamF o1 (FV v1 (CV (unTVar v2)))
@@ -143,13 +163,17 @@ weave gscope = w
     w (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
     w (LabeledU _ t1) t2 = w t1 t2
     w (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
-    w t1 t2 = case T.evaluateStep gscope t1 of
+    w t1 t2 = wStep t1 t2
+
+    -- Step the general type one level via @evaluateStep@ and retry. Used
+    -- both as the structural-mismatch catch-all and as the AppU
+    -- arity-mismatch fallback.
+    wStep t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
         if t1 == t1'
           then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
-          else do
-            w t1' t2
+          else w t1' t2
 
     -- Weave type arguments, handling Nat params that may be erased OR
     -- preserved in the concrete type. When the concrete head is also a Nat

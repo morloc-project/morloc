@@ -1,0 +1,148 @@
+-- Recursive RECORD fields, exercised across Py, Cpp, and R.
+--
+-- Tree      -- record self-reference guarded through a list field. Build a
+--              fixed 3-level tree in Python, then sum it in each of the
+--              three languages. The Cpp and R variants force the wire
+--              format to (de)serialize a recursive value across a process
+--              boundary.
+--
+-- LL        -- record self-reference guarded through an optional field.
+--              Build a linked list of length n in Python and count its
+--              length in each language.
+--
+-- Container -- parameterized recursive record (record-shaped analog of
+--              Pair). Builds a Container Int in Python and counts its
+--              length natively in morloc via the record-getter `.sub`,
+--              exercising parameter threading through the recursion in
+--              both TypeEval (alias-reduction for record selectors) and
+--              the wire-format ancestor tracking.
+--
+-- pingTree  -- Py -> Cpp -> Py round-trip via an identity function in
+--              Cpp. Exercises both directions of the wire format on the
+--              same recursive value within a single nexus call.
+
+-- KNOWN LIMITATION (the *Build / *FromJson section at the bottom of
+-- this file is commented out): native construction of recursive
+-- records routes through the C++ pool when root-cpp is imported, and
+-- the current C++ struct layout (using @std::optional<std::unique_ptr<T>>@
+-- for self-recursive optional fields) makes the struct move-only.
+-- The codegen elsewhere still assumes copyable types and emits
+-- intermediate let-bindings that hit deleted copy constructors. The
+-- fix is a redesign that stores all non-primitive struct fields
+-- behind a uniform pointer (`shared_ptr`), removing the move-only
+-- contamination. Until that lands, the recursive-record-CONSTRUCTION
+-- code is left in the file but commented out at the export list and
+-- definition sites; native CONSUMPTION of Py-built records (the sum*,
+-- ll*, containerLenPy, pingPyCpp paths below) works because no
+-- intermediate copy occurs on the consumer side.
+
+module main (sumPy, sumCpp, sumR, llPy, llCpp, llR, pingPyCpp, containerLenPy
+            -- , llBuild, treeBuild, containerBuild
+            -- , llFromJson, treeFromJson, containerFromJson
+            )
+
+import root
+import root-py
+import root-cpp
+import root-r
+-- maybe-py supplies `require` and `isNull` (typeclass methods with
+-- Python instances) used by the native morloc `containerLength` below.
+import maybe-py
+
+record Tree where
+  value :: Int
+  children :: [Tree]
+
+record Cpp => Tree = "tree_t"
+record Py  => Tree = "dict"
+record R   => Tree = "list"
+
+record LL where
+  head :: Int
+  tail :: ?LL
+
+record Cpp => LL = "ll_t"
+record Py  => LL = "dict"
+record R   => LL = "list"
+
+-- Parameterized recursive record. Polymorphic analog of LL: the
+-- recursive `sub` field carries an optional-guarded back-reference,
+-- but the payload field `val` is type-parameterized on `a`.
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+record Py => Container a = "dict"
+
+source Py  from "foo.py"  ("sum_tree"        as sumTreePy
+                          , "ll_len"         as llLenPy
+                          , "build_tree"     as buildTreePy
+                          , "build_ll"       as buildLLPy
+                          , "build_container" as buildContainerPy)
+source Cpp from "foo.hpp" ("sum_tree"        as sumTreeCpp
+                          , "ll_len"         as llLenCpp
+                          , "identity_tree"  as identityTreeCpp)
+source R   from "foo.R"   ("sum_tree"        as sumTreeR
+                          , "ll_len"         as llLenR)
+
+sumTreePy        :: Tree -> Int
+sumTreeCpp       :: Tree -> Int
+sumTreeR         :: Tree -> Int
+llLenPy          :: LL -> Int
+llLenCpp         :: LL -> Int
+llLenR           :: LL -> Int
+buildTreePy      :: Int -> Tree
+buildLLPy        :: Int -> LL
+buildContainerPy :: Int -> Container Int
+identityTreeCpp  :: Tree -> Tree
+
+-- Native morloc length over a Container. The recursive call exercises
+-- the typechecker's record selector path under parameterization:
+-- `.sub x` retrieves `?(Container a)`, and unifying it against
+-- `Container a` in the recursive call requires the typechecker to keep
+-- `a` consistent through the cycle.
+containerLength :: Container a -> Int
+containerLength x ? isNull (.sub x) = 1
+                  : 1 + containerLength (require (.sub x))
+
+sumPy depth = sumTreePy (buildTreePy depth)
+sumCpp depth = sumTreeCpp (buildTreePy depth)
+sumR depth = sumTreeR (buildTreePy depth)
+
+llPy n = llLenPy (buildLLPy n)
+llCpp n = llLenCpp (buildLLPy n)
+llR n = llLenR (buildLLPy n)
+
+containerLenPy n = containerLength (buildContainerPy n)
+
+-- Py -> Cpp identity -> Py: a single recursive value crosses the wire
+-- twice in opposite directions, then is summed locally.
+pingPyCpp depth = sumTreePy (identityTreeCpp (buildTreePy depth))
+
+-- Native construction of recursive RECORDS, plus JSON-input wrappers.
+-- These are commented out pending the C++ struct-layout redesign
+-- described at the top of this file. The intent of these functions
+-- is preserved here so the test can be revived in one diff once the
+-- pointer-everywhere struct representation lands.
+--
+-- llBuild :: Int -> LL
+-- llBuild n ? n > 0 = {head = n, tail = llBuild (n - 1)}
+--           : {head = 0, tail = Null}
+--
+-- treeBuild :: Int -> Tree
+-- treeBuild d ? d <= 0 = {value = 1, children = []}
+--              : let sub = treeBuild (d - 1)
+--                in {value = 0, children = [sub, sub]}
+--
+-- containerBuild :: Int -> Container Int
+-- containerBuild n ? n > 0 = {val = n, sub = containerBuild (n - 1)}
+--                  : {val = 0, sub = Null}
+--
+-- llFromJson :: LL -> Int
+-- llFromJson x = llLenPy x
+--
+-- treeFromJson :: Tree -> Int
+-- treeFromJson x = sumTreePy x
+--
+-- containerFromJson :: Container Int -> Int
+-- containerFromJson x = containerLength x

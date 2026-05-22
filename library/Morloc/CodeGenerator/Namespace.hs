@@ -164,6 +164,14 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
+  -- | Back-reference to a record whose definition appears as a NamF
+  -- somewhere on the enclosing TypeF path. Introduced by guarded
+  -- self-recursive records (e.g. @record Tree where children :: [Tree]@):
+  -- when @makeSerialAST'@ descends into the @[Tree]@ field, it would
+  -- otherwise re-expand the @Tree@ record forever. RecF cuts the cycle.
+  -- The FVar mirrors the NamF's outer name so downstream consumers can
+  -- resolve the back-reference structurally.
+  | RecF FVar
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -213,6 +221,9 @@ nullifyNatKindsF (NamF o n ps rs) =
   NamF o n (map nullifyNatKindsF ps) [(k, nullifyNatKindsF v) | (k, v) <- rs]
 nullifyNatKindsF (EffectF effs t) = EffectF effs (nullifyNatKindsF t)
 nullifyNatKindsF (OptionalF t) = OptionalF (nullifyNatKindsF t)
+-- RecF is a back-reference; it carries no nested types so the walk
+-- bottoms out here.
+nullifyNatKindsF t@(RecF _) = t
 nullifyNatKindsF t = t
 
 -- | Companion to 'nullifyNatKindsF' for the Type level.
@@ -288,6 +299,13 @@ data SerialAST
   | SerialString FVar
   | SerialNull FVar
   | SerialOptional FVar SerialAST
+  | -- | Back-reference to an ancestor 'SerialObject' with this FVar in
+    -- the SerialAST tree. Emitted by guarded self-recursive records to
+    -- cut the cycle that would otherwise expand forever during
+    -- 'makeSerialAST''. Downstream wire-schema emission renders it as a
+    -- back-ref token; the runtime resolves it back to the ancestor's
+    -- Schema*.
+    SerialRec FVar
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -325,6 +343,7 @@ instance Pretty SerialAST where
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
+  pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
@@ -536,7 +555,15 @@ data PolyExpr
   | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
-  | PolyNull (Indexed TVar)
+  -- The Indexed Type carries the FULL type of the Null (e.g.
+  -- @?(BTree Int)@, NOT just the underlying TVar). Storing the
+  -- complete type lets downstream passes (Serialize -> NativeExpr,
+  -- typeFof of enclosing TupleN/RecordN/IfN) preserve the alias's
+  -- type arguments. Earlier shapes stored only an @Indexed TVar@,
+  -- which lost the args of parameterised aliases and caused the
+  -- enclosing literal's typeFof to surface a bare-FVar-with-no-args
+  -- that schema computation could not interpret.
+  | PolyNull (Indexed Type)
   | PolyDoBlock (Indexed Type) PolyExpr
   | PolyEval (Indexed Type) PolyExpr
   | PolyCoerce Coercion (Indexed Type) PolyExpr
@@ -570,7 +597,9 @@ data MonoExpr
   | MonoReal (Indexed TVar) RealLit
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
-  | MonoNull (Indexed TVar)
+  -- See @PolyNull@ for the rationale: store the full type of the
+  -- Null literal, not just the inner TVar.
+  | MonoNull (Indexed Type)
   | MonoDoBlock (Indexed Type) MonoExpr
   | MonoEval (Indexed Type) MonoExpr
   | MonoCoerce Coercion (Indexed Type) MonoExpr
@@ -645,7 +674,10 @@ data NativeExpr
   | RealN FVar RealLit
   | IntN FVar Integer
   | StrN FVar Text
-  | NullN FVar
+  -- See @PolyNull@ in this module for the rationale on storing a
+  -- @TypeF@ rather than an @FVar@: parameterised aliases lose their
+  -- arg list if only the constructor name is kept.
+  | NullN TypeF
   | DoBlockN TypeF NativeExpr
   | EvalN TypeF NativeExpr
   | CoerceN Coercion TypeF NativeExpr
@@ -916,7 +948,8 @@ data NativeExpr_ nm se ne sr nr
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
   | StrN_ FVar Text
-  | NullN_ FVar
+  -- See @PolyNull@ / @NullN@ for the rationale: store @TypeF@ not @FVar@.
+  | NullN_ TypeF
   | DoBlockN_ TypeF ne
   | EvalN_ TypeF ne
   | CoerceN_ Coercion TypeF ne
@@ -1152,7 +1185,7 @@ instance HasTypeF NativeExpr where
   typeFof (RealN v _) = VarF v
   typeFof (IntN v _) = VarF v
   typeFof (StrN v _) = VarF v
-  typeFof (NullN v) = VarF v
+  typeFof (NullN t) = t
   typeFof (DoBlockN t _) = t
   typeFof (EvalN t _) = t
   typeFof (CoerceN _ t _) = t

@@ -34,14 +34,6 @@ serialize :: MonoHead -> MorlocMonad SerialManifold
 serialize (MonoHead lang m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
-  MM.sayVVV $
-    "In serialize for" <+> "m"
-      <> pretty m0 <+> pretty lang <+> "segment"
-      <> "\n  form0:" <+> pretty form0
-      <> "\n  typemap:" <+> viaShow typemap
-      <> "\n  This map we made from the expression:\n  "
-      <> pretty e0
-
   se1 <- serialExpr m0 e0
   let sm = SerialManifold m0 lang form0 headForm0 se1
   wireSerial lang sm
@@ -90,9 +82,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialExpr
-    serialExpr _ (MonoManifold m form e) = do
-      MM.sayVVV $ "serialExpr MonoManifold m" <> pretty m <> parens (pretty form)
-      serialExpr m e
+    serialExpr _ (MonoManifold m _ e) = serialExpr m e
     serialExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
        in case inferState e1 of
@@ -131,8 +121,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialArg
-    serialArg _ e@(MonoManifold m form _) = do
-      MM.sayVVV $ "serialArg MonoManifold m" <> pretty m <> parens (pretty form)
+    serialArg _ e@(MonoManifold m _ _) = do
       se <- serialExpr m e
       case se of
         (ManS sm) -> return $ SerialArgManifold sm
@@ -146,8 +135,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad NativeArg
-    nativeArg _ e@(MonoManifold m form _) = do
-      MM.sayVVV $ "nativeArg MonoManifold m" <> pretty m <> parens (pretty form)
+    nativeArg _ e@(MonoManifold m _ _) = do
       ne <- nativeExpr m e
       case ne of
         (ManN nm) -> return $ NativeArgManifold nm
@@ -162,7 +150,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       MonoExpr ->
       MorlocMonad NativeExpr
     nativeExpr _ (MonoManifold m form e) = do
-      MM.sayVVV $ "nativeExpr MonoManifold m" <> pretty m <> parens (pretty form)
       ne <- nativeExpr m e
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
       return . ManN $ NativeManifold m lang form' ne
@@ -219,20 +206,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _ _) _) = do
       e' <- serialExpr m e
       t' <- inferType t
-      MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
       naturalizeN "nativeE MonoApp" m lang t' e'
     nativeExpr m (MonoApp (MonoLetVar (Idx idx (FunT inputTypes outputType)) i) es) = do
-      MM.sayVVV $ "MonoLetVar case"
       args <- mapM (nativeArg m) es
       appType <- case drop (length es) inputTypes of
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
       return $ AppExeN appType (LocalCallP i) args
-    nativeExpr _ (MonoApp e es) = do
-      MM.sayVVV "nativeExprr MonoApp"
-      MM.sayVVV $ "e:" <+> pretty e
-      MM.sayVVV $ "es:" <+> list (map pretty es)
-      error "Illegal application"
+    nativeExpr _ (MonoApp _ _) = error "Illegal application"
     nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
     nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
     nativeExpr _ (MonoBndVar (B _) i) =
@@ -258,7 +239,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoNull v) = NullN <$> inferVar v
+    -- MonoNull now carries an Indexed Type for the full type the
+    -- Null inhabits (e.g. @?(BTree Int)@). Use @inferType@ (=
+    -- @inferConcreteType@) rather than @inferVar@ so the resulting
+    -- @TypeF@ preserves the alias's args; the bare-TVar @inferVar@
+    -- path collapsed parameterised aliases through their body's head
+    -- and lost the args (see the @PolyNull@ comment in Namespace.hs).
+    nativeExpr _ (MonoNull v) = NullN <$> inferType v
     nativeExpr m (MonoIf cond thenE elseE) = do
       condNe <- nativeExpr m cond
       thenNe <- nativeExpr m thenE
@@ -329,6 +316,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           case params of
             [] -> pretty t
             ps -> parens (pretty t <+> hsep (map go ps))
+        go (RecF (FV t _)) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))
@@ -388,8 +376,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     mergeTypes x _ = x
 
     serializeS :: MDoc -> Int -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS msg m se = do
-      MM.sayVVV $ "serializeS" <+> pretty m <> ":" <+> msg
+    serializeS _ m se =
       SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
 
     inferState :: MonoExpr -> SerializationState
@@ -415,8 +402,7 @@ unwrapLetDef m (MonoReturn e) = (m, e)
 unwrapLetDef m e = (m, e)
 
 naturalizeN :: MDoc -> Int -> Lang -> TypeF -> SerialExpr -> MorlocMonad NativeExpr
-naturalizeN msg m lang t se = do
-  MM.sayVVV $ "naturalizeN at" <+> msg
+naturalizeN _ m lang t se =
   DeserializeN t <$> Serial.makeSerialAST m lang t <*> pure se
 
 class IsSerializable a where
@@ -579,8 +565,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
 
     serializeS :: MDoc -> Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS msg m t se = do
-      MM.sayVVV $ "serializeS" <+> pretty m <> ":" <+> msg
+    serializeS _ m t se =
       SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent

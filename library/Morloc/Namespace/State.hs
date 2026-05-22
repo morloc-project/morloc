@@ -148,6 +148,14 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
+  , stateSerialAncestors :: Set.Set TVar
+  -- ^ General-type names of records currently being lowered by
+  -- 'makeSerialAST''. Used to detect guarded self-recursive records:
+  -- on the way down we insert the FVar's general name; if we hit it
+  -- again, we emit 'SerialRec' instead of expanding the cycle. The
+  -- field is reset to empty at every top-level 'makeSerialAST' call
+  -- and saved/restored around each NamF descent, so it never leaks
+  -- across unrelated invocations.
   }
   deriving (Show)
 
@@ -388,6 +396,7 @@ instance Defaultable MorlocState where
       , stateUnsafeSkipNullCheck = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
+      , stateSerialAncestors = Set.empty
       }
 
 instance Defaultable PackageMeta where

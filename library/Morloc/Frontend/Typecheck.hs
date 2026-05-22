@@ -1279,6 +1279,79 @@ checkE i g1 e1@(LstS _) b = do
 -- standalone base types rather than aliases of Int. Type aliases are
 -- expanded through the scope so that user-defined names like
 -- `type Char = UInt8` also accept integer literals directly.
+-- A @let@ binding under a check-direction expected type. Without
+-- this rule the let falls through to @checkEFallback@, which calls
+-- @synthE@ on the whole let and then subtypes against @t@; that
+-- synthesizes the let-BODY without a check direction, so any
+-- literal-vs-alias coercion inside the body (e.g. the TupS rule
+-- below firing on @(0, sub, sub) :: BTree Int@ with @sub :: BTree Int@
+-- needing @BTree Int -> ?(BTree Int)@) never gets to run. Mirrors
+-- @synthE LetS@ but uses @checkG@ for the body so the expected type
+-- threads through to the literal that consumes it.
+checkE i g (LetS v e1 e2) t = do
+  (g1, t1, e1') <- synthG g e1
+  let g2 = g1 ++> [AnnG v t1]
+      g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of
+        Just val' -> g2 { gammaIntVals = Map.insert v val' (gammaIntVals g2) }
+        Nothing -> g2
+  (g3, t2, e2') <- checkG g2' e2 t
+  return (g3, t2, LetS v e1' e2')
+-- A tuple literal checked against an expected type. If the expected
+-- type reduces to a tuple shape with matching arity, check each
+-- element against its corresponding expected position type. This
+-- enables element-wise coercion at the literal's boundary -- a slot
+-- declared as @?(LL Int)@ accepts a pure @LL Int@ value via the
+-- standard @a -> ?a@ coercion that @checkG@ already supplies.
+-- Without this rule, the checkEFallback path synthesizes the literal's
+-- type as @(Int, LL Int)@ and runs strict subtype against
+-- @LL Int = (Int, ?(LL Int))@, which fails at the @LL Int <: ?(LL Int)@
+-- subgoal -- @tryCoerce@ only descends through OptionalU and won't fire
+-- on a tuple-vs-tuple element mismatch from the outside.
+checkE i g (TupS xs) t = do
+  scope <- MM.getGeneralScope i
+  let tApplied = apply g t
+      -- Pull out the slot types if the type is already a tuple of the
+      -- right arity. Else try one alias-reduction step (e.g. expand
+      -- @BTree Int@ to its body's outer @Tuple3 [...]@) and re-check.
+      -- Critical: use ONE-STEP @reduceType@, NOT full
+      -- @evaluateType@. Full evaluation walks through the slot args
+      -- recursively, expanding any record-typed argument (e.g.
+      -- @Trie Int@ in a @(Str, Trie Int)@ slot) into its @NamU@ body.
+      -- The subsequent element-wise check then faces an
+      -- @AppU <: NamU@ subtype goal that no rule decomposes; the
+      -- pretty-printer happens to render both sides identically
+      -- (e.g. "Trie Int <: Trie Int") even though the typeU shapes
+      -- differ, producing a baffling fall-through error.
+      -- Only treat the head as a tuple when it actually IS the
+      -- TupleN constructor for this arity. Matching on a bare
+      -- @VarU _@ would also match user aliases that happen to have
+      -- @length ts == length xs@ (e.g. @FixedPair (n :: Nat) a@
+      -- applied as @FixedPair 2 Int@ has two type args, just like
+      -- @Tuple2 Int Int@), and would element-wise check the literal
+      -- against the alias's type args (@2@, @Int@) instead of the
+      -- expanded body's slot types.
+      tryMatch t' = case t' of
+        AppU (VarU v) ts
+          | v == BT.tuple (length xs)
+          , length ts == length xs -> Just ts
+        _ -> Nothing
+      tsOpt = case tryMatch tApplied of
+        Just ts -> Just ts
+        Nothing -> TE.reduceType scope tApplied >>= tryMatch
+  case tsOpt of
+    Just ts -> do
+      let go gAcc acc [] [] = return (gAcc, reverse acc)
+          go gAcc acc (x:xrest) (et:trest) = do
+            (g', _, x') <- checkG gAcc x et
+            go g' (x' : acc) xrest trest
+          go _ _ _ _ = error "unreachable: arity matched by guard"
+      (gFinal, xs') <- go g [] xs ts
+      -- Return the ORIGINAL expected type, not the stepped form.
+      -- Keeping the alias identity (e.g. @BTree Int@) on the AST
+      -- preserves the wire-format-declaration vs back-reference name
+      -- agreement that downstream codegen depends on.
+      return (gFinal, apply gFinal t, TupS xs')
+    Nothing -> checkEFallback i g (TupS xs) t
 -- C3: Record literal {k1=v1, ...} checked against a declared record type
 -- NamU. Reorder the literal's fields to match declared field order, reject
 -- literals whose key set differs from the declaration, and propagate

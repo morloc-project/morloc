@@ -120,11 +120,16 @@ typedef enum {
     MORLOC_MAP      = 16,
     MORLOC_OPTIONAL = 17,
     MORLOC_INT      = 18, // variable-width integer (Array of uint64_t limbs, two's complement)
-    MORLOC_TABLE    = 19  // Arrow IPC primitive. Schema columns (if any) are
+    MORLOC_TABLE    = 19, // Arrow IPC primitive. Schema columns (if any) are
                           // open constraints on the buffer's actual schema; the
                           // binary layout is fully described by the Arrow
                           // buffer itself, not by the morloc Schema. Wire form
                           // is `T` (no declared columns) or `T:K<entries>`.
+    MORLOC_RECUR    = 20  // Back-reference to a named schema declared by
+                          // `&<klen><name>` earlier on the path. Carries the
+                          // referenced name in `Schema.name`; structurally
+                          // terminates descent at the back-ref point. Wire form
+                          // is `^<klen><name>`.
 } morloc_serial_type;
 
 // Single-character schema encoding tokens.
@@ -142,6 +147,12 @@ typedef enum {
 #define SCHEMA_TABLE    'T'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
+//
+// `name` carries either a named-schema declaration (on the outer node of
+// a `&<klen><name>X` wire form, representing a recursive record like
+// `Tree`) or a back-reference target (on every `MORLOC_RECUR` node).
+// NULL for all non-recursive schemas. Appended at the struct's tail so
+// adding the field does not move any pre-existing offsets.
 struct Schema;
 typedef struct Schema {
     morloc_serial_type type;
@@ -151,6 +162,7 @@ typedef struct Schema {
     char* hint;
     struct Schema** parameters;
     char** keys;       // field names (records only)
+    char* name;        // recursive-schema declaration / back-ref name (or NULL)
 } Schema;
 
 // Variable-length array in voidstar representation.

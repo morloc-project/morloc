@@ -1,0 +1,40 @@
+-- Cross-module type-alias cycles must be rejected by the frontend,
+-- not silently hang the compiler. Pre-fix, this program causes
+-- `morloc make` to loop forever inside one of several reduce-and-retry
+-- sites (Realize.handleMany; the six expressCore/expressPolyExpr
+-- expand cases in Express.hs; or the alias-chase in pairEval) because
+-- the cycle A -> ABody -> A never terminates and no visited-set
+-- protects those walks.
+--
+-- The frontend's existing intra-module SCC check
+-- (checkMutualRecursion) does not catch this shape because each
+-- module's typedef looks acyclic in isolation; the cycle is only
+-- visible after imports are resolved. The fix runs cycle detection
+-- on the merged post-import typedef graph and reports a clear
+-- "Mutual recursion between type definitions" error.
+
+module main (fooLiteral, fooTuple, fooList, fooRecord)
+import root
+import .modA
+import .modB
+
+-- Each binding triggers a different reduce-and-retry codepath that
+-- would loop under the pre-fix compiler:
+--   * fooLiteral  -- Realize.handleMany (any literal at the cycle type)
+--   * fooTuple    -- Express.expressCore TupS expand
+--   * fooList     -- Express.expressCore LstS expand
+--   * fooRecord   -- Express.expressCore NamS expand
+-- After the fix, the frontend rejects the program before reaching
+-- any of these sites, so we only need to assert the error fires.
+
+fooLiteral :: A
+fooLiteral = 42
+
+fooTuple :: A
+fooTuple = (1, 2)
+
+fooList :: A
+fooList = [1, 2, 3]
+
+fooRecord :: A
+fooRecord = {x = 1}

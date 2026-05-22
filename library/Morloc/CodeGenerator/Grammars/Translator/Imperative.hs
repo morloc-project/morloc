@@ -520,8 +520,15 @@ lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lc
 lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
-lowerNativeExpr cfg _ (NullN_ fv) = do
-  mayT <- lcTypeOf cfg (VarF fv)
+lowerNativeExpr cfg _ (NullN_ t) = do
+  -- NullN_ now carries the full @TypeF@ of the Null's type slot
+  -- (e.g. @?(BTree Int)@), not just the underlying constructor's
+  -- @FVar@. Pass it through @lcTypeOf@ to get the IType the printer
+  -- uses for the null literal -- though most language printers
+  -- ignore this IType (Python emits "None", C++ emits "std::nullopt"
+  -- unconditionally), threading it preserves the option for languages
+  -- that do type-tagged null forms.
+  mayT <- lcTypeOf cfg t
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
 lowerNativeExpr cfg _ (DoBlockN_ t x) = do
   (hoisted, effectExpr) <- lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)

@@ -1,0 +1,12 @@
+module main (f)
+
+record C1 where
+  x :: C2
+
+record C2 where
+  y :: C3
+
+record C3 where
+  z :: C1
+
+f :: C1 -> C1

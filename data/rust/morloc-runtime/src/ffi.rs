@@ -335,6 +335,25 @@ pub fn calc_voidstar_size_inner(
     data: *const u8,
     schema: &crate::schema::Schema,
 ) -> Result<usize, MorlocError> {
+    let mut env: crate::recur::RecurEnv = Vec::new();
+    calc_voidstar_size_with_env(data, schema, &mut env)
+}
+
+fn calc_voidstar_size_with_env(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    env: &mut crate::recur::RecurEnv,
+) -> Result<usize, MorlocError> {
+    crate::recur::with_scope(env, schema, |env| {
+        calc_voidstar_size_inner_walk(data, schema, env)
+    })
+}
+
+fn calc_voidstar_size_inner_walk(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    env: &mut crate::recur::RecurEnv,
+) -> Result<usize, MorlocError> {
     use crate::schema::SerialType;
     use crate::shm::{self, Array};
 
@@ -372,30 +391,37 @@ pub fn calc_voidstar_size_inner(
                 } else {
                     let elem_data = shm::rel2abs(arr.data)?;
                     for i in 0..arr.size {
-                        size += calc_voidstar_size_inner(
+                        size += calc_voidstar_size_with_env(
                             elem_data.add(i * elem_width),
                             elem_schema,
+                            env,
                         )?;
                     }
                 }
                 Ok(size)
             }
             SerialType::Optional => {
-                let tag = *data;
-                let mut size = schema.width;
-                if tag != 0 {
-                    let inner_offset = schema.offsets.first().copied().unwrap_or(
-                        shm::align_up(1, schema.parameters[0].alignment().max(1)),
-                    );
-                    let inner_total = calc_voidstar_size_inner(
-                        data.add(inner_offset),
-                        &schema.parameters[0],
+                // Optional is now a single relptr (schema.width = sizeof(RelPtr)).
+                // RELNULL → no payload; otherwise reserve room for:
+                //   * the slot itself (schema.width)
+                //   * worst-case alignment padding before the inner T
+                //     (the flatten / packer aligns the cursor before
+                //     writing T at it)
+                //   * T's full size (its width plus any sub-data)
+                let relptr = *(data as *const shm::RelPtr);
+                if relptr == shm::RELNULL {
+                    Ok(schema.width)
+                } else {
+                    let inner_data = shm::rel2abs(relptr)?;
+                    let inner_schema = &schema.parameters[0];
+                    let inner_align = inner_schema.alignment().max(1);
+                    let inner_total = calc_voidstar_size_with_env(
+                        inner_data,
+                        inner_schema,
+                        env,
                     )?;
-                    if inner_total > schema.parameters[0].width {
-                        size += inner_total - schema.parameters[0].width;
-                    }
+                    Ok(schema.width + (inner_align - 1) + inner_total)
                 }
-                Ok(size)
             }
             SerialType::Tuple | SerialType::Map => {
                 if schema.is_fixed_width() {
@@ -403,9 +429,10 @@ pub fn calc_voidstar_size_inner(
                 } else {
                     let mut size = schema.width;
                     for i in 0..schema.parameters.len() {
-                        let elem_total = calc_voidstar_size_inner(
+                        let elem_total = calc_voidstar_size_with_env(
                             data.add(schema.offsets[i]),
                             &schema.parameters[i],
+                            env,
                         )?;
                         if elem_total > schema.parameters[i].width {
                             size += elem_total - schema.parameters[i].width;
@@ -413,6 +440,17 @@ pub fn calc_voidstar_size_inner(
                     }
                     Ok(size)
                 }
+            }
+            SerialType::Recur => {
+                // Resolve to the named declaration and recompute size
+                // using that schema. The variable-length data behind a
+                // Recur back-ref needs full accounting; without this,
+                // recursive voidstar buffers are undersized and inline
+                // packets truncate inner sub-trees.
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = crate::recur::lookup(env, name)?;
+                let target = &*target_ptr;
+                calc_voidstar_size_with_env(data, target, env)
             }
             _ => Ok(schema.width),
         }

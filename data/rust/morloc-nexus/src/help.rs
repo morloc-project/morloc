@@ -536,6 +536,9 @@ fn render_schema_type(s: &morloc_runtime::schema::Schema) -> String {
                 format!("Table {{{}}}", cols.join(", "))
             }
         }
+        // Recursive back-reference. Render as the declared name so help
+        // text shows e.g. `Tree` where the body would otherwise recurse.
+        Recur => s.name.clone().unwrap_or_else(|| "?".into()),
     }
 }
 
