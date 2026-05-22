@@ -108,14 +108,26 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
-      serializeS "serialE MonoIf" m ne
+      serializeS "serialE MonoIf" m (forceThunk ne)
     -- Thunk-producing intrinsics: convert to native and serialize with the
     -- inner type (strip EffectF) so the wire format matches the forced value.
     serialExpr m (MonoDoBlock _ e) = serialExpr m e
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
-    serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
+    serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m . forceThunk
+
+    -- Serialization sinks consume a value, not a thunk. When `nativeExpr`
+    -- returns a bare `DoBlockN` (e.g. an effectful intrinsic like @save/@load
+    -- whose `EvalS` wrapper was elided upstream -- this happens for the
+    -- cross-pool case where a do-block statement is extracted to a sub-
+    -- manifold that just runs the effect and returns its result), wrap with
+    -- `EvalN` so the lambda is invoked before reaching `_put_value`. If the
+    -- expression is already `EvalN`-wrapped (the common case where `EvalS`
+    -- survived), this is a no-op.
+    forceThunk :: NativeExpr -> NativeExpr
+    forceThunk ne@(DoBlockN _ inner) = EvalN (typeFof inner) ne
+    forceThunk ne = ne
 
     serialArg ::
       Int ->
