@@ -36,6 +36,11 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute_
 #include "mlc_arrow.hpp"
 #include "cppmorloc.hpp"
 
+// Defines mlc::Unit, which the generator emits for do-blocks whose final
+// expression is void-returning (e.g. @save/@savej/@savem). Needs to follow
+// the user-source includes so foreign code can use mlc::Unit too.
+#include "mlccpptypes/prelude.hpp"
+
 #define PROPAGATE_ERROR(errmsg) \
     if(errmsg != NULL) { \
       char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
