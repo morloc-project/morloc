@@ -212,14 +212,14 @@ pyMakeU16  :: Vector 4 UInt16
 pySumU16   :: Vector 4 UInt16 -> Int
 
 cppMakeU32 :: Vector 4 UInt32
-cppSumU32  :: Vector 4 UInt32 -> Int
+cppSumU32  :: Vector 4 UInt32 -> UInt64
 pyMakeU32  :: Vector 4 UInt32
-pySumU32   :: Vector 4 UInt32 -> Int
+pySumU32   :: Vector 4 UInt32 -> UInt64
 
 cppMakeU64 :: Vector 4 UInt64
-cppSumU64  :: Vector 4 UInt64 -> Int
+cppSumU64  :: Vector 4 UInt64 -> UInt64
 pyMakeU64  :: Vector 4 UInt64
-pySumU64   :: Vector 4 UInt64 -> Int
+pySumU64   :: Vector 4 UInt64 -> UInt64
 
 cppMakeF32 :: Vector 4 Float32
 cppSumF32  :: Vector 4 Float32 -> Real
@@ -272,9 +272,12 @@ rSingle      :: Vector 1 Real
 rSumEmpty    :: Vector 0 Real -> Real
 rSumSingle   :: Vector 1 Real -> Real
 
-pyOwnDataLarge :: Vector 50000 Real -> Str
-pyOwnDataSmall :: Vector 10 Real -> Str
-pyOwnDataAny   :: Vector 8200 Real -> Str
+-- All three probes wrap the same `_report` helper in src.py; the
+-- different names are only here so the test categories (5) and (8)
+-- read clearly. All take a Vector of any size.
+pyOwnDataLarge :: Vector n Real -> Str
+pyOwnDataSmall :: Vector n Real -> Str
+pyOwnDataAny   :: Vector n Real -> Str
 
 -- Polymorphic-in-size sum helpers. Required for literal-input tests
 -- because the size of a literal vector is determined by the input
@@ -338,13 +341,13 @@ cpU16 :: Int
 cpU16 = pySumU16 cppMakeU16
 pcU16 :: Int
 pcU16 = cppSumU16 pyMakeU16
-cpU32 :: Int
+cpU32 :: UInt64
 cpU32 = pySumU32 cppMakeU32
-pcU32 :: Int
+pcU32 :: UInt64
 pcU32 = cppSumU32 pyMakeU32
-cpU64 :: Int
+cpU64 :: UInt64
 cpU64 = pySumU64 cppMakeU64
-pcU64 :: Int
+pcU64 :: UInt64
 pcU64 = cppSumU64 pyMakeU64
 cpF32 :: Real
 cpF32 = pySumF32 cppMakeF32

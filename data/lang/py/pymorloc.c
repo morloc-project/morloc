@@ -2078,12 +2078,20 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
+        // The numpy fast-path in fromAnything (base_ptr == NULL) returns a
+        // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
+        // backing memory must outlive the view. Defer the shfree via
+        // shm_tracker so the dispatch's flush releases the block (and the
+        // schema) once the view is no longer in scope.
         PyObject* obj = fromAnything(schema, voidstar, NULL);
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-        free_schema(schema);
-        PyTRACE(obj == NULL)
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 
@@ -2117,12 +2125,20 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
+        // The numpy fast-path in fromAnything (base_ptr == NULL) returns a
+        // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
+        // backing memory must outlive the view. Defer the shfree via
+        // shm_tracker so the dispatch's flush releases the block (and the
+        // schema) once the view is no longer in scope.
         PyObject* obj = fromAnything(schema, voidstar, NULL);
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-        free_schema(schema);
-        PyTRACE(obj == NULL)
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 
