@@ -177,7 +177,7 @@ makeSchema mid lang t = do
 -- each nesting level with the corresponding dimension constraint.
 applyNatDimsFromType :: Type -> SerialAST -> SerialAST
 applyNatDimsFromType (AppT _ args) ast =
-  let dims = [Just n | NatLitT n <- args, n > 0]
+  let dims = [Just (NatLitF n) | NatLitT n <- args, n > 0]
   in applyDims dims ast
   where
     applyDims (d:ds) (SerialList v _ inner) = SerialList v d (applyDims ds inner)

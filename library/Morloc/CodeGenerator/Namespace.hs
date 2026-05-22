@@ -274,7 +274,14 @@ data TypeS
 data SerialAST
   = -- | use an (un)pack function to simplify an object
     SerialPack FVar (TypePacker, SerialAST)
-  | SerialList FVar (Maybe Integer) SerialAST
+  -- The (Maybe TypeF) dim slot distinguishes three cases that all map to a
+  -- list at the wire level but to different C++/Py macro arities:
+  --   Nothing            -- no Nat slot (plain List a)
+  --   Just (NatLitF n)   -- Nat slot with known value (Vector 10 a)
+  --   Just NatVoidF      -- Nat slot, value unknown at this site (Vector n a)
+  -- Both Just forms keep the slot count aligned with the concrete macro
+  -- template's positional `$N` indices; only Nothing emits a single-arg AppF.
+  | SerialList FVar (Maybe TypeF) SerialAST
   | SerialTuple FVar [SerialAST]
   | -- | Make a record, table, or object. The parameters indicate
     --   1) NamType - record/table/object

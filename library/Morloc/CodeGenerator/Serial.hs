@@ -52,13 +52,15 @@ data AliasShape
 
 -- | recurse all the way to a serializable type
 --
--- For SerialList, the optional dim is reified as a leading NatLitF arg when
--- present. This keeps macro indices (`$N`) in concrete-type bodies (e.g.
--- `"std::vector<$2>" n a`) aligned positionally with the AppF args. List
--- nodes without a dim emit a single-arg AppF, matching `"std::vector<$1>" a`.
+-- For SerialList, the optional dim slot is reified as a leading Nat-kinded
+-- arg when present. This keeps macro indices (`$N`) in concrete-type bodies
+-- (e.g. `"std::vector<$2>" n a`) aligned positionally with the AppF args.
+-- A polymorphic dim (Vector n a) still emits a `NatVoidF` placeholder so the
+-- $2 slot is reachable; only true List types (no dim slot) emit a single-arg
+-- AppF matching `"std::vector<$1>" a`.
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
-serialAstToType (SerialList v (Just d) s) = AppF (VarF v) [NatLitF d, serialAstToType s]
+serialAstToType (SerialList v (Just d) s) = AppF (VarF v) [d, serialAstToType s]
 serialAstToType (SerialList v Nothing s) = AppF (VarF v) [serialAstToType s]
 serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
@@ -136,8 +138,8 @@ serialAstToMsgpackSchema ast = emit ast
     emit (SerialList v@(FV (TV name) _) dim s) =
       recDecl name <> addHint v <> "a" <> encodeDim dim <> emit s
       where
-        encodeDim Nothing = ""
-        encodeDim (Just n) = ":" <> pretty n
+        encodeDim (Just (NatLitF n)) = ":" <> pretty n
+        encodeDim _                  = ""  -- no slot or void-valued slot
     emit (SerialTuple v@(FV (TV name) _) ss) =
       recDecl name <> addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map emit ss)
     -- Table primitive (Arrow IPC buffer). Open semantics: declared columns
@@ -210,7 +212,7 @@ addHint (FV _ (CV v)) = "<" <> pretty v <> ">"
 -- indices aligned with concrete-type bodies.
 shallowType :: SerialAST -> TypeF
 shallowType (SerialPack _ (p, _)) = typePackerPacked p
-shallowType (SerialList v (Just d) s) = AppF (VarF v) [NatLitF d, shallowType s]
+shallowType (SerialList v (Just d) s) = AppF (VarF v) [d, shallowType s]
 shallowType (SerialList v Nothing s) = AppF (VarF v) [shallowType s]
 shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
 shallowType (SerialObject o n ps rs) =
@@ -582,16 +584,16 @@ makeSerialAST m lang t0 = do
                    <+> "to a primitive list / tuple / sourced type."
 
         -- Extract dimension constraints from nat-kinded type args.
-        -- Every NatLitF position is reified, including 0 (a valid empty
-        -- dimension). Preserving the dim slot is what keeps positional
-        -- macros in concrete-type bodies aligned at the shallowType /
-        -- serialAstToType layer.
-        dims :: [Maybe Integer]
-        dims = [Just n | NatLitF n <- ts0]
+        -- Every Nat position is reified (including NatLitF 0, a valid empty
+        -- dimension, and NatVoidF for polymorphic-dim sites like @Vector n a@).
+        -- Preserving each slot is what keeps positional macros in concrete-type
+        -- bodies aligned at the shallowType / serialAstToType layer.
+        dims :: [Maybe TypeF]
+        dims = [Just t | t <- ts0, isNatTypeF t]
 
         -- Apply dimension constraints to nested SerialList nodes.
         -- Each dim in the list is consumed by one nesting level.
-        applyDimsToList :: [Maybe Integer] -> SerialAST -> SerialAST
+        applyDimsToList :: [Maybe TypeF] -> SerialAST -> SerialAST
         applyDimsToList (d:ds) (SerialList v _ inner) = SerialList v d (applyDimsToList ds inner)
         applyDimsToList _ ast = ast
 
