@@ -126,6 +126,8 @@ data Token
   | TokObject
   | TokClass
   | TokInstance
+  | TokEffect
+  | TokEscapable
   | TokInfixl
   | TokInfixr
   | TokInfix
@@ -230,6 +232,8 @@ showToken TokRecord = "'record'"
 showToken TokObject = "'object'"
 showToken TokClass = "'class'"
 showToken TokInstance = "'instance'"
+showToken TokEffect = "'effect'"
+showToken TokEscapable = "'escapable'"
 showToken TokInfixl = "'infixl'"
 showToken TokInfixr = "'infixr'"
 showToken TokInfix = "'infix'"

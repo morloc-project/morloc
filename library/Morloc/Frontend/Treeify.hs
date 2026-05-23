@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -26,6 +25,11 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Link as MFL
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import Morloc.Typecheck.Internal (collectEffLabels)
+import qualified Morloc.DataFiles as DF
+import qualified Morloc.Language as ML
+import Morloc.CodeGenerator.LanguageDescriptor
+  (loadLangDescriptorFromText, ldNamePattern, ldOperatorPattern, matchNamePattern)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -67,12 +71,23 @@ treeify d
       [k] -> do
         case DAG.lookupNode k d of
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
-          Nothing -> MM.throwSystemError $ "Compiler bug (__FILE__:__LINE__): Module DAG is missing key" <+> pretty k
+          Nothing -> MM.throwCompilerBug $ "module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols groups)) -> do
             d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
+
+            -- every effect label used in a `<...>` row must be declared
+            -- (the compiler hardcodes none); checked after link populates
+            -- the effect registry
+            checkDeclaredEffects d'
+
+            -- every sourced symbol name must match the foreign language's
+            -- name pattern (declared in lang.yaml, never hardcoded here);
+            -- the name is emitted verbatim, so code in this position would
+            -- be injected into the pool
+            checkSourceNames d'
 
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
@@ -123,9 +138,126 @@ treeify d
       -- multiple projects in parallel with potentially shared information and
       -- constraints could be valuable.
       roots ->
-        MM.throwSystemError $
-          "Compiler bug (__FILE__:__LINE__): unsupported multi-rooted module DAG:"
+        MM.throwCompilerBug $
+          "unsupported multi-rooted module DAG:"
             <+> tupled (map pretty roots)
+
+-- | Two signature-level effect checks, run after 'MFL.link' has
+-- populated 'stateEffects':
+--
+--  1. Every concrete effect label in a `<...>` row of a signature,
+--     annotation, typedef body, or class-method type must be declared
+--     with `effect` / `escapable effect`. The compiler hardcodes no
+--     effect names, so an undeclared label is always a user error.
+--
+--  2. Inescapable-propagation: every *inescapable* concrete label that
+--     appears in a parameter's effect row must also appear in the
+--     result row. This holds for all functions, sourced or defined --
+--     a sourced handler may discharge an *escapable* effect, but no
+--     function (not even a sourced one) may silently consume an
+--     inescapable one. Effect variables always propagate (they appear
+--     in the result), so they satisfy the rule automatically.
+-- | Reject a sourced symbol whose name does not match its language's
+-- identifier or operator pattern. Both patterns live only in lang.yaml
+-- (ldNamePattern / ldOperatorPattern); the compiler hardcodes no
+-- foreign-language naming rule. Operator vs identifier is decided by the
+-- symbol itself (srcOperator), so "foo" and "+" are valid but "foo+"
+-- matches neither. The name is emitted verbatim into the pool, so a
+-- non-name here is a code-injection vector. An empty pattern, or no
+-- embedded descriptor, is not checked (fail open).
+checkSourceNames :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
+  where
+    checkNode :: ExprI -> MorlocMonad ()
+    checkNode (ExprI i (SrcE src)) =
+      let lang = ML.langName (srcLang src)
+          nm = unSrcName (srcName src)
+       in case lookup
+            (MT.unpack lang)
+            [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
+            Just yamlText ->
+              case loadLangDescriptorFromText yamlText of
+                Right desc ->
+                  let isOp = srcOperator src
+                      pat = if isOp then ldOperatorPattern desc else ldNamePattern desc
+                      kind = if isOp then "operator" else "name"
+                   in if MT.null pat || matchNamePattern pat nm
+                        then return ()
+                        else
+                          MM.throwSourcedError i $
+                            "Invalid"
+                              <+> pretty lang
+                              <+> "source"
+                              <+> kind
+                              <+> squotes (pretty nm) <> "."
+                              <+> "A sourced symbol is emitted verbatim, so it"
+                              <+> "must be a valid"
+                              <+> pretty lang
+                              <+> kind <> ", not code."
+                              <+> "Expected pattern"
+                              <+> squotes (pretty pat) <> "."
+                Left _ -> return ()
+            Nothing -> return ()
+    checkNode _ = return ()
+
+checkDeclaredEffects :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+checkDeclaredEffects d = do
+  declared <- MM.gets stateEffects
+  mapM_ (AST.checkExprI (checkNode declared)) (DAG.nodes d)
+  where
+    checkNode :: Map.Map EffectLabel Bool -> ExprI -> MorlocMonad ()
+    checkNode declared (ExprI i e) = do
+      let tys = case e of
+            SigE (Signature _ _ et) -> [etype et]
+            AnnE _ t -> [t]
+            TypE (ExprTypeE _ _ _ t _) -> [t]
+            ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
+            _ -> []
+          used = Set.unions (map collectEffLabels tys)
+          undeclared = Set.filter (\l -> not (Map.member l declared)) used
+      case Set.toList undeclared of
+        (lbl0 : rest) ->
+          let plural = not (null rest)
+           in MM.throwSourcedError i $
+                "Undeclared effect"
+                  <> (if plural then "s" else "")
+                  <+> hcat
+                    (punctuate ", " (map (squotes . pretty) (lbl0 : rest)))
+                  <> "."
+                  <+> (if plural then "Declare each" else "Declare it")
+                  <+> "with `effect"
+                  <+> pretty lbl0 <> "`"
+                  <+> "(or `escapable effect"
+                  <+> pretty lbl0 <> "`) and import it."
+        [] -> do
+          let leaked = Set.unions (map inescapableLeak tys)
+          if Set.null leaked
+            then return ()
+            else
+              MM.throwSourcedError i $
+                "Inescapable effect"
+                  <> (if Set.size leaked > 1 then "s" else "")
+                  <+> hcat
+                    (punctuate ", " (map (squotes . pretty) (Set.toList leaked)))
+                  <+> "appear(s) in an argument but not in the result row."
+                  <+> "An inescapable effect performed via an argument must"
+                  <+> "propagate to the result (only a sourced handler may"
+                  <+> "discharge an escapable effect)."
+      where
+        -- Inescapable concrete labels in any parameter row that are
+        -- absent from the result row.
+        inescapableLeak ty =
+          let (params, ret) = uncurryFun ty
+              paramLabels = Set.unions (map collectEffLabels params)
+              inescapable =
+                Set.filter (\l -> Map.lookup l declared == Just False) paramLabels
+           in Set.difference inescapable (collectEffLabels ret)
+
+        -- Peel quantifiers and uncurry to (all parameters, final result).
+        uncurryFun (ForallU _ t) = uncurryFun t
+        uncurryFun (FunU ps r) =
+          let (ps', r') = uncurryFun r in (ps ++ ps', r')
+        uncurryFun t = ([], t)
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f

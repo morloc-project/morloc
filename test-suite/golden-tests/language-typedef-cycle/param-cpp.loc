@@ -1,0 +1,14 @@
+-- Parameterized Cpp cycle: each alias takes a type parameter and
+-- threads it through the cycle. Verifies that the SCC walk treats
+-- parameterized aliases the same as non-parameterized ones.
+module main (ida)
+import root
+
+type P a = a
+type Q a = a
+
+type Cpp => P a = "wrap_p" (Q a)
+type Cpp => Q a = "wrap_q" (P a)
+
+source Cpp from "ops.hpp" ("identity" as ida)
+ida :: P Int -> P Int

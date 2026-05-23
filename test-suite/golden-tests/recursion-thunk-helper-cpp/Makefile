@@ -5,6 +5,10 @@ all:
 	./nexus sumDown 1 >> obs.txt 2>> obs.err
 	./nexus sumDown 3 >> obs.txt 2>> obs.err
 	./nexus sumDown 5 >> obs.txt 2>> obs.err
+	./nexus sumDownAlias 0 >> obs.txt 2>> obs.err
+	./nexus sumDownAlias 1 >> obs.txt 2>> obs.err
+	./nexus sumDownAlias 3 >> obs.txt 2>> obs.err
+	./nexus sumDownAlias 5 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *err

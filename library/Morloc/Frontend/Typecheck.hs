@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -53,7 +52,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
       (g1, _, e1) <- synthG g0 e0
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
@@ -185,7 +184,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -678,7 +677,7 @@ synthE _ g0 (NamS rs) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE varIdx g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
+synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- Rename type AND constraints together so primitive constraints
   -- (CMember / CSubset / CDisjoint) reference the same fresh-name
   -- variables that the type uses. The renamed constraints are queued
@@ -717,8 +716,11 @@ synthE varIdx g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- signature.  Catches forces outside do-blocks (e.g. `f = !rint`)
   -- that the structural subtype rule cannot see, because EvalS strips
   -- the effect wrapper from the inner type.  See
-  -- spec/types/effects.md "Effect Checking".
-  mapM_ (checkEffectCoverage varIdx (apply g2 t1)) xs1
+  -- spec/types/effects.md "Effect Checking".  The body's own concrete
+  -- index (ci) localises the diagnostic to the definition: this
+  -- clause's index argument is the variable-reference / export-list
+  -- site and would mis-point the caret at the module declaration.
+  mapM_ (\x@(AnnoS _ ci _) -> checkEffectCoverage ci (apply g2 t1) x) xs1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
   return (g2, t2, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -875,8 +877,9 @@ synthE i g (DoBlockS e) = do
       let collected = collectDoEffects e1'
       return (g1, EffectU collected iT, DoBlockS e1')
     bareT -> do
-      -- Pure final: leave body as-is; tryCoerce CoerceToEffect will lift
-      -- against an effectful expected type at the use site.
+      -- Pure final: the block's type is <collected> bareT. An empty or
+      -- smaller effect set is a subtype of any expected effect set, so no
+      -- pure-to-effect lift is needed at the use site.
       let collected = collectDoEffects e1
       return (g1, EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
@@ -1148,7 +1151,7 @@ zipCheck i g0 (x0 : xs0) (t0 : ts0) = do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i _ _ [] = MM.throwSourcedError i "Compiler bug (__FILE__:__LINE__): too many arguments in zipCheck"
+zipCheck i _ _ [] = MM.throwCompilerBugAt i "too many arguments in zipCheck"
 
 foldCheck ::
   Gamma ->
@@ -1234,37 +1237,65 @@ checkE i g (EvalS e) t = do
 checkE i g e t@(ExistU v _ _)
   | Just _ <- lookupU v g
   = checkE' i g e (apply g t)
--- Nat dimension checking for list literals against nat-parameterized aliases
-checkE i g1 e1@(LstS _) b = do
-  (g2, a, e2) <- synthE' i g1 e1
-  let a' = apply g2 a
-      b' = apply g2 b
+-- Nat dimension checking for list literals against nat-parameterized aliases.
+-- A multi-arg AppU like `Vector 4 Int32` (where `type Vector (n :: Nat) a =
+-- List a`) does not match Rule A's single-arg pattern `(AppU v [t])`, so
+-- without help the elements fall to the synth path and freeze as `Int`
+-- before the subtype check, breaking literal defaulting. Before falling
+-- back to synth+subtype, evaluate `b` through the alias scope: if it
+-- reduces to a single-arg list shape `AppU _ [elemT]` whose element type
+-- is a real element type (not Nat/Str/Rec/List/Set-kinded) and is not an
+-- unsolved existential, re-enter the check against the reduced form so
+-- Rule A fires and propagates `elemT` into the literals. Nat dimensions
+-- are then checked against the *original* `b` so that `Vector 4 ...`
+-- still length-checks at 4. Unsolved existentials in the element slot
+-- fall through to the synth path for more flexible inference.
+checkE i g1 e1@(LstS xs) b = do
   scope <- MM.getGeneralScope i
-  case subtype scope a' b' g2 of
-    Right g3 -> do
-      let natArgs = getNatArgs scope b'
-          anno2 = AnnoS (Idx i a') i e2
-      g4 <- checkListNatDims g3 natArgs anno2
-      return (g4, apply g4 b', e2)
-    Left err ->
-      case tryCoerce scope a' b' g2 of
-        Just (coercions, g3) -> do
-          (finalExpr, _) <- foldlM
-            (\(expr, currentType) coercion -> do
-              idx <- MM.getCounterWithPos i
-              let wrappedAnno = AnnoS (Idx idx currentType) i expr
-              return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
-            (e2, apply g3 a')
-            coercions
+  let bEval = either (const b) id (TE.evaluateType scope b)
+      canPropagate = case bEval of
+        AppU _ [elemT] ->
+          not (null xs)
+          && not (isNatExpr elemT || isStrExpr elemT || isRecExpr elemT
+                  || isListExpr elemT || isSetExpr elemT)
+          && not (case elemT of { ExistU{} -> True; _ -> False })
+        _ -> False
+  if canPropagate
+    then do
+      (g2, _, e2) <- checkE' i g1 e1 bEval
+      let natArgs = getNatArgs scope b
+          anno = AnnoS (Idx i (apply g2 bEval)) i e2
+      g3 <- checkListNatDims g2 natArgs anno
+      return (g3, apply g3 b, e2)
+    else do
+      (g2, a, e2) <- synthE' i g1 e1
+      let a' = apply g2 a
+          b' = apply g2 b
+      case subtype scope a' b' g2 of
+        Right g3 -> do
           let natArgs = getNatArgs scope b'
-              anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
-          g4 <- checkListNatDims g3 natArgs anno3
-          return (g4, apply g4 b', finalExpr)
-        Nothing -> MM.throwSourcedError i $
-          "Type mismatch:"
-          <> line <> "  expected: " <> prettyTypeU b'
-          <> line <> "  inferred: " <> prettyTypeU a'
-          <> line <> err
+              anno2 = AnnoS (Idx i a') i e2
+          g4 <- checkListNatDims g3 natArgs anno2
+          return (g4, apply g4 b', e2)
+        Left err ->
+          case tryCoerce scope a' b' g2 of
+            Just (coercions, g3) -> do
+              (finalExpr, _) <- foldlM
+                (\(expr, currentType) coercion -> do
+                  idx <- MM.getCounterWithPos i
+                  let wrappedAnno = AnnoS (Idx idx currentType) i expr
+                  return (CoerceS coercion wrappedAnno, applyCoercion coercion currentType))
+                (e2, apply g3 a')
+                coercions
+              let natArgs = getNatArgs scope b'
+                  anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
+              g4 <- checkListNatDims g3 natArgs anno3
+              return (g4, apply g4 b', finalExpr)
+            Nothing -> MM.throwSourcedError i $
+              "Type mismatch:"
+              <> line <> "  expected: " <> prettyTypeU b'
+              <> line <> "  inferred: " <> prettyTypeU a'
+              <> line <> err
 --   Sub (with coercion fallback)
 -- Numeric literal defaulting: an `IntS` checked against any integer base
 -- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
@@ -1276,6 +1307,96 @@ checkE i g1 e1@(LstS _) b = do
 -- standalone base types rather than aliases of Int. Type aliases are
 -- expanded through the scope so that user-defined names like
 -- `type Char = UInt8` also accept integer literals directly.
+-- A @let@ binding under a check-direction expected type. Without
+-- this rule the let falls through to @checkEFallback@, which calls
+-- @synthE@ on the whole let and then subtypes against @t@; that
+-- synthesizes the let-BODY without a check direction, so any
+-- literal-vs-alias coercion inside the body (e.g. the TupS rule
+-- below firing on @(0, sub, sub) :: BTree Int@ with @sub :: BTree Int@
+-- needing @BTree Int -> ?(BTree Int)@) never gets to run. Mirrors
+-- @synthE LetS@ but uses @checkG@ for the body so the expected type
+-- threads through to the literal that consumes it.
+checkE i g (LetS v e1 e2) t = do
+  (g1, t1, e1') <- synthG g e1
+  let g2 = g1 ++> [AnnG v t1]
+      g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of
+        Just val' -> g2 { gammaIntVals = Map.insert v val' (gammaIntVals g2) }
+        Nothing -> g2
+  (g3, t2, e2') <- checkG g2' e2 t
+  return (g3, t2, LetS v e1' e2')
+-- A tuple literal checked against an expected type. If the expected
+-- type reduces to a tuple shape with matching arity, check each
+-- element against its corresponding expected position type. This
+-- enables element-wise coercion at the literal's boundary -- a slot
+-- declared as @?(LL Int)@ accepts a pure @LL Int@ value via the
+-- standard @a -> ?a@ coercion that @checkG@ already supplies.
+-- Without this rule, the checkEFallback path synthesizes the literal's
+-- type as @(Int, LL Int)@ and runs strict subtype against
+-- @LL Int = (Int, ?(LL Int))@, which fails at the @LL Int <: ?(LL Int)@
+-- subgoal -- @tryCoerce@ only descends through OptionalU and won't fire
+-- on a tuple-vs-tuple element mismatch from the outside.
+--
+-- C2.opt: compound literal (TupS/NamS) at an Optional expected type.
+-- The literal cannot itself be @Null@, so it is unambiguously the
+-- non-null inner T. Strip the Optional wrapper, recurse at T (which
+-- routes through the regular TupS/NamS rules below), and wrap the
+-- result in @CoerceToOptional@.
+--
+-- Without this, a nested literal like @(42, (7, (99, Null)))@ at type
+-- @LL Int@ would fail: the outer rule expands @LL Int@ to its tuple
+-- body and element-wise checks the inner tuple @(7, (99, Null))@ at
+-- @?(LL Int)@, but the next-level TupS rule only matches
+-- @AppU TupleN@-shaped expected types. The literal would synthesize
+-- as @(Int, (Int, ?ex))@ and the subtype check against @?(LL Int)@
+-- would fall through because @tryCoerce@ only walks Optional layers
+-- at the outermost expression, not inside element checks.
+checkE i g e@(TupS _) (OptionalU innerT) = checkOptionalLit i g e innerT
+checkE i g e@(NamS _) (OptionalU innerT) = checkOptionalLit i g e innerT
+checkE i g (TupS xs) t = do
+  scope <- MM.getGeneralScope i
+  let tApplied = apply g t
+      -- Pull out the slot types if the type is already a tuple of the
+      -- right arity. Else try one alias-reduction step (e.g. expand
+      -- @BTree Int@ to its body's outer @Tuple3 [...]@) and re-check.
+      -- Critical: use ONE-STEP @reduceType@, NOT full
+      -- @evaluateType@. Full evaluation walks through the slot args
+      -- recursively, expanding any record-typed argument (e.g.
+      -- @Trie Int@ in a @(Str, Trie Int)@ slot) into its @NamU@ body.
+      -- The subsequent element-wise check then faces an
+      -- @AppU <: NamU@ subtype goal that no rule decomposes; the
+      -- pretty-printer happens to render both sides identically
+      -- (e.g. "Trie Int <: Trie Int") even though the typeU shapes
+      -- differ, producing a baffling fall-through error.
+      -- Only treat the head as a tuple when it actually IS the
+      -- TupleN constructor for this arity. Matching on a bare
+      -- @VarU _@ would also match user aliases that happen to have
+      -- @length ts == length xs@ (e.g. @FixedPair (n :: Nat) a@
+      -- applied as @FixedPair 2 Int@ has two type args, just like
+      -- @Tuple2 Int Int@), and would element-wise check the literal
+      -- against the alias's type args (@2@, @Int@) instead of the
+      -- expanded body's slot types.
+      tryMatch t' = case t' of
+        AppU (VarU v) ts
+          | v == BT.tuple (length xs)
+          , length ts == length xs -> Just ts
+        _ -> Nothing
+      tsOpt = case tryMatch tApplied of
+        Just ts -> Just ts
+        Nothing -> TE.reduceType scope tApplied >>= tryMatch
+  case tsOpt of
+    Just ts -> do
+      let go gAcc acc [] [] = return (gAcc, reverse acc)
+          go gAcc acc (x:xrest) (et:trest) = do
+            (g', _, x') <- checkG gAcc x et
+            go g' (x' : acc) xrest trest
+          go _ _ _ _ = error "unreachable: arity matched by guard"
+      (gFinal, xs') <- go g [] xs ts
+      -- Return the ORIGINAL expected type, not the stepped form.
+      -- Keeping the alias identity (e.g. @BTree Int@) on the AST
+      -- preserves the wire-format-declaration vs back-reference name
+      -- agreement that downstream codegen depends on.
+      return (gFinal, apply gFinal t, TupS xs')
+    Nothing -> checkEFallback i g (TupS xs) t
 -- C3: Record literal {k1=v1, ...} checked against a declared record type
 -- NamU. Reorder the literal's fields to match declared field order, reject
 -- literals whose key set differs from the declaration, and propagate
@@ -1330,6 +1451,77 @@ checkE i g (RealS si x) t = do
   if BT.isRealBaseType t || BT.isRealBaseType tEval
     then return (g, t, RealS si x)
     else checkEFallback i g (RealS si x) t
+-- Bidirectional-checking rule for function application. Standard
+-- App-Check from Dunfield-Krishnaswami: synthesise f, instantiate
+-- its Foralls to fresh existentials, then unify the function's
+-- return type with the expected type BEFORE checking the args. This
+-- pins the function's parameter existentials so each arg is checked
+-- at a concrete type rather than at an open existential.
+--
+-- Motivating case: a literal at a structurally recursive type
+-- (e.g. `type Pair a = (a, ?(Pair a))`) needs to be CHECKED at
+-- `Pair Str` so the existing checkE TupS / checkOptionalLit rules
+-- can unfold the alias one ply at a time. Synthesis would commit to
+-- a finite tuple shape `(Str, (Str, ?ex))`, and rolling that back
+-- into the recursive alias is narrowing, not subtyping.
+--
+-- The rule fires only when the function's return type after
+-- ForallU-stripping is a bare existential variable (the
+-- `forall a. ... -> a` shape, post-instantiation). Two reasons:
+--
+--   1. That is exactly the case where pre-subtype is informative
+--      and safe -- it just pins the type variable to whatever the
+--      expected type is. There are no type-level transformations
+--      (RecDiff `r - f`, NatArith `m * n`, OptionalU wrappers, etc.)
+--      to invert.
+--   2. For functions with structured return types (e.g.
+--      `f :: T1 n Real -> T1 n Real` or `dropF :: f:Str -> r - f`),
+--      pre-subtype either defers uselessly (matching NatVar against
+--      NatVar) or over-commits (forcing the row variable to a shape
+--      the actual arg cannot satisfy). The OLD synth+subtype path
+--      via checkEFallback handles those cases correctly.
+--
+-- Pattern getters/setters (ExeS PatCall in the function position)
+-- also defer to checkEFallback: synthE has dedicated rules for those
+-- that the App-Check shape would bypass.
+--
+-- Any other case the rule can't handle cleanly (propagation
+-- subtype fails, partial application, arity mismatch) is delegated
+-- to checkEFallback, preserving the existing synth-and-subtype
+-- behaviour.
+checkE i g0 e@(AppS (AnnoS _ _ (ExeS _)) _) t = checkEFallback i g0 e t
+checkE i g0 (AppS f xs) t = do
+  (g1, funType0, funExpr0) <- synthG g0 f
+  let g1' = resolveNatLabels f funType0 xs g1
+      (g2, funType1) = stripForallU g1' (normalizeType funType0)
+  case funType1 of
+    FunU paramTypes returnType
+      | length xs == length paramTypes
+      , isBareExistU (apply g2 returnType) -> do
+          scope <- MM.getGeneralScope i
+          let returnApplied = apply g2 returnType
+              expectedApplied = apply g2 t
+          case subtype scope returnApplied expectedApplied g2 of
+            Right g3 -> do
+              (g4, _, xsAnn, _) <-
+                zipCheck i g3 xs (map (apply g3) paramTypes)
+              -- Re-subtype AFTER the args. The pre-args subtype only
+              -- carries information that the expected type already
+              -- has; when the bare-existential return collides with
+              -- something that itself contains unsolved variables
+              -- (the only way to reach here with a deferral) the
+              -- inner arg check still has to pin things, and the
+              -- post-args re-subtype is what propagates those
+              -- pinnings back to the expected type.
+              case subtype scope (apply g4 returnType) (apply g4 t) g4 of
+                Right g5 -> return (g5, apply g5 t, AppS funExpr0 xsAnn)
+                Left _ -> checkEFallback i g0 (AppS f xs) t
+            Left _ -> checkEFallback i g0 (AppS f xs) t
+      | otherwise -> checkEFallback i g0 (AppS f xs) t
+    _ -> checkEFallback i g0 (AppS f xs) t
+  where
+    isBareExistU (ExistU _ _ _) = True
+    isBareExistU _ = False
 checkE i g1 e1 b = checkEFallback i g1 e1 b
 
 checkEFallback ::
@@ -1376,6 +1568,38 @@ checkEFallback i g1 e1 b = do
           <> line <> "  expected: " <> prettyTypeU b'
           <> line <> "  inferred: " <> prettyTypeU a'
           <> line <> err
+
+-- | Check a compound literal (TupS or NamS) against the inner type of an
+-- Optional expected type, then wrap the result in @CoerceToOptional@.
+-- See the comment at the @checkE _ _ (TupS _) (OptionalU _)@ clause for
+-- the motivating case.
+checkOptionalLit ::
+  Int ->
+  Gamma ->
+  ExprS Int ManyPoly Int ->
+  TypeU ->
+  MorlocMonad
+    ( Gamma
+    , TypeU
+    , ExprS (Indexed TypeU) ManyPoly Int
+    )
+checkOptionalLit i g e innerT = do
+  (g', _, e') <- checkE' i g e innerT
+  idx <- MM.getCounterWithPos i
+  -- Propagate the general-typedef scope from the original index to the
+  -- fresh one. Without this, downstream phases (e.g. Express's
+  -- reduce-and-retry) call @MM.getGeneralScope idx@ and get an empty
+  -- scope, so a type like @Pair Str@ that depends on the alias @Pair@
+  -- being in scope fails to reduce -- surfacing as
+  -- @Expected a tuple type, got: Pair Str@. Mirrors the pattern
+  -- @propagateScope@ uses for concrete typedefs in Express.hs.
+  MM.modify $ \s ->
+    case GMap.yIsX i idx (stateGeneralTypedefs s) of
+      Just g'' -> s { stateGeneralTypedefs = g'' }
+      Nothing -> s
+  let appliedInner = apply g' innerT
+      innerAnno = AnnoS (Idx idx appliedInner) i e'
+  return (g', apply g' (OptionalU innerT), CoerceS CoerceToOptional innerAnno)
 
 -- | Choose the record-shaped type with the most keys. Non-record cases
 -- fall back to the second argument (the standard "return the expected
@@ -1448,13 +1672,6 @@ tryCoerce scope a (OptionalU b) g =
     Right g' -> Just ([CoerceToOptional], g')
     Left _ -> case tryCoerce scope a b g of
       Just (cs, g') -> Just (CoerceToOptional : cs, g')
-      Nothing -> Nothing
--- Coerce a pure value to an effectful type: a -> <E> a
-tryCoerce scope a (EffectU effs b) g =
-  case subtype scope a b g of
-    Right g' -> Just ([CoerceToEffect (resolveEffectSet effs)], g')
-    Left _ -> case tryCoerce scope a b g of
-      Just (cs, g') -> Just (CoerceToEffect (resolveEffectSet effs) : cs, g')
       Nothing -> Nothing
 tryCoerce _ _ _ _ = Nothing
 
@@ -1603,13 +1820,22 @@ peelLambdaLayers t body = (t, body)
 --
 -- Catches forces that escape do-blocks, the case the type-level
 -- subtype rule cannot see because EvalS strips the effect wrapper
--- from the inner type.  Pointing the diagnostic at the surrounding
--- annotation index ('idx') keeps the caret on the user-visible
--- signature rather than on a deeply nested sub-expression.
+-- from the inner type.  The caret is placed on the bound force
+-- ('<-' / EvalS) that produced the uncovered effect; only when no
+-- single node can be blamed does it fall back to the surrounding
+-- index ('idx').
+--
+-- Variable-aware: the call sites pass @apply g' annType@, and 'apply'
+-- substitutes solved effect-row variables ('applyEff', see the
+-- Applicable TypeU instance), so the declared row already reflects any
+-- effect-variable solutions.  The comparison is then a concrete-label
+-- subset: a universally-quantified tail variable contributes no
+-- concrete label and cannot cover an always-performed body effect,
+-- which would unsoundly hide it.
 checkEffectCoverage
   :: Int
   -> TypeU
-  -> AnnoS (Indexed TypeU) f c
+  -> AnnoS (Indexed TypeU) f Int
   -> MorlocMonad ()
 checkEffectCoverage idx declared body = do
   let (innerDecl, innerBody) = peelLambdaLayers declared body
@@ -1620,14 +1846,46 @@ checkEffectCoverage idx declared body = do
       uncovered = Set.difference inferred declEffs
   if Set.null uncovered
     then return ()
-    else MM.throwSourcedError idx $
-      "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
-        <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
-        <+> "Either add the effect to the signature or sequence the operation in a do-block."
+    else
+      let blameIdx = case uncoveredEvalIdxs uncovered innerBody of
+            (i : _) -> i
+            [] -> idx
+       in MM.throwSourcedError blameIdx $
+            "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
+              <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
+              <+> "Either add the effect to the signature or sequence the operation in a do-block."
   where
     renderEffectLabels s
       | Set.null s = "<>"
       | otherwise = "<" <> hcat (punctuate ", " (map pretty (Set.toList s))) <> ">"
+
+-- | Concrete indices of the force ('EvalS') nodes whose forced
+-- expression carries an effect in the uncovered set, in pre-order.
+-- Traverses only the nodes 'inferExprEffects' counts as
+-- evaluation-time (thunk boundaries -- lambdas and do-blocks -- are
+-- not crossed), so the first result is the force the user must fix.
+uncoveredEvalIdxs
+  :: Set.Set EffectLabel
+  -> AnnoS (Indexed TypeU) f Int
+  -> [Int]
+uncoveredEvalIdxs uncovered = go
+  where
+    go (AnnoS _ ci expr) = case expr of
+      EvalS e
+        | not (Set.null (Set.intersection (effLabels e) uncovered)) -> [ci]
+        | otherwise -> go e
+      LetS _ e1 e2 -> go e1 ++ go e2
+      AppS f' args -> go f' ++ concatMap go args
+      TupS es -> concatMap go es
+      LstS es -> concatMap go es
+      NamS rs -> concatMap (go . snd) rs
+      IfS c t e -> go c ++ go t ++ go e
+      CoerceS _ e -> go e
+      IntrinsicS _ es -> concatMap go es
+      _ -> []
+
+    effLabels (AnnoS (Idx _ (EffectU effs _)) _ _) = resolveEffectSet effs
+    effLabels _ = Set.empty
 
 -- helpers
 

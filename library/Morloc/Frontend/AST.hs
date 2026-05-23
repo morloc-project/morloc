@@ -21,6 +21,7 @@ module Morloc.Frontend.AST
   , findSignatures
   , findTypedefs
   , findSignatureTypeTerms
+  , findTypeTerms
   , checkExprI
   , findSources
   , maxIndex
@@ -170,7 +171,7 @@ findSignatures _ = []
 checkExprI :: (Monad m) => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
-checkExprI f e@(ExprI _ (AssE _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
+checkExprI f e@(ExprI _ (AssE _ e' es')) = f e >> checkExprI f e' >> mapM_ (checkExprI f) es'
 checkExprI f e@(ExprI _ (IstE _ _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AppE e' es)) = f e >> checkExprI f e' >> mapM_ (checkExprI f) es

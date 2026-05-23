@@ -1,0 +1,104 @@
+-- Cross-feature interactions: recursive records containing recursive
+-- tuple-alias fields, and tuple aliases wrapping recursive records.
+-- Each shape exercises BOTH the NamF (record) and AppF (tuple alias)
+-- ancestor paths in Serial.hs within a single value, so a regression
+-- in either ancestor-tracking branch surfaces here.
+--
+-- Node      -- record carrying BOTH a record-recursive optional self
+--              field AND a recursive tuple-alias field. Each `Node`
+--              instance contains an `id`, a `chain :: Pair Int`
+--              (tuple-alias recursion), and a `left :: ?Node`
+--              (record recursion). Native traversal `nodeReach`
+--              touches both axes: it walks `left` to count Nodes and
+--              walks `chain` to count tuple cells per node.
+--
+-- WrappedLL -- non-recursive tuple alias whose second slot is a
+--              recursive record (`LL`). The OUTER alias is not itself
+--              recursive; the recursion lives one level inside.
+
+module main (nodeReachPy, wrappedLenPy,
+             nodeBuild, wrappedBuild,
+             nodeFromJson, wrappedFromJson)
+
+import root
+import root-py
+import maybe-py
+
+type Pair a = (a, ?(Pair a))
+
+record LL where
+  head :: Int
+  tail :: ?LL
+
+record Py => LL = "dict"
+
+record Node where
+  ident :: Int
+  chain :: Pair Int
+  left  :: ?Node
+
+record Py => Node = "dict"
+
+-- Non-recursive tuple alias whose second slot is the recursive LL
+-- record. The OUTER alias is plain; the recursion is one level in.
+type WrappedLL = (Int, LL)
+
+source Py from "foo.py" ("build_node"       as buildNodePy
+                       , "build_wrapped_ll" as buildWrappedLLPy)
+
+buildNodePy      :: Int -> Node
+buildWrappedLLPy :: Int -> WrappedLL
+
+-- Count Pair cells in a chain: same shape as the tuple test's
+-- pairLength but defined here so the mixed test is self-contained.
+pairLength :: Pair a -> Int
+pairLength x ? isNull (.1 x) = 1
+             : 1 + pairLength (require (.1 x))
+
+-- Sum of: number of Nodes reached via `.left` chasing, weighted by
+-- each Node's `chain` length. Touches the record-recursion guard
+-- through `.left :: ?Node` AND the tuple-alias-recursion guard
+-- through `.chain :: Pair Int`.
+nodeReach :: Node -> Int
+nodeReach n ? isNull (.left n) = pairLength (.chain n)
+            : pairLength (.chain n) + nodeReach (require (.left n))
+
+-- Length of the inner LL inside the WrappedLL tuple. The outer `.1`
+-- selector retrieves the LL from the tuple position; the recursion
+-- then lives entirely in record-land.
+llLength :: LL -> Int
+llLength x ? isNull (.tail x) = 1
+           : 1 + llLength (require (.tail x))
+
+nodeReachPy n     = nodeReach (buildNodePy n)
+wrappedLenPy n    = llLength (.1 (buildWrappedLLPy n))
+
+-- Helper for native Pair construction inside nodeBuild's chain field.
+pairBuild :: Int -> Pair Int
+pairBuild n ? n > 0 = (n, pairBuild (n - 1))
+            : (0, Null)
+
+-- Helper for native LL construction inside wrappedBuild.
+llBuild :: Int -> LL
+llBuild n ? n > 0 = {head = n, tail = llBuild (n - 1)}
+          : {head = 0, tail = Null}
+
+-- Native Node builder: cross-feature literal containing both a record
+-- (left) and a tuple-alias (chain) field at recursive types. Each
+-- field is constructed natively; this exercises checkE's record-and-
+-- tuple-literal paths together within the same value.
+nodeBuild :: Int -> Node
+nodeBuild n ? n > 0 = {ident = n, chain = pairBuild 2, left = nodeBuild (n - 1)}
+            : {ident = 0, chain = pairBuild 2, left = Null}
+
+-- Native WrappedLL: a (Int, LL) tuple whose recursive part lives one
+-- level inside.
+wrappedBuild :: Int -> WrappedLL
+wrappedBuild n = (42, llBuild n)
+
+-- JSON-input wrappers for mixed shapes.
+nodeFromJson :: Node -> Int
+nodeFromJson x = nodeReach x
+
+wrappedFromJson :: WrappedLL -> Int
+wrappedFromJson x = llLength (.1 x)

@@ -25,6 +25,7 @@ module UnitTypeTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
+  , effectEscapabilityTests
   , namespaceErrorTests
   , typeclassTests
   , natErrorTests
@@ -35,6 +36,9 @@ module UnitTypeTests
   , letBindingTests
   , aliasConstructorTests
   , typedefKindVarTests
+  , recursiveRecordTests
+  , bidirectionalAppCheckTests
+  , postArgPropagationTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -271,6 +275,17 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Left _ -> return ()
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
+-- | Assert that a subtype check is accepted (dual of assertSubtypeBad).
+-- Used for positive rules whose resulting gamma involves freshly
+-- generated existentials (e.g. effect-row instantiation), where an
+-- exact-context assertion would be brittle.
+assertSubtypeOk :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
+assertSubtypeOk msg gs a b = testCase msg $ do
+  let g0 = listToGamma gs
+  case MTI.subtype Map.empty a b g0 of
+    Left e -> assertFailure $ "Expected subtype acceptance for " <> show a <> " <: " <> show b <> " but got: " <> show e
+    Right _ -> return ()
+
 -- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
 -- Uses slot spacing of 256 to match production code.
 listToGamma :: [GammaIndex] -> Gamma
@@ -293,6 +308,7 @@ listToGamma gs =
     , gammaRecSubs = Map.empty
     , gammaListSubs = Map.empty
     , gammaSetSubs = Map.empty
+    , gammaEffSubs = Map.empty
     , gammaIntVals = Map.empty
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
@@ -331,6 +347,19 @@ expectError msg code =
     case result of
       (Right _) -> assertFailure . MT.unpack $ "Expected failure"
       (Left _) -> return ()
+
+-- Asserts the frontend pipeline (parse, restructure, typecheck, alias
+-- evaluation) completes successfully. Used when the structure of the
+-- resulting type is uninteresting and we only care that no error was
+-- raised and the pipeline did not diverge (the surrounding group's
+-- localOption mkTimeout supplies the divergence guard).
+expectPass :: String -> MT.Text -> TestTree
+expectPass msg code =
+  testCase msg $ do
+    result <- runFront code
+    case result of
+      (Right _) -> return ()
+      (Left e) -> assertFailure $ "Expected pass but got error: " <> show e
 
 testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
 testEqual msg x y =
@@ -957,6 +986,72 @@ numericLiteralAliasTests =
         type Char = UInt8
         x :: Char
         x = 1.5
+        |]
+        -- Nat-parameterized list aliases: `Vector 4 Int32` reduces via
+        -- `type Vector (n :: Nat) a = List a` to `List Int32`. The list
+        -- literal's elements must take on the reduced element type,
+        -- not synthesize as `Int` and fail the subsequent subtype check.
+        -- This is the user's original reproducer from the bug report.
+      , assertGeneralType
+          "list literal :: Vector 4 Int32  (Vector (n::Nat) a = List a)"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 4 Int32
+        x = [1, 2, 3, 4]
+        |]
+          (lst (var "Int32"))
+      , assertGeneralType
+          "list literal :: Vector 3 Int8  (other fixed-width int)"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 3 Int8
+        x = [1, 2, 3]
+        |]
+          (lst (var "Int8"))
+      , assertGeneralType
+          "list literal :: Vector 2 UInt16  (unsigned fixed-width int)"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 2 UInt16
+        x = [1, 2]
+        |]
+          (lst (var "UInt16"))
+        -- Nested nat-parameterized alias: Matrix m n a = [[a]] requires
+        -- the element-type propagation to recurse through both layers.
+      , assertGeneralType
+          "nested list literal :: Matrix 2 2 Int32"
+          [r|
+        module main (x)
+        type Matrix (m :: Nat) (n :: Nat) a = List (List a)
+        x :: Matrix 2 2 Int32
+        x = [[1, 2], [3, 4]]
+        |]
+          (lst (lst (var "Int32")))
+        -- Real literals through nat-parameterized aliases use the same
+        -- dispatch — confirm the RealS path is unaffected.
+      , assertGeneralType
+          "real list literal :: Vector 2 Float32"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 2 Float32
+        x = [1.5, 2.5]
+        |]
+          (lst (var "Float32"))
+        -- Negative: Nat-dimension mismatch must still fail. The element
+        -- type was successfully propagated (Int32 accepted into the
+        -- literals), but length 3 does not satisfy Nat dimension 4.
+        -- This guards against the fix bypassing the nat-dim check.
+      , expectError
+          "list literal :: Vector 4 Int32 with wrong length must fail"
+          [r|
+        module main (x)
+        type Vector (n :: Nat) a = List a
+        x :: Vector 4 Int32
+        x = [1, 2, 3]
         |]
       ]
 
@@ -2090,6 +2185,39 @@ unitValuecheckTests =
              y = n + 1
              y = n + 2
       |]
+      , -- A polymorphic export that reaches a typeclass method backed by
+        -- instances with differing literal bodies (e.g. Integral Int zero=0
+        -- vs Integral Real zero=0.0). The instances are type-disjoint and
+        -- never co-selected, so this must not be flagged as a value conflict.
+        valuecheckPass
+          "polymorphic export through multi-instance typeclass with literal bodies"
+          [r|
+         module foo (f)
+           class Foo a where
+             bar :: a
+           instance Foo Int where
+             bar = 5
+           instance Foo Real where
+             bar = 5.0
+           f :: Foo a => a
+           f = bar
+      |]
+      , -- Conflicting bodies for the SAME instance type must still fail:
+        -- type-disjointness is the only thing that licenses skipping the
+        -- comparison, and here both alternatives are Int.
+        valuecheckFail
+          "duplicate same-type instance bodies still flagged"
+          [r|
+         module foo (f)
+           class Foo a where
+             bar :: a
+           instance Foo Int where
+             bar = 5
+           instance Foo Int where
+             bar = 6
+           f :: Foo a => a
+           f = bar
+      |]
       ]
 
 {- | Tests for infix operator functionality
@@ -3003,16 +3131,24 @@ effectSubtypeTests =
           [] (ioEff a) a
       , assertSubtypeBad "drop effect: <IO,Error> A </: A"
           [] (ioErrEff a) a
-      , assertSubtypeBad "drop effect: <> A </: A (empty is still suspended)"
-          [] (emptyEff a) a
 
-        -- === Pure-to-effect handled by coercion, not subtype ===
-        -- The pure-to-effect lift is the responsibility of `tryCoerce`,
-        -- not the subtype relation.  A bare subtype check between a
-        -- pure type and an effectful type should fail; coercion picks
-        -- it up at synthesis sites.  This test pins that boundary.
-      , assertSubtypeBad "pure </: <IO> via subtype alone"
-          [] a (ioEff a)
+        -- === Empty effect is the monoid identity: <> A == A ===
+        -- The empty effect set is NOT a suspended computation; it is
+        -- definitionally the inner type.  Effect coercion was removed,
+        -- so this holds through the subtype relation alone, in both
+        -- directions -- there is no `tryCoerce` step to involve.
+      , assertSubtypeGamma "empty effect identity: <> A <: A"
+          [] (emptyEff a) a []
+      , assertSubtypeGamma "empty effect identity: A <: <> A"
+          [] a (emptyEff a) []
+
+        -- === Pure-to-effect is plain subsumption, NOT coercion ===
+        -- The old pure-to-effect lift (`tryCoerce` / CoerceToEffect)
+        -- was removed.  A pure value satisfies an effectful slot
+        -- directly through subtyping: <> A == A and {} is a subset of
+        -- any effect row, so `A <: <IO> A` holds with no coercion step.
+      , assertSubtypeGamma "pure <: <IO> via subsumption (no coercion)"
+          [] a (ioEff a) []
 
         -- === Recursion through inner type ===
         -- The subtype rule recurses on the inner types after the
@@ -3048,6 +3184,21 @@ effectSubtypeTests =
           [] (ioEff a) (effVar "e1" a) []
       , assertSubtypeGamma "deferral: <IO,Error> A <: <e1> A passes (var on right)"
           [] (ioErrEff a) (effVar "e1" a) []
+
+        -- === Effect row may fill an inferred type variable ===
+        -- A non-empty effect row solves a bare existential (mirrors the
+        -- ExistU <: EffectU direction).  This lets a generic combinator
+        -- ($, ., id) thread an effectful value through a type variable;
+        -- the over-broad rejection here previously broke `f $ effExpr`.
+        -- Soundness is enforced where serialization happens, not here.
+      , assertSubtypeOk "effect into tyvar: <a> -| <Error> A <: <a> accepted"
+          [eag] (errEff a) ea
+      , assertSubtypeOk "effect into tyvar: <a> -| <IO,Error> A <: <a> accepted"
+          [eag] (ioErrEff a) ea
+        -- ...but a genuinely effectful value still cannot satisfy a
+        -- concrete non-effect type (that rejection is unchanged).
+      , assertSubtypeBad "effect into concrete still rejected: <Error> A </: A"
+          [] (errEff a) a
       ]
   where
     a = var "A"
@@ -3059,15 +3210,6 @@ effectSubtypeTests =
 -- | Effect synthesis tests verify that the inferred effect set on a
 -- top-level export matches the spec's structural propagation rule
 -- ('spec/types/effects.md' under "Effect Inference"):
---
---   * A pure do-block carries an empty effect set.
---   * Forcing an effectful expression collects that effect.
---   * Forces nested inside applications, tuples, lists, lets, etc.
---     bubble their effects up to the enclosing do-block.
---   * Multiple forces with distinct labels yield an EffectUnion.
---   * '<-' binds and '!' forces collect effects symmetrically.
---   * Pure-to-effect coercion lifts a pure body when the signature
---     declares effects (allowed, may warn in the future).
 effectSynthesisTests :: TestTree
 effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
@@ -3075,64 +3217,33 @@ effectSynthesisTests =
       "Effect synthesis tests"
       [ -- pure do-block with no effects infers empty effect set
         assertGeneralType
-          "pure do-block infers empty effects"
+          "pure do-block"
           [r|
         module main (x)
         x = do 42
           |]
-          (emptyEff int)
-      , -- force operator collects effect from forced expression
-        assertGeneralType
-          "do-block with force collects IO effect"
+          int
+      , assertGeneralType
+          "do-block with with one function call"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
-        x = do !(f 1)
+        x = do { f 1 }
           |]
           (ioEff int)
-      , -- force in tuple: effects collected, tuple gets plain inner types
-        assertGeneralType
-          "do-block with tuple of forces"
+      , assertGeneralType
+          "do-block with tuple of effectful elements"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
-        x = do (!(f 1), !(f 2))
+        x = do
+          x <- f 1
+          y <- f 2
+          (x, y)
           |]
           (ioEff (tuple [int, int]))
-      , -- force in function args: effects bubble up, function sees plain args
-        assertGeneralType
-          "do-block with forces in function args"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        add :: Int -> Int -> Int
-        x = do add !(f 1) !(f 2)
-          |]
-          (ioEff int)
-      , -- bind extracts value from effectful expr, adds effect to block
-        assertGeneralType
-          "do-block with bind"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        x = do
-            y <- f 1
-            y
-          |]
-          (ioEff int)
-      , -- multiple binds collect effects from all bound expressions
-        assertGeneralType
-          "do-block with chained binds"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        add :: Int -> Int -> Int
-        x = do
-            a <- f 1
-            b <- f 2
-            add a b
-          |]
-          (ioEff int)
       , -- let with pure RHS in do-block infers empty effect
         assertGeneralType
           "do-block with pure let binding"
@@ -3142,27 +3253,18 @@ effectSynthesisTests =
             let y = 1
             y
           |]
-          (emptyEff int)
-      , -- let with forced RHS collects effect from the force
-        assertGeneralType
+          int
+      , assertGeneralType
           "do-block with bind and let"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         add :: Int -> Int -> Int
         x = do
             y <- f 1
             let z = add y 1
             z
-          |]
-          (ioEff int)
-      , -- pure value auto-coerces to effectful when annotation demands it
-        assertGeneralType
-          "pure value coerces to effectful via annotation"
-          [r|
-        module main (x)
-        x :: <IO> Int
-        x = 42
           |]
           (ioEff int)
       , -- pure expression in do-block produces empty effects
@@ -3173,36 +3275,28 @@ effectSynthesisTests =
         add :: Int -> Int -> Int
         x = do add 1 2
           |]
-          (emptyEff int)
-      , -- forces with different effects produce EffectUnion
-        -- (order: IO first because it appears first in the application)
-        assertGeneralType
+          int
+      , assertGeneralType
           "do-block with multiple effect labels"
           [r|
         module main (x)
+        effect IO
+        effect Error
         f :: Int -> <IO> Int
         g :: Int -> <Error> Int
         add :: Int -> Int -> Int
-        x = do add !(f 1) !(g 2)
-          |]
-          (EffectU (EffectUnion (EffectSet (Set.singleton "IO")) (EffectSet (Set.singleton "Error"))) int)
-      , -- bind and force mix in same do-block, effects combine
-        assertGeneralType
-          "do-block mixing bind and force"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        add :: Int -> Int -> Int
         x = do
-            y <- f 1
-            add y !(f 2)
+          x <- f 1
+          y <- g 2
+          add x y
           |]
-          (ioEff int)
+          (ioErrEff int)
       , -- chained binds feeding results forward
         assertGeneralType
           "do-block with chained dependent binds"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         add :: Int -> Int -> Int
         x = do
@@ -3216,6 +3310,7 @@ effectSynthesisTests =
           "annotated do-block matches inferred effects"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x :: <IO> Int
         x = do
@@ -3228,9 +3323,11 @@ effectSynthesisTests =
           "polymorphic function in do-block"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         id :: a -> a
-        x = do !(f (id 42))
+        x = do
+          f (id 42)
           |]
           (ioEff int)
       , -- do-block returning a list with forces
@@ -3238,8 +3335,12 @@ effectSynthesisTests =
           "do-block returning list"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
-        x = do [!(f 1), !(f 2)]
+        x = do
+          x <- f 1
+          y <- f 2
+          [x, y]
           |]
           (ioEff (lst int))
       ]
@@ -3266,33 +3367,15 @@ effectErrorTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
     testGroup
       "Effect error tests"
-      [ -- '!' is only meaningful on a suspended (effectful) value.
-        -- Forcing a plain Int is nonsense and must be rejected.
-        exprTestBad
-          "force on non-effectful value"
-          [r|
-        module main (x)
-        x = do !(42)
-          |]
-
-        -- The argument inside a force must still typecheck against
-        -- the forced function's signature.  Here `f` takes Int, not Str.
-      , exprTestBad
-          "type mismatch inside do-block force"
-          [r|
-        module main (x)
-        f :: Int -> <IO> Int
-        x = do !(f "hello")
-          |]
-
-        -- A function `g :: Int -> Int` requires a pure Int.  Passing
+      [ -- A function `g :: Int -> Int` requires a pure Int.  Passing
         -- the effectful application `f 1 :: <IO> Int` directly (no
         -- force) must be rejected: effects do not silently drop at
         -- the argument boundary.
-      , exprTestBad
+        exprTestBad
           "effectful arg passed to pure parameter"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         g :: Int -> Int
         x = g (f 1)
@@ -3306,6 +3389,8 @@ effectErrorTests =
           "narrowing at binding: <IO,Error> bound to <IO>"
           [r|
         module main (x)
+        effect IO
+        effect Error
         rint :: <IO, Error> Int
         x :: <IO> Int
         x = rint
@@ -3317,6 +3402,7 @@ effectErrorTests =
           "narrowing at binding: <IO> bound to pure"
           [r|
         module main (x)
+        effect IO
         rint :: <IO> Int
         x :: Int
         x = rint
@@ -3329,6 +3415,8 @@ effectErrorTests =
           "narrowing at application: <IO,Error> arg to <IO> param"
           [r|
         module main (x)
+        effect IO
+        effect Error
         rint :: <IO, Error> Int
         consume :: <IO> Int -> Int
         x = consume rint
@@ -3341,68 +3429,169 @@ effectErrorTests =
           "disjoint effects: <Rand> arg to <IO> param"
           [r|
         module main (x)
+        effect Rand
+        effect IO
         rrand :: <Rand> Int
         consume :: <IO> Int -> Int
         x = consume rrand
           |]
+      ]
 
-        -- === Body-vs-signature effect coverage (the '!' outside do-block case) ===
-        -- The spec's "Effect Checking" rule requires that any effects
-        -- introduced by the body of a definition be declared in its
-        -- signature.  A bare '!' outside a do-block introduces an
-        -- effect into the surrounding term; if the signature does not
-        -- list that effect, it is a widening violation.  The
-        -- structural subtype rule cannot see this directly because
-        -- EvalS strips the effect wrapper from the inner type, so the
-        -- new 'checkEffectCoverage' pass enforces it.
-
-        -- A bare force outside a do-block makes the surrounding term
-        -- carry the forced effect.  Declaring the term as pure Int
-        -- silently dropped that effect before; now it errors.
-      , exprTestBad
-          "widening: force outside do-block in pure term"
+-- | Escapability tests.  An effect is inescapable by default
+-- (`effect E`); `escapable effect E` opts it into being
+-- dischargeable.  Two rules interact:
+--   * inescapable-propagation (signature-level): every inescapable
+--     concrete label in a parameter's effect row must also appear in
+--     the result row, so an inescapable effect is never silently
+--     consumed -- not even by a handler-shaped signature.
+--   * sourced-discharge (value-level): an escapable effect is exempt
+--     from propagation, but only a SOURCED handler may actually drop
+--     it; a defined function that carries the effect cannot.
+-- The handlers are APPLIED and the positive cases assert the
+-- discharged/propagated result type, so the assertion itself proves
+-- the rule.  The escapable-keyword contrast is two otherwise-identical
+-- applied programs differing only by the `escapable` keyword.
+effectEscapabilityTests :: TestTree
+effectEscapabilityTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Effect escapability tests"
+      [ -- === Escapable effect discharged by a SOURCED handler, applied ===
+        -- foo performs the escapable Error; the sourced handler recover
+        -- consumes <Error> Int and returns a pure Int.  Applying it
+        -- must yield Int -- the assertion itself proves the Error was
+        -- discharged at the call site, not merely that some unrelated
+        -- binding is well typed.
+        assertGeneralType
+          "escapable Error discharged by sourced handler (applied)"
           [r|
-        module main (randPure)
-        rint :: <Rand> Int
-        randPure :: Int
-        randPure = !rint
+        module main (x)
+        escapable effect Error
+        source Py ("foo")
+        source Py ("recover")
+        foo :: Int -> <Error> Int
+        recover :: <Error> Int -> Int
+        x :: Int
+        x = recover (foo 1)
+          |]
+          int
+      , -- Tail-variable handler <Error, e> a -> <e> a applied: Error is
+        -- discharged and the row variable solves to the empty row, so
+        -- the applied result reduces to a pure Int.
+        assertGeneralType
+          "escapable Error discharged, row variable solved (applied)"
+          [r|
+        module main (x)
+        escapable effect Error
+        source Py ("foo")
+        source Py ("handle")
+        foo :: Int -> <Error> Int
+        handle :: <Error, e> a -> <e> a
+        x :: Int
+        x = handle (foo 1)
+          |]
+          int
+      , -- An inescapable effect propagates THROUGH application: passt
+        -- keeps Cap in its result, so applying it to an effectful
+        -- argument yields <Cap> Int (the effect is not dropped).
+        assertGeneralType
+          "inescapable Cap propagates through application"
+          [r|
+        module main (x)
+        effect Cap
+        source Py ("foo")
+        source Py ("passt")
+        foo :: Int -> <Cap> Int
+        passt :: <Cap> Int -> <Cap> Int
+        x :: <Cap> Int
+        x = passt (foo 1)
+          |]
+          (EffectU (EffectSet (Set.singleton "Cap")) int)
+
+        -- === Escapable-keyword contrast (same applied program) ===
+        -- Identical to the first test EXCEPT `escapable` is dropped, so
+        -- Error is inescapable.  The handler is now rejected by the
+        -- inescapable-propagation rule -- isolating exactly what the
+        -- `escapable` keyword controls, with the handler applied.
+      , exprTestBad
+          "inescapable Error: the same applied program is rejected"
+          [r|
+        module main (x)
+        effect Error
+        source Py ("foo")
+        source Py ("recover")
+        foo :: Int -> <Error> Int
+        recover :: <Error> Int -> Int
+        x :: Int
+        x = recover (foo 1)
           |]
 
-        -- The same rule applies to a function whose return type is
-        -- declared pure but whose body uses a bare force.
+        -- === Only a SOURCED handler may discharge an escapable effect ===
+        -- recover is now DEFINED (recover t = t), not sourced.  Even
+        -- though Error is escapable, a defined function that carries the
+        -- effect cannot claim a pure result -- the discharge privilege
+        -- belongs to sourced handlers alone.
       , exprTestBad
-          "widening: force in pure function body"
+          "escapable Error: a defined (non-sourced) handler cannot discharge it"
           [r|
-        module main (purePlusEff)
-        rint :: <Rand> Int
-        add :: Int -> Int -> Int
-        purePlusEff :: Int -> Int
-        purePlusEff x = add x !rint
+        module main (x)
+        escapable effect Error
+        source Py ("foo")
+        foo :: Int -> <Error> Int
+        recover :: <Error> Int -> Int
+        recover t = t
+        x :: Int
+        x = recover (foo 1)
           |]
 
-        -- Let-binding to a forced value: the let's RHS force escapes
-        -- the surrounding term, so the term must declare the effect.
+        -- === Inescapable effect cannot escape through application ===
+        -- consume takes a pure Int; passing the inescapable effectful
+        -- `foo 1 :: <Cap> Int` would silently drop Cap at the argument
+        -- boundary.  Rejected.
       , exprTestBad
-          "widening: let-bound force in pure term"
+          "inescapable Cap cannot escape into a pure parameter (applied)"
           [r|
-        module main (letPureForce)
-        rint :: <Rand> Int
-        letPureForce :: Int
-        letPureForce = let x = !rint
-                       in x
+        module main (x)
+        effect Cap
+        source Py ("foo")
+        source Py ("consume")
+        foo :: Int -> <Cap> Int
+        consume :: Int -> Int
+        x :: Int
+        x = consume (foo 1)
           |]
 
-        -- Function declared with one effect but body uses a different
-        -- one.  Rand is not a subset of IO, so the body's force does
-        -- not fit the declared signature.
+        -- === Signature-level rejections (illegal before any use) ===
+        -- These declarations are rejected at the point of declaration
+        -- by the inescapable-propagation rule, so no application is
+        -- even reachable.
       , exprTestBad
-          "widening: body force has effect outside declared set"
+          "signature: inescapable Cap in parameter absent from result"
           [r|
-        module main (mixedEff)
-        rint :: <Rand> Int
-        ident :: Int -> Int
-        mixedEff :: Int -> <IO> Int
-        mixedEff x = ident !rint
+        module main (ok)
+        effect Cap
+        consume :: <Cap> Int -> Int
+        ok :: Int
+        ok = 42
+          |]
+      , exprTestBad
+          "signature: handler-shaped <Cap,e> a -> <e> a rejected (Cap inescapable)"
+          [r|
+        module main (ok)
+        effect Cap
+        bad :: <Cap, e> a -> <e> a
+        ok :: Int
+        ok = 42
+          |]
+      , exprTestBad
+          "signature: escapable Error droppable but inescapable Cap in same row leaks"
+          [r|
+        module main (ok)
+        escapable effect Error
+        effect Cap
+        mixed :: <Error, Cap> Int -> <Error> Int
+        ok :: Int
+        ok = 42
           |]
       ]
 
@@ -3474,6 +3663,20 @@ namespaceErrorTests =
         import helpers as h
         x :: Int
         x = double 5
+          |]
+      , -- typeclass methods are not exported as standalone symbols and
+        -- cannot be selectively imported; this should raise an error
+        -- (the test asserts only the presence of an error, not its text)
+        exprTestBad
+          "typeclass method cannot be selectively imported"
+          [r|
+        module eq (*)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        module main (test)
+        import eq ((==))
+        test :: Bool
+        test = True
           |]
       ]
 
@@ -3559,7 +3762,7 @@ typeclassTests =
         module main (foo)
         type Py => Int = "int"
         myId :: a -> a
-        source Py ("lambda x: x" as myId)
+        source Py ("myId")
         foo :: Int
         foo = (myId :: Int -> Int) 42
           |]
@@ -3571,7 +3774,7 @@ typeclassTests =
         module main (foo)
         type Py => Real = "float"
         myVal :: a
-        source Py ("lambda: 3.14" as myVal)
+        source Py ("myVal")
         foo :: Real
         foo = myVal :: Real
           |]
@@ -3667,12 +3870,14 @@ typeclassTests =
           "typeclass method in effectful do-block"
           [r|
         module main (x)
+        effect IO
         class Default a where
           def :: a
         instance Default Int where
           def = 0
         f :: Int -> <IO> Int
-        x = do !(f def)
+        x = do
+          f def
           |]
           (ioEff int)
 
@@ -4577,6 +4782,7 @@ natKindPromotionTests =
         "effectful tensor: <IO> T1 n Real with labeled dim"
         [r|
       module main (x)
+      effect IO
       type T1 (d :: Nat) a = [a]
       ioMake :: n:Int -> <IO> T1 n Real
       x = ioMake 5
@@ -4860,7 +5066,7 @@ letBindingTests =
             let y = 42
             y
           |]
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do-block with multi-binding let (omit repeated let)"
@@ -4871,7 +5077,7 @@ letBindingTests =
                 b = 2
             b
           |]
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do-block with separate let statements"
@@ -4882,12 +5088,13 @@ letBindingTests =
             let b = 2
             b
           |]
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do-block let interleaved with bind"
           [r|
         module main (x)
+        effect IO
         f :: Int -> <IO> Int
         x = do
             let a = 1
@@ -4902,17 +5109,17 @@ letBindingTests =
       , assertGeneralType
           "do with explicit braces and semicolons"
           "module main (x)\nx = do { 42 }"
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do with explicit braces, let, and semicolons"
           "module main (x)\nx = do { let a = 1; a }"
-          (emptyEff int)
+          int
 
       , assertGeneralType
           "do with explicit braces, multiple lets"
           "module main (x)\nx = do { let a = 1; let b = 2; b }"
-          (emptyEff int)
+          int
       ]
 
 -- | Tests for typeclass instance resolution when multiple instances share the
@@ -5124,4 +5331,570 @@ aliasConstructorTests =
         f :: Int
         f = ("hello" :: Str)
           |]
+      ]
+
+-- Recursive record types. Self-recursive references through @[_]@ or @?_@
+-- are legal (the data is heap-indirected and base-case-terminating).
+-- Bare self-recursion (under tuple, function, named app, or directly) and
+-- any mutual recursion remain illegal. Divergence is treated as failure
+-- via the per-group timeout: if alias expansion or any later phase loops
+-- on a recursive typedef, the offending test fires the timeout.
+--
+-- Syntax notes:
+--   * Record types use @record T where { f :: t; ... }@; type-level
+--     record literals @{f :: t}@ on the RHS of @type ... = ...@ are
+--     rejected by the parser (CLAUDE.md: the @::@-form is reserved for
+--     decls, not literals).
+--   * Self-recursion on a non-record type alias (@type B3 = B3 -> Int@,
+--     @type B2 = (B2, Int)@) parses and is exercised below for the
+--     non-record bare-self cases.
+recursiveRecordTests :: TestTree
+recursiveRecordTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout; divergence appears as failure
+    testGroup
+      "Recursive record types"
+      [
+        -- POSITIVE: guarded self-recursion is accepted
+
+        expectPass
+          "self-recursion through list field"
+          [r|
+        module main (f)
+        record T1 where
+          a :: [T1]
+        f :: T1 -> T1
+        |]
+      , expectPass
+          "self-recursion through optional field"
+          [r|
+        module main (f)
+        record T2 where
+          a :: ?T2
+        f :: T2 -> T2
+        |]
+      , expectPass
+          "self-recursion through optional of list"
+          [r|
+        module main (f)
+        record T3 where
+          a :: ?[T3]
+        f :: T3 -> T3
+        |]
+      , expectPass
+          "self-recursion through list of optional"
+          [r|
+        module main (f)
+        record T4 where
+          a :: [?T4]
+        f :: T4 -> T4
+        |]
+      , expectPass
+          "self-recursion through nested lists"
+          [r|
+        module main (f)
+        record T5 where
+          a :: [[T5]]
+        f :: T5 -> T5
+        |]
+      , expectPass
+          "self-recursion through optional of nested lists"
+          [r|
+        module main (f)
+        record T6 where
+          a :: ?[[T6]]
+        f :: T6 -> T6
+        |]
+      , expectPass
+          "parameterized self-recursion"
+          [r|
+        module main (f)
+        record T7 a where
+          value :: a
+          children :: [T7 a]
+        f :: T7 Int -> T7 Int
+        |]
+
+        -- NEGATIVE: bare self-recursion is rejected
+      , expectError
+          "bare self under record field is rejected"
+          [r|
+        module main (f)
+        record B1 where
+          a :: B1
+        f :: B1 -> B1
+        |]
+      , expectError
+          "bare self under tuple alias is rejected"
+          [r|
+        module main (f)
+        type B2 = (B2, Int)
+        f :: B2 -> B2
+        |]
+      , expectError
+          "bare self under function argument is rejected"
+          [r|
+        module main (f)
+        type B3 = B3 -> Int
+        f :: B3 -> Int
+        |]
+      , expectError
+          "bare self under function return is rejected"
+          [r|
+        module main (f)
+        type B4 = Int -> B4
+        f :: B4
+        |]
+      , expectError
+          "bare self under non-list non-optional app is rejected"
+          [r|
+        module main (f)
+        type Pair a b = (a, b)
+        record B5 where
+          a :: Pair B5 Int
+        f :: B5 -> B5
+        |]
+      , expectError
+          "mixed good-and-bad fields: rejection wins"
+          [r|
+        module main (f)
+        record B6 where
+          ok :: [B6]
+          bad :: B6
+        f :: B6 -> B6
+        |]
+
+        -- NEGATIVE: mutual recursion is rejected (out of scope this pass)
+      , expectError
+          "mutual recursion 2-cycle, unguarded, is rejected"
+          [r|
+        module main (f)
+        record M1 where
+          x :: M2
+        record M2 where
+          y :: M1
+        f :: M1 -> M1
+        |]
+      , expectError
+          "mutual recursion 2-cycle, both sides guarded, is rejected"
+          [r|
+        module main (f)
+        record N1 where
+          x :: [N2]
+        record N2 where
+          y :: [N1]
+        f :: N1 -> N1
+        |]
+      , expectError
+          "mutual recursion 3-cycle is rejected"
+          [r|
+        module main (f)
+        record C1 where
+          x :: C2
+        record C2 where
+          y :: C3
+        record C3 where
+          z :: C1
+        f :: C1 -> C1
+        |]
+      ]
+
+-- | Bidirectional checking for function application against structurally
+-- recursive types. The new `checkE (AppS f xs) t` rule propagates the
+-- expected type into the function's return position BEFORE checking the
+-- args. Without it, a literal at a recursive alias gets synthesised to
+-- a finite tuple shape and subtype fails when it tries to roll the
+-- finite type back into the recursive alias.
+--
+-- The cases here are typecheck-only (no codegen, no pool build) so the
+-- whole group runs in milliseconds. The deep tests below pin the
+-- linear-complexity claim from the plan.
+bidirectionalAppCheckTests :: TestTree
+bidirectionalAppCheckTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "Bidirectional App-check against recursive types"
+      [ -- Bug repro: monomorphic id-shaped call at a recursive alias.
+        -- Without the new rule, the literal synthesises to
+        -- `(Str, (Str, ?ex))` and subtype against `Pair Str` fails at
+        -- the inner `(Str, ?ex) <: ?(Pair Str)`.
+        expectPass
+          "monomorphic id at recursive Pair alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        idPair :: Pair Str -> Pair Str
+        foo :: Pair Str
+        foo = idPair ("a", ("b", Null))
+        |]
+      , -- Polymorphic id: forces stripForallU + propagation through the
+        -- shared `a` existential.
+        expectPass
+          "polymorphic id at recursive Pair alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        id :: a -> a
+        foo :: Pair Str
+        foo = id ("a", ("b", Null))
+        |]
+      , -- Multi-arg application: exercises the
+        -- `length xs == length paramTypes` arm beyond unary.
+        expectPass
+          "multi-arg polymorphic function at recursive alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        pick :: Bool -> a -> a -> a
+        foo :: Pair Str
+        foo = pick True ("a", Null) ("b", Null)
+        |]
+      , -- Nested AppS: argument is itself a function application, so
+        -- the new rule must recurse through checkG -> checkE -> AppS.
+        expectPass
+          "nested polymorphic id at recursive alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        id :: a -> a
+        foo :: Pair Str
+        foo = id (id ("a", ("b", Null)))
+        |]
+      , -- Partial application: falls back cleanly via checkEFallback.
+        -- The new rule's `_ -> checkEFallback` arm is exercised.
+        expectPass
+          "partial application falls through cleanly"
+          [r|
+        module main (bar)
+        add :: Int -> Int -> Int
+        bar :: Int -> Int
+        bar = add 1
+        |]
+      , -- Genuine type error must still be rejected: the propagation
+        -- step solves `a := Int`, then the argument check `"x" :: Int`
+        -- fails inside checkG (same diagnostic surface as today).
+        exprTestBad
+          "wrong-typed argument still rejected"
+          [r|
+        module main (foo)
+        id :: a -> a
+        foo :: Int
+        foo = id "hello"
+        |]
+      , -- Function-as-argument: confirms the rule doesn't over-eagerly
+        -- fire on FunU-returning calls where the existing logic was
+        -- already correct.
+        expectPass
+          "function-as-argument keeps working"
+          [r|
+        module main (foo)
+        apply :: (a -> b) -> a -> b
+        inc :: Int -> Int
+        foo :: Int
+        foo = apply inc 3
+        |]
+      , -- Linear-complexity probe: depth-20 recursive literal under a
+        -- monomorphic id at a recursive alias. With the linear
+        -- algorithm this is microseconds; with an O(N^2) regression
+        -- depth-20 is 400x slower, still well inside 2 s but visible
+        -- if cubic or exponential.
+        expectPass
+          "deep-20 recursive literal, monomorphic id"
+          (deepLiteralProgram False 20)
+      , -- Depth-20 literal under polymorphic id: forces stripForallU +
+        -- propagation at the recursive type.
+        expectPass
+          "deep-20 recursive literal, polymorphic id"
+          (deepLiteralProgram True 20)
+      , -- Depth-20 chain of id applications around a small literal:
+        -- exercises the application-nesting axis orthogonally to
+        -- literal depth.
+        expectPass
+          "deep-20 chained id applications"
+          (deepIdChainProgram 20)
+      , -- Combined axes: depth-20 literal nested inside a depth-20 id
+        -- chain. If complexity is O(M*N) this is 400 work units, still
+        -- linear-ish in 2 s but a regression to O((M*N)^k) for k>=2
+        -- would blow up here.
+        expectPass
+          "deep-20 literal under deep-20 id chain"
+          (deepCombinedProgram 20)
+      , -- Negative deep case: depth-20 literal at a wrong type. The
+        -- failure path must also be linear (no pathological cost when
+        -- the rule's propagation succeeds but the argument check
+        -- rejects).
+        exprTestBad
+          "deep-20 recursive literal at wrong type still rejected"
+          (deepWrongTypeProgram 20)
+      ]
+
+-- | Build a morloc source program with a depth-N recursive literal
+-- assigned to `foo :: Pair Str` via `idPair` (mono) or `id` (poly).
+-- The literal nests as ("s1", ("s2", ..., ("sN", Null) ... )).
+deepLiteralProgram :: Bool -> Int -> MT.Text
+deepLiteralProgram poly n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "type Pair a = (a, ?(Pair a))"
+  , if poly then "id :: a -> a" else "idPair :: Pair Str -> Pair Str"
+  , "foo :: Pair Str"
+  , "foo = " <> (if poly then "id " else "idPair ") <> deepLit n
+  ]
+
+-- | depth-N nested literal: ("s1", ("s2", ..., ("sN", Null) ... ))
+deepLit :: Int -> String
+deepLit n = go 1
+  where
+    go k
+      | k > n     = "Null"
+      | otherwise = "(\"s" <> show k <> "\", " <> go (k + 1) <> ")"
+
+-- | depth-N chain of `id` applications: id (id (id ... ("a", Null)))
+deepIdChainProgram :: Int -> MT.Text
+deepIdChainProgram n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "type Pair a = (a, ?(Pair a))"
+  , "id :: a -> a"
+  , "foo :: Pair Str"
+  , "foo = " <> chain n <> "(\"s1\", (\"s2\", Null))" <> replicate n ')'
+  ]
+  where
+    chain k = concat (replicate k "id (")
+
+-- | Combined: depth-N id chain wrapped around depth-N literal.
+deepCombinedProgram :: Int -> MT.Text
+deepCombinedProgram n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "type Pair a = (a, ?(Pair a))"
+  , "id :: a -> a"
+  , "foo :: Pair Str"
+  , "foo = " <> chain n <> deepLit n <> replicate n ')'
+  ]
+  where
+    chain k = concat (replicate k "id (")
+
+-- | depth-N literal annotated at the wrong type (Int) so the
+-- argument check must fail.
+deepWrongTypeProgram :: Int -> MT.Text
+deepWrongTypeProgram n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "id :: a -> a"
+  , "foo :: Int"
+  , "foo = id " <> deepLit n
+  ]
+
+-- | Coverage for the class of nat/str/list-label propagation
+-- patterns: information that flows from a literal argument OUT
+-- through one or more carrier functions to satisfy an outer
+-- expected type. The "labeled dims propagate through 3-function
+-- chain" case in natKindPromotionTests was the canonical example;
+-- these tests broaden the coverage along several axes:
+--
+--   * different chain depths (1, 2, 4) on the same nat-label axis
+--   * monomorphic vs polymorphic carrier functions
+--   * multi-label functions where multiple pinnings must propagate
+--   * multi-arg functions where one arg pins a shared variable
+--   * cross-existential pinning via a tuple's first element
+--   * negative cases: a downstream constraint must reject a wrong
+--     literal seen at any depth in the chain
+--
+-- Most cases here are handled by the OLD synth+subtype path -- the
+-- new checkE AppS rule is gated to bare-existential return types,
+-- which excludes the parameterized-carrier functions used in chains.
+-- That gating is itself under test: a regression that broadened the
+-- rule's trigger (e.g. dropping the isBareExistU guard) would let it
+-- over-commit on the structured-return cases below and surface as
+-- either a stranded NatVar or a Rec-key-set mismatch.
+postArgPropagationTests :: TestTree
+postArgPropagationTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "App-check post-arg propagation of inner solutions"
+      [ -- One level of indirection: monomorphic carrier with a single
+        -- nat var. The pre-subtype defers (NatVar n_f vs NatVar n_g),
+        -- the labelled `make` arg pins n_f := 5, and the post-subtype
+        -- has to push n_f's value out to n_g.
+        assertRawType
+          "depth-1 nat label chain through monomorphic id_"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        id_ :: T1 n Real -> T1 n Real
+        x = id_ (make 5)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
+      , -- Polymorphic carrier (forall a. a -> a) instead of the
+        -- nat-typed id_. Exercises the stripForallU + label-pinning
+        -- combination through the new rule.
+        assertRawType
+          "depth-1 nat label chain through polymorphic id"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        id :: a -> a
+        x = id (make 6)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 6, VarU (TV "Real")])
+      , -- Depth-2 chain: same direction as the 3-function chain, but
+        -- one level shorter. The post-subtype has to chain through
+        -- two carriers (the inner f and the outer g_ both leave the
+        -- nat var unsolved by themselves).
+        assertRawType
+          "depth-2 nat label chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        x = g (f (make 7))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
+      , -- Depth-4 chain: confirms the post-subtype propagation works
+        -- at arbitrary depth. If the propagation lost information at
+        -- some level the result would be a stranded NatVar like the
+        -- bug report.
+        assertRawType
+          "depth-4 nat label chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f1 :: T1 n Real -> T1 n Real
+        f2 :: T1 n Real -> T1 n Real
+        f3 :: T1 n Real -> T1 n Real
+        f4 :: T1 n Real -> T1 n Real
+        x = f4 (f3 (f2 (f1 (make 11))))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 11, VarU (TV "Real")])
+      , -- Two labels in the same function, both must propagate
+        -- through one level of indirection. Without the post-subtype
+        -- one of the nat vars (typically the second) would stay
+        -- stranded because the deferred constraint never re-fires.
+        assertRawType
+          "two-label function chained through id_"
+          [r|
+        module main (x)
+        type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+        make :: m:Int -> n:Int -> T2 m n Real
+        id_ :: T2 m n Real -> T2 m n Real
+        x = id_ (make 3 4)
+          |]
+          (AppU (VarU (TV "T2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+      , -- Multi-arg outer function where the recursive position is one
+        -- of several args. The other arg (a plain Real) must not
+        -- interfere with the post-subtype's nat-var propagation.
+        assertRawType
+          "label propagates through second arg of multi-arg function"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        scale :: Real -> T1 n Real -> T1 n Real
+        x = scale 2.0 (make 8)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 8, VarU (TV "Real")])
+      , -- Both args of a multi-arg function contribute the same label
+        -- value. The pre-subtype against the expected type defers,
+        -- but the first arg's labelled-nat pins one side; the second
+        -- arg then has to be checked against the now-pinned type,
+        -- and the post-subtype propagates the result back to the
+        -- expected nat var.
+        assertRawType
+          "shared label resolved by both args of binary op"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        add :: T1 n Real -> T1 n Real -> T1 n Real
+        x = add (make 4) (make 4)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 4, VarU (TV "Real")])
+      , -- Negative: depth-3 chain ending in a consumer that demands a
+        -- specific dimension. The mismatch must be caught, not
+        -- silently accepted by a stranded NatVar.
+        exprTestBad
+          "wrong-dim labelled arg at end of chain still rejected"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        consume :: T1 5 Real -> Int
+        x = consume (g (f (make 7)))
+          |]
+      , -- Negative: shared label disagreement across two arg positions.
+        -- Without correct propagation a stranded NatVar would let the
+        -- mismatch slip through.
+        exprTestBad
+          "label disagreement across shared-var binary op rejected"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        add :: T1 n Real -> T1 n Real -> T1 n Real
+        x = add (make 3) (make 5)
+          |]
+      , -- Nat arithmetic in the return type, propagated through a
+        -- chain. `make 6 2` returns `T1 (6*2) Real = T1 12 Real`; the
+        -- outer carriers must not lose the arithmetic result during
+        -- propagation.
+        assertRawType
+          "labelled nat arithmetic propagates through chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: m:Int -> n:Int -> T1 (m * n) Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        x = g (f (make 6 2))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
+      , -- Polymorphic id wraps a labelled call inside a multi-arg
+        -- outer. Combines the Forall-instantiation path with the
+        -- label-resolution path and exercises propagation at both
+        -- layers.
+        assertRawType
+          "polymorphic id wrapping labelled call inside outer scale"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        id :: a -> a
+        scale :: Real -> T1 n Real -> T1 n Real
+        x = scale 1.0 (id (make 9))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
+      , -- Pin a `forall a` from inside a TupS literal: the first
+        -- element of the tuple arg carries a labelled-nat value, and
+        -- the function's polymorphism `forall a.` must be solved by
+        -- that arg. Exercises the post-subtype when the carrier is a
+        -- non-nat existential.
+        assertRawType
+          "tuple-arg's labelled element pins outer existential"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        fst_ :: (a, Bool) -> a
+        x = fst_ (make 5, True)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
+      , -- The 3-function chain (the originally-failing test) as a
+        -- regression marker in the same group so the whole class is
+        -- co-located. Duplicated from natKindPromotionTests on
+        -- purpose: if someone later moves or renames the original
+        -- test, this group keeps locking in the contract.
+        assertRawType
+          "regression: labelled dims propagate through 3-function chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        x = g (f (make 9))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
       ]

@@ -213,6 +213,20 @@ addLocalState m0 e0 s0 = do
       let vmap = Map.fromList [(v, i) | (i, Signature v _ _) <- sigsIdx]
           classes = Map.insert cls (clsIndex, tcls, vmap) (linkClasses lstate)
       return $ lstate {linkClasses = classes}
+    -- Register a declared effect into the global effect registry. The
+    -- compiler hardcodes no effect names or escapability; this is the
+    -- only place effects enter 'stateEffects'. A label re-declared with
+    -- a different escapability is a hard error.
+    findDefs (ExprI _ (EffE lbl esc)) lstate = do
+      effs <- MM.gets stateEffects
+      case Map.lookup lbl effs of
+        Just esc'
+          | esc' /= esc ->
+              MM.throwSystemError $
+                "Conflicting effect declarations for" <+> squotes (pretty lbl)
+                  <> ": declared both as escapable and inescapable"
+        _ -> MM.modify (\s -> s {stateEffects = Map.insert lbl esc (stateEffects s)})
+      return lstate
     -- We only search for definitions at the top level. This may be the top-level
     -- inside of a where statement.
     findDefs (ExprI _ (ModE _ es)) lstate = foldrM findDefs lstate es

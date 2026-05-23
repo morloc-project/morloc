@@ -20,6 +20,7 @@ ldExtension: jl
 ldBoolTrue: "true"
 ldBoolFalse: "false"
 ldNullLiteral: "nothing"
+ldNullCheckTemplate: "{{expr}} !== nothing"
 ldRealPosInf: "Inf"
 ldRealNegInf: "-Inf"
 ldRealNaN: "NaN"
@@ -50,6 +51,9 @@ ldQualifiedImports: false
 ldIncludeRelToFile: true
 
 # Template fields
+# A sourced symbol is a Julia identifier or operator, emitted verbatim.
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_.!]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
 ldAssignOp: "="
 ldLambdaTemplate: "({{args}}) -> {{body}}"
 ldDoBlockExpr: "(() -> {{expr}})"

@@ -55,21 +55,16 @@ testListNested = [[1, Null], [Null, Null], [], [2, 3]]
 testListReal :: [?Real]
 testListReal = [1.5, Null, 2.5]
 
--- Record literal with a bare Null in an optional field. Records were
--- "working" only when Null arrived via a function call; the same
--- width-mismatch bug fires for literal-Null record fields too.
+-- Record literal with a bare Null in an optional field.
 testRecordNullField :: R
 testRecordNullField = { x = Null, y = "hi" }
 
 testRecordSomeField :: R
 testRecordSomeField = { x = 42, y = "bye" }
 
--- Tuple literal entirely of Nulls. (A mixed Int/Null tuple like
--- (1, Null, 3) at type (Int, ?Int, ?Int) is rejected at typecheck because
--- tuple synthesis does not currently propagate the ascribed element types
--- back to each element; that is a separate pre-existing limitation.)
+-- Tuple literal entirely of Nulls.
 testTupleNulls :: (?Int, ?Int)
-testTupleNulls = (Null, Null)
+testTupleNulls = (Null, 7)
 
 -- ?(?Int) is intentionally idempotent: nested ? collapses to a single
 -- null layer. Verify both branches reach the wire format unchanged.

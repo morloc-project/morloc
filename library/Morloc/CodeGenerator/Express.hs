@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Express
   ) where
 
 import qualified Data.Set as Set
+import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -66,7 +67,6 @@ linkConfigIndex midx fidx = do
   case Map.lookup fidx (stateManifoldConfig s) of
     Nothing -> return ()
     (Just mconfig) -> do
-      MM.sayVVV $ "Copy manifold config from" <+> pretty fidx <+> "to" <+> pretty midx
       MM.put (s {stateManifoldConfig = Map.insert midx mconfig (stateManifoldConfig s)})
 
 propagateScope :: Int -> Int -> MorlocMonad ()
@@ -139,7 +139,6 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
 
 expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
-  MM.sayVVV $ "express CallS (midx=" <> pretty midx <> "," <+> "cidx=" <> pretty cidx <> "):"
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
     (SrcCall src) -> return $ SrcCallP src
@@ -149,28 +148,69 @@ expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) =
     . PolyHead lang midx [Arg i None | i <- ids]
     . PolyReturn
     $ PolyApp (PolyExe (Idx midx c) exe') lambdaVals
+-- Point-free export aliasing a recursive function. extractRecursiveHelpers
+-- has pulled the helper into its own manifold and left a bare CallS back-edge
+-- at the export root. Eta-expand here so the PolyHead carries the function's
+-- arity; otherwise the export manifold would be emitted with zero args while
+-- the nexus manifest correctly records the type-driven arity.
+expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) = do
+  (mid, crossLang) <- lookupRecursiveTarget lang v
+  ids <- MM.takeFromCounter (length inputs)
+  let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
+      headArgs = [Arg i None | i <- ids]
+  case out of
+    EffectT effs innerOut ->
+      return
+        . PolyHead lang midx headArgs
+        . PolyReturn
+        . PolyDoBlock (Idx cidx (EffectT effs innerOut))
+        $ PolyApp (PolyExe (Idx midx (FunT inputs innerOut)) (RecCallP mid crossLang)) lambdaVals
+    _ ->
+      return
+        . PolyHead lang midx headArgs
+        . PolyReturn
+        $ PolyApp (PolyExe (Idx midx c) (RecCallP mid crossLang)) lambdaVals
 expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
-  MM.sayVVV $ "express LamS (midx=" <> pretty midx <> "):"
   setManifoldConfig midx e
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
   | [t] <- filter (not . isNatTypeT) ts = do
-      MM.sayVVV $ "express LstS"
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
       -- Preserve the FULL applied type args (Nat positions included) so
       -- downstream language code generators can see phantom dims.
       let x = PolyList (Idx cidx v) (map (Idx cidx) ts) xs'
       return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
-expressCore (AnnoS (Idx _ t) _ (LstS _)) = error $ "Invalid list form: " <> show t
-expressCore (AnnoS t@(Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
-  MM.sayVVV $ "express TupS:" <+> pretty t
-  let idxTs = zipWith mkIdx xs ts
-  xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
-  let x = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
-  return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
-expressCore (AnnoS g _ (TupS _)) = error $ "Invalid tuple form: " <> show g
-expressCore (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
-  MM.sayVVV $ "express NamT:" <+> pretty t
+-- LstS at a type whose head is a type-alias (e.g. @type Pat = [Pat]@
+-- used as a manifold return type). Reduce one alias step and retry.
+-- Same shape as the NamS reduce-and-retry below.
+expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (LstS xs)) = do
+  mayT <- evalGeneralStep midx (type2typeu t)
+  case mayT of
+    (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (LstS xs))
+    Nothing -> MM.throwSourcedError midx $ "Invalid list form: " <> pretty t
+-- TupS literal where the head IS the TupleN constructor: the type args
+-- are the slot types, so zip directly. For any other @AppT (VarT v) ts@
+-- (user alias whose args don't correspond to slot types -- e.g. the
+-- @NatLit n@ in a phantom-Nat tuple alias like
+-- @type FixedPair (n :: Nat) a = (a, a)@), fall through to the
+-- reduce-and-retry below so the alias body's slot types drive
+-- element-wise expression. See the parallel guard in Typecheck.hs C2.
+expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs))
+  | v == BT.tuple (length xs)
+  , length ts == length xs = do
+      let idxTs = zipWith mkIdx xs ts
+      xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
+      let x = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
+      return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
+-- TupS at a non-tuple head (user alias, including phantom-Nat aliases,
+-- and bare @VarT WrappedLL@ for @type WrappedLL = (Int, LL)@). Reduce
+-- one alias step and retry; same shape as the NamS reduce-and-retry.
+expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (TupS xs)) = do
+  mayT <- evalGeneralStep midx (type2typeu t)
+  case mayT of
+    (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (TupS xs))
+    Nothing -> MM.throwSourcedError midx $ "Invalid tuple form: " <> pretty t
+expressCore (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   -- C3 invariant: the literal's key order must equal the declared
   -- schema's key order. Typecheck.hs reorders NamS against the
   -- declared NamU; if that ever regresses, this assertion catches the
@@ -181,14 +221,11 @@ expressCore (AnnoS (Idx midx t@(NamT o v ps rs)) (Idx cidx lang, args) (NamS ent
   let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
-  MM.sayVVV $ "express NamT expand:" <+> pretty t
   mayT <- evalGeneralStep midx (type2typeu t)
   case mayT of
     (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
     Nothing -> MM.throwSourcedError midx $ "Missing concrete:" <+> "t=" <> pretty t
-expressCore e = do
-  MM.sayVVV "express default"
-  expressDefault e
+expressCore e = expressDefault e
 
 reduceType :: Scope -> Type -> Maybe Type
 reduceType scope t0 =
@@ -242,6 +279,24 @@ decideRemoteness bconf (Just (ManifoldConfig _ _ (Just res))) l1 l2 =
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
 
+-- Express a function argument. A do-block passed where an effect-typed
+-- (thunk) parameter is expected must be suspended whole -- identically to
+-- a bare effectful application argument -- so the handler receives an
+-- unevaluated thunk. Keep the EffectT on the inner expression so its
+-- source call is auto-suspended (Grammars.Common). The shared DoBlockS
+-- clause still strips EffectT for a return/export-position do-block, which
+-- forceExportThunks / pushForceIntoRemote discharge at the boundary.
+expressPolyArg ::
+  Lang ->
+  Indexed Type ->
+  AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
+  MorlocMonad PolyExpr
+expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _ _)) (Idx cidx lang, args) (DoBlockS x)) = do
+  x' <- expressPolyExprWrap lang (mkIdx x t) x
+  let e = PolyDoBlock (Idx cidx t) x'
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+expressPolyArg l pc e = expressPolyExprWrap l pc e
+
 expressPolyExpr ::
   (Lang -> Lang -> Maybe RemoteForm) ->
   Lang ->
@@ -269,7 +324,6 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        MM.sayVVV "case #4"
         let nContextArgs = length appArgs - length vs
             contextArgs = map unvalue (take nContextArgs appArgs)
 
@@ -291,8 +345,6 @@ expressPolyExpr
         propagateScope gidxCall midx
 
         xsInfo <- mapM partialExpress xs
-
-        MM.sayVVV $ "  xsInfo:" <+> pretty xsInfo
 
         let xs' = map (\(_, _, e) -> e) xsInfo
             callArgs = unique (concatMap (\(rs, _, _) -> rs) xsInfo)
@@ -341,59 +393,22 @@ expressPolyExpr
           , Maybe (Int, PolyExpr)
           , PolyExpr
           )
-      partialExpress (AnnoS (Idx _ t) (Idx cidx argLang, args@[Arg idx _]) (BndS v)) = do
-        MM.sayVVV $
-          "partialExpress case #0:" <+> "x="
-            <> pretty v <+> "cidx="
-            <> pretty cidx <+> "t =" <+> pretty t
-            <> "\n  parentLang:"
-            <> pretty parentLang
-            <> "\n  callLang:"
-            <> pretty callLang
-            <> "\n  argLang:"
-            <> pretty argLang
-            <> "\n  args:"
-            <> pretty args
+      partialExpress (AnnoS (Idx _ t) (Idx cidx _argLang, [Arg idx _]) (BndS _)) = do
         let x' = PolyBndVar (C (Idx cidx t)) idx
         return ([idx], Nothing, x')
       partialExpress x@(AnnoS (Idx _ t) (Idx cidx argLang, args) _)
         | argLang == callLang = do
-            MM.sayVVV $
-              "partialExpress case #2:" <+> "cidx="
-                <> pretty cidx <+> "t =" <+> pretty t
-                <> "\n  parentLang:"
-                <> pretty parentLang
-                <> "\n  callLang:"
-                <> pretty callLang
-                <> "\n  argLang:"
-                <> pretty argLang
-                <> "\n  args:"
-                <> pretty args
             let argParentType = Idx cidx t
             x' <- expressPolyExprWrap argLang argParentType x
             return ([i | Arg i _ <- args], Nothing, x')
         | otherwise = do
-            MM.sayVVV $
-              "partialExpress case #1:" <+> "cidx="
-                <> pretty cidx <+> "t =" <+> pretty t
-                <> "\n  parentLang:"
-                <> pretty parentLang
-                <> "\n  callLang:"
-                <> pretty callLang
-                <> "\n  argLang:"
-                <> pretty argLang
-                <> "\n  args:"
-                <> pretty args
             let argparentType = Idx cidx t
             letVal <- expressPolyExprWrap argLang argparentType x
             idx <- MM.getCounter
-            MM.sayVVV $ "making index in partialExpress #1:" <+> pretty idx
 
             let x' = PolyLetVar (Idx cidx t) idx
             return ([idx], Just (idx, letVal), x')
 expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArguments) (LamS vs body)) = do
-  MM.sayVVV $ "expressPolyExpr LamS:" <+> pretty lambdaType
-
   body' <- expressPolyExprWrap lang lambdaType body
 
   inputTypes <- case val lambdaType of
@@ -403,14 +418,6 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
   let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
       boundArguments = map unvalue $ drop (length contextArguments) manifoldArguments
       typeBoundArguments = fromJust $ safeZipWith (\t (Arg i _) -> Arg i (Just t)) inputTypes boundArguments
-
-  MM.sayVVV $
-    "Express lambda:"
-      <> "\n  vs:" <+> pretty vs
-      <> "\n  lambdaType:" <+> pretty lambdaType
-      <> "\n  manifoldArguments:" <+> list (map pretty manifoldArguments)
-      <> "\n  contextArguments:" <+> list (map pretty contextArguments)
-      <> "\n  boundArguments" <+> list (map pretty typeBoundArguments)
 
   return
     . PolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments)
@@ -428,7 +435,7 @@ expressPolyExpr
     )
     | srcInline src && isLocal = do
         propagateScope gidxCall midx
-        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         expressPolyApp parentLang f xsExpr >>= stripPolyReturn
     where
       remote = findRemote parentLang callLang
@@ -453,7 +460,7 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         expressPolyApp parentLang f xsExpr >>= stripPolyReturn
     where
       remote = findRemote parentLang callLang
@@ -471,7 +478,7 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        xsExpr <- zipWithM (expressPolyExprWrap callLang) (map (Idx cidxCall) inputs) xs
+        xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
 
         func <- expressPolyApp parentLang f xsExpr
         return
@@ -480,7 +487,7 @@ expressPolyExpr
     | not isLocal = do
         propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
-        mayXs <- safeZipWithM (expressPolyExprWrap callLang) idxInputTypes xs
+        mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         func <- expressPolyApp parentLang f (fromJust mayXs)
         return
           . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
@@ -527,7 +534,6 @@ expressPolyExpr
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
 expressPolyExpr _ _ _ (AnnoS (Idx i c) (Idx cidx _, rs) (BndS v)) = do
-  MM.sayVVV $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
   case [j | (Arg j v') <- rs, v == v'] of
     [r] -> return $ PolyBndVar (C (Idx cidx c)) r
     rs' ->
@@ -568,27 +574,41 @@ expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS _ x)) = ret
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS _ x)) = return $ PolyInt (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
 expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x)) = return $ PolyStr (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx v)
--- Null carries the type variable name of whatever it stands in for, used
--- downstream by per-language codegen to look up the concrete null literal
--- (e.g. None / NULL / std::nullopt). Peel OptionalT wrappers to reach the
--- underlying TVar so nested optionals (?(?T), ?(?(?T)), ...) resolve
--- correctly. If no representative TVar can be extracted -- e.g. an
--- unsolved existential leaked through typecheck and was rendered to UnkT --
--- raise a sourced error rather than fabricating a placeholder, mirroring
--- how 'inferConcreteType' handles UnkT in 'Morloc.CodeGenerator.Infer'.
+expressPolyExpr _ _ _ (AnnoS (Idx _ t@(VarT _)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx t)
+-- Null carries the full type it stands in for. Earlier this was just
+-- a @TVar@ extracted via @innerNullVar@, but a bare constructor name
+-- loses the arg list of parameterised aliases. For
+-- @Null :: ?(BTree Int)@, peeling Optional and discarding the @[Int]@
+-- yielded just @BTree@, whose downstream @inferConcreteVar@ chain
+-- resolved to an @FV BTree "tuple"@ FVar that the typeFof of the
+-- enclosing tuple/record/if surfaced as a bare-args VarF -- which
+-- @makeSerialAST@'s @dispatchVarF@ then could not interpret.
+--
+-- Now @innerNullType@ returns the full inner @Type@ (still peeling
+-- Optional wrappers for nested @?(?T)@ idempotence). Downstream
+-- consumers run @inferConcreteType@ on the stored type and surface
+-- the proper @TypeF@ at typeFof time.
 expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
-  case innerNullVar t of
-    Just v  -> return $ PolyNull (Idx cidx v)
+  case canonNullType t of
+    Just t' -> return $ PolyNull (Idx cidx t')
     Nothing -> MM.throwSourcedError midx $
-      "Cannot infer type variable for Null literal of type"
+      "Cannot infer type for Null literal of type"
       <+> dquotes (pretty t) <> "."
       <+> "This usually means an unsolved generic term escaped typechecking."
   where
-    innerNullVar (OptionalT inner) = innerNullVar inner
-    innerNullVar (VarT v)          = Just v
-    innerNullVar (AppT (VarT v) _) = Just v
-    innerNullVar _                 = Nothing
+    -- Require the outermost to be @OptionalT@ (which the typecheck
+    -- always supplies for @NullS@ via @synthE NullS@'s
+    -- @OptionalU v@). Then collapse nested Optionals (idempotence:
+    -- ?(?T) == ?T) and require a concrete head underneath. The stored
+    -- type is the canonical @?T@ where @T@ is @VarT@ or
+    -- @AppT (VarT _) _@, so downstream typeFof presents a single
+    -- Optional layer matching the slot's expected shape.
+    canonNullType (OptionalT inner) = OptionalT <$> peelOpt inner
+    canonNullType _                 = Nothing
+    peelOpt (OptionalT inner)       = peelOpt inner
+    peelOpt t'@(VarT _)             = Just t'
+    peelOpt t'@(AppT (VarT _) _)    = Just t'
+    peelOpt _                       = Nothing
 -- A list literal at type `Foo a1 ... an` has exactly one element-type arg
 -- (the rest, if any, are Nat-kinded phantom dims, e.g. for Vector n a).
 -- Extract the single non-Nat arg for typing children, but PRESERVE the
@@ -599,12 +619,45 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
       let e = PolyList (Idx cidx v) (map (Idx cidx) ts) xs'
       return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-expressPolyExpr _ _ _ (AnnoS _ _ (LstS _)) = error "LstS can only be (AppP (VarP _) [_]) type"
-expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)) = do
-  let idxTs = zipWith mkIdx xs ts
-  xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
-  let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+-- A list literal whose recorded type head is a type-alias (e.g.
+-- @type Pat = [Pat]@ used at the bare-name position, recorded as
+-- @VarT "Pat"@ rather than @AppT (VarT "List") [...]@). The pattern
+-- above matches only when the head is already the list constructor;
+-- when the head is an alias, reduce one step and retry. Mirrors the
+-- @TupS@ and @NamS@ reduce-and-retry fallbacks elsewhere in this
+-- function.
+expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(LstS _)) = do
+  scope <- MM.getGeneralScope midx
+  case reduceType scope t of
+    Just t' -> expressPolyExprWrap pl pc (AnnoS (Idx midx t') c e)
+    Nothing -> MM.throwSourcedError midx "Expected a list type"
+-- Same guard as expressCore: only treat the head as a tuple when it IS the
+-- TupleN constructor. A bare @length ts == length xs@ match would catch
+-- user aliases like @FixedPair (n :: Nat) a@ whose type args (NatLit n,
+-- a) are NOT the slot types; the cross-language wrap inside
+-- expressContainer would then use a Nat literal as the foreign call's
+-- parent type and surface downstream as @makeSerialAST' error on type:
+-- NatLitF n@. Falling through to the reduce-and-retry below expands the
+-- alias to its body's tuple constructor.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs))
+  | v == BT.tuple (length xs)
+  , length ts == length xs = do
+      let idxTs = zipWith mkIdx xs ts
+      xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
+      let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
+      return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+-- A tuple literal whose recorded type head is a type-alias (e.g.
+-- @type LL a = (a, ?(LL a))@). The alias's argument list does NOT zip
+-- 1:1 with the literal's entries -- the alias body does. Reduce one
+-- step (LL Int -> (Int, ?(LL Int))) and retry; the reduced head is
+-- the underlying tuple constructor whose arity matches the literal.
+-- Mirrors the same reduce-and-retry the NamS branch performs for
+-- record-shaped aliases below.
+expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(TupS _)) = do
+  scope <- MM.getGeneralScope midx
+  case reduceType scope t of
+    Just t' -> expressPolyExprWrap pl pc (AnnoS (Idx midx t') c e)
+    Nothing -> MM.throwSourcedError midx "Expected a tuple type"
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   -- C3 invariant: see comment at expressCore NamT above.
   assertRecordKeyOrder midx entries rs

@@ -1,0 +1,18 @@
+-- Intra-module cycle confined to the Cpp concrete scope. The
+-- general typedefs for @A@ and @B@ are unrelated, so the frontend's
+-- general-scope SCC check would miss the cycle. The cycle bites
+-- inside @pairEval@ when codegen tries to resolve the concrete type
+-- of @ida@'s argument: pairEval walks cscope first, finds
+-- @"wrap_a" B@, recurses on B which yields @"wrap_b" A@, recurses
+-- on A again, and loops forever.
+module main (ida)
+import root
+
+type A = Int
+type B = Int
+
+type Cpp => A = "wrap_a" B
+type Cpp => B = "wrap_b" A
+
+source Cpp from "ops.hpp" ("identity" as ida)
+ida :: A -> A

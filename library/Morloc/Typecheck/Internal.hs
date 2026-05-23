@@ -74,6 +74,9 @@ module Morloc.Typecheck.Internal
   , collectStrVarNames
   , collectRecVarNames
   , collectListVarNames
+  , collectEffVarNames
+  , collectEffLabels
+  , applyEff
 
     -- * debugging
   , seeGamma
@@ -383,6 +386,19 @@ dischargeConstraints g = case go (gammaConstraints g) [] of
 
 ----------------------------------------------------------------------
 
+-- | Substitute solved effect variables from 'gammaEffSubs' through an
+-- effect set, then normalize. Mirrors the NatVarU 'apply' lookup but for
+-- the EffectVar namespace; recurses so a tail solved to another open row
+-- is fully expanded.
+applyEff :: Gamma -> EffectSet -> EffectSet
+applyEff g = normalizeEffectSet . go
+  where
+    go e@(EffectSet _) = e
+    go (EffectVar v) = case Map.lookup v (gammaEffSubs g) of
+      Just e -> go e
+      Nothing -> EffectVar v
+    go (EffectUnion a b) = EffectUnion (go a) (go b)
+
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where
   -- [G]a = a
@@ -410,7 +426,7 @@ instance Applicable TypeU where
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts, tc) (map (second (apply g)) rs, rc)
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
-  apply g (EffectU effs t) = EffectU effs (apply g t)
+  apply g (EffectU effs t) = mkEffectU (applyEff g effs) (apply g t)
   apply g (OptionalU t) = OptionalU (apply g t)
   apply _ t@(NatLitU _) = t
   apply g (NatAddU a b) = NatAddU (apply g a) (apply g b)
@@ -491,6 +507,7 @@ instance Applicable Gamma where
       , gammaRecSubs = Map.map (apply g1) (gammaRecSubs g2)
       , gammaListSubs = Map.map (apply g1) (gammaListSubs g2)
       , gammaSetSubs = Map.map (apply g1) (gammaSetSubs g2)
+      , gammaEffSubs = Map.map (applyEff g1) (gammaEffSubs g2)
       , gammaConstraints = map (apply g1) (gammaConstraints g2)
       }
     where
@@ -535,7 +552,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -627,6 +644,90 @@ subtypeError t1 t2 msg =
     "Subtype error:" <+> msg
       <> "\n  "
       <> prettyTypeU t1 <+> "<:" <+> prettyTypeU t2
+
+isExistU :: TypeU -> Bool
+isExistU ExistU{} = True
+isExistU _ = False
+
+notExistU :: TypeU -> Bool
+notExistU = not . isExistU
+
+-- | Bind an effect-row tail variable to an effect set in 'gammaEffSubs'.
+-- Mirrors nat-variable solving (occurs-check, then insert). The set is
+-- reduced through the current gamma first so we never store a stale or
+-- self-referential row.
+solveEff :: TVar -> EffectSet -> Gamma -> Either MDoc Gamma
+solveEff v s g =
+  let s' = applyEff g s
+   in if v `elem` effectSetVars s'
+        then
+          Left $
+            "Infinite effect row:" <+> pretty v
+              <+> "occurs in" <+> prettyEffectSet s'
+        else Right g {gammaEffSubs = Map.insert v s' (gammaEffSubs g)}
+
+-- | Subtype/unify two effect rows for @\<e1\> i1 \<: \<e2\> i2@. An
+-- effect row carries at most one tail variable. A closed row uses
+-- subsumption (label subset: fewer effects are usable where more are
+-- expected); an open row solves its tail variable so the rows agree.
+-- The empty row is the monoid identity, so a pure value (empty left
+-- row) simply subsumes into any closed expected row. Once the rows are
+-- reconciled, recurse on the carried inner types.
+subtypeEffRows ::
+  Scope -> EffectSet -> EffectSet -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+subtypeEffRows scope e1 e2 i1 i2 g =
+  let e1' = applyEff g e1
+      e2' = applyEff g e2
+      (l1, vs1) = effectSetParts e1'
+      (l2, vs2) = effectSetParts e2'
+      lhs = EffectU e1' i1
+      rhs = EffectU e2' i2
+      recurse g' = subtype scope (apply g' i1) (apply g' i2) g'
+   in case (Set.toList vs1, Set.toList vs2) of
+        -- closed <: closed : effect subsumption
+        ([], []) ->
+          if Set.isSubsetOf l1 l2
+            then subtype scope i1 i2 g
+            else
+              subtypeError lhs rhs
+                "the left effect set is not a subset of the right effect set"
+        -- left open <: closed : l1 must fit, solve the tail to the remainder
+        ([t1], []) ->
+          if Set.isSubsetOf l1 l2
+            then solveEff t1 (EffectSet (Set.difference l2 l1)) g >>= recurse
+            else
+              subtypeError lhs rhs
+                "the left effect labels are not contained in the closed right row"
+        -- closed <: right open : l2 must fit, solve the tail to the remainder
+        ([], [t2]) ->
+          if Set.isSubsetOf l2 l1
+            then solveEff t2 (EffectSet (Set.difference l1 l2)) g >>= recurse
+            else
+              subtypeError lhs rhs
+                "the right effect labels are not contained in the closed left row"
+        -- open <: open
+        ([t1], [t2])
+          -- shared tail variable: the tails cancel, subsumption on labels
+          | t1 == t2 ->
+              if Set.isSubsetOf l1 l2
+                then subtype scope i1 i2 g
+                else
+                  subtypeError lhs rhs
+                    "effect labels around the shared row variable are not a subset"
+          -- distinct tails: solve the left tail to (l2 \ l1) | t2
+          | Set.isSubsetOf l1 l2 ->
+              solveEff
+                t1
+                (unionEffectSet (EffectSet (Set.difference l2 l1)) (EffectVar t2))
+                g
+                >>= recurse
+          | otherwise ->
+              subtypeError lhs rhs
+                "the left effect labels are not contained in the right open row"
+        -- more than one tail variable in a row is unsupported
+        _ ->
+          subtypeError lhs rhs
+            "an effect row may contain at most one effect variable"
 
 -- Nat expression helpers for SOP-based comparison
 isNatExpr :: TypeU -> Bool
@@ -862,29 +963,33 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- types involved are all existentials, it will always pass, so I omit
 -- it.
 
--- EffectU: covariant subtyping with effect row subsumption.
--- <E1> T1 <: <E2> T2 when E1 is a subset of E2 and T1 <: T2.
--- Fewer effects can be used where more effects are expected.
--- An effectful type cannot be narrowed to a type with fewer effects: this
--- is the narrowing check the user-facing rules call out. When either side
--- has an unsolved EffectVar we defer (effect inference does not yet solve
--- effect variables); for concrete sets the subset check is strict.
-subtype scope t1@(EffectU e1 i1) t2@(EffectU e2 i2) g
-  | effectSubsetOf e1 e2 = subtype scope i1 i2 g
-  | effectSetHasVar e1 || effectSetHasVar e2 = subtype scope i1 i2 g
-  | otherwise = subtypeError t1 t2 "effect set on left is not a subset of effect set on right"
--- Effectful type on the left, non-effectful on the right.
--- Effects do not silently drop; the surrounding term must declare them.
--- This catches e.g. `rint :: <Rand> Int` bound to `a :: Int`.
--- ExistU and ForallU on the right fall through to their own rules below
--- so that polymorphism and existential solving still work uniformly.
-subtype _ t1@(EffectU _ _) t2 _
-  | not (isAbsorbing t2) =
-      subtypeError t1 t2 "cannot discard effects when matching pure type"
-  where
-    isAbsorbing (ForallU _ _)  = True
-    isAbsorbing (ExistU _ _ _) = True
-    isAbsorbing _              = False
+-- EffectU: row-unifying covariant subtyping. Closed rows use subsumption
+-- (<E1> T1 <: <E2> T2 when E1 is a subset of E2); an open row solves its
+-- single tail variable in gammaEffSubs to make the rows agree. See
+-- 'subtypeEffRows'. The empty effect set is the monoid identity (<> A ==
+-- A), so a left side that solves to empty is treated as its inner type.
+subtype scope (EffectU e1 i1) (EffectU e2 i2) g = subtypeEffRows scope e1 e2 i1 i2 g
+-- Effectful type on the left, non-effectful on the right. The empty
+-- effect set is the monoid identity (<> A == A), so a left side that
+-- solves to empty is just its inner type. An inferred type variable (a
+-- closed existential) may be solved to the effect type, mirroring the
+-- symmetric ExistU <: EffectU instantiation; this lets a generic
+-- combinator thread an effectful value through a type variable. A
+-- non-serializable value in a type variable is not special-cased here:
+-- soundness is enforced where serialization happens, exactly as for a
+-- function value -- the thunk is realized in its own pool when local, or
+-- forced before a remote boundary (pushForceIntoRemote / makeSerialAST
+-- EffectF). A genuinely effectful value still cannot satisfy a concrete
+-- non-effect expected type.
+subtype scope t1@(EffectU e1 i1) t2 g
+  | isEmptyEffectSet (applyEff g e1) = subtype scope i1 t2 g
+  | ExistU _ ([], _) _ <- t2 =
+      occursCheck t2 t1 "InstantiateR" >> instantiate scope t1 t2 g
+  | otherwise =
+      subtypeError t1 t2 $
+        "an effectful value cannot be used where a non-effectful type is"
+          <+> "expected; run it in a do-block first (x <- e) and use the"
+          <+> "bound value"
 -- OptionalU: covariant subtyping
 subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 --  g1 |- B1 <: A1 -| g2
@@ -958,6 +1063,43 @@ subtype scope a b@(ExistU _ ([], _) _) g = occursCheck b a "InstantiateR" >> ins
 --  g1[Ea] |- Ea <: A -| g2
 subtype scope a@(ExistU _ ([], _) _) b g = occursCheck a b "InstantiateL" >> instantiate scope a b g
 subtype scope a@(AppU _ _) b@(ExistU _ _ _) g = subtype scope b a g
+-- ExistU carrying record-key constraints (e.g. from `.field x`) against
+-- a concrete NamU: forward to `instantiate`, which has the
+-- key-matching logic. Without this, the subtype dispatch falls
+-- through to "Type mismatch" whenever a getter is applied to a value
+-- whose type already unfolded to a record (typically after the
+-- alias-reduction clause below fires for `LL a` -> `NamU LL [...]`).
+subtype scope t1@(NamU _ _ _ _) t2@(ExistU _ _ ((_:_), _)) g =
+  occursCheck t1 t2 "InstantiateR" >> instantiate scope t1 t2 g
+subtype scope t1@(ExistU _ _ ((_:_), _)) t2@(NamU _ _ _ _) g =
+  occursCheck t1 t2 "InstantiateL" >> instantiate scope t1 t2 g
+-- If the right side is an applied type alias, reduce it one step
+-- before the arity / record-key rules below try to match against the
+-- raw constructor.
+--
+-- Two recursive-typedef cases want this:
+--
+--   record LL a where { v :: a; tail :: ?LL }       (NamU body)
+--   type LL a = (a, ?LL)                            (tuple body)
+--
+-- Both produce a use site like `x :: LL a` where `.tail x` or `.1 x`
+-- generates an ExistU carrying a field/index constraint. Subtyping
+-- that ExistU against the un-reduced `AppU (VarU "LL") [a]` finds the
+-- alias's parameter list (length 1) doesn't match the
+-- constraint's slot count (2 for a tuple) and the record-keys path
+-- requires an empty rs. After one reduction step `LL a` becomes the
+-- alias body (either a NamU the existing NamU/ExistU instantiate
+-- handles, or a tuple-shaped AppU whose arity matches), and the
+-- pre-existing rules close out the check.
+--
+-- Termination: TE.reduceType returns Nothing when no progress is
+-- possible, and recursive references inside the body are protected by
+-- the bnd-set in TypeEval.generalTransformType. Each call here makes
+-- one step of progress, so this doesn't loop.
+subtype scope t1@(ExistU _ _ _) t2@(AppU (VarU v) _) g1
+  | Map.member v scope
+  , Just t2' <- TE.reduceType scope t2 =
+      subtype scope t1 t2' g1
 subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
   -- if the existential is closed and the parameter length is not equal, die
   | pc1 == Closed && length ps1 /= length ps2 =
@@ -995,6 +1137,15 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
+-- Pure (non-effect) left vs effectful right. A pure value is <> A, so
+-- unify the empty row against the expected row (subsumption when the
+-- expected row is closed; solve its tail var when open). Reaching here
+-- the left is neither EffectU (consumed above), a ForallU, nor an
+-- empty-parameter ExistU (routed to substitute/instantiate above); the
+-- ExistU guard keeps any remaining existential on the instantiate path
+-- so do-block forcing of a polymorphic effect still works.
+subtype scope a (EffectU e2 i2) g
+  | notExistU a = subtypeEffRows scope emptyEffectSet e2 a i2 g
 -- NatVoidU is the erased-phantom-Nat sentinel; it is wildcard-compatible
 -- with any Nat expression. This mirrors the PartialOrd instance and is
 -- needed for subtyping at the codegen boundary, where unweaved TypeFs
@@ -1126,6 +1277,18 @@ instantiate scope ta@(VarU _) tb@(ExistU _ _ (_ : _, _)) g1 = do
   case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
     Nothing -> subtypeError ta tb "Error in VarU versus NamU with existential keys"
+-- AppU vs ExistU(rs): if AppU is an applied alias, reduce one step and
+-- retry. Mirrors the VarU case above but for the parameterized form
+-- (`LL a` rather than bare `LL`). Both record fields (`?LL` inside a
+-- `record LL a where ...`) and recursive type-alias tuples (`type LL a
+-- = (a, ?LL)`) end up here when a selector existential is unified
+-- against the unfolded use site.
+instantiate scope ta@(AppU (VarU v) _) tb@(ExistU _ _ ((_:_), _)) g1
+  | Map.member v scope, Just ta' <- TE.reduceType scope ta =
+      instantiate scope ta' tb g1
+instantiate scope ta@(ExistU _ _ ((_:_), _)) tb@(AppU (VarU v) _) g1
+  | Map.member v scope, Just tb' <- TE.reduceType scope tb =
+      instantiate scope ta tb' g1
 instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
   let keyset1 = Set.fromList $ map fst rs1
       keyset2 = Set.fromList $ map fst rs2
@@ -1675,28 +1838,32 @@ renameWithMap g0 (ForallU v@(TV s) t0) =
       t2 = substituteTVar v (VarU v') t1
       rw' = substituteTVar v (VarU v') . rw
    in (g2, ForallU v' t2, rw')
--- After stripping ForallU, rename NatVarU / StrVarU / RecVarU variables to
--- fresh names. All three kinds are implicitly forall-quantified and need
--- per-instantiation freshening so multiple uses of a polymorphic function
--- don't accidentally share a kind-variable name across call sites.
+-- After stripping ForallU, rename NatVarU / StrVarU / RecVarU / ListVarU
+-- and effect-row variables to fresh names. All are implicitly
+-- forall-quantified and need per-instantiation freshening so multiple
+-- uses of a polymorphic function don't accidentally share a
+-- kind-variable name across call sites.
 renameWithMap g0 t0 =
   let nvs = nub (collectNatVarNames t0)
       svs = nub (collectStrVarNames t0)
       rvs = nub (collectRecVarNames t0)
       lvs = nub (collectListVarNames t0)
-   in if null nvs && null svs && null rvs && null lvs
+      evs = nub (collectEffVarNames t0)
+   in if null nvs && null svs && null rvs && null lvs && null evs
       then (g0, t0, id)
       else
         let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@n")) g0 nvs
             (g2, svs') = statefulMap (\g (TV s) -> tvarname g (s <> "@s")) g1 svs
             (g3, rvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@r")) g2 rvs
             (g4, lvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@l")) g3 lvs
+            (g5, evs') = statefulMap (\g (TV s) -> tvarname g (s <> "@e")) g4 evs
             natMap = Map.fromList (zip nvs nvs')
             strMap = Map.fromList (zip svs svs')
             recMap = Map.fromList (zip rvs rvs')
             listMap = Map.fromList (zip lvs lvs')
-            rw = renameKindedVars natMap strMap recMap listMap
-         in (g4, rw t0, rw)
+            effMap = Map.fromList (zip evs evs')
+            rw = renameKindedVars natMap strMap recMap listMap effMap
+         in (g5, rw t0, rw)
 
 -- | Rename a signature's TypeU together with its primitive constraints.
 -- Both share the same fresh-name substitutions so a constraint like
@@ -1714,20 +1881,26 @@ renameEType g0 et =
     renameConstraint rw (CDisjoint a b) = CDisjoint (rw a) (rw b)
 
 -- | Rename kind-variable occurrences according to per-kind name maps.
--- Mirrors the old renameNatVars but additionally renames StrVarU and
--- RecVarU. Each kind has its own map so name spaces stay disjoint.
+-- Mirrors the old renameNatVars but additionally renames StrVarU,
+-- RecVarU, ListVarU and effect-row variables. Each kind has its own map
+-- so name spaces stay disjoint.
 renameKindedVars ::
   Map.Map TVar TVar ->  -- Nat-var renames
   Map.Map TVar TVar ->  -- Str-var renames
   Map.Map TVar TVar ->  -- Rec-var renames
   Map.Map TVar TVar ->  -- List-var renames
+  Map.Map TVar TVar ->  -- Eff-var renames
   TypeU -> TypeU
-renameKindedVars natM strM recM listM = go
+renameKindedVars natM strM recM listM effM = go
   where
     renN v = Map.findWithDefault v v natM
     renS v = Map.findWithDefault v v strM
     renR v = Map.findWithDefault v v recM
     renL v = Map.findWithDefault v v listM
+    renE v = Map.findWithDefault v v effM
+    goEff (EffectSet ls) = EffectSet ls
+    goEff (EffectVar v) = EffectVar (renE v)
+    goEff (EffectUnion a b) = EffectUnion (goEff a) (goEff b)
     go (NatVarU v) = NatVarU (renN v)
     go (StrVarU v) = StrVarU (renS v)
     go (RecVarU v) = RecVarU (renR v)
@@ -1737,7 +1910,7 @@ renameKindedVars natM strM recM listM = go
     go (FunU ts t) = FunU (map go ts) (go t)
     go (AppU t ts) = AppU (go t) (map go ts)
     go (NamU n o ps rs) = NamU n o (map go ps) [(k, go t) | (k, t) <- rs]
-    go (EffectU effs t) = EffectU effs (go t)
+    go (EffectU effs t) = mkEffectU (goEff effs) (go t)
     go (OptionalU t) = OptionalU (go t)
     go t@(NatLitU _) = t
     go (NatAddU a b) = NatAddU (go a) (go b)
@@ -2076,6 +2249,96 @@ collectListVarNames = go
     go (RecSingletonU k v) = go k ++ go v
     go (LabeledU _ t) = go t
 
+-- | Collect effect-row variable names ('EffectVar' inside 'EffectU').
+-- Mirrors collectNatVarNames; effect variables are their own
+-- implicitly-quantified namespace and need per-instantiation freshening.
+collectEffVarNames :: TypeU -> [TVar]
+collectEffVarNames = go
+  where
+    go (EffectU effs t) = effectSetVars effs ++ go t
+    go (VarU _) = []
+    go (NatVarU _) = []
+    go (StrVarU _) = []
+    go (RecVarU _) = []
+    go (ListVarU _) = []
+    go (SetVarU _) = []
+    go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
+    go (ForallU _ t) = go t
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (NamU _ _ ps rs) = concatMap go ps ++ concatMap (go . snd) rs
+    go (OptionalU t) = go t
+    go (NatLitU _) = []
+    go (NatAddU a b) = go a ++ go b
+    go (NatMulU a b) = go a ++ go b
+    go (NatSubU a b) = go a ++ go b
+    go (NatDivU a b) = go a ++ go b
+    go NatVoidU = []
+    go (StrLitU _) = []
+    go (StrConcatU a b) = go a ++ go b
+    go StrVoidU = []
+    go RecEmptyU = []
+    go (RecExtendU _ a b) = go a ++ go b
+    go (RecUnionU a b) = go a ++ go b
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = go a ++ go b
+    go (RecRestrictU a b) = go a ++ go b
+    go (RecDiffListU a b) = go a ++ go b
+    go RecVoidU = []
+    go (ListLitU es) = concatMap go es
+    go (ListAppU a b) = go a ++ go b
+    go ListVoidU = []
+    go SetEmptyU = []
+    go (SetLitU es) = concatMap go es
+    go (SetUnionU a b) = go a ++ go b
+    go (SetInterU a b) = go a ++ go b
+    go (SetDiffU a b) = go a ++ go b
+    go SetVoidU = []
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = go r ++ go f
+    go (RecSingletonU k v) = go k ++ go v
+    go (LabeledU _ t) = go t
+
+-- | Collect every concrete effect label appearing in any effect row of a
+-- type. Used to validate that effect labels are declared. Mirrors
+-- 'collectEffVarNames' but accumulates labels rather than row variables.
+collectEffLabels :: TypeU -> Set.Set EffectLabel
+collectEffLabels = go
+  where
+    go (EffectU effs t) = Set.union (resolveEffectSet effs) (go t)
+    go (ExistU _ (ts, _) (rs, _)) = Set.unions (map go ts ++ map (go . snd) rs)
+    go (ForallU _ t) = go t
+    go (FunU ts t) = Set.unions (map go (t : ts))
+    go (AppU t ts) = Set.unions (map go (t : ts))
+    go (NamU _ _ ps rs) = Set.unions (map go ps ++ map (go . snd) rs)
+    go (OptionalU t) = go t
+    go (NatAddU a b) = Set.union (go a) (go b)
+    go (NatMulU a b) = Set.union (go a) (go b)
+    go (NatSubU a b) = Set.union (go a) (go b)
+    go (NatDivU a b) = Set.union (go a) (go b)
+    go (StrConcatU a b) = Set.union (go a) (go b)
+    go (RecExtendU _ a b) = Set.union (go a) (go b)
+    go (RecUnionU a b) = Set.union (go a) (go b)
+    go (RecDiffU a _) = go a
+    go (RecIntersectU a b) = Set.union (go a) (go b)
+    go (RecRestrictU a b) = Set.union (go a) (go b)
+    go (RecDiffListU a b) = Set.union (go a) (go b)
+    go (ListLitU es) = Set.unions (map go es)
+    go (ListAppU a b) = Set.union (go a) (go b)
+    go (SetLitU es) = Set.unions (map go es)
+    go (SetUnionU a b) = Set.union (go a) (go b)
+    go (SetInterU a b) = Set.union (go a) (go b)
+    go (SetDiffU a b) = Set.union (go a) (go b)
+    go (KeysU r) = go r
+    go (ListToSetU l) = go l
+    go (SizeU c) = go c
+    go (ProjectFieldU r f) = Set.union (go r) (go f)
+    go (RecSingletonU k v) = Set.union (go k) (go v)
+    go (LabeledU _ t) = go t
+    go _ = Set.empty
+
 collectFixedNames :: Set.Set TVar -> TypeU -> Set.Set Text
 collectFixedNames generics = go
   where
@@ -2231,6 +2494,11 @@ prettyTypeU = renderClean . cleanTypeName
 
     f _ (VarU v) = tv v
     f _ (NatVarU v) = tv v
+    -- 'prettyTypeU' is the clean generalized-signature renderer used by
+    -- `morloc typecheck`. The existential/generic distinction is not
+    -- reliable here (an unsolved existential in a generalized signature
+    -- is, to the user, just a type variable), so render it like any
+    -- other variable -- not with the '*a' diagnostic convention.
     f _ (ExistU v ([], _) ([], _)) = tv v
     f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
     f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
@@ -2240,11 +2508,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (EffectU effs t) =
-      let labels = resolveEffectSet effs
-       in if Set.null labels
-            then "{" <> f True t <> "}"
-            else "<" <> hcat (punctuate "," (map pretty (Set.toList labels))) <> ">" <+> f False t
+    f _ (EffectU effs t) = prettyEffectSet effs <+> f False t
     f _ (OptionalU t) = "?" <> f False t
     f _ (NatLitU n) = pretty n
     f _ (NatAddU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"

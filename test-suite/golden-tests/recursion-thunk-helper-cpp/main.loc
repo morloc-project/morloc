@@ -1,7 +1,7 @@
 -- Test non-exported recursive helper returning an effect type.
 -- sumDown n = 0 + 1 + 2 + ... + n (each term doubled by sourced fn)
 
-module main (sumDown)
+module main (sumDown, sumDownAlias)
 
 import root-cpp
 
@@ -14,6 +14,12 @@ double_val :: Int -> <IO> Int
 -- Exported wrapper delegates to non-exported recursive helper
 sumDown :: Int -> <IO> Int
 sumDown n = helper n
+
+-- Point-free export aliasing the same non-exported recursive helper.
+-- Exercises the FunT inputs (EffectT effs out) branch of the top-level
+-- CallS eta-expansion in expressCore.
+sumDownAlias :: Int -> <IO> Int
+sumDownAlias = helper
 
 -- Non-exported recursive helper returning <IO> Int
 helper :: Int -> <IO> Int

@@ -1,0 +1,7 @@
+15
+15
+5
+{"val":null,"subs":[["L",{"val":null,"subs":[["L",{"val":0,"subs":[]}],["R",{"val":0,"subs":[]}]]}],["R",{"val":null,"subs":[["L",{"val":0,"subs":[]}],["R",{"val":0,"subs":[]}]]}]]}
+{"key":"inner","value":0,"children":[["L",{"key":"inner","value":0,"children":[["L",{"key":"leaf","value":1,"children":[]}],["R",{"key":"leaf","value":1,"children":[]}]]}],["R",{"key":"inner","value":0,"children":[["L",{"key":"leaf","value":1,"children":[]}],["R",{"key":"leaf","value":1,"children":[]}]]}]]}
+3
+2

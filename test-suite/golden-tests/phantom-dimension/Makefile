@@ -33,6 +33,8 @@ all:
 	./nexus rtChainVec >> obs.txt 2>> obs.err
 	echo "--- rtFixedPair ---" >> obs.txt
 	./nexus rtFixedPair >> obs.txt 2>> obs.err
+	echo "--- mixedFixedPair ---" >> obs.txt
+	./nexus mixedFixedPair >> obs.txt 2>> obs.err
 	echo "--- sumVecArg ---" >> obs.txt
 	./nexus sumVecArg >> obs.txt 2>> obs.err
 	echo "--- sumVecZeroArg ---" >> obs.txt

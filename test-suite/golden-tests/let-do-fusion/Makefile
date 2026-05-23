@@ -15,10 +15,6 @@ all:
 	./nexus doInLet >> obs.txt 2>> obs.err
 	echo "--- letInDo ---" >> obs.txt
 	./nexus letInDo >> obs.txt 2>> obs.err
-	echo "--- doInDoForced ---" >> obs.txt
-	./nexus doInDoForced >> obs.txt 2>> obs.err
-	echo "--- doInDoLet ---" >> obs.txt
-	./nexus doInDoLet >> obs.txt 2>> obs.err
 	echo "--- letBndTailEffect ---" >> obs.txt
 	./nexus letBndTailEffect >> obs.txt 2>> obs.err
 	echo "--- constTailWithEffect ---" >> obs.txt

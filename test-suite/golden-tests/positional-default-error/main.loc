@@ -1,0 +1,16 @@
+module main (echo)
+
+type Py => Int = "int"
+
+source Py from "lib.py" ("add")
+
+add :: Int -> Int -> Int
+
+echo ::
+  --' the first number (a normal required positional)
+  Int ->
+  --' the second number
+  --' default: 42
+  Int ->
+  Int
+echo x y = add x y

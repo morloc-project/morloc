@@ -36,6 +36,11 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute_
 #include "mlc_arrow.hpp"
 #include "cppmorloc.hpp"
 
+// Defines mlc::Unit, which the generator emits for do-blocks whose final
+// expression is void-returning (e.g. @save/@savej/@savem). Needs to follow
+// the user-source includes so foreign code can use mlc::Unit too.
+#include "mlccpptypes/prelude.hpp"
+
 #define PROPAGATE_ERROR(errmsg) \
     if(errmsg != NULL) { \
       char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
@@ -141,6 +146,10 @@ static void _release_packet_shm(const uint8_t* packet) {
 // Transforms a serialized value into a message ready for the socket
 template <typename T>
 uint8_t* _put_value(const T& value, Schema* schema) {
+    // Push the top-level schema's recursion declaration (if any) onto
+    // the env stack so Recur back-references inside the walk can
+    // resolve to their named target. RAII pops on every return path.
+    RecurEnvScope _recur_top(schema);
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
         // Arrow export: move table data into SHM, build packet.
@@ -199,6 +208,10 @@ uint8_t* _put_value(const T& value, Schema* schema) {
 // Use a key to retrieve a value
 template <typename T>
 T _get_value(const uint8_t* packet, Schema* schema){
+    // Push the top-level schema's recursion declaration (if any) so
+    // Recur back-references inside the walk can resolve. RAII pops on
+    // every return path including exceptions.
+    RecurEnvScope _recur_top(schema);
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;

@@ -1,0 +1,5 @@
+module main (f)
+
+type B2 = (B2, Int)
+
+f :: B2 -> B2

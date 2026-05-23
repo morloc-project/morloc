@@ -1,0 +1,6 @@
+module main (f)
+
+-- Vacuous under ?(?T) == ?T idempotence: every inhabitant collapses to null.
+type V2 = ?V2
+
+f :: V2 -> V2

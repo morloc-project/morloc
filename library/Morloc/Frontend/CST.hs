@@ -89,6 +89,7 @@ data CstExpr
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
   | CIstE ClassName [TypeU] [Loc CstExpr]
+  | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
   | CSrcOldE Located (Maybe Text) [(Text, Maybe Text)]
   | CSrcNewE Located (Maybe Text) [(Bool, Text, Located)]
@@ -113,7 +114,6 @@ data CstExpr
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
-  | CForceE (Loc CstExpr)  -- ^ !expr force operator (only valid inside do-blocks)
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
   -- Operator sections (Haskell naming: left = left operand given, right = right operand given)
@@ -137,7 +137,7 @@ data CstTypeDef
   = CstTypeAlias (Maybe Located) (TVar, [Either (TVar, Kind) TypeU]) (TypeU, Bool)
   | CstTypeAliasForward (TVar, [Either (TVar, Kind) TypeU])
   | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)]
-  | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool) [(Key, TypeU)]
+  | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool, [TypeU]) [(Key, TypeU)]
   deriving (Show, Eq)
 
 data CstClassHead

@@ -75,10 +75,20 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
           -- Here the primitive type (e.g., "std::vector<std::tuple<$1,std::string>>" a)
           -- cannot be woven with the `Foo a` type. So `Foo a` needs to be
           -- substituted for [(a, Str)], which can be woven.
+          --
+          -- 'evalGeneralStep' wraps 'TE.evaluateStep' which returns
+          -- @Just t@ even when @t == generalType@ (no progress). For a
+          -- guarded recursive record like @record Tree where children
+          -- :: [Tree]@ the bnd-protected NamU branch in
+          -- 'generalTransformType' returns the same NamU as input, so a
+          -- naive recursion here loops forever. Compare structurally
+          -- before recursing.
           mayReducedGType <- evalGeneralStep i generalType
           case mayReducedGType of
-            (Just reducedGType) -> inferConcreteType lang (Idx i (typeOf reducedGType))
-            Nothing ->
+            (Just reducedGType)
+              | reducedGType /= generalType ->
+                  inferConcreteType lang (Idx i (typeOf reducedGType))
+            _ ->
               MM.throwSourcedError i $
                 "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
@@ -119,19 +129,39 @@ inferConcreteTypeUUniversal lang generalType = do
           <> ":" <+> e2
     (Left e) -> MM.throwError e
 
+-- | 'weave' fuses a general TypeU with its language-specific concrete
+-- TypeU into a single TypeF. Purely structural -- no cycle detection
+-- at the weave level (that would collapse the intermediate alias-
+-- expansion node that 'makeSerialAST'' relies on to emit the
+-- recursive-schema @&name@ declaration alongside the @^name@ back-
+-- reference). Leak prevention for recursive aliases with no concrete-
+-- language mapping happens at the C++ render boundary in
+-- 'CppTranslator.hs', where every @VarF@/@AppF@/@RecF@ rule consults
+-- cscope to distinguish legitimate user mappings from pairEval bnd-
+-- protect leaks.
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
 weave gscope = w
   where
     w (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
     w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
-    w (AppU t1 ts1) (AppU t2 ts2) = AppF <$> w t1 t2 <*> weaveArgs ts1 ts2
+    -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
+    -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while
+    -- the concrete-side resolution expanded to @"tuple" [int, ?(...)]@
+    -- with 2 args), fall through to the catch-all @evaluateStep@ retry
+    -- on @t1@. This is the same generalization the catch-all already
+    -- performs for type-level mismatches; we just need to opt the AppU
+    -- branch into it on arg-length failure instead of failing outright.
+    w t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
+      case (AppF <$> w h1 h2 <*> weaveArgs ts1 ts2) of
+        r@(Right _) -> r
+        Left _ -> wStep t1 t2
     w t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
       | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 =
           NamF o1 (FV v1 (CV (unTVar v2)))
             <$> zipWithM w ts1 ts2
             <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w t1' t2') rs1 rs2
       | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
-    w (EffectU effs t1) (EffectU _ t2) = EffectF (resolveEffectSet effs) <$> w t1 t2
+    w (EffectU effs t1) (EffectU _ t2) = mkEffectF (resolveEffectSet effs) <$> w t1 t2
     w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
     w (NatLitU n) (NatLitU _) = return $ NatLitF n
     w (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
@@ -143,13 +173,15 @@ weave gscope = w
     w (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
     w (LabeledU _ t1) t2 = w t1 t2
     w (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
-    w t1 t2 = case T.evaluateStep gscope t1 of
+    w t1 t2 = wStep t1 t2
+
+    -- Step the general type one level via @evaluateStep@ and retry.
+    wStep t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
         if t1 == t1'
           then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
-          else do
-            w t1' t2
+          else w t1' t2
 
     -- Weave type arguments, handling Nat params that may be erased OR
     -- preserved in the concrete type. When the concrete head is also a Nat
@@ -223,11 +255,25 @@ inferConcreteVar lang t0@(Idx i v) = do
         -- realignment: for general aliases that have params but no args
         -- in this lookup, we still want to chase the alias by its head.
         gscopeUni <- MM.getGeneralUniversalScope
-        case Map.lookup v gscopeUni of
-          (Just ((_, body, _, _) : _)) -> do
-            FV _ cv <- inferConcreteVar lang (Idx i (extractKey body))
+        let
+          -- Guard against self-recursive lookup: if the body's
+          -- extracted key resolves back to v (e.g. a record whose
+          -- general definition is `record Container a where ...` --
+          -- the body's NamU carries the same TVar `Container`), a
+          -- naive recursion loops forever because each iteration
+          -- looks the same TVar up in gscopeUni and gets the same
+          -- body back. When the body's key is v itself, fall through
+          -- to pairEval, which produces a comprehensible
+          -- "No concrete <lang> type for <v>" error naming the
+          -- missing instance.
+          gscopeBody = case Map.lookup v gscopeUni of
+            (Just ((_, body, _, _) : _)) | extractKey body /= v -> Just (extractKey body)
+            _ -> Nothing
+        case gscopeBody of
+          Just bodyKey -> do
+            FV _ cv <- inferConcreteVar lang (Idx i bodyKey)
             return $ FV v cv
-          _ -> do
+          Nothing -> do
             -- Last resort: transitive resolution via pairEval.
             (cscope, gscope) <- getScope i lang
             case T.pairEval cscope gscope (VarU v) of

@@ -1,0 +1,8 @@
+module modA (A)
+import .modB
+-- A and ABody form a cycle that spans two modules. Each module's
+-- own typedef looks acyclic (A references ABody which lives in
+-- modB, not modA), so checkMutualRecursion's per-module pass does
+-- not see the SCC. The cycle only becomes visible after imports
+-- are resolved.
+type A = ABody

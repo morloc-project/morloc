@@ -300,13 +300,18 @@ cmdMake args verbosity config buildConfig = do
 -- | Evaluate a morloc expression
 cmdEval :: EvalCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdEval args verbosity config buildConfig = do
-  let rawExpr = evalExpression args
+  -- An eval input is the same morloc expression whether it comes from
+  -- -e or from a file; the file is just a text container. Preprocess
+  -- and parse it identically in both cases so they are interchangeable.
+  (_, rawCode) <- readScript (evalExpression args) (evalScript args)
+  let rawExpr = MT.unpack (unCode rawCode)
       code = MT.pack (preprocessEvalInput rawExpr)
       tmpBase = Config.configTmpDir config
       saveName = evalSave args
       extraArgs = evalArgs args
       isSave = not (null saveName)
       exeName = if isSave then saveName else "eval"
+      allowLocal = evalAllowLocalModules args
   createDirectoryIfMissing True tmpBase
   bracket
     (do
@@ -319,7 +324,7 @@ cmdEval args verbosity config buildConfig = do
       cleanupTmpDir tmpDir)
     (\(_origDir, tmpDir) -> do
       let action = do
-            MM.modify (\s -> s {stateEvalMode = True})
+            MM.modify (\s -> s {stateEvalMode = True, stateAllowLocalModules = allowLocal})
             if isSave then MM.modify (\s -> s {stateInstall = True}) else return ()
             M.writeProgram translator Nothing (Code code)
       result <- MM.runMorlocMonad (Just exeName) verbosity config buildConfig action

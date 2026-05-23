@@ -67,7 +67,18 @@ import qualified Morloc.ProgramBuilder.Install as Install
 import qualified Morloc.System as MS
 import qualified Network.HTTP.Simple as HTTP
 import System.Directory
-import System.Process (callProcess, readProcess)
+import System.Environment (getEnvironment)
+import System.Exit (ExitCode(..))
+import System.IO (stderr)
+import System.Process
+  ( callProcess
+  , createProcess
+  , proc
+  , readProcess
+  , waitForProcess
+  , CreateProcess(..)
+  , StdStream(..)
+  )
 
 data InstallReason = ExplicitInstall | AutoDependency
   deriving (Show, Eq)
@@ -147,6 +158,56 @@ reconcileOverwrite ow _ _ = ow
 moduleInstallError :: MDoc -> MorlocMonad a
 moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
 
+-- | Recursively remove the install target if it exists. Used both as the
+-- onException handler on the initial fetch IO and to roll back when a
+-- later validation step fails.
+runCleanup :: FilePath -> IO ()
+runCleanup targetDir = do
+  exists <- doesDirectoryExist targetDir
+  when exists $ removeDirectoryRecursive targetDir
+
+-- | Spawn the module's setup script. Working directory is the module's
+-- installed location, stdout and stderr stream to the morloc process's
+-- stderr so the user sees pip/apt-get/etc. output live. The morloc
+-- environment is exposed via MORLOC_* variables. Non-zero exit raises
+-- an IOException; the caller is responsible for cleanup-on-exception.
+runSetupScript ::
+     Config.Config
+  -> Text       -- ^ module name
+  -> PackageMeta
+  -> FilePath   -- ^ libpath (the plane directory containing targetDir)
+  -> FilePath   -- ^ targetDir (the module's installed dir)
+  -> FilePath   -- ^ resolved absolute path to the setup script
+  -> IO ()
+runSetupScript config name meta libpath targetDir setupPath = do
+  baseEnv <- getEnvironment
+  let extraEnv =
+        [ ("MORLOC_HOME",            Config.configHome config)
+        , ("MORLOC_MODULE_NAME",     MT.unpack name)
+        , ("MORLOC_MODULE_VERSION",  MT.unpack (packageVersion meta))
+        , ("MORLOC_MODULE_DIR",      targetDir)
+        , ("MORLOC_PLANE",           Config.configPlane config)
+        , ("MORLOC_PLANE_DIR",       libpath)
+        ]
+      -- Later entries shadow earlier ones, so the MORLOC_* additions win
+      -- over any stray values in the inherited environment.
+      mergedEnv = baseEnv ++ extraEnv
+      cp = (proc "bash" [setupPath])
+        { std_out = UseHandle stderr
+        , cwd     = Just targetDir
+        , env     = Just mergedEnv
+        }
+  (_, _, _, ph) <- createProcess cp
+  code <- waitForProcess ph
+  case code of
+    ExitSuccess -> return ()
+    ExitFailure n ->
+      ioError . userError
+        $ "setup script for module '"
+        <> MT.unpack name
+        <> "' failed with exit code "
+        <> show n
+
 -- | Is this a local (.dot-prefixed) import?
 isLocalImport :: MVar -> Bool
 isLocalImport (MV x) = "." `MT.isPrefixOf` x
@@ -161,6 +222,14 @@ findModule (_, currentModule) importModule
 -- e.g., .foo.bar -> <root>/foo/bar.loc or <root>/foo/bar/main.loc
 findLocalModule :: MVar -> MVar -> MorlocMonad Path
 findLocalModule currentModule importModule = do
+  allowLocal <- MM.gets stateAllowLocalModules
+  if not allowLocal
+    then MM.throwSystemError $
+      "Within module" <+> squotes (pretty currentModule)
+        <> "," <+> "local import" <+> squotes (pretty importModule)
+        <+> "is not permitted in eval mode."
+        <+> "Use 'morloc make' to build with local modules."
+    else return ()
   projectRoot <- MM.gets stateProjectRoot
   case projectRoot of
     Nothing -> MM.throwSystemError $
@@ -190,6 +259,7 @@ findBareModule :: MVar -> MVar -> MorlocMonad Path
 findBareModule currentModule importModule = do
   config <- MM.ask
   projectRoot <- MM.gets stateProjectRoot
+  allowLocal <- MM.gets stateAllowLocalModules
   let lib = Config.configLibrary config
       plane = Config.configPlane config
       planeCore = Config.configPlaneCore config
@@ -218,6 +288,7 @@ findBareModule currentModule importModule = do
             , MS.joinPath (lib : namePath <> ["main.loc"])
             ]
       localPaths
+        | not allowLocal = []  -- eval mode: installed modules only
         | isNamespaced = []  -- namespaced imports are never local
         | otherwise = case projectRoot of
             Just root ->
@@ -502,10 +573,7 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
               case Config.configRegistry config' of
                 Just regUrl -> installFromRegistry regUrl owner' modName targetDir
                 Nothing -> ioError $ userError "Registry URL not configured"
-          cleanup = do
-            exists <- doesDirectoryExist targetDir
-            when exists $ removeDirectoryRecursive targetDir
-      liftIO $ ioAction `onException` cleanup
+      liftIO $ ioAction `onException` runCleanup targetDir
 
       -- Read package.yaml for metadata and dependencies
       meta <- liftIO $ do
@@ -578,6 +646,34 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
             (depth + 1)
             AutoDependency
             depModstr
+
+      -- Run the optional setup script, if one is declared in package.yaml.
+      -- Runs after morloc deps are on disk (a setup script may rely on
+      -- transitive resources) but before typecheck (so a script that
+      -- builds C++/Python/R artifacts has a chance to lay them down).
+      case packageSetup meta of
+        Nothing -> return ()
+        Just relPath -> do
+          when (MS.isAbsolute relPath) $ do
+            liftIO $ runCleanup targetDir
+            moduleInstallError
+              $ "setup path must be relative to the module directory, got"
+              <+> squotes (pretty relPath)
+          when (".." `elem` MS.splitDirectories relPath) $ do
+            liftIO $ runCleanup targetDir
+            moduleInstallError
+              $ "setup path may not contain '..' segments, got"
+              <+> squotes (pretty relPath)
+          let setupPath = targetDir </> relPath
+          setupExists <- liftIO $ doesFileExist setupPath
+          unless setupExists $ do
+            liftIO $ runCleanup targetDir
+            moduleInstallError
+              $ "setup script not found at" <+> squotes (pretty setupPath)
+          MM.say $ "Running setup script for" <+> squotes (pretty name)
+                <> ":" <+> pretty relPath
+          liftIO $ runSetupScript config' name meta libpath targetDir setupPath
+            `onException` runCleanup targetDir
 
       -- Typecheck the module (if callback provided)
       exports <- case mayTypecheck of

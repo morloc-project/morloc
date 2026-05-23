@@ -1,0 +1,35 @@
+-- Regression: do-blocks used as parenthesised function arguments.
+-- The layout lexer previously never closed a do-block opened inside
+-- '(', so `f (do ... )` with natural indentation failed to parse.
+-- Every binding below must parse, compile, and run.
+module main (solo, nested, explicitBrace, plainParen)
+
+import root-py
+
+source Py from "foo.py" ("get_ten" as getTen, "dbl")
+
+type Py => Int = "int"
+
+getTen :: <IO> Int
+dbl :: Int -> Int
+
+-- the reported bug: natural-indent do-block as the sole paren argument,
+-- with the closing ')' on the same line as the final statement
+solo :: <IO> Int
+solo = id (do
+  x <- getTen
+  x)
+
+-- nested: f (g (do ...)) ; ')' immediately followed by ')'
+nested :: <IO> Int
+nested = id (id (do
+  x <- getTen
+  dbl x))
+
+-- regression: explicit-brace do-block in parens still works
+explicitBrace :: <IO> Int
+explicitBrace = id (do { x <- getTen; dbl x })
+
+-- regression: an ordinary parenthesised expression still parses
+plainParen :: Int
+plainParen = dbl (1 + 2)

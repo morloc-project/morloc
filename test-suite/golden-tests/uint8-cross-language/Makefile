@@ -6,7 +6,7 @@ all:
 	# array; checks that each language's encode/echo/decode chain works
 	# inside one pool.
 	echo "=== single-language round-trips ===" >> obs.txt
-	./nexus pyStr  '"hello world"' >> obs.txt 2>> obs.err
+	./nexus pyStr  '"See you in the stars my friend"' >> obs.txt 2>> obs.err
 	./nexus cppStr '"hello world"' >> obs.txt 2>> obs.err
 	./nexus rStr   '"hello world"' >> obs.txt 2>> obs.err
 

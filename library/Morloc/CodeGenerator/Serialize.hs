@@ -34,14 +34,6 @@ serialize :: MonoHead -> MorlocMonad SerialManifold
 serialize (MonoHead lang m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
-  MM.sayVVV $
-    "In serialize for" <+> "m"
-      <> pretty m0 <+> pretty lang <+> "segment"
-      <> "\n  form0:" <+> pretty form0
-      <> "\n  typemap:" <+> viaShow typemap
-      <> "\n  This map we made from the expression:\n  "
-      <> pretty e0
-
   se1 <- serialExpr m0 e0
   let sm = SerialManifold m0 lang form0 headForm0 se1
   wireSerial lang sm
@@ -90,9 +82,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialExpr
-    serialExpr _ (MonoManifold m form e) = do
-      MM.sayVVV $ "serialExpr MonoManifold m" <> pretty m <> parens (pretty form)
-      serialExpr m e
+    serialExpr _ (MonoManifold m _ e) = serialExpr m e
     serialExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
        in case inferState e1 of
@@ -118,21 +108,32 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
-      serializeS "serialE MonoIf" m ne
+      serializeS "serialE MonoIf" m (forceThunk ne)
     -- Thunk-producing intrinsics: convert to native and serialize with the
     -- inner type (strip EffectF) so the wire format matches the forced value.
     serialExpr m (MonoDoBlock _ e) = serialExpr m e
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
-    serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
+    serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m . forceThunk
+
+    -- Serialization sinks consume a value, not a thunk. When `nativeExpr`
+    -- returns a bare `DoBlockN` (e.g. an effectful intrinsic like @save/@load
+    -- whose `EvalS` wrapper was elided upstream -- this happens for the
+    -- cross-pool case where a do-block statement is extracted to a sub-
+    -- manifold that just runs the effect and returns its result), wrap with
+    -- `EvalN` so the lambda is invoked before reaching `_put_value`. If the
+    -- expression is already `EvalN`-wrapped (the common case where `EvalS`
+    -- survived), this is a no-op.
+    forceThunk :: NativeExpr -> NativeExpr
+    forceThunk ne@(DoBlockN _ inner) = EvalN (typeFof inner) ne
+    forceThunk ne = ne
 
     serialArg ::
       Int ->
       MonoExpr ->
       MorlocMonad SerialArg
-    serialArg _ e@(MonoManifold m form _) = do
-      MM.sayVVV $ "serialArg MonoManifold m" <> pretty m <> parens (pretty form)
+    serialArg _ e@(MonoManifold m _ _) = do
       se <- serialExpr m e
       case se of
         (ManS sm) -> return $ SerialArgManifold sm
@@ -146,8 +147,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad NativeArg
-    nativeArg _ e@(MonoManifold m form _) = do
-      MM.sayVVV $ "nativeArg MonoManifold m" <> pretty m <> parens (pretty form)
+    nativeArg _ e@(MonoManifold m _ _) = do
       ne <- nativeExpr m e
       case ne of
         (ManN nm) -> return $ NativeArgManifold nm
@@ -162,7 +162,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       MonoExpr ->
       MorlocMonad NativeExpr
     nativeExpr _ (MonoManifold m form e) = do
-      MM.sayVVV $ "nativeExpr MonoManifold m" <> pretty m <> parens (pretty form)
       ne <- nativeExpr m e
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
       return . ManN $ NativeManifold m lang form' ne
@@ -219,20 +218,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr m e@(MonoApp (MonoPoolCall t _ _ _ _) _) = do
       e' <- serialExpr m e
       t' <- inferType t
-      MM.sayVVV $ "nativeExpr MonoApp:" <+> pretty t'
       naturalizeN "nativeE MonoApp" m lang t' e'
     nativeExpr m (MonoApp (MonoLetVar (Idx idx (FunT inputTypes outputType)) i) es) = do
-      MM.sayVVV $ "MonoLetVar case"
       args <- mapM (nativeArg m) es
       appType <- case drop (length es) inputTypes of
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
       return $ AppExeN appType (LocalCallP i) args
-    nativeExpr _ (MonoApp e es) = do
-      MM.sayVVV "nativeExprr MonoApp"
-      MM.sayVVV $ "e:" <+> pretty e
-      MM.sayVVV $ "es:" <+> list (map pretty es)
-      error "Illegal application"
+    nativeExpr _ (MonoApp _ _) = error "Illegal application"
     nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
     nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
     nativeExpr _ (MonoBndVar (B _) i) =
@@ -258,7 +251,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoNull v) = NullN <$> inferVar v
+    -- MonoNull now carries an Indexed Type for the full type the
+    -- Null inhabits (e.g. @?(BTree Int)@). Use @inferType@ (=
+    -- @inferConcreteType@) rather than @inferVar@ so the resulting
+    -- @TypeF@ preserves the alias's args; the bare-TVar @inferVar@
+    -- path collapsed parameterised aliases through their body's head
+    -- and lost the args (see the @PolyNull@ comment in Namespace.hs).
+    nativeExpr _ (MonoNull v) = NullN <$> inferType v
     nativeExpr m (MonoIf cond thenE elseE) = do
       condNe <- nativeExpr m cond
       thenNe <- nativeExpr m thenE
@@ -278,16 +277,81 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
-          msch <- intrinsicSchema m intr tf es'
+          es'' <- unpackDataArgIfNeeded m intr es'
+          msch <- intrinsicSchema m intr tf es''
           let innerTf = case tf of
                 EffectF _ inner -> inner
                 other -> other
-          return $ DoBlockN tf (IntrinsicN innerTf intr msch es')
+          mPacker <- loadResultPacker m intr innerTf
+          let rawInnerTf = case mPacker of
+                Just (_, wireTf) -> rebuildOptionalInner innerTf wireTf
+                Nothing -> innerTf
+              raw = IntrinsicN rawInnerTf intr msch es''
+          wrapped <- case mPacker of
+            Just (packerSrc, wireTf) -> return $ MapOptionalN innerTf wireTf packerSrc raw
+            Nothing -> return raw
+          return $ DoBlockN tf wrapped
     nativeExpr m (MonoIntrinsic t intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es
-      msch <- intrinsicSchema m intr tf es'
-      return $ IntrinsicN tf intr msch es'
+      es'' <- unpackDataArgIfNeeded m intr es'
+      msch <- intrinsicSchema m intr tf es''
+      mPacker <- loadResultPacker m intr tf
+      let rawTf = case mPacker of
+            Just (_, wireTf) -> rebuildOptionalInner tf wireTf
+            Nothing -> tf
+          raw = IntrinsicN rawTf intr msch es''
+      case mPacker of
+        Just (packerSrc, wireTf) -> return $ MapOptionalN tf wireTf packerSrc raw
+        Nothing -> return raw
+
+    -- For data-bearing runtime intrinsics (@save/@savej/@savem/@show/@hash),
+    -- the runtime expects the value in *wire form*. The normal cross-pool
+    -- path inserts the unpacker in expandSerialize's SerialPack arm; we
+    -- mirror that here so intrinsics flow through the same pack/unpack
+    -- machinery as ordinary functions instead of feeding the runtime a
+    -- user-side struct it cannot serialize.
+    unpackDataArgIfNeeded ::
+      Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
+    unpackDataArgIfNeeded m intr (dataArg : rest)
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
+          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+          case ast of
+            SerialPack _ (packer, _) -> do
+              let unpackerSrc = typePackerReverse packer
+                  unpackedType = typePackerUnpacked packer
+              return (AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg] : rest)
+            _ -> return (dataArg : rest)
+    unpackDataArgIfNeeded _ _ args = return args
+
+    -- Symmetric to unpackDataArgIfNeeded: @load and @read return optional
+    -- values, and the runtime emits the wire form. When the user-facing
+    -- inner type has a Packable instance, expandDeserialize's SerialPack
+    -- arm inserts the packer; we mirror that here for the intrinsic
+    -- result, lifting the packer through the optional via MapOptionalN.
+    -- Returns the packer source + the wire-form inner type so the caller
+    -- can both rebuild the intrinsic's type with the wire form (so the
+    -- runtime call uses the wire-side template) and wrap the result
+    -- with the packer.
+    loadResultPacker ::
+      Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
+    loadResultPacker m intr resultTf
+      | intr `elem` [IntrLoad, IntrRead] = case resultTf of
+          OptionalF innerT -> do
+            ast <- Serial.makeSerialAST m lang innerT
+            case ast of
+              SerialPack _ (packer, _) ->
+                return $ Just (typePackerForward packer, typePackerUnpacked packer)
+              _ -> return Nothing
+          _ -> return Nothing
+      | otherwise = return Nothing
+
+    -- Replace the inner type of an OptionalF wrapper with a new type.
+    -- Used to swap the intrinsic's user-side optional inner for the
+    -- wire-side inner once the packer wrap is hoisted to MapOptionalN.
+    rebuildOptionalInner :: TypeF -> TypeF -> TypeF
+    rebuildOptionalInner (OptionalF _) newInner = OptionalF newInner
+    rebuildOptionalInner other _ = other
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
@@ -329,6 +393,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           case params of
             [] -> pretty t
             ps -> parens (pretty t <+> hsep (map go ps))
+        go (RecF (FV t _)) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))
@@ -388,8 +453,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     mergeTypes x _ = x
 
     serializeS :: MDoc -> Int -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS msg m se = do
-      MM.sayVVV $ "serializeS" <+> pretty m <> ":" <+> msg
+    serializeS _ m se =
       SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
 
     inferState :: MonoExpr -> SerializationState
@@ -415,8 +479,7 @@ unwrapLetDef m (MonoReturn e) = (m, e)
 unwrapLetDef m e = (m, e)
 
 naturalizeN :: MDoc -> Int -> Lang -> TypeF -> SerialExpr -> MorlocMonad NativeExpr
-naturalizeN msg m lang t se = do
-  MM.sayVVV $ "naturalizeN at" <+> msg
+naturalizeN _ m lang t se =
   DeserializeN t <$> Serial.makeSerialAST m lang t <*> pure se
 
 class IsSerializable a where
@@ -579,8 +642,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
 
     serializeS :: MDoc -> Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS msg m t se = do
-      MM.sayVVV $ "serializeS" <+> pretty m <> ":" <+> msg
+    serializeS _ m t se =
       SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent

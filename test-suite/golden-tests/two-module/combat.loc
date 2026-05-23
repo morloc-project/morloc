@@ -1,5 +1,7 @@
 module combat (rollDice)
 
+effect Rand
+
 import .util (roll)
 
 rollDice :: <Rand> [Int]

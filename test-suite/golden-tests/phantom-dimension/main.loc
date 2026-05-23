@@ -46,6 +46,7 @@ module main
   , rtVecBool2
   , rtChainVec
   , rtFixedPair
+  , mixedFixedPair
   , sumVecArg
   , sumVecZeroArg
   , makeVecResult
@@ -59,6 +60,7 @@ module main
 
 import root
 import root-cpp
+import root-py
 import tensor
 import tensor-cpp
 
@@ -125,6 +127,19 @@ rtChainVec = idcpp ([7.0, 8.0, 9.0] :: MyVec 3 Real)
 
 rtFixedPair :: FixedPair 2 Int
 rtFixedPair = idcpp ((42, 99) :: FixedPair 2 Int)
+
+-- Cross-language element inside a phantom-Nat tuple alias literal.
+-- The first slot is a Python value (idpy 42) forced into a non-Py
+-- manifold via idcpp on the outside. The current expressCore /
+-- expressPolyExpr handlers for TupS zip the literal's elements
+-- against the alias's *type args* [NatLit 2, Int] rather than the
+-- alias body's *slot types* [Int, Int]. When the first slot needs a
+-- cross-language wrap, expressContainer is called with the bogus
+-- parent type NatLit 2, which is illegal at the codegen layer.
+-- Same-language elements (the literals above) hide the bug because
+-- expressContainer's pc is only used on the cross-language branch.
+mixedFixedPair :: FixedPair 2 Int
+mixedFixedPair = idcpp ((idpy 42, 99) :: FixedPair 2 Int)
 
 -- 5) Vector as function argument: literal directly to foreign fn. --
 

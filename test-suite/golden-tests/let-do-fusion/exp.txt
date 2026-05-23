@@ -12,10 +12,6 @@
 88
 --- letInDo ---
 34
---- doInDoForced ---
-4
---- doInDoLet ---
-110
 --- letBndTailEffect ---
 6
 --- constTailWithEffect ---

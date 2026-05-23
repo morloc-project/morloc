@@ -64,7 +64,7 @@ doInThen x = do
   ? x > 0 = do
       y <- py_double x
       y + 1
-  : 0
+  : do 0
 
 -- The `:`-branch is a do-block.
 doInElse :: Int -> <IO> Int
@@ -92,4 +92,4 @@ nestedGuards x = do
       y <- py_double x
       ? y > 50 = y + 5000
       : y + 1
-  : 0
+  : do 0

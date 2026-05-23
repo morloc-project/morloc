@@ -1,0 +1,15 @@
+8
+8
+8
+6
+6
+6
+6
+16
+6
+{"head":3,"tail":{"head":2,"tail":{"head":1,"tail":{"head":0,"tail":null}}}}
+{"value":0,"children":[{"value":0,"children":[{"value":1,"children":[]},{"value":1,"children":[]}]},{"value":0,"children":[{"value":1,"children":[]},{"value":1,"children":[]}]}]}
+3
+12
+{"val":3,"sub":{"val":2,"sub":{"val":1,"sub":{"val":0,"sub":null}}}}
+2

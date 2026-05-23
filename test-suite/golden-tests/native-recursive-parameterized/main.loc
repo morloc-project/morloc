@@ -1,0 +1,82 @@
+-- Parameterized recursive types: more than one type parameter and/or
+-- recursion through associative-collection shapes.
+--
+-- Trie    -- one-parameter recursive record whose child storage is a
+--            list of (Str, Trie a) pairs. Tests parameter threading
+--            through a list-of-pairs structure: the recursive `Trie a`
+--            sits inside a tuple inside a list, so termination relies
+--            on the list's empty-base guard.
+--
+-- TreeKV  -- two-parameter recursive record indexed by key. Same
+--            shape as Trie but with both `k` and `v` threaded through
+--            the cycle. Catches bugs in parameter substitution that
+--            only fire for a >1-parameter alias.
+--
+-- KNOWN LIMITATION (intentionally NOT tested here): @Map k v@ is an
+-- opaque Packable type in the stdlib, NOT recognised by
+-- @classifyRecursion@ as a structural guard. A field
+-- @subs :: Map Str (Trie a)@ therefore reports the Trie reference as
+-- bare. The right fix is to teach the recursion classifier that any
+-- @Packable [t] _@-shaped type acts as a list guard. Until then, we
+-- exercise the same idea through @[(k, v)]@ which IS recognised.
+
+module main (trieSizePy, treeSizePy, twoLevelTriePy,
+             trieBuild, treeKVBuild,
+             trieFromJson, treeKVFromJson)
+
+import root
+import root-py
+
+record Trie a where
+  val  :: ?a
+  subs :: [(Str, Trie a)]
+
+record Py => Trie a = "dict"
+
+record TreeKV k v where
+  key      :: k
+  value    :: v
+  children :: [(k, TreeKV k v)]
+
+record Py => TreeKV k v = "dict"
+
+source Py from "foo.py" ("build_trie"       as buildTriePy
+                       , "trie_size"        as trieSizeRaw
+                       , "build_treekv"     as buildTreeKVPy
+                       , "tree_size"        as treeSizeRaw
+                       , "build_two_level"  as buildTwoLevelPy)
+
+buildTriePy        :: Int -> Trie Int
+trieSizeRaw        :: Trie Int -> Int
+buildTreeKVPy      :: Int -> TreeKV Str Int
+treeSizeRaw        :: TreeKV Str Int -> Int
+buildTwoLevelPy    :: Int -> Trie Int
+
+trieSizePy d       = trieSizeRaw (buildTriePy d)
+treeSizePy d       = treeSizeRaw (buildTreeKVPy d)
+twoLevelTriePy n   = trieSizeRaw (buildTwoLevelPy n)
+
+-- Native Trie builder: at the leaf, `val` is `Null` (a `?a` field
+-- accepting null) and `subs` is `[]`. Internal nodes carry no payload
+-- (val = Null) and two named children keyed "L" and "R". Tests
+-- construction of a recursive record that contains a list-of-pairs
+-- whose pair's second slot is the recursive self-reference.
+trieBuild :: Int -> Trie Int
+trieBuild d ? d <= 0 = {val = 0, subs = []}
+            : let sub = trieBuild (d - 1)
+              in {val = Null, subs = [("L", sub), ("R", sub)]}
+
+-- Native TreeKV builder: two-parameter recursive record. Both `k` and
+-- `v` thread through the recursion. Mirrors the trieBuild shape.
+treeKVBuild :: Int -> TreeKV Str Int
+treeKVBuild d ? d <= 0 = {key = "leaf", value = 1, children = []}
+              : let sub = treeKVBuild (d - 1)
+                in {key = "inner", value = 0,
+                    children = [("L", sub), ("R", sub)]}
+
+-- JSON-input wrappers for parameterized recursive shapes.
+trieFromJson :: Trie Int -> Int
+trieFromJson x = trieSizeRaw x
+
+treeKVFromJson :: TreeKV Str Int -> Int
+treeKVFromJson x = treeSizeRaw x

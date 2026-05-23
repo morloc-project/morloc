@@ -2,6 +2,7 @@
 #define __CPPMORLOC_HPP__
 
 #include <vector>
+#include <memory>
 #include <stack>
 #include <list>
 #include <forward_list>
@@ -52,11 +53,167 @@ template<typename A, typename B> struct is_std_pair<std::pair<A, B>> : std::true
 template<typename T> struct is_std_optional : std::false_type {};
 template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {};
 
+// shared_ptr<T> is the C++ surface form for a `?T` field at a recursive
+// cycle position (T's body would be incomplete inside its own
+// definition). `nullptr == absent`. The marshalling layer detects this
+// shape and handles the wire-format relptr at the field's slot.
+template<typename T> struct is_std_shared_ptr : std::false_type {};
+template<typename T> struct is_std_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+
 template<typename T>
 inline constexpr bool is_non_vector_container_v =
     is_std_list<T>::value || is_std_forward_list<T>::value ||
     is_std_deque<T>::value || is_std_stack<T>::value ||
     is_std_queue<T>::value;
+
+// ============================================================
+// Field representation dispatch (D1)
+// ============================================================
+//
+// The morloc encoding rule for `?T` at C++ field positions:
+//   - `?T` -> std::optional<T> everywhere sizeof(T) is known.
+//   - `?T` -> some pointer-shape (null == absent) at recursive-cycle
+//     positions where sizeof(T) is not yet known.
+//
+// Pointer-shape is polymorphic within a closed set (shared_ptr,
+// unique_ptr, raw T*). The codegen emits generic wrap/deref calls and
+// the C++ template machinery resolves which wrapper to use at compile
+// time. The value/pointer axis is enforced by static_assert: a user-
+// supplied struct that puts optional<T> where the rule says pointer
+// (or vice versa) gets a clear error.
+
+namespace mlc {
+
+template<typename T> struct is_pointer_shape : std::false_type {};
+template<typename T> struct is_pointer_shape<std::shared_ptr<T>> : std::true_type {};
+template<typename T> struct is_pointer_shape<std::unique_ptr<T>> : std::true_type {};
+template<typename T> struct is_pointer_shape<T*>                 : std::true_type {};
+
+// Pointer-shape traits. Primary intentionally undefined; only
+// recognized pointer kinds get specializations.
+template<typename FieldT> struct pointer_traits;
+
+template<typename T>
+struct pointer_traits<std::shared_ptr<T>> {
+    using inner = T;
+    static std::shared_ptr<T> wrap(T&& v)              { return std::make_shared<T>(std::move(v)); }
+    static std::shared_ptr<T> wrap(const T& v)         { return std::make_shared<T>(v); }
+    static std::shared_ptr<T> absent()                 { return nullptr; }
+    static const T& deref(const std::shared_ptr<T>& p) { return *p; }
+    static bool has_value(const std::shared_ptr<T>& p) { return p != nullptr; }
+};
+
+template<typename T>
+struct pointer_traits<std::unique_ptr<T>> {
+    using inner = T;
+    static std::unique_ptr<T> wrap(T&& v)              { return std::make_unique<T>(std::move(v)); }
+    static std::unique_ptr<T> wrap(const T& v)         { return std::make_unique<T>(v); }
+    static std::unique_ptr<T> absent()                 { return nullptr; }
+    static const T& deref(const std::unique_ptr<T>& p) { return *p; }
+    static bool has_value(const std::unique_ptr<T>& p) { return p != nullptr; }
+};
+
+// Raw pointer T*: READ-ONLY at field positions. The codegen has no
+// way to manage the pointee's lifetime when constructing a value, so
+// `wrap` is armed with a static_assert that fires at any call site
+// the codegen tries to materialize a T* field from a fresh value.
+// Useful for FFI consumer-side scenarios where the user's struct
+// already holds a T* owned by external code.
+template<typename T>
+struct pointer_traits<T*> {
+    using inner = T;
+    static T* wrap(T&&) {
+        static_assert(sizeof(T*) == 0,
+            "Cannot construct a field of type T* natively in C++. "
+            "Raw pointers carry no ownership information, so the morloc "
+            "codegen has no way to manage the pointee's lifetime. Use "
+            "std::shared_ptr or std::unique_ptr if native construction "
+            "is needed; or restrict the enclosing record to consumer-"
+            "side use only.");
+        return nullptr;
+    }
+    static T* absent()                  { return nullptr; }
+    static const T& deref(T* p)         { return *p; }
+    static bool has_value(T* p)         { return p != nullptr; }
+};
+
+// Generic field-construction entry point: the codegen emits
+//   {a, mlc::wrap_field<decltype(rec_t::field)>(value)}
+// at every aggregate-init / field-assign site. The static_assert
+// enforces the value/pointer axis of the encoding rule: ?T at a
+// recursive-cycle position must be pointer-shaped; ?T everywhere
+// else must be std::optional<T>; non-optional fields pass through.
+template<typename FieldT, typename Inner>
+FieldT wrap_field(Inner&& v) {
+    static_assert(
+        is_pointer_shape<FieldT>::value
+            || std::is_same_v<FieldT, std::optional<std::remove_cv_t<std::remove_reference_t<Inner>>>>
+            || std::is_constructible_v<FieldT, Inner>,
+        "Field type doesn't match the morloc encoding rule. "
+        "?T at a recursive-cycle position expects a pointer-shape "
+        "(std::shared_ptr<T>, std::unique_ptr<T>, or T*); "
+        "?T everywhere else expects std::optional<T>; "
+        "non-optional fields expect T directly."
+    );
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::wrap(std::forward<Inner>(v));
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return FieldT(std::forward<Inner>(v));
+    } else {
+        return FieldT(std::forward<Inner>(v));
+    }
+}
+
+template<typename FieldT>
+FieldT wrap_field_absent() {
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::absent();
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return std::nullopt;
+    } else {
+        static_assert(sizeof(FieldT) == 0,
+            "wrap_field_absent called on a non-nullable field type. "
+            "Only pointer-shapes and std::optional<T> can be absent.");
+        return FieldT{};
+    }
+}
+
+// Null-literal overload: morloc's `Null` codegens to `std::nullopt`,
+// which then flows into the field-construction site. For an optional
+// field that's just an assignment; for a pointer-shape field it must
+// resolve to nullptr. This overload routes both through
+// wrap_field_absent so the right "absent" value is constructed for
+// the field's actual type.
+template<typename FieldT>
+FieldT wrap_field(std::nullopt_t) {
+    return wrap_field_absent<FieldT>();
+}
+
+// Generic field-read entry point. Returns the underlying value by
+// const-reference, dispatching on whether the field is wrapped.
+template<typename FieldT>
+decltype(auto) deref_field(const FieldT& f) {
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::deref(f);
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return (*f);
+    } else {
+        return (f);
+    }
+}
+
+template<typename FieldT>
+bool field_has_value(const FieldT& f) {
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::has_value(f);
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return f.has_value();
+    } else {
+        return true;
+    }
+}
+
+} // namespace mlc
 
 
 // ============================================================
@@ -105,6 +262,76 @@ shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size
 int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size);
 int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr);
 
+
+// ============================================================
+// Recursive-record env (named-schema stack)
+// ============================================================
+//
+// Mirror of the C-side stack in pymorloc.c / rmorloc.c: when walking
+// a Schema that may contain MORLOC_RECUR back-references, every
+// declaration (a non-Recur schema with `name != nullptr`) is pushed
+// onto a thread-local stack. RecurEnvScope provides RAII push/pop so
+// nested entries (vectors, optionals, tuples) compose cleanly with
+// exception unwinding.
+struct CppRecurEntry {
+    const char* name;
+    const Schema* schema;
+};
+
+inline std::vector<CppRecurEntry>& cpp_recur_env() {
+    thread_local std::vector<CppRecurEntry> stack;
+    return stack;
+}
+
+inline const Schema* recur_env_lookup_cpp(const char* name) {
+    if (name == nullptr) return nullptr;
+    auto& stack = cpp_recur_env();
+    for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
+        if (it->name != nullptr && std::strcmp(it->name, name) == 0) {
+            return it->schema;
+        }
+    }
+    return nullptr;
+}
+
+struct RecurEnvScope {
+    bool pushed;
+    explicit RecurEnvScope(const Schema* schema) : pushed(false) {
+        if (schema != nullptr
+            && schema->name != nullptr
+            && schema->type != MORLOC_RECUR) {
+            cpp_recur_env().push_back({schema->name, schema});
+            pushed = true;
+        }
+    }
+    ~RecurEnvScope() {
+        if (pushed) {
+            auto& s = cpp_recur_env();
+            if (!s.empty()) s.pop_back();
+        }
+    }
+    RecurEnvScope(const RecurEnvScope&) = delete;
+    RecurEnvScope& operator=(const RecurEnvScope&) = delete;
+};
+
+// Resolve a Recur schema to the named declaration on the env stack.
+// Returns the original schema unchanged when not a Recur (so callers
+// can use it as an unconditional normaliser at the top of a walker).
+// Throws when a Recur is unresolvable, since downstream reads would
+// otherwise dereference an empty parameter list.
+inline const Schema* resolve_recur_cpp(const Schema* schema) {
+    if (schema == nullptr || schema->type != MORLOC_RECUR) {
+        return schema;
+    }
+    const Schema* target = recur_env_lookup_cpp(schema->name);
+    if (target == nullptr) {
+        std::ostringstream oss;
+        oss << "Recur back-reference to undeclared schema name '"
+            << (schema->name ? schema->name : "?") << "'";
+        throw std::runtime_error(oss.str());
+    }
+    return target;
+}
 
 // ============================================================
 // mpk_pack / mpk_unpack declarations
@@ -195,9 +422,10 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
     size_t total_size = schema->width;
+    const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
     // worst-case cursor alignment padding for element data
-    total_size += array_data_alignment_cpp(schema->parameters[0]) - 1;
-    switch(schema->parameters[0]->type){
+    total_size += array_data_alignment_cpp(elem_schema) - 1;
+    switch(elem_schema->type){
         case MORLOC_NIL:
         case MORLOC_BOOL:
         case MORLOC_SINT8:
@@ -210,7 +438,7 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
         case MORLOC_UINT64:
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
-            total_size += data.size() * schema->parameters[0]->width;
+            total_size += data.size() * elem_schema->width;
             break;
         case MORLOC_INT:
         case MORLOC_STRING:
@@ -219,22 +447,52 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
         case MORLOC_MAP:
         case MORLOC_OPTIONAL:
             for(size_t i = 0; i < data.size(); i++){
-               total_size += get_shm_size(schema->parameters[0], data[i]);
+               total_size += get_shm_size(elem_schema, data[i]);
+            }
+            break;
+        default:
+            // Recur / Table / unhandled: size depends on element kind that
+            // we cannot pre-compute structurally here. Fall back to the
+            // per-element walker which will resolve and recurse properly.
+            for(size_t i = 0; i < data.size(); i++){
+               total_size += get_shm_size(elem_schema, data[i]);
             }
             break;
     }
     return total_size;
 }
 
-// Optional: tag byte + aligned inner value
+// Optional: slot is a relptr (schema->width = sizeof(relptr_t)). Absent
+// values contribute only the slot. Present values contribute the slot,
+// worst-case alignment padding for the inner T, and T's full size
+// (including any of T's own variable-length sub-data).
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::optional<T>& data) {
     if (!data.has_value()) {
         return schema->width;
     }
-    size_t inner_size = get_shm_size(schema->parameters[0], *data);
-    size_t extra = (inner_size > schema->parameters[0]->width) ? inner_size - schema->parameters[0]->width : 0;
-    return schema->width + extra;
+    const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+    size_t inner_size = get_shm_size(inner_schema, *data);
+    size_t inner_align = schema_alignment_cpp(inner_schema);
+    if (inner_align == 0) inner_align = 1;
+    return schema->width + (inner_align - 1) + inner_size;
+}
+
+// shared_ptr<T>: the C++ surface form for `?T` at a recursive cycle
+// position. Mirrors the optional<T> wire-format handling exactly --
+// the schema is still the `?T` schema, and the slot is still a single
+// relptr. nullptr == absent (RELNULL); non-null == present with the
+// pointee occupying the inner slot.
+template<typename T>
+size_t get_shm_size(const Schema* schema, const std::shared_ptr<T>& data) {
+    if (!data) {
+        return schema->width;
+    }
+    const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+    size_t inner_size = get_shm_size(inner_schema, *data);
+    size_t inner_align = schema_alignment_cpp(inner_schema);
+    if (inner_align == 0) inner_align = 1;
+    return schema->width + (inner_align - 1) + inner_size;
 }
 
 size_t get_shm_size(const Schema* schema, const std::string& data) {
@@ -250,9 +508,10 @@ size_t createTupleShmSizeHelper(const Schema* schema, const Tuple& data, std::in
     size_t total_size = schema->width;
     (void)std::initializer_list<int>{(
         [&](){
-            size_t elem = get_shm_size(schema->parameters[Is], std::get<Is>(data));
-            if (elem > schema->parameters[Is]->width) {
-                total_size += elem - schema->parameters[Is]->width;
+            const Schema* field_schema = resolve_recur_cpp(schema->parameters[Is]);
+            size_t elem = get_shm_size(field_schema, std::get<Is>(data));
+            if (elem > field_schema->width) {
+                total_size += elem - field_schema->width;
             }
         }(),
         0
@@ -299,6 +558,10 @@ size_t get_shm_size(const Schema* schema, const std::queue<T>& data) {
 // Generic top-level: compute size, allocate, serialize
 template<typename T>
 void* toAnything(const Schema* schema, const T& data){
+    // Push the top schema's name onto the recur env so any back-ref
+    // encountered during the walk resolves to the matching declaration.
+    // RAII pops on every return path.
+    RecurEnvScope _recur_top(schema);
     size_t total_size = get_shm_size(schema, data);
     void* dest = shmalloc_cpp(total_size);
     void* cursor = (void*)((char*)dest + schema->width);
@@ -438,14 +701,18 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
         result->data = RELNULL;
         return dest;
     }
+    // Resolve a Recur element schema before descending so any
+    // user-generated struct overload sees the named declaration's
+    // parameters / offsets, not the empty back-ref node.
+    const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
     // align cursor for element data placement (bumps to 64 for primitive numerics)
-    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(schema->parameters[0])));
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(elem_schema)));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-    *cursor = static_cast<char*>(*cursor) + data.size() * schema->parameters[0]->width;
+    *cursor = static_cast<char*>(*cursor) + data.size() * elem_schema->width;
     char* start = (char*)cpp_rel2abs(result->data);
-    size_t width = schema->parameters[0]->width;
+    size_t width = elem_schema->width;
     for (size_t i = 0; i < data.size(); ++i) {
-         toAnything(start + width * i, cursor, schema->parameters[0], data[i]);
+         toAnything(start + width * i, cursor, elem_schema, data[i]);
     }
     return dest;
 }
@@ -459,15 +726,16 @@ void* toAnything_seq(void* dest, void** cursor, const Schema* schema, const Cont
         result->data = RELNULL;
         return dest;
     }
+    const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
     // align cursor for element data placement (bumps to 64 for primitive numerics)
-    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(schema->parameters[0])));
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(elem_schema)));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
-    *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
+    *cursor = static_cast<char*>(*cursor) + size * elem_schema->width;
     char* start = (char*)cpp_rel2abs(result->data);
-    size_t width = schema->parameters[0]->width;
+    size_t width = elem_schema->width;
     size_t i = 0;
     for (const auto& item : data) {
-        toAnything(start + width * i, cursor, schema->parameters[0], item);
+        toAnything(start + width * i, cursor, elem_schema, item);
         ++i;
     }
     return dest;
@@ -511,8 +779,10 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const char* da
 // Tuple
 template<typename Tuple, size_t... Is>
 void* createTupleAnythingHelper(void* dest, const Schema* schema, void** cursor, const Tuple& data, std::index_sequence<Is...>) {
+    // Each element's schema may be a Recur back-reference; resolve
+    // before dispatch so user-generated overloads see the target.
     (void)std::initializer_list<int>{(
-        toAnything((char*)dest + schema->offsets[Is], cursor, schema->parameters[Is], std::get<Is>(data)),
+        toAnything((char*)dest + schema->offsets[Is], cursor, resolve_recur_cpp(schema->parameters[Is]), std::get<Is>(data)),
         0
     )...};
     return dest;
@@ -530,14 +800,44 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::pai
 }
 
 // Optional
+//
+// The Optional slot is a single relptr. Absent → RELNULL. Present →
+// align the cursor for the inner T, write its relptr into the slot,
+// advance the cursor past T's width, then recurse to populate T.
 template<typename T>
 void* toAnything(void* dest, void** cursor, const Schema* schema, const std::optional<T>& data) {
     if (!data.has_value()) {
-        *((uint8_t*)dest) = 0;
-        memset((char*)dest + schema->offsets[0], 0, schema->parameters[0]->width);
+        *((relptr_t*)dest) = RELNULL;
     } else {
-        *((uint8_t*)dest) = 1;
-        toAnything((char*)dest + schema->offsets[0], cursor, schema->parameters[0], *data);
+        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        size_t inner_align = schema_alignment_cpp(inner_schema);
+        if (inner_align == 0) inner_align = 1;
+        *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), inner_align));
+        *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(*cursor));
+        void* inner_dest = *cursor;
+        *cursor = static_cast<char*>(*cursor) + inner_schema->width;
+        toAnything(inner_dest, cursor, inner_schema, *data);
+    }
+    return dest;
+}
+
+// shared_ptr<T>: the C++ surface form for `?T` at a recursive cycle.
+// Writes the wire-format relptr at dest (RELNULL when absent),
+// allocates the inner slot when present, and recurses into the
+// pointee. Mirrors the optional<T> overload above exactly.
+template<typename T>
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::shared_ptr<T>& data) {
+    if (!data) {
+        *((relptr_t*)dest) = RELNULL;
+    } else {
+        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        size_t inner_align = schema_alignment_cpp(inner_schema);
+        if (inner_align == 0) inner_align = 1;
+        *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), inner_align));
+        *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(*cursor));
+        void* inner_dest = *cursor;
+        *cursor = static_cast<char*>(*cursor) + inner_schema->width;
+        toAnything(inner_dest, cursor, inner_schema, *data);
     }
     return dest;
 }
@@ -560,7 +860,10 @@ Tuple fromTupleAnythingHelper(
   Tuple* = nullptr,
   const void* base_ptr = nullptr
 ) {
-    return Tuple(fromAnything(schema->parameters[Is],
+    // Resolve each element's schema (it may be a Recur back-reference)
+    // so any user-defined struct overload sees the named target's
+    // parameters/offsets rather than the empty back-ref node.
+    return Tuple(fromAnything(resolve_recur_cpp(schema->parameters[Is]),
                               (char*)anything + schema->offsets[Is],
                               static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr),
                               base_ptr)...);
@@ -571,6 +874,14 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
     if(data == NULL){
         throw std::runtime_error("Void error in fromAnything");
     }
+
+    // Resolve a back-reference to the named declaration on the env
+    // stack before descending. Recur nodes have no parameters/keys, so
+    // every downstream read needs the resolved target. Push the
+    // resolved schema's name (if any) onto the env so a sub-walk's
+    // Recur back-ref finds it.
+    schema = resolve_recur_cpp(schema);
+    RecurEnvScope _recur_scope(schema);
 
     if constexpr (std::is_same_v<T, bool>) {
         // NOTE: do NOT use bool here since its width is often not 1 byte
@@ -589,11 +900,17 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         Array* array = (Array*)data;
         if(array->size == 0) return result;
 
+        // Resolve a Recur element schema (e.g. vector<tree_t> with
+        // schema Array<Recur(Tree)>) to the named declaration before
+        // descending. User-generated struct overloads access
+        // schema->offsets[] directly and would crash on a Recur.
+        const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
+
         // Fast path for primitive arrays — only when C++ type width
         // matches schema width (e.g. both 8 bytes). When they differ
         // (e.g. int=4 bytes vs i8 schema=8 bytes), fall through to
         // the element-by-element slow path which converts per element.
-        switch(schema->parameters[0]->type){
+        switch(elem_schema->type){
             case MORLOC_NIL:
             case MORLOC_BOOL:
             case MORLOC_SINT8:
@@ -606,7 +923,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
             case MORLOC_UINT64:
             case MORLOC_FLOAT32:
             case MORLOC_FLOAT64:
-                if (sizeof(ElemT) == schema->parameters[0]->width) {
+                if (sizeof(ElemT) == elem_schema->width) {
                     ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
                     std::vector<ElemT> pv(arr_start, arr_start + array->size);
                     return pv;
@@ -616,7 +933,6 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
 
         // Complex element types
         result.reserve(array->size);
-        const Schema* elem_schema = schema->parameters[0];
         char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
         for(size_t i = 0; i < array->size; i++){
             result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr));
@@ -629,7 +945,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         T result;
         if(array->size == 0) return result;
 
-        const Schema* elem_schema = schema->parameters[0];
+        const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
         char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
 
         constexpr bool reverse = is_std_stack<T>::value || is_std_forward_list<T>::value;
@@ -667,11 +983,31 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
     }
     else if constexpr (is_std_optional<T>::value) {
         using InnerT = typename T::value_type;
-        uint8_t tag = *(const uint8_t*)data;
-        if (tag == 0) {
+        // The Optional slot is a relptr (RELNULL = absent). Resolve and
+        // recurse into the inner T's body when present.
+        relptr_t relptr = *(const relptr_t*)data;
+        if (relptr == RELNULL) {
             return std::nullopt;
         }
-        return std::optional<InnerT>(fromAnything(schema->parameters[0], (const char*)data + schema->offsets[0], static_cast<InnerT*>(nullptr), base_ptr));
+        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const void* inner_data = resolve_relptr_cpp(relptr, base_ptr);
+        return std::optional<InnerT>(
+            fromAnything(inner_schema, inner_data, static_cast<InnerT*>(nullptr), base_ptr));
+    }
+    else if constexpr (is_std_shared_ptr<T>::value) {
+        // shared_ptr<T> is the C++ surface form for `?T` at a recursive
+        // cycle. The wire slot is a single relptr (RELNULL == absent).
+        // Resolve it, then construct shared_ptr<T> wrapping the
+        // recursive recurse-into-pointee result.
+        using PointeeT = typename T::element_type;
+        relptr_t relptr = *(const relptr_t*)data;
+        if (relptr == RELNULL) {
+            return std::shared_ptr<PointeeT>(nullptr);
+        }
+        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const void* inner_data = resolve_relptr_cpp(relptr, base_ptr);
+        return std::make_shared<PointeeT>(
+            fromAnything(inner_schema, inner_data, static_cast<PointeeT*>(nullptr), base_ptr));
     }
     else if constexpr (std::is_arithmetic_v<T>) {
         // Primitives (int, double, float, etc.) — read at schema width and

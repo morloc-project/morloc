@@ -1,0 +1,140 @@
+=== (1) Round-trip Real across all six language pairs ===
+--- cpRound ---
+55
+--- pcRound ---
+55
+--- prRound ---
+55
+--- rpRound ---
+55
+--- crRound ---
+55
+--- rcRound ---
+55
+=== (2) Element types: Cpp <-> Py ===
+--- cpI8 ---
+-2
+--- pcI8 ---
+-2
+--- cpI16 ---
+-2
+--- pcI16 ---
+-2
+--- cpI32 ---
+-2
+--- pcI32 ---
+-2
+--- cpI64 ---
+-2
+--- pcI64 ---
+-2
+--- cpU8 ---
+383
+--- pcU8 ---
+383
+--- cpU16 ---
+98303
+--- pcU16 ---
+98303
+--- cpU32 ---
+4295032831
+--- pcU32 ---
+4295032831
+--- cpU64 ---
+4295032831
+--- pcU64 ---
+4295032831
+--- cpF32 ---
+8
+--- pcF32 ---
+8
+--- cpF64 ---
+8
+--- pcF64 ---
+8
+=== (2b) Width-alias extremes ===
+--- cpI8Min ---
+-128
+--- pcI8Min ---
+-128
+--- cpU8Max ---
+255
+--- pcU8Max ---
+255
+=== (3) Permutation probe: all six pairs (expect 8) ===
+--- cpPerm ---
+8
+--- pcPerm ---
+8
+--- prPerm ---
+8
+--- rpPerm ---
+8
+--- crPerm ---
+8
+--- rcPerm ---
+8
+=== (4) File IO @save / @savej / @savem round-trip ===
+--- fileBin ---
+[1,2,3,4,5,6,7,8,9,10]
+--- fileJson ---
+[1,2,3,4,5,6,7,8,9,10]
+--- fileMsg ---
+[1,2,3,4,5,6,7,8,9,10]
+--- fileSumBin ---
+55
+--- fileSumJson ---
+55
+=== (5) Zero-copy direct assertions (numpy OWNDATA) ===
+--- zcShmPyPy ---
+"OWNDATA=True,size=50000"
+--- zcInlinePyPy ---
+"OWNDATA=True,size=10"
+--- zcShmCpToPy ---
+"OWNDATA=False,size=50000"
+--- zcInlineCpToPy ---
+"OWNDATA=True,size=10"
+--- zcShmRToPy ---
+"OWNDATA=False,size=50000"
+=== (6) Morloc-level operations on Vector ===
+--- mlSum ---
+55
+--- mlLength ---
+50000
+--- mlReverse ---
+55
+--- mlSort ---
+255
+--- mlMap ---
+110
+=== (7) Edge cases (empty / single) ===
+--- emptyCross ---
+0
+--- singleCross ---
+42
+=== (8) Threshold straddle (Cpp -> Py) ===
+--- underThr ---
+"OWNDATA=True,size=8000"
+--- overThr ---
+"OWNDATA=False,size=8200"
+=== (9) Literal inputs: source literals + CLI literals ===
+--- litSrcRealAnnot ---
+15
+--- litSrcRealInfer ---
+15
+--- litSrcIntAnnot ---
+150
+--- litCliReal ---
+17.5
+--- litCliInt ---
+150
+--- litCliRealCpp ---
+17.5
+--- litCliIntCpp ---
+150
+--- litCliRealR ---
+17.5
+--- litCliEmpty ---
+0
+--- litCliSingle ---
+42

@@ -1,5 +1,6 @@
 pub mod error;
 pub mod schema;
+pub mod recur;
 pub mod packet;
 pub mod shm;
 pub mod hash;

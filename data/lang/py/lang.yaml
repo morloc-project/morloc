@@ -20,6 +20,7 @@ preamble:
 ldBoolTrue: "True"
 ldBoolFalse: "False"
 ldNullLiteral: "None"
+ldNullCheckTemplate: "{{expr}} is not None"
 ldRealPosInf: "float('inf')"
 ldRealNegInf: "float('-inf')"
 ldRealNaN: "float('nan')"
@@ -57,6 +58,9 @@ ldQualifiedImports: true
 ldIncludeRelToFile: false
 
 # Template fields
+# A sourced symbol is a Python identifier or operator, emitted verbatim.
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_.]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
 ldAssignOp: "="
 ldLambdaTemplate: "lambda {{args}}: {{body}}"
 ldDoBlockExpr: "(lambda: {{expr}})"

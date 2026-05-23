@@ -1,0 +1,136 @@
+=== (1) Round-trip rank 2-5 across all six pairs ===
+--- cpMat ---
+78
+--- pcMat ---
+78
+--- prMat ---
+78
+--- rpMat ---
+78
+--- crMat ---
+78
+--- rcMat ---
+78
+--- cpT3 ---
+276
+--- pcT3 ---
+276
+--- prT3 ---
+276
+--- rpT3 ---
+276
+--- crT3 ---
+276
+--- rcT3 ---
+276
+--- cpT4 ---
+276
+--- pcT4 ---
+276
+--- prT4 ---
+276
+--- rpT4 ---
+276
+--- crT4 ---
+276
+--- rcT4 ---
+276
+--- cpT5 ---
+496
+--- pcT5 ---
+496
+--- prT5 ---
+496
+--- rpT5 ---
+496
+--- crT5 ---
+496
+--- rcT5 ---
+496
+=== (2) Stdlib operations ===
+--- mmCpp ---
+163
+--- mmPy ---
+163
+--- mmR ---
+163
+--- idSum3 ---
+2
+--- idSum5 ---
+2
+--- zerosSum ---
+0
+--- onesSum ---
+12
+--- fillSum ---
+30
+=== (3) Row/column-major corner extraction (expect [0,12,11,23]) ===
+--- cornersCpToPy ---
+[0,12,11,23]
+--- cornersCpToR ---
+[0,12,11,23]
+--- cornersRtoCp ---
+[0,12,11,23]
+--- cornersPyToR ---
+[0,12,11,23]
+=== (4) File IO @save/@savej/@savem of a Matrix ===
+--- matFileBin ---
+[[3,4],[1,2,3,4,5,6,7,8,9,10,11,12]]
+--- matFileJson ---
+[[3,4],[1,2,3,4,5,6,7,8,9,10,11,12]]
+--- matFileMsg ---
+[[3,4],[1,2,3,4,5,6,7,8,9,10,11,12]]
+--- matFileSumBin ---
+78
+--- matFileSumJson ---
+78
+=== (5) Matrix element types ===
+--- matI32CpPy ---
+136
+--- matI32PyCp ---
+136
+--- matI64CpPy ---
+136
+--- matI64PyCp ---
+136
+--- matF32CpPy ---
+136
+--- matF32PyCp ---
+136
+=== (6) Zero-copy probes (DIRECT, ROOT, size) ===
+--- zcMatShmCpToPy ---
+"DIRECT=False,ROOT=False,size=20000"
+--- zcMatInlineCpToPy ---
+"DIRECT=False,ROOT=True,size=12"
+--- zcMatShmRToPy ---
+"DIRECT=False,ROOT=False,size=20000"
+--- zcT3ShmCpToPy ---
+"DIRECT=False,ROOT=False,size=60000"
+--- zcT5ShmCpToPy ---
+"DIRECT=False,ROOT=False,size=32768"
+=== (7) Edge cases: 1x1 matrix and 1x1x1 tensor ===
+--- unitMatCross ---
+7
+--- unitT3Cross ---
+9
+=== (8) Literal inputs: source literals + CLI literals ===
+--- litSrcMatAnnot ---
+21
+--- litSrcMatInfer ---
+21
+--- litSrcMatIntAnnot ---
+21
+--- litSrcT3Annot ---
+36
+--- litSrcT3Infer ---
+36
+--- litCliMat ---
+24
+--- litCliMatCpp ---
+24
+--- litCliMatR ---
+24
+--- litCliMatInt ---
+21
+--- litCliT3 ---
+36

@@ -1,0 +1,10 @@
+bare-field REJECTED
+bare-tuple REJECTED
+bare-function REJECTED
+mutual-2 REJECTED
+mutual-3 REJECTED
+mutual-guarded REJECTED
+mutual-tuple REJECTED
+vacuous-identity REJECTED
+vacuous-optional REJECTED
+vacuous-parametric REJECTED

@@ -529,6 +529,60 @@ if should_run "http-eval-timeout"; then
 fi
 
 # ======================================================================
+# Test Group 1g: /typecheck and /eval expression endpoints
+#
+# Regression guard for the daemon's /typecheck endpoint, which used to
+# return {"status":"ok","result":""} unconditionally: the daemon forked
+# `morloc typecheck <expr>` where the positional is a script *filename*,
+# so the inline expression was read as a missing file and produced no
+# output. The fix forks `morloc <subcmd> -e <expr>` (eval and typecheck
+# both take a file by default now). A well-typed expression must yield
+# a non-empty result; an ill-typed one must not return ok/empty.
+# ======================================================================
+
+if should_run "http-typecheck-eval"; then
+    echo "${BOLD}[http-typecheck-eval] /typecheck and /eval expressions${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    # /eval: a well-typed expression returns its value.
+    eval_resp=$(curl -s --max-time 60 \
+        -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Content-Type: application/json" \
+        -d '{"expr": "import root-py; 2 + 2"}')
+    eval_status=$(json_field "$eval_resp" "status")
+    eval_result=$(json_field "$eval_resp" "result")
+    assert_test "POST /eval '2 + 2' status=ok" "ok" "$eval_status"
+    assert_test "POST /eval '2 + 2' result=4" "4" "$eval_result"
+
+    # /typecheck: a well-typed expression returns a non-empty result
+    # (the inferred type text), never the old empty string.
+    tc_resp=$(curl -s --max-time 60 \
+        -X POST "http://127.0.0.1:${HTTP_PORT}/typecheck" \
+        -H "Content-Type: application/json" \
+        -d '{"expr": "import root-py; 2 + 2"}')
+    tc_status=$(json_field "$tc_resp" "status")
+    tc_result=$(json_field "$tc_resp" "result")
+    assert_test "POST /typecheck '2 + 2' status=ok" "ok" "$tc_status"
+    tc_nonempty=$([ -n "$tc_result" ] && echo "non-empty" || echo "empty")
+    assert_test "POST /typecheck '2 + 2' result non-empty" "non-empty" "$tc_nonempty"
+
+    # /typecheck: an ill-typed expression must not silently succeed
+    # with an empty result.
+    bad_resp=$(curl -s --max-time 60 \
+        -X POST "http://127.0.0.1:${HTTP_PORT}/typecheck" \
+        -H "Content-Type: application/json" \
+        -d '{"expr": "import root-py; 2 + True"}')
+    bad_status=$(json_field "$bad_resp" "status")
+    assert_test "POST /typecheck ill-typed status=error" "error" "$bad_status"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 1e: Structured JSON args (issue 5 regression guard)
 #
 # The hand-rolled args parser counted brackets without respecting

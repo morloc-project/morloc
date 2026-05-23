@@ -1,0 +1,7 @@
+module main (f)
+
+-- Parametric identity: V3 a = V3 a. Same vacuousness as the
+-- unparameterized form; the parameter does not introduce structure.
+type V3 a = V3 a
+
+f :: V3 Int -> V3 Int

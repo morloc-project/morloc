@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -53,13 +52,27 @@ pairEval cscope gscope =
       case generalTransformType bnd (\_ _ -> return) resolveFail gscope t of
         (Right t') ->
           if t' /= t
-            -- if general resolution succeeds, continue evaluation with the concrete scope
-            then f bnd t'
+            -- If general resolution succeeds, continue evaluation with
+            -- the concrete scope. Add any just-expanded alias name to
+            -- bnd before recursing: the gscope walk's local
+            -- self-recursion guard preserves back-references in the
+            -- body as-is, and the subsequent cscope walk needs to
+            -- leave them alone too. Without this, a recursive type
+            -- alias like @type Pair a = (a, ?(Pair a))@ loops between
+            -- gscope (which expands and protects via bnd) and cscope
+            -- (which has no Pair entry, falls back to resolveGen,
+            -- which re-expands).
+            then f (bumpBnd t bnd) t'
             -- if it fails, return to the concrete scope to handle failure without
             -- general resolution option
             else generalTransformType Set.empty id resolveFail cscope t
         -- if no resolution is possible, propagate the error
         e -> e
+
+    bumpBnd :: TypeU -> Set.Set TVar -> Set.Set TVar
+    bumpBnd (AppU (VarU v) _) bnd = Set.insert v bnd
+    bumpBnd (VarU v) bnd = Set.insert v bnd
+    bumpBnd _ bnd = bnd
 
 evaluateStep :: Scope -> TypeU -> Maybe TypeU
 evaluateStep scope t0 =
@@ -78,32 +91,53 @@ reduceType scope t0 =
 -- constructor is not an alias (e.g., FunU), reduceType returns Nothing.
 -- This function descends into compound types and reduces each leaf alias
 -- one step via reduceType. Returns Nothing if no leaf changed.
+--
+-- A bound set tracks NamU record names we are currently inside. When
+-- 'go' encounters a @VarU n@ with @n@ in the bound set, it leaves the
+-- variable alone instead of letting 'reduceType' re-expand it. This is
+-- the same termination trick that protects 'generalTransformType' on
+-- recursive records; without it, repeated outer calls (e.g. from
+-- Realize.handleMany) keep peeling another level off the recursion
+-- and the compiler loops forever.
 reduceTypeLeaves :: Scope -> TypeU -> Maybe TypeU
 reduceTypeLeaves scope t0 =
-  let (t1, changed) = go t0
+  let (t1, changed) = go Set.empty t0
   in if changed then Just t1 else Nothing
   where
-    go t = case reduceType scope t of
+    go :: Set.Set TVar -> TypeU -> (TypeU, Bool)
+    go bnd t@(VarU v)
+      | Set.member v bnd = (t, False)
+    go bnd t@(AppU (VarU v) _)
+      | Set.member v bnd = descend bnd t
+    go bnd t = case reduceType scope t of
       Just t' -> (t', True)
-      Nothing -> descend t
+      Nothing -> descend bnd t
 
-    descend (FunU ts t) =
-      let (ts', cs1) = unzip (map go ts)
-          (t', c2) = go t
+    descend bnd (FunU ts t) =
+      let (ts', cs1) = unzip (map (go bnd) ts)
+          (t', c2) = go bnd t
       in (FunU ts' t', or (c2 : cs1))
-    descend (AppU f ts) =
-      let (f', c1) = go f
-          (ts', cs) = unzip (map go ts)
-      in (AppU f' ts', or (c1 : cs))
-    descend (NamU o n ps rs) =
-      let (ps', cs1) = unzip (map go ps)
-          (vs', cs2) = unzip (map (go . snd) rs)
+    -- Do NOT recurse into the head of an AppU. A partial application
+    -- (the bare head with no args) would otherwise be passed to
+    -- 'reduceType', which expands a parameterized alias by substituting
+    -- its (now-absent) arguments. For a recursive alias like @List@
+    -- whose body is @AppU (VarU List) [a]@, the result is a strictly
+    -- larger AppU containing another bare @VarU List@, and the outer
+    -- driver (Realize.handleMany) recurses on the new structure -- the
+    -- compiler loops forever on guarded recursive records.
+    descend bnd (AppU f ts) =
+      let (ts', cs) = unzip (map (go bnd) ts)
+      in (AppU f ts', or cs)
+    descend bnd (NamU o n ps rs) =
+      let bnd' = Set.insert n bnd
+          (ps', cs1) = unzip (map (go bnd') ps)
+          (vs', cs2) = unzip (map (go bnd' . snd) rs)
       in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
-    descend (EffectU effs t) =
-      let (t', c) = go t in (EffectU effs t', c)
-    descend (OptionalU t) =
-      let (t', c) = go t in (OptionalU t', c)
-    descend t = (t, False)
+    descend bnd (EffectU effs t) =
+      let (t', c) = go bnd t in (EffectU effs t', c)
+    descend bnd (OptionalU t) =
+      let (t', c) = go bnd t in (OptionalU t', c)
+    descend _ t = (t, False)
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
 transformType :: Scope -> TypeU -> Either MorlocError TypeU
@@ -120,7 +154,7 @@ resolveIgnore ::
   Either MorlocError TypeU
 resolveIgnore f bnd (AppU (VarU v) ts) = AppU (VarU v) <$> mapM (f bnd) ts
 resolveIgnore _ _ t@(VarU _) = return t
-resolveIgnore _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
+resolveIgnore _ _ _ = MM.throwCompilerBug "resolveIgnore reached an unexpected branch"
 
 resolveFail ::
   (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
@@ -135,7 +169,7 @@ resolveFail _ _ (VarU v) =
   MM.throwSystemError $
     "Could not resolve type for variable" <+> squotes (pretty v)
       <> ". You may be missing a language-specific type definition."
-resolveFail _ _ _ = MM.throwSystemError "Compiler bug (__FILE__:__LINE__): Reached unexpected branch"
+resolveFail _ _ _ = MM.throwCompilerBug "resolveFail reached an unexpected branch"
 
 generalTransformType ::
   Set.Set TVar ->
@@ -169,8 +203,19 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         (Just [(_, NamU o'' n'' _ _, _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
         _ -> return (n, o)
-      ts' <- mapM (recurse bnd . snd) rs
-      ps' <- mapM (recurse bnd) ps
+      -- Bind BOTH the original and the substituted name inside the
+      -- record body so a recursive field referencing either form is
+      -- left alone. A field like @VarU n@ (original) or @VarU n'@
+      -- (concrete alias) would otherwise be looked up in scope and
+      -- re-expanded into the same NamU forever. Add both: when @n@ and
+      -- @n'@ differ (e.g. @record Tree where children :: [Tree]@ with a
+      -- concrete @record Py => Tree = "dict"@ mapping), the children
+      -- field still mentions the original @Tree@ name even though the
+      -- outer NamU is now named @dict@. See
+      -- plans/in-morloc-recursive-fields-* for context.
+      let bnd' = Set.insert n' (Set.insert n bnd)
+      ts' <- mapM (recurse bnd' . snd) rs
+      ps' <- mapM (recurse bnd') ps
       return $ NamU o' n' ps' (zip (map fst rs) ts')
     f bnd t0@(AppU (VarU v) ts)
       -- Handle generic case:
@@ -191,10 +236,22 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
             (Just ts') -> do
               mergedAliases <- foldlM (mergeAliases ts) Nothing (map Just ts') |>> fmap (renameTypedefs bnd)
               case mergedAliases of
-                (Just (vs, newType, _, isTerminal)) -> case isTerminal of
-                  True -> terminate bnd $ foldr parsub newType (zip vs ts)
-                  -- substitute the head term and re-evaluate
-                  False -> recurse bnd $ foldr parsub newType (zip vs ts)
+                -- @v@ is added to bnd only when the substituted body is
+                -- a record (NamU): records are the one alias shape that
+                -- can be self-recursive via fields, and the bnd guard
+                -- short-circuits those self-references during the
+                -- walk. Non-record aliases (e.g. @type List a =
+                -- "vector<$1>" a@) must NOT add @v@ to bnd, otherwise a
+                -- nested use of the same alias in an argument position
+                -- (@List (List Real)@) hits the bnd guard at the inner
+                -- level and is left unevaluated, leaking the morloc
+                -- general name into generated code.
+                (Just (vs, newType, _, isTerminal)) ->
+                  let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
+                  in case isTerminal of
+                       True -> terminate bnd' $ foldr parsub newType (zip vs ts)
+                       -- substitute the head term and re-evaluate
+                       False -> recurse bnd' $ foldr parsub newType (zip vs ts)
                 Nothing ->
                   MM.throwSystemError $
                     "No matching alias found for" <+> pretty t0
@@ -215,10 +272,25 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
             -- new parameters may be added on the right that are not on the left
             mergedAliases <- foldlM (mergeAliases []) Nothing (map Just ts1)
             case mergedAliases of
+              -- Add the looked-up key @v@ to bnd so a recursive
+              -- back-reference inside the substituted body (e.g. a
+              -- @record LL where tail :: ?LL@ whose concrete alias
+              -- @record Py => LL = "dict"@ substitutes name but
+              -- preserves the body) does not loop. Without this, the
+              -- inner @VarU v@ would look up @v@ again and recurse
+              -- forever. The NamU branch already adds both original
+              -- and substituted record names; this covers the bare
+              -- @VarU v@ entry point.
+              -- Same rule as the AppU branch: bnd extension is for
+              -- self-recursive aliases only. A plain non-recursive
+              -- alias like @type Foo = Bar@ neither needs nor wants
+              -- @Foo@ in bnd. See `isSelfRecursive` for the structural
+              -- check.
               (Just (_, t2, _, isTerminal)) ->
-                if isTerminal
-                  then terminate bnd t2
-                  else recurse bnd t2
+                let bnd' = if isSelfRecursive v t2 then Set.insert v bnd else bnd
+                in if isTerminal
+                     then terminate bnd' t2
+                     else recurse bnd' t2
               Nothing ->
                 MM.throwSystemError $
                   "No matching alias found for" <+> pretty t0
@@ -256,7 +328,15 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (FunU ts t) = FunU <$> mapM (recurse bnd) ts <*> recurse bnd t
     terminate bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
     terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
-    terminate bnd (NamU o v ts rs) = NamU o v <$> mapM (recurse bnd) ts <*> mapM (secondM (recurse bnd)) rs
+    terminate bnd (NamU o v ts rs) =
+      -- Same bnd-extension as in @f@ above. We only have the local name
+      -- @v@ here (no scope lookup), so we just add that one; the @f@
+      -- path is the more general entry point that handles concrete
+      -- aliases. @terminate@ is reached only after a full evaluation,
+      -- by which point the recursive references inside @rs@ already
+      -- reference whichever name @v@ holds.
+      let bnd' = Set.insert v bnd
+      in NamU o v <$> mapM (recurse bnd') ts <*> mapM (secondM (recurse bnd')) rs
     terminate _ (VarU v) = return (VarU v)
     terminate _ t@(NatVarU _) = return t
     terminate bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
@@ -296,6 +376,35 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
            in (v : vs', t', d', isTerminal')
     renameTypedefs bnd (Right _ : vs, t, d, isTerminal) =
       renameTypedefs bnd (vs, t, d, isTerminal)
+
+    -- True iff the substituted body contains a back-reference to the
+    -- alias's own name (e.g. @record LL where tail :: ?LL@'s body
+    -- mentions @LL@; @type Pair a = (a, ?(Pair a))@'s body mentions
+    -- @Pair@). Only self-recursive aliases need @v@ added to bnd
+    -- during the walk -- a non-recursive alias like @type List a =
+    -- "vector<$1>" a@ has no self-reference, and adding @v@ would
+    -- spuriously block a nested use such as @List (List Real)@.
+    --
+    -- The walk is structural and bounded by the body size, so the
+    -- check adds O(body) per substitution. Recursive types' bodies
+    -- are typically small (the recursion is at use sites, not in the
+    -- definition), so this is cheap in practice.
+    isSelfRecursive :: TVar -> TypeU -> Bool
+    isSelfRecursive v = go
+      where
+        go (VarU v')           = v == v'
+        go (AppU h ts)         = go h || any go ts
+        go (NamU _ _ ps rs)    = any go ps || any (go . snd) rs
+        go (FunU ts t)         = any go ts || go t
+        go (ForallU _ t)       = go t
+        go (EffectU _ t)       = go t
+        go (OptionalU t)       = go t
+        go (LabeledU _ t)      = go t
+        go (OpU _ args)        = any go args
+        go (LitU (LRec fs))    = any (go . snd) fs
+        go (LitU (LList es))   = any go es
+        go (LitU (LSet es))    = any go es
+        go _                   = False
 
     -- When a type alias is imported from two places, this function reconciles them, if possible
     mergeAliases ::
@@ -468,29 +577,37 @@ expandHeadOnly _ _ = Nothing
 -- instance method types reduce too.
 expandLeavesOnce :: Scope -> TypeU -> Maybe TypeU
 expandLeavesOnce scope t0 =
-  let (t1, changed) = go t0
+  let (t1, changed) = go Set.empty t0
   in if changed then Just t1 else Nothing
   where
-    go t = case expandHeadOnly scope t of
+    -- Same shape as 'reduceTypeLeaves.go': bound-set of NamU names cuts
+    -- recursive expansion, and AppU heads are NOT recursed into so a
+    -- parameterized alias is never expanded as a bare partial app.
+    go :: Set.Set TVar -> TypeU -> (TypeU, Bool)
+    go bnd t@(VarU v)
+      | Set.member v bnd = (t, False)
+    go bnd t@(AppU (VarU v) _)
+      | Set.member v bnd = descend bnd t
+    go bnd t = case expandHeadOnly scope t of
       Just t' -> (t', True)
-      Nothing -> descend t
+      Nothing -> descend bnd t
 
-    descend (ForallU v t) =
-      let (t', c) = go t in (ForallU v t', c)
-    descend (FunU ts t) =
-      let (ts', cs1) = unzip (map go ts)
-          (t', c2) = go t
+    descend bnd (ForallU v t) =
+      let (t', c) = go bnd t in (ForallU v t', c)
+    descend bnd (FunU ts t) =
+      let (ts', cs1) = unzip (map (go bnd) ts)
+          (t', c2) = go bnd t
       in (FunU ts' t', or (c2 : cs1))
-    descend (AppU f ts) =
-      let (f', c1) = go f
-          (ts', cs) = unzip (map go ts)
-      in (AppU f' ts', or (c1 : cs))
-    descend (NamU o n ps rs) =
-      let (ps', cs1) = unzip (map go ps)
-          (vs', cs2) = unzip (map (go . snd) rs)
+    descend bnd (AppU f ts) =
+      let (ts', cs) = unzip (map (go bnd) ts)
+      in (AppU f ts', or cs)
+    descend bnd (NamU o n ps rs) =
+      let bnd' = Set.insert n bnd
+          (ps', cs1) = unzip (map (go bnd') ps)
+          (vs', cs2) = unzip (map (go bnd' . snd) rs)
       in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
-    descend (EffectU effs t) =
-      let (t', c) = go t in (EffectU effs t', c)
-    descend (OptionalU t) =
-      let (t', c) = go t in (OptionalU t', c)
-    descend t = (t, False)
+    descend bnd (EffectU effs t) =
+      let (t', c) = go bnd t in (EffectU effs t', c)
+    descend bnd (OptionalU t) =
+      let (t', c) = go bnd t in (OptionalU t', c)
+    descend _ t = (t, False)

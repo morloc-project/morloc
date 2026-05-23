@@ -45,12 +45,10 @@ import qualified Morloc.BaseTypes as BT
 -- - 2 from guard_clauses ('?' could start guard or be part of next decl)
 -- - 1 from guard_expr ('?' in expr could be nested guard_expr or next guard_clause)
 -- - 4 from optional type syntax ('?' could start optional type or guard)
--- Note: force_expr (!) re-added for inline effect forcing in do-blocks
--- - 2 from force_expr ('!' could start force or be part of another expr)
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 92
+%expect 90
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -95,6 +93,8 @@ import qualified Morloc.BaseTypes as BT
   'object'   { Located _ TokObject _ }
   'class'    { Located _ TokClass _ }
   'instance' { Located _ TokInstance _ }
+  'effect'   { Located _ TokEffect _ }
+  'escapable' { Located _ TokEscapable _ }
   'infixl'   { Located _ TokInfixl _ }
   'infixr'   { Located _ TokInfixr _ }
   'infix'    { Located _ TokInfix _ }
@@ -169,6 +169,7 @@ top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
+  | effect_decl       { [$1] }
   | instance_decl     { $1 }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
@@ -255,6 +256,7 @@ import_module_name :: { Text }
 
 opt_import_list :: { Maybe [AliasedSymbol] }
   : {- empty -}                            { Nothing }
+  | '(' ')'                                { Just [] }
   | '(' import_items ')'                   { Just $2 }
 
 import_items :: { [AliasedSymbol] }
@@ -303,10 +305,33 @@ nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
   | 'object'   { ($1, NamObject) }
 
-nam_constructor :: { (Text, Bool) }
-  : STRING                    { (getString $1, True) }
-  | UPPER                     { (getName $1, False) }
-  | LOWER                     { (getName $1, False) }
+-- Constructor for a named-type definition (record/object). For the
+-- STRING form (a concrete language-specific type), optional positional
+-- args may follow (e.g. `"container_t<$1>" a`), parallel to the type-
+-- alias `concrete_rhs` syntax. The args are restricted to a non-`{`
+-- subset so they don't clash with the `{...}` field-list of
+-- `opt_nam_entries`.
+nam_constructor :: { (Text, Bool, [TypeU]) }
+  : STRING nam_constructor_args   { (getString $1, True, $2) }
+  | UPPER                         { (getName $1, False, []) }
+  | LOWER                         { (getName $1, False, []) }
+
+nam_constructor_args :: { [TypeU] }
+  : {- empty -}                                  { [] }
+  | nam_constructor_args nam_constructor_arg     { $1 ++ [$2] }
+
+-- A restricted atom-type for STRING-constructor positional args. The
+-- `{...}` cases of `atom_type` are excluded to avoid a shift/reduce
+-- conflict with `opt_nam_entries`.
+nam_constructor_arg :: { TypeU }
+  : '(' type ')'                  { $2 }
+  | '(' type ',' type_list1 ')'   { BT.tupleU ($2 : $4) }
+  | '[' type ']'                  { BT.listU $2 }
+  | '?' nam_constructor_arg       { OptionalU $2 }
+  | UPPER                         { VarU (TV (getName $1)) }
+  | LOWER                         { VarU (TV (getName $1)) }
+  | STRING                        { StrLitU (getString $1) }
+  | INTEGER                       { NatLitU (getInt $1) }
 
 opt_nam_entries :: { [(Key, TypeU)] }
   : {- empty -}              { [] }
@@ -354,8 +379,7 @@ non_string_type :: { TypeU }
   | non_string_non_fun            { $1 }
 
 non_string_non_fun :: { TypeU }
-  : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
-  | '<' effect_labels '>' non_string_non_fun  { EffectU (EffectSet (Set.fromList $2)) $4 }
+  : '<' effect_row '>' non_string_non_fun  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
   | non_string_add            { $1 }
 
 non_string_add :: { TypeU }
@@ -392,6 +416,16 @@ typeclass_decl :: { Loc CstExpr }
       { at $1 (CClsE $2 $5) }
   | 'class' class_head
       { at $1 (CClsE $2 []) }
+
+-- Effect declarations. An effect is a first-class, declared,
+-- importable/exportable entity (like a type or class name). Default is
+-- inescapable (safe); `escapable` opts a single effect into being
+-- discharge-able by a sourced handler.
+effect_decl :: { Loc CstExpr }
+  : 'effect' UPPER              { at $1 (CEffE (getName $2) False) }
+  | 'escapable' 'effect' UPPER  { at $1 (CEffE (getName $3) True) }
+  | 'effect' LOWER              {% effectNameError $2 }
+  | 'escapable' 'effect' LOWER  {% effectNameError $3 }
 
 class_head :: { CstClassHead }
   : app_type '=>' app_type
@@ -574,16 +608,12 @@ operand :: { Loc CstExpr }
   | '-' app_expr             { at $1 (CAppE (at $1 (CVarE (EV "negate"))) [$2]) }
 
 app_expr :: { Loc CstExpr }
-  : force_expr                     { $1 }
-  | force_expr atom_exprs1         { Loc ($1 <-> last $2) (CAppE $1 $2) }
-
-force_expr :: { Loc CstExpr }
-  : '!' atom_expr                  { Loc ($1 <-> $2) (CForceE $2) }
-  | atom_expr                      { $1 }
+  : atom_expr                      { $1 }
+  | atom_expr atom_exprs1          { Loc ($1 <-> last $2) (CAppE $1 $2) }
 
 atom_exprs1 :: { [Loc CstExpr] }
-  : force_expr                     { [$1] }
-  | atom_exprs1 force_expr         { $1 ++ [$2] }
+  : atom_expr                      { [$1] }
+  | atom_exprs1 atom_expr          { $1 ++ [$2] }
 
 atom_expr :: { Loc CstExpr }
   : paren_expr                { $1 }
@@ -722,8 +752,7 @@ fun_type :: { TypeU }
   : non_fun_type '->' type   { case $3 of { FunU args ret -> FunU ($1 : args) ret; t -> FunU [$1] t } }
 
 non_fun_type :: { TypeU }
-  : '<' LOWER '>'            { ExistU (TV (getName $2)) ([], Open) ([], Open) }
-  | '<' effect_labels '>' non_fun_type  { EffectU (EffectSet (Set.fromList $2)) $4 }
+  : '<' effect_row '>' non_fun_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
   | add_type                  { $1 }
 
 add_type :: { TypeU }
@@ -784,9 +813,16 @@ types1 :: { [TypeU] }
   : atom_type                  { [$1] }
   | types1 atom_type           { $1 ++ [$2] }
 
-effect_labels :: { [EffectLabel] }
-  : UPPER                       { [getName $1] }
-  | effect_labels ',' UPPER     { $1 ++ [getName $3] }
+-- An effect row: comma-separated UPPER labels plus at most one LOWER
+-- tail variable (validated by 'mkEffectRow'). `<…>` is effects-only;
+-- the bare `<a>` existential-hole syntax was removed.
+effect_row :: { [Either EffectLabel TVar] }
+  : effect_item                     { [$1] }
+  | effect_row ',' effect_item      { $1 ++ [$3] }
+
+effect_item :: { Either EffectLabel TVar }
+  : UPPER    { Left (getName $1) }
+  | LOWER    { Right (TV (getName $1)) }
 
 --------------------------------------------------------------------
 -- Constraints and signature types
@@ -803,8 +839,7 @@ sig_fun_args :: { [(Pos, TypeU)] }
   | pos_non_fun_type                     { [$1] }
 
 pos_non_fun_type :: { (Pos, TypeU) }
-  : '<' LOWER '>'     { (locPos $1, ExistU (TV (getName $2)) ([], Open) ([], Open)) }
-  | '<' effect_labels '>' pos_non_fun_type  { (locPos $1, EffectU (EffectSet (Set.fromList $2)) (snd $4)) }
+  : '<' effect_row '>' pos_non_fun_type  {% mkEffectRow $1 $2 >>= \es -> return (locPos $1, mkEffectU es (snd $4)) }
   | pos_add_type       { $1 }
 
 pos_add_type :: { (Pos, TypeU) }
@@ -1013,6 +1048,32 @@ checkFixityPrecedence tok =
             ("infix precedence must be in [0,9], got " ++ show n) [] srcLines))
         else return ()
 
+-- Build an effect-row 'EffectSet' from parsed items: any number of
+-- UPPER labels plus at most one LOWER tail variable. More than one
+-- effect variable in a row is a parse error (caret on the opening
+-- '<'). Empty / single-variable normalization is handled by
+-- 'mkEffectU' at the use site.
+mkEffectRow :: Located -> [Either EffectLabel TVar] -> P EffectSet
+mkEffectRow ltok items =
+  let labels = Set.fromList [l | Left l <- items]
+      vars = [v | Right v <- items]
+   in case vars of
+        [] -> return (EffectSet labels)
+        [v]
+          | Set.null labels -> return (EffectVar v)
+          | otherwise -> return (EffectUnion (EffectSet labels) (EffectVar v))
+        _ -> do
+          srcLines <- State.gets psSourceLines
+          State.lift
+            ( Left
+                ( ParseError
+                    (locPos ltok)
+                    "an effect row may contain at most one effect variable"
+                    []
+                    srcLines
+                )
+            )
+
 -- Reject duplicate field names in a record literal. Caret on the second
 -- occurrence's value position.
 checkRecordKeys :: [(Key, Loc CstExpr)] -> P ()
@@ -1052,6 +1113,21 @@ recLiteralColonColonError nameTok = do
   let msg = "type-level record literals use `=` to bind fields, not `::`\n"
          ++ "  try: {" ++ T.unpack (getName nameTok) ++ " = <type>, ...}\n"
          ++ "  `::` is for declarations (e.g. `x :: Int`, `record R where { x :: Int }`)"
+  State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
+
+-- Reject an effect declaration whose name is not an uppercase
+-- identifier. An effect name is lexed exactly like a type or class
+-- name: a single identifier token whose first character is uppercase
+-- (and which is not a reserved word). The caret falls on the bad name.
+effectNameError :: Located -> P a
+effectNameError nameTok = do
+  srcLines <- State.gets psSourceLines
+  let nm = getName nameTok
+      nmS = T.unpack nm
+      cap = T.unpack (T.toUpper (T.take 1 nm) <> T.drop 1 nm)
+      msg = "Illegal effect name '" ++ nmS ++ "'\n"
+         ++ "  The first character must be uppercase\n"
+         ++ "  try: `effect " ++ cap ++ "` (or `escapable effect " ++ cap ++ "`)"
   State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
 
 -- Same check for the positionless legacy form (`record T = MkT { ... }`).

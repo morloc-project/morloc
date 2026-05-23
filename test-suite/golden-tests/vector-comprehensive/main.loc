@@ -1,0 +1,538 @@
+-- vector-comprehensive: full-cycle and zero-copy tests for 1D Vectors.
+--
+-- This test is designed to expose bugs. Each block targets a class of
+-- failure mode that existing tests do not cover.
+--
+--   (1) Element-type coverage. Many widths (Int8..Int64, UInt8..UInt64,
+--       Float32) have never been round-tripped cross-language. Each
+--       width carries its own NPY_TYPE, std::vector<T>, and R typedef
+--       branch; any of them can silently fall back to a wrong dtype,
+--       lose sign, or be widened to a different on-wire packing.
+--
+--   (2) Element-position correctness. Sum-based assertions pass even
+--       if elements are shuffled. Powers-of-two probes (each position
+--       contributes a unique bit) reveal shuffles that sums hide.
+--
+--   (3) File IO cycle via @save / @load. The intrinsic-load tests only
+--       cover scalars and tuples. Vector with a Nat parameter has never
+--       been pushed through @save and back.
+--
+--   (4) Zero-copy semantics. Below the 64 KB inline threshold a Python
+--       consumer should see OWNDATA=True (memcpy from libc buffer);
+--       above it should see OWNDATA=False (numpy view over SHM). No
+--       existing test asserts on flags directly.
+--
+--   (5) Morloc-level ops on Vector. `type Vector n a = List a`, so
+--       `sum`, `length`, `reverse`, `sort`, `map` should work via the
+--       List instances; if alias-chain promotion breaks, this exposes
+--       which ops actually flow through.
+--
+--   (6) Edge cases that have historically broken: empty (size 0),
+--       single (size 1), and signed/unsigned extremes (-128 / 255).
+
+module main
+  ( cpRound, pcRound, prRound, rpRound, crRound, rcRound
+  , cpI8, pcI8, cpI16, pcI16, cpI32, pcI32, cpI64, pcI64
+  , cpU8, pcU8, cpU16, pcU16, cpU32, pcU32, cpU64, pcU64
+  , cpF32, pcF32, cpF64, pcF64
+  , cpI8Min, pcI8Min
+  , cpU8Max, pcU8Max
+  , cpPerm, pcPerm, prPerm, rpPerm, crPerm, rcPerm
+  , fileBin, fileJson, fileMsg
+  , fileSumBin, fileSumJson
+  , zcShmPyPy, zcInlinePyPy
+  , zcShmCpToPy, zcInlineCpToPy
+  , zcShmRToPy
+  , mlSum, mlLength, mlReverse, mlSort, mlMap
+  , emptyCross, singleCross
+  , underThr, overThr
+    -- (9) Literal inputs: morloc source literals + CLI literals
+  , litSrcRealAnnot, litSrcRealInfer, litSrcIntAnnot
+  , litCliReal, litCliInt
+  , litCliRealCpp, litCliIntCpp
+  , litCliRealR
+  , litCliEmpty, litCliSingle
+  )
+
+effect IO
+
+import root-cpp
+import root-py
+import root-r (Real, Int, Bool)
+import vector-cpp
+import vector-py
+import vector-r
+import maybe
+import maybe-cpp
+import maybe-py
+import maybe-r
+
+-- =========================================================================
+-- Sourced helpers
+-- =========================================================================
+
+source Cpp from "src.hpp"
+  ( "cppMakeReal10"
+  , "cppSumReal10"
+  , "cppMakeI8"
+  , "cppSumI8"
+  , "cppMakeI16"
+  , "cppSumI16"
+  , "cppMakeI32"
+  , "cppSumI32"
+  , "cppMakeI64"
+  , "cppSumI64"
+  , "cppMakeU8"
+  , "cppSumU8"
+  , "cppMakeU16"
+  , "cppSumU16"
+  , "cppMakeU32"
+  , "cppSumU32"
+  , "cppMakeU64"
+  , "cppSumU64"
+  , "cppMakeF32"
+  , "cppSumF32"
+  , "cppMakeF64"
+  , "cppSumF64"
+  , "cppMakeI8Min"
+  , "cppSumI8Min"
+  , "cppMakeU8Max"
+  , "cppSumU8Max"
+  , "cppMakePerm"
+  , "cppAtIdx3"
+  , "cppMakeBig"
+  , "cppMakeUnder"
+  , "cppMakeOver"
+  , "cppSumBig"
+  , "cppEmpty"
+  , "cppSingle"
+  , "cppSumEmpty"
+  , "cppSumSingle"
+  , "cppSumVecPoly"
+  , "cppSumI32Poly"
+  )
+
+source Py from "src.py"
+  ( "pyMakeReal10"
+  , "pySumReal10"
+  , "pyMakeI8"
+  , "pySumI8"
+  , "pyMakeI16"
+  , "pySumI16"
+  , "pyMakeI32"
+  , "pySumI32"
+  , "pyMakeI64"
+  , "pySumI64"
+  , "pyMakeU8"
+  , "pySumU8"
+  , "pyMakeU16"
+  , "pySumU16"
+  , "pyMakeU32"
+  , "pySumU32"
+  , "pyMakeU64"
+  , "pySumU64"
+  , "pyMakeF32"
+  , "pySumF32"
+  , "pyMakeF64"
+  , "pySumF64"
+  , "pyMakeI8Min"
+  , "pySumI8Min"
+  , "pyMakeU8Max"
+  , "pySumU8Max"
+  , "pyMakePerm"
+  , "pyAtIdx3"
+  , "pyMakeBig"
+  , "pyMakeUnder"
+  , "pyMakeOver"
+  , "pySumBig"
+  , "pyEmpty"
+  , "pySingle"
+  , "pySumEmpty"
+  , "pySumSingle"
+  , "pyOwnDataLarge"
+  , "pyOwnDataSmall"
+  , "pyOwnDataAny"
+  , "pySumVecPoly"
+  , "pySumI32Poly"
+  )
+
+source R from "src.R"
+  ( "rMakeReal10"
+  , "rSumReal10"
+  , "rMakePerm"
+  , "rAtIdx3"
+  , "rMakeBig"
+  , "rSumBig"
+  , "rEmpty"
+  , "rSingle"
+  , "rSumEmpty"
+  , "rSumSingle"
+  , "rSumVecPoly"
+  )
+
+-- =========================================================================
+-- Type signatures
+-- =========================================================================
+
+cppMakeReal10 :: Vector 10 Real
+cppSumReal10  :: Vector 10 Real -> Real
+pyMakeReal10  :: Vector 10 Real
+pySumReal10   :: Vector 10 Real -> Real
+rMakeReal10   :: Vector 10 Real
+rSumReal10    :: Vector 10 Real -> Real
+
+cppMakeI8  :: Vector 4 Int8
+cppSumI8   :: Vector 4 Int8 -> Int
+pyMakeI8   :: Vector 4 Int8
+pySumI8    :: Vector 4 Int8 -> Int
+
+cppMakeI16 :: Vector 4 Int16
+cppSumI16  :: Vector 4 Int16 -> Int
+pyMakeI16  :: Vector 4 Int16
+pySumI16   :: Vector 4 Int16 -> Int
+
+cppMakeI32 :: Vector 4 Int32
+cppSumI32  :: Vector 4 Int32 -> Int
+pyMakeI32  :: Vector 4 Int32
+pySumI32   :: Vector 4 Int32 -> Int
+
+cppMakeI64 :: Vector 4 Int64
+cppSumI64  :: Vector 4 Int64 -> Int
+pyMakeI64  :: Vector 4 Int64
+pySumI64   :: Vector 4 Int64 -> Int
+
+cppMakeU8  :: Vector 4 UInt8
+cppSumU8   :: Vector 4 UInt8 -> Int
+pyMakeU8   :: Vector 4 UInt8
+pySumU8    :: Vector 4 UInt8 -> Int
+
+cppMakeU16 :: Vector 4 UInt16
+cppSumU16  :: Vector 4 UInt16 -> Int
+pyMakeU16  :: Vector 4 UInt16
+pySumU16   :: Vector 4 UInt16 -> Int
+
+cppMakeU32 :: Vector 4 UInt32
+cppSumU32  :: Vector 4 UInt32 -> UInt64
+pyMakeU32  :: Vector 4 UInt32
+pySumU32   :: Vector 4 UInt32 -> UInt64
+
+cppMakeU64 :: Vector 4 UInt64
+cppSumU64  :: Vector 4 UInt64 -> UInt64
+pyMakeU64  :: Vector 4 UInt64
+pySumU64   :: Vector 4 UInt64 -> UInt64
+
+cppMakeF32 :: Vector 4 Float32
+cppSumF32  :: Vector 4 Float32 -> Real
+pyMakeF32  :: Vector 4 Float32
+pySumF32   :: Vector 4 Float32 -> Real
+
+cppMakeF64 :: Vector 4 Float64
+cppSumF64  :: Vector 4 Float64 -> Real
+pyMakeF64  :: Vector 4 Float64
+pySumF64   :: Vector 4 Float64 -> Real
+
+cppMakeI8Min :: Vector 1 Int8
+cppSumI8Min  :: Vector 1 Int8 -> Int
+pyMakeI8Min  :: Vector 1 Int8
+pySumI8Min   :: Vector 1 Int8 -> Int
+
+cppMakeU8Max :: Vector 1 UInt8
+cppSumU8Max  :: Vector 1 UInt8 -> Int
+pyMakeU8Max  :: Vector 1 UInt8
+pySumU8Max   :: Vector 1 UInt8 -> Int
+
+cppMakePerm :: Vector 8 Int32
+cppAtIdx3   :: Vector 8 Int32 -> Int
+pyMakePerm  :: Vector 8 Int32
+pyAtIdx3    :: Vector 8 Int32 -> Int
+rMakePerm   :: Vector 8 Int32
+rAtIdx3     :: Vector 8 Int32 -> Int
+
+cppMakeBig   :: Vector 50000 Real
+cppMakeUnder :: Vector 8000 Real
+cppMakeOver  :: Vector 8200 Real
+cppSumBig    :: Vector 50000 Real -> Real
+pyMakeBig    :: Vector 50000 Real
+pyMakeUnder  :: Vector 8000 Real
+pyMakeOver   :: Vector 8200 Real
+pySumBig     :: Vector 50000 Real -> Real
+rMakeBig     :: Vector 50000 Real
+rSumBig      :: Vector 50000 Real -> Real
+
+cppEmpty     :: Vector 0 Real
+cppSingle    :: Vector 1 Real
+cppSumEmpty  :: Vector 0 Real -> Real
+cppSumSingle :: Vector 1 Real -> Real
+pyEmpty      :: Vector 0 Real
+pySingle     :: Vector 1 Real
+pySumEmpty   :: Vector 0 Real -> Real
+pySumSingle  :: Vector 1 Real -> Real
+rEmpty       :: Vector 0 Real
+rSingle      :: Vector 1 Real
+rSumEmpty    :: Vector 0 Real -> Real
+rSumSingle   :: Vector 1 Real -> Real
+
+-- All three probes wrap the same `_report` helper in src.py; the
+-- different names are only here so the test categories (5) and (8)
+-- read clearly. All take a Vector of any size.
+pyOwnDataLarge :: Vector n Real -> Str
+pyOwnDataSmall :: Vector n Real -> Str
+pyOwnDataAny   :: Vector n Real -> Str
+
+-- Polymorphic-in-size sum helpers. Required for literal-input tests
+-- because the size of a literal vector is determined by the input
+-- shape, not by a fixed signature.
+pySumVecPoly  :: Vector n Real -> Real
+cppSumVecPoly :: Vector n Real -> Real
+rSumVecPoly   :: Vector n Real -> Real
+pySumI32Poly  :: Vector n Int32 -> Int
+cppSumI32Poly :: Vector n Int32 -> Int
+
+-- =========================================================================
+-- (1) Round-trip Real across all six pairs (expected sum = 55)
+-- =========================================================================
+cpRound :: Real
+cpRound = pySumReal10 cppMakeReal10
+pcRound :: Real
+pcRound = cppSumReal10 pyMakeReal10
+prRound :: Real
+prRound = rSumReal10 pyMakeReal10
+rpRound :: Real
+rpRound = pySumReal10 rMakeReal10
+crRound :: Real
+crRound = rSumReal10 cppMakeReal10
+rcRound :: Real
+rcRound = cppSumReal10 rMakeReal10
+
+-- =========================================================================
+-- (2) Element types: each pair must sum to its own distinct value
+--   I8:  -128 + -1 + 0 + 127 = -2
+--   I16: -32768 + -1 + 0 + 32767 = -2
+--   I32: -2147483648 + -1 + 0 + 2147483647 = -2
+--   I64: -9223372036854775807 + -1 + 0 + 9223372036854775806 = -2  (avoid INT64_MIN)
+--   U8:  0 + 1 + 127 + 255 = 383
+--   U16: 0 + 1 + 32767 + 65535 = 98303
+--   U32: 0 + 1 + 65535 + 4294967295 = 4295032831
+--   U64: 0 + 1 + 65535 + 4294967295 = 4295032831  (stays Int-safe)
+--   F32: 0.5 + 1.5 + 2.5 + 3.5 = 8.0
+--   F64: same as F32 input -> 8.0
+-- =========================================================================
+cpI8 :: Int
+cpI8 = pySumI8 cppMakeI8
+pcI8 :: Int
+pcI8 = cppSumI8 pyMakeI8
+cpI16 :: Int
+cpI16 = pySumI16 cppMakeI16
+pcI16 :: Int
+pcI16 = cppSumI16 pyMakeI16
+cpI32 :: Int
+cpI32 = pySumI32 cppMakeI32
+pcI32 :: Int
+pcI32 = cppSumI32 pyMakeI32
+cpI64 :: Int
+cpI64 = pySumI64 cppMakeI64
+pcI64 :: Int
+pcI64 = cppSumI64 pyMakeI64
+cpU8 :: Int
+cpU8 = pySumU8 cppMakeU8
+pcU8 :: Int
+pcU8 = cppSumU8 pyMakeU8
+cpU16 :: Int
+cpU16 = pySumU16 cppMakeU16
+pcU16 :: Int
+pcU16 = cppSumU16 pyMakeU16
+cpU32 :: UInt64
+cpU32 = pySumU32 cppMakeU32
+pcU32 :: UInt64
+pcU32 = cppSumU32 pyMakeU32
+cpU64 :: UInt64
+cpU64 = pySumU64 cppMakeU64
+pcU64 :: UInt64
+pcU64 = cppSumU64 pyMakeU64
+cpF32 :: Real
+cpF32 = pySumF32 cppMakeF32
+pcF32 :: Real
+pcF32 = cppSumF32 pyMakeF32
+cpF64 :: Real
+cpF64 = pySumF64 cppMakeF64
+pcF64 :: Real
+pcF64 = cppSumF64 pyMakeF64
+
+cpI8Min :: Int
+cpI8Min = pySumI8Min cppMakeI8Min
+pcI8Min :: Int
+pcI8Min = cppSumI8Min pyMakeI8Min
+cpU8Max :: Int
+cpU8Max = pySumU8Max cppMakeU8Max
+pcU8Max :: Int
+pcU8Max = cppSumU8Max pyMakeU8Max
+
+-- =========================================================================
+-- (3) Permutation probe: [1,2,4,8,16,32,64,128]. Element at index 3 is 8.
+-- A wire-format shuffle would give a different (but still power-of-two) value.
+-- =========================================================================
+cpPerm :: Int
+cpPerm = pyAtIdx3 cppMakePerm
+pcPerm :: Int
+pcPerm = cppAtIdx3 pyMakePerm
+prPerm :: Int
+prPerm = rAtIdx3 pyMakePerm
+rpPerm :: Int
+rpPerm = pyAtIdx3 rMakePerm
+crPerm :: Int
+crPerm = rAtIdx3 cppMakePerm
+rcPerm :: Int
+rcPerm = cppAtIdx3 rMakePerm
+
+-- =========================================================================
+-- (4) File IO: @save / @savej / @savem of a Vector, then @load.
+-- Vector with a Nat parameter has never gone through @save in the test
+-- suite. Each format takes a different code path inside voidstar.
+-- =========================================================================
+fileBin :: Str -> <IO> ?(Vector 10 Real)
+fileBin path = do
+  @save cppMakeReal10 path
+  @load path
+
+fileJson :: Str -> <IO> ?(Vector 10 Real)
+fileJson path = do
+  @savej cppMakeReal10 path
+  @load path
+
+fileMsg :: Str -> <IO> ?(Vector 10 Real)
+fileMsg path = do
+  @savem cppMakeReal10 path
+  @load path
+
+-- File IO + computation: after the round-trip, sum the loaded vector
+-- through the Python pool. Verifies that @load returns a value usable
+-- as a Vector (not just a structurally-equal list).
+fileSumBin :: Str -> <IO> ?Real
+fileSumBin path = do
+  @save cppMakeReal10 path
+  v <- @load path
+  mapMaybe pySumReal10 v
+
+fileSumJson :: Str -> <IO> ?Real
+fileSumJson path = do
+  @savej cppMakeReal10 path
+  v <- @load path
+  mapMaybe pySumReal10 v
+
+-- =========================================================================
+-- (5) Zero-copy direct assertions. The Python helper reports the numpy
+-- OWNDATA flag and the array size on a single line. Expected values:
+--   zcShmPyPy:      OWNDATA=False (Py->Py, size > 64KB, SHM-backed view)
+--   zcInlinePyPy:   OWNDATA=True  (Py->Py, size < 64KB, memcpy from inline)
+--   zcShmCpToPy:    OWNDATA=False (Cpp->Py, SHM-backed view)
+--   zcInlineCpToPy: OWNDATA=True  (Cpp->Py, memcpy from inline)
+--   zcShmRToPy:     OWNDATA=False (R->Py, SHM-backed view)
+-- A regression that silently switches the large path to memcpy would
+-- flip the False to True.
+-- =========================================================================
+zcShmPyPy :: Str
+zcShmPyPy = pyOwnDataLarge pyMakeBig
+zcInlinePyPy :: Str
+zcInlinePyPy = pyOwnDataSmall pyMakeReal10
+zcShmCpToPy :: Str
+zcShmCpToPy = pyOwnDataLarge cppMakeBig
+zcInlineCpToPy :: Str
+zcInlineCpToPy = pyOwnDataSmall cppMakeReal10
+zcShmRToPy :: Str
+zcShmRToPy = pyOwnDataLarge rMakeBig
+
+-- =========================================================================
+-- (6) Morloc-level operations on Vector via the List alias.
+-- =========================================================================
+mlSum :: Real
+mlSum = sum cppMakeReal10
+
+mlLength :: Int
+mlLength = length cppMakeBig
+
+mlReverse :: Real
+mlReverse = pySumReal10 (reverse cppMakeReal10)
+
+mlSort :: Int
+mlSort = cppSumI32 (sort (reverse cppMakePerm))
+
+mlMap :: Real
+mlMap = pySumReal10 (map (\x -> x * 2.0) cppMakeReal10)
+
+-- =========================================================================
+-- (7) Edge cases: empty (size 0) and single-element (size 1).
+-- =========================================================================
+emptyCross :: Real
+emptyCross = pySumEmpty cppEmpty
+
+singleCross :: Real
+singleCross = pySumSingle cppSingle
+
+-- =========================================================================
+-- (8) Threshold-straddle: under 64 KB stays inline, over crosses to SHM.
+-- =========================================================================
+underThr :: Str
+underThr = pyOwnDataAny cppMakeUnder
+overThr :: Str
+overThr = pyOwnDataAny cppMakeOver
+
+-- =========================================================================
+-- (9) Literal inputs.
+--
+-- Two literal sources, both expected to work:
+--   (a) morloc source literals: the value is written in the .loc file,
+--       with the size either annotated explicitly (`Vector 5 Real`) or
+--       inferred from the literal's length (`Vector n Real`).
+--   (b) CLI literals: the nexus accepts JSON on the command line and
+--       parses it according to the function's parameter type. For
+--       `Vector n Real`, an argv like '[1.5,2.5,3.5,4.5,5.5]' must
+--       infer n=5 from the array length.
+--
+-- These are the two ergonomic entry points users would actually reach
+-- for; without them, every numeric demo requires a sourced make-helper.
+-- =========================================================================
+
+-- (9a) Source literal with explicit size annotation (5 elements, sum=15.0).
+litSrcRealAnnot :: Real
+litSrcRealAnnot = pySumVecPoly ([1.0, 2.0, 3.0, 4.0, 5.0] :: Vector 5 Real)
+
+-- (9b) Source literal with size variable (size inferred from literal).
+-- Same value, but the type annotation leaves n free and asks the
+-- typechecker to infer it from the literal's length. If shape
+-- inference is not wired up, this should fail to typecheck.
+litSrcRealInfer :: Real
+litSrcRealInfer = pySumVecPoly ([1.0, 2.0, 3.0, 4.0, 5.0] :: Vector n Real)
+
+-- (9c) Source literal of Int32 vector via Cpp summer.
+litSrcIntAnnot :: Int
+litSrcIntAnnot = cppSumI32Poly ([10, 20, 30, 40, 50] :: Vector 5 Int32)
+
+-- (9d-9h) CLI literals. The argv determines the vector contents AND
+-- its size. Invocations:
+--   ./nexus litCliReal '[1.5,2.5,3.5,4.5,5.5]'         -> 17.5
+--   ./nexus litCliInt  '[10,20,30,40,50]'              -> 150
+--   ./nexus litCliRealCpp '[1.5,2.5,3.5,4.5,5.5]'      -> 17.5
+--   ./nexus litCliIntCpp  '[10,20,30,40,50]'           -> 150
+--   ./nexus litCliRealR '[1.5,2.5,3.5,4.5,5.5]'        -> 17.5
+--   ./nexus litCliEmpty '[]'                           -> 0
+--   ./nexus litCliSingle '[42]'                        -> 42
+litCliReal :: Vector n Real -> Real
+litCliReal v = pySumVecPoly v
+
+litCliInt :: Vector n Int32 -> Int
+litCliInt v = pySumI32Poly v
+
+litCliRealCpp :: Vector n Real -> Real
+litCliRealCpp v = cppSumVecPoly v
+
+litCliIntCpp :: Vector n Int32 -> Int
+litCliIntCpp v = cppSumI32Poly v
+
+litCliRealR :: Vector n Real -> Real
+litCliRealR v = rSumVecPoly v
+
+litCliEmpty :: Vector n Real -> Real
+litCliEmpty v = pySumVecPoly v
+
+litCliSingle :: Vector n Real -> Real
+litCliSingle v = pySumVecPoly v

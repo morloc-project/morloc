@@ -1,0 +1,4 @@
+#!/bin/sh
+exec morloc-nexus "$0" "$@"
+### MANIFEST ###
+{"name":"foo","build":{"path":"/home/z/projects/morloc-core/morloc-workspace/compiler/morloc/test-suite/golden-tests/caret-position-typeerror","time":1778938682,"morloc_version":"0.85.0"},"pools":[{"lang":"py","exec":["python3","/home/z/projects/morloc-core/morloc-workspace/compiler/morloc/test-suite/golden-tests/caret-position-typeerror/pools/foo/pool.py"],"socket":"pipe-py","allow_string_null":true,"metadata":{}}],"commands":[{"name":"val","type":"remote","mid":1,"pool":0,"needed_pools":[0],"desc":[],"args":[],"return":{"schema":"<str>s","type":"Str","desc":[],"constraints":[],"metadata":{}},"constraints":[],"metadata":{},"group":null}],"groups":[],"desc":[],"epilogues":[],"unsafe_skip_null_check":false,"metadata":{}}

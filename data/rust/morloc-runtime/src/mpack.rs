@@ -4,6 +4,7 @@
 //! The voidstar binary format is morloc-specific (Array/Tensor structs with relptrs).
 
 use crate::error::MorlocError;
+use crate::recur::{self, RecurEnv};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RELNULL};
 
@@ -12,11 +13,26 @@ use crate::shm::{self, AbsPtr, Array, RELNULL};
 /// Serialize voidstar data to MessagePack bytes.
 pub fn pack_with_schema(ptr: AbsPtr, schema: &Schema) -> Result<Vec<u8>, MorlocError> {
     let mut buf = Vec::with_capacity(256);
-    pack_data(ptr, schema, &mut buf)?;
+    let mut env: RecurEnv = Vec::new();
+    pack_data(ptr, schema, &mut buf, &mut env)?;
     Ok(buf)
 }
 
-fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), MorlocError> {
+fn pack_data(
+    ptr: AbsPtr,
+    schema: &Schema,
+    buf: &mut Vec<u8>,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| pack_data_inner(ptr, schema, buf, env))
+}
+
+fn pack_data_inner(
+    ptr: AbsPtr,
+    schema: &Schema,
+    buf: &mut Vec<u8>,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
     // SAFETY: ptr points to voidstar data in SHM with layout described by schema.
     // All reads are within bounds defined by schema.width, Array headers, etc.
     unsafe {
@@ -108,7 +124,7 @@ fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), Morl
                     let data = shm::rel2abs(arr.data)?;
                     for i in 0..arr.size {
                         let elem_ptr = data.add(i * elem_width);
-                        pack_data(elem_ptr, elem_schema, buf)?;
+                        pack_data(elem_ptr, elem_schema, buf, env)?;
                     }
                 }
             }
@@ -118,20 +134,20 @@ fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), Morl
 
                 for (i, field_schema) in schema.parameters.iter().enumerate() {
                     let field_ptr = ptr.add(schema.offsets[i]);
-                    pack_data(field_ptr, field_schema, buf)?;
+                    pack_data(field_ptr, field_schema, buf, env)?;
                 }
             }
             SerialType::Optional => {
-                let tag = *ptr;
-                if tag == 0 {
+                // The Optional slot is a single relptr: RELNULL for absent,
+                // otherwise the relptr to T's body elsewhere in the buffer.
+                let relptr = *(ptr as *const shm::RelPtr);
+                if relptr == shm::RELNULL {
                     rmp::encode::write_nil(buf)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
                 } else {
                     let inner_schema = &schema.parameters[0];
-                    let inner_offset = schema.offsets.first().copied()
-                        .unwrap_or_else(|| shm::align_up(1, inner_schema.alignment().max(1)));
-                    let inner_ptr = ptr.add(inner_offset);
-                    pack_data(inner_ptr, inner_schema, buf)?;
+                    let inner_ptr = shm::rel2abs(relptr)?;
+                    pack_data(inner_ptr, inner_schema, buf, env)?;
                 }
             }
             SerialType::Table => {
@@ -142,6 +158,21 @@ fn pack_data(ptr: AbsPtr, schema: &Schema, buf: &mut Vec<u8>) -> Result<(), Morl
                 return Err(MorlocError::Serialization(
                     "Cannot msgpack-encode a Table; Tables use the Arrow IPC SHM wire path".into(),
                 ));
+            }
+            SerialType::Recur => {
+                // Resolve the back-reference to the declared named
+                // schema on the env stack and pack the data as if it
+                // were that schema. The data has finite depth in
+                // SHM (relptrs into smaller subtrees), so recursion
+                // terminates at the natural base cases (empty arrays
+                // or null optionals).
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = recur::lookup(env, name)?;
+                // SAFETY: target_ptr came from the env stack which holds
+                // pointers derived from live `Schema` references in the
+                // outer call tree; the borrow is still valid here.
+                let target = &*target_ptr;
+                pack_data(ptr, target, buf, env)?;
             }
         }
     }
@@ -164,7 +195,8 @@ pub fn unpack_with_schema(
     // SAFETY: cursor starts at base + schema.width, within the allocated region.
     let mut cursor = unsafe { base.add(schema.width) };
     let mut reader = &data[..];
-    unpack_obj(base, schema, &mut cursor, &mut reader)?;
+    let mut env: RecurEnv = Vec::new();
+    unpack_obj(base, schema, &mut cursor, &mut reader, &mut env)?;
     Ok(base)
 }
 
@@ -173,6 +205,17 @@ fn unpack_obj(
     schema: &Schema,
     cursor: &mut AbsPtr,
     reader: &mut &[u8],
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| unpack_obj_inner(ptr, schema, cursor, reader, env))
+}
+
+fn unpack_obj_inner(
+    ptr: AbsPtr,
+    schema: &Schema,
+    cursor: &mut AbsPtr,
+    reader: &mut &[u8],
+    env: &mut RecurEnv,
 ) -> Result<(), MorlocError> {
     use rmp::decode;
 
@@ -266,7 +309,7 @@ fn unpack_obj(
 
                 for i in 0..n {
                     let elem_ptr = data_start.add(i * elem_width);
-                    unpack_obj(elem_ptr, elem_schema, cursor, reader)?;
+                    unpack_obj(elem_ptr, elem_schema, cursor, reader, env)?;
                 }
             }
             SerialType::Tuple | SerialType::Map => {
@@ -274,25 +317,32 @@ fn unpack_obj(
                     .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
                 for (i, field_schema) in schema.parameters.iter().enumerate() {
                     let field_ptr = ptr.add(schema.offsets[i]);
-                    unpack_obj(field_ptr, field_schema, cursor, reader)?;
+                    unpack_obj(field_ptr, field_schema, cursor, reader, env)?;
                 }
             }
             SerialType::Optional => {
                 let inner_schema = &schema.parameters[0];
-                let inner_offset = schema.offsets.first().copied()
-                    .unwrap_or_else(|| shm::align_up(1, inner_schema.alignment().max(1)));
+                let relptr_slot = ptr as *mut shm::RelPtr;
 
                 // Peek at the next byte to detect nil
                 if !reader.is_empty() && reader[0] == 0xc0 {
-                    // Null: consume nil byte, set tag = 0
+                    // Absent: write RELNULL, consume nil byte
                     decode::read_nil(reader)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
-                    *ptr = 0;
+                    *relptr_slot = shm::RELNULL;
                 } else {
-                    // Present: set tag = 1, parse inner
-                    *ptr = 1;
-                    let inner_ptr = ptr.add(inner_offset);
-                    unpack_obj(inner_ptr, inner_schema, cursor, reader)?;
+                    // Present: allocate inner T at the cursor, write its
+                    // relptr into the Optional slot, then unpack T into
+                    // the cursor region. The cursor advances past T's
+                    // header width here; T's own walker advances it
+                    // further for any sub-data it has.
+                    let inner_align = inner_schema.alignment().max(1);
+                    let aligned = shm::align_up(*cursor as usize, inner_align);
+                    *cursor = aligned as AbsPtr;
+                    *relptr_slot = shm::abs2rel(*cursor)?;
+                    let inner_ptr = *cursor;
+                    *cursor = cursor.add(inner_schema.width);
+                    unpack_obj(inner_ptr, inner_schema, cursor, reader, env)?;
                 }
             }
             SerialType::Table => {
@@ -301,6 +351,16 @@ fn unpack_obj(
                 return Err(MorlocError::Serialization(
                     "Cannot msgpack-decode a Table; Tables use the Arrow IPC SHM wire path".into(),
                 ));
+            }
+            SerialType::Recur => {
+                // Mirror of pack_data: resolve the back-reference and
+                // unpack as if the data carried the named schema.
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = recur::lookup(env, name)?;
+                // SAFETY: see pack_data's Recur arm for the lifetime
+                // argument; the env-stored pointer is still live here.
+                let target = &*target_ptr;
+                unpack_obj(ptr, target, cursor, reader, env)?;
             }
         }
     }
@@ -436,10 +496,23 @@ fn read_be_u64(reader: &mut &[u8]) -> Result<u64, MorlocError> {
 
 fn calc_unpack_size(data: &[u8], schema: &Schema) -> Result<usize, MorlocError> {
     let mut reader = data;
-    calc_size_r(schema, &mut reader)
+    let mut env: RecurEnv = Vec::new();
+    calc_size_r(schema, &mut reader, &mut env)
 }
 
-fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError> {
+fn calc_size_r(
+    schema: &Schema,
+    reader: &mut &[u8],
+    env: &mut RecurEnv,
+) -> Result<usize, MorlocError> {
+    recur::with_scope(env, schema, |env| calc_size_r_inner(schema, reader, env))
+}
+
+fn calc_size_r_inner(
+    schema: &Schema,
+    reader: &mut &[u8],
+    env: &mut RecurEnv,
+) -> Result<usize, MorlocError> {
     match schema.serial_type {
         SerialType::Nil => {
             rmp::decode::read_nil(reader).ok();
@@ -483,7 +556,7 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
             // Alignment padding (bumps to 64 for primitive numerics for SIMD/BLAS)
             total = shm::align_up(total, elem_schema.array_data_alignment());
             for _ in 0..n {
-                total += calc_size_r(elem_schema, reader)?;
+                total += calc_size_r(elem_schema, reader, env)?;
             }
             Ok(total)
         }
@@ -492,23 +565,26 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
             let mut total = schema.width;
             for field_schema in &schema.parameters {
                 if !field_schema.is_fixed_width() {
-                    total += calc_size_r(field_schema, reader)?;
+                    total += calc_size_r(field_schema, reader, env)?;
                 } else {
-                    calc_size_r(field_schema, reader)?;
+                    calc_size_r(field_schema, reader, env)?;
                 }
             }
             Ok(total)
         }
         SerialType::Optional => {
+            // The Optional slot is `schema.width` (= sizeof(RelPtr)) bytes.
+            // When present, the inner T's data lives at the cursor and
+            // needs `inner_align - 1` worst-case padding + sizeof(inner)
+            // + whatever the inner's own variable extras contribute.
             let inner_schema = &schema.parameters[0];
             if !reader.is_empty() && reader[0] == 0xc0 {
                 rmp::decode::read_nil(reader).ok();
-                Ok(schema.width.max(1 + inner_schema.width))
+                Ok(schema.width)
             } else {
-                let inner_size = calc_size_r(inner_schema, reader)?;
+                let inner_size = calc_size_r(inner_schema, reader, env)?;
                 let align = inner_schema.alignment().max(1);
-                let offset = shm::align_up(1, align);
-                Ok(offset + inner_size)
+                Ok(schema.width + (align - 1) + inner_size)
             }
         }
         SerialType::Table => {
@@ -519,6 +595,16 @@ fn calc_size_r(schema: &Schema, reader: &mut &[u8]) -> Result<usize, MorlocError
             Err(MorlocError::Serialization(
                 "Cannot compute msgpack size for a Table; Tables use the Arrow IPC SHM wire path".into(),
             ))
+        }
+        SerialType::Recur => {
+            // Resolve to the named schema and account for its width
+            // (the data lives behind a relptr at this slot, so we add
+            // only schema.width plus whatever the body adds via reads).
+            let name = schema.name.as_deref().unwrap_or("");
+            let target_ptr = recur::lookup(env, name)?;
+            // SAFETY: env pointer is valid for the duration of the walk.
+            let target = unsafe { &*target_ptr };
+            calc_size_r(target, reader, env)
         }
     }
 }

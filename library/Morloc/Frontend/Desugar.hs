@@ -22,6 +22,7 @@ module Morloc.Frontend.Desugar
   , showParseError
   ) where
 
+import Control.Monad (when)
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -705,8 +706,9 @@ mergeSelectors sels =
 -- Desugar a do-block to a let-chain. Non-final bare statements and <- binds
 -- are wrapped in EvalE so the typechecker sees them as forced effects (pure
 -- non-finals are therefore rejected). The final bare statement is returned
--- unwrapped so synthE DoBlockS can flatten it (if effectful) or let tryCoerce
--- lift it (if pure).
+-- unwrapped: synthE DoBlockS flattens it when effectful, otherwise the block
+-- type is <collected-effects> (type-of-final) and an empty effect set is a
+-- subtype of any expected effect set.
 desugarDo :: Span -> [CstDoStmt] -> D ExprI
 desugarDo sp [] = dfail (startPos sp) "empty do block"
 desugarDo _sp [CstDoBare e] = desugarExpr e
@@ -833,9 +835,6 @@ desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
-desugarExpr (Loc sp (CForceE e)) = do
-  e' <- desugarExpr e
-  freshExprSpan sp (EvalE e')
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"
@@ -845,6 +844,7 @@ desugarExpr (Loc _ (CAssE {})) = error "desugarExpr: unexpected CAssE in express
 desugarExpr (Loc _ (CTypE {})) = error "desugarExpr: unexpected CTypE in expression position"
 desugarExpr (Loc _ (CClsE {})) = error "desugarExpr: unexpected CClsE in expression position"
 desugarExpr (Loc _ (CIstE {})) = error "desugarExpr: unexpected CIstE in expression position"
+desugarExpr (Loc _ (CEffE {})) = error "desugarExpr: unexpected CEffE in expression position"
 desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in expression position"
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
@@ -954,6 +954,9 @@ desugarTopLevel (Loc sp (CIstE cn types body)) = do
   bodyExprs <- concatMapM desugarTopLevel body
   e <- freshExprSpan sp (IstE cn (map quantifyType types) bodyExprs)
   return [e]
+desugarTopLevel (Loc sp (CEffE lbl esc)) = do
+  e <- freshExprSpan sp (EffE lbl esc)
+  return [e]
 desugarTopLevel (Loc sp (CFixE assoc prec ops)) = do
   e <- freshExprSpan sp (FixE (Fixity assoc prec ops))
   return [e]
@@ -1052,8 +1055,37 @@ tokToEVar _ = EV "?"
 -- Type definition desugaring
 --------------------------------------------------------------------
 
+-- | True iff the alias body provides no information beyond a
+-- self-reference, optionally wrapped in @?_@. See the call site in
+-- @desugarTypeDef@ for the rationale on which shapes count as vacuous
+-- and why @[X]@-guarded recursion does not.
+isVacuousAlias :: TVar -> [Either (TVar, Kind) TypeU] -> TypeU -> Bool
+isVacuousAlias v vs = go
+  where
+    paramTypes = map (either (VarU . fst) id) vs
+    go (VarU v') = v == v'
+    go (AppU (VarU v') ps) = v == v' && ps == paramTypes
+    go (OptionalU t) = go t
+    go _ = False
+
 desugarTypeDef :: Span -> CstTypeDef -> D [ExprI]
 desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
+  -- Reject vacuous aliases: bodies that are nothing but the alias's own
+  -- self-reference, optionally wrapped in @?_@. The two motivating cases
+  -- are @type X = X@ (pure identity, no fixed point beyond X itself) and
+  -- @type X = ?X@ (collapses to nothing under the @?(?T) == ?T@
+  -- idempotence: every inhabitant is @null@). The parametric forms
+  -- @type Foo a = Foo a@ and @type Foo a = ?(Foo a)@ are the same family.
+  -- This check happens here -- not in @checkForSelfRecursion@ -- because
+  -- by the time we reach Restructure the parser has already lowered
+  -- forward declarations (@type Foo@) to the same @VarU Foo@ body, so
+  -- the two cases are no longer distinguishable. The list-guarded form
+  -- @type X = [X]@ is intentionally accepted: its inhabitants are
+  -- nested empty lists, which is a legitimate (if niche) shape.
+  when (isVacuousAlias v vs t) $
+    dfail (startPos sp) $
+      "Type alias '" ++ T.unpack (unTVar v) ++
+      "' has a vacuous body: it reduces to a self-reference with no payload"
   lang <- case maybeLangTok of
     Nothing -> return Nothing
     Just tok -> do
@@ -1079,14 +1111,23 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc))
   return [e]
-desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal) entries) = do
+desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) entries) = do
   lang <- case maybeLangTok of
     Nothing -> return Nothing
     Just tok -> do
       l <- parseLang tok
       return (Just (l, isTerminal))
   let con = if T.null conName then v else TV conName
-      t = NamU nt con (map (either (VarU . fst) id) vs) entries
+      -- If the user supplied explicit args after the constructor string
+      -- (e.g. `"container_t<$1>" a`, parallel to the type-alias
+      -- concrete_rhs syntax), use those as the body's positional args.
+      -- Otherwise, default to the LHS params, which covers the common
+      -- case where the macro indices map directly to the declared
+      -- parameter order.
+      bodyTs = if null conArgs
+                 then map (either (VarU . fst) id) vs
+                 else conArgs
+      t = NamU nt con bodyTs entries
       doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries]
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc))
   return [e]

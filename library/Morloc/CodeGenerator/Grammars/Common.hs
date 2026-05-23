@@ -297,6 +297,7 @@ renameNE old new = go where
   go (CoerceN c t ne) = CoerceN c t (go ne)
   go (IfN t c th el) = IfN t (go c) (go th) (go el)
   go (IntrinsicN t intr msch nes) = IntrinsicN t intr msch (map go nes)
+  go (MapOptionalN t wt src ne) = MapOptionalN t wt src (go ne)
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
 
@@ -453,6 +454,8 @@ invertSerialManifold sm0 =
       atomize (IfN t (weave (D condNe condLets)) (weave (D thenNe thenLets)) (weave (D elseNe elseLets))) []
     invertNativeExprM (IntrinsicN_ t intr msch nes) =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
+    invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
+      atomize (MapOptionalN t wt src ne) lets
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
     invertSerialArgM (SerialArgManifold_ (D sm deps)) = return $ D (SerialArgManifold sm) deps
@@ -551,6 +554,9 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ NatVoidF = []
     seekRecs _ (StrLitF _) = []
     seekRecs _ StrVoidF = []
+    -- A back-reference contributes nothing new: the record it names
+    -- is already visited at the NamF site that introduced the cycle.
+    seekRecs _ (RecF _) = []
 
 unifyRecords ::
   [ ( FVar

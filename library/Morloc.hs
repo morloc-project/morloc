@@ -41,6 +41,7 @@ import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
+import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
 import qualified Morloc.Monad as MM
@@ -143,15 +144,21 @@ writeProgram translateFn path code = do
         -- write the code and compile as needed
         >>= buildProgram
 
--- | In eval mode, reject source, class, and instance declarations in the root module.
--- Imported modules are not checked since they are pre-existing installed code.
+-- | An eval input is a single expression, not a module: it may import
+-- installed modules and use let/where/do, but may not define types,
+-- typeclasses, instances, or source foreign code. The check is fully
+-- recursive so a forbidden construct cannot hide inside a nested
+-- let/where/do block (the only grammatical path is a forced
+-- expression). Imported modules are not checked: eval mode also
+-- disables local-module resolution, so every import is genuinely
+-- pre-existing installed code.
 checkEvalRestrictions :: DAG MVar Import ExprI -> MorlocMonad ()
 checkEvalRestrictions dag =
   case DAG.roots dag of
     [] -> return ()
     (root : _) -> case Map.lookup root dag of
       Nothing -> return ()
-      Just (ExprI _ (ModE _ body), _) -> mapM_ checkExpr body
+      Just (ExprI _ (ModE _ body), _) -> mapM_ (AST.checkExprI checkExpr) body
       Just _ -> return ()
   where
     checkExpr :: ExprI -> MorlocMonad ()
@@ -161,4 +168,6 @@ checkEvalRestrictions dag =
       MM.throwSourcedError i "class declarations are not allowed in eval mode"
     checkExpr (ExprI i (IstE _ _ _)) =
       MM.throwSourcedError i "instance declarations are not allowed in eval mode"
+    checkExpr (ExprI i (TypE _)) =
+      MM.throwSourcedError i "type declarations are not allowed in eval mode"
     checkExpr _ = return ()

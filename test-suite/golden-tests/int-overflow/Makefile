@@ -16,7 +16,9 @@ all:
 	echo "" >> obs.txt
 	echo "=== S2: BigInt round-trip (pure morloc) ===" >> obs.txt
 	./nexus bigVarInt >> obs.txt
+	./nexus bigVarIntNeg >> obs.txt
 	./nexus intId 123456789012345678901234567890 >> obs.txt
+	./nexus intId -123456789012345678901234567890 >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S3: list round-trips ===" >> obs.txt
 	./nexus uint8ListId [0,255] >> obs.txt
@@ -69,7 +71,19 @@ all:
 	# tested here. They would silently wrap and pass; preventing this
 	# is the responsibility of the C++ source code, not morloc.
 	# BigInt -> C++ default int IS catchable at unpack time, so it stays.
+	# Same path catches the single-limb-fits-i64 cases that overflow int32,
+	# in both directions.
 	./nexus cintDbl 100000000000000000000000000000 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus cintDbl 2147483648 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus cintDbl -2147483649 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	# Python -> wire -> C++ chain: Python preserves the BigInt on the wire,
+	# C++ must reject the value at unpack rather than silently truncate.
+	./nexus pintToCint 2147483647 >> obs.txt
+	./nexus pintToCint -2147483648 >> obs.txt
+	./nexus pintToCint 2147483648 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus pintToCint -2147483649 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus pintToCint 123456789012345678901234567890 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus pintToCint -123456789012345678901234567890 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	./nexus cint8Dbl 63 >> obs.txt
 	./nexus cint16Dbl 16383 >> obs.txt
 	./nexus cint32Dbl 1073741823 >> obs.txt
@@ -116,8 +130,22 @@ all:
 	# C++ excluded: silent wraparound, not catchable post-hoc.
 	./nexus pint8Dbl -64 >> obs.txt
 	./nexus pint8Dbl -65 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus pint16Dbl -16384 >> obs.txt
+	./nexus pint16Dbl -16385 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus pint32Dbl -1073741824 >> obs.txt
+	./nexus pint32Dbl -1073741825 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus pint64Dbl -4611686018427387904 >> obs.txt
+	./nexus pint64Dbl -4611686018427387905 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	./nexus rint8Dbl -64 >> obs.txt
 	./nexus rint8Dbl -65 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus rint16Dbl -16384 >> obs.txt
+	./nexus rint16Dbl -16385 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	./nexus rint32Dbl -1073741824 >> obs.txt
+	./nexus rint32Dbl -1073741825 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
+	# rint64Dbl: R's numeric tops out at 2^53. -2^52 doubles to exactly -2^53;
+	# -2^52-1 doubles past -2^53 and trips the pack check.
+	./nexus rint64Dbl -4503599627370496 >> obs.txt
+	./nexus rint64Dbl -4503599627370497 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S11: unsigned types reject negative input ===" >> obs.txt
 	./nexus uint8Id -1 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
@@ -149,6 +177,8 @@ all:
 	./nexus intId 18446744073709551616 >> obs.txt  # u64 max + 1 (multi-limb)
 	./nexus intId -9223372036854775808 >> obs.txt  # i64 min
 	./nexus intId -9223372036854775809 >> obs.txt  # just below i64 min (multi-limb)
+	./nexus intId -18446744073709551615 >> obs.txt # -u64 max (multi-limb)
+	./nexus intId -18446744073709551616 >> obs.txt # -2^64 (deeper multi-limb)
 	echo "" >> obs.txt
 	echo "=== S15: R narrow numeric (round-trip identity through R) ===" >> obs.txt
 	# Int8/Int16 and UInt8/UInt16 fit R's 32-bit "integer".

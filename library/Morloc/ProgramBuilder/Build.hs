@@ -16,13 +16,14 @@ module Morloc.ProgramBuilder.Build
   ) where
 
 import Control.Monad.Except (catchError, throwError)
-import Morloc.Data.Doc ((<+>), vsep, pretty)
+import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
+import System.IO.Error (ioeGetFileName)
 import System.Process (callProcess)
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
@@ -63,9 +64,28 @@ build s = do
   (_ :/ tree) <- liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
   case failures tree of
     [] -> return ()
-    errs -> MM.throwSystemError $ "Failed to write generated files:" <+> vsep
-      [pretty (show e) | Failed _ e <- errs]
+    errs -> do
+      msgs <- liftIO (mapM describeWriteFailure errs)
+      MM.throwSystemError (vsep msgs)
   mapM_ runSysCommand (scriptMake s)
+
+-- | Turn a directory-tree write failure into an actionable message.
+-- A directory occupying the output path is the common, recoverable
+-- mistake (the chosen binary name collides with an existing
+-- directory); name the conflict and point at @-o@ instead of leaking
+-- the raw 'IOError' text to the user.
+describeWriteFailure :: DirTree a -> IO MDoc
+describeWriteFailure (Failed _ e) = do
+  let mpath = ioeGetFileName e
+  isDir <- maybe (return False) SD.doesDirectoryExist mpath
+  return $
+    if isDir
+      then "Cannot write the output file" <+> maybe "(the output path)" pretty mpath
+             <> ": a directory of that name already exists."
+             <> line
+             <> "Choose a different output name with -o, or remove the directory."
+      else "Failed to write generated file:" <+> pretty (show e)
+describeWriteFailure _ = return "Failed to write generated files."
 
 runSysCommand :: SysCommand -> MorlocMonad ()
 runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]

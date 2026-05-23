@@ -101,6 +101,8 @@ reduceNativeExpr ver ts lang (EvalN t ne) = EvalN t <$> reduceNativeExpr ver ts 
 reduceNativeExpr ver ts lang (CoerceN c t ne) = CoerceN c t <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (IfN t c th el) =
   IfN t <$> reduceNativeExpr ver ts lang c <*> reduceNativeExpr ver ts lang th <*> reduceNativeExpr ver ts lang el
+reduceNativeExpr ver ts lang (MapOptionalN t wt src ne) =
+  MapOptionalN t wt src <$> reduceNativeExpr ver ts lang ne
 -- leaf nodes
 reduceNativeExpr _ _ _ e = return e
 

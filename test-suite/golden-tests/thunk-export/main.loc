@@ -1,5 +1,7 @@
 module main (rollOnce, rollArg, rollPy)
 
+effect IO
+
 source Cpp from "foo.hpp" ("sideEffect")
 source Py from "foo.py" ("pySideEffect")
 

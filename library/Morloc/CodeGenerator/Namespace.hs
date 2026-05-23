@@ -33,6 +33,7 @@ module Morloc.CodeGenerator.Namespace
   , isNatTypeT
   , nullifyNatKindsF
   , nullifyNatKindsT
+  , mkEffectF
   , listElemTypeF
   , listElemTypeT
 
@@ -163,6 +164,19 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
+  -- | Back-reference to a record whose definition appears as a NamF
+  -- somewhere on the enclosing TypeF path. Introduced by guarded
+  -- self-recursive records (e.g. @record Tree where children :: [Tree]@):
+  -- when @makeSerialAST'@ descends into the @[Tree]@ field, it would
+  -- otherwise re-expand the @Tree@ record forever. RecF cuts the cycle.
+  -- The FVar's TVar is always the morloc-side identity of the alias
+  -- being back-referenced. The FVar's CVar slot is unreliable -- it
+  -- carries whatever bnd-protected text @weave@ produced (often the
+  -- morloc TVar text itself, since pairEval leaves bnd-bound positions
+  -- untouched). Consumers that need the language-side concrete name
+  -- (e.g. C++ rendering) must look it up in cscope using the TVar,
+  -- not read the CVar directly.
+  | RecF FVar
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -172,6 +186,16 @@ data TypeF
   | StrLitF Text -- ^ Type-level Str literal at the codegen level (kind-Str ground form)
   | StrVoidF -- ^ Erased phantom Str slot. Mirrors NatVoidF.
   deriving (Show, Ord, Eq)
+
+-- | Codegen-level companion to 'mkEffectU' / 'mkEffectT'. The empty
+-- effect set is the monoid identity (@<> A == A@) so a provably-empty
+-- label set returns the inner type; nested 'EffectF' are merged.
+mkEffectF :: Set.Set EffectLabel -> TypeF -> TypeF
+mkEffectF ls t
+  | Set.null ls = t
+  | otherwise = case t of
+      EffectF ls2 t2 -> mkEffectF (Set.union ls ls2) t2
+      _ -> EffectF ls t
 
 -- | True iff a TypeF is a Nat-kinded entry: a real Nat literal, or the
 -- erased-phantom sentinel 'NatVoidF'.
@@ -202,6 +226,9 @@ nullifyNatKindsF (NamF o n ps rs) =
   NamF o n (map nullifyNatKindsF ps) [(k, nullifyNatKindsF v) | (k, v) <- rs]
 nullifyNatKindsF (EffectF effs t) = EffectF effs (nullifyNatKindsF t)
 nullifyNatKindsF (OptionalF t) = OptionalF (nullifyNatKindsF t)
+-- RecF is a back-reference; it carries no nested types so the walk
+-- bottoms out here.
+nullifyNatKindsF t@(RecF _) = t
 nullifyNatKindsF t = t
 
 -- | Companion to 'nullifyNatKindsF' for the Type level.
@@ -252,7 +279,14 @@ data TypeS
 data SerialAST
   = -- | use an (un)pack function to simplify an object
     SerialPack FVar (TypePacker, SerialAST)
-  | SerialList FVar (Maybe Integer) SerialAST
+  -- The (Maybe TypeF) dim slot distinguishes three cases that all map to a
+  -- list at the wire level but to different C++/Py macro arities:
+  --   Nothing            -- no Nat slot (plain List a)
+  --   Just (NatLitF n)   -- Nat slot with known value (Vector 10 a)
+  --   Just NatVoidF      -- Nat slot, value unknown at this site (Vector n a)
+  -- Both Just forms keep the slot count aligned with the concrete macro
+  -- template's positional `$N` indices; only Nothing emits a single-arg AppF.
+  | SerialList FVar (Maybe TypeF) SerialAST
   | SerialTuple FVar [SerialAST]
   | -- | Make a record, table, or object. The parameters indicate
     --   1) NamType - record/table/object
@@ -277,6 +311,13 @@ data SerialAST
   | SerialString FVar
   | SerialNull FVar
   | SerialOptional FVar SerialAST
+  | -- | Back-reference to an ancestor 'SerialObject' with this FVar in
+    -- the SerialAST tree. Emitted by guarded self-recursive records to
+    -- cut the cycle that would otherwise expand forever during
+    -- 'makeSerialAST''. Downstream wire-schema emission renders it as a
+    -- back-ref token; the runtime resolves it back to the ancestor's
+    -- Schema*.
+    SerialRec FVar
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -314,6 +355,7 @@ instance Pretty SerialAST where
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
+  pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
@@ -525,7 +567,15 @@ data PolyExpr
   | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
-  | PolyNull (Indexed TVar)
+  -- The Indexed Type carries the FULL type of the Null (e.g.
+  -- @?(BTree Int)@, NOT just the underlying TVar). Storing the
+  -- complete type lets downstream passes (Serialize -> NativeExpr,
+  -- typeFof of enclosing TupleN/RecordN/IfN) preserve the alias's
+  -- type arguments. Earlier shapes stored only an @Indexed TVar@,
+  -- which lost the args of parameterised aliases and caused the
+  -- enclosing literal's typeFof to surface a bare-FVar-with-no-args
+  -- that schema computation could not interpret.
+  | PolyNull (Indexed Type)
   | PolyDoBlock (Indexed Type) PolyExpr
   | PolyEval (Indexed Type) PolyExpr
   | PolyCoerce Coercion (Indexed Type) PolyExpr
@@ -559,7 +609,9 @@ data MonoExpr
   | MonoReal (Indexed TVar) RealLit
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
-  | MonoNull (Indexed TVar)
+  -- See @PolyNull@ for the rationale: store the full type of the
+  -- Null literal, not just the inner TVar.
+  | MonoNull (Indexed Type)
   | MonoDoBlock (Indexed Type) MonoExpr
   | MonoEval (Indexed Type) MonoExpr
   | MonoCoerce Coercion (Indexed Type) MonoExpr
@@ -634,7 +686,10 @@ data NativeExpr
   | RealN FVar RealLit
   | IntN FVar Integer
   | StrN FVar Text
-  | NullN FVar
+  -- See @PolyNull@ in this module for the rationale on storing a
+  -- @TypeF@ rather than an @FVar@: parameterised aliases lose their
+  -- arg list if only the constructor name is kept.
+  | NullN TypeF
   | DoBlockN TypeF NativeExpr
   | EvalN TypeF NativeExpr
   | CoerceN Coercion TypeF NativeExpr
@@ -642,6 +697,15 @@ data NativeExpr
   | IntrinsicN TypeF Intrinsic (Maybe Text) [NativeExpr]
   -- ^ The Maybe Text is the precomputed msgpack schema string for the data arg
   -- (Nothing for compile-time intrinsics that are resolved by Reduce)
+  | MapOptionalN TypeF TypeF Source NativeExpr
+  -- ^ Lift a source function through an Optional. First TypeF is the
+  -- result type (the outer optional in user-facing form). Second TypeF
+  -- is the unwrapped wire-form inner type (what the inner NativeExpr
+  -- evaluates to once dereferenced). The Source is the function applied
+  -- to the inner value when present. Mirrors the pack/unpack insertion
+  -- that expandSerialize\/expandDeserialize do for SerialPack inside
+  -- SerialOptional. Used by Serialize.hs to wrap intrinsic results
+  -- (@load) whose user-facing optional type wraps a Packable inner.
   deriving (Show)
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
@@ -693,6 +757,7 @@ foldlNE f b (EvalN_ _ x) = f b x
 foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
+foldlNE f b (MapOptionalN_ _ _ _ x) = f b x
 
 data MonoidFold m a = MonoidFold
   { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
@@ -769,6 +834,7 @@ makeMonoidFoldDefault mempty' mappend' =
       return (foldl mappend' mempty' [a1, a2, a3], IfN t c thenE elseE)
     monoidNativeExpr' (IntrinsicN_ t intr msch (unzip -> (reqs, es))) =
       return (foldl mappend' mempty' reqs, IntrinsicN t intr msch es)
+    monoidNativeExpr' (MapOptionalN_ t wt src (a, ne)) = return (a, MapOptionalN t wt src ne)
 
 -- where
 --  * m - monad
@@ -905,12 +971,14 @@ data NativeExpr_ nm se ne sr nr
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
   | StrN_ FVar Text
-  | NullN_ FVar
+  -- See @PolyNull@ / @NullN@ for the rationale: store @TypeF@ not @FVar@.
+  | NullN_ TypeF
   | DoBlockN_ TypeF ne
   | EvalN_ TypeF ne
   | CoerceN_ Coercion TypeF ne
   | IfN_ TypeF ne ne ne
   | IntrinsicN_ TypeF Intrinsic (Maybe Text) [ne]
+  | MapOptionalN_ TypeF TypeF Source ne
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
 manifoldFoldToFoldWith fm =
@@ -1117,6 +1185,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(IntrinsicN t intr msch nes) = do
       nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
       opFoldWithNativeExprM fm full (IntrinsicN_ t intr msch nes')
+    f full@(MapOptionalN t wt src ne) = do
+      ne' <- surroundFoldNativeExprM sfm fm ne
+      opFoldWithNativeExprM fm full (MapOptionalN_ t wt src ne')
 
 class HasTypeF a where
   typeFof :: a -> TypeF
@@ -1141,12 +1212,13 @@ instance HasTypeF NativeExpr where
   typeFof (RealN v _) = VarF v
   typeFof (IntN v _) = VarF v
   typeFof (StrN v _) = VarF v
-  typeFof (NullN v) = VarF v
+  typeFof (NullN t) = t
   typeFof (DoBlockN t _) = t
   typeFof (EvalN t _) = t
   typeFof (CoerceN _ t _) = t
   typeFof (IfN t _ _ _) = t
   typeFof (IntrinsicN t _ _ _) = t
+  typeFof (MapOptionalN t _ _ _) = t
 
 class HasTypeM e where
   typeMof :: e -> TypeM
@@ -1344,6 +1416,7 @@ instance MFunctor NativeExpr where
         (CoerceN c t ne) -> mapNativeExpr f $ CoerceN c t (mgatedMap g f ne)
         (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
         (IntrinsicN t intr msch nes) -> mapNativeExpr f $ IntrinsicN t intr msch (map (mgatedMap g f) nes)
+        (MapOptionalN t wt src ne) -> mapNativeExpr f $ MapOptionalN t wt src (mgatedMap g f ne)
     | otherwise = mapNativeExpr f ne0
 
 instance (Pretty a) => Pretty (Arg a) where

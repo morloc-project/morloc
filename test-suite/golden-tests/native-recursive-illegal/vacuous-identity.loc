@@ -1,0 +1,6 @@
+module main (f)
+
+-- Pure identity alias: no fixed point beyond X itself, no information.
+type V1 = V1
+
+f :: V1 -> V1

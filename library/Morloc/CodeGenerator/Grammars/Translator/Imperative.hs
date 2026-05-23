@@ -60,6 +60,7 @@ import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import Data.Text (Text)
+import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Grammars.Common
   ( DispatchEntry (..)
@@ -92,6 +93,14 @@ data IStmt
     -- Semantics: declare resultVar; if cond { thenStmts; resultVar = thenExpr } else { elseStmts; resultVar = elseExpr }
     -- For elif chains, elseStmts contains another IIf and elseExpr is unused (IVar resultVar)
     IIf Text (Maybe IType) IExpr [IStmt] IExpr [IStmt] IExpr
+  | -- | resultVar, resultType (optional<final>), source (optional<raw>),
+    -- unwrappedVar, unwrappedType (raw), bodyStmts, bodyExpr.
+    -- Lifts an inner transformation through an Optional. If source is
+    -- null, resultVar is null; otherwise unwrappedVar is bound to the
+    -- source's contents, bodyStmts run, and resultVar is set to a
+    -- wrapped bodyExpr. Used by SerialOptional in expand{Ser,Deser}ialize
+    -- when the inner SerialAST itself requires statement-level construction.
+    IIfNotNull Text (Maybe IType) IExpr Text (Maybe IType) [IStmt] IExpr
   | IReturn IExpr
   | IExprStmt IExpr
 
@@ -270,8 +279,11 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> ([MDoc], MDoc)
-  -- ^ prior statements -> return expression -> (hoisted statements, effect expression)
+  , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
+  -- ^ type -> prior statements -> return expression -> (hoisted lines,
+  -- suspended-thunk expression). Monadic so a language whose thunk form
+  -- cannot hold statements (e.g. a Python lambda) can mint a fresh name
+  -- for a hoisted def-thunk.
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   , -- manifold lowering fields
@@ -332,6 +344,24 @@ expandSerialize cfg v0 s0 = do
         ( concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))]
         , IVar v'
         )
+    construct v opt@(SerialOptional _ innerS) = do
+      idx <- lcNewIndex cfg
+      resultType <- lcSerialAstType cfg opt
+      -- The unwrapped value is the inner *user-facing* (shallow) type, not
+      -- the wire form: the inner construct (e.g. SerialPack's unpacker)
+      -- consumes the user-facing value and produces the wire form. Using
+      -- lcSerialAstType here would declare u0 as the wire form and then
+      -- pass it to an unpacker expecting the user-facing form, breaking
+      -- compilation. lcDeserialAstType returns the shallow type per the
+      -- C++ translator's `cppTypeOf . shallowType`.
+      unwrappedType <- lcDeserialAstType cfg innerS
+      let v' = render $ helperNamer idx
+          uVar = "u" <> T.pack (show idx)
+      (before, x) <- go (pretty uVar) innerS
+      return
+        ( [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
+        , IVar v'
+        )
     construct _ _ = error "Unreachable in expandSerialize"
 
 {- | Expand deserialization into IR statements.
@@ -381,6 +411,17 @@ expandDeserialize cfg v0 s0
       let v' = render $ helperNamer idx
       return
         (IVar v', concat befores ++ [IAssign v' typeM (IRecordLit namType fv (zip (map fst rs) exprs))])
+    construct v opt@(SerialOptional _ innerS) = do
+      idx <- lcNewIndex cfg
+      resultType <- lcDeserialAstType cfg opt
+      unwrappedType <- lcRawDeserialAstType cfg innerS
+      let v' = render $ helperNamer idx
+          uVar = "u" <> T.pack (show idx)
+      (x, before) <- check (pretty uVar) innerS
+      return
+        ( IVar v'
+        , [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
+        )
     construct _ _ = error "Unreachable in expandDeserialize"
 
 -- | Lower a serial expression to PoolDocs via the IR.
@@ -517,24 +558,28 @@ lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lc
 lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
-lowerNativeExpr cfg _ (NullN_ fv) = do
-  mayT <- lcTypeOf cfg (VarF fv)
+lowerNativeExpr cfg _ (NullN_ t) = do
+  -- NullN_ now carries the full @TypeF@ of the Null's type slot
+  -- (e.g. @?(BTree Int)@), not just the underlying constructor's
+  -- @FVar@. Pass it through @lcTypeOf@ to get the IType the printer
+  -- uses for the null literal -- though most language printers
+  -- ignore this IType (Python emits "None", C++ emits "std::nullopt"
+  -- unconditionally), threading it preserves the option for languages
+  -- that do type-tagged null forms.
+  mayT <- lcTypeOf cfg t
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
-lowerNativeExpr cfg _ (DoBlockN_ t x) =
-  let (hoisted, effectExpr) = lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
-   in return
-        defaultValue
-          { poolExpr = effectExpr
-          , poolCompleteManifolds = poolCompleteManifolds x
-          , poolPriorLines = hoisted
-          , poolPriorExprs = poolPriorExprs x
-          }
+lowerNativeExpr cfg _ (DoBlockN_ t x) = do
+  (hoisted, effectExpr) <- lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
+  return
+    defaultValue
+      { poolExpr = effectExpr
+      , poolCompleteManifolds = poolCompleteManifolds x
+      , poolPriorLines = hoisted
+      , poolPriorExprs = poolPriorExprs x
+      }
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional is a noop in all target languages: T is a valid ?T
 lowerNativeExpr _ _ (CoerceN_ CoerceToOptional _ x) = return x
--- CoerceToEffect wraps the value in a suspend (thunk/lambda)
-lowerNativeExpr cfg _ (CoerceN_ (CoerceToEffect _) _ x) =
-  return $ x {poolExpr = lcPrintExpr cfg (IDoBlock (IRawExpr (render (poolExpr x))))}
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
@@ -578,6 +623,28 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
+-- Lift a source function through an Optional. Mirrors how
+-- expandDeserialize's SerialPack arm wraps an inner deserialization
+-- with a packer call, but at the NativeExpr level: the inner
+-- expression evaluates to optional<wireT> (e.g. the wire form returned
+-- by @load), and we produce optional<userT> by applying `src` to the
+-- inner value when present.
+lowerNativeExpr cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
+  idx <- lcNewIndex cfg
+  -- Result type: optional<userT>. origExpr's TypeF is the outer
+  -- optional in user-facing form.
+  resultType <- lcTypeOf cfg (typeFof origExpr)
+  -- Unwrap type: the wire-form inner (what the inner expression's
+  -- optional dereferences to).
+  unwrapType <- lcTypeOf cfg wireTf
+  let v' = render $ helperNamer idx
+      uVar = "u" <> T.pack (show idx)
+      packerCall = ICall (render (lcSrcName cfg src)) Nothing [[IVar uVar]]
+      ifStmt = IIfNotNull v' resultType (IRawExpr (render (poolExpr innerDocs))) uVar unwrapType [] packerCall
+  return $ innerDocs
+    { poolPriorLines = poolPriorLines innerDocs ++ [lcPrintStmt cfg ifStmt]
+    , poolExpr = pretty v'
+    }
 
 {- | Lower a serial manifold to PoolDocs.
 Replaces translateManifold from Common.hs for serial manifolds.

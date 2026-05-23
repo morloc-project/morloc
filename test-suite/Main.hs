@@ -33,6 +33,7 @@ main = do
       , effectSubtypeTests
       , effectSynthesisTests
       , effectErrorTests
+      , effectEscapabilityTests
       , namespaceErrorTests
       , typeclassTests
       , natErrorTests
@@ -43,6 +44,9 @@ main = do
       , typedefKindVarTests
       , letBindingTests
       , aliasConstructorTests
+      , recursiveRecordTests
+      , bidirectionalAppCheckTests
+      , postArgPropagationTests
       , morlocDepsTests
 
       -- -- These tests pass locally and when I run the same container that I
@@ -56,13 +60,21 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "native-recursive-illegal" "native-recursive-illegal"
+      , golden "native-recursive-mixed" "native-recursive-mixed"
+      , golden "native-recursive-record" "native-recursive-record"
+      , golden "native-recursive-list" "native-recursive-list"
+      , golden "native-recursive-parameterized" "native-recursive-parameterized"
+      , golden "native-recursive-tuple" "native-recursive-tuple"
+      , golden "recursive-type-literals" "recursive-type-literals"
+      , golden "missing-concrete-record-error" "missing-concrete-record-error"
+
       , golden "multiprocessing-py-1" "multiprocessing-py-1"
       , -- bug regression tests from doc-agents code-tester (v0.74.0)
         -- Each test asserts correct behavior; currently FAIL until bug is fixed
         golden "bug-load-type-infer" "bug-load-type-infer"
       , golden "bug-intrinsic-schema-crash" "bug-intrinsic-schema-crash"
 
-      , golden "shm-volume-growth-py" "shm-volume-growth-py"
       , golden "thunk-basic" "thunk-basic"
       , golden "thunk-effects" "thunk-effects"
       , golden "thunk-do" "thunk-do"
@@ -387,9 +399,6 @@ main = do
       , golden "R(C) serial-form-11-c" "serial-form-11-c"
       , golden "R(C) serial-form-11-py" "serial-form-11-py"
       , golden "R(C) serial-form-11-r" "serial-form-11-r"
-      , golden "R(R) serial-form-12-c" "serial-form-12-c"
-      , golden "R(R) serial-form-12-py" "serial-form-12-py"
-      , golden "R(R) serial-form-12-r" "serial-form-12-r"
       , -- object handling
         golden "object-1-c" "object-1-c"
       , golden "object-1-py" "object-1-py"
@@ -458,16 +467,12 @@ main = do
       , golden "optional-coerce-interop" "optional-coerce-interop"
       , golden "optional-coerce-return-py" "optional-coerce-return-py"
       , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
-      , -- effect coercion tests (a -> <IO> a)
-        golden "effect-coerce-py" "effect-coerce-py"
-      , golden "effect-coerce-cpp" "effect-coerce-cpp"
       , -- multi-label and subtyping effect tests
         golden "effect-multi-label-py" "effect-multi-label-py"
       , golden "effect-subtype-py" "effect-subtype-py"
       , golden "effect-error-cpp" "effect-error-cpp"
       , golden "effect-accumulate-py" "effect-accumulate-py"
-      , -- inline force operator (!) tests
-        golden "force-inline-basic" "force-inline-basic"
+      , golden "effect-escapable-py" "effect-escapable-py"
       , -- intrinsic tests
         golden "intrinsic-agnostic" "intrinsic-agnostic"
       , golden "intrinsic-hash" "intrinsic-hash"
@@ -632,6 +637,10 @@ main = do
         golden "tensor-comprehensive-cpp" "tensor-comprehensive-cpp"
       , golden "tensor-comprehensive-cross" "tensor-comprehensive-cross"
       , golden "tensor-dimensions" "tensor-dimensions"
+      , -- comprehensive vector + tensor coverage including file IO,
+        -- element-type, zero-copy assertions, and permutation probes
+        golden "vector-comprehensive" "vector-comprehensive"
+      , golden "tensor-comprehensive" "tensor-comprehensive"
       , -- nat-parameterized type tests
         golden "nat-typecheck" "nat-typecheck"
       -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
@@ -646,4 +655,6 @@ main = do
       , golden "real-overflow" "real-overflow"
       , -- unary minus / negate operator
         golden "negate-unary-operator" "negate-unary-operator"
+        -- an annoyingly slow one
+      , golden "shm-volume-growth-py" "shm-volume-growth-py"
       ]

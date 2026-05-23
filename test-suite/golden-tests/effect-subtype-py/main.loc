@@ -3,6 +3,8 @@ module main (testSubtype)
 
 import root-py
 
+effect Error
+
 source Py from "foo.py" ("ioFunc")
 
 type Py => Int = "int"

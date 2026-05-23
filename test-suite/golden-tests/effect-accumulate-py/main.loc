@@ -5,6 +5,8 @@ module main (combined, ioOnly)
 
 import root-py
 
+effect Error
+
 source Py from "foo.py" ("read_value" as readValue, "risky_double" as riskyDouble)
 
 type Py => Int = "int"

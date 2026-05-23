@@ -23,6 +23,7 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , loadLangDescriptor
   , loadLangDescriptorFromText
   , defaultLangDescriptor
+  , matchNamePattern
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -34,6 +35,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Yaml as Y
 import GHC.Generics (Generic)
+import qualified Text.Parsec as P
 
 -- | How to access tuple/list elements by index
 data IndexStyle
@@ -80,10 +82,23 @@ data LangDescriptor = LangDescriptor
   { -- Identity
     ldName :: !Text
   , ldExtension :: !String
+  , -- Anchored regex (subset) a sourced *identifier* must match in this
+    -- language; emitted verbatim. Empty = no check.
+    ldNamePattern :: !Text
+  , -- Anchored regex (subset) a sourced *operator* symbol must match
+    -- (e.g. "+", "//"); operator vs identifier is decided by the symbol,
+    -- so "foo" and "+" are valid but "foo+" matches neither. Empty = no
+    -- check.
+    ldOperatorPattern :: !Text
   , -- Literals
     ldBoolTrue :: !Text
   , ldBoolFalse :: !Text
   , ldNullLiteral :: !Text
+  , -- Predicate template for "the expression is not null", with {{expr}}
+    -- placeholder. Used by IIfNotNull when lifting an inner transformation
+    -- through an Optional. Examples: "{{expr}} is not None" (Python),
+    -- "!is.null({{expr}})" (R). C++ handles its own form in CppPrinter.
+    ldNullCheckTemplate :: !Text
   , -- Non-finite Real literals: idiomatic source-level expressions for
     -- +Inf, -Inf, and NaN in the target language. Used by IRealLit
     -- printing when the literal payload is non-finite.
@@ -263,6 +278,8 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldRunCommand" (Y.Array mempty)
             . ins "ldIsCompiled" (Y.Bool False)
             -- Template field defaults
+            . ins "ldNamePattern" (Y.String "")
+            . ins "ldOperatorPattern" (Y.String "")
             . ins "ldAssignOp" (Y.String "=")
             . ins "ldLambdaTemplate" (Y.String "({{args}}) -> {{body}}")
             . ins "ldDoBlockExpr" (Y.String "(() -> {{expr}})")
@@ -316,9 +333,12 @@ defaultLangDescriptor name ext =
   LangDescriptor
     { ldName = name
     , ldExtension = ext
+    , ldNamePattern = ""
+    , ldOperatorPattern = ""
     , ldBoolTrue = "True"
     , ldBoolFalse = "False"
     , ldNullLiteral = "None"
+    , ldNullCheckTemplate = "{{expr}} is not None"
     , ldRealPosInf = "float('inf')"
     , ldRealNegInf = "float('-inf')"
     , ldRealNaN = "float('nan')"
@@ -379,3 +399,90 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteEntry = ""
     , ldDispatchRemoteFooter = ""
     }
+
+-- Anchored regex-subset matcher. The pattern lives entirely in the
+-- language descriptor (lang.yaml); no language-specific identifier rule
+-- is hardcoded here. Supported subset: literal characters, '\'-escape,
+-- '.' (any char), character classes '[...]' / '[^...]' with 'a-z'
+-- ranges, and the postfix quantifiers '*', '+', '?'. The whole input
+-- must match (implicitly anchored at both ends). A pattern that fails
+-- to parse is treated as "no constraint" (fail open) so a malformed
+-- descriptor never wrongly rejects a user's program.
+data RNode
+  = RChar Char
+  | RAny
+  | RClass Bool [(Char, Char)]
+  | RStar RNode
+  | RPlus RNode
+  | ROpt RNode
+
+matchNamePattern :: Text -> Text -> Bool
+matchNamePattern pat input =
+  case P.parse (pRegex <* P.eof) "name-pattern" (T.unpack pat) of
+    Left _ -> True
+    Right ns -> any null (matchNodes ns (T.unpack input))
+  where
+    pRegex :: P.Parsec String () [RNode]
+    pRegex = P.many pQuant
+
+    pQuant :: P.Parsec String () RNode
+    pQuant = do
+      a <- pAtom
+      P.option
+        a
+        ( P.choice
+            [ RStar a <$ P.char '*'
+            , RPlus a <$ P.char '+'
+            , ROpt a <$ P.char '?'
+            ]
+        )
+
+    pAtom :: P.Parsec String () RNode
+    pAtom =
+      P.choice
+        [ P.char '\\' >> RChar <$> P.anyChar
+        , RAny <$ P.char '.'
+        , pClass
+        , RChar <$> P.noneOf "\\.[]*+?"
+        ]
+
+    pClass :: P.Parsec String () RNode
+    pClass = do
+      _ <- P.char '['
+      neg <- P.option False (True <$ P.char '^')
+      rs <- P.many1 pRange
+      _ <- P.char ']'
+      return (RClass neg rs)
+
+    pRange :: P.Parsec String () (Char, Char)
+    pRange = do
+      lo <- P.noneOf "]"
+      P.option
+        (lo, lo)
+        (P.try (P.char '-' >> P.noneOf "]" >>= \hi -> return (lo, hi)))
+
+-- Match a node list against a string, returning every possible
+-- unconsumed suffix; the overall match succeeds iff some suffix is
+-- empty. Atoms always consume exactly one character, so the RStar
+-- recursion strictly shrinks the input and terminates.
+matchNodes :: [RNode] -> String -> [String]
+matchNodes [] s = [s]
+matchNodes (RStar n : rest) s =
+  matchNodes rest s ++ [r | s' <- stepAtom n s, r <- matchNodes (RStar n : rest) s']
+matchNodes (RPlus n : rest) s =
+  [r | s' <- stepAtom n s, r <- matchNodes (RStar n : rest) s']
+matchNodes (ROpt n : rest) s =
+  matchNodes rest s ++ [r | s' <- stepAtom n s, r <- matchNodes rest s']
+matchNodes (n : rest) s =
+  [r | s' <- stepAtom n s, r <- matchNodes rest s']
+
+-- Consume exactly one input character with a non-quantified atom.
+stepAtom :: RNode -> String -> [String]
+stepAtom _ [] = []
+stepAtom (RChar c) (x : xs) = [xs | x == c]
+stepAtom RAny (_ : xs) = [xs]
+stepAtom (RClass neg ranges) (x : xs) =
+  [xs | any (\(a, b) -> a <= x && x <= b) ranges /= neg]
+stepAtom RStar {} _ = []
+stepAtom RPlus {} _ = []
+stepAtom ROpt {} _ = []

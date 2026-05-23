@@ -760,16 +760,18 @@ fn sample_to_serial_type(sample: Option<&serde_json::Value>) -> crate::schema::S
 fn maybe_optional(inner: crate::schema::Schema, nullable: bool) -> crate::schema::Schema {
     use crate::schema::{Schema, SerialType};
     if !nullable { return inner; }
-    let inner_align = inner.alignment().max(1);
-    let inner_off = crate::shm::align_up(1, inner_align);
+    // Optional's voidstar slot is a relptr (RELNULL = absent); width
+    // and alignment are pointer-sized. Mirrors schema.rs's
+    // `make_optional_schema`.
     Schema {
         serial_type: SerialType::Optional,
         size: 1,
-        width: inner_off + inner.width,
-        offsets: vec![inner_off],
+        width: std::mem::size_of::<crate::shm::RelPtr>(),
+        offsets: Vec::new(),
         hint: None,
         parameters: vec![inner],
         keys: Vec::new(),
+        name: None,
     }
 }
 
@@ -857,6 +859,7 @@ unsafe fn merge_table_schema_with_json(
         hint: None,
         parameters: params,
         keys,
+        name: None,
     })
 }
 

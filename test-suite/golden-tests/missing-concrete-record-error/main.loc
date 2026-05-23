@@ -1,0 +1,25 @@
+-- A parameterized recursive record whose general definition exists
+-- but has no concrete language instance. The realizer picks a language
+-- for `foo`'s body based on the typeclass instances available for the
+-- source-level operators (`>` and `-`), then needs a concrete
+-- representation for `Container Int` in that language. None exists.
+--
+-- Pre-fix: morloc make hung indefinitely while inferConcreteVar
+-- recursed on Container's general-scope NamU body whose extracted key
+-- was Container itself.
+-- Post-fix: morloc make emits a clean
+--   "No concrete <lang> type for 'Container'"
+-- error and exits non-zero.
+
+module main (foo)
+
+import root
+import root-py
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+foo :: Int -> Container Int
+foo n ? n > 0 = {val = n, sub = foo (n - 1)}
+      : {val = 0, sub = Null}

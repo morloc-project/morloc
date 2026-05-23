@@ -121,6 +121,10 @@ data MorlocState = MorlocState
   , stateInstallForce :: Bool
   , stateInstallDir :: Maybe Path
   , stateClassDefs :: Map ClassName [Constraint]
+  , stateEffects :: Map.Map EffectLabel Bool
+  -- ^ Declared effects: label -> isEscapable (True = escapable). The
+  -- compiler hardcodes none; all entries come from `effect` /
+  -- `escapable effect` declarations.
   , stateLangRegistry :: LangRegistry
   , stateExportGroups :: Map Text ([Text], [Int])
   -- ^ Map from group name to (description lines, member export indices)
@@ -132,6 +136,10 @@ data MorlocState = MorlocState
   -- ^ Project root directory (directory of the entry-point file)
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
+  , stateAllowLocalModules :: Bool
+  -- ^ When False, import resolution ignores local/project-relative
+  -- modules and resolves only installed (system) modules. False in
+  -- eval mode (the API sandbox boundary) unless --allow-local-modules.
   , stateUnsafeSkipNullCheck :: Bool
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
@@ -140,6 +148,14 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
+  , stateSerialAncestors :: Set.Set TVar
+  -- ^ General-type names of records currently being lowered by
+  -- 'makeSerialAST''. Used to detect guarded self-recursive records:
+  -- on the way down we insert the FVar's general name; if we hit it
+  -- again, we emit 'SerialRec' instead of expanding the cycle. The
+  -- field is reset to empty at every top-level 'makeSerialAST' call
+  -- and saved/restored around each NamF descent, so it never leaks
+  -- across unrelated invocations.
   }
   deriving (Show)
 
@@ -216,6 +232,10 @@ data PackageMeta
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
   , packageMorlocDependencies :: [(Text, Text)]
+  -- | Optional path (relative to the module root) to a shell script that
+  -- runs once during `morloc install`, after the source is on disk and
+  -- after morloc deps are installed. Non-zero exit fails the install.
+  , packageSetup :: !(Maybe FilePath)
   }
   deriving (Show, Ord, Eq)
 
@@ -265,6 +285,10 @@ data Gamma = Gamma
   , gammaListSubs :: Map TVar TypeU
   -- | Solutions for SetVarU variables from set constraint solving (Stage 8).
   , gammaSetSubs :: Map TVar TypeU
+  -- | Solutions for effect-row tail variables ('EffectVar') from
+  -- effect-row unification. A separate namespace for the implicitly
+  -- universally-quantified effect variables, mirroring gammaNatSubs.
+  , gammaEffSubs :: Map TVar EffectSet
   -- | Generic primitive constraints (Member / Subset / Disjoint) waiting for
   -- enough information to discharge. Stage 9 of the tables refactor. The
   -- 'Constraint' values carried here are the same as the ones the
@@ -361,15 +385,18 @@ instance Defaultable MorlocState where
       , stateInstallForce = False
       , stateInstallDir = Nothing
       , stateClassDefs = Map.empty
+      , stateEffects = Map.empty
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
       , stateEvalMode = False
+      , stateAllowLocalModules = True
       , stateUnsafeSkipNullCheck = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
+      , stateSerialAncestors = Set.empty
       }
 
 instance Defaultable PackageMeta where
@@ -390,6 +417,7 @@ instance Defaultable PackageMeta where
       , packageDependencies = []
       , packageInclude = Nothing
       , packageMorlocDependencies = []
+      , packageSetup = Nothing
       }
 
 instance FromJSON Config where
@@ -434,6 +462,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "dependencies" .!= []
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
+      <*> o .:? "setup"
     where
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
         (,) <$> od Aeson..: "name" <*> od Aeson..: "git-hash"

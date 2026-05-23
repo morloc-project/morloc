@@ -76,11 +76,29 @@ overrideCmdDocLines ls (ArgDocRec vars fields) =
 overrideCmdDocLines ls (ArgDocAlias vars) =
   ArgDocAlias (vars { docLines = ls })
 
+-- | A "In <module>:<function>, " prefix used to locate a faulty argument
+-- in diagnostics. Falls back gracefully when the module or term name is
+-- unavailable at this stage.
+argLocPrefix :: Int -> MorlocMonad MDoc
+argLocPrefix i = do
+  mmod <- MM.gets stateModuleName
+  mfun <- Map.lookup i <$> MM.gets stateName
+  return $ case (mmod, mfun) of
+    (Just m, Just f) -> "In " <> pretty m <> ":" <> pretty f <> ", "
+    (Just m, Nothing) -> "In module " <> pretty m <> ", "
+    (Nothing, Just f) -> "In " <> pretty f <> ", "
+    (Nothing, Nothing) -> ""
+
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
 processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   (ts', argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
-  cmdargs <- zipWithM makeCmdArg ts' argdocs'
+  loc <- argLocPrefix i
+  cmdargs <-
+    sequence
+      [ makeCmdArg (loc <> "positional argument #" <> pretty n) t' a'
+      | (n, t', a') <- zip3 [(1 :: Int) ..] ts' argdocs'
+      ]
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
     CmdDocSet
@@ -110,7 +128,12 @@ processArgDoc i t r = do
   (t', r') <- reduceArgDoc i t r
   case (t', r') of
     (NamT _ _ _ ts, ArgDocRec args entries) -> do
-      cmdargs <- zipWithM makeCmdArg (map snd ts) (map (ArgDocAlias . snd) entries)
+      loc <- argLocPrefix i
+      cmdargs <-
+        sequence
+          [ makeCmdArg (loc <> "field " <> pretty k) ty (ArgDocAlias dv)
+          | ((k, ty), (_, dv)) <- zip ts entries
+          ]
       return $
         CmdDocSet
           { cmdDocDesc = docLines args
@@ -162,17 +185,32 @@ reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   return (NamT o v ps (zip keys (map fst entries)), ArgDocRec arg (zip keys args'))
 reduceArgDoc _ t r = return (t, r)
 
-makeCmdArg :: Type -> ArgDoc -> MorlocMonad CmdArg
-makeCmdArg recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
+makeCmdArg :: MDoc -> Type -> ArgDoc -> MorlocMonad CmdArg
+makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
   -- Set the metavar default for groups to the record type name
   let typedEntries = zipWith (\(k, t) (_, r) -> (k, (t, r))) rs entries
-  resolveArgDocVars typedEntries recType arg
-makeCmdArg t (ArgDocRec r _) = resolveArgDocVars [] t r
-makeCmdArg t (ArgDocAlias r) = resolveArgDocVars [] t r
-makeCmdArg _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI parameter"
+  resolveArgDocVars loc typedEntries recType arg
+makeCmdArg loc t (ArgDocRec r _) = resolveArgDocVars loc [] t r
+makeCmdArg loc t (ArgDocAlias r) = resolveArgDocVars loc [] t r
+makeCmdArg _ _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI parameter"
 
-resolveArgDocVars :: [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
-resolveArgDocVars rs t r
+resolveArgDocVars :: MDoc -> [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
+resolveArgDocVars loc rs t r
+  -- A default value is only meaningful for a flag (true:/false:) or a
+  -- flagged optional argument (arg:). On a positional argument it was
+  -- silently discarded, leaving the argument required with no diagnostic.
+  -- An unrolled record group is exempt: each field carries its own tags.
+  | isJust (docDefault r)
+      && isNothing (docArg r)
+      && isNothing (docTrue r)
+      && isNothing (docFalse r)
+      && not (not (null rs) && docUnroll r == Just True) =
+      MM.throwSystemError $
+        loc
+          <> " is given a default value, but positional arguments are"
+          <> " required and cannot take defaults. Either remove the"
+          <> " 'default:' line, or make the field optional by adding an"
+          <> " 'arg:' docstring entry (e.g. \"arg: -f/--flag\")."
   | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
   | length rs > 0 && docUnroll r == Just True = resolveGrp t r rs
   | t == VarT MBT.bool = resolveFlagCmdArg r

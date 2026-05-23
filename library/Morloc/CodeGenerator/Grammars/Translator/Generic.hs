@@ -416,23 +416,7 @@ genericLowerConfig desc srcNamer = cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
-        , lcMakeDoBlock = \_ stmts expr ->
-            let suspendBlock = ldDoBlockBlock desc
-             in if T.null suspendBlock
-                  then
-                    -- pass stmts through, wrap expr only
-                    let wrapped = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
-                     in (stmts, wrapped)
-                  else
-                    -- absorb stmts into block
-                    case stmts of
-                      [] ->
-                        let wrapped = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
-                         in ([], wrapped)
-                      _ ->
-                        let body = render (vsep (stmts <> [expr]))
-                            wrapped = pretty $ substituteT suspendBlock [("body", body)]
-                         in ([], wrapped)
+        , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
         , lcMakeFunction = \mname args _ priorLines body headForm ->
@@ -578,6 +562,40 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       }
+
+-- Build a suspended do-block thunk. When the thunk form can hold
+-- statements (non-empty ldDoBlockBlock, e.g. an R closure body) the
+-- prior statements are absorbed into that block. When it cannot (empty
+-- ldDoBlockBlock, e.g. a Python lambda) and there ARE prior statements,
+-- emit a named local def as a hoisted line and reference it (uncalled)
+-- so its body runs only when the thunk is forced; hoisting the
+-- statements into the enclosing scope instead would run the effect
+-- before a handler. With no prior statements a plain expression thunk
+-- (ldDoBlockExpr) always suffices.
+genericMakeDoBlock :: LangDescriptor -> LowerConfig IndexM -> TypeF -> [MDoc] -> MDoc -> IndexM ([MDoc], MDoc)
+genericMakeDoBlock desc cfg _ stmts expr
+  | not (T.null suspendBlock) = case stmts of
+      [] -> return ([], exprThunk)
+      _ ->
+        let body = render (vsep (stmts <> [expr]))
+         in return ([], pretty $ substituteT suspendBlock [("body", body)])
+  | null stmts = return ([], exprThunk)
+  | otherwise = do
+      idx <- lcNewIndex cfg
+      let nm = helperNamer idx
+          header =
+            pretty $
+              substituteT (ldFuncDefHeader desc) [("name", render nm), ("args", "")]
+          retLine = pretty $ substituteT (ldReturnTemplate desc) [("expr", render expr)]
+          def = case ldBlockStyle desc of
+            BraceBlock -> block 4 header (vsep (stmts <> [retLine]))
+            EndKeywordBlock ->
+              vsep [header, indent 4 (vsep (stmts <> [retLine])), pretty (ldBlockEnd desc)]
+            IndentBlock -> nest 4 (vsep [header, vsep (stmts <> [retLine])])
+      return ([def], nm)
+  where
+    suspendBlock = ldDoBlockBlock desc
+    exprThunk = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
 
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
 genericMakeLet desc namer i p1 p2 =
@@ -770,6 +788,43 @@ genericPrintStmt desc = go
                 , indent 4 (vsep (map go thenStmts ++ [printE thenExpr]))
                 , "} else {"
                 , indent 4 (vsep (map go elseStmts ++ [printE elseExpr]))
+                , "}"
+                ]
+    go (IIfNotNull resultVar _ source unwrapVar _ bodyStmts bodyExpr) =
+      let srcVar = unwrapVar <> "_src"
+          srcDoc = pretty srcVar
+          srcBind = srcDoc <+> pretty (ldAssignOp desc) <+> printE source
+          condDoc = pretty $ substituteT (ldNullCheckTemplate desc) [("expr", render srcDoc)]
+          bindUnwrap = pretty unwrapVar <+> pretty (ldAssignOp desc) <+> srcDoc
+       in case ldBlockStyle desc of
+            IndentBlock ->
+              vsep
+                [ srcBind
+                , pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc)
+                , nest 4
+                    ( vsep
+                        ( ("if" <+> condDoc <> ":")
+                            : bindUnwrap
+                            : map go bodyStmts
+                            ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE bodyExpr]
+                        )
+                    )
+                ]
+            BraceBlock ->
+              vsep
+                [ srcBind <> ";"
+                , pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc) <> ";"
+                , "if" <+> parens condDoc <+> "{"
+                , indent 4 (vsep (bindUnwrap <> ";" : map go bodyStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE bodyExpr <> ";"]))
+                , "}"
+                ]
+            EndKeywordBlock ->
+              vsep
+                [ srcBind
+                , pretty resultVar <+> "<-" <+> "if" <+> parens condDoc <+> "{"
+                , indent 4 (vsep (bindUnwrap : map go bodyStmts ++ [printE bodyExpr]))
+                , "} else {"
+                , indent 4 (pretty (ldNullLiteral desc))
                 , "}"
                 ]
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"

@@ -1,0 +1,145 @@
+-- Recursive TUPLE ALIASES, exercised via native morloc traversals.
+--
+-- Pair  -- single-parameter, single self-reference under one optional
+--          slot. Builds a length-n linked list as nested tuples in
+--          Python, then counts length natively in morloc using `.0`
+--          and `.1` selectors (morloc tuple indices are 0-based).
+--
+-- BTree -- single-parameter, TWO self-references in one body. Exercises
+--          the branching-recursion path through the typechecker:
+--          unifying both `.1 x` and `.2 x` against `BTree a` requires
+--          the alias-reduction rules to fire twice in the same
+--          recursive equation.
+--
+-- Pair2 -- two-parameter recursion. Verifies that BOTH parameters
+--          thread cleanly through TypeEval's bnd protection -- a bug
+--          in parameter substitution would surface as a unification
+--          failure on the second arg.
+--
+-- Stress -- 400-deep right-spined Pair Int. Python builds iteratively
+--          (no recursion-limit pressure on the build side); morloc
+--          native code traverses recursively in the Py pool. Catches
+--          quadratic-time schema parsing, stack overflow in the
+--          runtime deserializer, and SHM growth. Depth capped at 400
+--          because the morloc-native recursion compiles to Python and
+--          each morloc-level call costs ~2 Python frames against the
+--          default sys.recursionlimit of 1000 -- language limits are
+--          the programmer's responsibility, not ours.
+--
+-- NOT TESTED HERE: cross-language traversal of recursive tuple aliases
+-- (e.g. Cpp consuming a Py-built Pair Int). The C++ codegen currently
+-- has no path to emit a forward-declared struct for a tuple-alias's
+-- recursive position, so the generated pool refers to an undeclared
+-- name. This is a real gap; tracked separately from these tests.
+
+-- Native construction (the *Build functions) exercises the literal
+-- tuple form of a recursive alias as a value (not just consumed via
+-- selectors). This catches bugs in checkE's tuple-literal handling
+-- and in Express.hs's TupS-with-alias-type case; both surface only
+-- when a tuple literal at a recursive-alias type appears in source.
+--
+-- JSON I/O (the *FromJson wrappers and the *Build nexus outputs)
+-- exercises the recursive-Schema arms of json_to_voidstar and
+-- to_json. The JSON path doesn't go through any sourced language pool
+-- -- the nexus binary parses input JSON straight into voidstar via
+-- json.rs and renders output JSON back -- so this isolates the JSON
+-- runtime layer from the language pools.
+
+module main (pairLenPy, btreeSizePy, btreeSumPy, pair2LenPy, pairLenDeepPy,
+             pairBuild, btreeBuild, pair2Build,
+             pairFromJson, btreeFromJson, pair2FromJson)
+
+import root
+import root-py
+import maybe-py
+
+type Pair a = (a, ?(Pair a))
+
+-- Branching tuple recursion: a value with two optional self-references
+-- in one body. Each instance has a payload plus up to two children.
+type BTree a = (a, ?(BTree a), ?(BTree a))
+
+-- Two-parameter recursion. The Pair2 alias keeps both parameters in
+-- the recursive position, so both must thread through TypeEval.
+type Pair2 a b = (a, b, ?(Pair2 a b))
+
+source Py from "foo.py" ("build_pair"      as buildPairPy
+                       , "build_pair_deep" as buildPairDeepPy
+                       , "build_btree"     as buildBTreePy
+                       , "build_pair2"     as buildPair2Py)
+
+buildPairPy     :: Int -> Pair Int
+buildPairDeepPy :: Int -> Pair Int
+buildBTreePy    :: Int -> BTree Int
+buildPair2Py    :: Int -> Pair2 Int Str
+
+-- Count chain length via `.1` selector. Same shape as pairLength in
+-- the record test, but here the recursion lives in a tuple slot.
+pairLength :: Pair a -> Int
+pairLength x ? isNull (.1 x) = 1
+             : 1 + pairLength (require (.1 x))
+
+-- Count nodes via two branching recursive calls. Tests that both
+-- alias-reduction queries on `.1 x` and `.2 x` resolve to `?(BTree a)`
+-- under the same alias-equation walk.
+btreeSize :: BTree a -> Int
+btreeSize x ?  isNull (.1 x) &&     isNull (.2 x) = 1
+            ?  isNull (.1 x) && not (isNull (.2 x)) = 1 + btreeSize (require (.2 x))
+            ? not (isNull (.1 x)) &&  isNull (.2 x) = 1 + btreeSize (require (.1 x))
+            : 1 + btreeSize (require (.1 x)) + btreeSize (require (.2 x))
+
+-- Count length on a two-parameter Pair2. The `b` parameter (Str)
+-- threads through every level even though `pair2Length` only reads
+-- the third slot.
+pair2Length :: Pair2 a b -> Int
+pair2Length x ? isNull (.2 x) = 1
+              : 1 + pair2Length (require (.2 x))
+
+-- Sum every payload by descending into both subtrees. Factors the
+-- optional-handling into a helper so the recursive function reads as
+-- a structural recursion.
+btreeSum :: BTree Int -> Int
+btreeSum x = .0 x + maybeSum (.1 x) + maybeSum (.2 x)
+
+maybeSum :: ?(BTree Int) -> Int
+maybeSum m ? isNull m = 0
+           : btreeSum (require m)
+
+pairLenPy n     = pairLength (buildPairPy n)
+btreeSizePy d   = btreeSize (buildBTreePy d)
+btreeSumPy d    = btreeSum (buildBTreePy d)
+pair2LenPy n    = pair2Length (buildPair2Py n)
+pairLenDeepPy n = pairLength (buildPairDeepPy n)
+
+-- Native construction. The recursive call returns @Pair Int@ but the
+-- second tuple slot expects @?(Pair Int)@; the typechecker's tuple
+-- element coercion (CoerceToOptional) handles that automatically. The
+-- terminator uses @Null@ in the optional slot.
+pairBuild :: Int -> Pair Int
+pairBuild n ? n > 0 = (n, pairBuild (n - 1))
+            : (0, Null)
+
+-- Branching native builder: both recursive arms appear in one literal.
+-- Uses @let@ to share the subtree value rather than rebuild it twice.
+btreeBuild :: Int -> BTree Int
+btreeBuild d ? d <= 0 = (1, Null, Null)
+             : let sub = btreeBuild (d - 1)
+               in (0, sub, sub)
+
+-- Multi-parameter native builder. The Str slot (@b@) carries a
+-- constant per level; the recursion still threads through.
+pair2Build :: Int -> Pair2 Int Str
+pair2Build n ? n > 0 = (n, "x", pair2Build (n - 1))
+              : (0, "end", Null)
+
+-- JSON-input wrappers: the nexus parses the recursive value from JSON
+-- via json_to_voidstar, then native code counts it. Exposes a
+-- monomorphic type so the nexus can pick the right schema.
+pairFromJson :: Pair Int -> Int
+pairFromJson x = pairLength x
+
+btreeFromJson :: BTree Int -> Int
+btreeFromJson x = btreeSize x
+
+pair2FromJson :: Pair2 Int Str -> Int
+pair2FromJson x = pair2Length x
