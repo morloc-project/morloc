@@ -26,7 +26,7 @@ Decidability follows the rules in plans/tables/10-rec-solver-decidability.md:
 - Intersection (@&@) defers when either side has a row-var tail.
 
 Type-level field types are 'TypeU' values. Per-field type unification is the
-responsibility of the calling typechecker — this solver only checks structural
+responsibility of the calling typechecker - this solver only checks structural
 equality of the field set.
 -}
 module Morloc.Typecheck.RecSolver

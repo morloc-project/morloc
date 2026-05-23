@@ -8,7 +8,7 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Solves equality and basic constraint problems on Set-kinded type
-expressions (Stage 8 of the tables refactor — foundational kind layer).
+expressions (Stage 8 of the tables refactor - foundational kind layer).
 
 The canonical form is a sorted, dedup'd list of element 'TypeU' values
 plus an optional set-tail variable. Two sets are equal when their

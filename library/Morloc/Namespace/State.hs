@@ -281,7 +281,7 @@ data Gamma = Gamma
   -- of the tables refactor; see plans/tables/10-rec-solver-decidability.md).
   , gammaRecSubs :: Map TVar TypeU
   -- | Solutions for ListVarU variables from list constraint solving (Stage 8
-  -- of the tables refactor — foundational kind layer).
+  -- of the tables refactor - foundational kind layer).
   , gammaListSubs :: Map TVar TypeU
   -- | Solutions for SetVarU variables from set constraint solving (Stage 8).
   , gammaSetSubs :: Map TVar TypeU
@@ -305,7 +305,7 @@ data Gamma = Gamma
   -- @Nothing@ means "no signature has been claimed yet"; the next
   -- @VarS (MonomorphicExpr (Just _) _)@ handled by 'synthE' will lock
   -- in its declared @econs@ as the assumption set. @Just@ (even @Just
-  -- []@) means the slot is taken — subsequent inner VarS calls add
+  -- []@) means the slot is taken - subsequent inner VarS calls add
   -- only to @gammaConstraints@, never to assumptions. The Maybe
   -- distinguishes "outermost-not-seen-yet" from "outermost-seen-with-
   -- empty-econs", which a plain list cannot.

@@ -447,7 +447,7 @@ expressPolyExpr
 -- target language (e.g. `x.field` for .isFile). Wrapping in
 -- PolyManifold creates a nested manifold whose body's `return` leaks
 -- into the parent's scope when the manifold gets inlined by codegen.
--- Treating PatCallP like srcInline matches its semantics — it's
+-- Treating PatCallP like srcInline matches its semantics - it's
 -- always a leaf expression, never a real function call.
 expressPolyExpr
   findRemote

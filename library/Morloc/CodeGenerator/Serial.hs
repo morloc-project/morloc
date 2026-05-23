@@ -320,7 +320,7 @@ makeSerialAST m lang t0 = do
     makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv)) = do
       anc <- MM.gets stateSerialAncestors
       -- Cycle detection: a bare reference to a record currently being
-      -- lowered is a guarded self-recursive back-edge (see §3 in the
+      -- lowered is a guarded self-recursive back-edge (see seciont 3 in the
       -- recursive-fields plan -- TypeEval leaves these as VarU/VarF).
       -- Emit SerialRec instead of trying to look up a packer.
       if Set.member gv anc

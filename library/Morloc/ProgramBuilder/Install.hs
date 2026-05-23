@@ -203,9 +203,9 @@ matchIgnorePattern pat relPath
            || (dir ++ "/") `isPrefixOf` relPath
            || ("/" ++ dir ++ "/") `isInfixOf` ("/" ++ relPath)
            || takeFileName (takeDirectory relPath) == dir
-  -- Pattern contains / → match against full relative path
+  -- Pattern contains / -> match against full relative path
   | '/' `elem` pat = matchGlob pat relPath
-  -- Pattern without / → match against filename only
+  -- Pattern without / -> match against filename only
   | otherwise = matchGlob pat (takeFileName relPath)
 
 -- ======================================================================

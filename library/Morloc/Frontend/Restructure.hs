@@ -894,9 +894,9 @@ refineKinds dag = do
     --
     -- Implicit constraints come from canonical operator forms:
     --
-    -- - @RecExtendU k _ (RecVarU r)@ — extending a polymorphic Rec by
+    -- - @RecExtendU k _ (RecVarU r)@ - extending a polymorphic Rec by
     --   a literal key emits @CDisjoint (SetLitU [StrLitU k]) (KeysU r)@.
-    -- - @RecRestrictU r l@ — restricting a Rec to a list of keys emits
+    -- - @RecRestrictU r l@ - restricting a Rec to a list of keys emits
     --   @CSubset (ListToSetU l) (KeysU r)@.
     --
     -- Constraints are de-duplicated against the existing @econs@ set so

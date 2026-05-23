@@ -2052,7 +2052,7 @@ tryExtractStrListPre g (AnnoS _ _ e) = tryEvalStrList g e
 -- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
 -- and the corresponding arguments are int literals or let-bound ints,
 -- inject NatVarU solutions into gamma so the return type gets concrete
--- dimensions. Same for Str labels (e.g., f:Str -> Tagged f a) — extract
+-- dimensions. Same for Str labels (e.g., f:Str -> Tagged f a) - extract
 -- string literals from the corresponding args and inject StrVarU solutions
 -- into gammaStrSubs. See plans/tables/05-labels-as-type-vars.md.
 resolveNatLabels ::
