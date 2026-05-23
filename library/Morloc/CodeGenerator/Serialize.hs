@@ -393,7 +393,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           case params of
             [] -> pretty t
             ps -> parens (pretty t <+> hsep (map go ps))
-        go (RecF (FV t _)) = pretty t
+        go (RecF t _) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))

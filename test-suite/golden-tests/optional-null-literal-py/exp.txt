@@ -5,7 +5,7 @@
 [1.5,null,2.5]
 {"x":null,"y":"hi"}
 {"x":42,"y":"bye"}
-[null,null]
+[null,7]
 null
 7
 {"a":null}

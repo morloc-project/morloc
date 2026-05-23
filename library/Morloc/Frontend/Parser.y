@@ -305,10 +305,33 @@ nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
   | 'object'   { ($1, NamObject) }
 
-nam_constructor :: { (Text, Bool) }
-  : STRING                    { (getString $1, True) }
-  | UPPER                     { (getName $1, False) }
-  | LOWER                     { (getName $1, False) }
+-- Constructor for a named-type definition (record/object). For the
+-- STRING form (a concrete language-specific type), optional positional
+-- args may follow (e.g. `"container_t<$1>" a`), parallel to the type-
+-- alias `concrete_rhs` syntax. The args are restricted to a non-`{`
+-- subset so they don't clash with the `{...}` field-list of
+-- `opt_nam_entries`.
+nam_constructor :: { (Text, Bool, [TypeU]) }
+  : STRING nam_constructor_args   { (getString $1, True, $2) }
+  | UPPER                         { (getName $1, False, []) }
+  | LOWER                         { (getName $1, False, []) }
+
+nam_constructor_args :: { [TypeU] }
+  : {- empty -}                                  { [] }
+  | nam_constructor_args nam_constructor_arg     { $1 ++ [$2] }
+
+-- A restricted atom-type for STRING-constructor positional args. The
+-- `{...}` cases of `atom_type` are excluded to avoid a shift/reduce
+-- conflict with `opt_nam_entries`.
+nam_constructor_arg :: { TypeU }
+  : '(' type ')'                  { $2 }
+  | '(' type ',' type_list1 ')'   { BT.tupleU ($2 : $4) }
+  | '[' type ']'                  { BT.listU $2 }
+  | '?' nam_constructor_arg       { OptionalU $2 }
+  | UPPER                         { VarU (TV (getName $1)) }
+  | LOWER                         { VarU (TV (getName $1)) }
+  | STRING                        { StrLitU (getString $1) }
+  | INTEGER                       { NatLitU (getInt $1) }
 
 opt_nam_entries :: { [(Key, TypeU)] }
   : {- empty -}              { [] }

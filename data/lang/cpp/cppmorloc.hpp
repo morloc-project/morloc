@@ -53,18 +53,167 @@ template<typename A, typename B> struct is_std_pair<std::pair<A, B>> : std::true
 template<typename T> struct is_std_optional : std::false_type {};
 template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {};
 
-// Marker for std::unique_ptr<T> -- used by the marshalling code to
-// detect a recursive-optional field's inner heap-indirected payload
-// (`std::optional<std::unique_ptr<T>>` is the morloc-emitted C++ type
-// for a `?T` field where T is a self-recursive record).
-template<typename T> struct is_std_unique_ptr : std::false_type {};
-template<typename T, typename D> struct is_std_unique_ptr<std::unique_ptr<T, D>> : std::true_type {};
+// shared_ptr<T> is the C++ surface form for a `?T` field at a recursive
+// cycle position (T's body would be incomplete inside its own
+// definition). `nullptr == absent`. The marshalling layer detects this
+// shape and handles the wire-format relptr at the field's slot.
+template<typename T> struct is_std_shared_ptr : std::false_type {};
+template<typename T> struct is_std_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_non_vector_container_v =
     is_std_list<T>::value || is_std_forward_list<T>::value ||
     is_std_deque<T>::value || is_std_stack<T>::value ||
     is_std_queue<T>::value;
+
+// ============================================================
+// Field representation dispatch (D1)
+// ============================================================
+//
+// The morloc encoding rule for `?T` at C++ field positions:
+//   - `?T` -> std::optional<T> everywhere sizeof(T) is known.
+//   - `?T` -> some pointer-shape (null == absent) at recursive-cycle
+//     positions where sizeof(T) is not yet known.
+//
+// Pointer-shape is polymorphic within a closed set (shared_ptr,
+// unique_ptr, raw T*). The codegen emits generic wrap/deref calls and
+// the C++ template machinery resolves which wrapper to use at compile
+// time. The value/pointer axis is enforced by static_assert: a user-
+// supplied struct that puts optional<T> where the rule says pointer
+// (or vice versa) gets a clear error.
+
+namespace mlc {
+
+template<typename T> struct is_pointer_shape : std::false_type {};
+template<typename T> struct is_pointer_shape<std::shared_ptr<T>> : std::true_type {};
+template<typename T> struct is_pointer_shape<std::unique_ptr<T>> : std::true_type {};
+template<typename T> struct is_pointer_shape<T*>                 : std::true_type {};
+
+// Pointer-shape traits. Primary intentionally undefined; only
+// recognized pointer kinds get specializations.
+template<typename FieldT> struct pointer_traits;
+
+template<typename T>
+struct pointer_traits<std::shared_ptr<T>> {
+    using inner = T;
+    static std::shared_ptr<T> wrap(T&& v)              { return std::make_shared<T>(std::move(v)); }
+    static std::shared_ptr<T> wrap(const T& v)         { return std::make_shared<T>(v); }
+    static std::shared_ptr<T> absent()                 { return nullptr; }
+    static const T& deref(const std::shared_ptr<T>& p) { return *p; }
+    static bool has_value(const std::shared_ptr<T>& p) { return p != nullptr; }
+};
+
+template<typename T>
+struct pointer_traits<std::unique_ptr<T>> {
+    using inner = T;
+    static std::unique_ptr<T> wrap(T&& v)              { return std::make_unique<T>(std::move(v)); }
+    static std::unique_ptr<T> wrap(const T& v)         { return std::make_unique<T>(v); }
+    static std::unique_ptr<T> absent()                 { return nullptr; }
+    static const T& deref(const std::unique_ptr<T>& p) { return *p; }
+    static bool has_value(const std::unique_ptr<T>& p) { return p != nullptr; }
+};
+
+// Raw pointer T*: READ-ONLY at field positions. The codegen has no
+// way to manage the pointee's lifetime when constructing a value, so
+// `wrap` is armed with a static_assert that fires at any call site
+// the codegen tries to materialize a T* field from a fresh value.
+// Useful for FFI consumer-side scenarios where the user's struct
+// already holds a T* owned by external code.
+template<typename T>
+struct pointer_traits<T*> {
+    using inner = T;
+    static T* wrap(T&&) {
+        static_assert(sizeof(T*) == 0,
+            "Cannot construct a field of type T* natively in C++. "
+            "Raw pointers carry no ownership information, so the morloc "
+            "codegen has no way to manage the pointee's lifetime. Use "
+            "std::shared_ptr or std::unique_ptr if native construction "
+            "is needed; or restrict the enclosing record to consumer-"
+            "side use only.");
+        return nullptr;
+    }
+    static T* absent()                  { return nullptr; }
+    static const T& deref(T* p)         { return *p; }
+    static bool has_value(T* p)         { return p != nullptr; }
+};
+
+// Generic field-construction entry point: the codegen emits
+//   {a, mlc::wrap_field<decltype(rec_t::field)>(value)}
+// at every aggregate-init / field-assign site. The static_assert
+// enforces the value/pointer axis of the encoding rule: ?T at a
+// recursive-cycle position must be pointer-shaped; ?T everywhere
+// else must be std::optional<T>; non-optional fields pass through.
+template<typename FieldT, typename Inner>
+FieldT wrap_field(Inner&& v) {
+    static_assert(
+        is_pointer_shape<FieldT>::value
+            || std::is_same_v<FieldT, std::optional<std::remove_cv_t<std::remove_reference_t<Inner>>>>
+            || std::is_constructible_v<FieldT, Inner>,
+        "Field type doesn't match the morloc encoding rule. "
+        "?T at a recursive-cycle position expects a pointer-shape "
+        "(std::shared_ptr<T>, std::unique_ptr<T>, or T*); "
+        "?T everywhere else expects std::optional<T>; "
+        "non-optional fields expect T directly."
+    );
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::wrap(std::forward<Inner>(v));
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return FieldT(std::forward<Inner>(v));
+    } else {
+        return FieldT(std::forward<Inner>(v));
+    }
+}
+
+template<typename FieldT>
+FieldT wrap_field_absent() {
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::absent();
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return std::nullopt;
+    } else {
+        static_assert(sizeof(FieldT) == 0,
+            "wrap_field_absent called on a non-nullable field type. "
+            "Only pointer-shapes and std::optional<T> can be absent.");
+        return FieldT{};
+    }
+}
+
+// Null-literal overload: morloc's `Null` codegens to `std::nullopt`,
+// which then flows into the field-construction site. For an optional
+// field that's just an assignment; for a pointer-shape field it must
+// resolve to nullptr. This overload routes both through
+// wrap_field_absent so the right "absent" value is constructed for
+// the field's actual type.
+template<typename FieldT>
+FieldT wrap_field(std::nullopt_t) {
+    return wrap_field_absent<FieldT>();
+}
+
+// Generic field-read entry point. Returns the underlying value by
+// const-reference, dispatching on whether the field is wrapped.
+template<typename FieldT>
+decltype(auto) deref_field(const FieldT& f) {
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::deref(f);
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return (*f);
+    } else {
+        return (f);
+    }
+}
+
+template<typename FieldT>
+bool field_has_value(const FieldT& f) {
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::has_value(f);
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return f.has_value();
+    } else {
+        return true;
+    }
+}
+
+} // namespace mlc
 
 
 // ============================================================
@@ -329,12 +478,21 @@ size_t get_shm_size(const Schema* schema, const std::optional<T>& data) {
     return schema->width + (inner_align - 1) + inner_size;
 }
 
-// unique_ptr: forwards to the pointee's get_shm_size. Used inside the
-// optional<unique_ptr<T>> recursive-record path.
+// shared_ptr<T>: the C++ surface form for `?T` at a recursive cycle
+// position. Mirrors the optional<T> wire-format handling exactly --
+// the schema is still the `?T` schema, and the slot is still a single
+// relptr. nullptr == absent (RELNULL); non-null == present with the
+// pointee occupying the inner slot.
 template<typename T>
-size_t get_shm_size(const Schema* schema, const std::unique_ptr<T>& data) {
-    if (!data) return 0;
-    return get_shm_size(schema, *data);
+size_t get_shm_size(const Schema* schema, const std::shared_ptr<T>& data) {
+    if (!data) {
+        return schema->width;
+    }
+    const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+    size_t inner_size = get_shm_size(inner_schema, *data);
+    size_t inner_align = schema_alignment_cpp(inner_schema);
+    if (inner_align == 0) inner_align = 1;
+    return schema->width + (inner_align - 1) + inner_size;
 }
 
 size_t get_shm_size(const Schema* schema, const std::string& data) {
@@ -663,19 +821,25 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::opt
     return dest;
 }
 
-// unique_ptr: a recursive optional field's inner heap-indirected
-// payload. The Optional overload above has already allocated the slot
-// for T's body; here we just write T's contents into that slot.
+// shared_ptr<T>: the C++ surface form for `?T` at a recursive cycle.
+// Writes the wire-format relptr at dest (RELNULL when absent),
+// allocates the inner slot when present, and recurses into the
+// pointee. Mirrors the optional<T> overload above exactly.
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::unique_ptr<T>& data) {
+void* toAnything(void* dest, void** cursor, const Schema* schema, const std::shared_ptr<T>& data) {
     if (!data) {
-        // Shouldn't happen if the optional<unique_ptr<T>> reached us
-        // with has_value() == true, but be defensive: leave dest alone
-        // and don't dispatch further. A null unique_ptr inside an
-        // optional with has_value() == true is a user-error.
-        return dest;
+        *((relptr_t*)dest) = RELNULL;
+    } else {
+        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        size_t inner_align = schema_alignment_cpp(inner_schema);
+        if (inner_align == 0) inner_align = 1;
+        *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), inner_align));
+        *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(*cursor));
+        void* inner_dest = *cursor;
+        *cursor = static_cast<char*>(*cursor) + inner_schema->width;
+        toAnything(inner_dest, cursor, inner_schema, *data);
     }
-    return toAnything(dest, cursor, schema, *data);
+    return dest;
 }
 
 
@@ -830,16 +994,20 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         return std::optional<InnerT>(
             fromAnything(inner_schema, inner_data, static_cast<InnerT*>(nullptr), base_ptr));
     }
-    else if constexpr (is_std_unique_ptr<T>::value) {
-        // A unique_ptr is the natural C++ encoding of a recursive
-        // optional's heap-indirected payload (e.g. tail :: ?LL becomes
-        // `std::optional<std::unique_ptr<ll_t>>` in C++). The Optional
-        // branch above has already resolved the wire-format relptr and
-        // is passing us the abs ptr to the inner T's body; we just
-        // construct T on the heap and wrap.
+    else if constexpr (is_std_shared_ptr<T>::value) {
+        // shared_ptr<T> is the C++ surface form for `?T` at a recursive
+        // cycle. The wire slot is a single relptr (RELNULL == absent).
+        // Resolve it, then construct shared_ptr<T> wrapping the
+        // recursive recurse-into-pointee result.
         using PointeeT = typename T::element_type;
-        return std::make_unique<PointeeT>(
-            fromAnything(schema, data, static_cast<PointeeT*>(nullptr), base_ptr));
+        relptr_t relptr = *(const relptr_t*)data;
+        if (relptr == RELNULL) {
+            return std::shared_ptr<PointeeT>(nullptr);
+        }
+        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const void* inner_data = resolve_relptr_cpp(relptr, base_ptr);
+        return std::make_shared<PointeeT>(
+            fromAnything(inner_schema, inner_data, static_cast<PointeeT*>(nullptr), base_ptr));
     }
     else if constexpr (std::is_arithmetic_v<T>) {
         // Primitives (int, double, float, etc.) — read at schema width and

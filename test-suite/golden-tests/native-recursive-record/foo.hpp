@@ -2,16 +2,26 @@
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <vector>
 
-// Forward-declared recursive struct types. Recursive fields must use
-// either std::vector<T> (size-bounded by base case []) or
-// std::optional<T> (size-bounded by base case nullopt). Direct
-// std::optional<T> of an incomplete T is not legal in C++; wrap via
-// pointer for the LL case.
+// Forward-declared recursive struct types.
+// - tree_t: cycle broken by std::vector<tree_t> (vector's internal
+//   indirection breaks the incomplete-type problem).
+// - ll_t: cycle broken by std::shared_ptr<ll_t> at the optional
+//   field. `nullptr == absent` matches the morloc-level ?LL
+//   semantics directly (the morloc encoding rule maps `?(recursive
+//   T)` to a single pointer-shape with null == absent).
 struct tree_t;
 struct ll_t;
+
+// container_t<T>: parameterized recursive record.
+// `sub` cycle broken by std::shared_ptr<container_t<T>>; nullptr == absent
+// matches the morloc-level `?(Container a)` semantics.
+template<typename T>
+struct container_t {
+    T val;
+    std::shared_ptr<container_t<T>> sub;
+};
 
 struct tree_t {
     int64_t value;
@@ -20,7 +30,7 @@ struct tree_t {
 
 struct ll_t {
     int64_t head;
-    std::optional<std::unique_ptr<ll_t>> tail;
+    std::shared_ptr<ll_t> tail;
 };
 
 inline int64_t sum_tree(const tree_t& t) {
@@ -34,9 +44,9 @@ inline int64_t sum_tree(const tree_t& t) {
 inline int64_t ll_len(const ll_t& node) {
     int64_t n = 1;
     const ll_t* cur = &node;
-    while (cur->tail.has_value()) {
+    while (cur->tail) {
         n += 1;
-        cur = cur->tail->get();
+        cur = cur->tail.get();
     }
     return n;
 }

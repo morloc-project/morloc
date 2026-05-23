@@ -1451,6 +1451,77 @@ checkE i g (RealS si x) t = do
   if BT.isRealBaseType t || BT.isRealBaseType tEval
     then return (g, t, RealS si x)
     else checkEFallback i g (RealS si x) t
+-- Bidirectional-checking rule for function application. Standard
+-- App-Check from Dunfield-Krishnaswami: synthesise f, instantiate
+-- its Foralls to fresh existentials, then unify the function's
+-- return type with the expected type BEFORE checking the args. This
+-- pins the function's parameter existentials so each arg is checked
+-- at a concrete type rather than at an open existential.
+--
+-- Motivating case: a literal at a structurally recursive type
+-- (e.g. `type Pair a = (a, ?(Pair a))`) needs to be CHECKED at
+-- `Pair Str` so the existing checkE TupS / checkOptionalLit rules
+-- can unfold the alias one ply at a time. Synthesis would commit to
+-- a finite tuple shape `(Str, (Str, ?ex))`, and rolling that back
+-- into the recursive alias is narrowing, not subtyping.
+--
+-- The rule fires only when the function's return type after
+-- ForallU-stripping is a bare existential variable (the
+-- `forall a. ... -> a` shape, post-instantiation). Two reasons:
+--
+--   1. That is exactly the case where pre-subtype is informative
+--      and safe -- it just pins the type variable to whatever the
+--      expected type is. There are no type-level transformations
+--      (RecDiff `r - f`, NatArith `m * n`, OptionalU wrappers, etc.)
+--      to invert.
+--   2. For functions with structured return types (e.g.
+--      `f :: T1 n Real -> T1 n Real` or `dropF :: f:Str -> r - f`),
+--      pre-subtype either defers uselessly (matching NatVar against
+--      NatVar) or over-commits (forcing the row variable to a shape
+--      the actual arg cannot satisfy). The OLD synth+subtype path
+--      via checkEFallback handles those cases correctly.
+--
+-- Pattern getters/setters (ExeS PatCall in the function position)
+-- also defer to checkEFallback: synthE has dedicated rules for those
+-- that the App-Check shape would bypass.
+--
+-- Any other case the rule can't handle cleanly (propagation
+-- subtype fails, partial application, arity mismatch) is delegated
+-- to checkEFallback, preserving the existing synth-and-subtype
+-- behaviour.
+checkE i g0 e@(AppS (AnnoS _ _ (ExeS _)) _) t = checkEFallback i g0 e t
+checkE i g0 (AppS f xs) t = do
+  (g1, funType0, funExpr0) <- synthG g0 f
+  let g1' = resolveNatLabels f funType0 xs g1
+      (g2, funType1) = stripForallU g1' (normalizeType funType0)
+  case funType1 of
+    FunU paramTypes returnType
+      | length xs == length paramTypes
+      , isBareExistU (apply g2 returnType) -> do
+          scope <- MM.getGeneralScope i
+          let returnApplied = apply g2 returnType
+              expectedApplied = apply g2 t
+          case subtype scope returnApplied expectedApplied g2 of
+            Right g3 -> do
+              (g4, _, xsAnn, _) <-
+                zipCheck i g3 xs (map (apply g3) paramTypes)
+              -- Re-subtype AFTER the args. The pre-args subtype only
+              -- carries information that the expected type already
+              -- has; when the bare-existential return collides with
+              -- something that itself contains unsolved variables
+              -- (the only way to reach here with a deferral) the
+              -- inner arg check still has to pin things, and the
+              -- post-args re-subtype is what propagates those
+              -- pinnings back to the expected type.
+              case subtype scope (apply g4 returnType) (apply g4 t) g4 of
+                Right g5 -> return (g5, apply g5 t, AppS funExpr0 xsAnn)
+                Left _ -> checkEFallback i g0 (AppS f xs) t
+            Left _ -> checkEFallback i g0 (AppS f xs) t
+      | otherwise -> checkEFallback i g0 (AppS f xs) t
+    _ -> checkEFallback i g0 (AppS f xs) t
+  where
+    isBareExistU (ExistU _ _ _) = True
+    isBareExistU _ = False
 checkE i g1 e1 b = checkEFallback i g1 e1 b
 
 checkEFallback ::

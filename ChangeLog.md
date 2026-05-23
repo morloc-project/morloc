@@ -36,6 +36,9 @@ Installation
    `MORLOC_PLANE_DIR`.
  - setup script failure always removes the broken module 
 
+Bugs
+ - Fixed many bugs and added many tests for tensors and vectors
+
 
 0.85.0 [2026-05-12]
 -------------------

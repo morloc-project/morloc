@@ -1111,14 +1111,23 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc))
   return [e]
-desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal) entries) = do
+desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) entries) = do
   lang <- case maybeLangTok of
     Nothing -> return Nothing
     Just tok -> do
       l <- parseLang tok
       return (Just (l, isTerminal))
   let con = if T.null conName then v else TV conName
-      t = NamU nt con (map (either (VarU . fst) id) vs) entries
+      -- If the user supplied explicit args after the constructor string
+      -- (e.g. `"container_t<$1>" a`, parallel to the type-alias
+      -- concrete_rhs syntax), use those as the body's positional args.
+      -- Otherwise, default to the LHS params, which covers the common
+      -- case where the macro indices map directly to the declared
+      -- parameter order.
+      bodyTs = if null conArgs
+                 then map (either (VarU . fst) id) vs
+                 else conArgs
+      t = NamU nt con bodyTs entries
       doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries]
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc))
   return [e]

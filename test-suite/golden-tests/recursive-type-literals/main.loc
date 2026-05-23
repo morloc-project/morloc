@@ -102,39 +102,39 @@ pairLangAgnostic :: Pair Str
 pairLangAgnostic = (@lang, (@lang, Null))
 
 pairLangPy :: Pair Str
-pairLangPy = idpy ((@lang, (@lang, Null)) :: Pair Str)
+pairLangPy = idpy (@lang, (@lang, Null))
 
 pairLangCpp :: Pair Str
-pairLangCpp = idcpp ((@lang, (@lang, Null)) :: Pair Str)
+pairLangCpp = idcpp (@lang, (@lang, Null))
 
 pairLangR :: Pair Str
-pairLangR = idr ((@lang, (@lang, Null)) :: Pair Str)
+pairLangR = idr ((@lang, (@lang, Null)))
 
 -- BTree Str -- branching recursion, two recursive positions.
 btreeLangAgnostic :: BTree Str
 btreeLangAgnostic = (@lang, (@lang, Null, Null), (@lang, Null, Null))
 
 btreeLangPy :: BTree Str
-btreeLangPy = idpy ((@lang, (@lang, Null, Null), (@lang, Null, Null)) :: BTree Str)
+btreeLangPy = idpy ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
 
 btreeLangCpp :: BTree Str
-btreeLangCpp = idcpp ((@lang, (@lang, Null, Null), (@lang, Null, Null)) :: BTree Str)
+btreeLangCpp = idcpp ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
 
 btreeLangR :: BTree Str
-btreeLangR = idr ((@lang, (@lang, Null, Null), (@lang, Null, Null)) :: BTree Str)
+btreeLangR = idr ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
 
 -- Rose Str -- list-guarded recursion.
 roseLangAgnostic :: Rose Str
 roseLangAgnostic = (@lang, [(@lang, []), (@lang, [])])
 
 roseLangPy :: Rose Str
-roseLangPy = idpy ((@lang, [(@lang, []), (@lang, [])]) :: Rose Str)
+roseLangPy = idpy (@lang, [(@lang, []), (@lang, [])])
 
 roseLangCpp :: Rose Str
-roseLangCpp = idcpp ((@lang, [(@lang, []), (@lang, [])]) :: Rose Str)
+roseLangCpp = idcpp ((@lang, [(@lang, []), (@lang, [])]))
 
 roseLangR :: Rose Str
-roseLangR = idr ((@lang, [(@lang, []), (@lang, [])]) :: Rose Str)
+roseLangR = idr ((@lang, [(@lang, []), (@lang, [])]))
 
 -- Container Str -- recursive record. Container is Py-only at the
 -- concrete level, so only Agnostic and Py contexts are reachable;
@@ -144,4 +144,4 @@ containerLangAgnostic :: Container Str
 containerLangAgnostic = {val = @lang, sub = {val = @lang, sub = Null}}
 
 containerLangPy :: Container Str
-containerLangPy = idpy ({val = @lang, sub = {val = @lang, sub = Null}} :: Container Str)
+containerLangPy = idpy {val = @lang, sub = {val = @lang, sub = Null}}

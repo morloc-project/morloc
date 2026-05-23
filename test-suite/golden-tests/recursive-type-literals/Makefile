@@ -3,7 +3,7 @@ all:
 	# Use a timeout to keep the suite responsive if a future
 	# regression reintroduces the codegen hang. Post-fix this
 	# completes in normal build time.
-	-timeout 60s morloc make -o nexus main.loc 2> build.err
+	-timeout 20s morloc make -o nexus main.loc 2> build.err
 	# === Plain Int/Str payload literals (agnostic via nexus) ===
 	./nexus pairLit               >  obs.txt 2>  obs.err
 	./nexus btreeLit              >> obs.txt 2>> obs.err
@@ -32,4 +32,4 @@ all:
 	./nexus containerLangPy       >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus pools __pycache__ *err obs.txt
+	rm -rf nexus pools __pycache__ *err diag.log

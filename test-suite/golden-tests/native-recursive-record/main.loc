@@ -21,24 +21,20 @@
 --              Cpp. Exercises both directions of the wire format on the
 --              same recursive value within a single nexus call.
 
--- KNOWN LIMITATION (the *Build / *FromJson section at the bottom of
--- this file is commented out): native construction of recursive
--- records routes through the C++ pool when root-cpp is imported, and
--- the current C++ struct layout (using @std::optional<std::unique_ptr<T>>@
--- for self-recursive optional fields) makes the struct move-only.
--- The codegen elsewhere still assumes copyable types and emits
--- intermediate let-bindings that hit deleted copy constructors. The
--- fix is a redesign that stores all non-primitive struct fields
--- behind a uniform pointer (`shared_ptr`), removing the move-only
--- contamination. Until that lands, the recursive-record-CONSTRUCTION
--- code is left in the file but commented out at the export list and
--- definition sites; native CONSUMPTION of Py-built records (the sum*,
--- ll*, containerLenPy, pingPyCpp paths below) works because no
--- intermediate copy occurs on the consumer side.
+-- Native construction of recursive records routes through the C++
+-- pool when root-cpp is imported. The encoding rule for `?T` at C++
+-- field positions: `std::optional<T>` wherever sizeof(T) is known,
+-- and a pointer-shape (default `std::shared_ptr<T>`, null == absent)
+-- at recursive-cycle positions where T's body is incomplete.
+-- Construction goes through `mlc::wrap_field<decltype(...)>(...)`
+-- which dispatches the right wrap at compile time via traits in
+-- cppmorloc.hpp.
 
-module main (sumPy, sumCpp, sumR, llPy, llCpp, llR, llNative, pingPyCpp, containerLenPy
-            -- , llBuild, treeBuild, containerBuild
-            -- , llFromJson, treeFromJson, containerFromJson
+module main ( sumPy, sumCpp, sumR
+            , llPy, llCpp, llR, llNative
+            , pingPyCpp, containerLenPy
+            , llBuild, treeBuild, containerBuild
+            , llFromJson, treeFromJson, containerFromJson
             )
 
 import root
@@ -72,7 +68,8 @@ record Container a where
   val :: a
   sub :: ?(Container a)
 
-record Py => Container a = "dict"
+record Py  => Container a = "dict"
+record Cpp => Container a = "container_t<$1>" a
 
 source Py  from "foo.py"  ("sum_tree"        as sumTreePy
                           , "ll_len"         as llLenPy
@@ -128,29 +125,29 @@ containerLenPy n = containerLength (buildContainerPy n)
 pingPyCpp depth = sumTreePy (identityTreeCpp (buildTreePy depth))
 
 -- Native construction of recursive RECORDS, plus JSON-input wrappers.
--- These are commented out pending the C++ struct-layout redesign
--- described at the top of this file. The intent of these functions
--- is preserved here so the test can be revived in one diff once the
--- pointer-everywhere struct representation lands.
---
--- llBuild :: Int -> LL
--- llBuild n ? n > 0 = {head = n, tail = llBuild (n - 1)}
---           : {head = 0, tail = Null}
---
--- treeBuild :: Int -> Tree
--- treeBuild d ? d <= 0 = {value = 1, children = []}
---              : let sub = treeBuild (d - 1)
---                in {value = 0, children = [sub, sub]}
---
--- containerBuild :: Int -> Container Int
--- containerBuild n ? n > 0 = {val = n, sub = containerBuild (n - 1)}
---                  : {val = 0, sub = Null}
---
--- llFromJson :: LL -> Int
--- llFromJson x = llLenPy x
---
--- treeFromJson :: Tree -> Int
--- treeFromJson x = sumTreePy x
---
--- containerFromJson :: Container Int -> Int
--- containerFromJson x = containerLength x
+-- Construction routes through the C++ pool (root-cpp is imported);
+-- aggregate inits like `{head = n, tail = llBuild (n - 1)}` lower to
+-- `ll_t a0 = {n_head, mlc::wrap_field<decltype(ll_t::tail)>(n_tail)};`
+-- where wrap_field dispatches via cppmorloc.hpp's pointer_traits.
+
+llBuild :: Int -> LL
+llBuild n ? n > 0 = {head = n, tail = llBuild (n - 1)}
+          : {head = 0, tail = Null}
+
+treeBuild :: Int -> Tree
+treeBuild d ? d <= 0 = {value = 1, children = []}
+             : let sub = treeBuild (d - 1)
+               in {value = 0, children = [sub, sub]}
+
+containerBuild :: Int -> Container Int
+containerBuild n ? n > 0 = {val = n, sub = containerBuild (n - 1)}
+                 : {val = 0, sub = Null}
+
+llFromJson :: LL -> Int
+llFromJson x = llLenPy x
+
+treeFromJson :: Tree -> Int
+treeFromJson x = sumTreePy x
+
+containerFromJson :: Container Int -> Int
+containerFromJson x = containerLength x

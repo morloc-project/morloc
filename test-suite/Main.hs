@@ -45,6 +45,8 @@ main = do
       , letBindingTests
       , aliasConstructorTests
       , recursiveRecordTests
+      , bidirectionalAppCheckTests
+      , postArgPropagationTests
       , morlocDepsTests
 
       -- -- These tests pass locally and when I run the same container that I
@@ -65,6 +67,7 @@ main = do
       , golden "native-recursive-parameterized" "native-recursive-parameterized"
       , golden "native-recursive-tuple" "native-recursive-tuple"
       , golden "recursive-type-literals" "recursive-type-literals"
+      , golden "missing-concrete-record-error" "missing-concrete-record-error"
 
       , golden "multiprocessing-py-1" "multiprocessing-py-1"
       , -- bug regression tests from doc-agents code-tester (v0.74.0)

@@ -37,6 +37,8 @@ module UnitTypeTests
   , aliasConstructorTests
   , typedefKindVarTests
   , recursiveRecordTests
+  , bidirectionalAppCheckTests
+  , postArgPropagationTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -5494,4 +5496,405 @@ recursiveRecordTests =
           z :: C1
         f :: C1 -> C1
         |]
+      ]
+
+-- | Bidirectional checking for function application against structurally
+-- recursive types. The new `checkE (AppS f xs) t` rule propagates the
+-- expected type into the function's return position BEFORE checking the
+-- args. Without it, a literal at a recursive alias gets synthesised to
+-- a finite tuple shape and subtype fails when it tries to roll the
+-- finite type back into the recursive alias.
+--
+-- The cases here are typecheck-only (no codegen, no pool build) so the
+-- whole group runs in milliseconds. The deep tests below pin the
+-- linear-complexity claim from the plan.
+bidirectionalAppCheckTests :: TestTree
+bidirectionalAppCheckTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "Bidirectional App-check against recursive types"
+      [ -- Bug repro: monomorphic id-shaped call at a recursive alias.
+        -- Without the new rule, the literal synthesises to
+        -- `(Str, (Str, ?ex))` and subtype against `Pair Str` fails at
+        -- the inner `(Str, ?ex) <: ?(Pair Str)`.
+        expectPass
+          "monomorphic id at recursive Pair alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        idPair :: Pair Str -> Pair Str
+        foo :: Pair Str
+        foo = idPair ("a", ("b", Null))
+        |]
+      , -- Polymorphic id: forces stripForallU + propagation through the
+        -- shared `a` existential.
+        expectPass
+          "polymorphic id at recursive Pair alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        id :: a -> a
+        foo :: Pair Str
+        foo = id ("a", ("b", Null))
+        |]
+      , -- Multi-arg application: exercises the
+        -- `length xs == length paramTypes` arm beyond unary.
+        expectPass
+          "multi-arg polymorphic function at recursive alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        pick :: Bool -> a -> a -> a
+        foo :: Pair Str
+        foo = pick True ("a", Null) ("b", Null)
+        |]
+      , -- Nested AppS: argument is itself a function application, so
+        -- the new rule must recurse through checkG -> checkE -> AppS.
+        expectPass
+          "nested polymorphic id at recursive alias"
+          [r|
+        module main (foo)
+        type Pair a = (a, ?(Pair a))
+        id :: a -> a
+        foo :: Pair Str
+        foo = id (id ("a", ("b", Null)))
+        |]
+      , -- Partial application: falls back cleanly via checkEFallback.
+        -- The new rule's `_ -> checkEFallback` arm is exercised.
+        expectPass
+          "partial application falls through cleanly"
+          [r|
+        module main (bar)
+        add :: Int -> Int -> Int
+        bar :: Int -> Int
+        bar = add 1
+        |]
+      , -- Genuine type error must still be rejected: the propagation
+        -- step solves `a := Int`, then the argument check `"x" :: Int`
+        -- fails inside checkG (same diagnostic surface as today).
+        exprTestBad
+          "wrong-typed argument still rejected"
+          [r|
+        module main (foo)
+        id :: a -> a
+        foo :: Int
+        foo = id "hello"
+        |]
+      , -- Function-as-argument: confirms the rule doesn't over-eagerly
+        -- fire on FunU-returning calls where the existing logic was
+        -- already correct.
+        expectPass
+          "function-as-argument keeps working"
+          [r|
+        module main (foo)
+        apply :: (a -> b) -> a -> b
+        inc :: Int -> Int
+        foo :: Int
+        foo = apply inc 3
+        |]
+      , -- Linear-complexity probe: depth-20 recursive literal under a
+        -- monomorphic id at a recursive alias. With the linear
+        -- algorithm this is microseconds; with an O(N^2) regression
+        -- depth-20 is 400x slower, still well inside 2 s but visible
+        -- if cubic or exponential.
+        expectPass
+          "deep-20 recursive literal, monomorphic id"
+          (deepLiteralProgram False 20)
+      , -- Depth-20 literal under polymorphic id: forces stripForallU +
+        -- propagation at the recursive type.
+        expectPass
+          "deep-20 recursive literal, polymorphic id"
+          (deepLiteralProgram True 20)
+      , -- Depth-20 chain of id applications around a small literal:
+        -- exercises the application-nesting axis orthogonally to
+        -- literal depth.
+        expectPass
+          "deep-20 chained id applications"
+          (deepIdChainProgram 20)
+      , -- Combined axes: depth-20 literal nested inside a depth-20 id
+        -- chain. If complexity is O(M*N) this is 400 work units, still
+        -- linear-ish in 2 s but a regression to O((M*N)^k) for k>=2
+        -- would blow up here.
+        expectPass
+          "deep-20 literal under deep-20 id chain"
+          (deepCombinedProgram 20)
+      , -- Negative deep case: depth-20 literal at a wrong type. The
+        -- failure path must also be linear (no pathological cost when
+        -- the rule's propagation succeeds but the argument check
+        -- rejects).
+        exprTestBad
+          "deep-20 recursive literal at wrong type still rejected"
+          (deepWrongTypeProgram 20)
+      ]
+
+-- | Build a morloc source program with a depth-N recursive literal
+-- assigned to `foo :: Pair Str` via `idPair` (mono) or `id` (poly).
+-- The literal nests as ("s1", ("s2", ..., ("sN", Null) ... )).
+deepLiteralProgram :: Bool -> Int -> MT.Text
+deepLiteralProgram poly n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "type Pair a = (a, ?(Pair a))"
+  , if poly then "id :: a -> a" else "idPair :: Pair Str -> Pair Str"
+  , "foo :: Pair Str"
+  , "foo = " <> (if poly then "id " else "idPair ") <> deepLit n
+  ]
+
+-- | depth-N nested literal: ("s1", ("s2", ..., ("sN", Null) ... ))
+deepLit :: Int -> String
+deepLit n = go 1
+  where
+    go k
+      | k > n     = "Null"
+      | otherwise = "(\"s" <> show k <> "\", " <> go (k + 1) <> ")"
+
+-- | depth-N chain of `id` applications: id (id (id ... ("a", Null)))
+deepIdChainProgram :: Int -> MT.Text
+deepIdChainProgram n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "type Pair a = (a, ?(Pair a))"
+  , "id :: a -> a"
+  , "foo :: Pair Str"
+  , "foo = " <> chain n <> "(\"s1\", (\"s2\", Null))" <> replicate n ')'
+  ]
+  where
+    chain k = concat (replicate k "id (")
+
+-- | Combined: depth-N id chain wrapped around depth-N literal.
+deepCombinedProgram :: Int -> MT.Text
+deepCombinedProgram n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "type Pair a = (a, ?(Pair a))"
+  , "id :: a -> a"
+  , "foo :: Pair Str"
+  , "foo = " <> chain n <> deepLit n <> replicate n ')'
+  ]
+  where
+    chain k = concat (replicate k "id (")
+
+-- | depth-N literal annotated at the wrong type (Int) so the
+-- argument check must fail.
+deepWrongTypeProgram :: Int -> MT.Text
+deepWrongTypeProgram n = MT.pack $ unlines
+  [ "module main (foo)"
+  , "id :: a -> a"
+  , "foo :: Int"
+  , "foo = id " <> deepLit n
+  ]
+
+-- | Coverage for the class of nat/str/list-label propagation
+-- patterns: information that flows from a literal argument OUT
+-- through one or more carrier functions to satisfy an outer
+-- expected type. The "labeled dims propagate through 3-function
+-- chain" case in natKindPromotionTests was the canonical example;
+-- these tests broaden the coverage along several axes:
+--
+--   * different chain depths (1, 2, 4) on the same nat-label axis
+--   * monomorphic vs polymorphic carrier functions
+--   * multi-label functions where multiple pinnings must propagate
+--   * multi-arg functions where one arg pins a shared variable
+--   * cross-existential pinning via a tuple's first element
+--   * negative cases: a downstream constraint must reject a wrong
+--     literal seen at any depth in the chain
+--
+-- Most cases here are handled by the OLD synth+subtype path -- the
+-- new checkE AppS rule is gated to bare-existential return types,
+-- which excludes the parameterized-carrier functions used in chains.
+-- That gating is itself under test: a regression that broadened the
+-- rule's trigger (e.g. dropping the isBareExistU guard) would let it
+-- over-commit on the structured-return cases below and surface as
+-- either a stranded NatVar or a Rec-key-set mismatch.
+postArgPropagationTests :: TestTree
+postArgPropagationTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "App-check post-arg propagation of inner solutions"
+      [ -- One level of indirection: monomorphic carrier with a single
+        -- nat var. The pre-subtype defers (NatVar n_f vs NatVar n_g),
+        -- the labelled `make` arg pins n_f := 5, and the post-subtype
+        -- has to push n_f's value out to n_g.
+        assertRawType
+          "depth-1 nat label chain through monomorphic id_"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        id_ :: T1 n Real -> T1 n Real
+        x = id_ (make 5)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
+      , -- Polymorphic carrier (forall a. a -> a) instead of the
+        -- nat-typed id_. Exercises the stripForallU + label-pinning
+        -- combination through the new rule.
+        assertRawType
+          "depth-1 nat label chain through polymorphic id"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        id :: a -> a
+        x = id (make 6)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 6, VarU (TV "Real")])
+      , -- Depth-2 chain: same direction as the 3-function chain, but
+        -- one level shorter. The post-subtype has to chain through
+        -- two carriers (the inner f and the outer g_ both leave the
+        -- nat var unsolved by themselves).
+        assertRawType
+          "depth-2 nat label chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        x = g (f (make 7))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
+      , -- Depth-4 chain: confirms the post-subtype propagation works
+        -- at arbitrary depth. If the propagation lost information at
+        -- some level the result would be a stranded NatVar like the
+        -- bug report.
+        assertRawType
+          "depth-4 nat label chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f1 :: T1 n Real -> T1 n Real
+        f2 :: T1 n Real -> T1 n Real
+        f3 :: T1 n Real -> T1 n Real
+        f4 :: T1 n Real -> T1 n Real
+        x = f4 (f3 (f2 (f1 (make 11))))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 11, VarU (TV "Real")])
+      , -- Two labels in the same function, both must propagate
+        -- through one level of indirection. Without the post-subtype
+        -- one of the nat vars (typically the second) would stay
+        -- stranded because the deferred constraint never re-fires.
+        assertRawType
+          "two-label function chained through id_"
+          [r|
+        module main (x)
+        type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+        make :: m:Int -> n:Int -> T2 m n Real
+        id_ :: T2 m n Real -> T2 m n Real
+        x = id_ (make 3 4)
+          |]
+          (AppU (VarU (TV "T2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
+      , -- Multi-arg outer function where the recursive position is one
+        -- of several args. The other arg (a plain Real) must not
+        -- interfere with the post-subtype's nat-var propagation.
+        assertRawType
+          "label propagates through second arg of multi-arg function"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        scale :: Real -> T1 n Real -> T1 n Real
+        x = scale 2.0 (make 8)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 8, VarU (TV "Real")])
+      , -- Both args of a multi-arg function contribute the same label
+        -- value. The pre-subtype against the expected type defers,
+        -- but the first arg's labelled-nat pins one side; the second
+        -- arg then has to be checked against the now-pinned type,
+        -- and the post-subtype propagates the result back to the
+        -- expected nat var.
+        assertRawType
+          "shared label resolved by both args of binary op"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        add :: T1 n Real -> T1 n Real -> T1 n Real
+        x = add (make 4) (make 4)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 4, VarU (TV "Real")])
+      , -- Negative: depth-3 chain ending in a consumer that demands a
+        -- specific dimension. The mismatch must be caught, not
+        -- silently accepted by a stranded NatVar.
+        exprTestBad
+          "wrong-dim labelled arg at end of chain still rejected"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        consume :: T1 5 Real -> Int
+        x = consume (g (f (make 7)))
+          |]
+      , -- Negative: shared label disagreement across two arg positions.
+        -- Without correct propagation a stranded NatVar would let the
+        -- mismatch slip through.
+        exprTestBad
+          "label disagreement across shared-var binary op rejected"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        add :: T1 n Real -> T1 n Real -> T1 n Real
+        x = add (make 3) (make 5)
+          |]
+      , -- Nat arithmetic in the return type, propagated through a
+        -- chain. `make 6 2` returns `T1 (6*2) Real = T1 12 Real`; the
+        -- outer carriers must not lose the arithmetic result during
+        -- propagation.
+        assertRawType
+          "labelled nat arithmetic propagates through chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: m:Int -> n:Int -> T1 (m * n) Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        x = g (f (make 6 2))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
+      , -- Polymorphic id wraps a labelled call inside a multi-arg
+        -- outer. Combines the Forall-instantiation path with the
+        -- label-resolution path and exercises propagation at both
+        -- layers.
+        assertRawType
+          "polymorphic id wrapping labelled call inside outer scale"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        id :: a -> a
+        scale :: Real -> T1 n Real -> T1 n Real
+        x = scale 1.0 (id (make 9))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
+      , -- Pin a `forall a` from inside a TupS literal: the first
+        -- element of the tuple arg carries a labelled-nat value, and
+        -- the function's polymorphism `forall a.` must be solved by
+        -- that arg. Exercises the post-subtype when the carrier is a
+        -- non-nat existential.
+        assertRawType
+          "tuple-arg's labelled element pins outer existential"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        fst_ :: (a, Bool) -> a
+        x = fst_ (make 5, True)
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
+      , -- The 3-function chain (the originally-failing test) as a
+        -- regression marker in the same group so the whole class is
+        -- co-located. Duplicated from natKindPromotionTests on
+        -- purpose: if someone later moves or renames the original
+        -- test, this group keeps locking in the contract.
+        assertRawType
+          "regression: labelled dims propagate through 3-function chain"
+          [r|
+        module main (x)
+        type T1 (d :: Nat) a = [a]
+        make :: n:Int -> T1 n Real
+        f :: T1 n Real -> T1 n Real
+        g :: T1 n Real -> T1 n Real
+        x = g (f (make 9))
+          |]
+          (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
       ]

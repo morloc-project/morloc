@@ -556,7 +556,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ StrVoidF = []
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
-    seekRecs _ (RecF _) = []
+    seekRecs _ (RecF _ _) = []
 
 unifyRecords ::
   [ ( FVar
