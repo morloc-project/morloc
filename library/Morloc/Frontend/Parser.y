@@ -814,7 +814,7 @@ types1 :: { [TypeU] }
   | types1 atom_type           { $1 ++ [$2] }
 
 -- An effect row: comma-separated UPPER labels plus at most one LOWER
--- tail variable (validated by 'mkEffectRow'). `<…>` is effects-only;
+-- tail variable (validated by 'mkEffectRow'). `<...>` is effects-only;
 -- the bare `<a>` existential-hole syntax was removed.
 effect_row :: { [Either EffectLabel TVar] }
   : effect_item                     { [$1] }

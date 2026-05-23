@@ -298,7 +298,7 @@ data LowerConfig m = LowerConfig
   -- ^ name, all args, manifold type, priorLines, body, headForm
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise
   , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
-  -- ^ name, contextArgs, boundArgs → partial application expression
+  -- ^ name, contextArgs, boundArgs - partial application expression
   , lcRegisterSchema :: Text -> m Int
   -- ^ Register a schema string and return its unique ID (index into schema table)
   }

@@ -239,7 +239,7 @@ reduceRecUnion a b = case (collectGroundRec a, collectGroundRec b) of
 --   informative as the input.
 -- - @Left msg@: contradicts; constraint cannot be satisfied.
 --
--- Typeclass constraints ('Constraint cls ts') aren't handled here —
+-- Typeclass constraints ('Constraint cls ts') aren't handled here -
 -- they pass through unchanged and are left for the typeclass-discharge
 -- machinery elsewhere.
 reduceConstraint :: Constraint -> Either Text (Maybe Constraint)
@@ -322,7 +322,7 @@ normaliseSet t = t
 --      (fully decided as true): drop it.
 --   2. Returns 'Left msg' (contradiction): the whole pass fails with
 --      the first contradiction.
---   3. Returns 'Right (Just c')' (still deferred — typically because a
+--   3. Returns 'Right (Just c')' (still deferred - typically because a
 --      row variable, list variable, etc., is not yet ground): the
 --      constraint is checked against @gammaAssumedConstraints@. If
 --      @c'@ is identical (after applying gamma) to one of the
@@ -339,10 +339,10 @@ normaliseSet t = t
 -- the body's gamma has solved everything that *can* be solved at this
 -- function's level, a leftover obligation is one of two things:
 --
---   * Equivalent (after apply) to a declared assumption — meaning the
+--   * Equivalent (after apply) to a declared assumption - meaning the
 --     caller has already promised this. We discharge it: the obligation
 --     is the caller's promise.
---   * Not equivalent to anything — meaning the body needs more than the
+--   * Not equivalent to anything - meaning the body needs more than the
 --     signature declares. That is a real error: the user must add the
 --     missing constraint to the function's @=>@ clause (or change the
 --     body so the constraint is no longer needed).
@@ -350,7 +350,7 @@ normaliseSet t = t
 -- This is essentially the same shape as Haskell's "missing class
 -- constraint" diagnostic, restricted to morloc's primitive Member /
 -- Subset / Disjoint forms. Equivalence is structural after gamma
--- application — two constraints are subsumed when their applied forms
+-- application - two constraints are subsumed when their applied forms
 -- are exactly @==@. We do not attempt logical implication (e.g.,
 -- @CSubset a b /\ CSubset b c => CSubset a c@); subsumption is the
 -- conservative-but-decidable approximation.
@@ -896,7 +896,7 @@ applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
       in case solveExist v t g of
            Right (Just g') -> Right g'
            Right Nothing ->
-             -- Not an existential — store as a NatVarU solution
+             -- Not an existential - store as a NatVarU solution
              Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
            Left err -> Left err
 

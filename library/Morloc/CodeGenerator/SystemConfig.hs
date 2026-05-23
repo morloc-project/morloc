@@ -98,7 +98,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- Strategy (in priority order):
   --   1. MORLOC_RUST_BIN: directory with pre-built libmorloc.so + morloc-nexus
   --      (used for release installs with portable musl-linked binaries)
-  --   2. MORLOC_RUST_DIR: Cargo workspace source — build from source via cargo
+  --   2. MORLOC_RUST_DIR: Cargo workspace source - build from source via cargo
   --      (used for development and container builds)
   --   3. Auto-detect Cargo workspace relative to morloc binary
   let soPath = libDir </> "libmorloc.so"

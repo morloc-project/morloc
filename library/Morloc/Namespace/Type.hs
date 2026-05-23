@@ -1187,7 +1187,7 @@ containsUnk StrVoidT = False
 
 ----- Pretty instances -------------------------------------------------------
 
--- | Records, objects, and tables render identically in type signatures —
+-- | Records, objects, and tables render identically in type signatures -
 -- just the type name optionally followed by parameters. The record/object/
 -- table distinction is surfaced separately in the CLI help's type
 -- definition block, where each named type is listed with its tag and

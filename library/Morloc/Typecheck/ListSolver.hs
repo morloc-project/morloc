@@ -8,7 +8,7 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Solves equality and basic constraint problems on List-kinded type
-expressions (Stage 8 of the tables refactor — foundational kind layer).
+expressions (Stage 8 of the tables refactor - foundational kind layer).
 
 The canonical form is a flat sequence of "chunks" where each chunk is
 either a ground literal element ('Lit') or a list-tail variable ('Var').
@@ -25,7 +25,7 @@ Decidability:
 
 Element-level equality (e.g. between two 'StrLitU' values) is checked by
 this solver structurally; per-element type unification is the calling
-typechecker's responsibility — this solver only checks structural
+typechecker's responsibility - this solver only checks structural
 equality of the chunk sequence.
 -}
 module Morloc.Typecheck.ListSolver
