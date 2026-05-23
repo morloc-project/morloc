@@ -22,7 +22,6 @@ module Morloc.CodeGenerator.Infer
   ) where
 
 import qualified Control.Monad.State as CMS
-import qualified Data.Set as Set
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
@@ -61,13 +60,12 @@ inferConcreteType _ (Idx i (UnkT _)) =
   MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
   concreteType <- inferConcreteTypeU lang (Idx i generalType)
-  (cscope, gscope) <- getScope i lang
-  case weave cscope gscope generalType concreteType of
+  (_, gscope) <- getScope i lang
+  case weave gscope generalType concreteType of
     (Right tf) -> return tf
     (Left _) -> do
       gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-      cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
-      case weave cscopeUni gscopeUni generalType concreteType of
+      case weave gscopeUni generalType concreteType of
         (Right tf) -> return tf
         (Left _) -> do
           -- Evaluate the general type one level and try again
@@ -97,9 +95,8 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
 inferConcreteTypeUniversal :: Lang -> Type -> MorlocMonad TypeF
 inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-  cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
   concreteType <- inferConcreteTypeUUniversal lang generalType
-  case weave cscopeUni gscopeUni generalType concreteType of
+  case weave gscopeUni generalType concreteType of
     (Right tf) -> return tf
     (Left _) -> do
       -- Evaluate the general type one level and recurse. This is the
@@ -132,29 +129,21 @@ inferConcreteTypeUUniversal lang generalType = do
           <> ":" <+> e2
     (Left e) -> MM.throwError e
 
-weave :: Scope -> Scope -> TypeU -> TypeU -> Either MDoc TypeF
-weave cscope gscope = w Set.empty
+-- | 'weave' fuses a general TypeU with its language-specific concrete
+-- TypeU into a single TypeF. Purely structural -- no cycle detection
+-- at the weave level (that would collapse the intermediate alias-
+-- expansion node that 'makeSerialAST'' relies on to emit the
+-- recursive-schema @&name@ declaration alongside the @^name@ back-
+-- reference). Leak prevention for recursive aliases with no concrete-
+-- language mapping happens at the C++ render boundary in
+-- 'CppTranslator.hs', where every @VarF@/@AppF@/@RecF@ rule consults
+-- cscope to distinguish legitimate user mappings from pairEval bnd-
+-- protect leaks.
+weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
+weave gscope = w
   where
-    -- Cycle detection on the GENERAL side. When @pairEval@ left a
-    -- bnd-protected back-reference (the inner @Pair@ of @type Pair a =
-    -- (a, ?(Pair a))@), the general head TVar reappears inside its own
-    -- body. Without this guard the original @w (VarU v1) (VarU (TV v2))@
-    -- arm below would synthesize @CV v2@ from the morloc-side TVar and
-    -- ship the morloc identifier into the concrete-name slot -- the
-    -- silent leak that surfaced as `Pair`/`BTree`/`Rose` tokens in
-    -- pool.cpp. Emit @RecF v (Just cv)@ when cscope holds an explicit
-    -- concrete mapping, @RecF v Nothing@ otherwise. The @Maybe CVar@
-    -- payload is the type-level encoding of "no concrete mapping
-    -- available" -- statically-typed translators (C++) must error on
-    -- the @Nothing@ constructor rather than synthesizing a CVar from
-    -- @v@'s text. Dynamic translators (Python, R) emit no type names
-    -- and never inspect the slot, so they handle recursive tuple
-    -- aliases without complaint.
-    w :: Set.Set TVar -> TypeU -> TypeU -> Either MDoc TypeF
-    w ancestors (VarU v) _ | Set.member v ancestors = recRef v
-    w ancestors (AppU (VarU v) _) _ | Set.member v ancestors = recRef v
-    w _ (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
-    w a (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM (w a) ts1 ts2 <*> w a t1 t2
+    w (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
+    w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
     -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
     -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while
     -- the concrete-side resolution expanded to @"tuple" [int, ?(...)]@
@@ -162,76 +151,58 @@ weave cscope gscope = w Set.empty
     -- on @t1@. This is the same generalization the catch-all already
     -- performs for type-level mismatches; we just need to opt the AppU
     -- branch into it on arg-length failure instead of failing outright.
-    w a t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
-      case (AppF <$> w a h1 h2 <*> weaveArgs a ts1 ts2) of
+    w t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
+      case (AppF <$> w h1 h2 <*> weaveArgs ts1 ts2) of
         r@(Right _) -> r
-        Left _ -> wStep a t1 t2
-    w a t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
+        Left _ -> wStep t1 t2
+    w t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
       | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 =
-          -- Push BOTH the general and the concrete-renamed names. A self-
-          -- recursive field can mention either form (e.g. @record Tree
-          -- where children :: [Tree]@ paired with @record Cpp => Tree =
-          -- "tree_t"@: the field's body still says @Tree@ but after
-          -- pairEval the outer record is named @tree_t@). Pushing both
-          -- guarantees the back-reference is caught no matter which name
-          -- appears in the concrete-side body.
-          let a' = Set.insert v1 (Set.insert v2 a)
-          in NamF o1 (FV v1 (CV (unTVar v2)))
-               <$> zipWithM (w a') ts1 ts2
-               <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w a' t1' t2') rs1 rs2
+          NamF o1 (FV v1 (CV (unTVar v2)))
+            <$> zipWithM w ts1 ts2
+            <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w t1' t2') rs1 rs2
       | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
-    w a (EffectU effs t1) (EffectU _ t2) = mkEffectF (resolveEffectSet effs) <$> w a t1 t2
-    w a (OptionalU t1) (OptionalU t2) = OptionalF <$> w a t1 t2
-    w _ (NatLitU n) (NatLitU _) = return $ NatLitF n
-    w _ (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
-    w _ NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
-    w _ (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
-    w a (LabeledU _ t1) t2 = w a t1 t2
-    w _ (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
-    w a t1 t2 = wStep a t1 t2
+    w (EffectU effs t1) (EffectU _ t2) = mkEffectF (resolveEffectSet effs) <$> w t1 t2
+    w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
+    w (NatLitU n) (NatLitU _) = return $ NatLitF n
+    w (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
+    w NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
+    w (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
+    w (LabeledU _ t1) t2 = w t1 t2
+    w (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
+    w t1 t2 = wStep t1 t2
 
-    -- Step the general type one level via @evaluateStep@ and retry. When
-    -- the head is a named alias, push it to the ancestor set so any
-    -- recursive back-reference inside the unrolled body is caught
-    -- structurally on the recursive @w@ call (rather than silently
-    -- passing through as a VarU whose TVar text would be cast into the
-    -- CV slot by the @VarU vs VarU@ arm above).
-    wStep a t1 t2 = case T.evaluateStep gscope t1 of
+    -- Step the general type one level via @evaluateStep@ and retry.
+    wStep t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
         if t1 == t1'
           then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
-          else
-            let a' = case t1 of
-                  VarU v -> Set.insert v a
-                  AppU (VarU v) _ -> Set.insert v a
-                  _ -> a
-            in w a' t1' t2
+          else w t1' t2
 
     -- Weave type arguments, handling Nat params that may be erased OR
     -- preserved in the concrete type. When the concrete head is also a Nat
     -- expression, consume it in lockstep; otherwise consume only the general
     -- arg (erased in concrete). Either way we emit a NatLitF placeholder.
-    weaveArgs :: Set.Set TVar -> [TypeU] -> [TypeU] -> Either MDoc [TypeF]
-    weaveArgs _ [] [] = Right []
-    weaveArgs _ [] cs
+    weaveArgs :: [TypeU] -> [TypeU] -> Either MDoc [TypeF]
+    weaveArgs [] [] = Right []
+    weaveArgs [] cs
       | all isNatLikeU cs = Right []  -- trailing Nat args in concrete only
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
-    weaveArgs a (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
+    weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
-    weaveArgs a (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs a gs (dropNatHead cs)
-    weaveArgs a (g:gs) (c:cs) = (:) <$> w a g c <*> weaveArgs a gs cs
-    weaveArgs _ _ [] = Left "general type has more non-Nat args than concrete type in weave"
+    weaveArgs (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs (g:gs) (c:cs) = (:) <$> w g c <*> weaveArgs gs cs
+    weaveArgs _ [] = Left "general type has more non-Nat args than concrete type in weave"
 
     isNatLikeU :: TypeU -> Bool
     isNatLikeU (NatLitU _) = True
@@ -247,31 +218,6 @@ weave cscope gscope = w Set.empty
     dropNatHead :: [TypeU] -> [TypeU]
     dropNatHead (c : cs) | isNatLikeU c = cs
     dropNatHead cs = cs
-
-    -- Back-reference resolution. The morloc-side TVar @v@ is in the
-    -- ancestor set, so we're inside its own alias body and emitting a
-    -- recursion cut. Emit @RecF v (Just cv)@ when the user supplied
-    -- an explicit concrete mapping (e.g. @record Cpp => Tree =
-    -- "tree_t"@, @type Cpp => Pair a = "pair_t<$1>" a@). Emit
-    -- @RecF v Nothing@ when no cscope entry exists -- the Maybe
-    -- encodes "no concrete-language name available" at the type
-    -- level so the morloc TVar text cannot silently masquerade as a
-    -- concrete name downstream. Dynamic translators (Python, R) emit
-    -- no type names and never inspect the slot; statically-typed
-    -- translators (C++) must pattern-match on @Nothing@ and raise a
-    -- diagnostic rather than letting an undeclared identifier reach
-    -- the generated pool.
-    recRef :: TVar -> Either MDoc TypeF
-    recRef v = case Map.lookup v cscope of
-      Just (entry : _) | Just cv <- extractCV entry -> Right $ RecF v (Just cv)
-      _ -> Right $ RecF v Nothing
-
-    extractCV :: ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> Maybe CVar
-    extractCV (_, t, _, _) = case t of
-      NamU _ (TV cv) _ _ -> Just (CV cv)
-      AppU (VarU (TV cv)) _ -> Just (CV cv)
-      VarU (TV cv) -> Just (CV cv)
-      _ -> Nothing
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do

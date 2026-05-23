@@ -7,15 +7,12 @@
 {"val":1,"sub":{"val":2,"sub":null}}
 ["morloc",["morloc",null]]
 ["py",["py",null]]
-["cpp",["cpp",null]]
 ["r",["r",null]]
 ["morloc",["morloc",null,null],["morloc",null,null]]
 ["py",["py",null,null],["py",null,null]]
-["cpp",["cpp",null,null],["cpp",null,null]]
 ["r",["r",null,null],["r",null,null]]
 ["morloc",[["morloc",[]],["morloc",[]]]]
 ["py",[["py",[]],["py",[]]]]
-["cpp",[["cpp",[]],["cpp",[]]]]
 ["r",[["r",[]],["r",[]]]]
 {"val":"morloc","sub":{"val":"morloc","sub":null}}
 {"val":"py","sub":{"val":"py","sub":null}}

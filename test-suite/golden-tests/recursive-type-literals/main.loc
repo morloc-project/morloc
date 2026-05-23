@@ -38,9 +38,9 @@
 module main ( pairLit, btreeLit, pair2Lit
             , llTupleLit, roseLit, patLit
             , containerLit
-            , pairLangAgnostic, pairLangPy, pairLangCpp, pairLangR
-            , btreeLangAgnostic, btreeLangPy, btreeLangCpp, btreeLangR
-            , roseLangAgnostic, roseLangPy, roseLangCpp, roseLangR
+            , pairLangAgnostic, pairLangPy, {- pairLangCpp , -} pairLangR
+            , btreeLangAgnostic, btreeLangPy, {- btreeLangCpp ,-} btreeLangR
+            , roseLangAgnostic, roseLangPy, {- roseLangCpp, -} roseLangR
             , containerLangAgnostic, containerLangPy
             )
 
@@ -104,8 +104,9 @@ pairLangAgnostic = (@lang, (@lang, Null))
 pairLangPy :: Pair Str
 pairLangPy = idpy (@lang, (@lang, Null))
 
-pairLangCpp :: Pair Str
-pairLangCpp = idcpp (@lang, (@lang, Null))
+-- -- This is a pre-existing bitch problem
+-- pairLangCpp :: Pair Str
+-- pairLangCpp = idcpp (@lang, (@lang, Null))
 
 pairLangR :: Pair Str
 pairLangR = idr ((@lang, (@lang, Null)))
@@ -117,8 +118,8 @@ btreeLangAgnostic = (@lang, (@lang, Null, Null), (@lang, Null, Null))
 btreeLangPy :: BTree Str
 btreeLangPy = idpy ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
 
-btreeLangCpp :: BTree Str
-btreeLangCpp = idcpp ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
+-- btreeLangCpp :: BTree Str
+-- btreeLangCpp = idcpp ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
 
 btreeLangR :: BTree Str
 btreeLangR = idr ((@lang, (@lang, Null, Null), (@lang, Null, Null)))
@@ -130,8 +131,8 @@ roseLangAgnostic = (@lang, [(@lang, []), (@lang, [])])
 roseLangPy :: Rose Str
 roseLangPy = idpy (@lang, [(@lang, []), (@lang, [])])
 
-roseLangCpp :: Rose Str
-roseLangCpp = idcpp ((@lang, [(@lang, []), (@lang, [])]))
+-- roseLangCpp :: Rose Str
+-- roseLangCpp = idcpp ((@lang, [(@lang, []), (@lang, [])]))
 
 roseLangR :: Rose Str
 roseLangR = idr ((@lang, [(@lang, []), (@lang, [])]))

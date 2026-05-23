@@ -164,21 +164,19 @@ data TypeF
   | FunF [TypeF] TypeF
   | AppF TypeF [TypeF]
   | NamF NamType FVar [TypeF] [(Key, TypeF)]
-  -- | Back-reference to a recursive alias or record whose definition
-  -- encloses this position. Introduced when the weaver in 'Infer.hs'
-  -- detects a cycle (the general head TVar reappears inside its own
-  -- body) and any time @makeSerialAST'@ encounters a guarded self-
-  -- reference. The first field is the morloc-side TVar (always known
-  -- -- it is the identity of the alias being back-referenced). The
-  -- second is the language-specific concrete name (CVar) IF the user
-  -- supplied an explicit mapping (e.g. @record Cpp => Tree = "tree_t"@
-  -- or @type Cpp => Pair a = "pair_t<$1>" a@), or 'Nothing' when no
-  -- concrete mapping exists for this target language. Statically-typed
-  -- translators (currently C++) must error on 'Nothing' rather than
-  -- synthesize a CVar from the TVar text -- that synthesis is exactly
-  -- the silent leak this representation prevents. Dynamic translators
-  -- (Python, R) emit no type names and never inspect the CVar slot.
-  | RecF TVar (Maybe CVar)
+  -- | Back-reference to a record whose definition appears as a NamF
+  -- somewhere on the enclosing TypeF path. Introduced by guarded
+  -- self-recursive records (e.g. @record Tree where children :: [Tree]@):
+  -- when @makeSerialAST'@ descends into the @[Tree]@ field, it would
+  -- otherwise re-expand the @Tree@ record forever. RecF cuts the cycle.
+  -- The FVar's TVar is always the morloc-side identity of the alias
+  -- being back-referenced. The FVar's CVar slot is unreliable -- it
+  -- carries whatever bnd-protected text @weave@ produced (often the
+  -- morloc TVar text itself, since pairEval leaves bnd-bound positions
+  -- untouched). Consumers that need the language-side concrete name
+  -- (e.g. C++ rendering) must look it up in cscope using the TVar,
+  -- not read the CVar directly.
+  | RecF FVar
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -230,7 +228,7 @@ nullifyNatKindsF (EffectF effs t) = EffectF effs (nullifyNatKindsF t)
 nullifyNatKindsF (OptionalF t) = OptionalF (nullifyNatKindsF t)
 -- RecF is a back-reference; it carries no nested types so the walk
 -- bottoms out here.
-nullifyNatKindsF t@(RecF _ _) = t
+nullifyNatKindsF t@(RecF _) = t
 nullifyNatKindsF t = t
 
 -- | Companion to 'nullifyNatKindsF' for the Type level.

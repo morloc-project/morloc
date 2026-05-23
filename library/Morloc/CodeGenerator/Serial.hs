@@ -66,7 +66,7 @@ serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
 serialAstToType (SerialObject o n ps rs) =
   let ts = map (serialAstToType . snd) rs
    in NamF o n ps (zip (map fst rs) ts)
-serialAstToType (SerialRec (FV v cv)) = RecF v (cvarToMaybe v cv)
+serialAstToType (SerialRec v) = RecF v
 serialAstToType (SerialReal x) = VarF x
 serialAstToType (SerialFloat32 x) = VarF x
 serialAstToType (SerialFloat64 x) = VarF x
@@ -86,18 +86,6 @@ serialAstToType (SerialNull x) = VarF x
 serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
 serialAstToType (SerialUnknown v) = UnkF v
-
--- | Compute the @Maybe CVar@ slot of a @RecF@ from a SerialRec's FVar.
--- A SerialRec produced via 'cvarToMaybe' carries an FVar whose CVar
--- either holds a real concrete-language name (from cscope resolution
--- in 'Infer.hs' weave) or falls back to the morloc-side TVar text
--- when no such mapping exists. The 'Nothing' case is the type-level
--- signal that statically-typed translators (C++) must error rather
--- than letting the morloc identifier reach their generated pool.
-cvarToMaybe :: TVar -> CVar -> Maybe CVar
-cvarToMaybe (TV gv) cv@(CV cvText)
-  | gv == cvText = Nothing
-  | otherwise = Just cv
 
 encode64 :: Int -> String
 encode64 i
@@ -248,13 +236,13 @@ shallowType (SerialString x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- A back-reference re-uses the ancestor's NamF identity; downstream
--- consumers resolve it structurally via the FVar. The CVar slot is
--- @Nothing@ exactly when the SerialRec was built without a concrete-
--- language mapping for the recursive alias; statically-typed
--- translators must error in that case rather than synthesizing a
--- concrete name from the morloc-side TVar (the silent leak that the
--- @RecF TVar (Maybe CVar)@ representation prevents at the type level).
-shallowType (SerialRec (FV v cv)) = RecF v (cvarToMaybe v cv)
+-- consumers resolve it structurally via the FVar's general TVar.
+-- The FVar's CVar slot is unreliable -- it carries whatever bnd-
+-- protected text @weave@ produced for the position. Consumers that
+-- need the language-side name look it up in cscope (e.g. C++ does
+-- this in 'CppTranslator.hs' to distinguish legitimate user mappings
+-- from pairEval bnd-protect leaks).
+shallowType (SerialRec v) = RecF v
 shallowType (SerialUnknown v) = UnkF v
 
 findPackers ::
@@ -706,19 +694,6 @@ makeSerialAST m lang t0 = do
                 NamF _ fv _ _ -> fv
                 _ -> FV (TV "Optional") (CV "optional")
       return $ SerialOptional v inner
-    -- RecF input: 'Infer.hs' weave already cut the cycle and tagged the
-    -- back-reference. Convert to SerialRec. When the concrete CVar is
-    -- absent ('Nothing'), wire-format encoding still needs *some* CVar
-    -- slot in SerialRec (the @^name@ schema reference uses the general
-    -- TVar, but other consumers reach into the FVar's CVar field); use
-    -- the morloc TVar text as a placeholder. Statically-typed pool
-    -- translators that bridge back through 'shallowType' will recover
-    -- the @Nothing@ via 'cvarToMaybe' and surface the C++-side error.
-    makeSerialAST' _ _ (RecF gv mcv) =
-      let cv = case mcv of
-                 Just c -> c
-                 Nothing -> CV (unTVar gv)
-      in return $ SerialRec (FV gv cv)
     makeSerialAST' _ _ t = MM.throwSourcedError m $ "makeSerialAST' error on type:" <+> pretty t
 
 resolvePacker ::
@@ -851,13 +826,8 @@ unweaveTypeF (OptionalF t) =
 
 -- A back-reference unweaves into a bare VarU for each side; the
 -- referenced NamF appears elsewhere in the surrounding TypeU/TypeF
--- and supplies the structural identity. When the concrete-language
--- mapping is absent (Nothing), the concrete side reuses the morloc
--- TVar -- this keeps unweave total, and there is no concrete-side
--- TypeU consumer that would prefer "fail" to "round-trip identity"
--- for a back-reference position.
-unweaveTypeF (RecF gv Nothing) = (VarU gv, VarU gv)
-unweaveTypeF (RecF gv (Just cv)) = (VarU gv, VarU (cv2tv cv))
+-- and supplies the structural identity.
+unweaveTypeF (RecF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
 
 -- Nat / Str types have no concrete/general distinction; duplicate as-is
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)

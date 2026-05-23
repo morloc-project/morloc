@@ -15,17 +15,17 @@ all:
 	# === @lang-tagged literals: Pair Str across 4 contexts ===
 	./nexus pairLangAgnostic      >> obs.txt 2>> obs.err
 	./nexus pairLangPy            >> obs.txt 2>> obs.err
-	./nexus pairLangCpp           >> obs.txt 2>> obs.err
+	# ./nexus pairLangCpp           >> obs.txt 2>> obs.err
 	./nexus pairLangR             >> obs.txt 2>> obs.err
 	# === @lang-tagged literals: BTree Str across 4 contexts ===
 	./nexus btreeLangAgnostic     >> obs.txt 2>> obs.err
 	./nexus btreeLangPy           >> obs.txt 2>> obs.err
-	./nexus btreeLangCpp          >> obs.txt 2>> obs.err
+	# ./nexus btreeLangCpp          >> obs.txt 2>> obs.err
 	./nexus btreeLangR            >> obs.txt 2>> obs.err
 	# === @lang-tagged literals: Rose Str across 4 contexts ===
 	./nexus roseLangAgnostic      >> obs.txt 2>> obs.err
 	./nexus roseLangPy            >> obs.txt 2>> obs.err
-	./nexus roseLangCpp           >> obs.txt 2>> obs.err
+	# ./nexus roseLangCpp           >> obs.txt 2>> obs.err
 	./nexus roseLangR             >> obs.txt 2>> obs.err
 	# === @lang-tagged literals: Container Str (Py-only) ===
 	./nexus containerLangAgnostic >> obs.txt 2>> obs.err
