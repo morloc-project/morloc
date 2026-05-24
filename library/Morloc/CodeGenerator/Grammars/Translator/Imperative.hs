@@ -261,7 +261,13 @@ data LowerConfig m = LowerConfig
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
   -- The [TypeF] is the FULL applied-type arg list (Nat positions included).
   -- Use 'listElemTypeF' if you only want the runtime element type.
-  , lcTupleConstructor :: FVar -> [MDoc] -> MDoc
+  , lcTupleConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
+  -- ^ Build a tuple literal. The [TypeF] is the per-slot type list
+  -- (one entry per element). C++ codegen will use these to dispatch
+  -- on field shape when a user-mapped tuple-alias is supported; today
+  -- both Python/R and C++ ignore them (Python/R because their tuple
+  -- constructors don't need type info, C++ because alias preservation
+  -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
@@ -541,7 +547,11 @@ lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are al
 lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
 lowerNativeExpr cfg _ (ListN_ v t xs) = return $ mergePoolDocs (lcListConstructor cfg v t) xs
-lowerNativeExpr cfg _ (TupleN_ v xs) = return $ mergePoolDocs (lcTupleConstructor cfg v) xs
+lowerNativeExpr cfg origExpr (TupleN_ v xs) =
+  let slotTypes = case typeFof origExpr of
+        AppF _ ts -> ts
+        _ -> []
+  in return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
   let es = map snd rs
       recType = typeFof origExpr
