@@ -78,6 +78,10 @@ module Morloc.Typecheck.Internal
   , collectEffLabels
   , applyEff
 
+    -- * effect propagation helpers
+  , topLevelEffects
+  , wrapTerminalEffects
+
     -- * debugging
   , seeGamma
   -- debugging
@@ -398,6 +402,18 @@ applyEff g = normalizeEffectSet . go
       Just e -> go e
       Nothing -> EffectVar v
     go (EffectUnion a b) = EffectUnion (go a) (go b)
+
+-- | Top-level effects of a type, or the empty set if not an EffectU.
+topLevelEffects :: TypeU -> EffectSet
+topLevelEffects (EffectU effs _) = effs
+topLevelEffects _ = emptyEffectSet
+
+-- | Wrap the terminal output of a (possibly curried) function type with
+-- effects. For a non-function type, wraps directly. Uses 'mkEffectU' so
+-- an empty set is a no-op and nested EffectU flatten.
+wrapTerminalEffects :: EffectSet -> TypeU -> TypeU
+wrapTerminalEffects effs (FunU as b) = FunU as (wrapTerminalEffects effs b)
+wrapTerminalEffects effs t           = mkEffectU effs t
 
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where

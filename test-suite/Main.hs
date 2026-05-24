@@ -34,6 +34,7 @@ main = do
       , effectSynthesisTests
       , effectErrorTests
       , effectEscapabilityTests
+      , effectPartialApplicationTests
       , namespaceErrorTests
       , typeclassTests
       , natErrorTests

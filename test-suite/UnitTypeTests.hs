@@ -26,6 +26,7 @@ module UnitTypeTests
   , effectSynthesisTests
   , effectErrorTests
   , effectEscapabilityTests
+  , effectPartialApplicationTests
   , namespaceErrorTests
   , typeclassTests
   , natErrorTests
@@ -3593,6 +3594,135 @@ effectEscapabilityTests =
         ok :: Int
         ok = 42
           |]
+      ]
+
+-- | Effect propagation under partial application.
+--
+-- The hard invariant: any effect at the top level of an applied
+-- argument's type must reach the terminal output of the enclosing
+-- application. The bare-existential subtyping rule (instantiate
+-- ExistU<->EffectU) solves a bare ?b to <IO> ?b' and stores the effect
+-- inside the gamma binding for the consumed slot. Without the
+-- application-site lift, the effect drops out of the user-visible spine
+-- whenever it lands in a slot whose type variable does not appear in
+-- the result. These tests pin down the post-fix behavior in five
+-- positive shapes plus a negative case that locks in non-interference
+-- with row-polymorphic handler-style signatures.
+effectPartialApplicationTests :: TestTree
+effectPartialApplicationTests =
+  localOption (mkTimeout 200000) $ -- 0.2 second timeout
+    testGroup
+      "Effect propagation under partial application"
+      [ -- Control: the consumed slot IS the result slot.  The instantiate
+        -- path stores <IO> in ?a's binding, and ?a is the terminal, so
+        -- the effect already reaches the output without the lift.
+        assertGeneralType
+          "f1 control: foo (bar str) -- consumed slot equals result slot"
+          [r|
+        module main (f1)
+        effect IO
+        foo :: a -> b -> c -> a
+        bar :: Str -> <IO> Str
+        f1 = foo (bar "hi")
+          |]
+          (fun [exist "a", exist "b", ioEff str])
+
+        -- Partial application: effectful arg goes into ?b (NOT the
+        -- result slot).  Pre-fix the <IO> tag silently dropped because
+        -- ?b is consumed.  Post-fix the lift places <IO> on the
+        -- terminal Int.
+      , assertGeneralType
+          "f2 partial app: foo (int) (bar str) -- effect into non-result slot"
+          [r|
+        module main (f2)
+        effect IO
+        foo :: a -> b -> c -> a
+        bar :: Str -> <IO> Str
+        f2 = foo 42 (bar "hi")
+          |]
+          (fun [exist "a", ioEff int])
+
+        -- Full application: every slot consumed.  Pre-fix the function
+        -- returns plain Int and the <IO> tag vanishes entirely.
+        -- Post-fix the terminal is wrapped as <IO> Int.
+      , assertGeneralType
+          "f3 full app: foo (int) (bar str) (bool) -- effect must reach pure-Int result"
+          [r|
+        module main (f3)
+        effect IO
+        foo :: a -> b -> c -> a
+        bar :: Str -> <IO> Str
+        f3 = foo 42 (bar "hi") True
+          |]
+          (ioEff int)
+
+        -- Two effectful args, each in a bare-existential slot.  Both
+        -- top-level effect sets must union onto the terminal output.
+        -- Here only IO is involved, but two independent absorbing slots
+        -- exercise the foldr-union path in liftAbsorbedEffects.
+      , assertGeneralType
+          "f4 two effectful args -- both contribute to terminal"
+          [r|
+        module main (f4)
+        effect IO
+        foo :: a -> b -> c -> a
+        bar :: Str -> <IO> Str
+        qux :: Str -> <IO> Str
+        f4 = foo (bar "hi") (qux "by")
+          |]
+          (fun [exist "a", ioEff str])
+
+        -- Different effects from different bare-existential slots must
+        -- UNION into the terminal output, not be lost or pick one side.
+        -- Exercises the foldr unionEffectSet path with non-equal sets.
+      , assertGeneralType
+          "f6 multi-effect union: <IO> arg and <Error> arg combine on terminal"
+          [r|
+        module main (f6)
+        effect IO
+        effect Error
+        foo :: a -> b -> c -> a
+        bar :: Str -> <IO> Str
+        qux :: Str -> <Error> Str
+        f6 = foo 1 (bar "hi") (qux "by")
+          |]
+          (ioErrEff int)
+
+        -- Let-bound effectful value flowing into a bare slot.  The
+        -- let-RHS still synthesizes to <IO> Str and is checked against
+        -- the bare existential through the same instantiate path, so
+        -- the lift must fire identically.
+      , assertGeneralType
+          "f5 let-bound effectful value into non-result slot"
+          [r|
+        module main (f5)
+        effect IO
+        foo :: a -> b -> c -> a
+        bar :: Str -> <IO> Str
+        f5 =
+          let x = bar "hi"
+          in foo 42 x True
+          |]
+          (ioEff int)
+
+        -- Negative: row-polymorphic handler signature.  The first
+        -- parameter is <Error, e> a, an EffectU -- NOT a bare
+        -- ExistU -- so isAbsorbing rejects it and the lift must not
+        -- fire.  The Error effect is escapable and discharged by the
+        -- handler; the result must be pure Int with no spurious <IO>
+        -- or <Error> manufactured by the lift.
+      , assertGeneralType
+          "handleEsc: row-poly handler discharges escapable Error, lift does not interfere"
+          [r|
+        module main (h)
+        escapable effect Error
+        source Py ("foo")
+        source Py ("handle")
+        foo :: Int -> <Error> Int
+        handle :: <Error, e> a -> <e> a
+        h = handle (foo 1)
+          |]
+          int
       ]
 
 namespaceErrorTests :: TestTree
