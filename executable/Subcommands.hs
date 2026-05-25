@@ -20,6 +20,7 @@ import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified CppTranslator
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BL
+import Data.Int (Int64)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -211,20 +212,24 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
     buildModuleExecutable locFile _name verbosity' config buildConfig' forceOverwrite = do
       code <- MT.readFile locFile
       -- `morloc install --build` re-enters the make pipeline. The
-      -- --unsafe-skip-null-check flag is a `morloc make` opt-in only,
-      -- so default to False here (safer).
-      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite False
+      -- --unsafe-skip-null-check, --inline-size, --no-shm, and
+      -- --tmpdir flags are `morloc make` opt-ins only, so default
+      -- them here (safer).
+      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite False Nothing False Nothing
 
 -- | Compile a morloc program and optionally install it.
 -- Shared by `morloc make --install` and `morloc install --build`.
 makeAndInstall ::
   Maybe Path -> Maybe String -> Code -> [T.Text] -> Int ->
-  Config.Config -> BuildConfig -> Bool -> Bool -> IO Bool
-makeAndInstall path outfile code extraIncludes verbosity config buildConfig force unsafeSkipNullCheck = do
+  Config.Config -> BuildConfig -> Bool -> Bool -> Maybe Int64 -> Bool -> Maybe Path -> IO Bool
+makeAndInstall path outfile code extraIncludes verbosity config buildConfig force unsafeSkipNullCheck inlineSize noShm tmpdir = do
   let action = do
         MM.modify (\s -> s {stateInstall = True
                           , stateInstallForce = force
-                          , stateUnsafeSkipNullCheck = unsafeSkipNullCheck})
+                          , stateUnsafeSkipNullCheck = unsafeSkipNullCheck
+                          , stateInlineSize = inlineSize
+                          , stateNoShm = noShm
+                          , stateTmpdir = tmpdir})
         M.writeProgram translator path code
   result <- MM.runMorlocMonad outfile verbosity config buildConfig action
   passed <- MM.writeMorlocReturn result
@@ -288,10 +293,14 @@ cmdMake args verbosity config buildConfig = do
       makeAndInstall path outfile code
         (map T.pack (makeInclude args)) verbosity config buildConfig
         (makeForce args) (makeUnsafeSkipNullCheck args)
+        (makeInlineSize args) (makeNoShm args) (makeTmpdir args)
     else do
       let action = do
             MM.modify (\s -> s {stateInstall = False
-                              , stateUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args})
+                              , stateUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
+                              , stateInlineSize = makeInlineSize args
+                              , stateNoShm = makeNoShm args
+                              , stateTmpdir = makeTmpdir args})
             M.writeProgram translator path code
       result <- MM.runMorlocMonad outfile verbosity config buildConfig action
       passed <- MM.writeMorlocReturn result

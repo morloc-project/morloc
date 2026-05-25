@@ -95,6 +95,32 @@ pub struct Manifest {
     /// --unsafe-skip-null-check`. Default false: checks enabled.
     #[serde(default)]
     pub unsafe_skip_null_check: bool,
+    /// Inline-vs-routed threshold in bytes. None = use libmorloc's
+    /// compile-time default (64 KiB). 0 = never inline. Set via
+    /// `morloc make --inline-size`. The nexus forwards this value to
+    /// libmorloc via the `MORLOC_INLINE_SIZE` env var and an FFI
+    /// setter; pool processes inherit the env var on spawn.
+    #[serde(default)]
+    pub inline_size: Option<i64>,
+    /// When true, the runtime never uses shared memory: data above the
+    /// inline threshold is written to a temp file and passed by path.
+    /// Set via `morloc make --no-shm`. Forwarded to libmorloc via the
+    /// `MORLOC_NO_SHM` env var and an FFI setter.
+    #[serde(default)]
+    pub no_shm: bool,
+    /// Directory where file-packet intermediates land when SHM is
+    /// disabled. None = libmorloc's default (`$TMPDIR` or `/tmp`).
+    /// Set via `morloc make --tmpdir`. Forwarded to libmorloc via
+    /// the `MORLOC_TMPDIR` env var; the file-packet writer uses it
+    /// as the parent directory for `morloc-pkt-<pid>-<seq>.mpk`.
+    ///
+    /// **Persistence:** when Some, file packets are NOT
+    /// auto-cleaned at end-of-eval (intended for test/debug
+    /// inspection of the wire-level traffic). When None (default),
+    /// files are unlinked via `eval_arena` when the eval that
+    /// produced them ends.
+    #[serde(default)]
+    pub tmpdir: Option<String>,
     /// **Reserved.** User-sourced free-form annotations on the module.
     /// Always emitted as `{}` today. Distinct from `build` (which is
     /// compiler-sourced).

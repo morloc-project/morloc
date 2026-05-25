@@ -1,3 +1,11 @@
+0.87.0 [2026-05-25]
+-------------------
+
+Allow control over data transfer approaches for a build
+ - `--no-shm` - completely disable shm
+ - `--inline-size` - set the threshold below which data is inlined (default 64k)
+ - `--tmpdir` - determine where intermediate files are written
+
 0.86.1 [2026-05-23]
 -------------------
 

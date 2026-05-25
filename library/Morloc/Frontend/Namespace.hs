@@ -111,8 +111,12 @@ copyState oldIndex newIndex = do
       , stateEvalMode = stateEvalMode s
       , stateAllowLocalModules = stateAllowLocalModules s
       , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
+      , stateInlineSize = stateInlineSize s
+      , stateNoShm = stateNoShm s
+      , stateTmpdir = stateTmpdir s
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
+      , stateSerialAncestors = stateSerialAncestors s
       }
   where
     updateGMap g = case GMap.yIsX oldIndex newIndex g of

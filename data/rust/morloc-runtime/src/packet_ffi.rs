@@ -895,7 +895,8 @@ pub unsafe extern "C" fn make_data_packet_auto(
         }
     };
 
-    if flat_size <= MORLOC_INLINE_THRESHOLD {
+    let threshold = crate::packet::inline_threshold();
+    if flat_size <= threshold {
         match crate::voidstar::flatten_to_buffer(voidstar as AbsPtr, &rs) {
             Ok(blob) => {
                 let packet = make_data_packet_with_schema(
@@ -920,7 +921,95 @@ pub unsafe extern "C" fn make_data_packet_auto(
         }
     }
 
-    make_standard_data_packet(relptr, schema)
+    if crate::packet::shm_enabled() {
+        make_standard_data_packet(relptr, schema)
+    } else {
+        make_file_data_packet_voidstar(voidstar, schema, &rs, errmsg)
+    }
+}
+
+// ── make_file_data_packet_voidstar ───────────────────────────────────────────
+//
+// FILE-routed data path for `morloc make --no-shm` (or when SHM is
+// disabled at runtime). Serializes the voidstar with the same
+// msgpack writer used for cross-language transport, drops the bytes
+// into a unique temp file, and emits a FILE+MSGPACK packet pointing
+// at that path. The file is registered with `eval_arena` so it is
+// unlinked when the surrounding eval scope ends. The receiver reads
+// the file in `get_data_packet_as_mpk` / `get_morloc_data_packet_value`
+// (existing FILE+MSGPACK branch).
+unsafe fn make_file_data_packet_voidstar(
+    voidstar: *mut c_void,
+    schema: *const CSchema,
+    rs: &crate::schema::Schema,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let mpk = match crate::mpack::pack_with_schema(voidstar as AbsPtr, rs) {
+        Ok(b) => b,
+        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+
+    // Persistence rule: a user-supplied `--tmpdir` (manifest /
+    // env var / FFI setter) means "I picked this location to inspect
+    // files, don't delete them out from under me". Default behavior
+    // (no override) puts files in $TMPDIR and registers them with
+    // eval_arena for cleanup at end-of-eval.
+    let user_dir = crate::packet::file_packet_tmpdir();
+    let persistent = user_dir.is_some();
+    let dir: std::path::PathBuf = match user_dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None    => std::env::temp_dir(),
+    };
+    // Create the directory if a user-specified path doesn't exist yet.
+    // std::env::temp_dir() always exists, but a manifest-supplied
+    // `--tmpdir` may not.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        set_errmsg(errmsg, &MorlocError::Io(e));
+        return ptr::null_mut();
+    }
+    let pid = std::process::id();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("morloc-pkt-{}-{}.mpk", pid, seq));
+
+    if let Err(e) = std::fs::write(&path, &mpk) {
+        set_errmsg(errmsg, &MorlocError::Io(e));
+        return ptr::null_mut();
+    }
+
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => {
+            set_errmsg(errmsg, &MorlocError::Packet("Non-UTF8 temp path for file packet".into()));
+            let _ = std::fs::remove_file(&path);
+            return ptr::null_mut();
+        }
+    };
+    let path_cstr = match std::ffi::CString::new(path_str) {
+        Ok(c) => c,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Packet("Embedded NUL in temp path for file packet".into()));
+            let _ = std::fs::remove_file(&path);
+            return ptr::null_mut();
+        }
+    };
+
+    let packet = make_mpk_data_packet(path_cstr.as_ptr(), schema);
+    if packet.is_null() {
+        set_errmsg(errmsg, &MorlocError::Packet("Failed to create FILE data packet".into()));
+        let _ = std::fs::remove_file(&path);
+        return ptr::null_mut();
+    }
+
+    // Only track for auto-cleanup when no user override is in effect.
+    // A `--tmpdir` user is expecting to inspect these files; an
+    // automatic unlink would defeat the purpose.
+    if !persistent {
+        crate::eval_arena::record_file_if_active(path);
+    }
+    packet
 }
 
 // ── print_morloc_data_packet ─────────────────────────────────────────────────

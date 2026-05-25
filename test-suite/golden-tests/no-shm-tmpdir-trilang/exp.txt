@@ -1,0 +1,14 @@
+--- nexus-zero output ---
+"HELLO_MARKER"
+[1,2,3,4,5]
+[[1,2],[3,4]]
+--- nexus-thresh output ---
+"TINY_MARKER"
+--- assertions ---
+tmp_zero_files_at_least_9=yes
+tmp_thresh_files_3_to_5=yes
+Str_serialized=yes
+List_serialized=yes
+Nested_serialized=yes
+tiny_in_tmp_thresh=no
+long_in_tmp_thresh=yes

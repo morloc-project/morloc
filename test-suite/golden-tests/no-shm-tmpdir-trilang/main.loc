@@ -1,0 +1,37 @@
+module main (echoStr, echoList, echoNested)
+
+type Py  => Str = "str"
+type Cpp => Str = "std::string"
+type R   => Str = "character"
+
+type Py  => Int = "int"
+type Cpp => Int = "int"
+type R   => Int = "integer"
+
+type Py  => List a = "list"           a
+type Cpp => List a = "std::vector<$1>" a
+type R   => List a = "list"           a
+
+source Py  from "pyfn.py"   ("py_id")
+source Cpp from "cppfn.hpp" ("cpp_id_str", "cpp_id_list", "cpp_id_nested")
+source R   from "rfn.R"     ("r_id")
+
+py_id :: a -> a
+r_id  :: a -> a
+
+cpp_id_str    :: Str     -> Str
+cpp_id_list   :: [Int]   -> [Int]
+cpp_id_nested :: [[Int]] -> [[Int]]
+
+-- Each command traverses py -> cpp -> r. Three pool returns per call,
+-- each going through make_data_packet_auto. Routing depends on the
+-- --inline-size threshold compiled into the nexus binary.
+
+echoStr :: Str -> Str
+echoStr s = r_id (cpp_id_str (py_id s))
+
+echoList :: [Int] -> [Int]
+echoList xs = r_id (cpp_id_list (py_id xs))
+
+echoNested :: [[Int]] -> [[Int]]
+echoNested xs = r_id (cpp_id_nested (py_id xs))

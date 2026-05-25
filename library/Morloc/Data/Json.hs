@@ -15,6 +15,7 @@ module Morloc.Data.Json
   ( jsonEscape
   , jsonStr
   , jsonInt
+  , jsonInt64
   , jsonBool
   , jsonNull
   , jsonArr
@@ -24,6 +25,7 @@ module Morloc.Data.Json
   ) where
 
 import Data.Char (ord)
+import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as MT
 import Numeric (showHex)
@@ -51,6 +53,10 @@ jsonStr t = "\"" <> jsonEscape t <> "\""
 -- | Render an 'Int' as a JSON number
 jsonInt :: Int -> Text
 jsonInt = MT.pack . show
+
+-- | Render an 'Int64' as a JSON number
+jsonInt64 :: Int64 -> Text
+jsonInt64 = MT.pack . show
 
 -- | Render a 'Bool' as a JSON boolean
 jsonBool :: Bool -> Text

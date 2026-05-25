@@ -24,6 +24,8 @@ module UI
   , EvalCommand (..)
   ) where
 
+import Data.Int (Int64)
+import Morloc.Data.Size (parseHumanSize)
 import Morloc.Module (GitProtocol (..), OverwriteProtocol (..))
 import Morloc.Version (versionStr)
 import Options.Applicative
@@ -73,6 +75,9 @@ data MakeCommand = MakeCommand
   , makeForce :: Bool
   , makeInclude :: [String]
   , makeUnsafeSkipNullCheck :: Bool
+  , makeInlineSize :: Maybe Int64
+  , makeNoShm :: Bool
+  , makeTmpdir :: Maybe String
   , makeScript :: String
   }
 
@@ -88,6 +93,9 @@ makeCommandParser =
     <*> optMakeForce
     <*> optMakeInclude
     <*> optUnsafeSkipNullCheck
+    <*> optInlineSize
+    <*> optNoShm
+    <*> optTmpdir
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -415,6 +423,44 @@ optUnsafeSkipNullCheck =
                 ++ "cannot represent them (e.g. R). Unsafe: a NUL passing "
                 ++ "into R may crash inside user code instead of being "
                 ++ "diagnosed cleanly at the FFI boundary."
+            )
+    )
+
+optInlineSize :: Parser (Maybe Int64)
+optInlineSize =
+  optional $ option (eitherReader parseHumanSize)
+    ( long "inline-size"
+        <> metavar "BYTES"
+        <> help
+            ( "Threshold (in bytes) under which data is inlined into "
+                ++ "packets instead of routed through shared memory or "
+                ++ "files. Accepts k/m/g suffixes (binary, 1024-based). "
+                ++ "0 = never inline. Default: 64k."
+            )
+    )
+
+optNoShm :: Parser Bool
+optNoShm =
+  switch
+    ( long "no-shm"
+        <> help
+            ( "Disable shared memory. Data above the inline threshold "
+                ++ "is written to a temp file and passed by path."
+            )
+    )
+
+optTmpdir :: Parser (Maybe String)
+optTmpdir =
+  optional $ strOption
+    ( long "tmpdir"
+        <> metavar "PATH"
+        <> help
+            ( "Directory for data files emitted by --no-shm "
+                ++ "(format `morloc-pkt-<pid>-<seq>.mpk`). When this "
+                ++ "flag is set, files are NOT auto-deleted at end of "
+                ++ "eval (useful for testing/inspection). Default "
+                ++ "(unset): files go to $TMPDIR or /tmp and are "
+                ++ "unlinked when the eval that produced them ends."
             )
     )
 

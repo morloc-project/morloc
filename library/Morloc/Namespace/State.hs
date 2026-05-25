@@ -61,6 +61,7 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
+import Data.Int (Int64)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
@@ -144,6 +145,20 @@ data MorlocState = MorlocState
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
   -- from this; the runtime then skips the boundary NUL scan.
+  , stateInlineSize :: Maybe Int64
+  -- ^ Inline-vs-route threshold, in bytes, from @morloc make
+  -- --inline-size@. @Nothing@ = use the libmorloc default; emitted as
+  -- the manifest @inline_size@ field, which the nexus forwards to
+  -- libmorloc via env var and FFI setter.
+  , stateNoShm :: Bool
+  -- ^ True when @morloc make --no-shm@ was given. Disables shared
+  -- memory at the runtime; data over the inline threshold is written
+  -- to a temp file and passed by path.
+  , stateTmpdir :: Maybe Path
+  -- ^ Directory for transient data files written by the @--no-shm@
+  -- routing path, from @morloc make --tmpdir@. @Nothing@ = use the
+  -- libmorloc default (@$TMPDIR@ or @/tmp@); emitted as the manifest
+  -- @tmpdir@ field, forwarded by the nexus via @MORLOC_TMPDIR@.
   , stateModuleDoc :: [Text]
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
@@ -394,6 +409,9 @@ instance Defaultable MorlocState where
       , stateEvalMode = False
       , stateAllowLocalModules = True
       , stateUnsafeSkipNullCheck = False
+      , stateInlineSize = Nothing
+      , stateNoShm = False
+      , stateTmpdir = Nothing
       , stateModuleDoc = []
       , stateModuleEpilogues = []
       , stateSerialAncestors = Set.empty
