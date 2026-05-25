@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
+import Data.Int (Int64)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
@@ -875,8 +876,11 @@ buildManifest ::
   [Text] ->
   [[Text]] ->
   Bool ->
+  Maybe Int64 ->
+  Bool ->
+  Maybe Path ->
   Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck =
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck inlineSize noShm tmpdir =
   jsonObj
     [ ("name", jsonStr (MT.pack programName))
     , ("build", buildJson)
@@ -886,6 +890,9 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     , ("desc", jsonStrArr moduleDoc)
     , ("epilogues", jsonArr (map jsonStrArr moduleEpilogues))
     , ("unsafe_skip_null_check", jsonBool unsafeSkipNullCheck)
+    , ("inline_size", maybe jsonNull jsonInt64 inlineSize)
+    , ("no_shm", jsonBool noShm)
+    , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) tmpdir)
     , ("metadata", metadataEmpty)
     ]
   where
@@ -1093,6 +1100,9 @@ generate cs rASTs = do
   moduleDoc <- MM.gets stateModuleDoc
   moduleEpilogues <- MM.gets stateModuleEpilogues
   unsafeSkipNullCheck <- MM.gets stateUnsafeSkipNullCheck
+  inlineSize <- MM.gets stateInlineSize
+  noShm <- MM.gets stateNoShm
+  tmpdir <- MM.gets stateTmpdir
 
   let manifestJson =
         buildManifest
@@ -1110,6 +1120,9 @@ generate cs rASTs = do
           moduleDoc
           moduleEpilogues
           unsafeSkipNullCheck
+          inlineSize
+          noShm
+          tmpdir
       wrapperScript = makeWrapperScript manifestJson
 
   return $

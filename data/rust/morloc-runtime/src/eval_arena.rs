@@ -35,12 +35,18 @@
 //! pointer to its long-lived owner.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 
 use crate::error::MorlocError;
 use crate::shm::{self, AbsPtr};
 
+struct ArenaState {
+    blocks: Vec<AbsPtr>,
+    files: Vec<PathBuf>,
+}
+
 thread_local! {
-    static ARENA: RefCell<Option<Vec<AbsPtr>>> = const { RefCell::new(None) };
+    static ARENA: RefCell<Option<ArenaState>> = const { RefCell::new(None) };
 }
 
 /// Initial capacity of the tracking vector. Sized to avoid libc-malloc
@@ -62,9 +68,9 @@ pub struct ArenaGuard {
 impl Drop for ArenaGuard {
     fn drop(&mut self) {
         ARENA.with(|cell| {
-            let blocks = cell.borrow_mut().take();
-            if let Some(blocks) = blocks {
-                for ptr in blocks {
+            let state = cell.borrow_mut().take();
+            if let Some(state) = state {
+                for ptr in state.blocks {
                     // Panic-safe: log and continue rather than propagate.
                     // A panic inside Drop while already unwinding aborts
                     // the process, which is strictly worse than leaving
@@ -74,6 +80,16 @@ impl Drop for ArenaGuard {
                             "eval_arena drop: shfree failed for {:p}: {:?}",
                             ptr, e
                         );
+                    }
+                }
+                for path in state.files {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            eprintln!(
+                                "eval_arena drop: remove_file failed for {}: {}",
+                                path.display(), e
+                            );
+                        }
                     }
                 }
             }
@@ -91,7 +107,10 @@ pub fn enter() -> Result<ArenaGuard, MorlocError> {
                 "eval_arena::enter called while an arena is already active on this thread".into(),
             ));
         }
-        *slot = Some(Vec::with_capacity(INITIAL_CAPACITY));
+        *slot = Some(ArenaState {
+            blocks: Vec::with_capacity(INITIAL_CAPACITY),
+            files: Vec::new(),
+        });
         Ok(ArenaGuard { _priv: () })
     })
 }
@@ -107,8 +126,21 @@ pub fn record_if_active(ptr: AbsPtr) {
         return;
     }
     ARENA.with(|cell| {
-        if let Some(v) = cell.borrow_mut().as_mut() {
-            v.push(ptr);
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            s.blocks.push(ptr);
+        }
+    });
+}
+
+/// Record a file path that should be unlinked when the arena guard
+/// drops. Used by the file-packet producer to register temp files for
+/// post-eval cleanup. No-op if no arena is active (the caller is then
+/// responsible for cleanup).
+#[inline]
+pub fn record_file_if_active(path: PathBuf) {
+    ARENA.with(|cell| {
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            s.files.push(path);
         }
     });
 }
@@ -130,9 +162,24 @@ pub fn forget_if_active(ptr: AbsPtr) {
         return;
     }
     ARENA.with(|cell| {
-        if let Some(v) = cell.borrow_mut().as_mut() {
-            if let Some(idx) = v.iter().rposition(|&p| p == ptr) {
-                v.swap_remove(idx);
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            if let Some(idx) = s.blocks.iter().rposition(|&p| p == ptr) {
+                s.blocks.swap_remove(idx);
+            }
+        }
+    });
+}
+
+/// Remove `path` from the active arena's file list. Use when a caller
+/// has taken responsibility for unlinking the file itself (or after the
+/// receiver has consumed it). No-op if no arena is active or the path
+/// is not tracked.
+#[inline]
+pub fn forget_file_if_active(path: &std::path::Path) {
+    ARENA.with(|cell| {
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            if let Some(idx) = s.files.iter().rposition(|p| p == path) {
+                s.files.swap_remove(idx);
             }
         }
     });
@@ -157,14 +204,14 @@ mod tests {
     }
 
     fn arena_len() -> usize {
-        ARENA.with(|cell| cell.borrow().as_ref().map(|v| v.len()).unwrap_or(0))
+        ARENA.with(|cell| cell.borrow().as_ref().map(|s| s.blocks.len()).unwrap_or(0))
     }
 
     fn arena_contains(p: AbsPtr) -> bool {
         ARENA.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .map(|v| v.contains(&p))
+                .map(|s| s.blocks.contains(&p))
                 .unwrap_or(false)
         })
     }

@@ -1094,7 +1094,9 @@ application ::
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let funType = apply g1 $ FunU (as1 <> remainder) b0
+  let consumedParams = take (length es0) as0
+      baseFunType    = apply g1 $ FunU (as1 <> remainder) b0
+      funType        = liftAbsorbedEffects g0 g1 consumedParams as1 baseFunType
   insetSay $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es1)
 
@@ -1118,18 +1120,49 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
         Left err -> throwTypeError i err
         Right Nothing -> return g2
         Right (Just g') -> return g'
-      (g4, _, es', _) <- zipCheck i g3 es eas
-      return (g4, apply g4 f, es')
+      (g4, as1, es', _) <- zipCheck i g3 es eas
+      let baseFun = apply g4 (FunU as1 ea)
+          funType = liftAbsorbedEffects g3 g4 eas as1 baseFun
+      return (g4, funType, es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do
         (g1, ts', es', _) <- zipCheck i g0 es ts
-        return (g1, apply g1 (FunU ts' t), es')
+        let baseFun = apply g1 (FunU ts' t)
+            funType = liftAbsorbedEffects g0 g1 ts ts' baseFun
+        return (g1, funType, es')
       (Just t) -> throwTypeError i $ "Application of term with non-functional type:\n   " <+> prettyTypeU t
       Nothing -> throwTypeError i $ "Expected function, but could not find type of term\n   " <+> pretty v
 application i _ _ t =
   throwTypeError i $
     "Application of non-functional expression of type:" <+> prettyTypeU t
+
+-- | Collect effects from consumed args whose *declared* param was a bare
+-- existential (the absorbing position created by the EffectU<:ExistU
+-- instantiation rule in 'subtype'). Lift those effects onto the terminal
+-- output of the residual function type. 'mkEffectU' keeps this
+-- idempotent: wrapping an already-effectful terminal merges; an empty
+-- set is a no-op. This preserves the invariant that any effect at the
+-- top level of an argument's type must reach the terminal output, which
+-- the bare-existential subtyping path would otherwise hide inside a
+-- consumed (and thus invisible) slot.
+liftAbsorbedEffects
+  :: Gamma             -- pre-zipCheck gamma (declared param shapes here)
+  -> Gamma             -- post-zipCheck gamma (arg solutions here)
+  -> [TypeU]           -- declared params for consumed args
+  -> [TypeU]           -- post-checkG arg types
+  -> TypeU             -- residual function type to wrap
+  -> TypeU
+liftAbsorbedEffects g0 g1 params args fty =
+  let effs = foldr unionEffectSet emptyEffectSet
+        [ topLevelEffects (apply g1 a)
+        | (p, a) <- zip params args
+        , isAbsorbing (apply g0 p)
+        ]
+   in wrapTerminalEffects effs fty
+  where
+    isAbsorbing (ExistU _ _ _) = True
+    isAbsorbing _              = False
 
 -- Tip together the arguments passed to an application
 zipCheck ::

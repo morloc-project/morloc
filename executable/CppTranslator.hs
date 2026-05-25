@@ -529,7 +529,7 @@ cppLowerConfig =
         state <- CMS.get
         return $ evaluatePattern state t p xs
     , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
-    , lcTupleConstructor = \_ -> ((<>) "std::make_tuple" . tupled)
+    , lcTupleConstructor = \_ _ -> ((<>) "std::make_tuple" . tupled)
     , lcRecordConstructor = \recType _ _ _ rs -> do
         t <- cppTypeOf recType
         idx <- getCounter
@@ -874,25 +874,39 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _) = return Nothing
     makeSerial _ _ (_, NamU _ (TV "arrow") _ _, _, _) = return Nothing
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _) = do
-      params <- mapM (either (\(p, _) -> return $ "T" <> pretty p) (\_ -> return "XXX_FIXME")) ps
-      let templateTerms = ["T" <> pretty p | Left (p, _) <- ps]
-          -- When the concrete name carries `$N` macros (e.g.
-          -- `"container_t<$1>"`), the macros are filled by the template
-          -- terms (T0, T1, ...). Otherwise the bare name gets a
-          -- conventional `<T0, ...>` appended. Without this branching,
-          -- a templated concrete name would lower to `container_t<$1><T0>`
-          -- and the serializer signature would fail to compile.
-          rtype = renderTemplatedType v templateTerms
-          rs' = map (second (evaluateTypeU scope)) rs
+      let selfName = TV v
           -- The struct's own name is needed by showDefType so a `?T`
           -- field referring back to T can be emitted as
           -- `optional<unique_ptr<T>>` (matching the voidstar wire
           -- format's relptr-based Optional and sidestepping C++'s
           -- incomplete-type rule for `optional<T>` inside T's body).
-          selfName = TV v
+          --
+          -- Each ps entry maps to one positional slot in the concrete
+          -- name's `$N` macro expansion. Left positions become template
+          -- type variables (T<a>); Right positions are concrete bindings
+          -- selected by `selectSpecialization` (e.g. a `record Cpp =>
+          -- Foo Int` entry) and render through showDefType to their C++
+          -- name.
+          paramAt (Left (p, _)) = "T" <> pretty p
+          paramAt (Right t) = showDefType selfName ps (typeOf (evaluateTypeU scope t))
+          allParams = map paramAt ps
+          -- templateTerms drives `template <class T...>`. Only Left
+          -- positions declare template parameters; Right positions are
+          -- already-bound concrete types and must not appear in the
+          -- template header.
+          templateTerms = ["T" <> pretty p | Left (p, _) <- ps]
+          -- When the concrete name carries `$N` macros (e.g.
+          -- `"container_t<$1>"`), the macros are filled positionally
+          -- by allParams (template names for Left, concrete names for
+          -- Right). Otherwise the bare name gets a conventional
+          -- `<a0, ...>` appended. Without this branching, a templated
+          -- concrete name would lower to `container_t<$1><T0>` and the
+          -- serializer signature would fail to compile.
+          rtype = renderTemplatedType v allParams
+          rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType selfName ps (typeOf t)) | (k, t) <- rs']
-          serializer = CP.printSerializer params rtype fields
-          deserializer = CP.printDeserializer (r == NamObject) params rtype fields
+          serializer = CP.printSerializer templateTerms rtype fields
+          deserializer = CP.printDeserializer (r == NamObject) templateTerms rtype fields
       return $ Just (serializer, deserializer)
     makeSerial _ _ _ = return Nothing
 

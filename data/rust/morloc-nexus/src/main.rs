@@ -77,6 +77,23 @@ fn main() {
         }
     };
 
+    // Forward the per-program inline-vs-shm routing knobs to libmorloc.
+    // Env vars are inherited by every pool process the nexus later
+    // execvp's, and libmorloc reads them once on first packet operation
+    // (via packet::ensure_config_loaded). Setting both before the
+    // dlopen-and-shinit block below guarantees the nexus's own libmorloc
+    // instance sees them too (its first read of the atomics will trip
+    // the Once and pull these values in).
+    if let Some(n) = manifest.inline_size {
+        std::env::set_var("MORLOC_INLINE_SIZE", n.to_string());
+    }
+    if manifest.no_shm {
+        std::env::set_var("MORLOC_NO_SHM", "1");
+    }
+    if let Some(ref dir) = manifest.tmpdir {
+        std::env::set_var("MORLOC_TMPDIR", dir);
+    }
+
     let single_command = manifest.commands.len() == 1 && manifest.groups.is_empty();
 
     // Second pass: parse options after manifest path (skip in single-command mode)

@@ -46,7 +46,99 @@ pub const PACKET_ENTRYPOINT_REMOTE_SFS: u8 = 0x01;
 
 // ── Inline threshold ─────────────────────────────────────��─────────────────
 
+// Compile-time default for the inline threshold. The effective runtime
+// value lives in INLINE_THRESHOLD below and is initialized to this
+// constant; both `morloc make --inline-size` (via env var + FFI setter)
+// and direct calls to `morloc_set_inline_threshold` override it.
 pub const MORLOC_INLINE_THRESHOLD: usize = 64 * 1024;
+
+// Runtime-tunable copy of the inline threshold, in bytes. Data with a
+// flat size <= this value is embedded directly in the packet (MESG);
+// larger payloads are routed via SHM (RPTR) or, when SHM is disabled,
+// via a temp file (FILE).
+//
+// Mutated by `config::morloc_set_inline_threshold` (FFI) and by the
+// `MORLOC_INLINE_SIZE` env var (read once via `ensure_config_loaded`).
+pub static INLINE_THRESHOLD: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(MORLOC_INLINE_THRESHOLD);
+
+// Runtime-tunable SHM enable flag. False = data over the inline
+// threshold is written to a temp file instead of shared memory.
+//
+// Mutated by `config::morloc_set_shm_enabled` (FFI) and by the
+// `MORLOC_NO_SHM` env var.
+pub static SHM_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+// Read the live inline threshold. Cheap and lock-free.
+#[inline]
+pub fn inline_threshold() -> usize {
+    ensure_config_loaded();
+    INLINE_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// Read the live SHM-enabled flag. Cheap and lock-free.
+#[inline]
+pub fn shm_enabled() -> bool {
+    ensure_config_loaded();
+    SHM_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// Tmpdir for file-packet intermediates (written when SHM_ENABLED is
+// false and data exceeds the inline threshold). Mutex<Option<String>>
+// rather than an atomic because the value is a variable-length path.
+// Empty/None = "use std::env::temp_dir() at call time".
+static TMPDIR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Read the configured tmpdir for file packets. None = fall back to
+/// `std::env::temp_dir()` (or `/tmp`) at the call site. Read by
+/// `make_file_data_packet_voidstar`.
+pub fn file_packet_tmpdir() -> Option<String> {
+    ensure_config_loaded();
+    TMPDIR.lock().ok().and_then(|g| g.clone())
+}
+
+/// Override the file-packet tmpdir. Empty string = unset (fall back
+/// to `std::env::temp_dir()`). Idempotent.
+pub fn set_file_packet_tmpdir(path: Option<String>) {
+    if let Ok(mut g) = TMPDIR.lock() {
+        *g = path.filter(|p| !p.is_empty());
+    }
+}
+
+// One-shot loader for env-var fallbacks. Pool processes inherit the
+// nexus's `MORLOC_INLINE_SIZE` / `MORLOC_NO_SHM` / `MORLOC_TMPDIR`
+// env vars on execvp; libmorloc reads them the first time
+// inline_threshold() / shm_enabled() / file_packet_tmpdir() is
+// called and pokes the globals. After that, FFI setters are the
+// only way to change the values.
+static CONFIG_INIT: std::sync::Once = std::sync::Once::new();
+
+fn ensure_config_loaded() {
+    CONFIG_INIT.call_once(|| {
+        if let Ok(s) = std::env::var("MORLOC_INLINE_SIZE") {
+            if let Ok(n) = s.parse::<i64>() {
+                if n >= 0 {
+                    INLINE_THRESHOLD.store(n as usize, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        if let Ok(s) = std::env::var("MORLOC_NO_SHM") {
+            let v = s.trim().to_ascii_lowercase();
+            let off = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+            if off {
+                SHM_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Ok(s) = std::env::var("MORLOC_TMPDIR") {
+            if !s.is_empty() {
+                if let Ok(mut g) = TMPDIR.lock() {
+                    *g = Some(s);
+                }
+            }
+        }
+    });
+}
 
 // ── Metadata ─────────��─────────────────────────────────────────────────────
 

@@ -394,7 +394,7 @@ genericLowerConfig desc srcNamer = cfg
               (FV _ (CV typeName))
                 | typeName `elem` ldAtomicTypes desc -> pretty (ldAtomicListFn desc) <> tupled es
               _ -> pretty (ldGenericListFn desc) <> tupled es
-        , lcTupleConstructor = \_ -> case ldTupleConstructor desc of
+        , lcTupleConstructor = \_ _ -> case ldTupleConstructor desc of
             "" -> tupled
             name -> \es -> pretty name <> tupled es
         , lcRecordConstructor = \_ _ _ _ rs ->

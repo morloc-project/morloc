@@ -251,8 +251,48 @@ typedef struct __attribute__((packed)) morloc_packet_header_s {
     uint64_t length;
 } morloc_packet_header_t;
 
-// Inline threshold: voidstar data <= this size is embedded in packet payload.
+// Default inline threshold: voidstar data <= this size is embedded in
+// the packet payload (PACKET_SOURCE_MESG); larger payloads route to
+// shared memory (PACKET_SOURCE_RPTR) or, when SHM is disabled, to a
+// temp file (PACKET_SOURCE_FILE). This is only the compile-time
+// default; the effective value at runtime is tunable per-program via
+// `morloc make --inline-size`, propagated through the manifest and
+// the MORLOC_INLINE_SIZE env var, and finally settable directly via
+// the morloc_set_inline_threshold() FFI below.
 #define MORLOC_INLINE_THRESHOLD (64 * 1024)
+
+// Override the inline threshold at runtime. Values < 0 are clamped to
+// 0 (never inline). Returns no status; idempotent.
+void morloc_set_inline_threshold(int64_t bytes);
+
+// Read the live inline threshold (in bytes).
+uint64_t morloc_get_inline_threshold(void);
+
+// Toggle shared memory at runtime. When disabled, payloads above the
+// inline threshold are written to a temp file (PACKET_SOURCE_FILE)
+// instead of shared memory (PACKET_SOURCE_RPTR). Set automatically by
+// the nexus on startup when the manifest carries `no_shm: true`
+// (from `morloc make --no-shm`); pool processes inherit the
+// MORLOC_NO_SHM env var on spawn.
+void morloc_set_shm_enabled(bool enabled);
+
+// Read the live SHM-enabled flag.
+bool morloc_get_shm_enabled(void);
+
+// Override the directory where file-packet intermediates land when
+// SHM is disabled. NULL or "" clears the override (libmorloc falls
+// back to $TMPDIR or /tmp). The directory is created lazily on
+// first write if it does not exist. Set automatically by the nexus
+// on startup when the manifest carries a `tmpdir` (from
+// `morloc make --tmpdir`); pool processes inherit MORLOC_TMPDIR on
+// spawn.
+//
+// Persistence: when a tmpdir is set (non-NULL, non-empty), file
+// packets are NOT auto-deleted at end-of-eval. The caller has
+// explicitly named the directory and is responsible for cleanup.
+// With no override (default), files are unlinked when the
+// surrounding eval scope ends via eval_arena.
+void morloc_set_tmpdir(const char* path);
 
 // Metadata sub-header in packet metadata sections.
 #define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01

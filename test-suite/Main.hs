@@ -7,6 +7,7 @@ import Test.Tasty
 import GoldenMakefileTests (goldenMakefileTest)
 import MorlocDepsTests (morlocDepsTests)
 import PropertyTests (propertyTests)
+import SizeParseTests (sizeParseTests)
 import UnitTypeTests
 
 main :: IO ()
@@ -34,6 +35,7 @@ main = do
       , effectSynthesisTests
       , effectErrorTests
       , effectEscapabilityTests
+      , effectPartialApplicationTests
       , namespaceErrorTests
       , typeclassTests
       , natErrorTests
@@ -48,6 +50,7 @@ main = do
       , bidirectionalAppCheckTests
       , postArgPropagationTests
       , morlocDepsTests
+      , sizeParseTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -199,6 +202,7 @@ main = do
       , golden "file-input-py" "file-input-py"
       , golden "file-input-c" "file-input-c"
       , golden "file-input-r" "file-input-r"
+      , golden "no-shm-tmpdir-trilang" "no-shm-tmpdir-trilang"
       , golden "packer-definitions-1" "packer-definitions-1"
       , golden "packer-definitions-2" "packer-definitions-2"
       , golden "packer-definitions-3" "packer-definitions-3"
