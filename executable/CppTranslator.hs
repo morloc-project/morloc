@@ -970,6 +970,7 @@ handleFlagsAndPaths srcs = do
   state <- MM.get
   let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
   let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
+  let userCxxFlags = unique . concatMap packageCxxFlags $ statePackageMeta state
   (srcs', libflags, paths) <-
     fmap unzip3
       . mapM flagAndPath
@@ -983,7 +984,7 @@ handleFlagsAndPaths srcs = do
 
   return
     ( filter (isJust . srcPath) srcs'
-    , [gccversion] <> explicitLibs ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
+    , [gccversion] <> explicitLibs <> userCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
     , unique (catMaybes paths)
     )
 

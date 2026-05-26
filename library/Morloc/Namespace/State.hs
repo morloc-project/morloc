@@ -243,6 +243,9 @@ data PackageMeta
   , packageBugReports :: !Text
   , packageCppVersion :: !Int
   , packageDependencies :: [Text]
+  -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
+  -- -march=native, -DXYZ). Propagates transitively through dependencies.
+  , packageCxxFlags :: [Text]
   , packageInclude :: Maybe [Text]
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
@@ -433,6 +436,7 @@ instance Defaultable PackageMeta where
       , packageBugReports = ""
       , packageCppVersion = 20
       , packageDependencies = []
+      , packageCxxFlags = []
       , packageInclude = Nothing
       , packageMorlocDependencies = []
       , packageSetup = Nothing
@@ -478,6 +482,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "bug-reports" .!= ""
       <*> o .:? "cpp-version" .!= 0
       <*> o .:? "dependencies" .!= []
+      <*> o .:? "cxx-flags" .!= []
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
       <*> o .:? "setup"
