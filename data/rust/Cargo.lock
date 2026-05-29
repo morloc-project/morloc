@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manifest"
-version = "0.86.1"
+version = "0.87.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.86.1"
+version = "0.87.0"
 dependencies = [
  "clap",
  "libc",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.86.1"
+version = "0.87.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",

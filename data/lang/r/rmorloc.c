@@ -1813,6 +1813,25 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         packet
     );
 
+    // If the foreign pool returned a fail packet, surface it as an R
+    // error. Without this the raw fail-packet bytes get returned to the
+    // autogen caller which then tries to deserialize them as data,
+    // producing a confusing downstream error or crashing the worker.
+    {
+        char* fail_check_err = NULL;
+        char* fail_msg = get_morloc_data_packet_error_message(
+            (const uint8_t*)result, &fail_check_err);
+        if (fail_check_err != NULL) { free(fail_check_err); }
+        if (fail_msg != NULL) {
+            char buf[8192];
+            snprintf(buf, sizeof(buf), "%s", fail_msg);
+            free(fail_msg);
+            free(packet);
+            free(result);
+            error("%s", buf);
+        }
+    }
+
     // Get result size
     size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);
 

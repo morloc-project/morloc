@@ -7,6 +7,20 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+/// Format an io::Error in a way users can act on. `read_exact` returns
+/// UnexpectedEof with the std-lib message "failed to fill whole buffer"
+/// whenever the peer closes the socket -- which here means the pool
+/// crashed. Most users have never seen that phrase. BrokenPipe is the
+/// same situation on the write side.
+fn explain_io(context: &str, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => format!(
+            "{context}: pool closed the connection before sending a response (likely crashed)"
+        ),
+        _ => format!("{context}: {e}"),
+    }
+}
+
 /// Send a packet (header + payload) over a Unix stream socket and receive the response.
 pub fn send_and_receive(
     socket_path: &Path,
@@ -24,20 +38,20 @@ pub fn send_and_receive(
     let header_bytes = header.to_bytes();
     stream
         .write_all(&header_bytes)
-        .map_err(|e| MorlocError::Ipc(format!("failed to send header: {e}")))?;
+        .map_err(|e| MorlocError::Ipc(explain_io("failed to send header", &e)))?;
 
     // Send payload
     if !payload.is_empty() {
         stream
             .write_all(payload)
-            .map_err(|e| MorlocError::Ipc(format!("failed to send payload: {e}")))?;
+            .map_err(|e| MorlocError::Ipc(explain_io("failed to send payload", &e)))?;
     }
 
     // Read response header
     let mut resp_header_bytes = [0u8; 32];
     stream
         .read_exact(&mut resp_header_bytes)
-        .map_err(|e| MorlocError::Ipc(format!("failed to read response header: {e}")))?;
+        .map_err(|e| MorlocError::Ipc(explain_io("failed to read response header", &e)))?;
 
     let resp_header = PacketHeader::from_bytes(&resp_header_bytes)?;
 
@@ -47,7 +61,7 @@ pub fn send_and_receive(
     if payload_len > 0 {
         stream
             .read_exact(&mut resp_payload)
-            .map_err(|e| MorlocError::Ipc(format!("failed to read response payload: {e}")))?;
+            .map_err(|e| MorlocError::Ipc(explain_io("failed to read response payload", &e)))?;
     }
 
     Ok((resp_header, resp_payload))
@@ -58,7 +72,7 @@ pub fn read_packet(stream: &mut UnixStream) -> Result<(PacketHeader, Vec<u8>), M
     let mut header_bytes = [0u8; 32];
     stream
         .read_exact(&mut header_bytes)
-        .map_err(|e| MorlocError::Ipc(format!("failed to read packet header: {e}")))?;
+        .map_err(|e| MorlocError::Ipc(explain_io("failed to read packet header", &e)))?;
 
     let header = PacketHeader::from_bytes(&header_bytes)?;
 
@@ -68,7 +82,7 @@ pub fn read_packet(stream: &mut UnixStream) -> Result<(PacketHeader, Vec<u8>), M
         let mut discard = vec![0u8; skip];
         stream
             .read_exact(&mut discard)
-            .map_err(|e| MorlocError::Ipc(format!("failed to skip metadata: {e}")))?;
+            .map_err(|e| MorlocError::Ipc(explain_io("failed to skip metadata", &e)))?;
     }
 
     let payload_len = header.length as usize;
@@ -76,7 +90,7 @@ pub fn read_packet(stream: &mut UnixStream) -> Result<(PacketHeader, Vec<u8>), M
     if payload_len > 0 {
         stream
             .read_exact(&mut payload)
-            .map_err(|e| MorlocError::Ipc(format!("failed to read payload: {e}")))?;
+            .map_err(|e| MorlocError::Ipc(explain_io("failed to read payload", &e)))?;
     }
 
     Ok((header, payload))
@@ -91,11 +105,11 @@ pub fn send_packet(
     let header_bytes = header.to_bytes();
     stream
         .write_all(&header_bytes)
-        .map_err(|e| MorlocError::Ipc(format!("failed to send header: {e}")))?;
+        .map_err(|e| MorlocError::Ipc(explain_io("failed to send header", &e)))?;
     if !payload.is_empty() {
         stream
             .write_all(payload)
-            .map_err(|e| MorlocError::Ipc(format!("failed to send payload: {e}")))?;
+            .map_err(|e| MorlocError::Ipc(explain_io("failed to send payload", &e)))?;
     }
     Ok(())
 }

@@ -1619,6 +1619,24 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     free(packet);
     packet = NULL;
 
+    // If the foreign pool returned a fail packet, surface it as a Python
+    // exception. Without this the raw fail-packet bytes get returned to
+    // the autogen caller which then tries to deserialize them as data,
+    // producing a confusing downstream error or crashing the worker.
+    {
+        char* fail_check_err = NULL;
+        char* fail_msg = get_morloc_data_packet_error_message(
+            (const uint8_t*)result, &fail_check_err);
+        if (fail_check_err != NULL) { free(fail_check_err); }
+        if (fail_msg != NULL) {
+            PyErr_Format(PyExc_RuntimeError, "%s", fail_msg);
+            free(fail_msg);
+            free(result);
+            result = NULL;
+            goto error;
+        }
+    }
+
     // Incref the result's SHM so the callee's tracker flush won't destroy
     // data we may still need (e.g. forwarded result packets).
     {

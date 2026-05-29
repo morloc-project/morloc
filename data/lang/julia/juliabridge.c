@@ -180,6 +180,26 @@ uint8_t* jlmorloc_foreign_call(const char* tmpdir, const char* socket_name,
                                                     &jl_errmsg);
     free(socket_path);
     free(call_pkt);
+
+    /* If the foreign pool returned a fail packet, surface it as a Julia
+     * exception via the standard NULL+jl_errmsg convention. Without this
+     * the raw fail-packet bytes get returned to the autogen caller which
+     * then tries to deserialize them as data, producing a confusing
+     * downstream error or crashing the worker. */
+    if (result != NULL) {
+        char* fail_check_err = NULL;
+        char* fail_msg = get_morloc_data_packet_error_message(
+            (const uint8_t*)result, &fail_check_err);
+        if (fail_check_err != NULL) { free(fail_check_err); }
+        if (fail_msg != NULL) {
+            snprintf(jl_errbuf, sizeof(jl_errbuf), "%s", fail_msg);
+            jl_errmsg = jl_errbuf;
+            free(fail_msg);
+            free(result);
+            return NULL;
+        }
+    }
+
     return result;
 }
 

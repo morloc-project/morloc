@@ -161,7 +161,7 @@ fn die_with_pool_error(
     socket: &PoolSocket,
     pool_index: usize,
     context: &str,
-    comm_err: &dyn std::fmt::Display,
+    comm_err: &std::io::Error,
 ) -> ! {
     // Give the dying pool process time to flush its stderr/stdout before
     // we tear down the process group. Without this, a Python traceback or
@@ -169,7 +169,22 @@ fn die_with_pool_error(
     // clean_exit sends SIGTERM/SIGKILL to the pool's process group.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    eprintln!("Error: {}: {}", context, comm_err);
+    // Translate opaque kernel-level IO failures into actionable text.
+    // `read_exact` returns UnexpectedEof with the std-lib message "failed
+    // to fill whole buffer" whenever the peer closes the socket -- which,
+    // in our case, is exactly what happens when the pool crashes. Most
+    // users have never seen that phrase and cannot act on it. BrokenPipe
+    // is the same situation on the write side.
+    let comm_msg: String = match comm_err.kind() {
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => format!(
+            "pool '{}' closed the connection before sending a response \
+             (likely crashed; see stderr above for any traceback)",
+            socket.lang
+        ),
+        _ => format!("{}", comm_err),
+    };
+
+    eprintln!("Error: {}: {}", context, comm_msg);
     if let Some(info) = process::pool_death_info(pool_index) {
         eprintln!("Pool '{}' {}", socket.lang, info);
     }
