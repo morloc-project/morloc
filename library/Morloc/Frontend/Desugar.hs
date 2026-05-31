@@ -1093,13 +1093,37 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD docs
-  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars)))
+  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
+  return [e]
+desugarTypeDef sp (CstNewtype (v, vs) t) = do
+  when (isVacuousAlias v vs t) $
+    dfail (startPos sp) $
+      "Newtype '" ++ T.unpack (unTVar v) ++
+      "' has a vacuous body: it reduces to a self-reference with no payload"
+  docs <- lookupDocsAt (startPos sp)
+  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
+  -- A bare @type Foo@ (no RHS) is a built-in primitive declaration:
+  -- the type is recognised by the compiler, has its own per-language
+  -- forms in the root-* modules, and is opaque to reduction. The
+  -- self-referential body is a structural placeholder so the alias
+  -- table still has a uniform shape.
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
-  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias defaultValue)))
+  docs <- lookupDocsAt (startPos sp)
+  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
+  -- A record / object / table declaration. These types are always
+  -- nominal and own their per-language form; they behave structurally
+  -- like newtypes (no typeclass inheritance, opaque to reduction). The
+  -- general declaration goes into gscope as TypedefNewtype so it is
+  -- exempt from Invariant 1 (a record may legally pair with a
+  -- @record Cpp => Foo = "..."@ form). An explicit @type SpecialPerson
+  -- = Person@ wrapped around a record is still TypedefAlias and would
+  -- still trip Invariant 1 if also given a per-language form.
   recDocs <- lookupDocsAt (startPos sp)
   recDocVars <- processArgDocLinesD recDocs
   fieldDocs <-
@@ -1109,9 +1133,14 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       doc = ArgDocRec recDocVars (zip (map fst entries) fieldDocs)
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
-  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc))
+  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) entries) = do
+  -- Legacy form covers both general @record Foo = Constructor ...@
+  -- (lang=Nothing, behaves like CstNamTypeWhere -> TypedefNewtype) and
+  -- per-language @record Cpp => Foo = "struct"@ (lang=Just, feeds
+  -- cscope; reduction relies on TypedefAlias + isTerminal=True to
+  -- terminate at the native form, so we keep TypedefAlias there).
   lang <- case maybeLangTok of
     Nothing -> return Nothing
     Just tok -> do
@@ -1129,7 +1158,10 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
                  else conArgs
       t = NamU nt con bodyTs entries
       doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries]
-  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc))
+      kind = case maybeLangTok of
+        Nothing -> TypedefNewtype  -- general record decl
+        Just _  -> TypedefAlias     -- per-language native form (cscope)
+  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc kind))
   return [e]
 
 --------------------------------------------------------------------

@@ -54,6 +54,9 @@ module Morloc.Typecheck.Internal
   , gammaContextList
   , gammaTrimAfter
 
+    -- * Packable wire-form lookup
+  , findPackableWireForm
+
     -- * selectors
   , selectorType
   , selectorGetter
@@ -428,7 +431,14 @@ instance Applicable TypeU where
     Nothing -> NatVarU v
   -- [G](A->B) = ([G]A -> [G]B)
   apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
-  apply g (AppU t ts) = AppU (apply g t) (map (apply g) ts)
+  apply g (AppU t ts) = case apply g t of
+    -- A partial-applied existential solution gets substituted into an
+    -- AppU head (@f -> AppU Vector [n]@ plus outer @AppU f [a]@),
+    -- producing a nested @AppU (AppU Vector [n]) [a]@. Re-flatten to
+    -- the canonical shape so downstream code (codegen, weave,
+    -- evaluateStep) only ever sees the flat form.
+    AppU h innerArgs -> AppU h (innerArgs ++ map (apply g) ts)
+    t' -> AppU t' (map (apply g) ts)
   -- [G]ForallU a.a = forall a. [G]a
   apply g (ForallU v a) =
     -- FIXME: VERY WRONG
@@ -568,91 +578,21 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty []) of
   (Left _) -> False
   (Right _) -> True
 
+-- | Subtype-compare two types after exhausting any 'type'-alias reduction.
+-- 'newtype' is opaque to 'reduceType' (returns Nothing), so two distinct
+-- newtypes -- or a newtype vs. its wire-parent -- are nominally distinct
+-- and fail to compare here. Transparent 'type' aliases substitute through
+-- freely, so an alias chain collapses to its base before structural
+-- comparison resumes.
 subtypeEvaluated :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
-subtypeEvaluated scope t1 t2 g
-  -- Reject sibling aliases before reduction. Without this, Array Int <: Deque Int
-  -- would succeed transitively (Array Int -> List Int -> Deque Int) even though
-  -- they are on different branches of the alias tree.
-  | areSiblingAliases scope t1 t2 =
-      Left $ "Cannot compare sibling types" <+> pretty t1 <+> "and" <+> pretty t2
-  | otherwise = case (TE.reduceType scope t1, TE.reduceType scope t2) of
-    (Just t1', _) -> subtype scope t1' t2 g
-    (_, Just t2') -> subtype scope t1 t2' g
-    (_, _)
-      -- When both are bare type constructors that can't be reduced (e.g.,
-      -- List vs Deque where Deque a = List a), check if one is an ancestor
-      -- of the other by evaluating and comparing heads.
-      | aliasEquivConstructors scope t1 t2 -> Right g
-      | otherwise -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
-
--- | Check whether two applied types are sibling aliases -- both reduce to
--- the same ancestor but neither reduces to the other. For example,
--- Array Int and Deque Int are siblings (both reduce to List Int, but
--- Array does not reduce to Deque nor vice versa).
-areSiblingAliases :: Scope -> TypeU -> TypeU -> Bool
-areSiblingAliases scope (AppU (VarU v1) _) (AppU (VarU v2) _)
-  | v1 == v2 = False
-  | otherwise =
-    let h1 = evalHead v1
-        h2 = evalHead v2
-    in case (h1, h2) of
-         -- Both reduce to the same ancestor, but neither is the other's ancestor
-         (Just hv1, Just hv2) -> hv1 == hv2 && hv1 /= v1 && hv2 /= v2
-         _ -> False
-  where
-    evalHead v = case Map.lookup v scope of
-      Just ((ps, _, _, _) : _)
-        | all isGenericParam ps && not (null ps) ->
-          let n = length ps
-              freshVars = [VarU (TV (MT.show' i <> "__sib_cmp")) | i <- [0 .. n - 1]]
-              app = AppU (VarU v) freshVars
-          in case TE.evaluateType scope app of
-               Right (AppU (VarU headV) _) -> Just headV
-               _ -> Nothing
-        | otherwise -> Nothing
-      _ -> Nothing
-    isGenericParam (Left _) = True
-    isGenericParam _ = False
-areSiblingAliases _ _ _ = False
-
--- | Check whether two unapplied type constructors are on the same path in
--- the alias hierarchy -- i.e., one reduces to the other. Applied aliases
--- (like Deque Int) are handled by reduceType above; this covers the bare
--- constructor case (Deque vs List) which arises when an existential is solved
--- to one name and then compared against an ancestor or descendant alias.
---
--- Only ancestor-descendant pairs match: List<->Deque and List<->Array succeed,
--- but Array<->Deque fails (siblings with a common ancestor but neither
--- reduces to the other).
-aliasEquivConstructors :: Scope -> TypeU -> TypeU -> Bool
-aliasEquivConstructors scope (VarU v1) (VarU v2) =
-  reducesToHead v1 v2 || reducesToHead v2 v1
-  where
-    reducesToHead src target =
-      case arityOf (Map.lookup src scope) of
-        Just n | n > 0 ->
-          let freshVars = [VarU (TV (MT.show' i <> "__alias_cmp")) | i <- [0 .. n - 1]]
-              app = AppU (VarU src) freshVars
-          in case TE.evaluateType scope app of
-               Right (AppU (VarU headV) _) -> headV == target
-               _ -> False
-        -- base type with no alias: matches only itself
-        _ -> False
-
-    arityOf :: Maybe [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> Maybe Int
-    arityOf Nothing = Nothing
-    arityOf (Just []) = Nothing
-    arityOf (Just ((ps, _, _, _) : _))
-      | all isGenericParam ps = Just (length ps)
-      | otherwise = Nothing
-
-    isGenericParam (Left _) = True
-    isGenericParam _ = False
-aliasEquivConstructors _ _ _ = False
+subtypeEvaluated scope t1 t2 g = case (TE.reduceType scope t1, TE.reduceType scope t2) of
+  (Just t1', _) -> subtype scope t1' t2 g
+  (_, Just t2') -> subtype scope t1 t2' g
+  _ -> Left $ "Cannot compare types" <+> pretty t1 <+> "and" <+> pretty t2
 
 subtypeError :: TypeU -> TypeU -> MDoc -> Either MDoc a
 subtypeError t1 t2 msg =
@@ -1035,11 +975,37 @@ subtype scope t1@(FunU as1 ret1) t2@(FunU as2 ret2) g0
 --  unparameterized types are the same as VarT, so subtype on that instead
 subtype scope t1@(AppU v1@(ExistU _ _ _) vs1) t2@(AppU v2 vs2) g
   | length vs1 == length vs2 = zipSubtype t1 t2 scope (v1 : vs1) (v2 : vs2) g
+  | length vs1 < length vs2
+  , let k = length vs2 - length vs1
+        (vs2prefix, vs2suffix) = splitAt k vs2
+        partial = AppU v2 vs2prefix
+  = do
+      g1 <- subtype scope v1 partial g
+      zipSubtype t1 t2 scope vs1 vs2suffix g1
   | otherwise = subtypeEvaluated scope t1 t2 g
 subtype scope t1@(AppU v1 vs1) t2@(AppU v2@(ExistU _ _ _) vs2) g
   | length vs1 == length vs2 = zipSubtype t1 t2 scope (v1 : vs1) (v2 : vs2) g
+  | length vs1 > length vs2
+  , let k = length vs1 - length vs2
+        (vs1prefix, vs1suffix) = splitAt k vs1
+        partial = AppU v1 vs1prefix
+  = do
+      g1 <- subtype scope partial v2 g
+      zipSubtype t1 t2 scope vs1suffix vs2 g1
   | otherwise = subtypeEvaluated scope t1 t2 g
 subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
+  -- Flatten nested AppU heads: instantiating a partial-applied class
+  -- type (e.g. `Functor (Vector n)`) over a method signature `f a`
+  -- substitutes the @Vector n@ form for `f`, producing @AppU (AppU
+  -- Vector [n]) [a]@. Other sites (parser, alias expansion) build the
+  -- canonical flat shape @AppU Vector [n, a]@. Normalise to the flat
+  -- form before structural comparison so the two shapes compare equal.
+  | AppU h1 inner1 <- v1, let t1' = AppU h1 (inner1 ++ vs1)
+  , t1' /= t1
+  = subtype scope t1' t2 g
+  | AppU h2 inner2 <- v2, let t2' = AppU h2 (inner2 ++ vs2)
+  , t2' /= t2
+  = subtype scope t1 t2' g
   | v1 == v2 && length vs1 == length vs2 = zipSubtype t1 t2 scope vs1 vs2 g
   -- Concrete-side type aliases for nat-parameterised types (e.g.
   -- `type Cpp => Vector (n :: Nat) a = "mlc::Tensor1<$1>" a`) drop Nat
@@ -1496,7 +1462,7 @@ isMoreSpecialized scope (AppU (VarU v1) _) (AppU (VarU v2) _) =
   where
     reducesToHead scope' src target =
       case Map.lookup src scope' of
-        Just ((ps, _, _, _) : _)
+        Just ((ps, _, _, _, _) : _)
           | all isGenericParam ps && not (null ps) ->
             let n = length ps
                 freshVars = [VarU (TV (MT.show' i <> "__spec_cmp")) | i <- [0 .. n - 1]]
@@ -2590,6 +2556,45 @@ evarname :: Gamma -> Text -> (Gamma, EVar)
 evarname g prefix =
   let i = gammaCounter g
    in (g {gammaCounter = i + 1}, EV (prefix <> "@@" <> MT.pack (show i)))
+
+-- | Find a @Packable@ instance whose @pack@ output head matches the
+-- outer TVar of @nativeT@, and return @pack@'s input (the decomposed
+-- form) with the instance's type parameters substituted from
+-- @nativeT@'s args. The class is @class Packable a b where pack :: a
+-- -> b@; pack composes recursively toward the wire format, so its
+-- input @a@ is the decomposed/serializable form for the wrapped
+-- output @b@. This is the tier-2 wire-form lookup that runs after a
+-- literal-check or codegen-dispatch rule fails to find a structural
+-- match via 'TE.wireParentRoot' (newtype bodies). For example, with
+-- @instance Packable (List (Tuple2 a b)) (Map a b)@ and a literal at
+-- @Map Str Int@, returns @List (Tuple2 Str Int)@. Returns 'Nothing'
+-- if no instance applies.
+findPackableWireForm :: TypeU -> MorlocMonad (Maybe TypeU)
+findPackableWireForm nativeT = do
+  let nativeTV = extractKey nativeT
+      nativeArgs = case nativeT of
+        AppU _ args -> args
+        _           -> []
+  sigmap <- MM.gets stateTypeclasses
+  case Map.lookup (EV "pack") sigmap of
+    Nothing -> return Nothing
+    Just inst -> return $ listToMaybe
+      [ wireSubstituted
+      | TermTypes (Just et) _ _ <- instanceTerms inst
+      , let (_, t) = unqualify (etype et)
+      , (wireForm, outputType) <- case t of
+          FunU [w] o -> [(w, o)]
+          _          -> []
+      , extractKey outputType == nativeTV
+      , let outputParams = case outputType of
+              AppU _ args -> [v | VarU v <- args]
+              _           -> []
+      , length outputParams == length nativeArgs
+      , let wireSubstituted = foldr
+              (\(v, t') acc -> substituteTVar v t' acc)
+              wireForm
+              (zip outputParams nativeArgs)
+      ]
 
 -- debugging -------------------
 

@@ -137,33 +137,6 @@ struct pointer_traits<T*> {
     static bool has_value(T* p)         { return p != nullptr; }
 };
 
-// Generic field-construction entry point: the codegen emits
-//   {a, mlc::wrap_field<decltype(rec_t::field)>(value)}
-// at every aggregate-init / field-assign site. The static_assert
-// enforces the value/pointer axis of the encoding rule: ?T at a
-// recursive-cycle position must be pointer-shaped; ?T everywhere
-// else must be std::optional<T>; non-optional fields pass through.
-template<typename FieldT, typename Inner>
-FieldT wrap_field(Inner&& v) {
-    static_assert(
-        is_pointer_shape<FieldT>::value
-            || std::is_same_v<FieldT, std::optional<std::remove_cv_t<std::remove_reference_t<Inner>>>>
-            || std::is_constructible_v<FieldT, Inner>,
-        "Field type doesn't match the morloc encoding rule. "
-        "?T at a recursive-cycle position expects a pointer-shape "
-        "(std::shared_ptr<T>, std::unique_ptr<T>, or T*); "
-        "?T everywhere else expects std::optional<T>; "
-        "non-optional fields expect T directly."
-    );
-    if constexpr (is_pointer_shape<FieldT>::value) {
-        return pointer_traits<FieldT>::wrap(std::forward<Inner>(v));
-    } else if constexpr (is_std_optional<FieldT>::value) {
-        return FieldT(std::forward<Inner>(v));
-    } else {
-        return FieldT(std::forward<Inner>(v));
-    }
-}
-
 template<typename FieldT>
 FieldT wrap_field_absent() {
     if constexpr (is_pointer_shape<FieldT>::value) {
@@ -175,6 +148,52 @@ FieldT wrap_field_absent() {
             "wrap_field_absent called on a non-nullable field type. "
             "Only pointer-shapes and std::optional<T> can be absent.");
         return FieldT{};
+    }
+}
+
+// Generic field-construction entry point: the codegen emits
+//   {a, mlc::wrap_field<decltype(rec_t::field)>(value)}
+// at every aggregate-init / field-assign site. The static_assert
+// enforces the value/pointer axis of the encoding rule: ?T at a
+// recursive-cycle position must be pointer-shaped; ?T everywhere
+// else must be std::optional<T>; non-optional fields pass through.
+//
+// The `Inner = std::optional<T>` branch handles the case where the
+// codegen emits a typed empty optional (e.g. `std::optional<T>{}`
+// for a Null literal). At a pointer-shape field that means "absent";
+// at an optional field it's a direct copy. The codegen uses the
+// typed empty-optional form so foreign-call argument positions
+// retain template-argument deducibility (bare `std::nullopt` has
+// type `nullopt_t` and cannot pin a template parameter).
+template<typename FieldT, typename Inner>
+FieldT wrap_field(Inner&& v) {
+    using InnerBare = std::remove_cv_t<std::remove_reference_t<Inner>>;
+    static_assert(
+        is_pointer_shape<FieldT>::value
+            || std::is_same_v<FieldT, std::optional<InnerBare>>
+            || is_std_optional<InnerBare>::value
+            || std::is_constructible_v<FieldT, Inner>,
+        "Field type doesn't match the morloc encoding rule. "
+        "?T at a recursive-cycle position expects a pointer-shape "
+        "(std::shared_ptr<T>, std::unique_ptr<T>, or T*); "
+        "?T everywhere else expects std::optional<T>; "
+        "non-optional fields expect T directly."
+    );
+    if constexpr (is_std_optional<InnerBare>::value) {
+        if (!v.has_value()) return wrap_field_absent<FieldT>();
+        if constexpr (is_pointer_shape<FieldT>::value) {
+            return pointer_traits<FieldT>::wrap(std::move(*v));
+        } else if constexpr (is_std_optional<FieldT>::value) {
+            return FieldT(std::move(*v));
+        } else {
+            return FieldT(std::move(*v));
+        }
+    } else if constexpr (is_pointer_shape<FieldT>::value) {
+        return pointer_traits<FieldT>::wrap(std::forward<Inner>(v));
+    } else if constexpr (is_std_optional<FieldT>::value) {
+        return FieldT(std::forward<Inner>(v));
+    } else {
+        return FieldT(std::forward<Inner>(v));
     }
 }
 

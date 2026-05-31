@@ -1,3 +1,7 @@
+0.88.0 [2026-05-31]
+ - fix numeric type inference (now `4 + 4.0` typechecks)
+
+
 0.87.0 [2026-05-25]
 -------------------
 

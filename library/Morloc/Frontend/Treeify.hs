@@ -210,7 +210,7 @@ checkDeclaredEffects d = do
       let tys = case e of
             SigE (Signature _ _ et) -> [etype et]
             AnnE _ t -> [t]
-            TypE (ExprTypeE _ _ _ t _) -> [t]
+            TypE (ExprTypeE _ _ _ t _ _) -> [t]
             ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
             _ -> []
           used = Set.unions (map collectEffLabels tys)

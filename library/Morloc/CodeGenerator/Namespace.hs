@@ -28,14 +28,20 @@ module Morloc.CodeGenerator.Namespace
   , TypeS (..)
   , FVar (..)
 
-    -- ** Nat-kinded type helpers
-  , isNatTypeF
-  , isNatTypeT
-  , nullifyNatKindsF
-  , nullifyNatKindsT
+    -- ** Kind-kinded type helpers
+    --
+    -- Kind-kinded args are positional type-args whose kind is NOT
+    -- @KindType@ (currently @KindNat@ and @KindStr@). They appear as
+    -- structural metadata in @TypeF@/@Type@ arg lists but are skipped
+    -- by macro substitution -- the @$N@ index in a per-language form
+    -- counts TYPE args only, not kind args.
+  , isKindTypeF
+  , isKindTypeT
+  , isKindTypeU
+  , partitionKindArgsF
+  , partitionKindArgsT
+  , partitionKindArgsU
   , mkEffectF
-  , listElemTypeF
-  , listElemTypeT
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -197,66 +203,63 @@ mkEffectF ls t
       EffectF ls2 t2 -> mkEffectF (Set.union ls ls2) t2
       _ -> EffectF ls t
 
--- | True iff a TypeF is a Nat-kinded entry: a real Nat literal, or the
--- erased-phantom sentinel 'NatVoidF'.
-isNatTypeF :: TypeF -> Bool
-isNatTypeF (NatLitF _) = True
-isNatTypeF NatVoidF = True
-isNatTypeF _ = False
+-- | True iff a TypeF entry is kind-kinded (Nat or Str): a kind literal
+-- or the erased-phantom sentinel. These positions are structural
+-- metadata; macros never index them.
+isKindTypeF :: TypeF -> Bool
+isKindTypeF (NatLitF _) = True
+isKindTypeF NatVoidF = True
+isKindTypeF (StrLitF _) = True
+isKindTypeF StrVoidF = True
+isKindTypeF _ = False
 
--- | True iff a Type is a Nat-kinded entry. Mirrors 'isNatTypeF'.
-isNatTypeT :: Type -> Bool
-isNatTypeT (NatLitT _) = True
-isNatTypeT (NatAddT _ _) = True
-isNatTypeT (NatMulT _ _) = True
-isNatTypeT (NatSubT _ _) = True
-isNatTypeT (NatDivT _ _) = True
-isNatTypeT NatVoidT = True
-isNatTypeT _ = False
+-- | True iff a Type entry is kind-kinded. Mirrors 'isKindTypeF',
+-- including Nat arithmetic (which is a kind-Nat expression).
+isKindTypeT :: Type -> Bool
+isKindTypeT (NatLitT _) = True
+isKindTypeT (NatAddT _ _) = True
+isKindTypeT (NatMulT _ _) = True
+isKindTypeT (NatSubT _ _) = True
+isKindTypeT (NatDivT _ _) = True
+isKindTypeT NatVoidT = True
+isKindTypeT _ = False
 
--- | Drop Nat-kinded positional args from compound types. The walk goes
--- one application deep at every layer so phantom dims at any nesting
--- level disappear. Use this when a downstream consumer only cares about
--- the runtime arg shape (e.g. wire schemas, dispatch on List/Tuple).
-nullifyNatKindsF :: TypeF -> TypeF
-nullifyNatKindsF (AppF t ts) =
-  AppF (nullifyNatKindsF t) (filter (not . isNatTypeF) (map nullifyNatKindsF ts))
-nullifyNatKindsF (FunF ts t) = FunF (map nullifyNatKindsF ts) (nullifyNatKindsF t)
-nullifyNatKindsF (NamF o n ps rs) =
-  NamF o n (map nullifyNatKindsF ps) [(k, nullifyNatKindsF v) | (k, v) <- rs]
-nullifyNatKindsF (EffectF effs t) = EffectF effs (nullifyNatKindsF t)
-nullifyNatKindsF (OptionalF t) = OptionalF (nullifyNatKindsF t)
--- RecF is a back-reference; it carries no nested types so the walk
--- bottoms out here.
-nullifyNatKindsF t@(RecF _) = t
-nullifyNatKindsF t = t
+-- | TypeU-level kind predicate. Includes nat variables and arithmetic
+-- (which are kind-Nat expressions before reduction).
+isKindTypeU :: TypeU -> Bool
+isKindTypeU (NatLitU _) = True
+isKindTypeU (NatVarU _) = True
+isKindTypeU (NatAddU _ _) = True
+isKindTypeU (NatMulU _ _) = True
+isKindTypeU (NatSubU _ _) = True
+isKindTypeU (NatDivU _ _) = True
+isKindTypeU NatVoidU = True
+isKindTypeU (StrLitU _) = True
+isKindTypeU (StrVarU _) = True
+isKindTypeU (StrConcatU _ _) = True
+isKindTypeU StrVoidU = True
+isKindTypeU _ = False
 
--- | Companion to 'nullifyNatKindsF' for the Type level.
-nullifyNatKindsT :: Type -> Type
-nullifyNatKindsT (AppT t ts) =
-  AppT (nullifyNatKindsT t) (filter (not . isNatTypeT) (map nullifyNatKindsT ts))
-nullifyNatKindsT (FunT ts t) = FunT (map nullifyNatKindsT ts) (nullifyNatKindsT t)
-nullifyNatKindsT (NamT o n ps rs) =
-  NamT o n (map nullifyNatKindsT ps) [(k, nullifyNatKindsT v) | (k, v) <- rs]
-nullifyNatKindsT (EffectT effs t) = EffectT effs (nullifyNatKindsT t)
-nullifyNatKindsT (OptionalT t) = OptionalT (nullifyNatKindsT t)
-nullifyNatKindsT t = t
+-- | Split a positional arg list into (type-args, count-of-kind-args).
+-- Used by every macro-substitution caller: pre-filtering at the
+-- @TypeF@ level keeps the indexing convention uniform (\"$N indexes
+-- the Nth type arg\") and threads the count for error-message hints.
+partitionKindArgsF :: [TypeF] -> ([TypeF], Int)
+partitionKindArgsF ts =
+  let types = filter (not . isKindTypeF) ts
+  in (types, length ts - length types)
 
--- | Extract the runtime element type of a list-shaped type's full arg
--- list (the only non-Nat positional arg). Used by consumers that
--- previously took the element type directly and now receive the full
--- args list.
-listElemTypeF :: [TypeF] -> TypeF
-listElemTypeF args = case filter (not . isNatTypeF) args of
-  [t] -> t
-  ts  -> error $ "listElemTypeF: expected exactly one runtime arg, got " <> show (length ts)
+-- | Type-level companion to 'partitionKindArgsF'.
+partitionKindArgsT :: [Type] -> ([Type], Int)
+partitionKindArgsT ts =
+  let types = filter (not . isKindTypeT) ts
+  in (types, length ts - length types)
 
--- | Type-level companion to 'listElemTypeF'.
-listElemTypeT :: [Type] -> Type
-listElemTypeT args = case filter (not . isNatTypeT) args of
-  [t] -> t
-  ts  -> error $ "listElemTypeT: expected exactly one runtime arg, got " <> show (length ts)
-
+-- | TypeU-level companion to 'partitionKindArgsF'.
+partitionKindArgsU :: [TypeU] -> ([TypeU], Int)
+partitionKindArgsU ts =
+  let types = filter (not . isKindTypeU) ts
+  in (types, length ts - length types)
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
     Passthrough
@@ -558,8 +561,9 @@ data PolyExpr
     -- The [Indexed Type] is the FULL list of positional type args of
     -- the list head (Vector / List / Deque / etc.), preserving Nat-kinded
     -- entries as NatLitT so phantom dimensions survive into language
-    -- code generators. Use 'listElemTypeT' to extract the runtime element
-    -- type; use 'nullifyNatKindsT' to strip Nat positions when needed.
+    -- code generators. Use 'partitionKindArgsT' to split into type-args
+    -- and kind-arg count when feeding macro substitution; the wire-side
+    -- @applyDimsToList@ consumes the kind positions directly.
     PolyList (Indexed TVar) [Indexed Type] [PolyExpr]
   | PolyTuple (Indexed TVar) [(Indexed Type, PolyExpr)]
   | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]

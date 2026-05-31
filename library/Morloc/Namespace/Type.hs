@@ -109,6 +109,7 @@ module Morloc.Namespace.Type
 
     -- * Scope
   , Scope
+  , TypedefKind (..)
 
     -- * Type extensions
   , Constraint (..)
@@ -227,9 +228,27 @@ unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
 
 ---- Type definitions
 
+{- | Distinguishes the three forms of type declaration:
+
+* 'TypedefAlias' -- transparent @type Foo = Bar@: same identity as Bar,
+  same instances, NO per-language overrides allowed. Reduces freely.
+
+* 'TypedefNewtype' -- nominal @newtype Foo = Bar@: own per-language
+  overrides, own instances, inherits only Bar's wire format.
+  Opaque to reduction.
+
+* 'TypedefPrimitive' -- @type Bool@, @type List a@, etc.: built-in
+  forward declaration with no RHS. Recognized by the compiler as a
+  base type; has its own per-language overrides (in root-cpp etc.).
+  Opaque to reduction. Cannot be cyclic (no body to chain through).
+-}
+data TypedefKind = TypedefAlias | TypedefNewtype | TypedefPrimitive
+  deriving (Show, Eq, Ord)
+
 {- | Scope maps each type name to its definitions: the type parameters, the
-body type, documentation, and whether the definition is terminal (won't be
-expanded further during type resolution).
+body type, documentation, whether the definition is terminal (won't be
+expanded further during type resolution), and whether it is a `type` alias
+or a `newtype`.
 -}
 type Scope =
   Map
@@ -238,6 +257,7 @@ type Scope =
       , TypeU
       , ArgDoc
       , Bool -- True if this is a "terminal" type (won't be reduced further)
+      , TypedefKind -- Alias (transparent) or Newtype (nominal, wire-equivalent)
       )
     ]
 
@@ -553,6 +573,7 @@ data ExprTypeE = ExprTypeE
   , exprTypeParams :: [Either (TVar, Kind) TypeU]
   , exprTypeType :: TypeU
   , exprTypeDoc :: ArgDoc
+  , exprTypeKind :: TypedefKind
   }
   deriving (Show, Ord, Eq)
 
@@ -630,6 +651,9 @@ instance Typelike Type where
   free StrVoidT = Set.empty
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
+  -- Flatten nested AppT heads -- see the TypeU instance below for context.
+  normalizeType (AppT (AppT h innerArgs) outerArgs) =
+    normalizeType (AppT h (innerArgs ++ outerArgs))
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
   normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
@@ -782,6 +806,13 @@ instance Typelike TypeU where
       sub (LabeledU n t) = LabeledU n (sub t)
 
   normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
+  -- Flatten nested AppU heads. Substituting a partial-applied class
+  -- type into a method's @f a@ signature produces @AppU (AppU H [n])
+  -- [a]@; the parser-produced canonical shape is @AppU H [n, a]@.
+  -- Downstream code (weave, evaluateStep, codegen) only matches the
+  -- flat shape.
+  normalizeType (AppU (AppU h innerArgs) outerArgs) =
+    normalizeType (AppU h (innerArgs ++ outerArgs))
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
@@ -1082,6 +1113,10 @@ type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
 type2typeu (UnkT v) = ForallU v (VarU v)
 type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
+type2typeu (AppT (AppT h innerArgs) outerArgs) =
+  -- Flatten nested AppT during the lift; same canonical-shape contract
+  -- as 'normalizeType'.
+  type2typeu (AppT h (innerArgs ++ outerArgs))
 type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k, x) <- rs]
 type2typeu (EffectT effs t) = mkEffectU (EffectSet effs) (type2typeu t)

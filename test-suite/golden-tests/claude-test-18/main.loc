@@ -7,7 +7,7 @@ module main (foo, bar)
 
 import root-py
 
-type SizedList n a = [a]
+newtype SizedList n a = [a]
 type Py => (SizedList n a) = "list" a
 
 -- Polymorphic function with Nat parameter

@@ -41,13 +41,19 @@ printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
 printExpr (IBoolLit True) = "true"
 printExpr (IBoolLit False) = "false"
--- Emit @std::nullopt@ unconditionally. The hinted-type form
--- @std::optional<T>()@ would be wrong for recursive-record optionals
--- where the storage type is @std::optional<std::unique_ptr<T>>@ --
--- @optional<T>()@ is a different type and the implicit conversion
--- fails. @std::nullopt@ is the type-agnostic empty marker and converts
--- to whichever @std::optional<...>@ the surrounding context expects.
-printExpr (INullLit _) = "std::nullopt"
+-- When the storage type is known, emit a value-initialised expression
+-- of that type (`std::optional<int>{}`, `std::shared_ptr<X>{}`). The
+-- type hint produced by `cppTypeOf` already accounts for the recursive
+-- shared_ptr indirection, so `IType{}` produces a null value for both
+-- the non-recursive optional and the recursive shared_ptr storage.
+-- Crucially, the typed form survives template-argument deduction at
+-- call sites (e.g. `morloc_fromMaybe<A>(std::optional<A>)`), where bare
+-- @std::nullopt@ has type `std::nullopt_t` and cannot pin `A`.
+-- Fall back to @std::nullopt@ when no hint is available; in that path
+-- the value is only ever assigned to a slot whose type is locally
+-- declared, where the implicit conversion from nullopt_t suffices.
+printExpr (INullLit (Just t)) = renderIType t <> "{}"
+printExpr (INullLit Nothing) = "std::nullopt"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i)
   | t == "int" = viaShow i

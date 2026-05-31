@@ -39,6 +39,7 @@ module Morloc.Namespace.State
   , Gamma (..)
   , GammaIndex (..)
   , ConstVal (..)
+  , NumLitKind (..)
 
     -- * Data files
   , NexusSource (..)
@@ -331,6 +332,15 @@ data Gamma = Gamma
   -- | Known constant values for let-bound variables (for nat label resolution).
   -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
   , gammaIntVals :: Map EVar ConstVal
+  -- | Numeric literals whose type-checking was deferred because they were
+  -- checked against an unsolved existential. Each entry is (caret index,
+  -- existential TVar, default kind). At end-of-typecheck the queue is
+  -- drained: if the existential is now solved to a compatible base type,
+  -- accept; otherwise apply the default (@Int@ for @IntDefault@, @Real@
+  -- for @RealDefault@). This is the @gammaDeferred@ pattern lifted to
+  -- numeric-literal polymorphism in argument positions like
+  -- @fold (+) 0 (xs :: Vector n Int8)@.
+  , gammaPendingNumLits :: [(Int, TVar, NumLitKind)]
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str
@@ -340,6 +350,15 @@ data ConstVal
   | ConstStr Text
   | ConstTup [ConstVal]
   | ConstList [ConstVal]
+  deriving (Show, Eq, Ord)
+
+-- | Distinguishes integer-like literals (no decimal point, default @Int@)
+-- from float-like literals (with decimal point, default @Real@). Used by
+-- @gammaPendingNumLits@ so that an unresolved existential gets the
+-- right default at end-of-typecheck.
+data NumLitKind
+  = IntDefault
+  | RealDefault
   deriving (Show, Eq, Ord)
 
 ---- Data files and system

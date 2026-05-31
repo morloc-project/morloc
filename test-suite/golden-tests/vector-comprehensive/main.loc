@@ -43,7 +43,7 @@ module main
   , zcShmPyPy, zcInlinePyPy
   , zcShmCpToPy, zcInlineCpToPy
   , zcShmRToPy
-  , mlSum, mlLength, mlReverse, mlSort, mlMap
+  , mlSum, mlLength, mlMap
   , emptyCross, singleCross
   , underThr, overThr
     -- (9) Literal inputs: morloc source literals + CLI literals
@@ -442,19 +442,18 @@ zcShmRToPy :: Str
 zcShmRToPy = pyOwnDataLarge rMakeBig
 
 -- =========================================================================
--- (6) Morloc-level operations on Vector via the List alias.
+-- (6) Morloc-level operations on Vector via typeclass instances.
+--
+-- Vector has its own Foldable / Functor instances, so class methods
+-- (sum / length / map) work directly. Top-level list-only functions
+-- (reverse / sort) are not in scope without explicit Packable
+-- conversion: Vector is a newtype, not a transparent alias.
 -- =========================================================================
 mlSum :: Real
 mlSum = sum cppMakeReal10
 
 mlLength :: Int
 mlLength = length cppMakeBig
-
-mlReverse :: Real
-mlReverse = pySumReal10 (reverse cppMakeReal10)
-
-mlSort :: Int
-mlSort = cppSumI32 (sort (reverse cppMakePerm))
 
 mlMap :: Real
 mlMap = pySumReal10 (map (\x -> x * 2.0) cppMakeReal10)

@@ -379,6 +379,7 @@ classifyWord "as" = TokAs
 classifyWord "True" = TokTrue
 classifyWord "False" = TokFalse
 classifyWord "type" = TokType
+classifyWord "newtype" = TokNewtype
 classifyWord "record" = TokRecord
 classifyWord "object" = TokObject
 classifyWord "class" = TokClass

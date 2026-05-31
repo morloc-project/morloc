@@ -330,14 +330,19 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
         }
         case MORLOC_ARRAY: {
             Array* array = (Array*)data;
-            // numpy fast-path: only when the element schema has a direct
-            // NumPy dtype counterpart (fixed-width primitives). For other
-            // element types (MORLOC_INT BigInt, MORLOC_STRING, nested
-            // tuples/arrays/records, MORLOC_NIL), fall through to the
-            // general list path so the user gets a working Python list
-            // rather than a hard error.
+            // The "numpy.ndarray" hint is authoritative: the user wants a
+            // NumPy array, regardless of element type. For fixed-width
+            // primitive elements we use the natural dtype (zero-copy / fast
+            // memcpy). For everything else (MORLOC_INT BigInt, MORLOC_STRING,
+            // nested tuples/arrays/records, MORLOC_NIL, MORLOC_OPTIONAL) we
+            // build an `np.empty(n, dtype=object)` and fill via recursive
+            // fromAnything per element. This preserves Functor's container
+            // invariance: `map asString ([1,2,3] :: Vector 3 Int)` stays a
+            // NumPy ndarray on both sides, the dtype just shifts from int64
+            // to object.
             int numpy_type_num = -1;
-            if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+            bool numpy_hint = (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0);
+            if (numpy_hint) {
                 Schema* element_schema = schema->parameters[0];
                 switch (element_schema->type) {
                     case MORLOC_BOOL:    numpy_type_num = NPY_BOOL; break;
@@ -351,10 +356,40 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
                     case MORLOC_FLOAT32: numpy_type_num = NPY_FLOAT32; break;
                     case MORLOC_FLOAT64: numpy_type_num = NPY_FLOAT64; break;
-                    default: numpy_type_num = -1; break;  // fall through
+                    default: numpy_type_num = NPY_OBJECT; break;  // boxed dtype=object path below
                 }
             }
-            if (numpy_type_num >= 0) {
+            if (numpy_type_num == NPY_OBJECT) {
+                // Boxed path: build dtype=object array and fill via
+                // recursive fromAnything. Each slot stores a PyObject*
+                // pointer; SETITEM handles INCREF/DECREF correctly.
+                import_numpy();
+                npy_intp dims[] = {array->size};
+                obj = PyArray_SimpleNew(1, dims, NPY_OBJECT);
+                if (obj == NULL) {
+                    PyRAISE("Failed to allocate numpy object array");
+                }
+                if (array->size > 0) {
+                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
+                    size_t width = schema->parameters[0]->width;
+                    Schema* element_schema = schema->parameters[0];
+                    PyArrayObject* arr = (PyArrayObject*)obj;
+                    for (size_t i = 0; i < array->size; i++) {
+                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        if (!item) {
+                            PyRAISE("Failed to convert element for numpy object array");
+                        }
+                        // PyArray_SETITEM copies the PyObject* into the slot
+                        // and bumps its refcount on the way in; we drop our
+                        // local reference afterwards.
+                        if (PyArray_SETITEM(arr, PyArray_GETPTR1(arr, i), item) < 0) {
+                            Py_DECREF(item);
+                            PyRAISE("Failed to set element in numpy object array");
+                        }
+                        Py_DECREF(item);
+                    }
+                }
+            } else if (numpy_type_num >= 0) {
                 import_numpy();
                 npy_intp dims[] = {array->size};
                 void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
@@ -666,7 +701,26 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                     for (int i = 0; i < ndim; i++) {
                         total_elements *= dims[i];
                     }
-                    required_size += total_elements * PyArray_ITEMSIZE(arr);
+                    if (PyArray_TYPE(arr) == NPY_OBJECT) {
+                        // Boxed array: each slot is a PyObject* and the wire
+                        // form needs the recursive-serialized size of every
+                        // contained object, not the pointer width.
+                        Schema* element_schema = schema->parameters[0];
+                        for (size_t i = 0; i < total_elements; i++) {
+                            PyObject* item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
+                            if (!item) {
+                                PyRAISE("Failed to read element from numpy object array");
+                            }
+                            ssize_t element_size = get_shm_size(element_schema, item);
+                            Py_DECREF(item);
+                            if (element_size == -1) {
+                                return -1;
+                            }
+                            required_size += element_size;
+                        }
+                    } else {
+                        required_size += total_elements * PyArray_ITEMSIZE(arr);
+                    }
                 } else if (PyBytes_Check(obj)) {
                     required_size += (ssize_t)PyBytes_GET_SIZE(obj);
                 } else if (PyByteArray_Check(obj)) {
@@ -910,6 +964,12 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 // strings type are immutable, so const
                 const char* immutable_data = NULL; 
 
+                // Distinguish a numpy array of fixed-width primitives (use
+                // memcpy fast-path off PyArray_DATA) from a numpy array of
+                // dtype=object (recurse per element via PyArray_GETITEM,
+                // since PyArray_DATA would expose PyObject* pointer bytes,
+                // not the serialized element payload).
+                bool numpy_is_object = false;
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
@@ -922,12 +982,17 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                     import_numpy();
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
-                    // This needs const data
-                    immutable_data = PyArray_DATA(arr); // Get the data pointer
 
-                    // Verify that the array is contiguous
-                    if (!PyArray_ISCONTIGUOUS(arr)) {
-                        PyRAISE("NumPy array must be contiguous");
+                    if (PyArray_TYPE(arr) == NPY_OBJECT) {
+                        // Boxed numpy array: leave immutable_data NULL and
+                        // dispatch to the per-element path below.
+                        numpy_is_object = true;
+                    } else {
+                        // Fixed-width primitive numpy array.
+                        immutable_data = PyArray_DATA(arr);
+                        if (!PyArray_ISCONTIGUOUS(arr)) {
+                            PyRAISE("NumPy array must be contiguous");
+                        }
                     }
                 } else {
                     immutable_data = PyUnicode_AsUTF8AndSize(obj, &size);
@@ -953,20 +1018,38 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
 
                 result->data = PyTRY(abs2rel, *cursor);
 
-                if (PyList_Check(obj)) {
-                    // Fixed size width of each element (variable size data will
-                    // be written to the cursor location)
+                if (PyList_Check(obj) || numpy_is_object) {
+                    // Per-element recursion: works for Python lists and for
+                    // dtype=object numpy arrays. Element access differs
+                    // (PyList_GetItem vs PyArray_GETITEM), but the wire-layout
+                    // and recursion shape are identical.
                     size_t width = schema->parameters[0]->width;
-    
+
                     // Move the cursor to the location immediately after the
                     // fixed sized elements
                     *cursor = (void*)(*(char**)cursor + size * width);
 
                     char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
+                    PyArrayObject* arr = numpy_is_object ? (PyArrayObject*)obj : NULL;
                     for (Py_ssize_t i = 0; i < size; i++) {
-                        PyObject* item = PyList_GetItem(obj, i);
-                        if (to_voidstar_r(start + width * i, cursor, element_schema, item) != 0) {
+                        PyObject* item;
+                        if (numpy_is_object) {
+                            // PyArray_GETITEM returns a NEW reference for
+                            // dtype=object arrays.
+                            item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
+                            if (!item) {
+                                goto error;
+                            }
+                        } else {
+                            // PyList_GetItem returns a BORROWED reference.
+                            item = PyList_GetItem(obj, i);
+                        }
+                        int rc = to_voidstar_r(start + width * i, cursor, element_schema, item);
+                        if (numpy_is_object) {
+                            Py_DECREF(item);
+                        }
+                        if (rc != 0) {
                             goto error;
                         }
                     }

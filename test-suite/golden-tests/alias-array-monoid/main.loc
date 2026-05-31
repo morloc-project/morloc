@@ -1,31 +1,32 @@
--- Test that Array has Semigroup and Monoid instances.
--- Array is a List alias, same as Deque, so it should support the same
--- Semigroup/Monoid operations. Types are resolved via annotations at
--- call sites rather than type-casting wrapper functions.
+-- Test that Deque has Semigroup and Monoid instances and that list
+-- literals can construct Deque values via the @Packable (List a)
+-- (Deque a)@ instance declared in root. (Replaces the earlier
+-- @Array@-based form; @Array@ has been removed in favor of @Vector@
+-- and @Deque@.)
 
-module main (testArrayMonoidPy, testArrayMonoidCpp, testArrayMonoidR)
+module main (testDequeMonoidPy, testDequeMonoidCpp, testDequeMonoidR)
 
 import root-py
 import root-cpp
 import root-r
 
-testArrayMonoidPy :: Bool
-testArrayMonoidPy =
-  let t1 = (([1,2] :: Array Int) <> [3,4]) == [1,2,3,4]
-      t2 = (mempty :: Array Int) == []
-      t3 = concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+testDequeMonoidPy :: Bool
+testDequeMonoidPy =
+  let t1 = (([1,2] :: Deque Int) <> [3,4]) == [1,2,3,4]
+      t2 = (mempty :: Deque Int) == []
+      t3 = concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
   in t1 && t2 && t3
 
-testArrayMonoidCpp :: Bool
-testArrayMonoidCpp =
-  let t1 = (([1,2] :: Array Int) <> [3,4]) == [1,2,3,4]
-      t2 = (mempty :: Array Int) == []
-      t3 = concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+testDequeMonoidCpp :: Bool
+testDequeMonoidCpp =
+  let t1 = (([1,2] :: Deque Int) <> [3,4]) == [1,2,3,4]
+      t2 = (mempty :: Deque Int) == []
+      t3 = concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
   in t1 && t2 && t3
 
-testArrayMonoidR :: Bool
-testArrayMonoidR =
-  let t1 = (([1,2] :: Array Int) <> [3,4]) == [1,2,3,4]
-      t2 = (mempty :: Array Int) == []
-      t3 = concat ([[1,2],[3],[4,5]] :: Array (Array Int)) == [1,2,3,4,5]
+testDequeMonoidR :: Bool
+testDequeMonoidR =
+  let t1 = (([1,2] :: Deque Int) <> [3,4]) == [1,2,3,4]
+      t2 = (mempty :: Deque Int) == []
+      t3 = concat ([[1,2],[3],[4,5]] :: Deque (Deque Int)) == [1,2,3,4,5]
   in t1 && t2 && t3

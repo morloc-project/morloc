@@ -233,8 +233,8 @@ generalTypeToSerialAST' anc (VarT v)
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       case Map.lookup v scope of
-        (Just [(_, _, _, True)]) -> error "Cannot handle terminal types"
-        (Just [([], t', _, False)]) -> do
+        (Just [(_, _, _, True, _)]) -> error "Cannot handle terminal types"
+        (Just [([], t', _, False, _)]) -> do
           -- Same retag-outer rule as in @resolveAliasApp@: the alias's
           -- body has a different outer constructor (e.g. @List@ for
           -- @type Pat = [Pat]@), but the @&Pat@/@^Pat@ pair must agree
@@ -309,7 +309,7 @@ resolveAliasApp anc v ts
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       case Map.lookup v scope of
-        (Just [(params, body, _, False)]) -> do
+        (Just [(params, body, _, False, _)]) -> do
           let tvars = [tv | Left (tv, _) <- params]
               resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
               anc' = Set.insert v anc

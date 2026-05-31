@@ -15,6 +15,7 @@ module UnitTypeTests
   , typeOrderTests
   , typeAliasTests
   , numericLiteralAliasTests
+  , pendingNumLitTests
   , packerTests
   , whereTests
   , orderInvarianceTests
@@ -36,6 +37,8 @@ module UnitTypeTests
   , natDimTests
   , letBindingTests
   , aliasConstructorTests
+  , newtypeTests
+  , literalDispatchTests
   , typedefKindVarTests
   , recursiveRecordTests
   , bidirectionalAppCheckTests
@@ -313,6 +316,7 @@ listToGamma gs =
     , gammaIntVals = Map.empty
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
+    , gammaPendingNumLits = []
     }
 
 exprTestBad :: String -> MT.Text -> TestTree
@@ -1053,6 +1057,155 @@ numericLiteralAliasTests =
         type Vector (n :: Nat) a = List a
         x :: Vector 4 Int32
         x = [1, 2, 3]
+        |]
+      ]
+
+-- Numeric literals appearing in argument positions where the
+-- function's parameter type is an unsolved existential. The fix in
+-- @checkE (IntS / RealS)@ defers the literal binding until a later
+-- arg pins the existential. If nothing pins it, the kind-appropriate
+-- default (Int / Real) is applied at end-of-typecheck.
+--
+-- @IntS@ also accepts real base types (Int-to-Real promotion), so
+-- expressions like @4 + 2.3@ where the @+@ wants @Real@ on both sides
+-- let the @4@ adopt @Real@ rather than locking the existential to
+-- @Int@ and failing.
+pendingNumLitTests :: TestTree
+pendingNumLitTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "Numeric literals in polymorphic argument positions"
+      [ -- ----- Bare top-level: synth-mode default -----
+        assertGeneralType
+          "bare int literal defaults to Int"
+          [r|
+        module main (x)
+        x = 42
+        |]
+          int
+      , assertGeneralType
+          "bare real literal defaults to Real"
+          [r|
+        module main (x)
+        x = 4.2
+        |]
+          real
+
+      -- ----- Direct integer-to-real promotion at the literal site -----
+      , assertGeneralType
+          "int literal :: Real (promotes)"
+          [r|
+        module main (x)
+        x :: Real
+        x = 42
+        |]
+          real
+      , assertGeneralType
+          "int literal :: Float32 (promotes)"
+          [r|
+        module main (x)
+        x :: Float32
+        x = 42
+        |]
+          (var "Float32")
+      , assertGeneralType
+          "int literal :: Float64 (promotes)"
+          [r|
+        module main (x)
+        x :: Float64
+        x = 42
+        |]
+          (var "Float64")
+
+      -- ----- Mixed-numeric list literal -----
+      , assertGeneralType
+          "list of int + real literals at [Real]"
+          [r|
+        module main (x)
+        x :: List Real
+        x = [1, 2, 3.0]
+        |]
+          (lst real)
+
+      -- ----- Polymorphic identity: literal flows through, default applies -----
+      , assertGeneralType
+          "id of int literal defaults to Int"
+          [r|
+        module main (x)
+        id :: a -> a
+        x = id 42
+        |]
+          int
+      , assertGeneralType
+          "id of real literal defaults to Real"
+          [r|
+        module main (x)
+        id :: a -> a
+        x = id 4.2
+        |]
+          real
+
+      -- ----- Polymorphic binary function: both args share the existential -----
+      , assertGeneralType
+          "add of two int literals defaults to Int"
+          [r|
+        module main (x)
+        add :: a -> a -> a
+        x = add 1 1
+        |]
+          int
+      , assertGeneralType
+          "add of two real literals defaults to Real"
+          [r|
+        module main (x)
+        add :: a -> a -> a
+        x = add 1.5 2.5
+        |]
+          real
+      , assertGeneralType
+          "add of int + real literals -- int promotes (1 + 2.3)"
+          [r|
+        module main (x)
+        add :: a -> a -> a
+        x = add 1 2.3
+        |]
+          real
+      , assertGeneralType
+          "add of real + int literals -- int promotes (2.3 + 1)"
+          [r|
+        module main (x)
+        add :: a -> a -> a
+        x = add 2.3 1
+        |]
+          real
+
+      -- ----- Annotated arg pins the existential, literal adopts the width -----
+      , assertGeneralType
+          "add of int literal + Int8-annotated -- literal adopts Int8"
+          [r|
+        module main (x)
+        add :: a -> a -> a
+        y :: Int8
+        y = 5
+        x :: Int8
+        x = add 1 y
+        |]
+          (var "Int8")
+
+      -- ----- Negative: numeric literal in a non-numeric slot fails -----
+      , exprTestBad
+          "int literal in Bool slot rejected"
+          [r|
+        module main (x)
+        x :: Bool
+        x = 42
+        |]
+      , exprTestBad
+          "real literal in Int slot rejected (no demotion)"
+          [r|
+        module main (x)
+        x :: Int
+        x = 4.2
         |]
       ]
 
@@ -4302,7 +4455,7 @@ typedefKindVarTests =
                       [NatAddU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 3, NatLitU 2]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4317,7 +4470,7 @@ typedefKindVarTests =
                       [NatAddU (NatVarU (TV "k")) (NatVarU (TV "n")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 3]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4330,7 +4483,7 @@ typedefKindVarTests =
                       [NatSubU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 5, NatLitU 3]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4343,7 +4496,7 @@ typedefKindVarTests =
                       [NatMulU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 3, NatLitU 2]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4356,7 +4509,7 @@ typedefKindVarTests =
                       [NatDivU (NatVarU (TV "n")) (NatVarU (TV "m")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat), Left (TV "m", KindNat)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 6, NatLitU 2]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4368,7 +4521,7 @@ typedefKindVarTests =
         let bodyT = StrConcatU (StrVarU (TV "s")) (StrLitU "_suffix")
             params = [Left (TV "s", KindStr)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [StrLitU "prefix"]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4382,7 +4535,7 @@ typedefKindVarTests =
                       [NatAddU (NatVarU (TV "n")) (NatVarU (TV "n")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 4]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -4396,7 +4549,7 @@ typedefKindVarTests =
                       [NatAddU (NatVarU (TV "n")) (NatLitU 1), VarU (TV "a")]
             params = [Left (TV "n", KindNat), Left (TV "a", KindType)]
             scope = Map.singleton (TV "Foo")
-                      [(params, bodyT, ArgDocAlias defaultValue, False)]
+                      [(params, bodyT, ArgDocAlias defaultValue, False, TypedefAlias)]
             input = AppU (VarU (TV "Foo")) [NatLitU 4, VarU (TV "Int")]
         in case TE.evaluateType scope input of
              Right t -> assertEqual ""
@@ -5252,24 +5405,24 @@ letBindingTests =
           int
       ]
 
--- | Tests for typeclass instance resolution when multiple instances share the
--- same underlying type (e.g., Foldable List, Foldable Deque, Foldable Array
--- where Deque and Array are defined as List). Instance resolution must handle
--- these without erroring when the first instance solves an existential and
--- subsequent instances have a different alias name but equivalent applied form.
+-- | Tests for typeclass instance resolution across newtype boundaries.
+-- @newtype Deque a = List a@ and @newtype Array a = List a@ are nominally
+-- distinct from List and from each other, but share its wire format. Each
+-- needs its own typeclass instances; an instance on List does not apply
+-- to Deque, and a Deque value cannot be passed where an Array is expected.
 aliasConstructorTests :: TestTree
 aliasConstructorTests =
   localOption (mkTimeout 2000000) $ -- 2 second timeout
     testGroup
-      "Typeclass resolution with type alias families"
+      "Typeclass resolution with newtype families"
       [
-        -- === POSITIVE: aliases that should be equivalent ===
+        -- === POSITIVE: newtypes used as type constructors with their own instances ===
 
-        -- Two aliases for the same underlying type used in a Foldable context.
-        -- concat needs (Foldable f, Monoid a). When fold's existential ?f is
-        -- solved to one alias, checking it against another should succeed.
+        -- Two newtypes of the same wire-parent, each with its own Foldable
+        -- instance. concat needs (Foldable f, Monoid a); the call site fixes
+        -- f to a specific newtype which routes to the matching instance.
         assertGeneralType
-          "fold over alias types: Deque and List are equivalent constructors"
+          "fold over newtype: Deque and List each carry their own Foldable instance"
           [r|
         module main (f)
         class Semigroup a where
@@ -5278,7 +5431,7 @@ aliasConstructorTests =
           mempty :: a
         class Foldable f where
           fold :: (b -> a -> b) -> b -> f a -> b
-        type Deque a = List a
+        newtype Deque a = List a
         instance Semigroup (List a)
         instance Semigroup (Deque a)
         instance Monoid (List a)
@@ -5292,15 +5445,15 @@ aliasConstructorTests =
           |]
           (fun [lst (lst int), lst int])
 
-      , -- Three aliases for the same type used as type constructors
+      , -- Three newtypes sharing a wire-parent, each with its own Functor instance
         assertGeneralType
-          "three aliases (List, Deque, Array) all equivalent as constructors"
+          "three newtypes (List, Deque, Array) each carry their own Functor instance"
           [r|
         module main (f)
         class Functor f where
           fmap :: (a -> b) -> f a -> f b
-        type Deque a = List a
-        type Array a = List a
+        newtype Deque a = List a
+        newtype Array a = List a
         instance Functor List
         instance Functor Deque
         instance Functor Array
@@ -5309,15 +5462,15 @@ aliasConstructorTests =
           |]
           (fun [lst int, lst int])
 
-      , -- Transitive alias chains: A = B = C should all be equivalent
+      , -- Chained newtype wire-parents: MyList -> Deque -> List
         assertGeneralType
-          "transitive alias: MyList = Deque = List"
+          "chained newtypes: MyList wire-parent Deque, Deque wire-parent List"
           [r|
         module main (f)
         class Foldable f where
           fold :: (b -> a -> b) -> b -> f a -> b
-        type Deque a = List a
-        type MyList a = Deque a
+        newtype Deque a = List a
+        newtype MyList a = Deque a
         instance Foldable List
         instance Foldable Deque
         instance Foldable MyList
@@ -5326,14 +5479,14 @@ aliasConstructorTests =
           |]
           (fun [lst int, int])
 
-      , -- Multi-parameter aliases: same arity, same underlying type
+      , -- Multi-parameter newtype: same arity as wire-parent
         assertGeneralType
-          "two-parameter alias equivalence"
+          "two-parameter newtype with its own instance"
           [r|
         module main (f)
         class MyClass f where
           myMethod :: f a b -> f a b
-        type MyMap a b = Map a b
+        newtype MyMap a b = Map a b
         instance MyClass Map
         instance MyClass MyMap
         f :: Map Int Str -> Map Int Str
@@ -5341,18 +5494,19 @@ aliasConstructorTests =
           |]
           (fun [arr "Map" [int, str], arr "Map" [int, str]])
 
-      , -- === TYPE SPECIALIZATION ===
-        -- When a root type (List) and a descendant (Deque) are unified,
-        -- the inferred type should specialize to the descendant regardless
-        -- of argument order.
+      , -- === ANNOTATION-DRIVEN NEWTYPE SELECTION ===
+        -- A return-type annotation propagates the newtype through the
+        -- expression: both append arguments must be Deque Int because
+        -- the signature says so. Demonstrates that newtype identity
+        -- flows through bidirectional checking without alias reduction.
 
         assertRawType
-          "specializes to Deque: annotation on right"
+          "newtype annotation on right propagates to result"
           [r|
         module main (bar)
         class Semigroup a where
           append :: a -> a -> a
-        type Deque a = List a
+        newtype Deque a = List a
         instance Semigroup (List a)
         instance Semigroup (Deque a)
         bar :: Deque Int
@@ -5361,12 +5515,12 @@ aliasConstructorTests =
           (arr "Deque" [int])
 
       , assertRawType
-          "specializes to Deque: annotation on left"
+          "newtype annotation on left propagates to result"
           [r|
         module main (baz)
         class Semigroup a where
           append :: a -> a -> a
-        type Deque a = List a
+        newtype Deque a = List a
         instance Semigroup (List a)
         instance Semigroup (Deque a)
         baz :: Deque Int
@@ -5374,16 +5528,15 @@ aliasConstructorTests =
           |]
           (arr "Deque" [int])
 
-      , -- Transitive specialization: MyList = Deque = List should
-        -- specialize to the deepest descendant
+      , -- Annotation across a chain: MyList -> Deque -> List wire-parents
         assertRawType
-          "transitive specialization to deepest descendant"
+          "newtype annotation propagates through chained wire-parents"
           [r|
         module main (bar)
         class Semigroup a where
           append :: a -> a -> a
-        type Deque a = List a
-        type MyList a = Deque a
+        newtype Deque a = List a
+        newtype MyList a = Deque a
         instance Semigroup (List a)
         instance Semigroup (Deque a)
         instance Semigroup (MyList a)
@@ -5392,11 +5545,11 @@ aliasConstructorTests =
           |]
           (arr "MyList" [int])
 
-      , -- concat: the original motivating case. concat uses fold, (<>),
-        -- and mempty which are all typeclass methods with instances for
-        -- multiple members of the List representation family.
+      , -- concat used over a List value with full Semigroup/Monoid/Foldable
+        -- instances on the List newtype. Demonstrates polymorphic typeclass
+        -- dispatch when each newtype carries its own instance set.
         assertGeneralType
-          "concat typechecks with List representation family"
+          "concat typechecks over List with full instance set"
           [r|
         module main (f)
         class Semigroup a where
@@ -5405,8 +5558,8 @@ aliasConstructorTests =
           mempty :: a
         class Foldable f where
           fold :: (b -> a -> b) -> b -> f a -> b
-        type Deque a = List a
-        type Array a = List a
+        newtype Deque a = List a
+        newtype Array a = List a
         instance Semigroup (List a)
         instance Semigroup (Deque a)
         instance Semigroup (Array a)
@@ -5423,31 +5576,31 @@ aliasConstructorTests =
           |]
           (fun [lst (lst int), lst int])
 
-      , -- === NEGATIVE: SIBLING REJECTION ===
+      , -- === NEGATIVE: NEWTYPE NOMINAL DISTINCTION ===
 
-        -- Sibling aliases with applied types should be rejected.
-        -- This tests the areSiblingAliases check that prevents
-        -- transitive matching through the common ancestor.
+        -- Newtypes of the same wire-parent are nominally distinct.
+        -- A binary operator with shared type variable cannot mix them.
         exprTestBad
-          "sibling aliases Array and Deque are incompatible"
+          "newtypes Array and Deque are nominally distinct"
           [r|
         module main (bad)
         class Semigroup a where
           append :: a -> a -> a
-        type Deque a = List a
-        type Array a = List a
+        newtype Deque a = List a
+        newtype Array a = List a
         instance Semigroup (Deque a)
         instance Semigroup (Array a)
         bad = append ([1,2,3] :: Array Int) ([4,5,6] :: Deque Int)
           |]
 
-      , -- Sibling rejection also applies to function arguments
+      , -- A function expecting one newtype must reject a value of a
+        -- different newtype, even when both share a wire-parent.
         exprTestBad
           "function expecting Deque rejects Array argument"
           [r|
         module main (bad)
-        type Deque a = List a
-        type Array a = List a
+        newtype Deque a = List a
+        newtype Array a = List a
         f :: Deque Int -> Int
         bad :: Int
         bad = f ([1,2,3] :: Array Int)
@@ -5461,6 +5614,289 @@ aliasConstructorTests =
         f :: Int
         f = ("hello" :: Str)
           |]
+      ]
+
+-- | Tests for the @newtype@ declaration's nominal-distinct, wire-equivalent
+-- semantics. @newtype Foo = Bar@ inherits only the wire format from Bar;
+-- typeclass instances, per-language overrides, and type identity are Foo's
+-- own. Covers basic acceptance, instance non-inheritance, frontend
+-- invariants (Invariant 1: transparent @type@ alias cannot carry a
+-- per-language form; Invariant 2: cycle in the newtype wire-parent graph
+-- is rejected), and composition with @?@/@<E>@ wrappers.
+newtypeTests :: TestTree
+newtypeTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "newtype declaration"
+      [ -- A bare newtype with no inherited instances should parse and
+        -- typecheck. The wire-parent identity (List) is preserved in the
+        -- general scope; the newtype identity (MyList) is what the
+        -- typechecker sees at the boundary.
+        assertGeneralType
+          "bare newtype parses and is distinct from wire-parent"
+          [r|
+        module main (f)
+        newtype MyList a = List a
+        f :: MyList Int -> MyList Int
+        f x = x
+          |]
+          (fun [arr "MyList" [int], arr "MyList" [int]])
+
+      , -- A newtype with an explicit typeclass instance is usable through
+        -- that instance. The wire-parent's instance is irrelevant here:
+        -- only the newtype's own instance routes to the dispatch.
+        assertGeneralType
+          "newtype with explicit Functor instance routes through it"
+          [r|
+        module main (f)
+        class Functor f where
+          fmap :: (a -> b) -> f a -> f b
+        newtype MyList a = List a
+        instance Functor MyList
+        f :: MyList Int -> MyList Int
+        f = fmap (\x -> x)
+          |]
+          (fun [arr "MyList" [int], arr "MyList" [int]])
+
+      , -- Without an explicit instance on the newtype, a typeclass method
+        -- declared on the wire-parent is not visible. Instance resolution
+        -- stops at the newtype boundary.
+        exprTestBad
+          "newtype does NOT inherit Functor instance from wire-parent"
+          [r|
+        module main (f)
+        class Functor f where
+          fmap :: (a -> b) -> f a -> f b
+        newtype MyList a = List a
+        instance Functor List
+        f :: MyList Int -> MyList Int
+        f = fmap (\x -> x)
+          |]
+
+      , -- Invariant 1: a transparent @type@ alias cannot carry a per-language
+        -- form. The right alternative is to declare @Foo@ as a @newtype@.
+        exprTestBad
+          "type alias with per-language form is rejected"
+          [r|
+        module main (f)
+        type Foo = Int
+        type Py => Foo = "my_foo"
+        f :: Foo -> Foo
+        f x = x
+          |]
+
+      , -- Invariant 2: a cycle in the newtype wire-parent graph is rejected.
+        exprTestBad
+          "cyclic newtype chain is rejected"
+          [r|
+        module main (f)
+        newtype A = B
+        newtype B = A
+        f :: A -> A
+        f x = x
+          |]
+
+      , -- Optional composes structurally with newtype: ?(MyList Int) is
+        -- a distinct nominal type whose wire format is Optional (List Int).
+        assertGeneralType
+          "newtype composes with Optional wrapper"
+          [r|
+        module main (f)
+        newtype MyList a = List a
+        f :: ?(MyList Int) -> ?(MyList Int)
+        f x = x
+          |]
+          (fun [OptionalU (arr "MyList" [int]), OptionalU (arr "MyList" [int])])
+
+      , -- Effect wrappers compose with newtype the same way.
+        assertGeneralType
+          "newtype composes with effect wrapper"
+          [r|
+        module main (f)
+        effect IO
+        newtype MyList a = List a
+        f :: MyList Int -> <IO> MyList Int
+        f x = x
+          |]
+          (fun [arr "MyList" [int], ioEff (arr "MyList" [int])])
+
+      , -- A newtype with its own per-language form. The Cpp form is
+        -- registered alongside the general declaration; the typechecker
+        -- treats MyInt as nominally distinct from Int even though both
+        -- compile to @int@ in C++ here. (No instance inheritance.)
+        assertGeneralType
+          "newtype with explicit per-language form"
+          [r|
+        module main (f)
+        newtype MyInt = Int
+        type Cpp => MyInt = "int"
+        f :: MyInt -> MyInt
+        f x = x
+          |]
+          (fun [var "MyInt", var "MyInt"])
+
+      , -- A newtype whose wire-parent is another newtype: instance and
+        -- per-language lookup walk the wire-parent chain in code-gen but
+        -- treat each level as a distinct nominal type at the type level.
+        assertGeneralType
+          "chained newtypes: distinct identities, shared wire format"
+          [r|
+        module main (f)
+        newtype Inner = Int
+        newtype Outer = Inner
+        f :: Outer -> Outer
+        f x = x
+          |]
+          (fun [var "Outer", var "Outer"])
+
+      , -- A vacuous newtype body (Foo = Foo) is rejected by the same
+        -- self-reference check that rejects vacuous type aliases.
+        exprTestBad
+          "vacuous newtype body is rejected"
+          [r|
+        module main (f)
+        newtype Foo = Foo
+        f :: Foo -> Foo
+        f x = x
+          |]
+      ]
+
+-- | Tests for value-level literals being accepted at newtype-typed
+-- positions. The typechecker walks the newtype's wire-parent chain via
+-- @wireParentRoot@: if the chain reaches the literal's natural primitive
+-- (e.g. @newtype Foo = Int@ for an integer literal), the literal is
+-- accepted at the newtype's identity. Codegen handles per-language
+-- conversion via @*Like@ instances when the newtype's effective
+-- per-language form diverges from the wire-parent's; the typechecker
+-- itself doesn't consult @*Like@ instances.
+literalDispatchTests :: TestTree
+literalDispatchTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "Literal acceptance at newtype types"
+      [ -- An integer literal inhabits a newtype whose wire-parent
+        -- chain reaches @Int@.
+        assertGeneralType
+          "integer literal at newtype Foo (Foo's wire-parent is Int)"
+          [r|
+        module main (x)
+        newtype Foo = Int
+        x :: Foo
+        x = 5
+          |]
+          (var "Foo")
+
+      , -- A string literal at a newtype whose wire-parent is Str.
+        assertGeneralType
+          "string literal at newtype Name (Name's wire-parent is Str)"
+          [r|
+        module main (x)
+        newtype Name = Str
+        x :: Name
+        x = "Alice"
+          |]
+          (var "Name")
+
+      , -- A boolean literal at a newtype whose wire-parent is Bool.
+        assertGeneralType
+          "bool literal at newtype Flag (Flag's wire-parent is Bool)"
+          [r|
+        module main (x)
+        newtype Flag = Bool
+        x :: Flag
+        x = True
+          |]
+          (var "Flag")
+
+      , -- A real literal at a newtype whose wire-parent is Real.
+        assertGeneralType
+          "real literal at newtype Speed (Speed's wire-parent is Real)"
+          [r|
+        module main (x)
+        newtype Speed = Real
+        x :: Speed
+        x = 3.14
+          |]
+          (var "Speed")
+
+      , -- A list literal at a Nat-parameterised newtype container whose
+        -- wire-parent is List. Length-checks against the Nat dimension.
+        assertGeneralType
+          "list literal at newtype Vec n a (wire-parent is List a)"
+          [r|
+        module main (x)
+        newtype Vec (n :: Nat) a = List a
+        x :: Vec 3 Int
+        x = [1, 2, 3]
+          |]
+          (arr "Vec" [NatLitU 3, var "Int"])
+
+      , -- A literal whose natural primitive doesn't match the newtype's
+        -- wire-parent chain is rejected. Foo here has wire-parent Str,
+        -- so an integer literal cannot inhabit it.
+        exprTestBad
+          "integer literal rejected when newtype's wire-parent is not Int"
+          [r|
+        module main (x)
+        newtype Foo = Str
+        x :: Foo
+        x = 5
+          |]
+
+      , -- Length mismatch against a Nat-parameterised newtype: the
+        -- structural shape check accepts the list, then the existing
+        -- nat-dim check rejects the wrong length.
+        exprTestBad
+          "list literal length mismatch at Vec 3 Int"
+          [r|
+        module main (x)
+        newtype Vec (n :: Nat) a = List a
+        x :: Vec 3 Int
+        x = [1, 2]
+          |]
+
+      , -- Bare-VarT newtype-list: an unparameterised newtype that aliases
+        -- a fully-applied list (e.g. @newtype Bytes = List UInt8@).
+        -- A list literal at @Bytes@ is accepted because the wire-parent
+        -- chain reaches a list shape; the children are typed at the
+        -- wire-parent's element type.
+        assertGeneralType
+          "list literal at bare-VarT newtype Bytes (Bytes = List UInt8)"
+          [r|
+        module main (x)
+        newtype Bytes = List UInt8
+        x :: Bytes
+        x = [1, 2, 3]
+          |]
+          (var "Bytes")
+
+      , -- The same shape applied to a newtype whose body is a list of a
+        -- different primitive. Confirms the element type comes from the
+        -- wire-parent body, not from the user-facing type's args (which
+        -- are empty here).
+        assertGeneralType
+          "list literal at bare-VarT newtype Reals (Reals = List Real)"
+          [r|
+        module main (x)
+        newtype Reals = List Real
+        x :: Reals
+        x = [1.0, 2.0, 3.0]
+          |]
+          (var "Reals")
+
+      , -- Chained newtype: a list literal at an outer newtype whose
+        -- wire-parent walks through another newtype to reach List. The
+        -- iterated 'wireParentRoot' must follow the full chain.
+        assertGeneralType
+          "list literal at chained newtype-of-newtype-of-List"
+          [r|
+        module main (x)
+        newtype Inner = List Int
+        newtype Outer = Inner
+        x :: Outer
+        x = [1, 2, 3]
+          |]
+          (var "Outer")
       ]
 
 -- Recursive record types. Self-recursive references through @[_]@ or @?_@
@@ -5755,6 +6191,50 @@ bidirectionalAppCheckTests =
         exprTestBad
           "deep-20 recursive literal at wrong type still rejected"
           (deepWrongTypeProgram 20)
+      , -- Regression: a polymorphic indexer (`at :: Int -> [a] -> a`)
+        -- whose return is the bare element type, applied in a
+        -- position that expects `?a`. The App-Check shortcut was
+        -- pre-pinning the function's return existential to the FULL
+        -- `?a`, which propagated through the polymorphic arg and
+        -- forced `xs :: [?a]` against the actual `xs :: [a]`,
+        -- producing an occurs check `a <: ?a`. The fix bails to
+        -- checkEFallback when the expected type is OptionalU so the
+        -- coercion fires at the application boundary.
+        expectPass
+          "indexer at ?a return position coerces at boundary"
+          [r|
+        module main (foo)
+        listAt :: Int -> [a] -> a
+        foo :: [a] -> ?a
+        foo xs = listAt 0 xs
+        |]
+      , -- The full listToMaybe pattern from the maybe stdlib:
+        -- explicit null-guard on one branch, polymorphic indexer on
+        -- the other. The else-branch must coerce `a` to `?a` cleanly.
+        expectPass
+          "guarded safeHead pattern with polymorphic indexer"
+          [r|
+        module main (foo)
+        listAt :: Int -> [a] -> a
+        isEmpty :: [a] -> Bool
+        foo :: [a] -> ?a
+        foo xs
+          ? isEmpty xs = Null
+          : listAt 0 xs
+        |]
+      , -- Negative: applying a function whose return is NOT the
+        -- expected `?a`'s inner type must still be rejected. `f ::
+        -- a -> a` applied to `xs : [a]` returns `[a]`, which cannot
+        -- coerce to `?a`. Confirms the OptionalU bypass doesn't
+        -- accidentally permit wrong-shape coercions.
+        exprTestBad
+          "wrong-shape return at ?a position still rejected"
+          [r|
+        module main (foo)
+        f :: a -> a
+        foo :: [a] -> ?a
+        foo xs = f xs
+        |]
       ]
 
 -- | Build a morloc source program with a depth-N recursive literal

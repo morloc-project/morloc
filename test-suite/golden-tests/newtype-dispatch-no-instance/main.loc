@@ -1,0 +1,21 @@
+-- When a newtype's per-language form diverges from its wire-parent's,
+-- a corresponding *Like instance is required for the language being
+-- compiled. Without an instance, code generation raises a hard sourced
+-- error at the literal site.
+--
+-- Here @MyInt@ is a newtype over @Int@ with a Py override mapping it to
+-- a non-int class. No @IntLike MyInt@ instance is declared, so compiling
+-- a literal at @MyInt@ in Py must fail at code generation.
+
+module main (result)
+
+import root-py
+
+newtype MyInt = Int
+type Py => MyInt = "MyIntClass"
+
+source Py from "test.py" ("to_int" as toInt)
+toInt :: MyInt -> Int
+
+result :: Int
+result = toInt 42

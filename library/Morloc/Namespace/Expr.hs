@@ -660,13 +660,24 @@ instance Pretty Expr where
         _ -> tupled (map pretty constraints) <+> "=> "
   pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (EffE lbl esc) = (if esc then "escapable effect" else "effect") <+> pretty lbl
-  pretty (TypE (ExprTypeE lang v vs t _)) =
-    "type" <+> pretty lang
-      <> "@"
-      <> pretty v
-        <+> sep (map (either pretty (parens . pretty)) vs)
-        <+> "="
-        <+> pretty t
+  pretty (TypE (ExprTypeE lang v vs t _ kind)) = case kind of
+    TypedefPrimitive ->
+      "type" <+> pretty lang
+        <> "@"
+        <> pretty v
+          <+> sep (map (either pretty (parens . pretty)) vs)
+    _ ->
+      keyword <+> pretty lang
+        <> "@"
+        <> pretty v
+          <+> sep (map (either pretty (parens . pretty)) vs)
+          <+> "="
+          <+> pretty t
+      where
+        keyword = case kind of
+          TypedefAlias -> "type"
+          TypedefNewtype -> "newtype"
+          TypedefPrimitive -> "type"  -- unreachable, handled above
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE ExportAll) = "export *"

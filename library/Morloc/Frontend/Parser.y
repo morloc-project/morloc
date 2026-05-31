@@ -89,6 +89,7 @@ import qualified Morloc.BaseTypes as BT
   'True'     { Located _ TokTrue _ }
   'False'    { Located _ TokFalse _ }
   'type'     { Located _ TokType _ }
+  'newtype'  { Located _ TokNewtype _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
   'class'    { Located _ TokClass _ }
@@ -291,6 +292,20 @@ typedef_decl :: { Loc CstExpr }
   | 'type' '(' UPPER typedef_params ')' '=' type
       { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $3), $4) ($7, False))) }
   | 'type' '(' UPPER typedef_params ')'
+      { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
+  | 'newtype' UPPER typedef_params '=' type
+      { at $1 (CTypE (CstNewtype (TV (getName $2), $3) $5)) }
+  | 'newtype' '(' UPPER typedef_params ')' '=' type
+      { at $1 (CTypE (CstNewtype (TV (getName $3), $4) $7)) }
+  -- @newtype X@ / @newtype (X a)@ with no RHS is a built-in primitive
+  -- declaration: nominal, opaque, owns its per-language forms. Reuses
+  -- 'CstTypeAliasForward' since the desugar is identical
+  -- (TypedefPrimitive). The 'newtype' keyword reads better than 'type'
+  -- for these declarations because primitives behave structurally like
+  -- newtypes (no typeclass inheritance, own per-language forms).
+  | 'newtype' UPPER typedef_params
+      { at $1 (CTypE (CstTypeAliasForward (TV (getName $2), $3))) }
+  | 'newtype' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
       {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }

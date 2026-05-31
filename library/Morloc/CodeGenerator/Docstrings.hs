@@ -153,7 +153,19 @@ reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
 reduceArgDoc i t@(VarT v) arg = do
   scope <- MM.getGeneralScope i
   case Map.lookup v scope of
-    (Just [(_, typeOf -> parentType, parentArg, _)]) ->
+    -- Record-newtype: declared via @record Foo where { ... }@. The body
+    -- is a 'NamU' carrying the record-level and field-level
+    -- docstrings; non-record newtypes are opaque (their docstring is
+    -- their own). Walk into the NamU so the CLI flag derivation sees
+    -- the per-field @arg:@/@metavar:@/@default:@ directives.
+    (Just [(_, typeOf -> parentType@(NamT _ _ _ _), parentArg, _, TypedefNewtype)]) ->
+      inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
+    -- Newtype and primitive boundaries otherwise stop inheritance:
+    -- their docstring is their own, the wire-parent's (if any) is not
+    -- consulted.
+    (Just [(_, _, _, _, TypedefNewtype)]) -> return (t, arg)
+    (Just [(_, _, _, _, TypedefPrimitive)]) -> return (t, arg)
+    (Just [(_, typeOf -> parentType, parentArg, _, TypedefAlias)]) ->
       inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
     (Just _) -> MM.throwSystemError $ "Multiple definitions for type alias '" <> pretty (unTVar v) <> "'"
     Nothing -> return (t, arg)

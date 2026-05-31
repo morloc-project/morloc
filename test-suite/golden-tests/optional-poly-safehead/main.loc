@@ -1,0 +1,111 @@
+module main
+  ( cppCase
+  , pyCase
+  , rCase
+  , cppNullCase
+  , pyNullCase
+  , rNullCase
+  )
+
+-- Regression for two bugs uncovered by the maybe stdlib's
+-- listToMaybe / default pair:
+--
+--   1. Typecheck: a polymorphic function whose return is a bare
+--      type variable (e.g. `at 0 xs :: a`) used in a context that
+--      expects `?a` was pushing the OptionalU into the function's
+--      polymorphic argument slot, producing an occurs check
+--      `a <: ?a`. The fix is to bail to checkEFallback in
+--      Frontend/Typecheck.hs when the App-Check expected type is
+--      OptionalU, so the coercion fires at the application
+--      boundary instead of inside the args.
+--
+--   2. C++ codegen: a Null literal passed to a templated foreign
+--      function (e.g. `unwrap_or<A>(A, std::optional<A>)`) was
+--      emitting bare `std::nullopt`. C++ template-argument
+--      deduction cannot bind `A` from `std::nullopt_t`, so the
+--      call failed to compile. The fix in CppPrinter.hs emits the
+--      typed `IType{}` form when the storage type is known.
+--
+-- The test wires both bugs together: a morloc-defined polymorphic
+-- `safeHead` in each backend (bug 1), then `unwrapOr ... (Null
+-- :: ?Int)` to feed a literal Null into a templated foreign
+-- function (bug 2).
+
+type Cpp => Int = "int"
+type Py  => Int = "int"
+type R   => Int = "integer"
+
+type Cpp => List a = "std::vector<$1>" a
+type Py  => List a = "list" a
+type R   => List a = "list" a
+
+type Cpp => Bool = "bool"
+type Py  => Bool = "bool"
+type R   => Bool = "logical"
+
+cppIsEmpty   :: [a] -> Bool
+cppAt        :: Int -> [a] -> a
+cppUnwrapOr  :: a -> ?a -> a
+
+pyIsEmpty    :: [a] -> Bool
+pyAt         :: Int -> [a] -> a
+pyUnwrapOr   :: a -> ?a -> a
+
+rIsEmpty     :: [a] -> Bool
+rAt          :: Int -> [a] -> a
+rUnwrapOr    :: a -> ?a -> a
+
+source Cpp from "helpers.hpp"
+  ( "list_is_empty" as cppIsEmpty
+  , "list_at"       as cppAt
+  , "unwrap_or"     as cppUnwrapOr
+  )
+
+source Py from "helpers.py"
+  ( "list_is_empty" as pyIsEmpty
+  , "list_at"       as pyAt
+  , "unwrap_or"     as pyUnwrapOr
+  )
+
+source R from "helpers.R"
+  ( "list_is_empty" as rIsEmpty
+  , "list_at"       as rAt
+  , "unwrap_or"     as rUnwrapOr
+  )
+
+-- The polymorphic safeHead variants. The `else` branch is
+-- `<lang>At 0 xs :: a` checked against the function's declared
+-- return `?a` — exactly the App-Check OptionalU shape that bug 1
+-- mishandled.
+cppSafeHead :: [a] -> ?a
+cppSafeHead xs
+  ? cppIsEmpty xs = Null
+  : cppAt 0 xs
+
+pySafeHead :: [a] -> ?a
+pySafeHead xs
+  ? pyIsEmpty xs = Null
+  : pyAt 0 xs
+
+rSafeHead :: [a] -> ?a
+rSafeHead xs
+  ? rIsEmpty xs = Null
+  : rAt 0 xs
+
+cppCase :: Int
+cppCase = cppUnwrapOr 99 (cppSafeHead [42, 43])
+
+pyCase :: Int
+pyCase = pyUnwrapOr 99 (pySafeHead [42, 43])
+
+rCase :: Int
+rCase = rUnwrapOr 99 (rSafeHead [42, 43])
+
+cppNullCase :: Int
+cppNullCase = cppUnwrapOr 99 (Null :: ?Int)
+
+pyNullCase :: Int
+pyNullCase = pyUnwrapOr 99 (Null :: ?Int)
+
+rNullCase :: Int
+rNullCase = rUnwrapOr 99 (Null :: ?Int)

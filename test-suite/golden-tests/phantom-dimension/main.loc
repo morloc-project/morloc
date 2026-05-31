@@ -182,16 +182,16 @@ rtVecInt0 = idcpp ([] :: Vector 0 Int)
 --    `NatVoidF`). Three sub-cases cover first/second/both dims being 0,
 --    plus a non-zero sanity case.
 mat2x3 :: Matrix 2 3 Real
-mat2x3 = pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector 6 Real))
+mat2x3 = ((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
 mat0x3 :: Matrix 0 3 Real
-mat0x3 = pack (((0, 3), []) :: ((Int,Int), Vector 0 Real))
+mat0x3 = ((0, 3), [])
 
 mat3x0 :: Matrix 3 0 Real
-mat3x0 = pack (((3, 0), []) :: ((Int,Int), Vector 0 Real))
+mat3x0 = ((3, 0), [])
 
 mat0x0 :: Matrix 0 0 Real
-mat0x0 = pack (((0, 0), []) :: ((Int,Int), Vector 0 Real))
+mat0x0 = ((0, 0), [])
 
 -- 10) Matrix round-trip through idcpp. Confirms the dim values come back
 --     identical after pack -> wire -> unpack -> pack -> wire.

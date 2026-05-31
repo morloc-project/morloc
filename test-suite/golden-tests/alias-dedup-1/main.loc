@@ -11,7 +11,9 @@ import root-cpp
 -- Each alias supports different typeclasses:
 --   List:   Functor, Foldable, Indexed, Stack, Queue
 --   Deque:  Functor, Foldable, Stack, Queue
---   Array:  Functor, Foldable, Indexed
+
+-- this is simple alias for list
+type Array a = List a
 
 -- Functor (all aliases have it)
 mapDeque :: Deque Int -> Deque Int
@@ -140,7 +142,7 @@ testAliasCpp =
 testInt32Cpp :: Bool
 testInt32Cpp =
   let t1 = add32 10 20 == 30
-      t2 = mul64 100 200 == 20000
+  let t2 = mul64 100 200 == 20000
   in t1 && t2
 
 testDeepChainPy :: Int

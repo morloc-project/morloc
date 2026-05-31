@@ -194,6 +194,17 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                 size += buf_align - 1;
                 const char* str;
 
+                // R's NULL stands in for a zero-length vector (e.g. an
+                // R function returning numeric(0) may surface as NULL
+                // through some code paths, and a literal `[] :: Vector
+                // 0 a` deserialised on the wire-empty branch is
+                // represented as NULL). Treat it as an empty array
+                // with no element data; the inner switch's TYPE-based
+                // arms would otherwise fall to default and error.
+                if (TYPEOF(obj) == NILSXP) {
+                    return size;
+                }
+
                 switch (TYPEOF(obj)) {
                     case CHARSXP:
                         str = CHAR(obj);

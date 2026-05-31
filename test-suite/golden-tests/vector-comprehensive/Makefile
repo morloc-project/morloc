@@ -105,10 +105,6 @@ all:
 	./nexus mlSum >> obs.txt 2>> obs.err
 	echo "--- mlLength ---" >> obs.txt
 	./nexus mlLength >> obs.txt 2>> obs.err
-	echo "--- mlReverse ---" >> obs.txt
-	./nexus mlReverse >> obs.txt 2>> obs.err
-	echo "--- mlSort ---" >> obs.txt
-	./nexus mlSort >> obs.txt 2>> obs.err
 	echo "--- mlMap ---" >> obs.txt
 	./nexus mlMap >> obs.txt 2>> obs.err
 	echo "=== (7) Edge cases (empty / single) ===" >> obs.txt

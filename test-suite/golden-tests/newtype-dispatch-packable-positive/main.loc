@@ -1,0 +1,43 @@
+-- A newtype whose per-language form diverges from its wire-parent's
+-- gets a @Packable@ instance providing the @pack@/@unpack@ bridge.
+-- In @class Packable a b where pack :: a -> b@, @a@ is the wire form
+-- and @b@ is the native form, so @pack@ constructs a native from its
+-- wire representation. The code generator wraps each literal at the
+-- newtype type with the instance's @pack@ source, and the result
+-- round-trips through @unpack@ at the wire boundary. Both the
+-- primitive case (@MyInt@) and the parametric-list case (@MyVec a@)
+-- are exercised.
+
+module main (intResult, vecResult)
+
+import root-py
+
+newtype MyInt = Int
+type Py => MyInt = "MyIntClass"
+
+instance Packable Int MyInt where
+  source Py from "main.py"
+   ( "pack_myint" as pack
+   , "unpack_myint" as unpack
+   )
+
+newtype MyVec a = List a
+type Py => (MyVec a) = "MyVecClass" a
+
+instance Packable (List a) (MyVec a) where
+  source Py from "main.py"
+   ( "pack_myvec" as pack
+   , "unpack_myvec" as unpack
+   )
+
+source Py from "main.py" ("to_int" as toInt)
+toInt :: MyInt -> Int
+
+source Py from "main.py" ("len_vec" as lenVec)
+lenVec :: MyVec Int -> Int
+
+intResult :: Int
+intResult = toInt 42
+
+vecResult :: Int
+vecResult = lenVec [10, 20, 30]

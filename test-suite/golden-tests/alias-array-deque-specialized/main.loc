@@ -1,29 +1,29 @@
 -- Regression test for a latent bug in the SerialAST builder.
 --
--- `type Array a = List a` and `type Deque a = List a` are stdlib general-scope
--- aliases. Combined with specialized integer aliases (e.g. `type Int32 = Int`),
--- a previous bug fully evaluated the type when looking up the outer alias,
--- collapsing the element type from Int32 to Int and emitting BigInt schema
--- (16-byte width) instead of i4 (4-byte width). The mismatch surfaced only
--- cross-language with specialized element types -- existing tests used Array
--- with only Int/Real/Bool, all of which are terminal serialization base types.
+-- @newtype Deque a = List a@ in the stdlib (with a per-language form
+-- @std::deque<$1>@ on the C++ side and a @Packable (List a) (Deque a)@
+-- instance) combines with specialized integer aliases (e.g. @type
+-- Int32 = Int@). A previous bug fully evaluated the type when looking
+-- up the outer alias, collapsing the element type from @Int32@ to
+-- @Int@ and emitting BigInt schema (16-byte width) instead of @i4@
+-- (4-byte width). The mismatch surfaced only cross-language with
+-- specialized element types -- the older tests used the now-removed
+-- @Array@ type with only @Int@/@Real@/@Bool@, all of which are
+-- terminal serialization base types.
 --
--- This test forces the previously-latent code path: parameterized aliases
--- (Array, Deque) with element types that themselves alias (Int32 -> Int,
--- Float32 -> Real, etc.), passed across language boundaries.
+-- This test forces the previously-latent code path: a parameterized
+-- newtype-of-list (@Deque@) with element types that themselves alias
+-- (@Int32 -> Int@, @Float32 -> Real@, etc.), passed across language
+-- boundaries.
 module main
-  ( testArrayInt32Cp
-  , testArrayInt32Pc
-  , testArrayInt64Cp
-  , testArrayInt64Pc
-  , testArrayFloat32Cp
-  , testArrayFloat32Pc
-  , testArrayFloat64Cp
-  , testArrayFloat64Pc
-  , testDequeInt32Cp
+  ( testDequeInt32Cp
   , testDequeInt32Pc
+  , testDequeInt64Cp
+  , testDequeInt64Pc
   , testDequeFloat32Cp
   , testDequeFloat32Pc
+  , testDequeFloat64Cp
+  , testDequeFloat64Pc
   )
 
 import root-cpp
@@ -34,8 +34,6 @@ source Cpp from "src.hpp"
   , "cppMakeI64" , "cppSumI64"
   , "cppMakeF32" , "cppSumF32"
   , "cppMakeF64" , "cppSumF64"
-  , "cppMakeI32D", "cppSumI32D"
-  , "cppMakeF32D", "cppSumF32D"
   )
 
 source Py from "src.py"
@@ -43,72 +41,48 @@ source Py from "src.py"
   , "pyMakeI64" , "pySumI64"
   , "pyMakeF32" , "pySumF32"
   , "pyMakeF64" , "pySumF64"
-  , "pyMakeI32D", "pySumI32D"
-  , "pyMakeF32D", "pySumF32D"
   )
 
--- Array variants
-cppMakeI32 :: Array Int32
-cppSumI32  :: Array Int32 -> Int
-pyMakeI32  :: Array Int32
-pySumI32   :: Array Int32 -> Int
+cppMakeI32 :: Deque Int32
+cppSumI32  :: Deque Int32 -> Int
+pyMakeI32  :: Deque Int32
+pySumI32   :: Deque Int32 -> Int
 
-cppMakeI64 :: Array Int64
-cppSumI64  :: Array Int64 -> Int
-pyMakeI64  :: Array Int64
-pySumI64   :: Array Int64 -> Int
+cppMakeI64 :: Deque Int64
+cppSumI64  :: Deque Int64 -> Int
+pyMakeI64  :: Deque Int64
+pySumI64   :: Deque Int64 -> Int
 
-cppMakeF32 :: Array Float32
-cppSumF32  :: Array Float32 -> Real
-pyMakeF32  :: Array Float32
-pySumF32   :: Array Float32 -> Real
+cppMakeF32 :: Deque Float32
+cppSumF32  :: Deque Float32 -> Real
+pyMakeF32  :: Deque Float32
+pySumF32   :: Deque Float32 -> Real
 
-cppMakeF64 :: Array Float64
-cppSumF64  :: Array Float64 -> Real
-pyMakeF64  :: Array Float64
-pySumF64   :: Array Float64 -> Real
-
--- Deque variants (subset)
-cppMakeI32D :: Deque Int32
-cppSumI32D  :: Deque Int32 -> Int
-pyMakeI32D  :: Deque Int32
-pySumI32D   :: Deque Int32 -> Int
-
-cppMakeF32D :: Deque Float32
-cppSumF32D  :: Deque Float32 -> Real
-pyMakeF32D  :: Deque Float32
-pySumF32D   :: Deque Float32 -> Real
+cppMakeF64 :: Deque Float64
+cppSumF64  :: Deque Float64 -> Real
+pyMakeF64  :: Deque Float64
+pySumF64   :: Deque Float64 -> Real
 
 -- Cross-language pairs: writer + reader must agree on element width.
 -- Sum of [10..17] = 108 (Int32, Int64).
 -- Sum of [1.5, 2.5, 3.5] = 7.5 (Float32, Float64).
 
-testArrayInt32Cp :: Int
-testArrayInt32Cp = pySumI32 cppMakeI32
-testArrayInt32Pc :: Int
-testArrayInt32Pc = cppSumI32 pyMakeI32
-
-testArrayInt64Cp :: Int
-testArrayInt64Cp = pySumI64 cppMakeI64
-testArrayInt64Pc :: Int
-testArrayInt64Pc = cppSumI64 pyMakeI64
-
-testArrayFloat32Cp :: Real
-testArrayFloat32Cp = pySumF32 cppMakeF32
-testArrayFloat32Pc :: Real
-testArrayFloat32Pc = cppSumF32 pyMakeF32
-
-testArrayFloat64Cp :: Real
-testArrayFloat64Cp = pySumF64 cppMakeF64
-testArrayFloat64Pc :: Real
-testArrayFloat64Pc = cppSumF64 pyMakeF64
-
 testDequeInt32Cp :: Int
-testDequeInt32Cp = pySumI32D cppMakeI32D
+testDequeInt32Cp = pySumI32 cppMakeI32
 testDequeInt32Pc :: Int
-testDequeInt32Pc = cppSumI32D pyMakeI32D
+testDequeInt32Pc = cppSumI32 pyMakeI32
+
+testDequeInt64Cp :: Int
+testDequeInt64Cp = pySumI64 cppMakeI64
+testDequeInt64Pc :: Int
+testDequeInt64Pc = cppSumI64 pyMakeI64
 
 testDequeFloat32Cp :: Real
-testDequeFloat32Cp = pySumF32D cppMakeF32D
+testDequeFloat32Cp = pySumF32 cppMakeF32
 testDequeFloat32Pc :: Real
-testDequeFloat32Pc = cppSumF32D pyMakeF32D
+testDequeFloat32Pc = cppSumF32 pyMakeF32
+
+testDequeFloat64Cp :: Real
+testDequeFloat64Cp = pySumF64 cppMakeF64
+testDequeFloat64Pc :: Real
+testDequeFloat64Pc = cppSumF64 pyMakeF64
