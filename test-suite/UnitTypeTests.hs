@@ -784,6 +784,87 @@ typeAliasTests =
         c :: ({x :: Int, y :: Int}, Int)
         c = undefined
         |]
+      -- Invariant 3 (R1): an @instance@ may only be declared on the root of
+      -- an alias tree. A transparent @type@ alias inherits the root's
+      -- instances; declaring an instance on the leaf would collide with the
+      -- root's.
+      , expectError
+          "instance on transparent alias is rejected (simple)"
+          [r|
+        module main (f)
+        type MyStr = Str
+        class Eq a where
+          (==) :: a -> a -> Bool
+        instance Eq MyStr where
+          (==) x y = True
+        f :: MyStr -> MyStr -> Bool
+        f x y = x == y
+        |]
+      , expectError
+          "instance on transparent alias is rejected (parameterized)"
+          [r|
+        module main (f)
+        type MyList a = List a
+        class Functor f where
+          map :: (a -> b) -> f a -> f b
+        instance Functor MyList where
+          map = undefined
+        f :: MyList Int -> MyList Int
+        f xs = map (\x -> x) xs
+        |]
+      , expectError
+          "instance on transparent alias is rejected (deep chain)"
+          [r|
+        module main (f)
+        type A = Str
+        type B = A
+        class Foo a where
+          tag :: a -> Str
+        instance Foo B where
+          tag x = x
+        f :: B -> Str
+        f x = tag x
+        |]
+      -- R1 positive: a @newtype@ legitimately owns its own instances.
+      , expectPass
+          "instance on newtype is accepted"
+          [r|
+        module main (f)
+        newtype MyStr = Str
+        class Tag a where
+          tag :: a -> Str
+        instance Tag MyStr where
+          tag x = "tagged"
+        f :: MyStr -> Str
+        f x = tag x
+        |]
+      -- R2: cousin transparent aliases unify and share the root's
+      -- instance. Both @B@ and @C@ reduce to @Str@, so the root's
+      -- @Default@ method dispatches at every call site.
+      , expectPass
+          "cousin transparent aliases share the root's instance"
+          [r|
+        module main (f)
+        type B = Str
+        type C = Str
+        class Default a where
+          def :: a
+        instance Default Str where
+          def = ""
+        f :: B -> C
+        f x = def
+        |]
+      , assertGeneralType
+          "cousin transparent aliases are interchangeable (subtype)"
+          [r|
+        module main (f)
+        type Cousin1 = Str
+        type Cousin2 = Str
+        g :: Cousin1 -> Cousin1
+        f :: Cousin2 -> Cousin1
+        f x = g x
+        |]
+          (fun [var "Str", var "Str"])
       ]
 
 -- | Tests for integer/real literal defaulting through type aliases.

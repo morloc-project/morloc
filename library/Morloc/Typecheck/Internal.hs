@@ -1292,7 +1292,25 @@ instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
       (\g' (t1, t2) -> subtype scope t1 t2 g')
       g1
       [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  solveExist v ta g2 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
+  -- Also process record-key constraints accumulated on @v@ via earlier
+  -- merges (its own ExistG entry, plus any solved alias of @v@ shaped
+  -- @ExistU v _ rs@) that are NOT in the expression's @rs2@. Without
+  -- this, merged constraints contributed to @v@ via a sibling existential
+  -- get dropped when @v@ is pinned to a concrete @NamU@.
+  let rs2Keys = Set.fromList (map fst rs2)
+      extraRecs =
+        [ r
+        | r@(k, _) <- accumulatedRecords v g2
+        , Set.notMember k rs2Keys
+        ]
+  g3 <-
+    foldM
+      (\g' (k, vt) -> case lookup k rs1 of
+                        Just tat -> subtype scope tat vt g'
+                        Nothing -> Right g')
+      g2
+      extraRecs
+  solveExist v ta g3 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
 -- ExistU vs EffectU: solve ?a = <effs> ?b, then ?b <: inner
 instantiate scope (ExistU v ([], _) _) (EffectU effs inner) g1 = do
   let (g2, veb) = tvarname g1 "eff"
@@ -1340,10 +1358,23 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
 -- This is terrible kludge, I am not close to having considered all the edge
 -- cases. I need to completely rewrite my type system. Argh. I also need to get
 -- rid of all default types. Defaults should be set explicitly in morloc code.
-instantiate _ ta@(ExistU _ _ (_ : _, _)) (ExistU v ([], _) ([], _)) g1 =
-  solveExist v ta g1 >>= maybe (return g1) return
-instantiate _ (ExistU v ([], _) ([], _)) tb@(ExistU _ _ (_ : _, _)) g1 =
-  solveExist v tb g1 >>= maybe (return g1) return
+--
+-- When the bare-expression side @v@ has accumulated record-key constraints
+-- in its ExistG entry (or via solved aliases in gammaSolved), redispatch
+-- through the records-aware ExistU/ExistU rule so @extendRec@ can merge
+-- them with the other side's records. Without this, @v@ gets pinned to the
+-- non-empty side and its own gamma-stored records are silently dropped --
+-- exactly the bug behind "No instance found for Indexable::__access_index__"
+-- when a let-bound record literal is sliced and a multi-branch group on its
+-- fields uses bracket accessors.
+instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(ExistU v ps@([], _) ([], _)) g1
+  | rs <- accumulatedRecords v g1, not (null rs) =
+      instantiate scope ta (ExistU v ps (rs, Open)) g1
+  | otherwise = solveExist v ta g1 >>= maybe (return g1) return
+instantiate scope ta@(ExistU v ps@([], _) ([], _)) tb@(ExistU _ _ (_ : _, _)) g1
+  | rs <- accumulatedRecords v g1, not (null rs) =
+      instantiate scope (ExistU v ps (rs, Open)) tb g1
+  | otherwise = solveExist v tb g1 >>= maybe (return g1) return
 
 --
 -- ----------------------------------------- InstLAllR
@@ -1356,7 +1387,22 @@ instantiate scope ta@(ExistU _ _ _) (ForallU v2 t2) g1 =
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate scope ta@(ExistU v1 (ps1, pc1) (rs1, rc1)) tb@(ExistU v2 (ps2, pc2) (rs2, rc2)) g1 = do
+instantiate scope ta0@(ExistU v1 (ps1, pc1) (rs1_expr, rc1)) tb0@(ExistU v2 (ps2, pc2) (rs2_expr, rc2)) g1 = do
+  -- Extend each side's record list with the aliased records each
+  -- existential has accumulated in gamma (its own ExistG plus any solved
+  -- alias whose solution is shaped @ExistU v _ rs@). Without this, fields
+  -- contributed to v via earlier extendRec merges live on a sibling
+  -- existential's gammaSolved entry and never participate in the current
+  -- merge -- they get dropped when the apply-ExistU "FIXME" path strips
+  -- records on dereference.
+  let mergeWithAccumulated v rsExpr =
+        let acc = accumulatedRecords v g1
+            seenK = Set.fromList (map fst rsExpr)
+         in rsExpr ++ [r | r@(k, _) <- acc, Set.notMember k seenK]
+      rs1 = mergeWithAccumulated v1 rs1_expr
+      rs2 = mergeWithAccumulated v2 rs2_expr
+      ta = ExistU v1 (ps1, pc1) (rs1, rc1)
+      tb = ExistU v2 (ps2, pc2) (rs2, rc2)
   -- check and expand open parameters
   (ps1', _) <- case (pc1, pc2, compare (length ps1) (length ps2)) of
     (_, _, EQ) -> Right (ps1, ps2)
@@ -1428,20 +1474,69 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1 =
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate scope ta (ExistU v ([], _) ([], _)) g1 =
-  case lookupU v g1 of
-    Just t  -> subtype scope ta t g1 >>= specializeExist scope v t ta
-    Nothing -> solveExist v ta g1 >>= maybe (return g1) return
+instantiate scope ta (ExistU v ([], _) ([], _)) g1 = do
+  g1' <- propagateExistGRecords scope v ta g1
+  case lookupU v g1' of
+    Just t  -> subtype scope ta t g1' >>= specializeExist scope v t ta
+    Nothing -> solveExist v ta g1' >>= maybe (return g1') return
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate scope (ExistU v ([], _) ([], _)) tb g1 =
-  case lookupU v g1 of
-    Just t  -> subtype scope t tb g1 >>= specializeExist scope v t tb
-    Nothing -> solveExist v tb g1 >>= maybe (return g1) return
+instantiate scope (ExistU v ([], _) ([], _)) tb g1 = do
+  g1' <- propagateExistGRecords scope v tb g1
+  case lookupU v g1' of
+    Just t  -> subtype scope t tb g1' >>= specializeExist scope v t tb
+    Nothing -> solveExist v tb g1' >>= maybe (return g1') return
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
+
+-- | When a bare existential @v@ (no records on the expression form) is about
+-- to be solved to a type @t@, gather every record-key constraint that has
+-- been associated with @v@ -- both from @v@'s own ExistG entry AND from
+-- every solved alias of @v@ in @gammaSolved@ (i.e. any other existential
+-- whose solution is shaped @ExistU v _ rs@). Unify each constraint against
+-- @t@'s matching field BEFORE the actual solve.
+--
+-- Without this, records that landed on a sibling existential during a
+-- prior @extendRec@-driven merge get silently dropped when @v@ is pinned
+-- to a concrete @NamU@: the apply-ExistU \"FIXME\" path strips them on
+-- dereference, and downstream class-method dispatch fails because the
+-- container existential attached to one of those dropped keys is never
+-- solved.
+--
+-- This is a no-op when @v@ has no associated records, when @v@ is already
+-- solved, or when @t@ is not a @NamU@ (function / effect / optional
+-- targets can't structurally absorb record-key constraints).
+-- | Collect every record-key constraint that has been associated with @v@:
+-- @v@'s own ExistG entry plus every solved alias of @v@ in @gammaSolved@
+-- (i.e. any existential whose solution dereferences to @ExistU v _ rs@).
+-- Deduplicates by key, preferring @v@'s own entries.
+accumulatedRecords :: TVar -> Gamma -> [(Key, TypeU)]
+accumulatedRecords v g =
+  let ownRecs = case access1 v g of
+        Just (_, ExistG _ _ (rs, _)) -> rs
+        _ -> []
+      aliasRecs =
+        [ r
+        | sol <- Map.elems (gammaSolved g)
+        , ExistU v' _ (rs, _) <- [sol]
+        , v' == v
+        , r <- rs
+        ]
+      seen0 = Set.fromList (map fst ownRecs)
+   in ownRecs ++ [r | r@(k, _) <- aliasRecs, Set.notMember k seen0]
+
+propagateExistGRecords :: Scope -> TVar -> TypeU -> Gamma -> Either MDoc Gamma
+propagateExistGRecords scope v t g = case t of
+  NamU _ _ _ taRecs ->
+    foldM
+      (\g' (k, vt) -> case lookup k taRecs of
+                        Just tat -> subtype scope tat vt g'
+                        Nothing -> Right g')
+      g
+      (accumulatedRecords v g)
+  _ -> Right g
 
 -- | After a subtype check succeeds between a solved existential's current
 -- value and a new type, check if the new type is more specialized (a

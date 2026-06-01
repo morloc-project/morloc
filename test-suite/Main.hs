@@ -66,6 +66,8 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "bracket-accessors" "bracket-accessors"
+
       , golden "native-recursive-illegal" "native-recursive-illegal"
       , golden "native-recursive-mixed" "native-recursive-mixed"
       , golden "native-recursive-record" "native-recursive-record"
@@ -180,8 +182,8 @@ main = do
       , golden "alias-constructor-equiv" "alias-constructor-equiv"
       , golden "alias-array-monoid" "alias-array-monoid"
       , golden "alias-array-deque-specialized" "alias-array-deque-specialized"
-      , golden "alias-typeclass-specificity" "alias-typeclass-specificity"
-      , golden "alias-no-cross-instance" "alias-no-cross-instance"
+      , golden "alias-cousins-share-instance" "alias-cousins-share-instance"
+      , golden "alias-instance-rejected" "alias-instance-rejected"
       , golden "newtype-dispatch-no-instance" "newtype-dispatch-no-instance"
       , golden "newtype-dispatch-packable-positive" "newtype-dispatch-packable-positive"
       , golden "packable-map-literal" "packable-map-literal"

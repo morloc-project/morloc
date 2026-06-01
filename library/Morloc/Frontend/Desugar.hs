@@ -622,18 +622,163 @@ data AccessorResult
   | ARSetter Selector [ExprI]
 
 buildAccessor :: Span -> CstAccessorBody -> D ExprI
-buildAccessor sp body = do
-  desBody <- desugarAccessorBody body
-  result <- resolveBody desBody
-  case result of
-    ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
-    ARSetter sel vals -> do
-      patI <- freshExprSpan sp (PatE (PatternStruct sel))
-      lamI <- freshIdSpan sp
-      let v = EV (".setter_" <> T.pack (show lamI))
-      vArg <- freshExprSpan sp (VarE defaultValue v)
-      appI <- freshExprSpan sp (AppE patI (vArg : vals))
-      return (ExprI lamI (LamE [v] appI))
+buildAccessor sp body
+  | bodyHasBracket body = buildAccessorBracket sp body
+  | otherwise = do
+      desBody <- desugarAccessorBody body
+      result <- resolveBody desBody
+      case result of
+        ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
+        ARSetter sel vals -> do
+          patI <- freshExprSpan sp (PatE (PatternStruct sel))
+          lamI <- freshIdSpan sp
+          let v = EV (".setter_" <> T.pack (show lamI))
+          vArg <- freshExprSpan sp (VarE defaultValue v)
+          appI <- freshExprSpan sp (AppE patI (vArg : vals))
+          return (ExprI lamI (LamE [v] appI))
+
+-- True when any sub-component of the body is a bracket accessor. When True,
+-- we use the lambda-based path below: bracket access lowers to function-call
+-- chains via Indexable/Sliceable/Functor, which is structurally incompatible
+-- with the Selector ADT used by PatternStruct.
+bodyHasBracket :: CstAccessorBody -> Bool
+bodyHasBracket (CABKey _ t) = tailHasBracket t
+bodyHasBracket (CABIdx _ t) = tailHasBracket t
+bodyHasBracket (CABGroup bs) = any bodyHasBracket bs
+bodyHasBracket (CABBracket _ _) = True
+
+tailHasBracket :: CstAccessorTail -> Bool
+tailHasBracket CATEnd = False
+tailHasBracket (CATSet _) = False
+tailHasBracket (CATChain b) = bodyHasBracket b
+
+-- Lambda-based accessor path. Produces an unapplied function (LamE) whose body
+-- chains together selector PatE applications, bracket index/slice/map calls,
+-- and group tuple constructions.
+buildAccessorBracket :: Span -> CstAccessorBody -> D ExprI
+buildAccessorBracket sp body = do
+  vId <- freshIdSpan sp
+  let v = EV (".bracket_arg_" <> T.pack (show vId))
+  vExpr <- freshExprSpan sp (VarE defaultValue v)
+  inner <- applyAccessor sp body vExpr
+  lamId <- freshIdSpan sp
+  return (ExprI lamId (LamE [v] inner))
+
+-- Apply an accessor body to a concrete subject expression. Recursively builds
+-- the AppE / TupE / map-LamE chain that the lambda path needs.
+applyAccessor :: Span -> CstAccessorBody -> ExprI -> D ExprI
+applyAccessor sp (CABKey name tail') subject = do
+  applied <- applyKeyPat sp name subject
+  applyTail sp tail' applied
+applyAccessor sp (CABIdx idx tail') subject = do
+  applied <- applyIdxPat sp idx subject
+  applyTail sp tail' applied
+applyAccessor sp (CABGroup bodies) subject = do
+  -- Each branch needs its own fresh VarE node referencing the subject
+  -- variable. Sharing one ExprI across multiple AppE positions confuses the
+  -- typechecker (every ExprI ID is a unique typed position). If the subject
+  -- is already a VarE, fresh VarE references to the same name resolve via
+  -- name lookup; otherwise we bind it to a let-variable first.
+  --
+  -- Known limitation: when a branch of the group contains a bracket
+  -- accessor (an __access_index__ call) AND a sibling branch projects a
+  -- different record field of the same subject, the typechecker's open-
+  -- record existential does not always concretise the bracketed field's
+  -- type in time for class-instance resolution. Authors hitting this
+  -- "No instance found for Indexable::__access_index__" error can work
+  -- around it by extracting the chain into a top-level helper with an
+  -- explicit signature (see test-suite/golden-tests/bracket-accessors).
+  case subject of
+    ExprI _ (VarE _ subjName) -> do
+      parts <- mapM
+        (\b -> do
+           vExpr <- freshExprSpan sp (VarE defaultValue subjName)
+           applyAccessor sp b vExpr)
+        bodies
+      freshExprSpan sp (TupE parts)
+    _ -> do
+      vId <- freshIdSpan sp
+      let v = EV (".group_subj_" <> T.pack (show vId))
+      parts <- mapM
+        (\b -> do
+           vExpr <- freshExprSpan sp (VarE defaultValue v)
+           applyAccessor sp b vExpr)
+        bodies
+      tupE <- freshExprSpan sp (TupE parts)
+      freshExprSpan sp (LetE [(v, subject)] tupE)
+applyAccessor sp (CABBracket axes tail') subject =
+  lowerBracket sp axes tail' subject
+
+applyKeyPat :: Span -> Text -> ExprI -> D ExprI
+applyKeyPat sp name subject = do
+  pat <- freshExprSpan sp (PatE (PatternStruct (SelectorKey (name, SelectorEnd) [])))
+  freshExprSpan sp (AppE pat [subject])
+
+applyIdxPat :: Span -> Int -> ExprI -> D ExprI
+applyIdxPat sp idx subject = do
+  pat <- freshExprSpan sp (PatE (PatternStruct (SelectorIdx (idx, SelectorEnd) [])))
+  freshExprSpan sp (AppE pat [subject])
+
+applyTail :: Span -> CstAccessorTail -> ExprI -> D ExprI
+applyTail _ CATEnd e = return e
+applyTail sp (CATSet _) _ =
+  dfail (startPos sp)
+    "setters are not supported on accessor chains that contain a bracket"
+applyTail sp (CATChain body) e = applyAccessor sp body e
+
+lowerBracket :: Span -> [CstBracketAxis] -> CstAccessorTail -> ExprI -> D ExprI
+lowerBracket sp axes tail' subject = case axes of
+  [] -> dfail (startPos sp) "empty bracket accessor"
+  [BAxIdx eLoc] -> do
+    iExpr <- desugarExpr eLoc >>= wrapToIndex sp
+    indexFn <- freshExprSpan sp (VarE defaultValue (EV "__access_index__"))
+    callExpr <- freshExprSpan sp (AppE indexFn [iExpr, subject])
+    applyTail sp tail' callExpr
+  [BAxSlice mStart mStop mStep] -> do
+    sliceCall <- buildSliceCall sp mStart mStop mStep subject
+    case tail' of
+      CATEnd -> return sliceCall
+      CATSet _ ->
+        dfail (startPos sp)
+          "setters are not supported on slice accessors"
+      CATChain bodyTail -> do
+        eId <- freshIdSpan sp
+        let eName = EV (".bracket_elem_" <> T.pack (show eId))
+        eExpr <- freshExprSpan sp (VarE defaultValue eName)
+        innerBody <- applyAccessor sp bodyTail eExpr
+        lamId <- freshIdSpan sp
+        let lamExpr = ExprI lamId (LamE [eName] innerBody)
+        mapFn <- freshExprSpan sp (VarE defaultValue (EV "map"))
+        freshExprSpan sp (AppE mapFn [lamExpr, sliceCall])
+  _ -> dfail (startPos sp)
+         "multi-axis bracket accessors are not supported in v1 (1D lists only)"
+
+buildSliceCall
+  :: Span
+  -> Maybe (Loc CstExpr)
+  -> Maybe (Loc CstExpr)
+  -> Maybe (Loc CstExpr)
+  -> ExprI
+  -> D ExprI
+buildSliceCall sp mStart mStop mStep subject = do
+  startE <- maybeOrNullToIndex sp mStart
+  stopE <- maybeOrNullToIndex sp mStop
+  stepE <- maybeOrNullToIndex sp mStep
+  sliceFn <- freshExprSpan sp (VarE defaultValue (EV "__get_slice__"))
+  freshExprSpan sp (AppE sliceFn [startE, stopE, stepE, subject])
+
+-- Wrap a user-supplied bound expression with __to_index__ so any IndexLike
+-- integral type dispatches through its instance cast to Int64.
+wrapToIndex :: Span -> ExprI -> D ExprI
+wrapToIndex sp e = do
+  toIndexFn <- freshExprSpan sp (VarE defaultValue (EV "__to_index__"))
+  freshExprSpan sp (AppE toIndexFn [e])
+
+-- Null is left as Null (becomes ?Int64 via the T -> ?T implicit coercion);
+-- only user-supplied expressions are routed through __to_index__.
+maybeOrNullToIndex :: Span -> Maybe (Loc CstExpr) -> D ExprI
+maybeOrNullToIndex sp Nothing = freshExprSpan sp NullE
+maybeOrNullToIndex sp (Just e) = desugarExpr e >>= wrapToIndex sp
 
 -- Intermediate accessor types (with ExprI values after desugaring)
 data IAccessorBody
@@ -650,6 +795,10 @@ desugarAccessorBody :: CstAccessorBody -> D IAccessorBody
 desugarAccessorBody (CABKey name tail') = IABKey name <$> desugarAccessorTail tail'
 desugarAccessorBody (CABIdx idx tail') = IABIdx idx <$> desugarAccessorTail tail'
 desugarAccessorBody (CABGroup bodies) = IABGroup <$> mapM desugarAccessorBody bodies
+desugarAccessorBody (CABBracket _ _) =
+  -- buildAccessor dispatches CABBracket through buildAccessorBracket before
+  -- calling this; reaching here would be a compiler-internal error.
+  dfail (Pos 0 0 "") "internal error: CABBracket in selector-only path"
 
 desugarAccessorTail :: CstAccessorTail -> D IAccessorTail
 desugarAccessorTail CATEnd = return IATEnd
@@ -778,6 +927,25 @@ desugarExpr (Loc sp (CAppE (Loc _ (CIntrinsicE name)) args)) = do
   intr <- resolveIntrinsic (startPos sp) name
   args' <- mapM desugarExpr args
   etaExpandIntrinsic sp intr args'
+-- Direct application of an accessor to a subject. Without this case, the
+-- general @CAppE@ path below desugars @.a.[0] e@ as @AppE (LamE [bracket_arg]
+-- body) [e]@ -- introducing a fresh existential @bracket_arg@ that the
+-- typechecker has to merge with @e@'s existential later. When two such
+-- accessor-applied chains share a binder in a tuple (e.g.
+-- @(.a.[0].0 e, .b.[0] e)@), the per-branch @bracket_arg@s accumulate
+-- record-key constraints separately, and the AppU<:AppU subtype rule fails
+-- to propagate @f := List@ into both branches. Inlining the application at
+-- desugar time keeps a single existential -- the user's binder -- so all
+-- record-key constraints accumulate in one place.
+desugarExpr (Loc _ (CAppE (Loc accSp (CAccessorE body)) (firstArg : rest)))
+  | bodyHasBracket body = do
+      argE <- desugarExpr firstArg
+      applied <- applyAccessor accSp body argE
+      case rest of
+        [] -> return applied
+        moreArgs -> do
+          rest' <- mapM desugarExpr moreArgs
+          freshExprFrom applied (AppE applied rest')
 -- Compound expressions
 desugarExpr (Loc _ (CAppE f args)) = do
   f' <- desugarExpr f

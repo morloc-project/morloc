@@ -16,9 +16,9 @@ mapList xs = map (\x -> x + 1) xs
 foldList :: [Int] -> Int
 foldList = fold (\acc x -> acc + x) 0
 
--- Use Indexed (at)
+-- Use Indexable (.[0])
 atList :: [Int] -> Int
-atList xs = at 0 xs
+atList xs = .[0] xs
 
 -- Use multiple typeclasses: map then fold
 mapThenFold :: [Int] -> Int

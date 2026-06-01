@@ -8,7 +8,7 @@ source Cpp from "foo.hpp" ("identity_int" as identityInt, "identity_str" as iden
 
 equalHashes :: [a] -> Bool
 equalHashes xs =
-  let headHash = @hash (at 0 xs)
+  let headHash = @hash (.[0] xs)
       isSame = map ((==) headHash) (map @hash xs)
   in fold (==) True isSame
 

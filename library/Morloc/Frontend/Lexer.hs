@@ -80,11 +80,22 @@ data LexState = LexState
   { lsInput :: !String -- remaining input
   , lsPos :: !Pos -- current position
   , lsTokens :: ![Located] -- accumulated tokens (reversed)
+  , lsBracketStack :: ![Bool] -- per-'[' flag: True = getter-bracket (slice
+                              -- context), False = list literal / type bracket
   }
+
+-- | True when the current bracket context is a slice bracket. Inside a slice
+-- bracket every ':' must lex as a single TokColon rather than coalescing into
+-- longer operator tokens like '::', '::-', or ':-'. This is required so
+-- Python-style slice syntax such as .[::-1] and .[:-1] tokenizes correctly.
+inSliceBracket :: LexState -> Bool
+inSliceBracket st = case lsBracketStack st of
+  (True : _) -> True
+  _ -> False
 
 -- | Lex into raw tokens (no layout processing)
 lexRaw :: String -> String -> Pos -> Either LexError [Located]
-lexRaw _filename input pos0 = go (LexState input pos0 [])
+lexRaw _filename input pos0 = go (LexState input pos0 [] [])
   where
     go :: LexState -> Either LexError [Located]
     go st = case lsInput st of
@@ -95,7 +106,7 @@ lexRaw _filename input pos0 = go (LexState input pos0 [])
 
 -- | Lex a single token, advancing the state
 lexOne :: LexState -> Either LexError LexState
-lexOne st@(LexState input pos toks) = case input of
+lexOne st@(LexState input pos toks _) = case input of
   -- Whitespace
   '\n' : rest -> Right st {lsInput = rest, lsPos = nextLine pos}
   c : rest
@@ -167,13 +178,67 @@ lexOne st@(LexState input pos toks) = case input of
   '0' : 'b' : rest -> lexBinaryNumber pos rest st
   '0' : 'B' : rest -> lexBinaryNumber pos rest st
   c : _ | isDigit c -> lexDecNumber pos input st
-  -- Delimiters and punctuation
-  '(' : rest -> emit1 TokLParen "(" rest
-  ')' : rest -> emit1 TokRParen ")" rest
-  '[' : rest -> emit1 TokLBracket "[" rest
-  ']' : rest -> emit1 TokRBracket "]" rest
-  '{' : rest -> emit1 TokLBrace "{" rest
-  '}' : rest -> emit1 TokRBrace "}" rest
+  -- Delimiters and punctuation. lsBracketStack tracks every open delimiter
+  -- so the lexer knows when it is in slice-axis position. Inside a slice
+  -- bracket the slice-colon rule splits every ':' into a single TokColon; the
+  -- moment any nested delimiter ('(', '{', or a non-slice '[') opens, the
+  -- shielding pushes False, restoring the regular operator lexer so '::',
+  -- ':-', user-defined colon operators, etc., tokenize normally inside the
+  -- nested expression. The original context resumes on the matching close.
+  '(' : rest ->
+    Right
+      st
+        { lsInput = rest
+        , lsPos = advanceCol pos 1
+        , lsTokens = Located pos TokLParen "(" : toks
+        , lsBracketStack = False : lsBracketStack st
+        }
+  ')' : rest ->
+    Right
+      st
+        { lsInput = rest
+        , lsPos = advanceCol pos 1
+        , lsTokens = Located pos TokRParen ")" : toks
+        , lsBracketStack = drop 1 (lsBracketStack st)
+        }
+  '[' : rest ->
+    -- A '[' immediately following a getter-dot opens a slice bracket. Any
+    -- other '[' is a list literal or type bracket and shields like '('.
+    let isSlice = case prevSignificantToken toks of
+          Just (TokGetterDot, _) -> True
+          Just (TokGetterDotChain, _) -> True
+          _ -> False
+     in Right
+          st
+            { lsInput = rest
+            , lsPos = advanceCol pos 1
+            , lsTokens = Located pos TokLBracket "[" : toks
+            , lsBracketStack = isSlice : lsBracketStack st
+            }
+  ']' : rest ->
+    Right
+      st
+        { lsInput = rest
+        , lsPos = advanceCol pos 1
+        , lsTokens = Located pos TokRBracket "]" : toks
+        , lsBracketStack = drop 1 (lsBracketStack st)
+        }
+  '{' : rest ->
+    Right
+      st
+        { lsInput = rest
+        , lsPos = advanceCol pos 1
+        , lsTokens = Located pos TokLBrace "{" : toks
+        , lsBracketStack = False : lsBracketStack st
+        }
+  '}' : rest ->
+    Right
+      st
+        { lsInput = rest
+        , lsPos = advanceCol pos 1
+        , lsTokens = Located pos TokRBrace "}" : toks
+        , lsBracketStack = drop 1 (lsBracketStack st)
+        }
   ',' : rest -> emit1 TokComma "," rest
   ';' : rest -> emit1 TokSemicolon ";" rest
   -- Underscore: standalone '_' is a hole, '_var' is an identifier
@@ -206,7 +271,7 @@ lexOne st@(LexState input pos toks) = case input of
                       : toks
                 }
   '.' : c : rest
-    | isLower c || c == '(' ->
+    | isLower c || c == '(' || c == '[' ->
         emit1 TokGetterDot "." (c : rest)
   '.' : c : rest
     | not (isOperatorChar c) ->
@@ -295,6 +360,22 @@ lexOne st@(LexState input pos toks) = case input of
           , lsPos = advanceCol pos 4
           , lsTokens = Located pos TokNaN "-NaN" : toks
           }
+  -- Slice-axis position (top of lsBracketStack is True): force every ':' to
+  -- lex as a single TokColon. This prevents the operator lexer from
+  -- coalescing '::', '::-', ':-', ':>', etc. into multi-char operator tokens,
+  -- so Python-style slice syntax like .[::-1], .[:-1], .[::2], .[i::k]
+  -- tokenizes as intended. Nested '(', '{', or non-slice '[' shield their
+  -- contents from this rule -- so an annotation '(k :: Int)', a labeled term
+  -- '(lbl:k)', or any user-defined colon operator can still appear inside a
+  -- slice bracket as long as it is wrapped in parens or another shielding
+  -- delimiter.
+  ':' : rest | inSliceBracket st ->
+    Right
+      st
+        { lsInput = rest
+        , lsPos = advanceCol pos 1
+        , lsTokens = Located pos TokColon ":" : toks
+        }
   -- Operators and reserved operator sequences
   c : rest | isOperatorChar c -> lexOperator pos (c : rest) st
   -- Identifiers and keywords
