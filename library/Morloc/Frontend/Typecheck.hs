@@ -389,17 +389,15 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
           | singleGroup -> connectInstance singleGroup g1 es
           | otherwise   -> connectInstance singleGroup g0 es
 
--- | Filter typeclass instances to only those reachable from gt by walking
--- the alias chain. This prevents sibling aliases from inheriting each
--- other's instances: walking A' -> Str never reaches A (a sibling),
--- but walking B -> A does reach A (a parent).
---
--- This walks gt's chain only. Walking the instance's chain too (so that
--- e.g. an instance with head `Vector (d1*d2) a` matches a call site with
--- head `List a`) was tried and reverted: it broke nominal-distinct
--- aliases like Deque a / Array a / Vector n a -- all alias to List a,
--- but each has its own typeclass instances that should NOT be applied
--- to List call sites. Bidirectional walking conflates them.
+-- | Filter typeclass instances to only those reachable from @gt@ by
+-- walking its alias chain to a matching root-headed candidate.
+-- Invariant 3 (frontend) guarantees every instance head is a newtype,
+-- a primitive, or a bare type variable -- never a transparent alias.
+-- So all cousins on a tree converge at the same root; walking @gt@'s
+-- chain alone is enough to find the shared instance. Walking the
+-- instance's chain too would erase the nominal boundary between
+-- sibling newtypes (Deque a / Array a / Vector n a) that all share
+-- @List a@ as their wire-parent body but each own their own instances.
 filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
 filterByAliasChain scope gt0 candidates = go gt0
   where

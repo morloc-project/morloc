@@ -723,6 +723,12 @@ collectUniversalTypes dag = do
   -- Invariant 2: a `newtype` wire-parent chain must not contain a cycle.
   checkNewtypeCycles universalGeneralScope
 
+  -- Invariant 3: a typeclass instance may only be declared on the root of
+  -- an alias tree. Transparent `type` aliases share all instances with
+  -- their root, so an instance on an alias would be ambiguous with the
+  -- root's instance.
+  checkInstanceOnRoot dag universalGeneralScope
+
   s <- MM.get
   MM.put
     ( s
@@ -859,6 +865,72 @@ checkNewtypeCycles gscope =
               in case mapMaybe (\c -> dfs path' [c]) children of
                    (cyc : _) -> Just (v : cyc)
                    [] -> Nothing
+
+-- | Enforce Invariant 3: an @instance@ declaration's head type must not be
+-- a transparent @type@ alias. Transparent aliases are fully interchangeable
+-- with their root, so an instance on a leaf would collide with the root's
+-- instance. @newtype@ and primitive heads (and bare type variables) are
+-- accepted.
+checkInstanceOnRoot :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkInstanceOnRoot dag gscope =
+  case findOffense of
+    Nothing -> return ()
+    Just (i, v) ->
+      MM.throwSourcedError i $
+        "Cannot declare instance on transparent alias"
+          <+> squotes (pretty (unTVar v)) <> "."
+          <> line
+          <> "All members of an alias tree share a single instance."
+          <+> "Either declare the instance for the root type, or change"
+          <+> "the declaration of" <+> squotes (pretty (unTVar v))
+          <+> "from 'type' to 'newtype' so it becomes a nominally distinct"
+          <+> "type that owns its own instances."
+  where
+    findOffense :: Maybe (Int, TVar)
+    findOffense = case
+        [ (i, v)
+        | (_, (e, _)) <- Map.toList dag
+        , (i, ts) <- findInstanceTypes e
+        , Just v <- map extractHead ts
+        , isTransparentAlias v
+        ] of
+      ((i, v) : _) -> Just (i, v)
+      []           -> Nothing
+
+    isTransparentAlias :: TVar -> Bool
+    isTransparentAlias v = case Map.lookup v gscope of
+      Nothing -> False
+      Just entries -> any isAliasKind entries
+      where
+        isAliasKind (_, _, _, _, TypedefAlias) = True
+        isAliasKind _ = False
+
+    -- Walk an expression tree to collect (instance-index, type-args) for
+    -- every @IstE@ node. The index lets us locate the source caret on the
+    -- offending @instance@ line.
+    findInstanceTypes :: ExprI -> [(Int, [TypeU])]
+    findInstanceTypes = go
+      where
+        go (ExprI i (IstE _ ts _)) = [(i, ts)]
+        go (ExprI _ (ModE _ es)) = concatMap go es
+        go _ = []
+
+    -- Pull the outermost named-type head out of an instance type, skipping
+    -- @forall@-bound variables. Returns @Nothing@ when the head is a bound
+    -- variable, an existential, or some other shape that cannot resolve to
+    -- a typedef-table entry.
+    extractHead :: TypeU -> Maybe TVar
+    extractHead = headOf Set.empty
+      where
+        headOf bnd (ForallU v t)     = headOf (Set.insert v bnd) t
+        headOf bnd (VarU v)
+          | Set.member v bnd         = Nothing
+          | otherwise                = Just v
+        headOf bnd (AppU (VarU v) _)
+          | Set.member v bnd         = Nothing
+          | otherwise                = Just v
+        headOf bnd (AppU h _)        = headOf bnd h
+        headOf _   _                 = Nothing
 
 {- | links the general entries from records to their abbreviated concrete cousins.
 For example:
