@@ -45,6 +45,30 @@ all:
 	./nexus sliceThenGroup >> obs.txt 2>> obs.err
 	echo "--- deepChain ---" >> obs.txt
 	./nexus deepChain >> obs.txt 2>> obs.err
+	echo "--- indexFromForeignLength ---" >> obs.txt
+	./nexus indexFromForeignLength >> obs.txt 2>> obs.err
+	echo "--- sliceFromOptionalStart ---" >> obs.txt
+	./nexus sliceFromOptionalStart >> obs.txt 2>> obs.err
+	echo "--- indexInt8 ---" >> obs.txt
+	./nexus indexInt8 >> obs.txt 2>> obs.err
+	echo "--- indexInt16 ---" >> obs.txt
+	./nexus indexInt16 >> obs.txt 2>> obs.err
+	echo "--- indexUInt32 ---" >> obs.txt
+	./nexus indexUInt32 >> obs.txt 2>> obs.err
+	echo "--- sliceInt8Bound ---" >> obs.txt
+	./nexus sliceInt8Bound >> obs.txt 2>> obs.err
+	echo "--- sliceMixedWidthBounds ---" >> obs.txt
+	./nexus sliceMixedWidthBounds >> obs.txt 2>> obs.err
+	echo "--- crossPoolReceiverPyToCpp ---" >> obs.txt
+	./nexus crossPoolReceiverPyToCpp >> obs.txt 2>> obs.err
+	echo "--- crossPoolReceiverCppToR ---" >> obs.txt
+	./nexus crossPoolReceiverCppToR >> obs.txt 2>> obs.err
+	echo "--- crossPoolReceiverRToPy ---" >> obs.txt
+	./nexus crossPoolReceiverRToPy >> obs.txt 2>> obs.err
+	echo "--- crossPoolIdxForeign ---" >> obs.txt
+	./nexus crossPoolIdxForeign >> obs.txt 2>> obs.err
+	echo "--- crossPoolSliceNested ---" >> obs.txt
+	./nexus crossPoolSliceNested >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *err __pycache__

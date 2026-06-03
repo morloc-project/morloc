@@ -67,6 +67,7 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "bracket-accessors" "bracket-accessors"
+      , golden "bracket-accessors-pure" "bracket-accessors-pure"
 
       , golden "native-recursive-illegal" "native-recursive-illegal"
       , golden "native-recursive-mixed" "native-recursive-mixed"

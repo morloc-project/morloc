@@ -701,15 +701,19 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                     for (int i = 0; i < ndim; i++) {
                         total_elements *= dims[i];
                     }
-                    if (PyArray_TYPE(arr) == NPY_OBJECT) {
-                        // Boxed array: each slot is a PyObject* and the wire
-                        // form needs the recursive-serialized size of every
-                        // contained object, not the pointer width.
+                    // Per-element sizing required when (a) dtype=object
+                    // (slots are PyObject*) or (b) the morloc element
+                    // schema is variable-width -- numpy's flat inline
+                    // storage does not match morloc's wire layout (e.g.
+                    // numpy int64 is 8 bytes per slot but morloc Int is
+                    // a 16-byte BigInt header plus optional limb tail).
+                    if (PyArray_TYPE(arr) == NPY_OBJECT
+                        || !schema_is_fixed_width(schema->parameters[0])) {
                         Schema* element_schema = schema->parameters[0];
                         for (size_t i = 0; i < total_elements; i++) {
                             PyObject* item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
                             if (!item) {
-                                PyRAISE("Failed to read element from numpy object array");
+                                PyRAISE("Failed to read element from numpy array");
                             }
                             ssize_t element_size = get_shm_size(element_schema, item);
                             Py_DECREF(item);
@@ -719,7 +723,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                             required_size += element_size;
                         }
                     } else {
-                        required_size += total_elements * PyArray_ITEMSIZE(arr);
+                        required_size += total_elements * schema->parameters[0]->width;
                     }
                 } else if (PyBytes_Check(obj)) {
                     required_size += (ssize_t)PyBytes_GET_SIZE(obj);
@@ -964,12 +968,15 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 // strings type are immutable, so const
                 const char* immutable_data = NULL; 
 
-                // Distinguish a numpy array of fixed-width primitives (use
-                // memcpy fast-path off PyArray_DATA) from a numpy array of
-                // dtype=object (recurse per element via PyArray_GETITEM,
-                // since PyArray_DATA would expose PyObject* pointer bytes,
-                // not the serialized element payload).
-                bool numpy_is_object = false;
+                // Distinguish a numpy array we can memcpy bulk off
+                // PyArray_DATA from one we must walk per-element via
+                // PyArray_GETITEM. We must walk per-element when (a)
+                // dtype=object (PyArray_DATA exposes PyObject* pointer
+                // bytes, not payloads) or (b) the morloc element
+                // schema is variable-width (its wire layout has a
+                // header / sub-data that numpy's flat dtype storage
+                // does not provide).
+                bool numpy_per_element = false;
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
                 } else if (PyBytes_Check(obj)) {
@@ -983,10 +990,19 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
 
-                    if (PyArray_TYPE(arr) == NPY_OBJECT) {
-                        // Boxed numpy array: leave immutable_data NULL and
-                        // dispatch to the per-element path below.
-                        numpy_is_object = true;
+                    // Force per-element path when the morloc element
+                    // schema is variable-width. The memcpy fast-path
+                    // assumes numpy's flat element storage matches the
+                    // wire layout; for Int (16-byte BigInt vs 8-byte
+                    // int64) and other variable-width schemas it does
+                    // not, and memcpy would read past numpy's buffer
+                    // and write corrupt headers into SHM.
+                    if (PyArray_TYPE(arr) == NPY_OBJECT
+                        || !schema_is_fixed_width(schema->parameters[0])) {
+                        // Boxed numpy array OR variable-width element
+                        // schema: leave immutable_data NULL and dispatch
+                        // to the per-element path below.
+                        numpy_per_element = true;
                     } else {
                         // Fixed-width primitive numpy array.
                         immutable_data = PyArray_DATA(arr);
@@ -1018,11 +1034,14 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
 
                 result->data = PyTRY(abs2rel, *cursor);
 
-                if (PyList_Check(obj) || numpy_is_object) {
-                    // Per-element recursion: works for Python lists and for
-                    // dtype=object numpy arrays. Element access differs
-                    // (PyList_GetItem vs PyArray_GETITEM), but the wire-layout
-                    // and recursion shape are identical.
+                if (PyList_Check(obj) || numpy_per_element) {
+                    // Per-element recursion: works for Python lists and
+                    // numpy arrays that need per-element walking
+                    // (dtype=object, or any variable-width element
+                    // schema where numpy's flat storage cannot stand in
+                    // for the wire layout). Element access differs
+                    // (PyList_GetItem vs PyArray_GETITEM), but the
+                    // wire-layout and recursion shape are identical.
                     size_t width = schema->parameters[0]->width;
 
                     // Move the cursor to the location immediately after the
@@ -1031,12 +1050,11 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
 
                     char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
-                    PyArrayObject* arr = numpy_is_object ? (PyArrayObject*)obj : NULL;
+                    PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item;
-                        if (numpy_is_object) {
-                            // PyArray_GETITEM returns a NEW reference for
-                            // dtype=object arrays.
+                        if (numpy_per_element) {
+                            // PyArray_GETITEM returns a NEW reference.
                             item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
                             if (!item) {
                                 goto error;
@@ -1046,7 +1064,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                             item = PyList_GetItem(obj, i);
                         }
                         int rc = to_voidstar_r(start + width * i, cursor, element_schema, item);
-                        if (numpy_is_object) {
+                        if (numpy_per_element) {
                             Py_DECREF(item);
                         }
                         if (rc != 0) {

@@ -21,6 +21,18 @@ module main (
   , sliceThenNestedSlice
   , sliceThenGroup
   , deepChain
+  , indexFromForeignLength
+  , sliceFromOptionalStart
+  , indexInt8
+  , indexInt16
+  , indexUInt32
+  , sliceInt8Bound
+  , sliceMixedWidthBounds
+  , crossPoolReceiverPyToCpp
+  , crossPoolReceiverCppToR
+  , crossPoolReceiverRToPy
+  , crossPoolIdxForeign
+  , crossPoolSliceNested
   )
 
 import root-py
@@ -245,3 +257,83 @@ deepChainRows =
 
 deepChain :: [(Int, Int)]
 deepChain = .[0:2].(.a.[0].0, .b.[0].y) deepChainRows
+
+-- ─── Foreign-call result as a bracket bound ─────────────────────────────────
+-- `length` is sourced per language via the Foldable instance. Its
+-- return type is `Int`. Using it as a bound exercises the IndexLike
+-- Int instance lookup at codegen *with the bound value produced by a
+-- foreign function call* rather than by a literal. The whole
+-- expression is pool-bound (Eq, length, and bracket-slice all resolve
+-- to the same language).
+indexFromForeignLength :: Int
+indexFromForeignLength = .[length [10, 20, 30] - 1] [100, 200, 300, 400, 500]
+
+-- ─── Optional-typed bound (?Int32) ─────────────────────────────────────────
+-- `optStart` is a top-level value of type `?Int32`. With
+-- `__to_index__ :: i -> ?Int64` and the new `IndexLike (?Int32)`
+-- instance, this exercises the lookup-and-wrap path for a non-Null,
+-- non-literal Optional bound. A blank slot from the desugar would
+-- produce the same shape; this case verifies the user-level optional
+-- expression composes identically.
+optStart :: ?Int32
+optStart = (Null :: ?Int32)
+
+sliceFromOptionalStart :: [Int]
+sliceFromOptionalStart = .[optStart:3] [10, 20, 30, 40, 50]
+
+-- ─── Various integer-width bounds ─────────────────────────────────────────
+-- Each annotation pins the bound to a specific IndexLike instance.
+-- Mixing widths in one slice (Int8 start, Int16 stop) ensures the
+-- per-bound lookup is per-position, not per-call.
+indexInt8 :: Int
+indexInt8 = .[(0 :: Int8)] [10, 20, 30]
+
+indexInt16 :: Int
+indexInt16 = .[(1 :: Int16)] [10, 20, 30]
+
+indexUInt32 :: Int
+indexUInt32 = .[(2 :: UInt32)] [10, 20, 30]
+
+sliceInt8Bound :: [Int]
+sliceInt8Bound = .[(1 :: Int8):3] [10, 20, 30, 40, 50]
+
+sliceMixedWidthBounds :: [Int]
+sliceMixedWidthBounds = .[(1 :: Int8):(4 :: Int16)] [10, 20, 30, 40, 50]
+
+-- ─── Cross-pool stress: bracket with args/result in different languages ───
+-- The bracket is necessarily local to ONE pool after Realize picks the
+-- cheapest assignment, but the args and the surrounding expression
+-- straddle pool boundaries. These tests exercise the path where
+-- Realize's choice puts the bracket in a different pool from the
+-- caller, exposing any not-isLocal handling gap in
+-- Express.hs::expressPolyExpr's bracket dispatch.
+
+-- Receiver assembled in Python, bracket executed in C++ context.
+crossPoolReceiverPyToCpp :: Int
+crossPoolReceiverPyToCpp = idcpp (.[2] (idpy [100, 200, 300, 400, 500]))
+
+-- Receiver assembled in C++, bracket executed in R context.
+crossPoolReceiverCppToR :: Int
+crossPoolReceiverCppToR = idr (.[1] (idcpp [10, 20, 30]))
+
+-- Receiver assembled in R, bracket executed in Python context.
+crossPoolReceiverRToPy :: Int
+crossPoolReceiverRToPy = idpy (.[-1] (idr [7, 8, 9]))
+
+-- Index expression from one pool, receiver from another, bracket from a third.
+crossPoolIdxForeign :: Int
+crossPoolIdxForeign = idr (.[idpy 1] (idcpp [10, 20, 30, 40, 50]))
+
+-- Nested cross-pool: outer slice in R, inner slice (via map) of records
+-- with the original pool being C++. Uses the named @Pt@ record so the
+-- C++ pool has a concrete struct (@pt_t@) to materialize.
+crossPoolSlicePts :: [Pt]
+crossPoolSlicePts = ptIdCpp
+  [ {x = 10, y = 100}
+  , {x = 20, y = 200}
+  , {x = 30, y = 300}
+  , {x = 40, y = 400}
+  ]
+
+crossPoolSliceNested :: [Int]
+crossPoolSliceNested = idr (.[0:3].x crossPoolSlicePts)

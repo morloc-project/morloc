@@ -5978,6 +5978,37 @@ literalDispatchTests =
         x = [1, 2, 3]
           |]
           (var "Outer")
+
+      , -- Bracket-index pattern on a Nat-parameterized container returns
+        -- the element type (Vec n a -> a). The test inlines a stub
+        -- __to_index__ since the desugarer wraps user-supplied bounds.
+        assertGeneralType
+          "bracket index on Vec n a returns a"
+          [r|
+        module main (f)
+        class IndexLike i where
+          __to_index__ :: i -> Int64
+        instance IndexLike Int where
+          source Py ("identity" as __to_index__)
+        newtype Vec (n :: Nat) a = List a
+        f :: Vec 5 Int -> Int
+        f x = .[0] x
+          |]
+          (FunU [arr "Vec" [NatLitU 5, var "Int"]] (var "Int"))
+
+      , -- Bracket slice on a List preserves the shape.
+        assertGeneralType
+          "bracket slice on List a returns List a"
+          [r|
+        module main (f)
+        class IndexLike i where
+          __to_index__ :: i -> Int64
+        instance IndexLike Int where
+          source Py ("identity" as __to_index__)
+        f :: [Int] -> [Int]
+        f x = .[1:5] x
+          |]
+          (FunU [arr "List" [var "Int"]] (arr "List" [var "Int"]))
       ]
 
 -- Recursive record types. Self-recursive references through @[_]@ or @?_@

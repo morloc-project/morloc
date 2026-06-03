@@ -952,6 +952,26 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
       genericRecordAccessor desc o cname d (pretty k)
     accessRecord t _ _ = error $ "Invalid record type: " <> show t
 genericEvalPattern _ _ (PatternStruct _) [] = error "Unreachable empty pattern"
+-- Bracket index: receiver[index]. Emits native indexing syntax per
+-- language. Args are [index, receiver].
+genericEvalPattern desc _ PatternBracketIndex [i, m] =
+  case ldIndexStyle desc of
+    ZeroBracket -> m <> "[" <> i <> "]"
+    OneBracket -> m <> "[(" <> i <> ") + 1]"
+    OneDoubleBracket -> m <> "[[(" <> i <> ") + 1]]"
+genericEvalPattern _ _ PatternBracketIndex args =
+  error $ "PatternBracketIndex expects 2 args (index, receiver), got " <> show (length args)
+-- Bracket slice: receiver[start:stop:step]. For now uses native Python-style
+-- slicing where the language supports it. Args are [start, stop, step, receiver].
+-- start/stop/step may be Null (rendered as a language-specific null).
+genericEvalPattern desc _ PatternBracketSlice [start, stop, step, m] =
+  case ldIndexStyle desc of
+    ZeroBracket -> m <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
+    -- Non-zero-based languages (R) don't have native Python-style step
+    -- slicing. Emit a fallback that will need a runtime helper.
+    _ -> "morloc_slice" <> tupled [start, stop, step, m]
+genericEvalPattern _ _ PatternBracketSlice args =
+  error $ "PatternBracketSlice expects 4 args (start, stop, step, receiver), got " <> show (length args)
 
 writeSelector :: LangDescriptor -> Either Int Text -> MDoc
 writeSelector desc (Right k) = case ldKeyAccess desc of

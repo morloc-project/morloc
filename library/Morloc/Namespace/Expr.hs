@@ -183,6 +183,22 @@ ungroup (SelectorIdx x xs) = concat [map ((:) (Left i)) (ungroup s) | (i, s) <- 
 data Pattern
   = PatternText Text [Text]
   | PatternStruct Selector
+  -- ^ Field / index accessor (record .field, tuple .0).
+  | PatternBracketIndex
+  -- ^ Python-style bracket index (xs[i]). Carries no payload; the index
+  -- expression and receiver are passed via the outer AppS as
+  -- [index, receiver]. The typechecker synthesizes the result type as
+  -- the receiver's element type. The codegen translator emits the
+  -- appropriate native indexing operation based on the receiver type.
+  | PatternBracketSlice
+  -- ^ Python-style bracket slice (xs[i:j:k]). Carries no payload; the
+  -- three bound expressions (start, stop, step; each Null or an Int64
+  -- after toIndex wrapping) and the receiver are passed via the outer
+  -- AppS as [start, stop, step, receiver]. The typechecker synthesizes
+  -- the result type structurally: a Nat-parameterized container has
+  -- its outer Nat replaced by NatUnknown; otherwise the receiver type
+  -- is preserved. The codegen translator emits the appropriate native
+  -- slicing operation.
   deriving (Show, Ord, Eq)
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
@@ -200,6 +216,13 @@ data Intrinsic
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
   | IntrRead      -- ^ @read   :: Str -> ?a          -- deserialize from JSON string
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
+  | IntrMap       -- ^ implicit @(a -> b) -> List a -> List b@ map; emitted by
+                  -- the desugar's bracket-accessor lowering when a slice is
+                  -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
+                  -- a user-facing @\@map@ -- there is no entry in 'parseIntrinsic'.
+                  -- The pure-runtime evaluator executes this as a direct
+                  -- per-element loop over MORLOC_ARRAY; the pool path resolves
+                  -- it to the language's @Functor.map@ instance.
   deriving (Show, Ord, Eq)
 
 -- | Map intrinsic to its canonical name
@@ -217,6 +240,7 @@ intrinsicName IntrTypeof = "typeof"
 intrinsicName IntrShow = "show"
 intrinsicName IntrRead = "read"
 intrinsicName IntrDatafile = "datafile"
+intrinsicName IntrMap = "map"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -250,6 +274,7 @@ intrinsicArity IntrTypeof = 1
 intrinsicArity IntrShow = 1
 intrinsicArity IntrRead = 1
 intrinsicArity IntrDatafile = 1
+intrinsicArity IntrMap = 2
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
@@ -358,6 +383,14 @@ data E
   | LitP (Indexed Type) Lit
   | SrcP (Indexed Type) Source
   | PatP (Indexed Type) Selector
+  -- | Bracket-index pattern at the value-check level. Applied via AppP
+  -- to (index, receiver). The codegen translator emits the appropriate
+  -- native indexing operation per receiver type.
+  | BracketIndexP (Indexed Type)
+  -- | Bracket-slice pattern at the value-check level. Applied via AppP
+  -- to (start, stop, step, receiver). The codegen translator emits the
+  -- appropriate native slicing operation per receiver type.
+  | BracketSliceP (Indexed Type)
   | IfP (Indexed Type) E E E
   | DoBlockP (Indexed Type) E
   | EvalP (Indexed Type) E
@@ -639,6 +672,8 @@ instance Pretty ExprI where
 instance Pretty Pattern where
   pretty (PatternText s ss) = dquotes $ hcat (pretty s : ["#{}" <> pretty s' | s' <- ss])
   pretty (PatternStruct s) = pretty s
+  pretty PatternBracketIndex = ".[i]"
+  pretty PatternBracketSlice = ".[i:j:k]"
 
 instance Pretty Selector where
   pretty SelectorEnd = ""

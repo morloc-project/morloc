@@ -730,9 +730,15 @@ lowerBracket :: Span -> [CstBracketAxis] -> CstAccessorTail -> ExprI -> D ExprI
 lowerBracket sp axes tail' subject = case axes of
   [] -> dfail (startPos sp) "empty bracket accessor"
   [BAxIdx eLoc] -> do
-    iExpr <- desugarExpr eLoc >>= wrapToIndex sp
-    indexFn <- freshExprSpan sp (VarE defaultValue (EV "__access_index__"))
-    callExpr <- freshExprSpan sp (AppE indexFn [iExpr, subject])
+    iExpr <- desugarExpr eLoc
+    -- Emit a PatternBracketIndex pattern applied to (index, receiver).
+    -- The index expression stays at its natural type; codegen inserts
+    -- any language-specific cast (e.g. __to_index__) when emitting the
+    -- pool call. Keeping the desugar output free of sourced functions
+    -- preserves "pure" status for bracket expressions that would
+    -- otherwise be evaluable on the nexus.
+    indexPat <- freshExprSpan sp (PatE PatternBracketIndex)
+    callExpr <- freshExprSpan sp (AppE indexPat [iExpr, subject])
     applyTail sp tail' callExpr
   [BAxSlice mStart mStop mStep] -> do
     sliceCall <- buildSliceCall sp mStart mStop mStep subject
@@ -748,8 +754,16 @@ lowerBracket sp axes tail' subject = case axes of
         innerBody <- applyAccessor sp bodyTail eExpr
         lamId <- freshIdSpan sp
         let lamExpr = ExprI lamId (LamE [eName] innerBody)
-        mapFn <- freshExprSpan sp (VarE defaultValue (EV "map"))
-        freshExprSpan sp (AppE mapFn [lamExpr, sliceCall])
+        -- Emit the implicit map as the IntrMap intrinsic rather than
+        -- a name reference to `map`. Going through `VarE "map"` would
+        -- require the user's module to import a binding for `map`
+        -- (typically Functor's class method via root) -- a silent
+        -- dependency the user has no reason to expect from a bracket
+        -- accessor. The intrinsic node is self-contained: the
+        -- pure-runtime path lowers it to the Map evaluator branch
+        -- directly, and the pool path resolves @Functor.map@ for the
+        -- target language at codegen.
+        freshExprSpan sp (IntrinsicE IntrMap [lamExpr, sliceCall])
   _ -> dfail (startPos sp)
          "multi-axis bracket accessors are not supported in v1 (1D lists only)"
 
@@ -761,24 +775,29 @@ buildSliceCall
   -> ExprI
   -> D ExprI
 buildSliceCall sp mStart mStop mStep subject = do
-  startE <- maybeOrNullToIndex sp mStart
-  stopE <- maybeOrNullToIndex sp mStop
-  stepE <- maybeOrNullToIndex sp mStep
-  sliceFn <- freshExprSpan sp (VarE defaultValue (EV "__get_slice__"))
-  freshExprSpan sp (AppE sliceFn [startE, stopE, stepE, subject])
+  startE <- desugarSliceBound sp mStart
+  stopE  <- desugarSliceBound sp mStop
+  stepE  <- desugarSliceBound sp mStep
+  -- Emit a PatternBracketSlice pattern applied to (start, stop, step,
+  -- receiver). The typechecker synthesizes the result type structurally:
+  -- a Nat-parameterized container has its outer Nat replaced by
+  -- NatVoidU (the wildcard sentinel); otherwise the receiver type is
+  -- preserved. The codegen translator emits the appropriate native
+  -- slicing operation.
+  slicePat <- freshExprSpan sp (PatE PatternBracketSlice)
+  freshExprSpan sp (AppE slicePat [startE, stopE, stepE, subject])
 
--- Wrap a user-supplied bound expression with __to_index__ so any IndexLike
--- integral type dispatches through its instance cast to Int64.
-wrapToIndex :: Span -> ExprI -> D ExprI
-wrapToIndex sp e = do
-  toIndexFn <- freshExprSpan sp (VarE defaultValue (EV "__to_index__"))
-  freshExprSpan sp (AppE toIndexFn [e])
-
--- Null is left as Null (becomes ?Int64 via the T -> ?T implicit coercion);
--- only user-supplied expressions are routed through __to_index__.
-maybeOrNullToIndex :: Span -> Maybe (Loc CstExpr) -> D ExprI
-maybeOrNullToIndex sp Nothing = freshExprSpan sp NullE
-maybeOrNullToIndex sp (Just e) = desugarExpr e >>= wrapToIndex sp
+-- | Lower a single slice bound. Missing positions become
+-- @(Null :: ?Int64)@: annotating the synthetic Null pins every empty
+-- slot to a uniform wire schema so the runtime and pool codegen don't
+-- need to invent a default. User-supplied bounds stay at their natural
+-- type; codegen inserts any language-specific cast (e.g.
+-- @__to_index__@) at emit time.
+desugarSliceBound :: Span -> Maybe (Loc CstExpr) -> D ExprI
+desugarSliceBound sp Nothing = do
+  nullExpr <- freshExprSpan sp NullE
+  freshExprSpan sp (AnnE nullExpr (OptionalU BT.i64U))
+desugarSliceBound _ (Just e) = desugarExpr e
 
 -- Intermediate accessor types (with ExprI values after desugaring)
 data IAccessorBody

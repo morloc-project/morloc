@@ -489,6 +489,47 @@ compatibleTypeU = go Set.empty Set.empty
     isNatExprT NatVoidU = True
     isNatExprT _ = False
 
+-- | Result type of bracket indexing on a container. For a container of
+-- shape @AppU h args@, the element type is the LAST non-Nat-kinded arg
+-- (Vector has [Nat, a]; List has [a]; both yield @a@). When the shape
+-- isn't yet known (receiver is an existential or other non-AppU form),
+-- introduce a fresh existential so downstream unification can pin it
+-- down.
+bracketElementType :: Gamma -> TypeU -> (Gamma, TypeU)
+bracketElementType g (AppU _ args) = case filter (not . isKindTypeU') args of
+  []  -> newvar "bidx_elem_" g
+  ts  -> (g, last ts)
+bracketElementType g _ = newvar "bidx_elem_" g
+
+-- | Result type of bracket slicing on a container. For @AppU h args@,
+-- if the first arg is Nat-kinded (Vector-style: @Vector n a@), replace
+-- it with 'NatVoidU' (the erased-phantom-Nat wildcard) so the output
+-- length is independent of the input length AND two slice results
+-- compare equal at the Nat slot. A fresh existential here would never
+-- get solved -- there is no constraint that pins it -- and would
+-- propagate to downstream stages as @forall bslice_dim_N . _@, breaking
+-- instance dispatch and Eq comparisons between independent slices.
+-- 'NatVoidU' is the right granularity: "this Nat is unknown; treat as
+-- wildcard against any other Nat" (see Typecheck/Internal.hs NatVoidU
+-- subtype rule). Non-Nat-parameterized containers (List-style) pass
+-- through.
+bracketSliceResultType :: Gamma -> TypeU -> (Gamma, TypeU)
+bracketSliceResultType g t@(AppU h args) = case args of
+  (a : rest) | isKindTypeU' a ->
+    (g, AppU h (NatVoidU : rest))
+  _ -> (g, t)
+bracketSliceResultType g t = (g, t)
+
+isKindTypeU' :: TypeU -> Bool
+isKindTypeU' (NatLitU _) = True
+isKindTypeU' (NatVarU _) = True
+isKindTypeU' (NatAddU _ _) = True
+isKindTypeU' (NatMulU _ _) = True
+isKindTypeU' (NatSubU _ _) = True
+isKindTypeU' (NatDivU _ _) = True
+isKindTypeU' NatVoidU = True
+isKindTypeU' _ = False
+
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a
 throwTypeError i msg = MM.throwSourcedError i ("General type error:" <+> msg)
@@ -665,6 +706,72 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
   return (g, t, ExeS (PatCall (PatternText s ss)))
+
+-- Bracket-index pattern (xs[i]). Args: [index, receiver]. The index type
+-- is left as a fresh existential so the user can supply any integral
+-- type: the pool-dispatch codegen path resolves a per-instance
+-- __to_index__ cast, the pure-runtime path requires an integral wire
+-- type. The receiver shape is "container of elemType" with both the
+-- container constructor and the element type left as existentials so
+-- chained record/bracket accessors propagate constraints correctly.
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExpr, rcvExpr]) = do
+  let (g1, elemType) = newvar "bidx_elem_" g0
+      (g2, fExist)   = newvar "bidx_f_" g1
+      (g3, idxType)  = newvar "bidx_idx_" g2
+      expectedRcv    = AppU fExist [elemType]
+  (g4, _, rcv') <- checkG g3 rcvExpr expectedRcv
+  (g5, _, i')   <- checkG g4 iExpr idxType
+  let ft = FunU [apply g5 idxType, apply g5 expectedRcv] (apply g5 elemType)
+      f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
+  return (g5, apply g5 elemType, AppS f1 [i', rcv'])
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
+  error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
+
+-- Bracket-slice pattern (xs[i:j:k]). Args: [start, stop, step, receiver].
+-- Each bound is checked against a fresh bare existential so user
+-- expressions of any type unify naturally (Null bounds synth as
+-- OptionalU v and solve the existential to that; integer literals
+-- solve it to Int; user-annotated values solve it to their stated
+-- type). The "optional" nature of each slot is structural -- carried
+-- by NullS vs non-Null at the AST level -- not type-level. Codegen
+-- enforces semantic validity: pool dispatch resolves each non-Null
+-- bound's __to_index__ instance; pure-runtime evaluation requires a
+-- known wire integer. Result type is the receiver type with the outer
+-- Nat parameter replaced by a fresh existential (for Nat-parameterized
+-- containers like Vector); otherwise the receiver type is preserved.
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [startE, stopE, stepE, rcvExpr]) = do
+  (g1, rcvType, rcv') <- synthG g0 rcvExpr
+  let rcvType' = apply g1 rcvType
+      (g1a, resultType) = bracketSliceResultType g1 rcvType'
+      (g2, startTy) = newvar "bslice_start_" g1a
+      (g3, stopTy)  = newvar "bslice_stop_"  g2
+      (g4, stepTy)  = newvar "bslice_step_"  g3
+  (g5, _, s1) <- checkG g4 startE startTy
+  (g6, _, s2) <- checkG g5 stopE  stopTy
+  (g7, _, s3) <- checkG g6 stepE  stepTy
+  let ft = FunU [apply g7 startTy, apply g7 stopTy, apply g7 stepTy, rcvType']
+              resultType
+      f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketSlice))
+  return (g7, apply g7 resultType, AppS f1 [s1, s2, s3, rcv'])
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) args) =
+  error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
+
+-- Bare bracket patterns (when used as values, not applied). The
+-- function types match the AppS arities above; index and bound types
+-- are polymorphic existentials, resolved at the application site.
+synthE _ g (ExeS (PatCall PatternBracketIndex)) = do
+  let (g1, a) = newvar "bidx_elem_" g
+      (g2, r) = newvar "bidx_recv_" g1
+      (g3, i) = newvar "bidx_idx_"  g2
+      ft = FunU [i, r] a
+  return (g3, ft, ExeS (PatCall PatternBracketIndex))
+synthE _ g (ExeS (PatCall PatternBracketSlice)) = do
+  let (g1, a) = newvar "bslice_recv_"  g
+      (g2, s) = newvar "bslice_start_" g1
+      (g3, t) = newvar "bslice_stop_"  g2
+      (g4, p) = newvar "bslice_step_"  g3
+      ft = FunU [OptionalU s, OptionalU t, OptionalU p, a] a
+  return (g4, ft, ExeS (PatCall PatternBracketSlice))
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -1005,6 +1112,24 @@ synthE i g (EvalS e) = do
       "Cannot force a non-effectful value (got type" <+> pretty t <> ")."
       <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
       <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
+-- IntrMap: the desugar-inserted implicit map for bracket-accessor
+-- chains. Typed as @(a -> b) -> f a -> f b@: the container head @f@
+-- is a fresh existential so the same intrinsic covers @List@,
+-- @Vector m@, and any future Functor instance. @a@ and @b@ are
+-- existentials solved by checking the function and the receiver
+-- against their expected shapes.
+synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
+  let (g1, a) = newvar "map_elem_"      g
+      (g2, b) = newvar "map_result_"    g1
+      (g3, f) = newvar "map_container_" g2
+      funcExpectedT = FunU [a] b
+      listExpectedT = AppU f [a]
+      resultT       = AppU f [b]
+  (g4, _, funcE') <- checkG g3 funcE funcExpectedT
+  (g5, _, listE') <- checkG g4 listE listExpectedT
+  return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
+synthE _ _ (IntrinsicS IntrMap args) =
+  error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes

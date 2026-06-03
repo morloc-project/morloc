@@ -42,3 +42,27 @@ true
 [[1,10],[2,20]]
 --- deepChain ---
 [[11,101],[21,301]]
+--- indexFromForeignLength ---
+300
+--- sliceFromOptionalStart ---
+[10,20,30]
+--- indexInt8 ---
+10
+--- indexInt16 ---
+20
+--- indexUInt32 ---
+30
+--- sliceInt8Bound ---
+[20,30]
+--- sliceMixedWidthBounds ---
+[20,30,40]
+--- crossPoolReceiverPyToCpp ---
+300
+--- crossPoolReceiverCppToR ---
+20
+--- crossPoolReceiverRToPy ---
+9
+--- crossPoolIdxForeign ---
+20
+--- crossPoolSliceNested ---
+[10,20,30]

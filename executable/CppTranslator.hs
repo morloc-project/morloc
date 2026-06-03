@@ -791,6 +791,18 @@ evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) =
     accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
     accessRecord _ d k = d <> "." <> pretty k
 evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
+-- C++ bracket index: List and Vector both use std::vector<T> on the wire,
+-- so the same morloc_at helper works for both. Args: [index, receiver].
+evaluatePattern _ _ PatternBracketIndex [i, m] =
+  "morloc_at" <> tupled [i, m]
+evaluatePattern _ _ PatternBracketIndex args =
+  error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
+-- C++ bracket slice: List and Vector share std::vector<T> on the wire,
+-- so morloc_slice works for both. Args: [start, stop, step, receiver].
+evaluatePattern _ _ PatternBracketSlice [start, stop, step, m] =
+  "morloc_slice" <> tupled [start, stop, step, m]
+evaluatePattern _ _ PatternBracketSlice args =
+  error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
 
 writeSelector :: MDoc -> [Either Int Text] -> MDoc
 writeSelector d [] = d

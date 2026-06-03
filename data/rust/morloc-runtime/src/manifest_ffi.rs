@@ -52,6 +52,7 @@ pub enum MorlocExpressionType {
     Hash = 8,
     Save = 9,
     Load = 10,
+    Map = 11,
 }
 
 #[repr(C)]
@@ -68,6 +69,12 @@ pub enum MorlocPatternType {
     ByKey = 0,
     ByIndex = 1,
     End = 2,
+    // Bracket patterns: leaf pattern types whose meaning is entirely
+    // determined by the variant. The pattern node carries no selectors
+    // or field indices; arity is decided by the surrounding App node
+    // (BracketIndex = 2 args, BracketSlice = 4 args).
+    BracketIndex = 3,
+    BracketSlice = 4,
 }
 
 #[repr(C)]
@@ -168,6 +175,16 @@ pub struct MorlocSaveExpression {
     pub path: *mut MorlocExpression,
 }
 
+// Pure-morloc list map. `func` is a MorlocExpression with etype == Lam and
+// exactly one parameter; `list` is an expression evaluating to an Array.
+// The evaluator allocates an output Array sized by list.size * b_width,
+// where b_width comes from the surrounding Map node's schema.parameters[0].
+#[repr(C)]
+pub struct MorlocMapExpression {
+    pub func: *mut MorlocExpression,
+    pub list: *mut MorlocExpression,
+}
+
 #[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
@@ -179,6 +196,7 @@ pub union ExprUnion {
     pub data_expr: *mut MorlocData,
     pub unary_expr: *mut MorlocExpression,
     pub save_expr: *mut MorlocSaveExpression,
+    pub map_expr: *mut MorlocMapExpression,
 }
 
 #[repr(C)]
@@ -449,6 +467,22 @@ unsafe fn build_pattern(jp: &serde_json::Value) -> Result<*mut MorlocPattern, Mo
             fn make_morloc_pattern_end() -> *mut MorlocPattern;
         }
         return Ok(make_morloc_pattern_end());
+    }
+
+    if ptype == "bracket_index" || ptype == "bracket_slice" {
+        // Leaf bracket pattern: no selectors, no fields. The evaluator
+        // dispatches on ptype and uses the surrounding App's args
+        // directly.
+        let pat = libc::calloc(1, std::mem::size_of::<MorlocPattern>()) as *mut MorlocPattern;
+        (*pat).ptype = if ptype == "bracket_index" {
+            MorlocPatternType::BracketIndex
+        } else {
+            MorlocPatternType::BracketSlice
+        };
+        (*pat).size = 0;
+        (*pat).fields = PatternFields { indices: ptr::null_mut() };
+        (*pat).selectors = ptr::null_mut();
+        return Ok(pat);
     }
 
     let sels = jp.get("selectors").and_then(|v| v.as_array());
@@ -742,6 +776,27 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::Save;
             (*expr).schema = schema;
             (*expr).expr.save_expr = save;
+            Ok(expr)
+        }
+
+        "map" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let func = build_expr(je.get("func").unwrap_or(&serde_json::Value::Null))?;
+            let list = build_expr(je.get("list").unwrap_or(&serde_json::Value::Null))?;
+            let me = libc::calloc(1, std::mem::size_of::<MorlocMapExpression>()) as *mut MorlocMapExpression;
+            (*me).func = func;
+            (*me).list = list;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Map;
+            (*expr).schema = schema;
+            (*expr).expr.map_expr = me;
             Ok(expr)
         }
 

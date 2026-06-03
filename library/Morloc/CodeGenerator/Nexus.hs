@@ -33,7 +33,7 @@ import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
-import Morloc.Data.Doc (pretty, render)
+import Morloc.Data.Doc (pretty, render, (<+>))
 import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
@@ -90,6 +90,12 @@ data NexusExpr
   | OptNullX Text         -- absent ?T: at runtime sets tag=0 and leaves the
                           -- inner slot zero. Schema is the outer ?T schema so
                           -- the slot has the right width inside arrays/records.
+  | MapX Text NexusExpr NexusExpr  -- schema (return type = List b), lambda, list.
+                                   -- Emits the runtime Map intrinsic: per-element
+                                   -- loop applying the lambda body to each input
+                                   -- element. Only the desugar's bracket-accessor
+                                   -- lowering generates this; there is no
+                                   -- user-facing @map syntax.
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -372,6 +378,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST t
 
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
+    -- Pure-path bracket validation: each non-Null bound must resolve
+    -- to a wire integer type. There is no per-language IndexLike
+    -- instance to fall back on in the nexus runtime, so anything
+    -- non-integral is rejected at codegen with a clear message.
+    -- @(Null :: ?Int64)@ (from the desugar's empty-bound annotation),
+    -- bare integer literals, and explicit @(_ :: Int*)@ annotations
+    -- all pass.
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) [sE, eE, pE, rE])) = do
+      validateBracketBound "start" sE
+      validateBracketBound "stop"  eE
+      validateBracketBound "step"  pE
+      AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) [iE, rE])) = do
+      validateBracketBound "index" iE
+      AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
     toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
@@ -443,6 +464,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       outerSchema <- type2schema t
       childX <- toNexusExpr e
       return $ OptX outerSchema childX
+    -- IntrMap: the desugar-emitted implicit map for bracket-accessor
+    -- chains. The runtime evaluator's Map intrinsic handles this as a
+    -- per-element loop over the input array, applying the lambda body
+    -- without any pool dispatch.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrMap [funcE, listE])) =
+      MapX <$> type2schema t <*> toNexusExpr funcE <*> toNexusExpr listE
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
@@ -659,6 +686,35 @@ stripEffect :: Type -> Type
 stripEffect (EffectT _ t) = stripEffect t
 stripEffect t             = t
 
+-- | Validate a bracket bound's type for the pure-runtime path. NullS
+-- bounds and integer-typed bounds pass; anything else raises a sourced
+-- codegen error citing the inferred type and the bound's role
+-- (start / stop / step / index).
+validateBracketBound :: Text -> AnnoS (Indexed Type) One () -> MorlocMonad ()
+validateBracketBound role (AnnoS (Idx i t) _ _) =
+  if isIntegralPureBound t
+    then return ()
+    else MM.throwSourcedError i $
+      "Bracket" <+> pretty role <+> "bound must be an integer wire type"
+      <+> "in pure morloc (one of Int, Int8/16/32/64, UInt8/16/32/64);"
+      <+> "got" <+> pretty t
+
+-- | True if 't' is an integer wire type, possibly wrapped in a single
+-- 'OptionalT' (the @(Null :: ?Int64)@ shape from the desugar's empty
+-- bound annotation) and/or 'EffectT' layers.
+isIntegralPureBound :: Type -> Bool
+isIntegralPureBound t = case peel t of
+  VarT (TV n) -> n `elem`
+    [ "Int"
+    , "Int8", "Int16", "Int32", "Int64"
+    , "UInt", "UInt8", "UInt16", "UInt32", "UInt64"
+    ]
+  _ -> False
+  where
+    peel (OptionalT inner) = peel inner
+    peel (EffectT _ inner) = peel inner
+    peel inner             = inner
+
 -- | If a type's surface form is a named type, return its 'NamType' tag.
 -- Otherwise Nothing. Single source of the @kind@ constraint.
 surfaceNamKind :: Type -> Maybe NamType
@@ -760,6 +816,13 @@ exprToJson (BndX schema var) =
     , ("schema", jsonStr schema)
     , ("var", jsonStr var)
     ]
+exprToJson (MapX schema funcExpr listExpr) =
+  jsonObj
+    [ ("tag", jsonStr "map")
+    , ("schema", jsonStr schema)
+    , ("func", exprToJson funcExpr)
+    , ("list", exprToJson listExpr)
+    ]
 exprToJson (ShowX schema child) =
   jsonObj
     [ ("tag", jsonStr "show")
@@ -815,6 +878,23 @@ exprToJson (PatX schema (PatternStruct sel)) =
     [ ("tag", jsonStr "pattern")
     , ("schema", jsonStr schema)
     , ("pattern", selectorToJson sel)
+    ]
+-- Bracket patterns (index, slice). When these appear at the nexus
+-- boundary (a partially-applied accessor exposed as a top-level value),
+-- emit a pattern record the nexus interprets opaquely. The nexus does
+-- not execute the bracket operation itself; the call always dispatches
+-- to a pool manifold that contains the resolved bracket call.
+exprToJson (PatX schema PatternBracketIndex) =
+  jsonObj
+    [ ("tag", jsonStr "pattern")
+    , ("schema", jsonStr schema)
+    , ("pattern", jsonObj [("type", jsonStr "bracket_index")])
+    ]
+exprToJson (PatX schema PatternBracketSlice) =
+  jsonObj
+    [ ("tag", jsonStr "pattern")
+    , ("schema", jsonStr schema)
+    , ("pattern", jsonObj [("type", jsonStr "bracket_slice")])
     ]
 
 selectorToJson :: Selector -> Text
