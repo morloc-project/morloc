@@ -36,6 +36,9 @@ impl<'de> Deserialize<'de> for Scope {
 pub enum ContainerEngine {
     Docker,
     Podman,
+    /// Apptainer or Singularity. The two are treated as a single engine; the
+    /// runtime executable is detected at dispatch time.
+    Apptainer,
 }
 
 impl Serialize for ContainerEngine {
@@ -43,6 +46,7 @@ impl Serialize for ContainerEngine {
         match self {
             ContainerEngine::Docker => serializer.serialize_str("docker"),
             ContainerEngine::Podman => serializer.serialize_str("podman"),
+            ContainerEngine::Apptainer => serializer.serialize_str("apptainer"),
         }
     }
 }
@@ -53,6 +57,7 @@ impl<'de> Deserialize<'de> for ContainerEngine {
         match s.as_str() {
             "docker" => Ok(ContainerEngine::Docker),
             "podman" => Ok(ContainerEngine::Podman),
+            "apptainer" | "singularity" => Ok(ContainerEngine::Apptainer),
             _ => Err(serde::de::Error::custom(format!(
                 "Unknown container engine: {s}"
             ))),
@@ -190,7 +195,7 @@ impl Default for Config {
 pub struct EnvironmentConfig {
     /// Human-readable name (also the directory name).
     pub name: String,
-    /// Base container image reference.
+    /// Base container image reference (OCI URI; same field for all engines).
     pub base_image: String,
     /// Original pullable image reference (e.g., :edge tag) before local re-tagging.
     #[serde(default)]
@@ -205,9 +210,25 @@ pub struct EnvironmentConfig {
     /// None when only the base image is used.
     #[serde(default)]
     pub built_image: Option<String>,
+    /// Filename of the Singularity definition file (within the env config dir).
+    /// Apptainer-engine equivalent of `dockerfile`. Both may be present in the
+    /// same env; on Apptainer the .def is preferred.
+    #[serde(default)]
+    pub singularity_def: Option<String>,
+    /// SHA256 hash of the .def content (for rebuild detection under Apptainer).
+    #[serde(default)]
+    pub def_content_hash: Option<String>,
+    /// Path to the cached base .sif (Apptainer engine only).
+    #[serde(default)]
+    pub base_sif: Option<String>,
+    /// Path to the built layered .sif from `update` (Apptainer engine only).
+    /// Apptainer-engine equivalent of `built_image`.
+    #[serde(default)]
+    pub layered_sif: Option<String>,
     /// Container engine for this environment.
     pub engine: ContainerEngine,
-    /// Shared memory size for container runs.
+    /// Shared memory size for container runs. Honored under docker/podman;
+    /// ignored under apptainer (host /dev/shm is shared transparently).
     #[serde(default = "default_shm_size")]
     pub shm_size: String,
     /// Morloc version this environment was created from.
@@ -220,10 +241,24 @@ fn default_shm_size() -> String {
 }
 
 impl EnvironmentConfig {
-    /// Returns the image to use for running containers.
-    /// Prefers the built Dockerfile layer image, falls back to base_image.
+    /// Returns the image reference to use for running containers.
+    ///
+    /// For docker/podman this is the built layer tag (preferred) or the base
+    /// OCI URI. For apptainer this is the local .sif path (layered preferred,
+    /// base as fallback). The returned string is opaque to the caller; pass
+    /// it as `RunConfig::image` and the engine dispatch will route correctly.
     pub fn active_image(&self) -> &str {
-        self.built_image.as_deref().unwrap_or(&self.base_image)
+        match self.engine {
+            ContainerEngine::Docker | ContainerEngine::Podman => self
+                .built_image
+                .as_deref()
+                .unwrap_or(&self.base_image),
+            ContainerEngine::Apptainer => self
+                .layered_sif
+                .as_deref()
+                .or(self.base_sif.as_deref())
+                .unwrap_or(&self.base_image),
+        }
     }
 }
 

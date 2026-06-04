@@ -22,6 +22,14 @@ use crate::error::{ManagerError, Result};
 use crate::selinux::{detect_selinux, volume_suffix, SELinuxMode};
 use crate::types::*;
 
+/// Path under the user's home that morloc-manager exports as
+/// `MORLOC_BIN_LINK_DIR` to the in-container `morloc init`. The Haskell side
+/// (SystemConfig.hs) symlinks newly installed nexus/manager binaries here so
+/// they end up on PATH (see the comment in `run_with_config`). Kept as a
+/// relative path because the absolute form depends on the in-container $HOME,
+/// which morloc-manager computes per-invocation.
+const MORLOC_BIN_LINK_REL: &str = ".local/share/morloc/bin";
+
 // ======================================================================
 // CLI types
 // ======================================================================
@@ -91,9 +99,9 @@ enum Cmd {
     // -- Development --
     /// Configure the default container engine
     #[command(display_order = 0)]
-    #[command(after_help = "Examples:\n  morloc-manager setup --engine podman\n  morloc-manager setup --engine docker\n  sudo morloc-manager setup --engine podman --system")]
+    #[command(after_help = "Examples:\n  morloc-manager setup --engine podman\n  morloc-manager setup --engine docker\n  morloc-manager setup --engine apptainer\n  sudo morloc-manager setup --engine podman --system")]
     Setup {
-        /// Container engine: podman or docker
+        /// Container engine: podman, docker, apptainer, or singularity
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
         /// Apply to system scope (requires root)
@@ -121,6 +129,12 @@ enum Cmd {
         /// Generate a stub Dockerfile for customization
         #[arg(long)]
         dockerfile_stub: bool,
+        /// Singularity .def recipe to layer on top of the base image (apptainer engine)
+        #[arg(long)]
+        deffile: Option<String>,
+        /// Generate a stub Singularity .def recipe for customization (apptainer engine)
+        #[arg(long)]
+        deffile_stub: bool,
         /// Force overwrite of existing Dockerfile stub
         #[arg(long)]
         force: bool,
@@ -133,10 +147,10 @@ enum Cmd {
         /// A single engine flag (may be repeated)
         #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
         engine_arg: Vec<String>,
-        /// Container engine: podman or docker
+        /// Container engine: podman, docker, apptainer, or singularity
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
-        /// Shared memory size (default: 512m)
+        /// Shared memory size (default: 512m; ignored under apptainer/singularity)
         #[arg(long)]
         shm_size: Option<String>,
         /// Create in system scope (requires root)
@@ -250,6 +264,9 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Replace the Dockerfile
         #[arg(long)]
         dockerfile: Option<String>,
+        /// Replace the Singularity .def recipe (apptainer engine)
+        #[arg(long)]
+        deffile: Option<String>,
         /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
@@ -268,10 +285,13 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Generate a stub Dockerfile (fails if one already exists)
         #[arg(long)]
         dockerfile_stub: bool,
-        /// Force overwrite of existing Dockerfile stub
+        /// Generate a stub Singularity .def recipe (fails if one already exists)
+        #[arg(long)]
+        deffile_stub: bool,
+        /// Force overwrite of existing Dockerfile/.def stub
         #[arg(long)]
         force: bool,
-        /// Skip Dockerfile build
+        /// Skip Dockerfile/.def build
         #[arg(long)]
         no_build: bool,
         /// Re-run morloc init
@@ -391,6 +411,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 enum EngineArg {
     Docker,
     Podman,
+    Apptainer,
+    /// Alias for Apptainer (the older binary name). Both resolve to
+    /// ContainerEngine::Apptainer; the runtime executable is detected later.
+    Singularity,
 }
 
 impl From<EngineArg> for ContainerEngine {
@@ -398,6 +422,7 @@ impl From<EngineArg> for ContainerEngine {
         match e {
             EngineArg::Docker => ContainerEngine::Docker,
             EngineArg::Podman => ContainerEngine::Podman,
+            EngineArg::Apptainer | EngineArg::Singularity => ContainerEngine::Apptainer,
         }
     }
 }
@@ -580,7 +605,34 @@ fn display_engine(engine: ContainerEngine) -> &'static str {
     match engine {
         ContainerEngine::Docker => "docker",
         ContainerEngine::Podman => "podman",
+        ContainerEngine::Apptainer => "apptainer",
     }
+}
+
+/// Content of the Singularity .def stub written by `--deffile-stub`. Uses
+/// Apptainer's native build-arg substitution: `{{ BASE_SIF }}` is replaced
+/// at build time with the path to the env's base .sif. No textual
+/// preprocessing in morloc-manager.
+fn singularity_def_stub(env_name: &str) -> String {
+    format!(
+"# morloc environment: {env_name}
+# Edit this file, then rebuild with: morloc-manager update
+#
+# {{{{ BASE_SIF }}}} is substituted at build time with the path to
+# this environment's base .sif. The substitution is handled
+# natively by `apptainer build --build-arg BASE_SIF=...`.
+
+Bootstrap: localimage
+From: {{{{ BASE_SIF }}}}
+
+%post
+    # Add your build commands here, e.g.:
+    # apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*
+    # pip install scikit-learn pandas
+    # R -e \"install.packages('ggplot2', repos='https://cloud.r-project.org')\"
+    true
+"
+    )
 }
 
 fn bold_green(msg: &str) -> String {
@@ -689,7 +741,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 println!("System engine:  {}",
                     sys.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
                 println!();
-                println!("Set with: morloc-manager setup --engine <podman|docker>");
+                println!("Set with: morloc-manager setup --engine <podman|docker|apptainer|singularity>");
                 return Ok(());
             }
             if system { check_system_write_access()?; }
@@ -715,6 +767,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             tag,
             dockerfile,
             dockerfile_stub,
+            deffile,
+            deffile_stub,
             force,
             include,
             flagfile,
@@ -743,26 +797,51 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } {
                 cfg.engine
             } else {
-                // No config — try auto-detection
+                // No config — try auto-detection. Apptainer/Singularity are
+                // included so HPC-only hosts work out of the box.
                 let has_podman = which("podman");
                 let has_docker = which("docker");
-                match (has_podman, has_docker) {
-                    (true, false) => ContainerEngine::Podman,
-                    (false, true) => {
-                        check_docker_socket(ContainerEngine::Docker);
-                        ContainerEngine::Docker
+                let has_apptainer = which("apptainer") || which("singularity");
+                let candidates: Vec<(ContainerEngine, &str)> = [
+                    (ContainerEngine::Podman, "podman"),
+                    (ContainerEngine::Docker, "docker"),
+                    (ContainerEngine::Apptainer, "apptainer"),
+                ]
+                .into_iter()
+                .filter(|(e, _)| match e {
+                    ContainerEngine::Podman => has_podman,
+                    ContainerEngine::Docker => has_docker,
+                    ContainerEngine::Apptainer => has_apptainer,
+                })
+                .collect();
+                match candidates.as_slice() {
+                    [] => return Err(ManagerError::EngineNotFound),
+                    [(only, _)] => {
+                        if *only == ContainerEngine::Docker {
+                            check_docker_socket(ContainerEngine::Docker);
+                        }
+                        *only
                     }
-                    (true, true) => {
+                    multi => {
                         let scope_flag = if system { " --system" } else { "" };
+                        let names: Vec<String> = multi
+                            .iter()
+                            .map(|(_, n)| (*n).to_string())
+                            .collect();
+                        let setup_lines: String = multi
+                            .iter()
+                            .map(|(_, n)| {
+                                format!("  morloc-manager setup --engine {n}{scope_flag}\n")
+                            })
+                            .collect();
                         return Err(ManagerError::EnvError(format!(
-                            "Both podman and docker are installed and no default is set.\n\
-                             Pick one with:\n  \
-                             morloc-manager setup --engine podman{scope_flag}\n  \
-                             morloc-manager setup --engine docker{scope_flag}\n\
-                             Or pass --engine to this command directly."
+                            "Multiple container engines are installed ({}) and no \
+                             default is set.\nPick one with:\n{}\
+                             Or pass --engine to this command directly.",
+                            names.join(", "),
+                            setup_lines
                         )));
                     }
-                    (false, false) => return Err(ManagerError::EngineNotFound),
                 }
             };
 
@@ -956,6 +1035,36 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 None
             };
 
+            // Resolve .def file: explicit path takes precedence, then stub generation
+            let resolved_deffile = if deffile.is_some() {
+                if deffile_stub {
+                    return Err(ManagerError::EnvError(
+                        "Cannot use both --deffile and --deffile-stub".to_string(),
+                    ));
+                }
+                deffile
+            } else if deffile_stub {
+                let def_path = cfg::env_deffile_path(scope, &env_name);
+                if def_path.exists() && !force {
+                    return Err(ManagerError::EnvError(format!(
+                        ".def already exists: {}\nUse --force to overwrite.",
+                        def_path.display()
+                    )));
+                }
+                let stub_dir = cfg::data_dir(scope).join("tmp");
+                fs::create_dir_all(&stub_dir).map_err(|e| {
+                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
+                })?;
+                let stub_path = stub_dir.join(format!("{env_name}.def"));
+                let stub_content = singularity_def_stub(&env_name);
+                fs::write(&stub_path, &stub_content).map_err(|e| {
+                    ManagerError::EnvError(format!("Failed to write stub .def: {e}"))
+                })?;
+                Some(stub_path.to_string_lossy().to_string())
+            } else {
+                None
+            };
+
             let opts = environment::ApplyOptions {
                 name: env_name.clone(),
                 scope,
@@ -964,12 +1073,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 original_image,
                 morloc_version: morloc_ver,
                 dockerfile: resolved_dockerfile,
+                deffile: resolved_deffile,
                 includes: include,
                 flagfile,
                 engine_args: engine_arg,
                 engine: Some(resolved_engine),
                 shm_size: Some(shm_size.unwrap_or_else(|| "512m".to_string())),
-                skip_dockerfile_build: dockerfile_stub,
+                skip_dockerfile_build: dockerfile_stub || deffile_stub,
                 verbose,
             };
 
@@ -978,6 +1088,11 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             if dockerfile_stub {
                 let df_path = cfg::env_dockerfile_path(scope, &env_name);
                 eprintln!("Stub Dockerfile: {}", df_path.display());
+                eprintln!("Edit it, then run: morloc-manager update {env_name}");
+            }
+            if deffile_stub {
+                let def_path = cfg::env_deffile_path(scope, &env_name);
+                eprintln!("Stub .def: {}", def_path.display());
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
@@ -1318,11 +1433,20 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         scope: String,
                         active: bool,
                         base_image: String,
+                        #[serde(skip_serializing_if = "Option::is_none")]
                         built_image: Option<String>,
                         morloc_version: Option<Version>,
                         engine: String,
-                        shm_size: String,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        shm_size: Option<String>,
+                        #[serde(skip_serializing_if = "Option::is_none")]
                         dockerfile: Option<String>,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        deffile: Option<String>,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        base_sif: Option<String>,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        layered_sif: Option<String>,
                         flags: Vec<String>,
                         data_dir: String,
                     }
@@ -1330,8 +1454,26 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         let df_path = cfg::env_dockerfile_path(scope, &env_name);
                         df_path.display().to_string()
                     });
+                    let def_str = ec.singularity_def.as_ref().map(|_| {
+                        let def_path = cfg::env_deffile_path(scope, &env_name);
+                        def_path.display().to_string()
+                    });
                     let flags_path = cfg::env_flags_path(scope, &env_name);
                     let flags = cfg::read_flags_file_lines(&flags_path);
+                    // SHM size is honored only under docker/podman; Apptainer
+                    // shares host /dev/shm so the field is meaningless there
+                    // and is omitted from `info` output for that engine.
+                    let shm = match ec.engine {
+                        ContainerEngine::Apptainer => None,
+                        _ => Some(ec.shm_size.clone()),
+                    };
+                    // .sif paths only apply under Apptainer. Built_image
+                    // mirrors that asymmetry: it is the OCI fallback tag for
+                    // Apptainer and the primary built layer for docker/podman.
+                    let (base_sif, layered_sif) = match ec.engine {
+                        ContainerEngine::Apptainer => (ec.base_sif.clone(), ec.layered_sif.clone()),
+                        _ => (None, None),
+                    };
                     let output = InfoDetail {
                         name: ec.name.clone(),
                         scope: match scope { Scope::Local => "local", Scope::System => "system" }.to_string(),
@@ -1340,8 +1482,11 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         built_image: ec.built_image.clone(),
                         morloc_version: ec.morloc_version.clone(),
                         engine: display_engine(ec.engine).to_string(),
-                        shm_size: ec.shm_size.clone(),
+                        shm_size: shm,
                         dockerfile: df_str,
+                        deffile: def_str,
+                        base_sif,
+                        layered_sif,
                         flags,
                         data_dir: data_dir.display().to_string(),
                     };
@@ -1358,18 +1503,67 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         println!("Morloc version: {}", ver.show());
                     }
                     println!("Engine:         {}", display_engine(ec.engine));
-                    println!("SHM size:       {}", ec.shm_size);
-                    println!("Dockerfile:     {}", match ec.dockerfile {
-                        Some(_) => {
-                            let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                            if df_path.exists() {
-                                df_path.display().to_string()
-                            } else {
-                                format!("{} (MISSING)", df_path.display())
+                    // Engine-specific fields:
+                    // * Docker/Podman: show SHM size and the Dockerfile path.
+                    // * Apptainer:    show base .sif path and the .def path
+                    //                 (Dockerfile, if present, is the OCI
+                    //                 fallback recipe and is also surfaced).
+                    match ec.engine {
+                        ContainerEngine::Docker | ContainerEngine::Podman => {
+                            println!("SHM size:       {}", ec.shm_size);
+                            println!("Dockerfile:     {}", match ec.dockerfile {
+                                Some(_) => {
+                                    let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                                    if df_path.exists() {
+                                        df_path.display().to_string()
+                                    } else {
+                                        format!("{} (MISSING)", df_path.display())
+                                    }
+                                }
+                                None => "none".to_string(),
+                            });
+                        }
+                        ContainerEngine::Apptainer => {
+                            println!("Base SIF:       {}", match ec.base_sif {
+                                Some(ref p) => {
+                                    if std::path::Path::new(p).is_file() {
+                                        p.clone()
+                                    } else {
+                                        format!("{p} (MISSING)")
+                                    }
+                                }
+                                None => "none".to_string(),
+                            });
+                            if let Some(ref p) = ec.layered_sif {
+                                println!("Layered SIF:    {}", if std::path::Path::new(p).is_file() {
+                                    p.clone()
+                                } else {
+                                    format!("{p} (MISSING)")
+                                });
+                            }
+                            println!("Def file:       {}", match ec.singularity_def {
+                                Some(_) => {
+                                    let def_path = cfg::env_deffile_path(scope, &env_name);
+                                    if def_path.exists() {
+                                        def_path.display().to_string()
+                                    } else {
+                                        format!("{} (MISSING)", def_path.display())
+                                    }
+                                }
+                                None => "none".to_string(),
+                            });
+                            // Surface a Dockerfile too if one exists -- under
+                            // Apptainer it is the OCI-fallback recipe.
+                            if ec.dockerfile.is_some() {
+                                let df_path = cfg::env_dockerfile_path(scope, &env_name);
+                                println!("Dockerfile:     {} (OCI fallback)", if df_path.exists() {
+                                    df_path.display().to_string()
+                                } else {
+                                    format!("{} (MISSING)", df_path.display())
+                                });
                             }
                         }
-                        None => "none".to_string(),
-                    });
+                    }
                     let flags_path = cfg::env_flags_path(scope, &env_name);
                     println!("Flags:          {}", flags_path.display());
                     let flags = cfg::read_flags_file_lines(&flags_path);
@@ -1508,7 +1702,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
         // ---- update ----
         Cmd::Update {
-            name, image, version, tag, dockerfile, dockerfile_stub, force, include, flagfile,
+            name, image, version, tag, dockerfile, deffile, dockerfile_stub, deffile_stub,
+            force, include, flagfile,
             engine_arg, engine, shm_size, no_build, reinit, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
@@ -1568,6 +1763,33 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 dockerfile
             };
 
+            // Handle --deffile-stub: generate stub if no .def exists
+            let resolved_deffile = if deffile.is_some() && deffile_stub {
+                return Err(ManagerError::EnvError(
+                    "Cannot use both --deffile and --deffile-stub".to_string(),
+                ));
+            } else if deffile_stub {
+                let def_path = cfg::env_deffile_path(env_scope, &env_name);
+                if def_path.exists() && !force {
+                    return Err(ManagerError::EnvError(format!(
+                        ".def already exists: {}\nUse --force to overwrite.",
+                        def_path.display()
+                    )));
+                }
+                let stub_dir = cfg::data_dir(env_scope).join("tmp");
+                fs::create_dir_all(&stub_dir).map_err(|e| {
+                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
+                })?;
+                let stub_path = stub_dir.join(format!("{env_name}.def"));
+                let stub_content = singularity_def_stub(&env_name);
+                fs::write(&stub_path, &stub_content).map_err(|e| {
+                    ManagerError::EnvError(format!("Failed to write stub .def: {e}"))
+                })?;
+                Some(stub_path.to_string_lossy().to_string())
+            } else {
+                deffile
+            };
+
             if version.is_some() && image.is_some() {
                 return Err(ManagerError::EnvError(
                     "--version and --image are mutually exclusive".to_string()
@@ -1606,12 +1828,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 original_image,
                 morloc_version: morloc_ver,
                 dockerfile: resolved_dockerfile,
+                deffile: resolved_deffile,
                 includes: include,
                 flagfile,
                 engine_args: engine_arg,
                 engine: engine.map(|e| e.into()),
                 shm_size,
-                skip_dockerfile_build: no_build || dockerfile_stub,
+                skip_dockerfile_build: no_build || dockerfile_stub || deffile_stub,
                 verbose,
             };
             environment::apply_environment(&opts)?;
@@ -1619,6 +1842,11 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             if dockerfile_stub {
                 let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
                 eprintln!("Stub Dockerfile: {}", df_path.display());
+                eprintln!("Edit it, then run: morloc-manager update {env_name}");
+            }
+            if deffile_stub {
+                let def_path = cfg::env_deffile_path(env_scope, &env_name);
+                eprintln!("Stub .def: {}", def_path.display());
                 eprintln!("Edit it, then run: morloc-manager update {env_name}");
             }
 
@@ -1738,8 +1966,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     manifest_path.display()
                 )))?;
             let engine = match engine_override {
-                Some(EngineArg::Docker) => ContainerEngine::Docker,
-                Some(EngineArg::Podman) => ContainerEngine::Podman,
+                Some(arg) => arg.into(),
                 None => {
                     let e = ensure_engine()?;
                     eprintln!(
@@ -1817,9 +2044,16 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 find_running_serve_container()?
             };
+            // Apptainer has no `logs` subcommand: instances write to per-name
+            // log files under ~/.apptainer/instances/logs/.... Hand this off
+            // to serve.rs which knows the path layout.
+            if matches!(engine, ContainerEngine::Apptainer) {
+                return serve::apptainer_logs(&container_name, follow);
+            }
             let exe = match engine {
                 ContainerEngine::Podman => "podman",
                 ContainerEngine::Docker => "docker",
+                ContainerEngine::Apptainer => unreachable!(),
             };
             let mut cmd_args = vec!["logs"];
             if follow {
@@ -1896,12 +2130,27 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::Status => {
             let mut all_containers: Vec<serve::ServeContainerInfo> = Vec::new();
             let mut any_engine = false;
-            for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
+            for engine in [
+                ContainerEngine::Podman,
+                ContainerEngine::Docker,
+                ContainerEngine::Apptainer,
+            ] {
                 let exe = match engine {
                     ContainerEngine::Podman => "podman",
                     ContainerEngine::Docker => "docker",
+                    // Either apptainer or singularity counts; both serve
+                    // instances live under the same Apptainer engine.
+                    ContainerEngine::Apptainer => {
+                        if which("apptainer") {
+                            "apptainer"
+                        } else if which("singularity") {
+                            "singularity"
+                        } else {
+                            ""
+                        }
+                    }
                 };
-                if which(exe) {
+                if !exe.is_empty() && which(exe) {
                     any_engine = true;
                     if let Ok(containers) = serve::query_serve_containers(engine, verbose) {
                         all_containers.extend(containers);
@@ -1950,12 +2199,25 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 /// Returns (container_name, engine). Errors if zero or multiple found.
 fn find_running_serve_container() -> Result<(String, ContainerEngine)> {
     let mut found: Vec<(String, ContainerEngine)> = Vec::new();
-    for engine in [ContainerEngine::Podman, ContainerEngine::Docker] {
+    for engine in [
+        ContainerEngine::Podman,
+        ContainerEngine::Docker,
+        ContainerEngine::Apptainer,
+    ] {
         let exe = match engine {
             ContainerEngine::Podman => "podman",
             ContainerEngine::Docker => "docker",
+            ContainerEngine::Apptainer => {
+                if which("apptainer") {
+                    "apptainer"
+                } else if which("singularity") {
+                    "singularity"
+                } else {
+                    ""
+                }
+            }
         };
-        if which(exe) {
+        if !exe.is_empty() && which(exe) {
             for name in serve::find_running_serve_containers(engine) {
                 found.push((name, engine));
             }
@@ -2132,12 +2394,31 @@ fn run_with_config(
     } else {
         cwd.to_string()
     };
+    // The Haskell-side `morloc init` (SystemConfig.hs) optionally symlinks the
+    // freshly installed nexus/manager binaries into a "user bin" directory so
+    // they end up on PATH. Its legacy default for that target was
+    // `~/.local/bin/`, but under engines that mount the host $HOME (Apptainer
+    // does so by default) that directory IS the host's general-purpose bin,
+    // and symlinking container-internal targets (`/opt/morloc/bin/...`) into
+    // it leaves dangling host symlinks that can clobber the user's own
+    // ~/.local/bin/morloc-* files.
+    //
+    // We instead point `MORLOC_BIN_LINK_DIR` at a morloc-specific subdir of
+    // the user's data tree: `~/.local/share/morloc/bin/`. That path is
+    // morloc-owned space (no third-party binaries land there), so cross-tool
+    // clobbering is not a concern, and we add it to PATH so the resulting
+    // symlinks are actually findable. Users who want to redirect the link
+    // target can override `MORLOC_BIN_LINK_DIR` via `-x --env ...` or via
+    // their env.flags; the later --env wins under both docker/podman and
+    // apptainer.
+    let link_dir = format!("{home}/{MORLOC_BIN_LINK_REL}");
     let mut env_vars = vec![
         ("HOME".to_string(), home.to_string()),
         ("MORLOC_HOME".to_string(), mh.to_string()),
+        ("MORLOC_BIN_LINK_DIR".to_string(), link_dir.clone()),
         (
             "PATH".to_string(),
-            format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+            format!("{link_dir}:{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ),
     ];
     env_vars.extend(user_env.iter().cloned());
@@ -2355,6 +2636,10 @@ mod tests {
             dockerfile: None,
             content_hash: None,
             built_image: None,
+            singularity_def: None,
+            def_content_hash: None,
+            base_sif: None,
+            layered_sif: None,
             engine: ContainerEngine::Podman,
             shm_size: "1g".to_string(),
             morloc_version: Some(Version::new(0, 67, 0)),
@@ -2614,5 +2899,239 @@ mod tests {
     #[test]
     fn var_tmp_is_unsafe() {
         assert!(!selinux::is_safe_to_relabel("/var/tmp"));
+    }
+
+    // ---- Apptainer engine tests ----
+
+    #[test]
+    fn engine_executable_apptainer_returns_one_of_two() {
+        // Runtime-detected; the result depends on what's on $PATH at test time.
+        // Just assert the cached value is a known name.
+        let exe = engine_executable(ContainerEngine::Apptainer);
+        assert!(exe == "apptainer" || exe == "singularity");
+    }
+
+    #[test]
+    fn container_engine_deserializes_apptainer() {
+        let j: ContainerEngine = serde_json::from_str("\"apptainer\"").unwrap();
+        assert_eq!(j, ContainerEngine::Apptainer);
+    }
+
+    #[test]
+    fn container_engine_deserializes_singularity_as_apptainer() {
+        let j: ContainerEngine = serde_json::from_str("\"singularity\"").unwrap();
+        assert_eq!(j, ContainerEngine::Apptainer);
+    }
+
+    #[test]
+    fn container_engine_apptainer_serializes_as_apptainer() {
+        let s = serde_json::to_string(&ContainerEngine::Apptainer).unwrap();
+        assert_eq!(s, "\"apptainer\"");
+    }
+
+    #[test]
+    fn build_run_args_apptainer_with_command() {
+        let mut cfg = RunConfig::new("/path/to/base.sif");
+        cfg.command = Some(vec!["morloc".to_string(), "--version".to_string()]);
+        cfg.bind_mounts = vec![("/host/data".to_string(), "/opt/morloc".to_string())];
+        cfg.env = vec![("MORLOC_HOME".to_string(), "/opt/morloc".to_string())];
+        cfg.work_dir = Some("/tmp".to_string());
+        let args = build_run_args(ContainerEngine::Apptainer, &[], &cfg);
+        // Subcommand should be `exec` (not `run`/`shell`).
+        assert_eq!(args[0], "exec");
+        // Bind translation.
+        assert!(args.windows(2).any(|w| w == ["--bind", "/host/data:/opt/morloc"]));
+        // Env translation.
+        assert!(args.windows(2).any(|w| w == ["--env", "MORLOC_HOME=/opt/morloc"]));
+        // Workdir translation: -w -> --pwd.
+        assert!(args.windows(2).any(|w| w == ["--pwd", "/tmp"]));
+        // No `-i`, `-t`, `--rm`, `--user`, `--name`, `--shm-size`, `-p`, `-v`, `-w`, `-e` in argv.
+        for forbidden in ["-i", "-t", "--rm", "--user", "--name", "--shm-size", "-v", "-w", "-e"] {
+            assert!(
+                !args.iter().any(|a| a == forbidden),
+                "argv leaked a Docker-style flag: {forbidden} in {:?}", args
+            );
+        }
+        // Image and command come at the end.
+        let img_idx = args.iter().position(|a| a == "/path/to/base.sif").unwrap();
+        assert!(args[img_idx + 1..].contains(&"morloc".to_string()));
+        assert!(args[img_idx + 1..].contains(&"--version".to_string()));
+    }
+
+    #[test]
+    fn build_run_args_apptainer_shell() {
+        let mut cfg = RunConfig::new("/path/to/base.sif");
+        cfg.interactive = true;
+        cfg.command = Some(vec!["/bin/bash".to_string()]);
+        let args = build_run_args(ContainerEngine::Apptainer, &[], &cfg);
+        assert_eq!(args[0], "shell");
+        // After the image, `shell` does not append the command (it's the shell itself).
+        let img_idx = args.iter().position(|a| a == "/path/to/base.sif").unwrap();
+        assert!(args[img_idx + 1..].is_empty());
+    }
+
+    #[test]
+    fn build_run_args_apptainer_no_command_uses_run() {
+        let cfg = RunConfig::new("/path/to/base.sif");
+        let args = build_run_args(ContainerEngine::Apptainer, &[], &cfg);
+        // No command and not shell -> `apptainer run <sif>` invokes runscript.
+        assert_eq!(args[0], "run");
+    }
+
+    #[test]
+    fn build_run_args_apptainer_drops_shm_size() {
+        let mut cfg = RunConfig::new("/path/to/base.sif");
+        cfg.shm_size = Some("1g".to_string());
+        cfg.command = Some(vec!["true".to_string()]);
+        let args = build_run_args(ContainerEngine::Apptainer, &[], &cfg);
+        assert!(!args.iter().any(|a| a == "--shm-size"));
+        assert!(!args.iter().any(|a| a == "1g"));
+    }
+
+    #[test]
+    fn build_apptainer_native_argv_emits_build_args_and_paths() {
+        let cfg = container::ApptainerNativeBuildConfig {
+            deffile: "/cfg/recipe.def".to_string(),
+            output_sif: "/data/sif/layered.sif".to_string(),
+            build_args: vec![("BASE_SIF".to_string(), "/data/sif/base.sif".to_string())],
+        };
+        let argv = container::build_apptainer_native_argv(&cfg);
+        assert_eq!(argv[0], "build");
+        assert!(argv.contains(&"--force".to_string()));
+        // Both policy flags are always set: see note_ignore_subuid in
+        // container.rs for why.
+        assert!(argv.contains(&"--ignore-subuid".to_string()));
+        assert!(argv.contains(&"--ignore-fakeroot-command".to_string()));
+        assert!(argv.windows(2).any(|w| w == ["--build-arg", "BASE_SIF=/data/sif/base.sif"]));
+        // Output sif is the temp path with .tmp.sif suffix; final rename
+        // happens after success in apptainer_build_native.
+        assert!(argv.iter().any(|a| a == "/data/sif/layered.sif.tmp.sif"));
+        // Recipe path is the last argv slot.
+        assert_eq!(argv.last().unwrap(), "/cfg/recipe.def");
+    }
+
+    #[test]
+    fn build_apptainer_oci_convert_argv_picks_docker_daemon_scheme() {
+        let cfg = container::ApptainerOciConvertConfig {
+            source_engine: ContainerEngine::Docker,
+            source_tag: "localhost/morloc-env:dnd".to_string(),
+            output_sif: "/data/sif/layered.sif".to_string(),
+        };
+        let argv = container::build_apptainer_oci_convert_argv(&cfg);
+        assert_eq!(argv[0], "build");
+        assert!(argv.contains(&"--ignore-subuid".to_string()));
+        assert!(argv.contains(&"--ignore-fakeroot-command".to_string()));
+        assert!(argv.iter().any(|a| a == "/data/sif/layered.sif.tmp.sif"));
+        assert_eq!(
+            argv.last().unwrap(),
+            "docker-daemon://localhost/morloc-env:dnd"
+        );
+    }
+
+    #[test]
+    fn build_apptainer_oci_convert_argv_uses_podman_daemon() {
+        let cfg = container::ApptainerOciConvertConfig {
+            source_engine: ContainerEngine::Podman,
+            source_tag: "localhost/morloc-env:dnd".to_string(),
+            output_sif: "/data/sif/layered.sif".to_string(),
+        };
+        let argv = container::build_apptainer_oci_convert_argv(&cfg);
+        assert_eq!(
+            argv.last().unwrap(),
+            "podman-daemon://localhost/morloc-env:dnd"
+        );
+    }
+
+    #[test]
+    fn env_config_yaml_round_trip_with_apptainer_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        // Use a temp env dir layout. write_env_config takes (scope, name) and
+        // pins to cfg::env_config_path; we use the lower-level write helper
+        // to keep the test hermetic.
+        let path = dir.path().join("env.yaml");
+        let ec = EnvironmentConfig {
+            name: "dnd".to_string(),
+            base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
+            original_image: None,
+            dockerfile: None,
+            content_hash: None,
+            built_image: None,
+            singularity_def: Some("recipe.def".to_string()),
+            def_content_hash: Some("deadbeef".to_string()),
+            base_sif: Some("/data/dnd/sif/base.sif".to_string()),
+            layered_sif: Some("/data/dnd/sif/layered.sif".to_string()),
+            engine: ContainerEngine::Apptainer,
+            shm_size: "512m".to_string(),
+            morloc_version: Some(Version::new(0, 85, 0)),
+        };
+        let yaml = serde_yaml::to_string(&ec).unwrap();
+        std::fs::write(&path, yaml).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let ec2: EnvironmentConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(ec2.engine, ContainerEngine::Apptainer);
+        assert_eq!(ec2.singularity_def.as_deref(), Some("recipe.def"));
+        assert_eq!(ec2.base_sif.as_deref(), Some("/data/dnd/sif/base.sif"));
+        assert_eq!(ec2.layered_sif.as_deref(), Some("/data/dnd/sif/layered.sif"));
+        assert_eq!(ec2.def_content_hash.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn env_config_json_back_compat_reads_without_apptainer_fields() {
+        // Legacy env.json (created before the new fields were added) must
+        // still deserialize. Use the existing JSON read path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env.json");
+        let legacy = r#"{
+            "name": "legacy",
+            "base_image": "ghcr.io/morloc-project/morloc/morloc-full:0.67.0",
+            "engine": "podman",
+            "shm_size": "512m"
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+        let ec: EnvironmentConfig = cfg::read_config(&path).unwrap();
+        assert_eq!(ec.engine, ContainerEngine::Podman);
+        assert!(ec.singularity_def.is_none());
+        assert!(ec.base_sif.is_none());
+        assert!(ec.layered_sif.is_none());
+    }
+
+    #[test]
+    fn active_image_apptainer_prefers_layered_sif() {
+        let ec = EnvironmentConfig {
+            name: "test".to_string(),
+            base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
+            original_image: None,
+            dockerfile: None,
+            content_hash: None,
+            built_image: None,
+            singularity_def: None,
+            def_content_hash: None,
+            base_sif: Some("/base.sif".to_string()),
+            layered_sif: Some("/layered.sif".to_string()),
+            engine: ContainerEngine::Apptainer,
+            shm_size: "512m".to_string(),
+            morloc_version: None,
+        };
+        assert_eq!(ec.active_image(), "/layered.sif");
+    }
+
+    #[test]
+    fn active_image_apptainer_falls_back_to_base_sif() {
+        let ec = EnvironmentConfig {
+            name: "test".to_string(),
+            base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
+            original_image: None,
+            dockerfile: None,
+            content_hash: None,
+            built_image: None,
+            singularity_def: None,
+            def_content_hash: None,
+            base_sif: Some("/base.sif".to_string()),
+            layered_sif: None,
+            engine: ContainerEngine::Apptainer,
+            shm_size: "512m".to_string(),
+            morloc_version: None,
+        };
+        assert_eq!(ec.active_image(), "/base.sif");
     }
 }

@@ -69,6 +69,7 @@ impl fmt::Display for ContainerEngine {
         match self {
             ContainerEngine::Docker => write!(f, "Docker"),
             ContainerEngine::Podman => write!(f, "Podman"),
+            ContainerEngine::Apptainer => write!(f, "Apptainer"),
         }
     }
 }

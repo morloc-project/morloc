@@ -38,12 +38,25 @@ pub fn env_config_dir(scope: Scope, name: &str) -> PathBuf {
     config_dir(scope).join("environments").join(name)
 }
 
+/// Canonical path for the env config file (YAML).
 pub fn env_config_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("env.yaml")
+}
+
+/// Legacy env config path. Read-only fallback for environments created before
+/// the YAML switch; new writes always go to env.yaml.
+pub fn env_config_path_legacy_json(scope: Scope, name: &str) -> PathBuf {
     env_config_dir(scope, name).join("env.json")
 }
 
 pub fn env_dockerfile_path(scope: Scope, name: &str) -> PathBuf {
     env_config_dir(scope, name).join("Dockerfile")
+}
+
+/// Path to the Singularity definition file in an env's config directory
+/// (Apptainer-engine equivalent of the Dockerfile path).
+pub fn env_deffile_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("recipe.def")
 }
 
 pub fn env_flags_path(scope: Scope, name: &str) -> PathBuf {
@@ -52,6 +65,21 @@ pub fn env_flags_path(scope: Scope, name: &str) -> PathBuf {
 
 pub fn env_data_dir(scope: Scope, name: &str) -> PathBuf {
     data_dir(scope).join("environments").join(name)
+}
+
+/// Directory holding the .sif files for an Apptainer environment.
+pub fn env_sif_dir(scope: Scope, name: &str) -> PathBuf {
+    env_data_dir(scope, name).join("sif")
+}
+
+/// Path to the cached base .sif (Apptainer engine only).
+pub fn env_base_sif_path(scope: Scope, name: &str) -> PathBuf {
+    env_sif_dir(scope, name).join("base.sif")
+}
+
+/// Path to the built layered .sif from `update` (Apptainer engine only).
+pub fn env_layered_sif_path(scope: Scope, name: &str) -> PathBuf {
+    env_sif_dir(scope, name).join("layered.sif")
 }
 
 // ======================================================================
@@ -72,6 +100,22 @@ pub fn read_config<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     })
 }
 
+/// Read a YAML config file. Falls back through YAML parse, then JSON parse for
+/// the same path. Used by env configs to ease migration from env.json.
+fn read_yaml_config<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            ManagerError::ConfigPermissionDenied(path.display().to_string())
+        } else {
+            ManagerError::ConfigNotFound(path.display().to_string())
+        }
+    })?;
+    serde_yaml::from_slice(&bytes).map_err(|e| ManagerError::ConfigParseError {
+        path: path.display().to_string(),
+        msg: e.to_string(),
+    })
+}
+
 pub fn read_active_config() -> Option<Config> {
     let local_path = config_path(Scope::Local);
     if let Ok(cfg) = read_config::<Config>(&local_path) {
@@ -81,8 +125,18 @@ pub fn read_active_config() -> Option<Config> {
     read_config::<Config>(&system_path).ok()
 }
 
+/// Read an environment's config. Prefers env.yaml; falls back to legacy
+/// env.json for envs created before the YAML switch.
 pub fn read_env_config(scope: Scope, name: &str) -> Result<EnvironmentConfig> {
-    read_config(&env_config_path(scope, name))
+    let yaml_path = env_config_path(scope, name);
+    if yaml_path.is_file() {
+        return read_yaml_config(&yaml_path);
+    }
+    let json_path = env_config_path_legacy_json(scope, name);
+    if json_path.is_file() {
+        return read_config(&json_path);
+    }
+    Err(ManagerError::ConfigNotFound(yaml_path.display().to_string()))
 }
 
 // ======================================================================
@@ -118,8 +172,40 @@ pub fn write_config<T: serde::Serialize>(path: &Path, val: &T) -> Result<()> {
     })
 }
 
+/// Atomically write a YAML config file with locking, mirroring `write_config`.
+fn write_yaml_config<T: serde::Serialize>(path: &Path, val: &T) -> Result<()> {
+    let dir = path.parent().unwrap();
+    fs::create_dir_all(dir).map_err(|e| ManagerError::ConfigParseError {
+        path: path.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    best_effort_chmod(dir, 0o755);
+
+    let lock_path = format!("{}.lock", path.display());
+    with_file_lock(&lock_path, || {
+        let tmp_path = path.with_extension("tmp");
+        let yaml = serde_yaml::to_string(val).map_err(|e| ManagerError::ConfigParseError {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })?;
+        fs::write(&tmp_path, yaml.as_bytes()).map_err(|e| ManagerError::ConfigParseError {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })?;
+        fs::rename(&tmp_path, path).map_err(|e| ManagerError::ConfigParseError {
+            path: path.display().to_string(),
+            msg: e.to_string(),
+        })?;
+        best_effort_chmod(path, 0o644);
+        Ok(())
+    })
+}
+
+/// Write an environment config to env.yaml. If a legacy env.json exists from
+/// before the YAML switch, leave it in place as a safety net; future reads
+/// prefer the YAML.
 pub fn write_env_config(scope: Scope, name: &str, ec: &EnvironmentConfig) -> Result<()> {
-    write_config(&env_config_path(scope, name), ec)
+    write_yaml_config(&env_config_path(scope, name), ec)
 }
 
 // ======================================================================
@@ -139,7 +225,8 @@ pub fn find_env_scope(name: &str) -> Result<Scope> {
     Err(ManagerError::EnvironmentNotFound(name.to_string()))
 }
 
-/// List environment names in a given scope.
+/// List environment names in a given scope. Recognizes both env.yaml (new) and
+/// env.json (legacy) so envs created before the YAML switch still appear.
 pub fn list_env_names(scope: Scope) -> Vec<String> {
     let env_dir = config_dir(scope).join("environments");
     if !env_dir.is_dir() {
@@ -150,7 +237,10 @@ pub fn list_env_names(scope: Scope) -> Vec<String> {
     };
     entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("env.json").is_file())
+        .filter(|e| {
+            let p = e.path();
+            p.join("env.yaml").is_file() || p.join("env.json").is_file()
+        })
         .filter_map(|e| e.file_name().into_string().ok())
         .collect()
 }

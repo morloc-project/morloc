@@ -111,6 +111,7 @@ pub fn doctor(
     let engine_str = match engine {
         ContainerEngine::Docker => "docker",
         ContainerEngine::Podman => "podman",
+        ContainerEngine::Apptainer => "apptainer",
     };
 
     if !json_mode {
@@ -191,13 +192,15 @@ pub fn doctor(
 
 fn check_engine(c: &mut Counts, engine: ContainerEngine) {
     let exe = engine_executable(engine);
-    let fmt = match engine {
-        ContainerEngine::Podman => "{{.Version.Version}}",
-        ContainerEngine::Docker => "{{.ServerVersion}}",
+    // For Apptainer/Singularity there is no `info --format ...`; use
+    // `--version` directly which prints something like
+    // "apptainer version 1.3.4".
+    let argv: Vec<&str> = match engine {
+        ContainerEngine::Podman => vec!["info", "--format", "{{.Version.Version}}"],
+        ContainerEngine::Docker => vec!["info", "--format", "{{.ServerVersion}}"],
+        ContainerEngine::Apptainer => vec!["--version"],
     };
-    let output = Command::new(exe)
-        .args(["info", "--format", fmt])
-        .output();
+    let output = Command::new(exe).args(&argv).output();
     match output {
         Ok(o) if o.status.success() => {
             let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -222,6 +225,14 @@ fn check_engine(c: &mut Counts, engine: ContainerEngine) {
 }
 
 fn check_base_image(c: &mut Counts, engine: ContainerEngine, base_image: &str) {
+    // For Apptainer the engine-side `image_exists_locally` call below is
+    // skipped: ec.base_image is the human-readable OCI URI, while presence
+    // is determined by the .sif file on disk (checked separately when
+    // base_sif is recorded). check_built_image handles the .sif-path case.
+    if matches!(engine, ContainerEngine::Apptainer) {
+        c.pass(&format!("Base image {base_image} (apptainer; presence checked via .sif)"));
+        return;
+    }
     if image_exists_locally(engine, base_image) {
         c.pass(&format!("Base image {base_image}"));
     } else {
@@ -233,6 +244,41 @@ fn check_base_image(c: &mut Counts, engine: ContainerEngine, base_image: &str) {
 }
 
 fn check_built_image(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig, scope: Scope, env_name: &str) {
+    // Apptainer: check .sif files on disk rather than OCI image tags.
+    if matches!(engine, ContainerEngine::Apptainer) {
+        if let Some(ref sif) = ec.base_sif {
+            if std::path::Path::new(sif).is_file() {
+                c.pass(&format!("Base .sif {sif}"));
+            } else {
+                c.fail(&format!(
+                    "Base .sif {sif} not found on disk\n       \
+                     Run: morloc-manager update --image <ref> to repull"
+                ));
+            }
+        }
+        if ec.singularity_def.is_some() || ec.dockerfile.is_some() {
+            let recipe_kind = if ec.singularity_def.is_some() { ".def" } else { "Dockerfile" };
+            match &ec.layered_sif {
+                Some(sif) => {
+                    if std::path::Path::new(sif).is_file() {
+                        c.pass(&format!("Layered .sif {sif}"));
+                    } else {
+                        c.fail(&format!(
+                            "Layered .sif {sif} not found on disk\n       \
+                             Run: morloc-manager update"
+                        ));
+                    }
+                }
+                None => {
+                    c.warn(&format!(
+                        "{recipe_kind} configured but no layered .sif built yet\n       \
+                         Run: morloc-manager update"
+                    ));
+                }
+            }
+        }
+        return;
+    }
     if ec.dockerfile.is_none() {
         return;
     }
