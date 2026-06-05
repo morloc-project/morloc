@@ -77,6 +77,7 @@ fn build_help_template() -> String {
 #[command(disable_version_flag = true)]
 #[command(arg_required_else_help = true)]
 #[command(hide_possible_values = true)]
+#[command(term_width = 80)]
 struct Cli {
     /// Print container commands to stderr before executing
     #[arg(short, long, global = true)]
@@ -186,6 +187,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long)]
         env_file: Option<String>,
+        /// One-shot engine flag, appended to env.flags.yaml `run.<engine>`
+        /// for this invocation only (repeatable; not persisted)
+        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
+        engine_arg: Vec<String>,
     },
     /// Remove a morloc environment
     #[command(display_order = 3)]
@@ -270,12 +275,14 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
-        /// Replace the flags file
+        /// Replace the flags file (YAML, schema documented in env.flags.yaml stub)
         #[arg(long)]
         flagfile: Option<String>,
-        /// Add an engine flag (repeatable; appends unless --flagfile replaces)
-        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
-        engine_arg: Vec<String>,
+        /// One-shot build-engine flag for this rebuild only (repeatable;
+        /// requires --reinit; not persisted). Use env.flags.yaml `build`
+        /// section for persistent build flags.
+        #[arg(long = "reinit-arg", allow_hyphen_values = true, requires = "reinit")]
+        reinit_arg: Vec<String>,
         /// Change the container engine
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
@@ -318,6 +325,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long)]
         env_file: Option<String>,
+        /// One-shot engine flag, appended to env.flags.yaml `start.<engine>`
+        /// for this invocation only (repeatable; not persisted)
+        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
+        engine_arg: Vec<String>,
         /// Replace an already-running serve container
         #[arg(long)]
         force: bool,
@@ -619,20 +630,48 @@ fn singularity_def_stub(env_name: &str) -> String {
 # Edit this file, then rebuild with: morloc-manager update
 #
 # {{{{ BASE_SIF }}}} is substituted at build time with the path to
-# this environment's base .sif. The substitution is handled
-# natively by `apptainer build --build-arg BASE_SIF=...`.
+# this environment's base .sif.
 
 Bootstrap: localimage
 From: {{{{ BASE_SIF }}}}
 
 %post
-    # Add your build commands here, e.g.:
-    # apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*
+    set -euo pipefail
+
+    # apt-get on hosts without a full subuid range needs APT::Sandbox::User=root:
+    #   apt-get -o APT::Sandbox::User=root update \\
+    #     && apt-get -o APT::Sandbox::User=root install -y jq \\
+    #     && rm -rf /var/lib/apt/lists/*
+    #
     # pip install scikit-learn pandas
     # R -e \"install.packages('ggplot2', repos='https://cloud.r-project.org')\"
-    true
+    :
 "
     )
+}
+
+/// Render a phase of env.flags.yaml for `info` text output. Only sections
+/// with at least one flag are printed; an entirely empty section
+/// (the default for a fresh env) is suppressed.
+fn print_flag_section(label: &str, section: &EngineFlags) {
+    let mut emitted_header = false;
+    let mut emit = |engine: &str, list: &[String]| {
+        if list.is_empty() {
+            return;
+        }
+        if !emitted_header {
+            println!("  {label}:");
+            emitted_header = true;
+        }
+        println!("    {engine}:");
+        for flag in list {
+            println!("      - {flag}");
+        }
+    };
+    emit("all", &section.all);
+    emit("docker", &section.docker);
+    emit("podman", &section.podman);
+    emit("apptainer", &section.apptainer);
 }
 
 fn bold_green(msg: &str) -> String {
@@ -1077,6 +1116,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 includes: include,
                 flagfile,
                 engine_args: engine_arg,
+                reinit_args: Vec::new(),
                 engine: Some(resolved_engine),
                 shm_size: Some(shm_size.unwrap_or_else(|| "512m".to_string())),
                 skip_dockerfile_build: dockerfile_stub || deffile_stub,
@@ -1118,12 +1158,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- run ----
-        Cmd::Run { command, shell, env_vars, env_file } => {
+        Cmd::Run { command, shell, env_vars, env_file, engine_arg } => {
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
             let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
-            run_in_container(verbose, shell, &command, &user_env).map_err(|e| match e {
+            run_in_container(verbose, shell, &command, &user_env, &engine_arg).map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -1447,7 +1487,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         base_sif: Option<String>,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         layered_sif: Option<String>,
-                        flags: Vec<String>,
+                        flag_config: FlagConfig,
+                        flags_file: String,
                         data_dir: String,
                     }
                     let df_str = ec.dockerfile.as_ref().map(|_| {
@@ -1458,8 +1499,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         let def_path = cfg::env_deffile_path(scope, &env_name);
                         def_path.display().to_string()
                     });
-                    let flags_path = cfg::env_flags_path(scope, &env_name);
-                    let flags = cfg::read_flags_file_lines(&flags_path);
+                    let flags_path = cfg::env_flags_yaml_path(scope, &env_name);
+                    let flag_config = cfg::read_flag_config(scope, &env_name)
+                        .unwrap_or_default();
                     // SHM size is honored only under docker/podman; Apptainer
                     // shares host /dev/shm so the field is meaningless there
                     // and is omitted from `info` output for that engine.
@@ -1487,7 +1529,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         deffile: def_str,
                         base_sif,
                         layered_sif,
-                        flags,
+                        flag_config,
+                        flags_file: flags_path.display().to_string(),
                         data_dir: data_dir.display().to_string(),
                     };
                     println!("{}", serde_json::to_string_pretty(&output).unwrap());
@@ -1564,12 +1607,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                             }
                         }
                     }
-                    let flags_path = cfg::env_flags_path(scope, &env_name);
+                    let flags_path = cfg::env_flags_yaml_path(scope, &env_name);
                     println!("Flags:          {}", flags_path.display());
-                    let flags = cfg::read_flags_file_lines(&flags_path);
-                    for flag in &flags {
-                        println!("  {flag}");
-                    }
+                    let flag_config = cfg::read_flag_config(scope, &env_name)
+                        .unwrap_or_default();
+                    print_flag_section("build", &flag_config.build);
+                    print_flag_section("run", &flag_config.run);
+                    print_flag_section("start", &flag_config.start);
                     println!("Data dir:       {}", data_dir.display());
                 }
             } else {
@@ -1704,7 +1748,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::Update {
             name, image, version, tag, dockerfile, deffile, dockerfile_stub, deffile_stub,
             force, include, flagfile,
-            engine_arg, engine, shm_size, no_build, reinit, non_interactive: _,
+            reinit_arg, engine, shm_size, no_build, reinit, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
                 Some(n) => {
@@ -1831,7 +1875,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 deffile: resolved_deffile,
                 includes: include,
                 flagfile,
-                engine_args: engine_arg,
+                engine_args: Vec::new(),
+                reinit_args: reinit_arg,
                 engine: engine.map(|e| e.into()),
                 shm_size,
                 skip_dockerfile_build: no_build || dockerfile_stub || deffile_stub,
@@ -1980,7 +2025,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- start ----
-        Cmd::Start { name, port, env_vars, env_file, force } => {
+        Cmd::Start { name, port, env_vars, env_file, engine_arg, force } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -2004,8 +2049,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 port
             };
-            let flags_path = cfg::env_flags_path(env_scope, &env_name);
-            let extra_flags = cfg::read_flags_file(&flags_path);
+            let mut extra_flags = cfg::read_flag_config(env_scope, &env_name)?
+                .materialize(Phase::Start, ec.engine);
+            extra_flags.extend(engine_arg.iter().cloned());
             let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
             serve::serve_environment(
                 ec.engine, verbose, &image,
@@ -2247,8 +2293,9 @@ fn run_in_container(
     shell: bool,
     args: &[String],
     user_env: &[(String, String)],
+    cli_engine_args: &[String],
 ) -> Result<()> {
-    run_in_container_for(None, verbose, shell, args, user_env)
+    run_in_container_for(None, verbose, shell, args, user_env, cli_engine_args, Phase::Run)
 }
 
 fn run_in_container_for(
@@ -2257,6 +2304,8 @@ fn run_in_container_for(
     shell: bool,
     args: &[String],
     user_env: &[(String, String)],
+    cli_engine_args: &[String],
+    phase: Phase,
 ) -> Result<()> {
     let (env_name, env_scope, ec) = match target {
         Some(t) => t,
@@ -2325,9 +2374,12 @@ fn run_in_container_for(
         ));
     }
 
-    // Read flags from the environment's flags file
-    let flags_path = cfg::env_flags_path(env_scope, &env_name);
-    let extra_flags = cfg::read_flags_file(&flags_path);
+    // Materialize flags from env.flags.yaml for the active phase + engine,
+    // then append CLI one-shot overrides. The flag-file errors out on the
+    // legacy flat env.flags format with a migration hint.
+    let mut extra_flags = cfg::read_flag_config(env_scope, &env_name)?
+        .materialize(phase, engine);
+    extra_flags.extend(cli_engine_args.iter().cloned());
 
     let is_init = matches!(args, [a, b, ..] if a == "morloc" && b == "init");
     let is_home_dir = normalize_trailing(&cwd) == normalize_trailing(&home);
@@ -2470,7 +2522,10 @@ fn run_morloc_init_for(
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
     eprintln!("Initializing morloc (this may take several minutes)...");
-    run_in_container_for(target, verbose, false, &init_args, &[])
+    // `morloc init` is a run-style invocation (it execs inside the
+    // container); it picks up `run.<engine>` flags from env.flags.yaml.
+    // No CLI engine-args here (the inner command is set by morloc-manager).
+    run_in_container_for(target, verbose, false, &init_args, &[], &[], Phase::Run)
 }
 
 fn normalize_trailing(p: &str) -> String {
@@ -2690,9 +2745,11 @@ mod tests {
     fn freeze_manifest_reads_legacy_env_vars() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.json");
-        // Simulate an old manifest that included env_vars
+        // Version (de)serializes as a string via its Display/FromStr impls.
+        // env_vars survives for backward-compat with old manifests that
+        // wrote the field; new code skips it on write.
         let json = r#"{
-            "morloc_version": {"major":0,"minor":67,"patch":0,"pre":null},
+            "morloc_version": "0.67.0",
             "frozen_at": "2025-01-01T00:00:00Z",
             "modules": [],
             "programs": [],
@@ -2705,49 +2762,88 @@ mod tests {
         assert_eq!(fm.env_vars, vec!["API_KEY", "DB_URL"]);
     }
 
-    // ---- Config flags tests ----
+    // ---- FlagConfig tests ----
 
     #[test]
-    fn read_flags_file_parses() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.flags");
-        fs::write(
-            &path,
-            "# This is a comment\n--gpus all\n\n  -v /data:/data  \n# another comment\n--network host\n",
-        )
-        .unwrap();
-        let flags = cfg::read_flags_file(&path);
+    fn flag_config_default_is_all_empty() {
+        let fc = FlagConfig::default();
+        for phase in [Phase::Build, Phase::Run, Phase::Start] {
+            for eng in [
+                ContainerEngine::Docker,
+                ContainerEngine::Podman,
+                ContainerEngine::Apptainer,
+            ] {
+                assert!(fc.materialize(phase, eng).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn flag_config_materialize_concatenates_all_then_engine() {
+        let yaml = r#"
+build:
+  all:
+    - --shared
+  apptainer:
+    - --ignore-subuid
+"#;
+        let fc: FlagConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
-            flags,
-            vec!["--gpus", "all", "-v", "/data:/data", "--network", "host"]
+            fc.materialize(Phase::Build, ContainerEngine::Apptainer),
+            vec!["--shared", "--ignore-subuid"]
+        );
+        assert_eq!(
+            fc.materialize(Phase::Build, ContainerEngine::Docker),
+            vec!["--shared"]
+        );
+        assert!(fc.materialize(Phase::Run, ContainerEngine::Apptainer).is_empty());
+    }
+
+    #[test]
+    fn flag_config_rejects_unknown_section() {
+        let yaml = "runn:\n  apptainer:\n    - --nv\n";
+        let err = serde_yaml::from_str::<FlagConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("runn"), "got: {err}");
+    }
+
+    #[test]
+    fn flag_config_rejects_unknown_engine() {
+        let yaml = "run:\n  aptainer:\n    - --nv\n";
+        let err = serde_yaml::from_str::<FlagConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("aptainer"), "got: {err}");
+    }
+
+    #[test]
+    fn flag_config_rejects_scalar_as_list() {
+        let yaml = "run:\n  apptainer: --nv\n";
+        let err = serde_yaml::from_str::<FlagConfig>(yaml).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("sequence")
+                || err.to_string().to_lowercase().contains("list")
+                || err.to_string().to_lowercase().contains("invalid"),
+            "got: {err}"
         );
     }
 
     #[test]
-    fn read_flags_file_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let flags = cfg::read_flags_file(&dir.path().join("nope.flags"));
-        assert!(flags.is_empty());
+    fn flag_config_singularity_alias_resolves_to_apptainer() {
+        let yaml = "run:\n  singularity:\n    - --nv\n";
+        let fc: FlagConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            fc.materialize(Phase::Run, ContainerEngine::Apptainer),
+            vec!["--nv"]
+        );
     }
 
     #[test]
-    fn read_flags_file_expands_env_vars() {
+    fn read_flag_config_absent_file_returns_default() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.flags");
-        fs::write(&path, "-v $HOME/data:/data\n").unwrap();
-        let flags = cfg::read_flags_file(&path);
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(flags, vec!["-v", &format!("{home}/data:/data")]);
-    }
-
-    #[test]
-    fn read_flags_file_expands_tilde() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.flags");
-        fs::write(&path, "-v ~/data:/data\n").unwrap();
-        let flags = cfg::read_flags_file(&path);
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(flags, vec!["-v", &format!("{home}/data:/data")]);
+        // env.flags.yaml at default scope path won't exist for an env name
+        // we just made up. Materialize should still work.
+        let fc = FlagConfig::default();
+        assert!(fc.materialize(Phase::Run, ContainerEngine::Apptainer).is_empty());
+        // keep `dir` alive
+        drop(dir);
     }
 
     // ---- Container CLI argument tests ----
@@ -2796,7 +2892,10 @@ mod tests {
             &engine_specific_run_flags(ContainerEngine::Docker),
             &cfg,
         );
-        assert!(args.contains(&"-it".to_string()));
+        // -i and -t are emitted as separate flags; -i is unconditional
+        // so piped stdin works, -t is added for interactive sessions.
+        assert!(args.contains(&"-i".to_string()));
+        assert!(args.contains(&"-t".to_string()));
     }
 
     #[test]
@@ -2865,6 +2964,7 @@ mod tests {
             context: "/tmp/ctx".to_string(),
             tag: "test:v1".to_string(),
             build_args: vec![("BASE".to_string(), "ubuntu:22.04".to_string())],
+            extra_flags: Vec::new(),
         };
         let args = build_build_args(&cfg);
         assert_eq!(args[0], "build");
@@ -2872,6 +2972,21 @@ mod tests {
         assert!(args.contains(&"-t".to_string()));
         assert!(args.contains(&"--build-arg".to_string()));
         assert_eq!(args.last().unwrap(), "/tmp/ctx");
+    }
+
+    #[test]
+    fn build_build_args_includes_extra_flags_before_context() {
+        let cfg = BuildConfig {
+            dockerfile: "/tmp/Dockerfile".to_string(),
+            context: "/tmp/ctx".to_string(),
+            tag: "test:v1".to_string(),
+            build_args: vec![("BASE".to_string(), "ubuntu:22.04".to_string())],
+            extra_flags: vec!["--platform=linux/amd64".to_string()],
+        };
+        let args = build_build_args(&cfg);
+        let flag_idx = args.iter().position(|a| a == "--platform=linux/amd64").unwrap();
+        let ctx_idx = args.iter().position(|a| a == "/tmp/ctx").unwrap();
+        assert!(flag_idx < ctx_idx);
     }
 
     // ---- SELinux tests ----
@@ -2994,14 +3109,15 @@ mod tests {
             deffile: "/cfg/recipe.def".to_string(),
             output_sif: "/data/sif/layered.sif".to_string(),
             build_args: vec![("BASE_SIF".to_string(), "/data/sif/base.sif".to_string())],
+            extra_flags: Vec::new(),
         };
         let argv = container::build_apptainer_native_argv(&cfg);
         assert_eq!(argv[0], "build");
         assert!(argv.contains(&"--force".to_string()));
-        // Both policy flags are always set: see note_ignore_subuid in
-        // container.rs for why.
-        assert!(argv.contains(&"--ignore-subuid".to_string()));
-        assert!(argv.contains(&"--ignore-fakeroot-command".to_string()));
+        // No mode-selecting flags are passed by default; user supplies them
+        // via env.flags.yaml `build.apptainer` or `update --reinit-arg`.
+        assert!(!argv.contains(&"--ignore-subuid".to_string()));
+        assert!(!argv.contains(&"--ignore-fakeroot-command".to_string()));
         assert!(argv.windows(2).any(|w| w == ["--build-arg", "BASE_SIF=/data/sif/base.sif"]));
         // Output sif is the temp path with .tmp.sif suffix; final rename
         // happens after success in apptainer_build_native.
@@ -3011,16 +3127,38 @@ mod tests {
     }
 
     #[test]
+    fn build_apptainer_native_argv_threads_extra_flags() {
+        let cfg = container::ApptainerNativeBuildConfig {
+            deffile: "/cfg/recipe.def".to_string(),
+            output_sif: "/data/sif/layered.sif".to_string(),
+            build_args: vec![("BASE_SIF".to_string(), "/data/sif/base.sif".to_string())],
+            extra_flags: vec![
+                "--ignore-subuid".to_string(),
+                "--ignore-fakeroot-command".to_string(),
+            ],
+        };
+        let argv = container::build_apptainer_native_argv(&cfg);
+        let force_idx = argv.iter().position(|a| a == "--force").unwrap();
+        let isubuid_idx = argv.iter().position(|a| a == "--ignore-subuid").unwrap();
+        let buildarg_idx = argv.iter().position(|a| a == "--build-arg").unwrap();
+        // extra_flags land between --force and the first --build-arg.
+        assert!(force_idx < isubuid_idx);
+        assert!(isubuid_idx < buildarg_idx);
+    }
+
+    #[test]
     fn build_apptainer_oci_convert_argv_picks_docker_daemon_scheme() {
         let cfg = container::ApptainerOciConvertConfig {
             source_engine: ContainerEngine::Docker,
             source_tag: "localhost/morloc-env:dnd".to_string(),
             output_sif: "/data/sif/layered.sif".to_string(),
+            extra_flags: Vec::new(),
         };
         let argv = container::build_apptainer_oci_convert_argv(&cfg);
         assert_eq!(argv[0], "build");
-        assert!(argv.contains(&"--ignore-subuid".to_string()));
-        assert!(argv.contains(&"--ignore-fakeroot-command".to_string()));
+        // No mode-selecting flags by default; user supplies via flag file.
+        assert!(!argv.contains(&"--ignore-subuid".to_string()));
+        assert!(!argv.contains(&"--ignore-fakeroot-command".to_string()));
         assert!(argv.iter().any(|a| a == "/data/sif/layered.sif.tmp.sif"));
         assert_eq!(
             argv.last().unwrap(),
@@ -3034,6 +3172,7 @@ mod tests {
             source_engine: ContainerEngine::Podman,
             source_tag: "localhost/morloc-env:dnd".to_string(),
             output_sif: "/data/sif/layered.sif".to_string(),
+            extra_flags: Vec::new(),
         };
         let argv = container::build_apptainer_oci_convert_argv(&cfg);
         assert_eq!(

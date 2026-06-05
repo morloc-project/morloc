@@ -173,6 +173,9 @@ pub fn build_serve_image(
         context: context_dir.to_string_lossy().to_string(),
         tag: tag.to_string(),
         build_args: Vec::new(),
+        // Serve-image builds are short-lived bootstrap recipes generated
+        // by morloc-manager itself; no user-supplied build flags apply.
+        extra_flags: Vec::new(),
     };
     if verbose {
         let exe = engine_executable(engine);
@@ -791,6 +794,9 @@ fn rebuild_env_image(
         context: build_dir.to_string(),
         tag: env_tag.clone(),
         build_args: vec![("CONTAINER_BASE".to_string(), effective_base.to_string())],
+        // Deployment-image rebuild during unfreeze is morloc-manager's own
+        // bootstrap step; no user flag-file applies here.
+        extra_flags: Vec::new(),
     };
     let (status, _, build_err) = container_build(engine, &build_cfg);
     if status.success() {

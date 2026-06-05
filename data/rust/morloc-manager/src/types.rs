@@ -263,6 +263,87 @@ impl EnvironmentConfig {
 }
 
 // ======================================================================
+// Container flag configuration
+// ======================================================================
+
+/// Phase of container invocation a flag list applies to. Names match the
+/// CLI subcommand that triggers the phase, so users can grep the same
+/// word in their notes and find both the section in env.flags.yaml and
+/// the subcommand that consumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Build,
+    Run,
+    Start,
+}
+
+/// Per-engine flag lists for a single phase. The `all` slot applies to
+/// every engine; engine-specific slots apply only to that engine. At
+/// materialize time the active engine's list is appended to `all`,
+/// in that order. `deny_unknown_fields` catches typos like `aptainer`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EngineFlags {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub all: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docker: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub podman: Vec<String>,
+    #[serde(default, alias = "singularity", skip_serializing_if = "Vec::is_empty")]
+    pub apptainer: Vec<String>,
+}
+
+impl EngineFlags {
+    pub fn for_engine(&self, engine: ContainerEngine) -> Vec<String> {
+        let engine_slice = match engine {
+            ContainerEngine::Docker => &self.docker,
+            ContainerEngine::Podman => &self.podman,
+            ContainerEngine::Apptainer => &self.apptainer,
+        };
+        let mut out = self.all.clone();
+        out.extend(engine_slice.iter().cloned());
+        out
+    }
+}
+
+fn is_empty_engine_flags(ef: &EngineFlags) -> bool {
+    ef.all.is_empty()
+        && ef.docker.is_empty()
+        && ef.podman.is_empty()
+        && ef.apptainer.is_empty()
+}
+
+/// The full env.flags.yaml schema. All sections optional; missing or
+/// empty sections materialize to empty lists. Strict schema: unknown
+/// top-level keys are a parse error so a typo like `runn:` is caught
+/// instead of silently ignored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FlagConfig {
+    #[serde(default, skip_serializing_if = "is_empty_engine_flags")]
+    pub build: EngineFlags,
+    #[serde(default, skip_serializing_if = "is_empty_engine_flags")]
+    pub run: EngineFlags,
+    #[serde(default, skip_serializing_if = "is_empty_engine_flags")]
+    pub start: EngineFlags,
+}
+
+impl FlagConfig {
+    /// Returns the materialized flag list for a (phase, engine) pair:
+    /// `phase.all ++ phase.engine`. Pure operation; CLI one-shot
+    /// overrides are appended by the caller, not here.
+    pub fn materialize(&self, phase: Phase, engine: ContainerEngine) -> Vec<String> {
+        let section = match phase {
+            Phase::Build => &self.build,
+            Phase::Run => &self.run,
+            Phase::Start => &self.start,
+        };
+        section.for_engine(engine)
+    }
+}
+
+// ======================================================================
 // Freeze manifest
 // ======================================================================
 

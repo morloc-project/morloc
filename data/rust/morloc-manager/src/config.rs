@@ -59,8 +59,9 @@ pub fn env_deffile_path(scope: Scope, name: &str) -> PathBuf {
     env_config_dir(scope, name).join("recipe.def")
 }
 
-pub fn env_flags_path(scope: Scope, name: &str) -> PathBuf {
-    env_config_dir(scope, name).join("env.flags")
+/// Path to the YAML-format container flag config file (canonical).
+pub fn env_flags_yaml_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("env.flags.yaml")
 }
 
 pub fn env_data_dir(scope: Scope, name: &str) -> PathBuf {
@@ -247,24 +248,48 @@ pub fn list_env_names(scope: Scope) -> Vec<String> {
 
 
 // ======================================================================
-// Flags files
+// Flag configuration (env.flags.yaml)
 // ======================================================================
 
-pub fn read_flags_file(path: &Path) -> Vec<String> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    contents
-        .lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .flat_map(shell_expand_line)
-        .collect()
+/// Read an env's container flag configuration from `env.flags.yaml`.
+/// Strict schema: unknown sections or engine names are parse errors.
+/// Absent file -> `FlagConfig::default()` (all empty).
+pub fn read_flag_config(scope: Scope, name: &str) -> Result<FlagConfig> {
+    let yaml_path = env_flags_yaml_path(scope, name);
+    if !yaml_path.is_file() {
+        return Ok(FlagConfig::default());
+    }
+    let mut cfg: FlagConfig = read_yaml_config(&yaml_path)?;
+    expand_flag_config(&mut cfg);
+    Ok(cfg)
 }
 
-/// Expand a single flagfile line through the shell, getting glob expansion,
-/// environment variable expansion, tilde expansion, and quote handling.
-/// Falls back to simple whitespace splitting if the shell invocation fails.
+/// Write an env's flag configuration to env.flags.yaml. Used by
+/// `--flagfile` on `new`/`update`.
+pub fn write_flag_config(scope: Scope, name: &str, cfg: &FlagConfig) -> Result<()> {
+    write_yaml_config(&env_flags_yaml_path(scope, name), cfg)
+}
+
+fn expand_flag_config(cfg: &mut FlagConfig) {
+    expand_engine_flags(&mut cfg.build);
+    expand_engine_flags(&mut cfg.run);
+    expand_engine_flags(&mut cfg.start);
+}
+
+fn expand_engine_flags(ef: &mut EngineFlags) {
+    ef.all = expand_list(&ef.all);
+    ef.docker = expand_list(&ef.docker);
+    ef.podman = expand_list(&ef.podman);
+    ef.apptainer = expand_list(&ef.apptainer);
+}
+
+fn expand_list(items: &[String]) -> Vec<String> {
+    items.iter().flat_map(|s| shell_expand_line(s)).collect()
+}
+
+/// Expand a string through the shell, getting glob expansion, environment
+/// variable expansion, tilde expansion, and quote handling. Falls back
+/// to simple whitespace splitting if the shell invocation fails.
 fn shell_expand_line(line: &str) -> Vec<String> {
     let output = StdCommand::new("sh")
         .args(["-c", &format!("printf '%s\\0' {}", line)])
@@ -285,19 +310,6 @@ fn shell_expand_line(line: &str) -> Vec<String> {
         }
         _ => line.split_whitespace().map(|s| s.to_string()).collect(),
     }
-}
-
-/// Read flags file preserving one line per entry (for display).
-pub fn read_flags_file_lines(path: &Path) -> Vec<String> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    contents
-        .lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|s| s.to_string())
-        .collect()
 }
 
 // ======================================================================

@@ -38,8 +38,17 @@ pub struct ApplyOptions {
     /// takes precedence; on docker/podman the Dockerfile takes precedence.
     pub deffile: Option<String>,
     pub includes: Vec<String>,
+    /// Path to a user-supplied YAML flag file. When set, its contents replace
+    /// env.flags.yaml in the env config dir (declarative bulk write).
     pub flagfile: Option<String>,
+    /// `-x/--engine-arg` flags on `new`. Written to `run.<engine>` of the
+    /// freshly created env.flags.yaml as the user's initial configuration.
+    /// Unused on `update` (where `-x` has been removed).
     pub engine_args: Vec<String>,
+    /// `--reinit-arg` flags on `update`. One-shot build-engine flags
+    /// appended to the materialized build flag list for this invocation.
+    /// Never persisted. Requires `--reinit`; CLI layer enforces that.
+    pub reinit_args: Vec<String>,
     pub engine: Option<ContainerEngine>,
     pub shm_size: Option<String>,
     /// Skip the recipe-build step (Dockerfile under docker/podman, .def under
@@ -580,39 +589,30 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         }
     }
 
-    // Write flags file: for new envs or when flagfile is provided, write fresh.
-    // For updates with only engine_args, append to existing.
-    let flags_path = config::env_flags_path(scope, name);
-    if opts.is_new || opts.flagfile.is_some() {
-        let mut flag_lines: Vec<String> = Vec::new();
-        if let Some(ref src) = opts.flagfile {
-            let content = fs::read_to_string(src).map_err(|e| {
-                ManagerError::EnvError(format!("Failed to read flagfile '{}': {e}", src))
-            })?;
-            flag_lines.extend(
-                content
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty() && !l.starts_with('#')),
-            );
-        }
-        flag_lines.extend(opts.engine_args.iter().cloned());
-        let flags_content = if flag_lines.is_empty() {
-            String::new()
-        } else {
-            flag_lines.join("\n") + "\n"
+    // Flag-config write policy:
+    //   * --flagfile: parse the user file as a FlagConfig (strict schema),
+    //     replace env.flags.yaml. Works on both `new` and `update`.
+    //   * is_new + engine_args: seed env.flags.yaml with run.<engine> set
+    //     to engine_args. This is the only path where `-x` writes to the
+    //     file; on `update` `-x` no longer exists.
+    //   * Otherwise: do not touch env.flags.yaml. Users edit it themselves.
+    if let Some(ref src) = opts.flagfile {
+        let bytes = fs::read(src).map_err(|e| {
+            ManagerError::EnvError(format!("Failed to read flagfile '{}': {e}", src))
+        })?;
+        let parsed: FlagConfig = serde_yaml::from_slice(&bytes).map_err(|e| {
+            ManagerError::EnvError(format!("Invalid flagfile '{}': {e}", src))
+        })?;
+        config::write_flag_config(scope, name, &parsed)?;
+    } else if opts.is_new && !opts.engine_args.is_empty() {
+        let mut fc = FlagConfig::default();
+        let target = match ec.engine {
+            ContainerEngine::Docker => &mut fc.run.docker,
+            ContainerEngine::Podman => &mut fc.run.podman,
+            ContainerEngine::Apptainer => &mut fc.run.apptainer,
         };
-        fs::write(&flags_path, &flags_content).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to write flags file: {e}"))
-        })?;
-    } else if !opts.engine_args.is_empty() {
-        // Append engine_args to existing flags file
-        let mut existing = config::read_flags_file_lines(&flags_path);
-        existing.extend(opts.engine_args.iter().cloned());
-        let flags_content = existing.join("\n") + "\n";
-        fs::write(&flags_path, &flags_content).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to write flags file: {e}"))
-        })?;
+        target.extend(opts.engine_args.iter().cloned());
+        config::write_flag_config(scope, name, &fc)?;
     }
 
     // Build the recipe layer if present and not skipped. The dispatch matrix
@@ -685,6 +685,13 @@ fn run_recipe_build(
     let df_path = config::env_dockerfile_path(scope, name);
     let def_path = config::env_deffile_path(scope, name);
 
+    // Materialize build-phase flags: env.flags.yaml `build.<engine>` prepended
+    // to `build.all`, then this invocation's --reinit-arg flags appended.
+    // The engine resolves duplicates last-wins.
+    let mut build_extra_flags = config::read_flag_config(scope, name)?
+        .materialize(Phase::Build, ec.engine);
+    build_extra_flags.extend(opts.reinit_args.iter().cloned());
+
     match ec.engine {
         ContainerEngine::Docker | ContainerEngine::Podman => {
             if ec.dockerfile.is_none() {
@@ -719,12 +726,14 @@ fn run_recipe_build(
                 context: cfg_dir.to_string_lossy().to_string(),
                 tag: tag.clone(),
                 build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
+                extra_flags: build_extra_flags.clone(),
             };
             if opts.verbose {
                 let exe = engine_executable(ec.engine);
                 eprintln!(
-                    "[morloc-manager] {exe} build -f {} -t {} {}",
-                    build_cfg.dockerfile, build_cfg.tag, build_cfg.context
+                    "[morloc-manager] {exe} build -f {} -t {} {} {}",
+                    build_cfg.dockerfile, build_cfg.tag,
+                    build_extra_flags.join(" "), build_cfg.context
                 );
             }
             let status = container_build_visible(ec.engine, &build_cfg);
@@ -765,11 +774,13 @@ fn run_recipe_build(
                     deffile: def_path.to_string_lossy().to_string(),
                     output_sif: out_sif.to_string_lossy().to_string(),
                     build_args: vec![("BASE_SIF".to_string(), base_sif.to_string())],
+                    extra_flags: build_extra_flags.clone(),
                 };
                 if opts.verbose {
                     let exe = engine_executable(ec.engine);
                     eprintln!(
-                        "[morloc-manager] {exe} build --build-arg BASE_SIF={} {} {}",
+                        "[morloc-manager] {exe} build {} --build-arg BASE_SIF={} {} {}",
+                        build_extra_flags.join(" "),
                         base_sif,
                         out_sif.display(),
                         def_path.display()
@@ -814,11 +825,16 @@ fn run_recipe_build(
                 return Ok(());
             }
             let oci_tag = format!("localhost/morloc-env:{name}");
+            // The OCI build helper step gets no user build-flags. Those are
+            // intended for `apptainer build`, not the upstream `docker
+            // build` that produces the source image. Forwarding them
+            // would risk mixing flag dialects.
             let build_cfg = BuildConfig {
                 dockerfile: df_path.to_string_lossy().to_string(),
                 context: cfg_dir.to_string_lossy().to_string(),
                 tag: oci_tag.clone(),
                 build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
+                extra_flags: Vec::new(),
             };
             if opts.verbose {
                 let oci_exe = engine_executable(oci_engine);
@@ -839,6 +855,7 @@ fn run_recipe_build(
                 source_engine: oci_engine,
                 source_tag: oci_tag.clone(),
                 output_sif: out_sif.to_string_lossy().to_string(),
+                extra_flags: build_extra_flags.clone(),
             };
             let convert_status = apptainer_build_from_oci_daemon(&convert_cfg);
             if !convert_status.success() {

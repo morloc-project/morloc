@@ -53,6 +53,10 @@ pub struct BuildConfig {
     pub context: String,
     pub tag: String,
     pub build_args: Vec<(String, String)>,
+    /// User-supplied build-engine flags (from env.flags.yaml `build` section
+    /// plus any one-shot CLI overrides). Forwarded verbatim into the build
+    /// argv after `--build-arg` pairs, before the context.
+    pub extra_flags: Vec<String>,
 }
 
 /// Configuration for an Apptainer native build from a Singularity .def file.
@@ -67,6 +71,11 @@ pub struct ApptainerNativeBuildConfig {
     pub output_sif: String,
     /// `--build-arg` pairs forwarded to `apptainer build`.
     pub build_args: Vec<(String, String)>,
+    /// User-supplied build flags (from env.flags.yaml `build.apptainer` plus
+    /// any one-shot CLI overrides). Inserted into the argv between
+    /// `--force` and the build-args, so they apply to mode-selection
+    /// flags like `--ignore-subuid` / `--fakeroot`.
+    pub extra_flags: Vec<String>,
 }
 
 /// Configuration for converting an existing OCI image (in the local
@@ -81,6 +90,9 @@ pub struct ApptainerOciConvertConfig {
     pub source_tag: String,
     /// Output .sif path.
     pub output_sif: String,
+    /// User-supplied build flags forwarded to `apptainer build` during the
+    /// OCI-to-SIF conversion step.
+    pub extra_flags: Vec<String>,
 }
 
 // ======================================================================
@@ -671,6 +683,7 @@ pub fn build_build_args(cfg: &BuildConfig) -> Vec<String> {
         args.push("--build-arg".to_string());
         args.push(format!("{key}={val}"));
     }
+    args.extend(cfg.extra_flags.iter().cloned());
     args.push(cfg.context.clone());
     args
 }
@@ -685,7 +698,6 @@ pub fn build_build_args(cfg: &BuildConfig) -> Vec<String> {
 /// never leaves a corrupt .sif behind.
 pub fn apptainer_build_native(cfg: &ApptainerNativeBuildConfig) -> ExitStatus {
     let exe = engine_executable(ContainerEngine::Apptainer);
-    note_ignore_subuid();
     let argv = build_apptainer_native_argv(cfg);
 
     let status = run_process_to_stderr(exe, &argv);
@@ -700,7 +712,6 @@ pub fn apptainer_build_native(cfg: &ApptainerNativeBuildConfig) -> ExitStatus {
 /// when the user has only a Dockerfile recipe. Atomic write as above.
 pub fn apptainer_build_from_oci_daemon(cfg: &ApptainerOciConvertConfig) -> ExitStatus {
     let exe = engine_executable(ContainerEngine::Apptainer);
-    note_ignore_subuid();
     let argv = build_apptainer_oci_convert_argv(cfg);
 
     let status = run_process_to_stderr(exe, &argv);
@@ -710,51 +721,21 @@ pub fn apptainer_build_from_oci_daemon(cfg: &ApptainerOciConvertConfig) -> ExitS
     status
 }
 
-/// Announce -- once per build, before invoking apptainer -- that we are
-/// passing the user-namespace-only build flags. This is a build-policy
-/// choice the user should see; the message also gives users an obvious
-/// string to grep for if they want to revisit the policy.
-fn note_ignore_subuid() {
-    eprintln!(
-        "[morloc-manager] INFO: passing --ignore-subuid and --ignore-fakeroot-command\n  \
-         to `apptainer build`. Together these select Apptainer's unprivileged\n  \
-         user-namespace build mode:\n  \
-           * --ignore-subuid skips the /etc/subuid-driven fakeroot path that\n  \
-             FATAL-errors when unprivileged user namespaces are unavailable.\n  \
-           * --ignore-fakeroot-command skips Apptainer's bundled fakeroot\n  \
-             LD_PRELOAD wrapper, which can fail with a libc/library mismatch\n  \
-             inside the target image, and instead runs %post as namespace-\n  \
-             mapped root.\n  \
-         Both flags are no-ops under `sudo apptainer build`. To override, edit\n  \
-         build_apptainer_*_argv in data/rust/morloc-manager/src/container.rs."
-    );
-}
-
 /// Pure-function argv builder for the native .def path. Kept separate so
 /// tests can assert on the exact argv without spawning Apptainer.
 ///
-/// Two policy flags are always passed:
-///
-/// * `--ignore-subuid`: Apptainer otherwise prefers fakeroot mode when
-///   /etc/subuid is mapped, and FATAL-errors if unprivileged user
-///   namespaces are not available.
-/// * `--ignore-fakeroot-command`: With subuid ignored, Apptainer falls
-///   through to "root-mapped namespace" mode and by default tries to run
-///   %post under its bundled `fakeroot` LD_PRELOAD wrapper. That wrapper
-///   is dynamically linked and fails if the target image's libc differs
-///   from the host's. Ignoring it makes %post run as namespace-mapped
-///   root, which is what we actually want for `Bootstrap: localimage`
-///   plus `apt-get install`-style recipes.
-///
-/// The two flags together select Apptainer's modern user-namespace-only
-/// build mode. They are no-ops when the build is run as real root (sudo).
+/// No mode-selecting flags (`--fakeroot`, `--ignore-subuid`,
+/// `--ignore-fakeroot-command`) are passed by default. Apptainer's own
+/// defaults apply; on hosts where those defaults fail, the user supplies
+/// the needed flags via `env.flags.yaml` (`build.apptainer: [...]`) or
+/// the one-shot `update --reinit --reinit-arg ...`. This keeps
+/// build-policy choices in the user's hands and out of the tool.
 pub fn build_apptainer_native_argv(cfg: &ApptainerNativeBuildConfig) -> Vec<String> {
     let mut argv = vec![
         "build".to_string(),
         "--force".to_string(),
-        "--ignore-subuid".to_string(),
-        "--ignore-fakeroot-command".to_string(),
     ];
+    argv.extend(cfg.extra_flags.iter().cloned());
     for (key, val) in &cfg.build_args {
         argv.push("--build-arg".to_string());
         argv.push(format!("{key}={val}"));
@@ -772,14 +753,14 @@ pub fn build_apptainer_oci_convert_argv(cfg: &ApptainerOciConvertConfig) -> Vec<
         // Apptainer cannot be the source of an OCI image; reject by code.
         ContainerEngine::Apptainer => "docker-daemon",
     };
-    vec![
+    let mut argv = vec![
         "build".to_string(),
         "--force".to_string(),
-        "--ignore-subuid".to_string(),
-        "--ignore-fakeroot-command".to_string(),
-        tmp_sif_path(&cfg.output_sif),
-        format!("{scheme}://{}", cfg.source_tag),
-    ]
+    ];
+    argv.extend(cfg.extra_flags.iter().cloned());
+    argv.push(tmp_sif_path(&cfg.output_sif));
+    argv.push(format!("{scheme}://{}", cfg.source_tag));
+    argv
 }
 
 fn tmp_sif_path(final_path: &str) -> String {
