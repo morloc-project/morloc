@@ -60,6 +60,33 @@ pub fn is_shutting_down() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Acquire)
 }
 
+// ── C-ABI wrappers for cross-library access ────────────────────────────────
+//
+// The nexus calls these via `extern "C"` declarations that resolve at
+// load time against libmorloc.so (DT_NEEDED). The Rust-side fns
+// (is_shutting_down/begin_recovery/end_recovery) cannot be used from
+// the nexus because the nexus no longer links morloc-runtime as an
+// rlib -- and even when it did, linking the rlib gave the nexus its
+// own disjoint copy of RECOVERY_IN_PROGRESS / SHUTDOWN_REQUESTED,
+// silently breaking recovery coordination with libmorloc.so's daemon
+// loop. Going through the C ABI ensures both ends touch the same
+// atomics.
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_daemon_is_shutting_down() -> bool {
+    is_shutting_down()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_daemon_begin_recovery() -> bool {
+    begin_recovery()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_daemon_end_recovery() {
+    end_recovery()
+}
+
 // SAFETY: These globals are set once during daemon_run initialization (single-threaded)
 // and only read afterwards. The daemon is single-threaded for request dispatch.
 static mut G_POOL_ALIVE_FN: Option<unsafe extern "C" fn(usize) -> bool> = None;
@@ -68,14 +95,9 @@ static mut G_BINDING_STORE: *mut BindingStore = ptr::null_mut();
 
 // -- C-compatible types -------------------------------------------------------
 
-/// Matches morloc_socket_t from call.h
-#[repr(C)]
-pub struct MorlocSocket {
-    pub lang: *mut c_char,
-    pub syscmd: *mut *mut c_char,
-    pub socket_filename: *mut c_char,
-    pub pid: i32,
-}
+// Re-export MorlocSocket from the types crate so nexus and libmorloc.so
+// share the canonical layout without redefining it on either side.
+pub use morloc_runtime_types::daemon_socket::MorlocSocket;
 
 /// Matches daemon_config_t from daemon.h.
 ///

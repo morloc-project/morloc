@@ -469,8 +469,8 @@ struct TypeLayout<'a> {
 
 /// Pretty-render a parsed `Schema` as a morloc-flavored type string,
 /// suitable for the field-type column in the schemas block.
-fn render_schema_type(s: &morloc_runtime::schema::Schema) -> String {
-    use morloc_runtime::schema::SerialType::*;
+fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
+    use morloc_runtime_types::schema::SerialType::*;
     match s.serial_type {
         Nil => "()".into(),
         Bool => "Bool".into(),
@@ -552,11 +552,11 @@ fn extract_named_layout<'a>(
     schema_str: Option<&str>,
     kind: Option<&'a str>,
 ) -> Option<TypeLayout<'a>> {
-    use morloc_runtime::schema::SerialType;
+    use morloc_runtime_types::schema::SerialType;
     let name = type_name?;
     let schema = schema_str?;
     let kind = kind?;
-    let parsed = morloc_runtime::schema::parse_schema(schema).ok()?;
+    let parsed = morloc_runtime_types::schema::parse_schema(schema).ok()?;
     if parsed.serial_type != SerialType::Map {
         return None;
     }

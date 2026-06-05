@@ -81,9 +81,9 @@ fn main() {
     // Env vars are inherited by every pool process the nexus later
     // execvp's, and libmorloc reads them once on first packet operation
     // (via packet::ensure_config_loaded). Setting both before the
-    // dlopen-and-shinit block below guarantees the nexus's own libmorloc
-    // instance sees them too (its first read of the atomics will trip
-    // the Once and pull these values in).
+    // shinit call below guarantees the nexus's own libmorloc.so sees
+    // them too (its first read of the atomics will trip the Once and
+    // pull these values in).
     if let Some(n) = manifest.inline_size {
         std::env::set_var("MORLOC_INLINE_SIZE", n.to_string());
     }
@@ -144,45 +144,29 @@ fn main() {
     // orphans without reading the SHM headers.
     let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
 
-    // Initialize shared memory via libmorloc.so using dlsym.
-    // CRITICAL: We must use dlsym to call the CDYLIB's shinit, not the rlib's.
-    // The rlib and cdylib have separate static globals (VOLUMES, ALLOC_MUTEX, etc.).
-    // All SHM operations in pool-facing C code go through the cdylib's globals.
-    // If we call the rlib's shinit, the cdylib's globals stay uninitialized.
+    // Initialize shared memory. The nexus no longer statically links
+    // morloc-runtime as an rlib, so these `extern "C"` symbols resolve
+    // at load time via DT_NEEDED against the single process-shared
+    // copy in libmorloc.so. The dlsym workaround that used to live
+    // here is gone -- it existed only to bypass symbol shadowing by
+    // the rlib's static copy of shinit, which is now absent.
     {
-        let _lib = unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_NOW) };
-        // RTLD_DEFAULT (NULL handle) searches in order: executable, then loaded libs
-        // But the rlib symbols come first. Use RTLD_NEXT-style lookup via the .so path.
-        let lib_path = std::ffi::CString::new(
-            format!("{}/lib/libmorloc.so", morloc_home())
-        ).unwrap();
-        let lib = unsafe { libc::dlopen(lib_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-        if lib.is_null() {
-            let err = unsafe { libc::dlerror() };
-            let err_msg = if err.is_null() {
-                "unknown error".to_string()
-            } else {
-                unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned()
-            };
-            eprintln!("Error: failed to load libmorloc.so: {}", err_msg);
-            process::clean_exit(1);
+        extern "C" {
+            fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
+            fn shinit(
+                shm_basename: *const std::ffi::c_char,
+                volume_index: usize,
+                shm_size: usize,
+                errmsg: *mut *mut std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
         }
-
-        type ShmSetFallbackFn = unsafe extern "C" fn(*const std::ffi::c_char);
-        type ShinitFn = unsafe extern "C" fn(*const std::ffi::c_char, usize, usize, *mut *mut std::ffi::c_char) -> *mut std::ffi::c_void;
-
-        let set_fb_sym = std::ffi::CString::new("shm_set_fallback_dir").unwrap();
-        let shinit_sym = std::ffi::CString::new("shinit").unwrap();
-
-        let set_fb: ShmSetFallbackFn = unsafe { std::mem::transmute(libc::dlsym(lib, set_fb_sym.as_ptr())) };
-        let do_shinit: ShinitFn = unsafe { std::mem::transmute(libc::dlsym(lib, shinit_sym.as_ptr())) };
 
         let tmpdir_c = std::ffi::CString::new(tmpdir.as_str()).unwrap();
         let basename_c = std::ffi::CString::new(shm_basename.as_str()).unwrap();
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
         unsafe {
-            set_fb(tmpdir_c.as_ptr());
-            let shm = do_shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
+            shm_set_fallback_dir(tmpdir_c.as_ptr());
+            let shm = shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
             if shm.is_null() {
                 let msg = if !errmsg.is_null() {
                     let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
@@ -195,7 +179,6 @@ fn main() {
                 process::clean_exit(1);
             }
         }
-        unsafe { libc::dlclose(lib) };
     }
 
     // Become subreaper for orphaned grandchildren
@@ -522,20 +505,20 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         ) -> *mut c_char;
         fn parse_schema(
             schema_str: *const c_char, errmsg: *mut *mut c_char,
-        ) -> *mut morloc_runtime::cschema::CSchema;
+        ) -> *mut morloc_runtime_types::cschema::CSchema;
         fn get_morloc_data_packet_value(
-            data: *const u8, schema: *const morloc_runtime::cschema::CSchema,
+            data: *const u8, schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut c_char,
         ) -> *mut u8;
         fn pack_with_schema(
-            mlc: *const c_void, schema: *const morloc_runtime::cschema::CSchema,
+            mlc: *const c_void, schema: *const morloc_runtime_types::cschema::CSchema,
             mpkptr: *mut *mut c_char, mpk_size: *mut usize, errmsg: *mut *mut c_char,
         ) -> i32;
         fn write_atomic(
             filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char,
         ) -> i32;
         fn print_morloc_data_packet(
-            packet: *const u8, schema: *const morloc_runtime::cschema::CSchema,
+            packet: *const u8, schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut c_char,
         ) -> i32;
     }

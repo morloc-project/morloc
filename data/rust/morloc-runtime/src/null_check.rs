@@ -1,23 +1,23 @@
 //! NUL-in-Str guard for cross-pool dispatch.
 //!
-//! Recursively walks a schema-typed value laid out in shared memory and
-//! reports the first String slot that contains an interior NUL byte. The
-//! dispatch path uses this to reject NUL-bearing Strs at the boundary
-//! into languages whose lang.yaml sets `allow_string_null = false`
-//! (currently R and C), rather than letting the NUL propagate into
-//! user-language code where it would crash inside something like
-//! base R's `nchar` with a confusing diagnostic.
+//! This module re-exports the stateless half (`env_skip_null_check` and
+//! `first_null_in_json`) from `morloc-runtime-types::null_check` and adds
+//! the SHM-walking variant (`first_null_in_strings`) here because it
+//! calls `shm::rel2abs`, which reads the process-global `VOLUMES` of
+//! this crate's `shm` module.
+//!
+//! The dispatch path uses these checks to reject NUL-bearing Strs at
+//! the boundary into languages whose lang.yaml sets
+//! `allow_string_null = false` (currently R and C), rather than letting
+//! the NUL propagate into user-language code where it would crash
+//! inside something like base R's `nchar` with a confusing diagnostic.
 //!
 //! The check is opt-out at runtime via the `MORLOC_SKIP_NULL_CHECK=1`
 //! environment variable or per-program via the manifest's
 //! `unsafe_skip_null_check` flag (set by `morloc make
 //! --unsafe-skip-null-check`).
-//!
-//! Note: this module does not pull in the schema or shm types directly
-//! in its function signatures because both live in sibling modules and
-//! we want a minimal dependency surface. The walker borrows `&Schema`
-//! and an `AbsPtr` to the value's voidstar slot, both already-public
-//! aliases for `*mut u8` plus the public Schema struct.
+
+pub use morloc_runtime_types::null_check::*;
 
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array};
@@ -140,71 +140,6 @@ unsafe fn check_string(ptr: AbsPtr, path: &mut String) -> Option<String> {
     }
 }
 
-/// Cheap env-var probe used by dispatch sites. Reads MORLOC_SKIP_NULL_CHECK
-/// once per call; not cached because the flag is meant for ad-hoc benchmarks
-/// and we'd rather respect a mid-run unset than win a few nanoseconds.
-pub fn env_skip_null_check() -> bool {
-    matches!(
-        std::env::var("MORLOC_SKIP_NULL_CHECK").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
-    )
-}
-
-/// Walk a JSON value looking for the first String leaf containing an
-/// interior NUL byte. Returns a debug path on hit (e.g. "args[2].foo[3]"
-/// when prefixed with an "args[N]" segment by the caller). The check
-/// happens before the value is dispatched to a pool, so finding a NUL
-/// here lets the runtime fail with a clear morloc-level error rather
-/// than letting the byte propagate into the target language.
-///
-/// JSON itself decodes `` to a Rust `String` containing a NUL,
-/// which is why this walk works without any SHM access.
-pub fn first_null_in_json(value: &serde_json::Value) -> Option<String> {
-    let mut path = String::new();
-    walk_json(value, &mut path)
-}
-
-fn walk_json(value: &serde_json::Value, path: &mut String) -> Option<String> {
-    match value {
-        serde_json::Value::String(s) => {
-            // Quick reject: most strings have no NUL.
-            if !s.as_bytes().contains(&0) {
-                return None;
-            }
-            let offset = s.as_bytes().iter().position(|&b| b == 0)?;
-            Some(format!("{} (byte {} of {})", path, offset, s.len()))
-        }
-        serde_json::Value::Array(arr) => {
-            for (i, v) in arr.iter().enumerate() {
-                let saved_len = path.len();
-                path.push('[');
-                path.push_str(&i.to_string());
-                path.push(']');
-                let r = walk_json(v, path);
-                if r.is_some() {
-                    return r;
-                }
-                path.truncate(saved_len);
-            }
-            None
-        }
-        serde_json::Value::Object(obj) => {
-            for (k, v) in obj.iter() {
-                let saved_len = path.len();
-                path.push('.');
-                path.push_str(k);
-                let r = walk_json(v, path);
-                if r.is_some() {
-                    return r;
-                }
-                path.truncate(saved_len);
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,13 +217,11 @@ mod tests {
     // putting a literal NUL byte in this source file. We assemble the
     // escape at runtime so the file stays plain ASCII.
     fn nul_escape() -> &'static str {
-        //   is 6 source bytes: backslash, u, 0, 0, 0, 0.
         "\\u0000"
     }
 
     #[test]
     fn json_scan_string_with_unicode_nul() {
-        // JSON   decodes to a NUL byte in the Rust String value.
         let json = format!("\"abc{}def\"", nul_escape());
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let r = first_null_in_json(&v);
