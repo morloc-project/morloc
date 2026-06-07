@@ -194,6 +194,17 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                 size += buf_align - 1;
                 const char* str;
 
+                // R's NULL stands in for a zero-length vector (e.g. an
+                // R function returning numeric(0) may surface as NULL
+                // through some code paths, and a literal `[] :: Vector
+                // 0 a` deserialised on the wire-empty branch is
+                // represented as NULL). Treat it as an empty array
+                // with no element data; the inner switch's TYPE-based
+                // arms would otherwise fall to default and error.
+                if (TYPEOF(obj) == NILSXP) {
+                    return size;
+                }
+
                 switch (TYPEOF(obj)) {
                     case CHARSXP:
                         str = CHAR(obj);
@@ -1812,6 +1823,25 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         socket_path,
         packet
     );
+
+    // If the foreign pool returned a fail packet, surface it as an R
+    // error. Without this the raw fail-packet bytes get returned to the
+    // autogen caller which then tries to deserialize them as data,
+    // producing a confusing downstream error or crashing the worker.
+    {
+        char* fail_check_err = NULL;
+        char* fail_msg = get_morloc_data_packet_error_message(
+            (const uint8_t*)result, &fail_check_err);
+        if (fail_check_err != NULL) { free(fail_check_err); }
+        if (fail_msg != NULL) {
+            char buf[8192];
+            snprintf(buf, sizeof(buf), "%s", fail_msg);
+            free(fail_msg);
+            free(packet);
+            free(result);
+            error("%s", buf);
+        }
+    }
 
     // Get result size
     size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);

@@ -23,6 +23,7 @@ module Morloc.Frontend.CST
   , CstSigItem (..)
   , CstDoStmt (..)
   , CstAccessorBody (..)
+  , CstBracketAxis (..)
   , CstAccessorTail (..)
   , at
   , (<->)
@@ -135,6 +136,7 @@ data CstSigType = CstSigType
 
 data CstTypeDef
   = CstTypeAlias (Maybe Located) (TVar, [Either (TVar, Kind) TypeU]) (TypeU, Bool)
+  | CstNewtype (TVar, [Either (TVar, Kind) TypeU]) TypeU
   | CstTypeAliasForward (TVar, [Either (TVar, Kind) TypeU])
   | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)]
   | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool, [TypeU]) [(Key, TypeU)]
@@ -159,6 +161,17 @@ data CstAccessorBody
   = CABKey Text CstAccessorTail
   | CABIdx Int CstAccessorTail
   | CABGroup [CstAccessorBody]
+  | CABBracket [CstBracketAxis] CstAccessorTail
+  deriving (Show, Eq)
+
+-- A single axis of a bracket accessor body. v1 only honors length-1 lists; the
+-- list shape is preserved so the future tensor/matrix round can extend rank
+-- without grammar changes.
+data CstBracketAxis
+  = BAxIdx (Loc CstExpr)
+  | BAxSlice (Maybe (Loc CstExpr))   -- start
+             (Maybe (Loc CstExpr))   -- stop
+             (Maybe (Loc CstExpr))   -- step
   deriving (Show, Eq)
 
 data CstAccessorTail

@@ -1,6 +1,6 @@
---- testArrayMonoidPy ---
+--- testDequeMonoidPy ---
 true
---- testArrayMonoidCpp ---
+--- testDequeMonoidCpp ---
 true
---- testArrayMonoidR ---
+--- testDequeMonoidR ---
 true

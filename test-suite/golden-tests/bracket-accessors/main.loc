@@ -1,0 +1,339 @@
+module main (
+    testRangeCpp
+  , testRangePy
+  , testRangeR
+  , testRecordCpp
+  , testRecordPy
+  , testRecordR
+  , indexOne
+  , sliceClosed
+  , sliceOpenLeft
+  , sliceOpenRight
+  , sliceFull
+  , sliceReverse
+  , sliceEvery
+  , sliceNegEnd
+  , sliceWithStep
+  , chainedFieldThenSlice
+  , chainedIndexThenField
+  , sliceThenTupleField
+  , sliceThenRecordField
+  , sliceThenNestedSlice
+  , sliceThenGroup
+  , deepChain
+  , indexFromForeignLength
+  , sliceFromOptionalStart
+  , indexInt8
+  , indexInt16
+  , indexUInt32
+  , sliceInt8Bound
+  , sliceMixedWidthBounds
+  , crossPoolReceiverPyToCpp
+  , crossPoolReceiverCppToR
+  , crossPoolReceiverRToPy
+  , crossPoolIdxForeign
+  , crossPoolSliceNested
+  )
+
+import root-py
+import root-r
+import root-cpp
+
+record Pt where
+  x :: Int
+  y :: Int
+record Cpp => Pt = "pt_t"
+record Py => Pt = "dict"
+record R => Pt = "list"
+
+record Row where
+  a :: [(Int, Int)]
+  b :: [Pt]
+record Cpp => Row = "row_t"
+record Py => Row = "dict"
+record R => Row = "list"
+
+-- Bring pt.hpp into the C++ pool so 'pt_t' / 'row_t' are defined when the
+-- code generator emits record literals against them. pt_passthrough is a
+-- harmless no-op binding whose only purpose is to anchor the include.
+ptIdCpp :: a -> a
+source Cpp from "pt.hpp" ("pt_passthrough" as ptIdCpp)
+
+ten = [0,1,2,3,4,5,6,7,8,9]
+
+testLangRange :: (Bool -> Bool) -> Bool
+testLangRange langId = langId $
+  -- indexing
+  ( .[0] ten == 0 ) &&    -- positive index from start, 0-based
+  ( .[-1] ten == 9 ) &&   -- negative index from end
+  ( .[-2] ten == 8 ) &&
+  ( .[1+1] ten == 2 ) &&  -- expressions work
+  -- slicing
+  ( .[:] ten == ten ) &&  -- no-op copy
+  ( .[0:0] ten == [] ) && -- if step positive and start >= stop, return empty
+  ( .[1:1] ten == [] ) &&
+  ( .[1:0] ten == [] ) &&
+  ( .[8:99] ten == [8,9] ) && -- clamping is allowed
+  -- negative bounds wrap from the end (Python semantics: stop=-1 means
+  -- length-1, so the last element is excluded)
+  ( .[0:-1] ten == [0,1,2,3,4,5,6,7,8] ) &&
+  ( .[0:-9] ten == [0] ) &&
+  ( .[0:-10] ten == [] ) &&
+  ( .[-1:0] ten == [] ) && -- start=9 > stop=0 under forward step gives empty
+  ( .[-1:] ten == [9] ) &&  -- start=9, stop defaults to length, returns last element
+  ( .[-2:-1] ten == .[8:9] ten ) &&
+  ( .[(1 :: Int):2] ten == [1] ) && -- parenthesized annotations are allowed
+  -- step
+  ( .[::] ten == ten ) &&
+  ( .[::2] ten == [0,2,4,6,8] ) &&
+  ( .[::-1] ten == [9,8,7,6,5,4,3,2,1,0] ) && -- negative step reverses slice direction
+  ( .[::-2] ten == [9,7,5,3,1] ) &&
+  ( .[7::] ten == [7,8,9] ) &&
+  ( .[:3:] ten == [0,1,2] ) &&
+  ( .[0:3:] ten == [0,1,2] ) &&
+  ( .[7::1] ten == [7,8,9] ) &&
+  ( .[:3:1] ten == [0,1,2] ) &&
+  ( .[0:3:1] ten == [0,1,2] ) &&
+  ( .[2:7:2] ten == [2,4,6] ) &&
+  ( .[7:2:-2] ten == [7,5,3] )
+
+  -- the one non-total case is `.[::0]`, a step of 0 is meaningless and should raise a runtime error
+
+testRangeCpp :: Bool
+testRangeCpp = testLangRange idcpp
+
+testRangePy :: Bool
+testRangePy = testLangRange idpy
+
+testRangeR :: Bool
+testRangeR = testLangRange idr
+
+-- Records, tuples, and bracket-tail composition exercised in a single
+-- language pool. Each call to langId forces the inner expression to evaluate
+-- inside the target language, so a regression in slice-then-field-map shows
+-- up as a per-language failure rather than an aggregate one.
+pts :: [Pt]
+pts =
+  [ {x = 0, y = 100}
+  , {x = 1, y = 101}
+  , {x = 2, y = 102}
+  , {x = 3, y = 103}
+  , {x = 4, y = 104}
+  , {x = 5, y = 105}
+  , {x = 6, y = 106}
+  ]
+
+pairs :: [(Int, Str)]
+pairs = [(0,"a"),(1,"b"),(2,"c"),(3,"d"),(4,"e"),(5,"f"),(6,"g")]
+
+rows :: [Row]
+rows =
+  [ { a = [(10, 20), (11, 21)], b = [{x = 100, y = 200}, {x = 110, y = 210}] }
+  , { a = [(30, 40), (31, 41)], b = [{x = 300, y = 400}, {x = 310, y = 410}] }
+  , { a = [(50, 60), (51, 61)], b = [{x = 500, y = 600}, {x = 510, y = 610}] }
+  ]
+
+testLangRecord :: (Bool -> Bool) -> Bool
+testLangRecord langId = langId $
+  -- index + record field (scalar tail composes directly)
+  ( .[0].x pts == 0 ) &&
+  ( .[2].y pts == 102 ) &&
+  ( .[-1].x pts == 6 ) &&         -- negative index then field
+  ( .[-2].y pts == 105 ) &&
+  -- slice + record field (tail mapped over slice elements)
+  ( .[:3].x pts == [0,1,2] ) &&
+  ( .[2:5].y pts == [102,103,104] ) &&
+  ( .[:].x pts == [0,1,2,3,4,5,6] ) &&
+  -- explicit Null step is identical to the no-step form
+  ( .[:5:].x pts == .[:5].x pts ) &&
+  ( .[:5:].x pts == [0,1,2,3,4] ) &&
+  -- strided slice + field
+  ( .[::2].x pts == [0,2,4,6] ) &&
+  ( .[::-1].x pts == [6,5,4,3,2,1,0] ) && -- reverse + field map
+  ( .[1::2].y pts == [101,103,105] ) &&
+  -- slice + grouped record tail (each element produces a tuple)
+  ( .[0:3].(.x, .y) pts == [(0,100),(1,101),(2,102)] ) &&
+  ( .[::-1].(.x, .y) pts ==
+      [(6,106),(5,105),(4,104),(3,103),(2,102),(1,101),(0,100)] ) &&
+  -- tuple-list slice + tuple selector
+  ( .[1:4].0 pairs == [1,2,3] ) &&
+  ( .[:3].1 pairs == ["a","b","c"] ) &&
+  ( .[::-1].0 pairs == [6,5,4,3,2,1,0] ) &&
+  -- nested record access through a slice (.[0].a then .[0].0)
+  ( .[0].a.[0].0 rows == 10 ) &&
+  ( .[1].b.[1].y rows == 410 ) &&
+  ( .[-1].b.[0].x rows == 500 ) &&
+  -- deeply chained slice tail mixing record, bracket, and tuple selectors
+  ( .[0:2].(.a.[0].0, .b.[0].y) rows == [(10,200),(30,400)] ) &&
+  -- empty-slice tails over records should give empty lists
+  ( .[3:3].x pts == ([] :: [Int]) ) &&
+  ( .[100:200].(.x, .y) pts == ([] :: [(Int, Int)]) )
+
+testRecordCpp :: Bool
+testRecordCpp = testLangRecord idcpp
+
+testRecordPy :: Bool
+testRecordPy = testLangRecord idpy
+
+testRecordR :: Bool
+testRecordR = testLangRecord idr
+
+-- A single .[i] returns a scalar.
+indexOne :: Int
+indexOne = .[2] [10, 20, 30, 40, 50]
+
+-- Closed forward slice.
+sliceClosed :: [Int]
+sliceClosed = .[1:4] [10, 20, 30, 40, 50]
+
+-- Open start defaults to 0 in positive-step direction.
+sliceOpenLeft :: [Int]
+sliceOpenLeft = .[:3] [10, 20, 30, 40, 50]
+
+-- Open stop defaults to length in positive-step direction.
+sliceOpenRight :: [Int]
+sliceOpenRight = .[1:] [10, 20, 30, 40, 50]
+
+-- All-open slice is a no-op copy.
+sliceFull :: [Int]
+sliceFull = .[:] [10, 20, 30]
+
+-- Step -1 reverses the list. Both bounds default per Python's rules.
+sliceReverse :: [Int]
+sliceReverse = .[::-1] [1, 2, 3, 4, 5]
+
+-- Step 2 takes every other element.
+sliceEvery :: [Int]
+sliceEvery = .[::2] [1, 2, 3, 4, 5, 6, 7, 8]
+
+-- Negative start wraps from the end (Python semantics).
+sliceNegEnd :: [Int]
+sliceNegEnd = .[(0 - 3):] [10, 20, 30, 40, 50]
+
+-- Explicit step expression with closed bounds.
+sliceWithStep :: [Int]
+sliceWithStep = .[0:10:3] [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+-- Record field followed by a bracket: the bracket is the tail of a chain.
+chainedFieldThenSlice :: [Int]
+chainedFieldThenSlice = .[1:3] [10, 20, 30, 40]
+
+-- Bracket index followed by a record field: index returns a scalar, the field
+-- accessor composes directly.
+chainedPts :: [Pt]
+chainedPts = [{x = 1, y = 2}, {x = 3, y = 4}, {x = 5, y = 6}]
+
+chainedIndexThenField :: Int
+chainedIndexThenField = .[1].y chainedPts
+
+-- Slice followed by a tuple selector: lifted via map.
+sliceThenTupleField :: [Int]
+sliceThenTupleField = .[1:4].0 [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")]
+
+-- Slice followed by a record field: lifted via map.
+recordFieldPts :: [Pt]
+recordFieldPts = [{x = 1, y = 10}, {x = 2, y = 20}, {x = 3, y = 30}, {x = 4, y = 40}]
+
+sliceThenRecordField :: [Int]
+sliceThenRecordField = .[0:3].x recordFieldPts
+
+-- Slice followed by a nested slice: outer map runs the inner slice per row.
+sliceThenNestedSlice :: [[Int]]
+sliceThenNestedSlice = .[0:2].[0:3] [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [99, 99]]
+
+-- Slice followed by a grouped tail: each element produces a tuple of branches.
+groupPts :: [Pt]
+groupPts = [{x = 1, y = 10}, {x = 2, y = 20}, {x = 3, y = 30}]
+
+sliceThenGroup :: [(Int, Int)]
+sliceThenGroup = .[0:2].(.x, .y) groupPts
+
+-- Deep chain: slice -> grouped tail mixing nested patterns.
+deepChainRows :: [Row]
+deepChainRows =
+  [ { a = [(11, 12), (13, 14)], b = [{x = 100, y = 101}, {x = 200, y = 201}] }
+  , { a = [(21, 22), (23, 24)], b = [{x = 300, y = 301}] }
+  ]
+
+deepChain :: [(Int, Int)]
+deepChain = .[0:2].(.a.[0].0, .b.[0].y) deepChainRows
+
+-- ─── Foreign-call result as a bracket bound ─────────────────────────────────
+-- `length` is sourced per language via the Foldable instance. Its
+-- return type is `Int`. Using it as a bound exercises the IndexLike
+-- Int instance lookup at codegen *with the bound value produced by a
+-- foreign function call* rather than by a literal. The whole
+-- expression is pool-bound (Eq, length, and bracket-slice all resolve
+-- to the same language).
+indexFromForeignLength :: Int
+indexFromForeignLength = .[length [10, 20, 30] - 1] [100, 200, 300, 400, 500]
+
+-- ─── Optional-typed bound (?Int32) ─────────────────────────────────────────
+-- `optStart` is a top-level value of type `?Int32`. With
+-- `__to_index__ :: i -> ?Int64` and the new `IndexLike (?Int32)`
+-- instance, this exercises the lookup-and-wrap path for a non-Null,
+-- non-literal Optional bound. A blank slot from the desugar would
+-- produce the same shape; this case verifies the user-level optional
+-- expression composes identically.
+optStart :: ?Int32
+optStart = (Null :: ?Int32)
+
+sliceFromOptionalStart :: [Int]
+sliceFromOptionalStart = .[optStart:3] [10, 20, 30, 40, 50]
+
+-- ─── Various integer-width bounds ─────────────────────────────────────────
+-- Each annotation pins the bound to a specific IndexLike instance.
+-- Mixing widths in one slice (Int8 start, Int16 stop) ensures the
+-- per-bound lookup is per-position, not per-call.
+indexInt8 :: Int
+indexInt8 = .[(0 :: Int8)] [10, 20, 30]
+
+indexInt16 :: Int
+indexInt16 = .[(1 :: Int16)] [10, 20, 30]
+
+indexUInt32 :: Int
+indexUInt32 = .[(2 :: UInt32)] [10, 20, 30]
+
+sliceInt8Bound :: [Int]
+sliceInt8Bound = .[(1 :: Int8):3] [10, 20, 30, 40, 50]
+
+sliceMixedWidthBounds :: [Int]
+sliceMixedWidthBounds = .[(1 :: Int8):(4 :: Int16)] [10, 20, 30, 40, 50]
+
+-- ─── Cross-pool stress: bracket with args/result in different languages ───
+-- The bracket is necessarily local to ONE pool after Realize picks the
+-- cheapest assignment, but the args and the surrounding expression
+-- straddle pool boundaries. These tests exercise the path where
+-- Realize's choice puts the bracket in a different pool from the
+-- caller, exposing any not-isLocal handling gap in
+-- Express.hs::expressPolyExpr's bracket dispatch.
+
+-- Receiver assembled in Python, bracket executed in C++ context.
+crossPoolReceiverPyToCpp :: Int
+crossPoolReceiverPyToCpp = idcpp (.[2] (idpy [100, 200, 300, 400, 500]))
+
+-- Receiver assembled in C++, bracket executed in R context.
+crossPoolReceiverCppToR :: Int
+crossPoolReceiverCppToR = idr (.[1] (idcpp [10, 20, 30]))
+
+-- Receiver assembled in R, bracket executed in Python context.
+crossPoolReceiverRToPy :: Int
+crossPoolReceiverRToPy = idpy (.[-1] (idr [7, 8, 9]))
+
+-- Index expression from one pool, receiver from another, bracket from a third.
+crossPoolIdxForeign :: Int
+crossPoolIdxForeign = idr (.[idpy 1] (idcpp [10, 20, 30, 40, 50]))
+
+-- Nested cross-pool: outer slice in R, inner slice (via map) of records
+-- with the original pool being C++. Uses the named @Pt@ record so the
+-- C++ pool has a concrete struct (@pt_t@) to materialize.
+crossPoolSlicePts :: [Pt]
+crossPoolSlicePts = ptIdCpp
+  [ {x = 10, y = 100}
+  , {x = 20, y = 200}
+  , {x = 30, y = 300}
+  , {x = 40, y = 400}
+  ]
+
+crossPoolSliceNested :: [Int]
+crossPoolSliceNested = idr (.[0:3].x crossPoolSlicePts)

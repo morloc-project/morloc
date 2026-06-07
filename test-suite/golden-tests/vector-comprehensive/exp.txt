@@ -101,10 +101,6 @@
 55
 --- mlLength ---
 50000
---- mlReverse ---
-55
---- mlSort ---
-255
 --- mlMap ---
 110
 === (7) Edge cases (empty / single) ===

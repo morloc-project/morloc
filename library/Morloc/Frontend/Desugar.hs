@@ -22,7 +22,6 @@ module Morloc.Frontend.Desugar
   , showParseError
   ) where
 
-import Control.Monad (when)
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -622,18 +621,182 @@ data AccessorResult
   | ARSetter Selector [ExprI]
 
 buildAccessor :: Span -> CstAccessorBody -> D ExprI
-buildAccessor sp body = do
-  desBody <- desugarAccessorBody body
-  result <- resolveBody desBody
-  case result of
-    ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
-    ARSetter sel vals -> do
-      patI <- freshExprSpan sp (PatE (PatternStruct sel))
-      lamI <- freshIdSpan sp
-      let v = EV (".setter_" <> T.pack (show lamI))
-      vArg <- freshExprSpan sp (VarE defaultValue v)
-      appI <- freshExprSpan sp (AppE patI (vArg : vals))
-      return (ExprI lamI (LamE [v] appI))
+buildAccessor sp body
+  | bodyHasBracket body = buildAccessorBracket sp body
+  | otherwise = do
+      desBody <- desugarAccessorBody body
+      result <- resolveBody desBody
+      case result of
+        ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
+        ARSetter sel vals -> do
+          patI <- freshExprSpan sp (PatE (PatternStruct sel))
+          lamI <- freshIdSpan sp
+          let v = EV (".setter_" <> T.pack (show lamI))
+          vArg <- freshExprSpan sp (VarE defaultValue v)
+          appI <- freshExprSpan sp (AppE patI (vArg : vals))
+          return (ExprI lamI (LamE [v] appI))
+
+-- True when any sub-component of the body is a bracket accessor. When True,
+-- we use the lambda-based path below: bracket access lowers to function-call
+-- chains via Indexable/Sliceable/Functor, which is structurally incompatible
+-- with the Selector ADT used by PatternStruct.
+bodyHasBracket :: CstAccessorBody -> Bool
+bodyHasBracket (CABKey _ t) = tailHasBracket t
+bodyHasBracket (CABIdx _ t) = tailHasBracket t
+bodyHasBracket (CABGroup bs) = any bodyHasBracket bs
+bodyHasBracket (CABBracket _ _) = True
+
+tailHasBracket :: CstAccessorTail -> Bool
+tailHasBracket CATEnd = False
+tailHasBracket (CATSet _) = False
+tailHasBracket (CATChain b) = bodyHasBracket b
+
+-- Lambda-based accessor path. Produces an unapplied function (LamE) whose body
+-- chains together selector PatE applications, bracket index/slice/map calls,
+-- and group tuple constructions.
+buildAccessorBracket :: Span -> CstAccessorBody -> D ExprI
+buildAccessorBracket sp body = do
+  vId <- freshIdSpan sp
+  let v = EV (".bracket_arg_" <> T.pack (show vId))
+  vExpr <- freshExprSpan sp (VarE defaultValue v)
+  inner <- applyAccessor sp body vExpr
+  lamId <- freshIdSpan sp
+  return (ExprI lamId (LamE [v] inner))
+
+-- Apply an accessor body to a concrete subject expression. Recursively builds
+-- the AppE / TupE / map-LamE chain that the lambda path needs.
+applyAccessor :: Span -> CstAccessorBody -> ExprI -> D ExprI
+applyAccessor sp (CABKey name tail') subject = do
+  applied <- applyKeyPat sp name subject
+  applyTail sp tail' applied
+applyAccessor sp (CABIdx idx tail') subject = do
+  applied <- applyIdxPat sp idx subject
+  applyTail sp tail' applied
+applyAccessor sp (CABGroup bodies) subject = do
+  -- Each branch needs its own fresh VarE node referencing the subject
+  -- variable. Sharing one ExprI across multiple AppE positions confuses the
+  -- typechecker (every ExprI ID is a unique typed position). If the subject
+  -- is already a VarE, fresh VarE references to the same name resolve via
+  -- name lookup; otherwise we bind it to a let-variable first.
+  --
+  -- Known limitation: when a branch of the group contains a bracket
+  -- accessor (an __access_index__ call) AND a sibling branch projects a
+  -- different record field of the same subject, the typechecker's open-
+  -- record existential does not always concretise the bracketed field's
+  -- type in time for class-instance resolution. Authors hitting this
+  -- "No instance found for Indexable::__access_index__" error can work
+  -- around it by extracting the chain into a top-level helper with an
+  -- explicit signature (see test-suite/golden-tests/bracket-accessors).
+  case subject of
+    ExprI _ (VarE _ subjName) -> do
+      parts <- mapM
+        (\b -> do
+           vExpr <- freshExprSpan sp (VarE defaultValue subjName)
+           applyAccessor sp b vExpr)
+        bodies
+      freshExprSpan sp (TupE parts)
+    _ -> do
+      vId <- freshIdSpan sp
+      let v = EV (".group_subj_" <> T.pack (show vId))
+      parts <- mapM
+        (\b -> do
+           vExpr <- freshExprSpan sp (VarE defaultValue v)
+           applyAccessor sp b vExpr)
+        bodies
+      tupE <- freshExprSpan sp (TupE parts)
+      freshExprSpan sp (LetE [(v, subject)] tupE)
+applyAccessor sp (CABBracket axes tail') subject =
+  lowerBracket sp axes tail' subject
+
+applyKeyPat :: Span -> Text -> ExprI -> D ExprI
+applyKeyPat sp name subject = do
+  pat <- freshExprSpan sp (PatE (PatternStruct (SelectorKey (name, SelectorEnd) [])))
+  freshExprSpan sp (AppE pat [subject])
+
+applyIdxPat :: Span -> Int -> ExprI -> D ExprI
+applyIdxPat sp idx subject = do
+  pat <- freshExprSpan sp (PatE (PatternStruct (SelectorIdx (idx, SelectorEnd) [])))
+  freshExprSpan sp (AppE pat [subject])
+
+applyTail :: Span -> CstAccessorTail -> ExprI -> D ExprI
+applyTail _ CATEnd e = return e
+applyTail sp (CATSet _) _ =
+  dfail (startPos sp)
+    "setters are not supported on accessor chains that contain a bracket"
+applyTail sp (CATChain body) e = applyAccessor sp body e
+
+lowerBracket :: Span -> [CstBracketAxis] -> CstAccessorTail -> ExprI -> D ExprI
+lowerBracket sp axes tail' subject = case axes of
+  [] -> dfail (startPos sp) "empty bracket accessor"
+  [BAxIdx eLoc] -> do
+    iExpr <- desugarExpr eLoc
+    -- Emit a PatternBracketIndex pattern applied to (index, receiver).
+    -- The index expression stays at its natural type; codegen inserts
+    -- any language-specific cast (e.g. __to_index__) when emitting the
+    -- pool call. Keeping the desugar output free of sourced functions
+    -- preserves "pure" status for bracket expressions that would
+    -- otherwise be evaluable on the nexus.
+    indexPat <- freshExprSpan sp (PatE PatternBracketIndex)
+    callExpr <- freshExprSpan sp (AppE indexPat [iExpr, subject])
+    applyTail sp tail' callExpr
+  [BAxSlice mStart mStop mStep] -> do
+    sliceCall <- buildSliceCall sp mStart mStop mStep subject
+    case tail' of
+      CATEnd -> return sliceCall
+      CATSet _ ->
+        dfail (startPos sp)
+          "setters are not supported on slice accessors"
+      CATChain bodyTail -> do
+        eId <- freshIdSpan sp
+        let eName = EV (".bracket_elem_" <> T.pack (show eId))
+        eExpr <- freshExprSpan sp (VarE defaultValue eName)
+        innerBody <- applyAccessor sp bodyTail eExpr
+        lamId <- freshIdSpan sp
+        let lamExpr = ExprI lamId (LamE [eName] innerBody)
+        -- Emit the implicit map as the IntrMap intrinsic rather than
+        -- a name reference to `map`. Going through `VarE "map"` would
+        -- require the user's module to import a binding for `map`
+        -- (typically Functor's class method via root) -- a silent
+        -- dependency the user has no reason to expect from a bracket
+        -- accessor. The intrinsic node is self-contained: the
+        -- pure-runtime path lowers it to the Map evaluator branch
+        -- directly, and the pool path resolves @Functor.map@ for the
+        -- target language at codegen.
+        freshExprSpan sp (IntrinsicE IntrMap [lamExpr, sliceCall])
+  _ -> dfail (startPos sp)
+         "multi-axis bracket accessors are not supported in v1 (1D lists only)"
+
+buildSliceCall
+  :: Span
+  -> Maybe (Loc CstExpr)
+  -> Maybe (Loc CstExpr)
+  -> Maybe (Loc CstExpr)
+  -> ExprI
+  -> D ExprI
+buildSliceCall sp mStart mStop mStep subject = do
+  startE <- desugarSliceBound sp mStart
+  stopE  <- desugarSliceBound sp mStop
+  stepE  <- desugarSliceBound sp mStep
+  -- Emit a PatternBracketSlice pattern applied to (start, stop, step,
+  -- receiver). The typechecker synthesizes the result type structurally:
+  -- a Nat-parameterized container has its outer Nat replaced by
+  -- NatVoidU (the wildcard sentinel); otherwise the receiver type is
+  -- preserved. The codegen translator emits the appropriate native
+  -- slicing operation.
+  slicePat <- freshExprSpan sp (PatE PatternBracketSlice)
+  freshExprSpan sp (AppE slicePat [startE, stopE, stepE, subject])
+
+-- | Lower a single slice bound. Missing positions become
+-- @(Null :: ?Int64)@: annotating the synthetic Null pins every empty
+-- slot to a uniform wire schema so the runtime and pool codegen don't
+-- need to invent a default. User-supplied bounds stay at their natural
+-- type; codegen inserts any language-specific cast (e.g.
+-- @__to_index__@) at emit time.
+desugarSliceBound :: Span -> Maybe (Loc CstExpr) -> D ExprI
+desugarSliceBound sp Nothing = do
+  nullExpr <- freshExprSpan sp NullE
+  freshExprSpan sp (AnnE nullExpr (OptionalU BT.i64U))
+desugarSliceBound _ (Just e) = desugarExpr e
 
 -- Intermediate accessor types (with ExprI values after desugaring)
 data IAccessorBody
@@ -650,6 +813,10 @@ desugarAccessorBody :: CstAccessorBody -> D IAccessorBody
 desugarAccessorBody (CABKey name tail') = IABKey name <$> desugarAccessorTail tail'
 desugarAccessorBody (CABIdx idx tail') = IABIdx idx <$> desugarAccessorTail tail'
 desugarAccessorBody (CABGroup bodies) = IABGroup <$> mapM desugarAccessorBody bodies
+desugarAccessorBody (CABBracket _ _) =
+  -- buildAccessor dispatches CABBracket through buildAccessorBracket before
+  -- calling this; reaching here would be a compiler-internal error.
+  dfail (Pos 0 0 "") "internal error: CABBracket in selector-only path"
 
 desugarAccessorTail :: CstAccessorTail -> D IAccessorTail
 desugarAccessorTail CATEnd = return IATEnd
@@ -778,6 +945,25 @@ desugarExpr (Loc sp (CAppE (Loc _ (CIntrinsicE name)) args)) = do
   intr <- resolveIntrinsic (startPos sp) name
   args' <- mapM desugarExpr args
   etaExpandIntrinsic sp intr args'
+-- Direct application of an accessor to a subject. Without this case, the
+-- general @CAppE@ path below desugars @.a.[0] e@ as @AppE (LamE [bracket_arg]
+-- body) [e]@ -- introducing a fresh existential @bracket_arg@ that the
+-- typechecker has to merge with @e@'s existential later. When two such
+-- accessor-applied chains share a binder in a tuple (e.g.
+-- @(.a.[0].0 e, .b.[0] e)@), the per-branch @bracket_arg@s accumulate
+-- record-key constraints separately, and the AppU<:AppU subtype rule fails
+-- to propagate @f := List@ into both branches. Inlining the application at
+-- desugar time keeps a single existential -- the user's binder -- so all
+-- record-key constraints accumulate in one place.
+desugarExpr (Loc _ (CAppE (Loc accSp (CAccessorE body)) (firstArg : rest)))
+  | bodyHasBracket body = do
+      argE <- desugarExpr firstArg
+      applied <- applyAccessor accSp body argE
+      case rest of
+        [] -> return applied
+        moreArgs -> do
+          rest' <- mapM desugarExpr moreArgs
+          freshExprFrom applied (AppE applied rest')
 -- Compound expressions
 desugarExpr (Loc _ (CAppE f args)) = do
   f' <- desugarExpr f
@@ -1093,13 +1279,37 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD docs
-  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars)))
+  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
+  return [e]
+desugarTypeDef sp (CstNewtype (v, vs) t) = do
+  when (isVacuousAlias v vs t) $
+    dfail (startPos sp) $
+      "Newtype '" ++ T.unpack (unTVar v) ++
+      "' has a vacuous body: it reduces to a self-reference with no payload"
+  docs <- lookupDocsAt (startPos sp)
+  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
+  -- A bare @type Foo@ (no RHS) is a built-in primitive declaration:
+  -- the type is recognised by the compiler, has its own per-language
+  -- forms in the root-* modules, and is opaque to reduction. The
+  -- self-referential body is a structural placeholder so the alias
+  -- table still has a uniform shape.
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
-  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias defaultValue)))
+  docs <- lookupDocsAt (startPos sp)
+  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
+  -- A record / object / table declaration. These types are always
+  -- nominal and own their per-language form; they behave structurally
+  -- like newtypes (no typeclass inheritance, opaque to reduction). The
+  -- general declaration goes into gscope as TypedefNewtype so it is
+  -- exempt from Invariant 1 (a record may legally pair with a
+  -- @record Cpp => Foo = "..."@ form). An explicit @type SpecialPerson
+  -- = Person@ wrapped around a record is still TypedefAlias and would
+  -- still trip Invariant 1 if also given a per-language form.
   recDocs <- lookupDocsAt (startPos sp)
   recDocVars <- processArgDocLinesD recDocs
   fieldDocs <-
@@ -1109,9 +1319,14 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       doc = ArgDocRec recDocVars (zip (map fst entries) fieldDocs)
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
-  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc))
+  e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) entries) = do
+  -- Legacy form covers both general @record Foo = Constructor ...@
+  -- (lang=Nothing, behaves like CstNamTypeWhere -> TypedefNewtype) and
+  -- per-language @record Cpp => Foo = "struct"@ (lang=Just, feeds
+  -- cscope; reduction relies on TypedefAlias + isTerminal=True to
+  -- terminate at the native form, so we keep TypedefAlias there).
   lang <- case maybeLangTok of
     Nothing -> return Nothing
     Just tok -> do
@@ -1129,7 +1344,10 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
                  else conArgs
       t = NamU nt con bodyTs entries
       doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries]
-  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc))
+      kind = case maybeLangTok of
+        Nothing -> TypedefNewtype  -- general record decl
+        Just _  -> TypedefAlias     -- per-language native form (cscope)
+  e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t doc kind))
   return [e]
 
 --------------------------------------------------------------------

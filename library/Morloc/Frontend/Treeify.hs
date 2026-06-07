@@ -210,21 +210,21 @@ checkDeclaredEffects d = do
       let tys = case e of
             SigE (Signature _ _ et) -> [etype et]
             AnnE _ t -> [t]
-            TypE (ExprTypeE _ _ _ t _) -> [t]
+            TypE (ExprTypeE _ _ _ t _ _) -> [t]
             ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
             _ -> []
           used = Set.unions (map collectEffLabels tys)
           undeclared = Set.filter (\l -> not (Map.member l declared)) used
       case Set.toList undeclared of
         (lbl0 : rest) ->
-          let plural = not (null rest)
+          let isPlural = not (null rest)
            in MM.throwSourcedError i $
                 "Undeclared effect"
-                  <> (if plural then "s" else "")
+                  <> (if isPlural then "s" else "")
                   <+> hcat
                     (punctuate ", " (map (squotes . pretty) (lbl0 : rest)))
                   <> "."
-                  <+> (if plural then "Declare each" else "Declare it")
+                  <+> (if isPlural then "Declare each" else "Declare it")
                   <+> "with `effect"
                   <+> pretty lbl0 <> "`"
                   <+> "(or `escapable effect"

@@ -415,6 +415,24 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
         PROPAGATE_ERROR(errmsg)
     }
 
+    // If the foreign pool returned a fail packet, surface it as a C++
+    // exception. Without this the raw fail-packet bytes get returned to
+    // the autogen caller which then tries to deserialize them as data,
+    // producing a confusing downstream error or crashing the worker.
+    {
+        char* fail_check_err = NULL;
+        char* fail_msg = get_morloc_data_packet_error_message(
+            (const uint8_t*)result, &fail_check_err);
+        if (fail_check_err != NULL) { free(fail_check_err); }
+        if (fail_msg != NULL) {
+            std::string msg(fail_msg);
+            free(fail_msg);
+            free(result);
+            free(args_array);
+            throw std::runtime_error(msg);
+        }
+    }
+
     // Incref the result's SHM so the callee's tracker flush won't destroy
     // data we may still need (e.g. forwarded result packets).
     {

@@ -19,18 +19,18 @@ import root-py
 
 -- === Type hierarchy ===
 
-type Bytes = Str
+-- new type with same wire format as string but different native representation
+newtype Bytes = Str
 type Py => Bytes = "bytes"
 
-type Filename = Str
+-- new type with same wire format and native representation as Str, but different typeclasses
+newtype Filename = Str
 
 -- === Conversion functions ===
 
-toBytes :: Str -> Bytes
-source Py from "strlib.py" ("to_bytes" as toBytes)
-
-fromBytes :: Bytes -> Str
-source Py from "strlib.py" ("from_bytes" as fromBytes)
+instance Packable Str Bytes where
+  source Py from "strlib.py" ("to_bytes" as pack)
+  source Py from "strlib.py" ("from_bytes" as unpack)
 
 -- === Typeclass: Filelike (Filename only) ===
 
@@ -52,33 +52,33 @@ instance Stringlike Str where
 instance Stringlike Bytes where
   source Py from "strlib.py" ("split_bytes" as split, "trim_bytes" as trim)
 
+instance Stringlike Filename where
+  source Py from "strlib.py" ("split_str" as split, "trim_str" as trim)
+
 -- === Tests ===
 
 test_result =
-  -- 1. Conversion round-trip
+  -- Conversion round-trip
   let s = "hello"
-      b = toBytes s
-      s2 = fromBytes b
+      b = pack s :: Bytes
+      s2 = unpack b
   in s == s2
-
-  -- 2. Filename as transparent alias (Eq inherited from Str)
-  && (("foo.txt" :: Filename) == "foo.txt")
 
   -- 3. Filelike on Filename
   && extension ("archive.tar.gz" :: Filename) == ".gz"
 
   -- 4. Stringlike on Str
-  && split "," ("a,b,c" :: Str) == ["a", "b", "c"]
-  && trim ("  hello  " :: Str) == "hello"
+  && split "," "a,b,c" == ["a", "b", "c"]
+  && trim "  hello  " == "hello"
 
   -- 4b. Stringlike on Bytes
-  && split "," ("a,b,c" :: Bytes) == ["a", "b", "c"]
-  && trim ("  hello  " :: Bytes) == "hello"
+  && split "," ("a,b,c" :: Bytes) == (["a", "b", "c"] :: [Bytes])
+  && trim ("  hello  " :: Bytes) == ("hello" :: Bytes)
 
   -- 5. Filename inherits Stringlike from Str
-  && split "/" ("src/main.py" :: Filename) == ["src", "main.py"]
-  && trim ("  path  " :: Filename) == "path"
+  && split "/" ("src/main.py" :: Filename) == (["src", "main.py"] :: [Filename])
+  && trim ("  path  " :: Filename) == ("path" :: Filename)
 
   -- 6. Stringlike on Bytes (uses its own instance, not Str's)
-  && split "," (toBytes "x,y,z") == [toBytes "x", toBytes "y", toBytes "z"]
-  && trim (toBytes "  data  ") == toBytes "data"
+  && split "," ("x,y,z" :: Bytes) == (["x", "y", "z"] :: [Bytes])
+  && trim ("  data  " :: Bytes) == ("data" :: Bytes)

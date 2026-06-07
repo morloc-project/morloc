@@ -112,6 +112,16 @@ extern "C" {
         shm_size: usize,
         errmsg: *mut *mut std::ffi::c_char,
     ) -> *mut std::ffi::c_void;
+    // C-ABI bridges to libmorloc.so's daemon-coordination atomics.
+    // Used to live as `morloc_runtime::daemon_ffi::*` Rust calls, but
+    // those resolved to the rlib's disjoint copy of the atomics --
+    // recovery would mark "in progress" in nexus's copy and libmorloc.so
+    // would never see it, with the inverse for end_recovery. The C-ABI
+    // wrappers in `morloc-runtime::daemon_ffi` flip the cdylib's atomics
+    // that the request handlers actually read.
+    fn morloc_daemon_is_shutting_down() -> bool;
+    fn morloc_daemon_begin_recovery() -> bool;
+    fn morloc_daemon_end_recovery();
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -131,7 +141,7 @@ extern "C" {
 /// Loop guard: if more than RECOVERY_MAX_ATTEMPTS recoveries fire
 /// within RECOVERY_WINDOW, the daemon exits with a fatal error.
 extern "C" fn pool_check_and_recover(
-    _sockets: *mut morloc_runtime::daemon_ffi::MorlocSocket,
+    _sockets: *mut morloc_runtime_types::daemon_socket::MorlocSocket,
     n_pools: usize,
 ) {
     // Fast path: if no pool has died, we're done. This runs every
@@ -150,12 +160,12 @@ extern "C" fn pool_check_and_recover(
     // If the daemon is already shutting down, the dead pool we just
     // observed is the result of `clean_exit` SIGTERM'ing the pool
     // group, not a crash. Don't fight the shutdown by respawning.
-    if morloc_runtime::daemon_ffi::is_shutting_down() {
+    if unsafe { morloc_daemon_is_shutting_down() } {
         return;
     }
 
     // Begin recovery; if another caller got here first, bail.
-    if !morloc_runtime::daemon_ffi::begin_recovery() {
+    if !unsafe { morloc_daemon_begin_recovery() } {
         return;
     }
 
@@ -278,7 +288,7 @@ extern "C" fn pool_check_and_recover(
     // RECOVERY_IN_PROGRESS pinned would wedge the daemon forever
     // (every subsequent request returns "recovering", and
     // begin_recovery's compare_exchange would refuse to retry).
-    morloc_runtime::daemon_ffi::end_recovery();
+    unsafe { morloc_daemon_end_recovery() };
 }
 
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
@@ -583,7 +593,7 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
 /// Matches the C nexus behavior: initial delay 1ms, multiplier 1.25,
 /// plus socket timeout that doubles from 10ms to ~10s.
 fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String> {
-    use morloc_runtime::packet::PacketHeader;
+    use morloc_runtime_types::packet::PacketHeader;
     use std::os::unix::net::UnixStream;
     use std::io::{Read, Write};
 
@@ -715,7 +725,7 @@ pub fn make_tmpdir() -> Result<String, String> {
 
 /// Generate a job hash from seed, pid, and timestamps.
 pub fn make_job_hash(seed: u64) -> u64 {
-    use morloc_runtime::hash::xxh64;
+    use morloc_runtime_types::hash::xxh64;
 
     let pid = std::process::id() as u64;
     let now = std::time::SystemTime::now()

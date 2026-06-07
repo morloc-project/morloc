@@ -161,7 +161,7 @@ fn die_with_pool_error(
     socket: &PoolSocket,
     pool_index: usize,
     context: &str,
-    comm_err: &dyn std::fmt::Display,
+    comm_err: &std::io::Error,
 ) -> ! {
     // Give the dying pool process time to flush its stderr/stdout before
     // we tear down the process group. Without this, a Python traceback or
@@ -169,7 +169,22 @@ fn die_with_pool_error(
     // clean_exit sends SIGTERM/SIGKILL to the pool's process group.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    eprintln!("Error: {}: {}", context, comm_err);
+    // Translate opaque kernel-level IO failures into actionable text.
+    // `read_exact` returns UnexpectedEof with the std-lib message "failed
+    // to fill whole buffer" whenever the peer closes the socket -- which,
+    // in our case, is exactly what happens when the pool crashes. Most
+    // users have never seen that phrase and cannot act on it. BrokenPipe
+    // is the same situation on the write side.
+    let comm_msg: String = match comm_err.kind() {
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => format!(
+            "pool '{}' closed the connection before sending a response \
+             (likely crashed; see stderr above for any traceback)",
+            socket.lang
+        ),
+        _ => format!("{}", comm_err),
+    };
+
+    eprintln!("Error: {}: {}", context, comm_msg);
     if let Some(info) = process::pool_death_info(pool_index) {
         eprintln!("Pool '{}' {}", socket.lang, info);
     }
@@ -535,7 +550,7 @@ pub fn dispatch_command(
         // env var MORLOC_SKIP_NULL_CHECK=1 is in effect.
         let target_pool = &manifest.pools[cmd.pool_index];
         let skip = manifest.unsafe_skip_null_check
-            || morloc_runtime::null_check::env_skip_null_check();
+            || morloc_runtime_types::null_check::env_skip_null_check();
         if !skip && !target_pool.allow_string_null {
             for (i, av) in parsed_args.iter().enumerate() {
                 let payload = match av {
@@ -550,7 +565,7 @@ pub fn dispatch_command(
                     // are skipped.
                     if let Ok(jv) = serde_json::from_str::<serde_json::Value>(s) {
                         if let Some(p) =
-                            morloc_runtime::null_check::first_null_in_json(&jv)
+                            morloc_runtime_types::null_check::first_null_in_json(&jv)
                         {
                             eprintln!(
                                 "Error: {} does not support embedded NUL bytes in strings (at args[{}]{})",
@@ -789,8 +804,8 @@ fn run_remote_command(
     sockets: &[PoolSocket],
     config: &NexusConfig,
 ) {
-    use morloc_runtime::packet;
-    use morloc_runtime::schema::parse_schema;
+    use morloc_runtime_types::packet;
+    use morloc_runtime_types::schema::parse_schema;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -798,7 +813,7 @@ fn run_remote_command(
     extern "C" {
         fn parse_cli_data_argument(
             dest: *mut u8, arg: *const std::ffi::c_void,
-            schema: *const morloc_runtime::cschema::CSchema,
+            schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
         fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
@@ -809,7 +824,7 @@ fn run_remote_command(
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
         fn get_morloc_data_packet_value(
-            data: *const u8, schema: *const morloc_runtime::cschema::CSchema,
+            data: *const u8, schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
     }
@@ -845,7 +860,7 @@ fn run_remote_command(
             }
         };
 
-        let c_schema = morloc_runtime::cschema::CSchema::from_rust(&schema);
+        let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
         let c_arg;
@@ -890,7 +905,7 @@ fn run_remote_command(
 
         let c_pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
         unsafe { free_argument_t(c_arg) };
-        unsafe { morloc_runtime::cschema::CSchema::free(c_schema) };
+        unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 
         if c_pkt.is_null() {
             let msg = if !errmsg.is_null() {
@@ -1006,7 +1021,7 @@ fn run_remote_command(
     }
 
     // Extract and print via C library for correct voidstar handling
-    let c_schema = morloc_runtime::cschema::CSchema::from_rust(&return_schema);
+    let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&return_schema);
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
     let result_ptr = unsafe {
         get_morloc_data_packet_value(full_packet.as_ptr(), c_schema, &mut errmsg)
@@ -1020,7 +1035,7 @@ fn run_remote_command(
             "unknown error".into()
         };
         eprintln!("Error: failed to extract result: {}", msg);
-        unsafe { morloc_runtime::cschema::CSchema::free(c_schema) };
+        unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
         process::clean_exit(1);
     }
 
@@ -1032,13 +1047,13 @@ fn run_remote_command(
     // inside the JSON path; binary formats always emit a well-formed
     // stream so downstream consumers see the expected bytes.
     print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
-    unsafe { morloc_runtime::cschema::CSchema::free(c_schema) };
+    unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 }
 
 /// Print using the C library functions for correct voidstar handling.
 fn print_result_c(
     ptr: *mut u8,
-    schema: *const morloc_runtime::cschema::CSchema,
+    schema: *const morloc_runtime_types::cschema::CSchema,
     full_packet: &[u8],
     is_arrow: bool,
     config: &NexusConfig,
@@ -1046,13 +1061,13 @@ fn print_result_c(
     extern "C" {
         fn print_voidstar(
             voidstar: *const std::ffi::c_void,
-            schema: *const morloc_runtime::cschema::CSchema,
+            schema: *const morloc_runtime_types::cschema::CSchema,
             keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> bool;
         fn pretty_print_voidstar(
             voidstar: *const std::ffi::c_void,
-            schema: *const morloc_runtime::cschema::CSchema,
+            schema: *const morloc_runtime_types::cschema::CSchema,
             keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> bool;
@@ -1066,7 +1081,7 @@ fn print_result_c(
         ) -> bool;
         fn pack_with_schema(
             mlc: *const std::ffi::c_void,
-            schema: *const morloc_runtime::cschema::CSchema,
+            schema: *const morloc_runtime_types::cschema::CSchema,
             mpkptr: *mut *mut std::ffi::c_char,
             mpk_size: *mut usize,
             errmsg: *mut *mut std::ffi::c_char,
@@ -1136,7 +1151,7 @@ fn print_result_c(
             extern "C" {
                 fn print_morloc_data_packet(
                     packet: *const u8,
-                    schema: *const morloc_runtime::cschema::CSchema,
+                    schema: *const morloc_runtime_types::cschema::CSchema,
                     errmsg: *mut *mut std::ffi::c_char,
                 ) -> i32;
             }
@@ -1229,7 +1244,7 @@ fn print_result_c(
 
 /// Execute a pure command by evaluating the expression via C library.
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
-    use morloc_runtime::schema::parse_schema;
+    use morloc_runtime_types::schema::parse_schema;
 
     // Open a per-eval SHM arena. Every shm::shmalloc that fires while
     // this guard is alive (CLI arg ingress via msgpack/voidstar unpack,
@@ -1242,17 +1257,52 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     // explicit lifetime keeps nexus and daemon symmetric and protects
     // any future repeated-call use of run_pure_command.
     //
+    // The arena lives in libmorloc.so's `thread_local! ARENA`. We
+    // cannot call `eval_arena::enter()` Rust-side because the nexus no
+    // longer links morloc-runtime as an rlib -- and even if it did,
+    // that path would touch the nexus's own copy of ARENA, missing
+    // every SHM block tracked by libmorloc.so's morloc_eval. The C-ABI
+    // begin/end pair routes us through libmorloc.so's single arena;
+    // EvalArenaGuard below wraps the handle in RAII so the
+    // exit-on-Drop pattern carries through.
+    //
     // Note: error branches below call process::clean_exit(1) which does
     // NOT run Rust destructors; the arena guard's drop is skipped on
     // those paths. That's acceptable here because clean_exit also tears
     // down the whole process via atexit shclose. No additional handling
     // is needed.
-    let _arena = match morloc_runtime::eval_arena::enter() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("Error: eval arena could not be opened: {}", e);
+    extern "C" {
+        fn morloc_eval_arena_enter(
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
+        fn morloc_eval_arena_exit(handle: *mut std::ffi::c_void);
+    }
+    struct EvalArenaGuard {
+        handle: *mut std::ffi::c_void,
+    }
+    impl Drop for EvalArenaGuard {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                unsafe { morloc_eval_arena_exit(self.handle) };
+            }
+        }
+    }
+    let _arena = {
+        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+        let h = unsafe { morloc_eval_arena_enter(&mut err) };
+        if h.is_null() {
+            let msg = if !err.is_null() {
+                let s =
+                    unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
+                unsafe { libc::free(err as *mut std::ffi::c_void) };
+                s
+            } else {
+                "unknown error".into()
+            };
+            eprintln!("Error: eval arena could not be opened: {}", msg);
             process::clean_exit(1);
         }
+        EvalArenaGuard { handle: h }
     };
 
     extern "C" {
@@ -1262,26 +1312,26 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         ) -> *mut std::ffi::c_void; // morloc_expression_t*
         fn morloc_eval(
             expr: *mut std::ffi::c_void,
-            return_schema: *const morloc_runtime::cschema::CSchema,
+            return_schema: *const morloc_runtime_types::cschema::CSchema,
             arg_voidstar: *const *mut u8,
-            arg_schemas: *const *const morloc_runtime::cschema::CSchema,
+            arg_schemas: *const *const morloc_runtime_types::cschema::CSchema,
             nargs: usize,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut std::ffi::c_void; // absptr_t
         fn parse_cli_data_argument(
             dest: *mut u8, arg: *const std::ffi::c_void,
-            schema: *const morloc_runtime::cschema::CSchema,
+            schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
         fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
         fn free_argument_t(arg: *mut std::ffi::c_void);
         fn get_morloc_data_packet_value(
-            data: *const u8, schema: *const morloc_runtime::cschema::CSchema,
+            data: *const u8, schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
         fn make_standard_data_packet(
             relptr: isize,
-            schema: *const morloc_runtime::cschema::CSchema,
+            schema: *const morloc_runtime_types::cschema::CSchema,
         ) -> *mut u8;
         fn abs2rel(ptr: *mut std::ffi::c_void, errmsg: *mut *mut std::ffi::c_char) -> isize;
     }
@@ -1311,7 +1361,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
             process::clean_exit(1);
         }
     };
-    let c_return_schema = morloc_runtime::cschema::CSchema::from_rust(&return_schema);
+    let c_return_schema = morloc_runtime_types::cschema::CSchema::from_rust(&return_schema);
 
     // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
     // declaration order: parse_command_args pushes one ArgValue for
@@ -1319,7 +1369,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     // schema per arg position too. Walk both lists in lockstep; for
     // flags, the schema_str() accessor returns None and we fall back
     // to the bool schema "b" so the wire format stays consistent.
-    let mut c_arg_schemas: Vec<*const morloc_runtime::cschema::CSchema> = Vec::new();
+    let mut c_arg_schemas: Vec<*const morloc_runtime_types::cschema::CSchema> = Vec::new();
     let mut c_arg_voidstars: Vec<*mut u8> = Vec::new();
 
     for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
@@ -1331,7 +1381,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                 process::clean_exit(1);
             }
         };
-        let c_schema = morloc_runtime::cschema::CSchema::from_rust(&schema);
+        let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
 
         let json_str = match arg_val {
             ArgValue::Value(s) => s.clone(),
@@ -1404,10 +1454,10 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
     // Cleanup
     for cs in &c_arg_schemas {
-        unsafe { morloc_runtime::cschema::CSchema::free(*cs as *mut morloc_runtime::cschema::CSchema) };
+        unsafe { morloc_runtime_types::cschema::CSchema::free(*cs as *mut morloc_runtime_types::cschema::CSchema) };
     }
     unsafe {
-        morloc_runtime::cschema::CSchema::free(c_return_schema);
+        morloc_runtime_types::cschema::CSchema::free(c_return_schema);
         libc::free(result_packet as *mut std::ffi::c_void);
     }
 }

@@ -233,11 +233,22 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         (Just (Right t)) -> BndVarN <$> inferType t <*> pure i
         _ -> error "No type found"
     nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
-    nativeExpr m (MonoList v args es) =
-      ListN
-        <$> inferVar v
-        <*> mapM inferType args
-        <*> mapM (nativeExpr m) es
+    -- Resolve the head FVar via the FULL applied type so that
+    -- parametrised typedefs (e.g. R's @type Vector n Bool = "logical"@
+    -- vs @type Vector n a = "list"@) pick the rule that matches the
+    -- args, not just the head TVar. The bare-TVar @inferVar@ path
+    -- picks the first typedef by head name and silently emits the
+    -- wrong CV when no Packable wrap is inserted -- see the analogous
+    -- MonoNull comment below.
+    nativeExpr m (MonoList (Idx vIdx vTv) args es) = do
+      let argTs = map (\(Idx _ t) -> t) args
+          fullT = if null args then VarT vTv else AppT (VarT vTv) argTs
+      fullTf <- inferType (Idx vIdx fullT)
+      let (headFV, argTfs) = case fullTf of
+            VarF fv -> (fv, [])
+            AppF (VarF fv) ts -> (fv, ts)
+            _ -> error "MonoList head must resolve to VarF or AppF (VarF _)"
+      ListN headFV argTfs <$> mapM (nativeExpr m) es
     nativeExpr m (MonoTuple v rs) =
       TupleN
         <$> inferVar v

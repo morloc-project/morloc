@@ -1,0 +1,24 @@
+-- Positive test for R2: cousin transparent aliases share the root's
+-- typeclass instance. A, A', and B all resolve to Str, so the single
+-- @instance Stringlike Str@ is found at every call site regardless of
+-- which alias the value is annotated with.
+
+module main (test_result)
+
+import root-py
+
+type A  = Str
+type A' = Str
+type B  = A
+
+class Stringlike a where
+  tag :: a -> Str
+
+instance Stringlike Str where
+  source Py from "helpers.py" ("tag_str" as tag)
+
+test_result =
+     tag ("hello" :: A)  == "tag:hello"
+  && tag ("world" :: A') == "tag:world"
+  && tag ("nested" :: B) == "tag:nested"
+  && tag ("plain" :: Str) == "tag:plain"

@@ -19,7 +19,6 @@ type declarations, and collects type definitions and source mappings into
 module Morloc.Frontend.Restructure (restructure) where
 
 import qualified Data.Graph as Graph
-import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -54,7 +53,7 @@ restructure s = do
       |>> handleTypeDeclarations
     >>= doM collectTags
     >>= doM collectTypes
-    >>= (\x -> collectUniversalTypes >> return x)
+    >>= (\x -> collectUniversalTypes x >> return x)
     >>= doM collectSources
 
 doM :: (Monad m) => (a -> m ()) -> a -> m a
@@ -141,7 +140,7 @@ checkForSelfRecursion d = do
   return d
   where
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
-    isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _)))
+    isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _ _)))
       -- Forward declaration with no body: parser lowers @type Foo@ to a
       -- body that is just @VarU Foo@ itself. Exempt these along with the
       -- parametric self-application case @type Foo a = Foo a@.
@@ -150,7 +149,7 @@ checkForSelfRecursion d = do
       | classifyRecursion v t == Bare =
           MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
-    isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _)))
+    isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _ _)))
       -- Language-specific typedefs: the same rule applied to the body
       -- and any TypeU parameter slots.
       | any ((== Bare) . classifyRecursion v) (t : rights ts) =
@@ -240,7 +239,7 @@ checkMutualRecursion d = do
     rejectCyclic _ = return ()
 
     collectTypedefs :: ExprI -> [(Int, Maybe Lang, TVar, [Either (TVar, Kind) TypeU], TypeU)]
-    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _))) = [(i, fmap fst form, v, vs, t)]
+    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _ _))) = [(i, fmap fst form, v, vs, t)]
     collectTypedefs (ExprI _ (ModE _ es)) = concatMap collectTypedefs es
     collectTypedefs _ = []
 
@@ -461,7 +460,7 @@ resolveImports d0 =
 
     findSymbols :: ExprI -> Set Symbol
     findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
-    findSymbols (ExprI _ (TypE (ExprTypeE _ v _ _ _))) = Set.singleton $ TypeSymbol v
+    findSymbols (ExprI _ (TypE (ExprTypeE _ v _ _ _ _))) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (ClsE (Typeclass _ cls _ _))) = Set.singleton $ ClassSymbol cls
     findSymbols (ExprI _ (SigE (Signature e _ _))) = Set.singleton $ TermSymbol e
@@ -496,8 +495,8 @@ handleTypeDeclarations = DAG.mapNode f
     f e = e
 
     isNotSelfDef :: ExprI -> Bool
-    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _))) = v /= v'
-    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either (VarU . fst) id) -> vs) (AppU v' vs') _))) =
+    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _ _))) = v /= v'
+    isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either (VarU . fst) id) -> vs) (AppU v' vs') _ _))) =
       v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zip vs vs'))
     isNotSelfDef _ = True
 
@@ -710,10 +709,24 @@ collectTypes fullDag = do
     * stateUniversalGeneralTypedefs
     * stateUniversalConcreteTypedefs
 -}
-collectUniversalTypes :: MorlocMonad ()
-collectUniversalTypes = do
+collectUniversalTypes :: DAG MVar a ExprI -> MorlocMonad ()
+collectUniversalTypes dag = do
   universalGeneralScope <- getUniversalGeneralScope
   universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
+
+  -- Invariant 1: a transparent `type` alias may not carry a per-language
+  -- override. A `type` alias chain must resolve to a single concrete type
+  -- per language. Per-language overrides belong to newtypes or primitives.
+  checkAliasLanguageFormConflict dag universalGeneralScope universalConcreteScope
+
+  -- Invariant 2: a `newtype` wire-parent chain must not contain a cycle.
+  checkNewtypeCycles universalGeneralScope
+
+  -- Invariant 3: a typeclass instance may only be declared on the root of
+  -- an alias tree. Transparent `type` aliases share all instances with
+  -- their root, so an instance on an alias would be ambiguous with the
+  -- root's instance.
+  checkInstanceOnRoot dag universalGeneralScope
 
   s <- MM.get
   MM.put
@@ -743,6 +756,181 @@ collectUniversalTypes = do
           let langMaps' = map (Map.map (completeRecords gscope)) langMaps
           return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
 
+-- | Enforce Invariant 1: a transparent @type Foo = Bar@ alias may not
+-- carry a per-language form. Primitives and newtypes are exempt -- both
+-- are nominally distinct base forms and own their per-language overrides.
+checkAliasLanguageFormConflict :: DAG MVar a ExprI -> Scope -> Map.Map Lang Scope -> MorlocMonad ()
+checkAliasLanguageFormConflict dag gscope cscopes =
+  let bad =
+        [ (lang, v)
+        | (lang, cscope) <- Map.toList cscopes
+        , v <- Map.keys cscope
+        , isTransparentAlias v gscope
+        ]
+  in case bad of
+       [] -> return ()
+       ((lang, v) : _) ->
+         let (mIdx, mMod) = findTypedefSite lang v
+             header = squotes (pretty (unTVar v)) <+> "is declared as a 'type' alias"
+                 <+> "but has a per-language form for" <+> pretty lang <> "."
+             advice = "Change 'type' to 'newtype' so" <+> squotes (pretty (unTVar v))
+                 <+> "becomes a nominally distinct type that owns its native"
+                 <+> "language forms."
+         in case mIdx of
+              -- A source caret already tells the user which file/line,
+              -- so the module name would be redundant.
+              Just i  -> MM.throwSourcedError i (header <> line <> advice)
+              -- No source caret: at least name the declaring module so
+              -- the user knows where to look.
+              Nothing ->
+                let whereClause = case mMod of
+                      Just m  -> line <> "Declared in module" <+> squotes (pretty (unMVar m)) <> "."
+                      Nothing -> mempty
+                in MM.throwSystemError (header <> whereClause <> line <> advice)
+  where
+    isTransparentAlias :: TVar -> Scope -> Bool
+    isTransparentAlias v scope = case Map.lookup v scope of
+      Nothing -> False
+      Just entries -> any isAliasKind entries
+      where
+        isAliasKind (_, _, _, _, TypedefAlias) = True
+        isAliasKind _ = False
+
+    -- Walk the per-module AST to find the per-language typedef
+    -- declaration for (lang, v). Returns the declaration's AST index
+    -- (so the error caret lands on the offending line) and the
+    -- module name (for the error message). Both are best-effort: a
+    -- transformation pass that drops indices would yield Nothing.
+    findTypedefSite :: Lang -> TVar -> (Maybe Int, Maybe MVar)
+    findTypedefSite lang v = case
+        [ (i, m)
+        | (m, (e, _)) <- Map.toList dag
+        , i <- findLangTypedefIndices lang v e
+        ] of
+      ((i, m) : _) -> (Just i, Just m)
+      []           -> (Nothing, Nothing)
+
+    -- Recursively find indices of @type Lang => v ...@ declarations
+    -- inside a module's expression tree.
+    findLangTypedefIndices :: Lang -> TVar -> ExprI -> [Int]
+    findLangTypedefIndices lang v = go
+      where
+        go (ExprI i (TypE (ExprTypeE (Just (lang', _)) v' _ _ _ _)))
+          | lang == lang' && v == v' = [i]
+          | otherwise = []
+        go (ExprI _ (ModE _ es)) = concatMap go es
+        go _ = []
+
+-- | Enforce Invariant 2: the wire-parent edges between newtypes must form
+-- a DAG. A cycle (e.g. @newtype A = B; newtype B = A@) is rejected at the
+-- frontend. Primitives are leaves -- they have no wire-parent edges.
+checkNewtypeCycles :: Scope -> MorlocMonad ()
+checkNewtypeCycles gscope =
+  let edges =
+        [ (v, child)
+        | (v, entries) <- Map.toList gscope
+        , (_, body, _, _, TypedefNewtype) <- entries
+        , child <- bodyHead body
+        ]
+      graph = Map.fromListWith (<>) [(v, [c]) | (v, c) <- edges]
+  in case findCycle graph of
+       Nothing -> return ()
+       Just cyc ->
+         MM.throwSourcedError 0 $
+           "Cycle in newtype wire-parent chain:" <+>
+           hsep (punctuate " ->" (map (pretty . unTVar) cyc))
+  where
+    bodyHead :: TypeU -> [TVar]
+    bodyHead (VarU v) = [v]
+    bodyHead (AppU (VarU v) _) = [v]
+    bodyHead _ = []
+
+    findCycle :: Map.Map TVar [TVar] -> Maybe [TVar]
+    findCycle g = go Set.empty (Map.keys g)
+      where
+        go _ [] = Nothing
+        go visited (v : vs)
+          | Set.member v visited = go visited vs
+          | otherwise = case dfs Set.empty [v] of
+              Just cyc -> Just cyc
+              Nothing -> go (Set.insert v visited) vs
+
+        dfs _ [] = Nothing
+        dfs path (v : _)
+          | Set.member v path = Just [v]
+          | otherwise =
+              let children = Map.findWithDefault [] v g
+                  path' = Set.insert v path
+              in case mapMaybe (\c -> dfs path' [c]) children of
+                   (cyc : _) -> Just (v : cyc)
+                   [] -> Nothing
+
+-- | Enforce Invariant 3: an @instance@ declaration's head type must not be
+-- a transparent @type@ alias. Transparent aliases are fully interchangeable
+-- with their root, so an instance on a leaf would collide with the root's
+-- instance. @newtype@ and primitive heads (and bare type variables) are
+-- accepted.
+checkInstanceOnRoot :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkInstanceOnRoot dag gscope =
+  case findOffense of
+    Nothing -> return ()
+    Just (i, v) ->
+      MM.throwSourcedError i $
+        "Cannot declare instance on transparent alias"
+          <+> squotes (pretty (unTVar v)) <> "."
+          <> line
+          <> "All members of an alias tree share a single instance."
+          <+> "Either declare the instance for the root type, or change"
+          <+> "the declaration of" <+> squotes (pretty (unTVar v))
+          <+> "from 'type' to 'newtype' so it becomes a nominally distinct"
+          <+> "type that owns its own instances."
+  where
+    findOffense :: Maybe (Int, TVar)
+    findOffense = case
+        [ (i, v)
+        | (_, (e, _)) <- Map.toList dag
+        , (i, ts) <- findInstanceTypes e
+        , Just v <- map extractHead ts
+        , isTransparentAlias v
+        ] of
+      ((i, v) : _) -> Just (i, v)
+      []           -> Nothing
+
+    isTransparentAlias :: TVar -> Bool
+    isTransparentAlias v = case Map.lookup v gscope of
+      Nothing -> False
+      Just entries -> any isAliasKind entries
+      where
+        isAliasKind (_, _, _, _, TypedefAlias) = True
+        isAliasKind _ = False
+
+    -- Walk an expression tree to collect (instance-index, type-args) for
+    -- every @IstE@ node. The index lets us locate the source caret on the
+    -- offending @instance@ line.
+    findInstanceTypes :: ExprI -> [(Int, [TypeU])]
+    findInstanceTypes = go
+      where
+        go (ExprI i (IstE _ ts _)) = [(i, ts)]
+        go (ExprI _ (ModE _ es)) = concatMap go es
+        go _ = []
+
+    -- Pull the outermost named-type head out of an instance type, skipping
+    -- @forall@-bound variables. Returns @Nothing@ when the head is a bound
+    -- variable, an existential, or some other shape that cannot resolve to
+    -- a typedef-table entry.
+    extractHead :: TypeU -> Maybe TVar
+    extractHead = headOf Set.empty
+      where
+        headOf bnd (ForallU v t)     = headOf (Set.insert v bnd) t
+        headOf bnd (VarU v)
+          | Set.member v bnd         = Nothing
+          | otherwise                = Just v
+        headOf bnd (AppU (VarU v) _)
+          | Set.member v bnd         = Nothing
+          | otherwise                = Just v
+        headOf bnd (AppU h _)        = headOf bnd h
+        headOf _   _                 = Nothing
+
 {- | links the general entries from records to their abbreviated concrete cousins.
 For example:
   record (Person a) = Person {name :: Str, info a}
@@ -755,33 +943,34 @@ completeRecords gscope = Map.mapWithKey (completeRecord gscope)
     completeRecord ::
       Scope ->
       TVar ->
-      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] ->
-      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)]
+      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] ->
+      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)]
     completeRecord g v xs = case Map.lookup v g of
-      (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _) <- ys]) xs
+      (Just ys) -> map (completeValue [(vs, t) | (vs, t, _, _, _) <- ys]) xs
       Nothing -> xs
 
     completeValue ::
       [([Either (TVar, Kind) TypeU], TypeU)] ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)
-    completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal) = (vs, NamU o v ps rs, d, terminal)
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)
+    completeValue ((vs, NamU _ _ ps rs) : _) (_, NamU o v _ [], d, terminal, kind) = (vs, NamU o v ps rs, d, terminal, kind)
     completeValue _ x = x
 
 -- merge type functions, names of generics do not matter
 mergeEntries ::
-  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] ->
-  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] ->
-  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)]
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] ->
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] ->
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)]
 mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
   where
     isNovel ::
-      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)] -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> Bool
+      [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> Bool
     isNovel [] _ = True
-    isNovel ((vs2, t2, _, isTerminal1) : ys) x@(vs1, t1, _, isTerminal2)
+    isNovel ((vs2, t2, _, isTerminal1, kind1) : ys) x@(vs1, t1, _, isTerminal2, kind2)
       | (length vs1 == length vs2)
           && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(fst v1, fst v2) | (Left v1, Left v2) <- zip vs1 vs2]
-          && isTerminal1 == isTerminal2 =
+          && isTerminal1 == isTerminal2
+          && kind1 == kind2 =
           False
       | otherwise = isNovel ys x
 
@@ -802,7 +991,7 @@ filterAndSubstitute links typemap =
         (Just xs) ->
           Map.insert
             localAlias
-            (map (\(a, b, c, d) -> (a, rename sourceName localAlias b, c, d)) xs)
+            (map (\(a, b, c, d, e) -> (a, rename sourceName localAlias b, c, d, e)) xs)
             (Map.delete sourceName typedefs)
         Nothing -> typedefs
 
@@ -832,7 +1021,7 @@ refineKinds dag = do
   where
     collectAllTypeDefParams :: ExprI -> [(TVar, [Either (TVar, Kind) TypeU])]
     collectAllTypeDefParams (ExprI _ (ModE _ es)) = concatMap collectAllTypeDefParams es
-    collectAllTypeDefParams (ExprI _ (TypE (ExprTypeE _ v ps _ _))) = [(v, ps)]
+    collectAllTypeDefParams (ExprI _ (TypE (ExprTypeE _ v ps _ _ _))) = [(v, ps)]
     collectAllTypeDefParams (ExprI _ (AssE _ e es)) = concatMap collectAllTypeDefParams (e:es)
     collectAllTypeDefParams (ExprI _ (IstE _ _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams _ = []

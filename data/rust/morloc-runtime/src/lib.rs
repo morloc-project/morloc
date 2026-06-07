@@ -1,16 +1,29 @@
+// Modules that come entirely (error, hash, schema, cschema) or
+// partially (packet, null_check) from morloc-runtime-types live as
+// thin re-export shims in this crate so existing `crate::error::*`,
+// `crate::schema::*`, etc. call sites inside libmorloc.so continue to
+// compile unchanged. The canonical type definitions live in the types
+// crate so nexus and libmorloc.so share them via the rlib without
+// duplicating any state.
 pub mod error;
 pub mod schema;
 pub mod recur;
 pub mod packet;
 pub mod shm;
 pub mod hash;
+// Re-export the daemon_socket and shm_types modules from the types
+// crate at the same path so existing C-ABI signatures referencing
+// `crate::shm` constants keep working; daemon_socket gives daemon_ffi
+// the `MorlocSocket` struct without re-defining it.
+pub use morloc_runtime_types::shm_types;
+pub use morloc_runtime_types::daemon_socket;
 pub mod ipc;
 pub mod json;
 pub mod mpack;
-// FFI and utility modules export #[no_mangle] extern "C" symbols.
-// When the "no-ffi-exports" feature is active (nexus build), these modules
-// are not compiled, preventing symbol conflicts with libmorloc.so.
-// CSchema type is always available (used by nexus for Rust<->C conversion)
+// FFI modules export #[no_mangle] extern "C" symbols that constitute
+// libmorloc.so's public surface. The nexus reaches these via DT_NEEDED;
+// it does not link this crate as an rlib (see Cargo.toml's crate-type
+// comment for why).
 pub mod cschema;
 pub mod ffi;
 pub mod utility;
@@ -22,6 +35,7 @@ pub mod packet_ffi;
 pub mod ipc_ffi;
 pub mod http_ffi;
 pub mod slurm_ffi;
+pub mod slurm_bridge;
 pub mod manifest_ffi;
 pub mod eval_arena;
 pub mod eval_ffi;

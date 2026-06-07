@@ -5,25 +5,25 @@ module main (testListLiteral, testListMempty, testListAppend,
              testDequeLiteral, testDequeMempty, testDequeAppend,
              testDequeCons, testDequeUncons,
              testDequeSnoc, testDequeUnsnoc,
-             testVectorLiteral, testVectorAppend,
-             testVectorCons, testVectorUncons,
-             testVectorSnoc, testVectorUnsnoc)
+             testArrayLiteral, testArrayAppend,
+             testArrayCons, testArrayUncons,
+             testArraySnoc, testArrayUnsnoc)
 
--- Primitive types (standalone, no root import)
-type Cpp => Int = "int"
-
--- Container types
-type Cpp => List a = "std::vector<$1>" a
-type Cpp => Deque a = "std::deque<$1>" a
-type Cpp => Vector a = "std::vector<$1>" a
-
--- Tuple for uncons/unsnoc return types
-type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+import internal
 
 -- General type definitions
-type List a
-type Deque a = List a
-type Vector a = List a
+
+-- deque is an independent type that only has the wire-type of a List
+newtype Deque a = List a
+
+-- array is a soft alias for list
+type Array a = List a
+
+-- Language-specific types
+type Cpp => Int = "int"
+type Cpp => List a = "std::vector<$1>" a
+type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b
+type Cpp => Deque a = "std::deque<$1>" a
 
 -- Typeclasses
 class Semigroup a where
@@ -42,6 +42,12 @@ class Stack f where
 class Queue f where
   snoc :: f a -> a -> f a
   unsnoc :: f a -> (f a, a)
+
+instance Packable (List a) (Deque a) where
+  source Cpp from "deque.hpp"
+   ( "morloc_packDeque" as pack
+   , "morloc_unpackDeque" as unpack
+   )
 
 -- List instances
 instance Semigroup (List a) where
@@ -75,8 +81,6 @@ instance Stack Deque where
 instance Queue Deque where
   source Cpp from "foo.hpp" ("dequeSnoc" as snoc)
   source Cpp from "foo.hpp" ("dequeUnsnoc" as unsnoc)
-
--- No Vector instances needed (reduces to List in C++)
 
 -- List tests
 testListLiteral :: [Int]
@@ -114,32 +118,32 @@ testDequeAppend :: Deque Int
 testDequeAppend = append [1, 2] [3, 4]
 
 testDequeCons :: Deque Int
-testDequeCons = cons 0 [1, 2, 3]
+testDequeCons = cons 0 ([1, 2, 3] :: Deque Int)
 
 testDequeUncons :: (Int, Deque Int)
-testDequeUncons = uncons [1, 2, 3]
+testDequeUncons = uncons ([1, 2, 3] :: Deque Int)
 
 testDequeSnoc :: Deque Int
-testDequeSnoc = snoc [1, 2, 3] 4
+testDequeSnoc = snoc ([1, 2, 3] :: Deque Int) 4
 
 testDequeUnsnoc :: (Deque Int, Int)
-testDequeUnsnoc = unsnoc [1, 2, 3]
+testDequeUnsnoc = unsnoc ([1, 2, 3] :: Deque Int)
 
--- Vector tests (uses List instances via alias, both map to std::vector)
-testVectorLiteral :: Vector Int
-testVectorLiteral = [7, 8, 9]
+-- Array tests (uses List instances via alias, both map to std::vector)
+testArrayLiteral :: Array Int
+testArrayLiteral = [7, 8, 9]
 
-testVectorAppend :: Vector Int
-testVectorAppend = append [1, 2] [3, 4]
+testArrayAppend :: Array Int
+testArrayAppend = append [1, 2] [3, 4]
 
-testVectorCons :: Vector Int
-testVectorCons = cons 0 [1, 2, 3]
+testArrayCons :: Array Int
+testArrayCons = cons 0 [1, 2, 3]
 
-testVectorUncons :: (Int, Vector Int)
-testVectorUncons = uncons [1, 2, 3]
+testArrayUncons :: (Int, Array Int)
+testArrayUncons = uncons [1, 2, 3]
 
-testVectorSnoc :: Vector Int
-testVectorSnoc = snoc [1, 2, 3] 4
+testArraySnoc :: Array Int
+testArraySnoc = snoc [1, 2, 3] 4
 
-testVectorUnsnoc :: (Vector Int, Int)
-testVectorUnsnoc = unsnoc [1, 2, 3]
+testArrayUnsnoc :: (Array Int, Int)
+testArrayUnsnoc = unsnoc [1, 2, 3]

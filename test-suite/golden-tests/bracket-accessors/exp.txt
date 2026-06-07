@@ -1,0 +1,68 @@
+--- testRangeCpp ---
+true
+--- testRangePy ---
+true
+--- testRangeR ---
+true
+--- testRecordCpp ---
+true
+--- testRecordPy ---
+true
+--- testRecordR ---
+true
+--- indexOne ---
+30
+--- sliceClosed ---
+[20,30,40]
+--- sliceOpenLeft ---
+[10,20,30]
+--- sliceOpenRight ---
+[20,30,40,50]
+--- sliceFull ---
+[10,20,30]
+--- sliceReverse ---
+[5,4,3,2,1]
+--- sliceEvery ---
+[1,3,5,7]
+--- sliceNegEnd ---
+[30,40,50]
+--- sliceWithStep ---
+[1,4,7,10]
+--- chainedFieldThenSlice ---
+[20,30]
+--- chainedIndexThenField ---
+4
+--- sliceThenTupleField ---
+[2,3,4]
+--- sliceThenRecordField ---
+[1,2,3]
+--- sliceThenNestedSlice ---
+[[1,2,3],[6,7,8]]
+--- sliceThenGroup ---
+[[1,10],[2,20]]
+--- deepChain ---
+[[11,101],[21,301]]
+--- indexFromForeignLength ---
+300
+--- sliceFromOptionalStart ---
+[10,20,30]
+--- indexInt8 ---
+10
+--- indexInt16 ---
+20
+--- indexUInt32 ---
+30
+--- sliceInt8Bound ---
+[20,30]
+--- sliceMixedWidthBounds ---
+[20,30,40]
+--- crossPoolReceiverPyToCpp ---
+300
+--- crossPoolReceiverCppToR ---
+20
+--- crossPoolReceiverRToPy ---
+9
+--- crossPoolIdxForeign ---
+20
+--- crossPoolSliceNested ---
+[10,20,30]

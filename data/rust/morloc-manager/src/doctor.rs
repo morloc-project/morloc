@@ -102,6 +102,7 @@ pub fn doctor(
     ec: &EnvironmentConfig,
     deep: bool,
     strict: bool,
+    slurm: bool,
     json_mode: bool,
 ) -> Result<()> {
     let scope_str = match scope {
@@ -111,6 +112,7 @@ pub fn doctor(
     let engine_str = match engine {
         ContainerEngine::Docker => "docker",
         ContainerEngine::Podman => "podman",
+        ContainerEngine::Apptainer => "apptainer",
     };
 
     if !json_mode {
@@ -145,6 +147,13 @@ pub fn doctor(
     } else {
         if !json_mode { println!("\nDeep checks"); }
         c.skip("Use --deep to run container-side checks");
+    }
+
+    // ==== SLURM-bridge prerequisites (opt-in via --slurm) ====
+    if slurm {
+        if !json_mode { println!("\nSLURM bridge"); }
+        c.set_category("slurm");
+        check_slurm_prereqs(&mut c, engine, ec);
     }
 
     let fail_count = c.fail;
@@ -191,13 +200,15 @@ pub fn doctor(
 
 fn check_engine(c: &mut Counts, engine: ContainerEngine) {
     let exe = engine_executable(engine);
-    let fmt = match engine {
-        ContainerEngine::Podman => "{{.Version.Version}}",
-        ContainerEngine::Docker => "{{.ServerVersion}}",
+    // For Apptainer/Singularity there is no `info --format ...`; use
+    // `--version` directly which prints something like
+    // "apptainer version 1.3.4".
+    let argv: Vec<&str> = match engine {
+        ContainerEngine::Podman => vec!["info", "--format", "{{.Version.Version}}"],
+        ContainerEngine::Docker => vec!["info", "--format", "{{.ServerVersion}}"],
+        ContainerEngine::Apptainer => vec!["--version"],
     };
-    let output = Command::new(exe)
-        .args(["info", "--format", fmt])
-        .output();
+    let output = Command::new(exe).args(&argv).output();
     match output {
         Ok(o) if o.status.success() => {
             let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -222,6 +233,14 @@ fn check_engine(c: &mut Counts, engine: ContainerEngine) {
 }
 
 fn check_base_image(c: &mut Counts, engine: ContainerEngine, base_image: &str) {
+    // For Apptainer the engine-side `image_exists_locally` call below is
+    // skipped: ec.base_image is the human-readable OCI URI, while presence
+    // is determined by the .sif file on disk (checked separately when
+    // base_sif is recorded). check_built_image handles the .sif-path case.
+    if matches!(engine, ContainerEngine::Apptainer) {
+        c.pass(&format!("Base image {base_image} (apptainer; presence checked via .sif)"));
+        return;
+    }
     if image_exists_locally(engine, base_image) {
         c.pass(&format!("Base image {base_image}"));
     } else {
@@ -233,6 +252,41 @@ fn check_base_image(c: &mut Counts, engine: ContainerEngine, base_image: &str) {
 }
 
 fn check_built_image(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig, scope: Scope, env_name: &str) {
+    // Apptainer: check .sif files on disk rather than OCI image tags.
+    if matches!(engine, ContainerEngine::Apptainer) {
+        if let Some(ref sif) = ec.base_sif {
+            if std::path::Path::new(sif).is_file() {
+                c.pass(&format!("Base .sif {sif}"));
+            } else {
+                c.fail(&format!(
+                    "Base .sif {sif} not found on disk\n       \
+                     Run: morloc-manager update --image <ref> to repull"
+                ));
+            }
+        }
+        if ec.singularity_def.is_some() || ec.dockerfile.is_some() {
+            let recipe_kind = if ec.singularity_def.is_some() { ".def" } else { "Dockerfile" };
+            match &ec.layered_sif {
+                Some(sif) => {
+                    if std::path::Path::new(sif).is_file() {
+                        c.pass(&format!("Layered .sif {sif}"));
+                    } else {
+                        c.fail(&format!(
+                            "Layered .sif {sif} not found on disk\n       \
+                             Run: morloc-manager update"
+                        ));
+                    }
+                }
+                None => {
+                    c.warn(&format!(
+                        "{recipe_kind} configured but no layered .sif built yet\n       \
+                         Run: morloc-manager update"
+                    ));
+                }
+            }
+        }
+        return;
+    }
     if ec.dockerfile.is_none() {
         return;
     }
@@ -552,6 +606,120 @@ fn check_programs_deep(
         } else {
             let snippet: String = stderr.lines().take(3).collect::<Vec<_>>().join("\n       ");
             c.fail(&format!("{} -- smoke test failed: {snippet}", prog.name));
+        }
+    }
+}
+
+// ======================================================================
+// SLURM-bridge prerequisites
+// ======================================================================
+
+/// Checks for a containerized SLURM dispatch workflow. Verifies the
+/// host-side prerequisites that `morloc-manager run --slurm-bridge`
+/// will rely on: cluster client tools, codegen toggle in the build
+/// config, env image resolvability, NFS-shared morloc-manager binary
+/// path, and a writable runtime dir for the bridge UDS.
+fn check_slurm_prereqs(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig) {
+    fn which(name: &str) -> bool {
+        Command::new(name).arg("--version").output().is_ok()
+    }
+
+    // 1. sbatch on PATH.
+    if which("sbatch") {
+        c.pass("sbatch on host PATH");
+    } else {
+        c.fail("sbatch not on host PATH (install slurm-client or load the slurm module)");
+    }
+
+    // 2. sacct on PATH.
+    if which("sacct") {
+        c.pass("sacct on host PATH");
+    } else {
+        c.fail("sacct not on host PATH (install slurm-client or load the slurm module)");
+    }
+
+    // 3. build.yaml has slurm-support: true.
+    let build_yaml = cfg::config_dir(Scope::Local).join("build.yaml");
+    match fs::read_to_string(&build_yaml) {
+        Ok(content) => {
+            // Lightweight grep; a YAML parse here would duplicate
+            // Config.hs's logic for a one-line key.
+            if content.lines().any(|l| {
+                let t = l.trim();
+                t == "slurm-support: true" || t == "slurm-support:true"
+            }) {
+                c.pass(&format!("{} has slurm-support: true", build_yaml.display()));
+            } else {
+                c.fail(&format!(
+                    "{} missing `slurm-support: true` (run `morloc-manager update --reinit --init-arg --slurm`, or `morloc-manager run -- morloc init -f --slurm`)",
+                    build_yaml.display()
+                ));
+            }
+        }
+        Err(_) => {
+            c.fail(&format!(
+                "{} does not exist; run `morloc-manager update --reinit --init-arg --slurm`",
+                build_yaml.display()
+            ));
+        }
+    }
+
+    // 4. Active env image is resolvable.
+    let image = ec.active_image();
+    if image.is_empty() {
+        c.fail("active env has no resolvable image (run `morloc-manager update`)");
+    } else {
+        c.pass(&format!("active env image: {}", image));
+    }
+
+    // 5. Engine softly recommended to be Apptainer.
+    let _ = engine; // silence unused if all checks short-circuit
+    if ec.engine != ContainerEngine::Apptainer {
+        c.warn(&format!(
+            "engine is {:?}; non-Apptainer engines require image distribution to every compute node (registry pull or pre-populated store)",
+            ec.engine
+        ));
+    } else {
+        c.pass("engine is Apptainer (image is a shared-FS file)");
+    }
+
+    // 6. morloc-manager binary path looks NFS-mirrorable. Heuristic:
+    //    must live under $HOME (the typical NFS-shared root).
+    match (std::env::current_exe(), dirs::home_dir()) {
+        (Ok(exe), Some(home)) => {
+            if exe.starts_with(&home) {
+                c.pass(&format!(
+                    "morloc-manager binary is under $HOME ({})",
+                    exe.display()
+                ));
+            } else {
+                c.warn(&format!(
+                    "morloc-manager binary at {} is not under $HOME; compute nodes may not be able to exec the same absolute path. Install under ~/.local/bin or another NFS-shared location.",
+                    exe.display()
+                ));
+            }
+        }
+        _ => {
+            c.warn("could not resolve morloc-manager's own absolute path; --slurm-bridge may fail to compose a working sbatch wrap");
+        }
+    }
+
+    // 7. Bridge UDS dir is writable.
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let probe = std::path::PathBuf::from(&runtime_dir).join(".morloc-doctor-probe");
+    match fs::write(&probe, b"") {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            c.pass(&format!("bridge UDS dir writable: {}", runtime_dir));
+        }
+        Err(e) => {
+            c.fail(&format!(
+                "bridge UDS dir {} not writable ({}); set XDG_RUNTIME_DIR or fix /tmp",
+                runtime_dir, e
+            ));
         }
     }
 }

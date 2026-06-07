@@ -7,6 +7,16 @@ use crate::error::MorlocError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
+// Wire-format types and constants live in `morloc-runtime-types::shm_types`
+// so they can be shared with the nexus without duplicating process state.
+// Re-exported here so existing call sites (`crate::shm::RelPtr`,
+// `crate::shm::Array`, etc.) keep working unchanged.
+pub use morloc_runtime_types::shm_types::{
+    align_up, AbsPtr, Array, BlockHeader, RelPtr, ShmHeader, VolPtr,
+    BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
+    RELNULL, SHM_MAGIC, VOLNULL,
+};
+
 /// Cross-platform file pre-allocation.
 /// Linux: posix_fallocate (allocates disk blocks).
 /// macOS: ftruncate (extends file, may be sparse).
@@ -20,77 +30,13 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
     if libc::ftruncate(fd, size) == -1 { -1 } else { 0 }
 }
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
-pub const SHM_MAGIC: u32 = 0xFECA_0DF0;
-pub const BLK_MAGIC: u32 = 0x0CB1_0DF0;
-pub const MAX_VOLUME_NUMBER: usize = 32;
-pub const MAX_FILENAME_SIZE: usize = 128;
-pub const MAX_PATH_SIZE: usize = 512;
+// ── Internal lock constants ────────────────────────────────────────────────
 
 const LOCK_UNLOCKED: u32 = 0;
 const LOCK_LOCKED: u32 = 1;
 const SPIN_LIMIT: u32 = 40;
 #[cfg(target_os = "linux")]
 const LOCK_TIMEOUT_SECS: u64 = 5;
-
-// ── Pointer types ──────────────────────────────────────────────────────────
-
-/// Relative pointer: index into the multi-volume pool (cross-process safe).
-pub type RelPtr = isize;
-/// Volume-local pointer: offset within a single volume.
-pub type VolPtr = isize;
-/// Absolute pointer: virtual address in this process.
-pub type AbsPtr = *mut u8;
-
-pub const RELNULL: RelPtr = -1;
-pub const VOLNULL: VolPtr = -1;
-
-// ── Block alignment ────────────────────────────────────────────────────────
-
-pub const BLOCK_ALIGN: usize = std::mem::align_of::<BlockHeader>();
-
-#[inline]
-pub const fn align_up(x: usize, align: usize) -> usize {
-    (x + align - 1) & !(align - 1)
-}
-
-// ── Shared memory header (lives in mmap'd region) ──────────────────────────
-
-#[repr(C)]
-pub struct ShmHeader {
-    pub magic: u32,
-    pub volume_name: [u8; MAX_FILENAME_SIZE],
-    pub volume_index: i32,
-    pub volume_size: usize,
-    pub relative_offset: usize,
-    pub lock: AtomicU32,
-    pub cursor: VolPtr,
-}
-
-#[repr(C)]
-pub struct BlockHeader {
-    pub magic: u32,
-    pub reference_count: AtomicU32,
-    pub size: usize,
-}
-
-const _: () = assert!(
-    std::mem::size_of::<BlockHeader>()
-        == std::mem::size_of::<u32>()
-            + std::mem::size_of::<AtomicU32>()
-            + std::mem::size_of::<usize>()
-);
-
-// ── Voidstar data structures (used by serialization) ───────────────────────
-
-/// Variable-length array/string representation in SHM.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct Array {
-    pub size: usize,
-    pub data: RelPtr,
-}
 
 // ── Send wrapper for raw pointers ──────────────────────────────────────────
 
@@ -270,12 +216,52 @@ pub fn shinit(
     Ok(shm)
 }
 
+/// Reason `shopen` could not return a mapped volume. Each variant is
+/// distinguishable so callers (notably `rel2abs`) can render a precise
+/// diagnostic instead of the historical generic "volume not found".
+#[derive(Debug)]
+pub enum ShopenMiss {
+    /// COMMON_BASENAME is empty: this process never called `shinit`.
+    /// Post-refactor (rlib removal) this should not be reachable from
+    /// normal call paths -- there is one libmorloc.so per process and
+    /// the nexus/pool wire shinit before any allocation. Surfacing it
+    /// explicitly catches "someone touched a relptr before init" bugs.
+    NotInitialized,
+    /// Basename is set but neither `/dev/shm/<basename>_<i>` nor the
+    /// file-backed fallback at `<fallback_dir>/<basename>_<i>` could be
+    /// opened. Common causes: the writer never created this volume,
+    /// the writer crashed before sending, basename mismatch between
+    /// writer and reader, or another process (or stale-SHM cleanup)
+    /// unlinked the segment.
+    FileMissing {
+        basename: String,
+        volume_index: usize,
+        fallback_dir: String,
+        shm_errno: i32,
+    },
+}
+
 /// Open an existing SHM volume (or return cached pointer).
+/// Wrapper around `shopen_diag` that collapses miss reasons into
+/// `Ok(None)` for legacy callers; use `shopen_diag` directly when you
+/// need to render a specific diagnostic.
 pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError> {
+    match shopen_diag(volume_index)? {
+        Ok(shm) => Ok(Some(shm)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Diagnostic version of `shopen`: distinguishes "not initialized"
+/// from "file missing" so `rel2abs` can give the user something
+/// actionable instead of the generic "volume not found".
+pub fn shopen_diag(
+    volume_index: usize,
+) -> Result<Result<*mut ShmHeader, ShopenMiss>, MorlocError> {
     {
         let vols = VOLUMES.lock().unwrap();
         if !vols[volume_index].is_null() {
-            return Ok(Some(vols[volume_index].ptr()));
+            return Ok(Ok(vols[volume_index].ptr()));
         }
     }
 
@@ -284,7 +270,7 @@ pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError
         get_cstr_buf(&cb).to_string()
     };
     if basename.is_empty() {
-        return Ok(None);
+        return Ok(Err(ShopenMiss::NotInitialized));
     }
 
     let shm_name = format!("{}_{}", basename, volume_index);
@@ -293,19 +279,31 @@ pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError
     let name_cstr = std::ffi::CString::new(shm_name.as_str()).unwrap();
     // SAFETY: name_cstr is a valid null-terminated CString.
     let fd = unsafe { libc::shm_open(name_cstr.as_ptr(), libc::O_RDWR, 0o666) };
+    let shm_open_errno = if fd == -1 { unsafe { crate::utility::errno_val() } } else { 0 };
 
     let fd = if fd == -1 {
         // Try file-backed fallback
         let fb = FALLBACK_DIR.lock().unwrap();
-        let fallback = get_cstr_buf(&fb);
+        let fallback = get_cstr_buf(&fb).to_string();
+        drop(fb);
         if fallback.is_empty() {
-            return Ok(None);
+            return Ok(Err(ShopenMiss::FileMissing {
+                basename,
+                volume_index,
+                fallback_dir: String::new(),
+                shm_errno: shm_open_errno,
+            }));
         }
         let file_path = format!("{}/{}", fallback, shm_name);
         let path_cstr = std::ffi::CString::new(file_path.as_str()).unwrap();
         let fd2 = unsafe { libc::open(path_cstr.as_ptr(), libc::O_RDWR) };
         if fd2 == -1 {
-            return Ok(None);
+            return Ok(Err(ShopenMiss::FileMissing {
+                basename,
+                volume_index,
+                fallback_dir: fallback,
+                shm_errno: shm_open_errno,
+            }));
         }
         fd2
     } else {
@@ -350,7 +348,7 @@ pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError
         vols[volume_index].set(shm);
     }
 
-    Ok(Some(shm))
+    Ok(Ok(shm))
 }
 
 /// Close and unlink all SHM volumes.
@@ -526,9 +524,12 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
     }
     let mut remaining = ptr as usize;
 
-    // First try with volumes already mapped
-    {
+    // First try with volumes already mapped. Sum their sizes so the
+    // error path can report how far into the SHM pool the relptr
+    // actually pointed before we ran out of mapped volumes.
+    let already_mapped_total: usize = {
         let vols = VOLUMES.lock().unwrap();
+        let mut total = 0usize;
         for i in 0..MAX_VOLUME_NUMBER {
             if vols[i].is_null() {
                 break; // No more volumes mapped
@@ -545,19 +546,17 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
                 return Ok(unsafe { base.add(remaining) as AbsPtr });
             }
             remaining -= vol_size;
+            total += vol_size;
         }
-    }
+        total
+    };
 
     // If not found, try opening unmapped volumes
     remaining = ptr as usize;
     for i in 0..MAX_VOLUME_NUMBER {
-        let shm = match shopen(i)? {
-            Some(s) => s,
-            None => {
-                return Err(MorlocError::Shm(format!(
-                    "Failed to find volume for relptr {}", ptr
-                )));
-            }
+        let shm = match shopen_diag(i)? {
+            Ok(s) => s,
+            Err(miss) => return Err(rel2abs_miss_error(ptr, i, already_mapped_total, miss)),
         };
         // SAFETY: shm is a valid mmap'd ShmHeader pointer from shopen.
         let vol_size = unsafe { (*shm).volume_size };
@@ -571,9 +570,77 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
         remaining -= vol_size;
     }
 
+    // Walked all MAX_VOLUME_NUMBER slots without finding it.
     Err(MorlocError::Shm(format!(
-        "Shared memory pool does not contain index {}", ptr
+        "relptr {} exceeds total SHM capacity (scanned all {} volume slots; \
+         the pool must have grown beyond MAX_VOLUME_NUMBER, or the relptr is corrupt)",
+        ptr, MAX_VOLUME_NUMBER
     )))
+}
+
+/// Build a user-facing error for an `shopen` miss inside `rel2abs`. Each
+/// `ShopenMiss` variant has a different root cause and a different fix,
+/// so they get different messages instead of the legacy generic
+/// "Failed to find volume". `already_mapped_bytes` is how much of the
+/// pool was successfully scanned before the miss, included so the user
+/// can correlate the relptr value with the working portion of SHM.
+fn rel2abs_miss_error(
+    ptr: RelPtr,
+    volume_index: usize,
+    already_mapped_bytes: usize,
+    miss: ShopenMiss,
+) -> MorlocError {
+    let basename_now = {
+        let cb = COMMON_BASENAME.lock().unwrap();
+        get_cstr_buf(&cb).to_string()
+    };
+    match miss {
+        ShopenMiss::NotInitialized => MorlocError::Shm(format!(
+            "cannot resolve relptr {} -- SHM is not initialized in this process \
+             (COMMON_BASENAME is empty). Caller reached rel2abs before any \
+             shinit; if you see this after the rlib-removal refactor it most \
+             likely means a foreign caller bypassed the dispatch path. \
+             {} volume(s) were already mapped totaling {} bytes before the miss.",
+            ptr, volume_index, already_mapped_bytes
+        )),
+        ShopenMiss::FileMissing {
+            basename,
+            volume_index: vi,
+            fallback_dir,
+            shm_errno,
+        } => {
+            let errno_msg = unsafe {
+                let s = libc::strerror(shm_errno);
+                if s.is_null() {
+                    format!("errno={}", shm_errno)
+                } else {
+                    std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned()
+                }
+            };
+            let basename_note = if basename_now == basename {
+                String::new()
+            } else {
+                format!(
+                    " (current COMMON_BASENAME is now '{}'; basename may have \
+                     changed after pool-crash recovery)",
+                    basename_now
+                )
+            };
+            let fallback_note = if fallback_dir.is_empty() {
+                "no file-backed fallback directory was configured".to_string()
+            } else {
+                format!("file-backed fallback '{}/{}_{}' also missing", fallback_dir, basename, vi)
+            };
+            MorlocError::Shm(format!(
+                "cannot resolve relptr {} -- SHM volume '/dev/shm/{}_{}' does not exist \
+                 (shm_open: {}).{} {}. Likely causes: writer never created this volume, \
+                 writer crashed before sending, basename mismatch between writer and \
+                 reader, or another process (or /dev/shm cleanup) unlinked it. \
+                 {} volume(s) were already mapped before the miss.",
+                ptr, basename, vi, errno_msg, basename_note, fallback_note, volume_index
+            ))
+        }
+    }
 }
 
 /// Convert absolute pointer to relative pointer.

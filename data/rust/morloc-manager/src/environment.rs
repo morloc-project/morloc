@@ -7,9 +7,11 @@ use sha2::{Digest, Sha256};
 
 use crate::config;
 use crate::container::{
-    self, check_remote_image, container_build_visible,
-    container_pull_visible, engine_executable, exit_code_to_int,
-    image_exists_locally, BuildConfig, RemoteImageStatus,
+    self, apptainer_build_from_oci_daemon, apptainer_build_native,
+    check_remote_image, container_build_visible, container_pull_to_path,
+    container_pull_visible, detect_oci_builder, engine_executable,
+    exit_code_to_int, image_exists_locally, ApptainerNativeBuildConfig,
+    ApptainerOciConvertConfig, BuildConfig, RemoteImageStatus,
 };
 use crate::error::{ManagerError, Result};
 use crate::serve;
@@ -30,11 +32,28 @@ pub struct ApplyOptions {
     pub original_image: Option<String>,
     pub morloc_version: Option<Version>,
     pub dockerfile: Option<String>,
+    /// Path to a Singularity .def file. Mutually exclusive with a Dockerfile
+    /// stub only for stub generation (which lives in main.rs); the env config
+    /// itself may hold both a Dockerfile and a .def. On Apptainer the .def
+    /// takes precedence; on docker/podman the Dockerfile takes precedence.
+    pub deffile: Option<String>,
     pub includes: Vec<String>,
+    /// Path to a user-supplied YAML flag file. When set, its contents replace
+    /// env.flags.yaml in the env config dir (declarative bulk write).
     pub flagfile: Option<String>,
+    /// `-x/--engine-arg` flags on `new`. Written to `run.<engine>` of the
+    /// freshly created env.flags.yaml as the user's initial configuration.
+    /// Unused on `update` (where `-x` has been removed).
     pub engine_args: Vec<String>,
+    /// `--reinit-arg` flags on `update`. One-shot build-engine flags
+    /// appended to the materialized build flag list for this invocation.
+    /// Never persisted. Requires `--reinit`; CLI layer enforces that.
+    pub reinit_args: Vec<String>,
     pub engine: Option<ContainerEngine>,
     pub shm_size: Option<String>,
+    /// Skip the recipe-build step (Dockerfile under docker/podman, .def under
+    /// apptainer, or the OCI fallback). Retains the legacy name despite now
+    /// covering both recipe kinds because of how callers reference it.
     pub skip_dockerfile_build: bool,
     pub verbose: bool,
 }
@@ -84,8 +103,18 @@ pub fn version_to_image(ver: &Version) -> String {
 /// Pull an image by tag from the morloc registry, detect its version, and
 /// return (image_ref, version). The tag can be a semver string ("0.77.0"),
 /// a named tag ("edge", "nightly"), or any other valid container tag.
+///
+/// For docker/podman this writes to the engine's image store and returns the
+/// versioned OCI ref. For apptainer the .sif is written to a per-tag cache
+/// path (`apptainer_pull_cache_path`); the returned string is the OCI ref
+/// (the .sif path is recoverable from the same helper) and the cached .sif
+/// is later moved into the env's data dir by apply_environment.
 pub fn pull_tagged_image(engine: ContainerEngine, tag: &str) -> Result<(String, Version)> {
     let image_ref = format!("{MORLOC_IMAGE_PREFIX}:{tag}");
+
+    if matches!(engine, ContainerEngine::Apptainer) {
+        return pull_tagged_image_apptainer(&image_ref);
+    }
 
     if !image_exists_locally(engine, &image_ref) {
         match check_remote_image(engine, &image_ref) {
@@ -133,6 +162,106 @@ pub fn pull_tagged_image(engine: ContainerEngine, tag: &str) -> Result<(String, 
     Ok((versioned_image, ver))
 }
 
+/// Apptainer-specific pull. Writes the .sif to a per-OCI-ref cache path so
+/// that the env-name resolution that happens after the pull (driven by
+/// `detect_morloc_version`) does not need to know the env name yet. The
+/// caller later calls `claim_apptainer_pull_into_env` to move the cached
+/// .sif into the env's data dir.
+fn pull_tagged_image_apptainer(image_ref: &str) -> Result<(String, Version)> {
+    let cache_path = apptainer_pull_cache_path(image_ref);
+
+    if cache_path.is_file() {
+        eprintln!("Using local copy of {image_ref} ({})", cache_path.display());
+    } else {
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                ManagerError::EnvError(format!(
+                    "Failed to create apptainer pull cache dir {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        eprintln!("Pulling {image_ref} -> {}...", cache_path.display());
+        let status = container_pull_to_path(
+            ContainerEngine::Apptainer,
+            image_ref,
+            &cache_path.to_string_lossy(),
+        );
+        if !status.success() {
+            return Err(ManagerError::EngineError {
+                engine: ContainerEngine::Apptainer,
+                code: exit_code_to_int(status),
+                stderr: "Apptainer pull failed (see output above)".to_string(),
+            });
+        }
+    }
+
+    let ver = detect_morloc_version(
+        ContainerEngine::Apptainer,
+        &cache_path.to_string_lossy(),
+    )?;
+
+    // Return the OCI ref (NOT the cache path). Storing the OCI URI in
+    // ec.base_image keeps it human-readable and re-pullable; the .sif path
+    // lives in ec.base_sif and is filled in by apply_environment after the
+    // move.
+    Ok((image_ref.to_string(), ver))
+}
+
+/// Cache path for an Apptainer pull, keyed by the OCI image reference. The
+/// .sif lives here until claimed into an env's data dir.
+pub fn apptainer_pull_cache_path(oci_ref: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(oci_ref.as_bytes());
+    let h = hex_encode(&hasher.finalize());
+    let base = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("morloc")
+        .join("apptainer-pull");
+    base.join(format!("{}.sif", &h[..16]))
+}
+
+/// Move a cached .sif (produced by `pull_tagged_image_apptainer` or
+/// `pull_custom_image`) into the env's data dir at the canonical
+/// `<env-data-dir>/sif/base.sif` location. Returns the final path. If the
+/// cache file is missing (e.g. caller did not pull through this function),
+/// returns Err.
+pub fn claim_apptainer_pull_into_env(
+    scope: Scope,
+    name: &str,
+    oci_ref: &str,
+) -> Result<PathBuf> {
+    let cache = apptainer_pull_cache_path(oci_ref);
+    if !cache.is_file() {
+        return Err(ManagerError::EnvError(format!(
+            "Apptainer pull cache missing for {oci_ref} (expected at {}). Re-run with --image or --tag to repull.",
+            cache.display()
+        )));
+    }
+    let dst = config::env_base_sif_path(scope, name);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            ManagerError::EnvError(format!(
+                "Failed to create sif dir {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    // rename within the same filesystem is atomic; if cache and dst are on
+    // different filesystems, fall back to copy+remove.
+    if fs::rename(&cache, &dst).is_err() {
+        fs::copy(&cache, &dst).map_err(|e| {
+            ManagerError::EnvError(format!(
+                "Failed to move pulled .sif from {} to {}: {e}",
+                cache.display(),
+                dst.display()
+            ))
+        })?;
+        let _ = fs::remove_file(&cache);
+    }
+    Ok(dst)
+}
+
 /// Pull the :edge image. Convenience wrapper around pull_tagged_image.
 pub fn resolve_latest(engine: ContainerEngine) -> Result<(String, Version)> {
     pull_tagged_image(engine, "edge")
@@ -145,10 +274,18 @@ pub fn pull_version_image(engine: ContainerEngine, ver: &Version) -> Result<Stri
 }
 
 /// Detect the morloc version by running `morloc --version` inside the image.
+/// For docker/podman this uses `<engine> run --rm <ref>`; for apptainer it
+/// uses `apptainer exec <sif-path>`.
 pub fn detect_morloc_version(engine: ContainerEngine, image: &str) -> Result<Version> {
     let exe = engine_executable(engine);
+    let argv: Vec<&str> = match engine {
+        ContainerEngine::Docker | ContainerEngine::Podman => {
+            vec!["run", "--rm", image, "morloc", "--version"]
+        }
+        ContainerEngine::Apptainer => vec!["exec", image, "morloc", "--version"],
+    };
     let output = Command::new(exe)
-        .args(["run", "--rm", image, "morloc", "--version"])
+        .args(&argv)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -171,8 +308,37 @@ pub fn detect_morloc_version(engine: ContainerEngine, image: &str) -> Result<Ver
     })
 }
 
-/// Pull a custom image (not from morloc registry).
+/// Pull a custom image (not from morloc registry). For Apptainer this writes
+/// to the per-OCI-ref cache path (see `apptainer_pull_cache_path`); the
+/// caller is expected to claim the .sif into an env via
+/// `claim_apptainer_pull_into_env` after the env name is known.
 pub fn pull_custom_image(engine: ContainerEngine, image: &str) -> Result<()> {
+    if matches!(engine, ContainerEngine::Apptainer) {
+        let cache_path = apptainer_pull_cache_path(image);
+        if cache_path.is_file() {
+            eprintln!("Using local copy of {image} ({})", cache_path.display());
+            return Ok(());
+        }
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                ManagerError::EnvError(format!(
+                    "Failed to create apptainer pull cache dir {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        eprintln!("Pulling {image} -> {}...", cache_path.display());
+        let status = container_pull_to_path(engine, image, &cache_path.to_string_lossy());
+        if !status.success() {
+            return Err(ManagerError::EngineError {
+                engine,
+                code: exit_code_to_int(status),
+                stderr: "Apptainer pull failed (see output above)".to_string(),
+            });
+        }
+        return Ok(());
+    }
+
     if image_exists_locally(engine, image) {
         eprintln!("Using local copy of {image}");
         return Ok(());
@@ -312,6 +478,10 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
             dockerfile: None,
             content_hash: None,
             built_image: None,
+            singularity_def: None,
+            def_content_hash: None,
+            base_sif: None,
+            layered_sif: None,
             engine: opts.engine.unwrap_or(ContainerEngine::Podman),
             shm_size: "512m".to_string(),
             morloc_version: None,
@@ -359,6 +529,33 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         false
     };
 
+    // Copy Singularity .def if a new one was provided
+    let deffile_changed = if let Some(ref src) = opts.deffile {
+        let dest = config::env_deffile_path(scope, name);
+        let dest_dir = dest.parent().unwrap();
+        fs::create_dir_all(dest_dir).map_err(|e| {
+            ManagerError::EnvError(format!("Failed to create config dir: {e}"))
+        })?;
+        fs::copy(src, &dest).map_err(|e| {
+            ManagerError::EnvError(format!("Failed to copy .def file '{}': {e}", src))
+        })?;
+        ec.singularity_def = Some("recipe.def".to_string());
+        true
+    } else {
+        false
+    };
+
+    // For Apptainer: claim the cached pull .sif (from pull_tagged_image /
+    // pull_custom_image) into the env's data dir. This runs once at `new`
+    // and again whenever the base image changes via `update --image`.
+    let needs_base_sif_claim = matches!(ec.engine, ContainerEngine::Apptainer)
+        && (opts.is_new || opts.base_image.is_some())
+        && !ec.base_image.is_empty();
+    if needs_base_sif_claim {
+        let dst = claim_apptainer_pull_into_env(scope, name, &ec.base_image)?;
+        ec.base_sif = Some(dst.to_string_lossy().to_string());
+    }
+
     // Copy included files/directories into build context.
     // Supports src:dest syntax (like Docker volume mounts) for explicit placement.
     let cfg_dir = config::env_config_dir(scope, name);
@@ -392,95 +589,58 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         }
     }
 
-    // Write flags file: for new envs or when flagfile is provided, write fresh.
-    // For updates with only engine_args, append to existing.
-    let flags_path = config::env_flags_path(scope, name);
-    if opts.is_new || opts.flagfile.is_some() {
-        let mut flag_lines: Vec<String> = Vec::new();
-        if let Some(ref src) = opts.flagfile {
-            let content = fs::read_to_string(src).map_err(|e| {
-                ManagerError::EnvError(format!("Failed to read flagfile '{}': {e}", src))
-            })?;
-            flag_lines.extend(
-                content
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty() && !l.starts_with('#')),
-            );
-        }
-        flag_lines.extend(opts.engine_args.iter().cloned());
-        let flags_content = if flag_lines.is_empty() {
-            String::new()
-        } else {
-            flag_lines.join("\n") + "\n"
+    // Flag-config write policy:
+    //   * --flagfile: parse the user file as a FlagConfig (strict schema),
+    //     replace env.flags.yaml. Works on both `new` and `update`.
+    //   * is_new + engine_args: seed env.flags.yaml with run.<engine> set
+    //     to engine_args. This is the only path where `-x` writes to the
+    //     file; on `update` `-x` no longer exists.
+    //   * Otherwise: do not touch env.flags.yaml. Users edit it themselves.
+    if let Some(ref src) = opts.flagfile {
+        let bytes = fs::read(src).map_err(|e| {
+            ManagerError::EnvError(format!("Failed to read flagfile '{}': {e}", src))
+        })?;
+        let parsed: FlagConfig = serde_yaml::from_slice(&bytes).map_err(|e| {
+            ManagerError::EnvError(format!("Invalid flagfile '{}': {e}", src))
+        })?;
+        config::write_flag_config(scope, name, &parsed)?;
+    } else if opts.is_new && !opts.engine_args.is_empty() {
+        let mut fc = FlagConfig::default();
+        let target = match ec.engine {
+            ContainerEngine::Docker => &mut fc.run.docker,
+            ContainerEngine::Podman => &mut fc.run.podman,
+            ContainerEngine::Apptainer => &mut fc.run.apptainer,
         };
-        fs::write(&flags_path, &flags_content).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to write flags file: {e}"))
-        })?;
-    } else if !opts.engine_args.is_empty() {
-        // Append engine_args to existing flags file
-        let mut existing = config::read_flags_file_lines(&flags_path);
-        existing.extend(opts.engine_args.iter().cloned());
-        let flags_content = existing.join("\n") + "\n";
-        fs::write(&flags_path, &flags_content).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to write flags file: {e}"))
-        })?;
+        target.extend(opts.engine_args.iter().cloned());
+        config::write_flag_config(scope, name, &fc)?;
     }
 
-    // Build Dockerfile layer if present and not skipped
-    let has_dockerfile = ec.dockerfile.is_some();
-    let should_build = has_dockerfile
+    // Build the recipe layer if present and not skipped. The dispatch matrix
+    // covers all engine x recipe combinations:
+    //
+    //   docker/podman + Dockerfile   -> today's OCI build
+    //   docker/podman + only .def    -> error (Singularity-only env)
+    //   apptainer + .def             -> native apptainer build (no Docker needed)
+    //   apptainer + only Dockerfile  -> fallback: OCI build + .sif convert
+    //                                   (requires docker/podman on the host)
+    //   apptainer + both             -> prefer .def
+    let has_recipe = ec.dockerfile.is_some() || ec.singularity_def.is_some();
+    let recipe_changed = dockerfile_changed || deffile_changed;
+    let want_build = has_recipe
         && !opts.skip_dockerfile_build
-        && (opts.is_new || dockerfile_changed || !opts.includes.is_empty()
-            || opts.base_image.is_some() || opts.engine.is_some()
-            // For update with no specific changes, rebuild if Dockerfile exists
-            || (!opts.is_new && opts.dockerfile.is_none() && opts.includes.is_empty()));
+        && (opts.is_new
+            || recipe_changed
+            || !opts.includes.is_empty()
+            || opts.base_image.is_some()
+            || opts.engine.is_some()
+            // For update with no specific changes, rebuild if a recipe exists.
+            || (!opts.is_new
+                && opts.dockerfile.is_none()
+                && opts.deffile.is_none()
+                && opts.includes.is_empty()));
 
-    if should_build {
-        let tag = format!("localhost/morloc-env:{name}");
-        let df_path = config::env_dockerfile_path(scope, name);
-        if df_path.exists() {
-            let hash = hash_file(&df_path)?;
-            // Skip rebuild when nothing has actually changed: same Dockerfile
-            // hash, no new includes, no base-image change, tagged image still
-            // present. Without this, `update` with no arguments silently
-            // re-runs the full build every time.
-            let unchanged = !opts.is_new
-                && !dockerfile_changed
-                && opts.includes.is_empty()
-                && opts.base_image.is_none()
-                && ec.content_hash.as_deref() == Some(hash.as_str())
-                && ec.built_image.as_ref()
-                    .map(|img| image_exists_locally(ec.engine, img))
-                    .unwrap_or(false);
-            if unchanged {
-                eprintln!("Dockerfile unchanged; skipping rebuild.");
-            } else {
-                let build_cfg = BuildConfig {
-                    dockerfile: df_path.to_string_lossy().to_string(),
-                    context: cfg_dir.to_string_lossy().to_string(),
-                    tag: tag.clone(),
-                    build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
-                };
-                if opts.verbose {
-                    let exe = engine_executable(ec.engine);
-                    eprintln!(
-                        "[morloc-manager] {exe} build -f {} -t {} {}",
-                        build_cfg.dockerfile, build_cfg.tag, build_cfg.context
-                    );
-                }
-                let status = container_build_visible(ec.engine, &build_cfg);
-                if !status.success() {
-                    return Err(ManagerError::EngineError {
-                        engine: ec.engine,
-                        code: exit_code_to_int(status),
-                        stderr: "Build failed (see output above)".to_string(),
-                    });
-                }
-                ec.built_image = Some(tag);
-                ec.content_hash = Some(hash);
-            }
-        }
+    if want_build {
+        run_recipe_build(scope, name, &mut ec, &cfg_dir, opts, dockerfile_changed, deffile_changed)?;
     }
 
     // Always reconcile the stored morloc version against the actual image.
@@ -492,7 +652,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
     // - If the image has no morloc binary (e.g., a bare base image staged
     //   for a Dockerfile layer not yet built), silently leave the field
     //   unchanged rather than failing the whole operation.
-    let detect_target = ec.built_image.clone().unwrap_or_else(|| ec.base_image.clone());
+    let detect_target = ec.active_image().to_string();
     if !detect_target.is_empty() {
         if let Ok(detected) = detect_morloc_version(ec.engine, &detect_target) {
             ec.morloc_version = Some(match ec.morloc_version.take() {
@@ -508,6 +668,214 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
     config::write_env_config(scope, name, &ec)?;
 
     Ok(())
+}
+
+/// Dispatch the recipe build per the engine x recipe matrix documented in the
+/// caller. Mutates `ec` with the resulting image identifier (OCI tag or .sif
+/// path) and content hash.
+fn run_recipe_build(
+    scope: Scope,
+    name: &str,
+    ec: &mut EnvironmentConfig,
+    cfg_dir: &Path,
+    opts: &ApplyOptions,
+    dockerfile_changed: bool,
+    deffile_changed: bool,
+) -> Result<()> {
+    let df_path = config::env_dockerfile_path(scope, name);
+    let def_path = config::env_deffile_path(scope, name);
+
+    // Materialize build-phase flags: env.flags.yaml `build.<engine>` prepended
+    // to `build.all`, then this invocation's --reinit-arg flags appended.
+    // The engine resolves duplicates last-wins.
+    let mut build_extra_flags = config::read_flag_config(scope, name)?
+        .materialize(Phase::Build, ec.engine);
+    build_extra_flags.extend(opts.reinit_args.iter().cloned());
+
+    match ec.engine {
+        ContainerEngine::Docker | ContainerEngine::Podman => {
+            if ec.dockerfile.is_none() {
+                // Only the .def is present; docker/podman cannot consume it.
+                return Err(ManagerError::EnvError(format!(
+                    "Environment '{name}' has only a Singularity .def recipe. \
+                     Either switch to `--engine apptainer` or add a Dockerfile \
+                     via `update --dockerfile-stub`."
+                )));
+            }
+            if !df_path.is_file() {
+                return Ok(());
+            }
+            let hash = hash_file(&df_path)?;
+            let tag = format!("localhost/morloc-env:{name}");
+            let unchanged = !opts.is_new
+                && !dockerfile_changed
+                && opts.includes.is_empty()
+                && opts.base_image.is_none()
+                && ec.content_hash.as_deref() == Some(hash.as_str())
+                && ec
+                    .built_image
+                    .as_ref()
+                    .map(|img| image_exists_locally(ec.engine, img))
+                    .unwrap_or(false);
+            if unchanged {
+                eprintln!("Dockerfile unchanged; skipping rebuild.");
+                return Ok(());
+            }
+            let build_cfg = BuildConfig {
+                dockerfile: df_path.to_string_lossy().to_string(),
+                context: cfg_dir.to_string_lossy().to_string(),
+                tag: tag.clone(),
+                build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
+                extra_flags: build_extra_flags.clone(),
+            };
+            if opts.verbose {
+                let exe = engine_executable(ec.engine);
+                eprintln!(
+                    "[morloc-manager] {exe} build -f {} -t {} {} {}",
+                    build_cfg.dockerfile, build_cfg.tag,
+                    build_extra_flags.join(" "), build_cfg.context
+                );
+            }
+            let status = container_build_visible(ec.engine, &build_cfg);
+            if !status.success() {
+                return Err(ManagerError::EngineError {
+                    engine: ec.engine,
+                    code: exit_code_to_int(status),
+                    stderr: "Build failed (see output above)".to_string(),
+                });
+            }
+            ec.built_image = Some(tag);
+            ec.content_hash = Some(hash);
+            Ok(())
+        }
+        ContainerEngine::Apptainer => {
+            // Native path: prefer the .def when present (Docker-free build).
+            if def_path.is_file() {
+                let def_hash = hash_file(&def_path)?;
+                let out_sif = config::env_layered_sif_path(scope, name);
+                let unchanged = !opts.is_new
+                    && !deffile_changed
+                    && opts.includes.is_empty()
+                    && opts.base_image.is_none()
+                    && ec.def_content_hash.as_deref() == Some(def_hash.as_str())
+                    && out_sif.is_file();
+                if unchanged {
+                    eprintln!(".def recipe unchanged; skipping rebuild.");
+                    return Ok(());
+                }
+                let base_sif = ec.base_sif.as_deref().ok_or_else(|| {
+                    ManagerError::EnvError(format!(
+                        "Environment '{name}' has no base .sif recorded. \
+                         Re-run `morloc-manager new` or `update --image <ref>` \
+                         to pull a base image first."
+                    ))
+                })?;
+                let cfg = ApptainerNativeBuildConfig {
+                    deffile: def_path.to_string_lossy().to_string(),
+                    output_sif: out_sif.to_string_lossy().to_string(),
+                    build_args: vec![("BASE_SIF".to_string(), base_sif.to_string())],
+                    extra_flags: build_extra_flags.clone(),
+                };
+                if opts.verbose {
+                    let exe = engine_executable(ec.engine);
+                    eprintln!(
+                        "[morloc-manager] {exe} build {} --build-arg BASE_SIF={} {} {}",
+                        build_extra_flags.join(" "),
+                        base_sif,
+                        out_sif.display(),
+                        def_path.display()
+                    );
+                }
+                let status = apptainer_build_native(&cfg);
+                if !status.success() {
+                    return Err(ManagerError::EngineError {
+                        engine: ec.engine,
+                        code: exit_code_to_int(status),
+                        stderr: "Apptainer build failed (see output above)".to_string(),
+                    });
+                }
+                ec.layered_sif = Some(out_sif.to_string_lossy().to_string());
+                ec.def_content_hash = Some(def_hash);
+                return Ok(());
+            }
+
+            // Fallback path: Dockerfile-only on apptainer. Requires a local
+            // OCI builder (docker or podman).
+            if !df_path.is_file() {
+                return Ok(());
+            }
+            let oci_engine = detect_oci_builder().ok_or_else(|| {
+                ManagerError::EnvError(format!(
+                    "Environment '{name}' has a Dockerfile but Apptainer cannot read \
+                     Dockerfiles directly, and no Docker or Podman was found on PATH \
+                     to convert it. Either install one, or replace the Dockerfile \
+                     with a Singularity .def via `update --deffile-stub`."
+                ))
+            })?;
+            let df_hash = hash_file(&df_path)?;
+            let out_sif = config::env_layered_sif_path(scope, name);
+            let unchanged = !opts.is_new
+                && !dockerfile_changed
+                && opts.includes.is_empty()
+                && opts.base_image.is_none()
+                && ec.content_hash.as_deref() == Some(df_hash.as_str())
+                && out_sif.is_file();
+            if unchanged {
+                eprintln!("Dockerfile unchanged; skipping rebuild.");
+                return Ok(());
+            }
+            let oci_tag = format!("localhost/morloc-env:{name}");
+            // The OCI build helper step gets no user build-flags. Those are
+            // intended for `apptainer build`, not the upstream `docker
+            // build` that produces the source image. Forwarding them
+            // would risk mixing flag dialects.
+            let build_cfg = BuildConfig {
+                dockerfile: df_path.to_string_lossy().to_string(),
+                context: cfg_dir.to_string_lossy().to_string(),
+                tag: oci_tag.clone(),
+                build_args: vec![("CONTAINER_BASE".to_string(), ec.base_image.clone())],
+                extra_flags: Vec::new(),
+            };
+            if opts.verbose {
+                let oci_exe = engine_executable(oci_engine);
+                eprintln!(
+                    "[morloc-manager] (apptainer fallback) {oci_exe} build -f {} -t {} {}",
+                    build_cfg.dockerfile, build_cfg.tag, build_cfg.context
+                );
+            }
+            let oci_status = container_build_visible(oci_engine, &build_cfg);
+            if !oci_status.success() {
+                return Err(ManagerError::EngineError {
+                    engine: oci_engine,
+                    code: exit_code_to_int(oci_status),
+                    stderr: "OCI build (for apptainer fallback) failed (see output above)".to_string(),
+                });
+            }
+            let convert_cfg = ApptainerOciConvertConfig {
+                source_engine: oci_engine,
+                source_tag: oci_tag.clone(),
+                output_sif: out_sif.to_string_lossy().to_string(),
+                extra_flags: build_extra_flags.clone(),
+            };
+            let convert_status = apptainer_build_from_oci_daemon(&convert_cfg);
+            if !convert_status.success() {
+                return Err(ManagerError::EngineError {
+                    engine: ec.engine,
+                    code: exit_code_to_int(convert_status),
+                    stderr: "OCI -> .sif conversion failed (see output above)".to_string(),
+                });
+            }
+            ec.built_image = Some(oci_tag);
+            ec.content_hash = Some(df_hash);
+            ec.layered_sif = Some(out_sif.to_string_lossy().to_string());
+            eprintln!(
+                "[morloc-manager] note: using {} as a build helper. For a Docker-free \
+                 build, add a .def recipe via `update --deffile-stub`.",
+                engine_executable(oci_engine)
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Remove an environment and all its data.

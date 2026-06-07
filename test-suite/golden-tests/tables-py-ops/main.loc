@@ -5,6 +5,7 @@ module main
   )
 
 import root
+import vector-py
 import table-py
 
 source Py from "src.py"
@@ -47,7 +48,7 @@ picked n = selectColsDyn ["y"] (mkData n)
 reversed_ :: Int -> Table n {x=Int, y=Str}
 reversed_ n =
   let t = mkData n
-  in pickRows (reverse (range 0 (nrow t))) t
+  in pickRows (pack (.[::-1] (range 0 (nrow t))) :: Vector n Int) t
 
 -- rbind: doubled row count via Nat addition; pyarrow concat_arrays.
 rbound :: Int -> Table m {x=Int, y=Str}

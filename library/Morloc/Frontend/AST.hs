@@ -78,11 +78,11 @@ findSources _ = []
 -}
 findTypedefs ::
   ExprI ->
-  ( Map.Map TVar [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)]
-  , Map.Map Lang (Map.Map TVar [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)])
+  ( Map.Map TVar [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)]
+  , Map.Map Lang (Map.Map TVar [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)])
   )
-findTypedefs (ExprI _ (TypE (ExprTypeE Nothing v vs t d))) = (Map.singleton v [(vs, t, d, False)], Map.empty)
-findTypedefs (ExprI _ (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t d))) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, d, isTerminal)]))
+findTypedefs (ExprI _ (TypE (ExprTypeE Nothing v vs t d k))) = (Map.singleton v [(vs, t, d, False, k)], Map.empty)
+findTypedefs (ExprI _ (TypE (ExprTypeE (Just (lang, isTerminal)) v vs t d k))) = (Map.empty, Map.singleton lang (Map.singleton v [(vs, t, d, isTerminal, k)]))
 findTypedefs (ExprI _ (ModE _ es)) = foldl combine (Map.empty, Map.empty) (map findTypedefs es)
   where
     combine (g1, c1) (g2, c2) =

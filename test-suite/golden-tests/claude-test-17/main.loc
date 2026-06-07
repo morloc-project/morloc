@@ -6,8 +6,8 @@ module main (foo, bar)
 
 import root-py
 
-type SizedList n a = [a]
-type Py => (SizedList n a) = "list" a
+newtype SizedList (n :: Nat) a = [a]
+type Py => (SizedList (n :: Nat) a) = "list" a
 
 -- A function that takes a "SizedList 3 Int" and returns its length
 myLen :: SizedList 3 Int -> Int

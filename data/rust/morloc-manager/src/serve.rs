@@ -22,6 +22,20 @@ pub fn build_serve_image(
     rebuild: bool,
     programs: &[ProgramEntry],
 ) -> Result<()> {
+    if matches!(engine, ContainerEngine::Apptainer) {
+        // The Apptainer unfreeze path is not yet implemented end-to-end --
+        // the OCI builder available on the freeze host may not be available
+        // on a deployment host. Produce a clear error here instead of
+        // silently falling into a docker/podman code path that will fail
+        // later with a confusing message.
+        return Err(ManagerError::UnfreezeError(format!(
+            "Apptainer unfreeze is not yet implemented in this build. The frozen \
+             state at '{state_tarball}' is engine-agnostic and can be unfrozen \
+             under --engine docker or --engine podman; or rebuild from the env's \
+             .def recipe with `apptainer build {tag}.sif ...`. Track support in \
+             the SLURM-prep roadmap."
+        )));
+    }
     if !Path::new(state_tarball).exists() {
         return Err(ManagerError::UnfreezeError(format!(
             "Tarball not found: {state_tarball}"
@@ -159,6 +173,9 @@ pub fn build_serve_image(
         context: context_dir.to_string_lossy().to_string(),
         tag: tag.to_string(),
         build_args: Vec::new(),
+        // Serve-image builds are short-lived bootstrap recipes generated
+        // by morloc-manager itself; no user-supplied build flags apply.
+        extra_flags: Vec::new(),
     };
     if verbose {
         let exe = engine_executable(engine);
@@ -288,6 +305,18 @@ pub fn serve_environment(
     shm_size: &Option<String>,
     user_env: &[(String, String)],
 ) -> Result<()> {
+    if matches!(engine, ContainerEngine::Apptainer) {
+        return serve_apptainer_instance(
+            verbose,
+            image,
+            data_dir,
+            container_name,
+            ports,
+            extra_flags,
+            user_env,
+        );
+    }
+
     // Clean up any existing dead container with this name (silently)
     let _ = crate::container::container_remove_quiet(engine, container_name);
 
@@ -404,6 +433,21 @@ pub fn serve_environment(
 }
 
 pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) -> Result<()> {
+    if matches!(engine, ContainerEngine::Apptainer) {
+        // Existence check is more useful as an error than as a precondition
+        // here: the instance might already be gone from a SIGKILL etc.
+        let running = apptainer_list_serve_instances();
+        if !running.iter().any(|c| c.name == name) {
+            return Err(ManagerError::EnvError(format!(
+                "No serve instance running for '{name}'"
+            )));
+        }
+        if verbose {
+            let exe = engine_executable(engine);
+            eprintln!("[morloc-manager] {exe} instance stop {name}");
+        }
+        return apptainer_instance_stop(name);
+    }
     if !crate::container::container_exists(engine, name) {
         return Err(ManagerError::EnvError(format!(
             "No serve container running for '{name}'"
@@ -458,6 +502,13 @@ pub struct ServeContainerInfo {
 
 /// Query running serve containers and return structured info.
 pub fn query_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<Vec<ServeContainerInfo>> {
+    if matches!(engine, ContainerEngine::Apptainer) {
+        if verbose {
+            let exe = engine_executable(engine);
+            eprintln!("[morloc-manager] {exe} instance list --json");
+        }
+        return Ok(apptainer_list_serve_instances());
+    }
     let exe = engine_executable(engine);
     let fmt = "{{.Names}}\t{{.Status}}\t{{.Ports}}";
     let prefix = serve_container_prefix();
@@ -507,6 +558,12 @@ pub fn query_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<
 
 /// Find running serve container names for the current user.
 pub fn find_running_serve_containers(engine: ContainerEngine) -> Vec<String> {
+    if matches!(engine, ContainerEngine::Apptainer) {
+        return apptainer_list_serve_instances()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+    }
     let exe = engine_executable(engine);
     let filter = format!("name={}", serve_container_prefix());
     let output = Command::new(exe)
@@ -737,6 +794,9 @@ fn rebuild_env_image(
         context: build_dir.to_string(),
         tag: env_tag.clone(),
         build_args: vec![("CONTAINER_BASE".to_string(), effective_base.to_string())],
+        // Deployment-image rebuild during unfreeze is morloc-manager's own
+        // bootstrap step; no user flag-file applies here.
+        extra_flags: Vec::new(),
     };
     let (status, _, build_err) = container_build(engine, &build_cfg);
     if status.success() {
@@ -747,4 +807,243 @@ fn rebuild_env_image(
         );
         effective_base.to_string()
     }
+}
+
+// ======================================================================
+// Apptainer instance backend
+// ======================================================================
+
+/// Start a long-running morloc serve instance under Apptainer.
+///
+/// Apptainer has no NAT; host_port and container_port must match. If they
+/// differ, return a clear error rather than silently rewriting either side.
+/// All other RunConfig flags translate per the table in build_apptainer_args.
+fn serve_apptainer_instance(
+    verbose: bool,
+    image: &str,
+    data_dir: &str,
+    instance_name: &str,
+    ports: &[(u16, u16)],
+    extra_flags: &[String],
+    user_env: &[(String, String)],
+) -> Result<()> {
+    // Stop any leftover instance with this name from a previous run.
+    let _ = apptainer_instance_stop(instance_name);
+
+    for (h, c) in ports {
+        if h != c {
+            return Err(ManagerError::EnvError(format!(
+                "Apptainer uses host networking; port mapping -p {h}:{c} cannot be \
+                 rewritten. Either configure the nexus to bind to port {h} directly, \
+                 or use -p {c}:{c} (matching host:container)."
+            )));
+        }
+    }
+
+    let port_str: Vec<String> = ports
+        .iter()
+        .map(|(h, c)| format!("{h}:{c}"))
+        .collect();
+    eprintln!(
+        "Starting serve instance {instance_name} on ports {}...",
+        port_str.join(", ")
+    );
+    eprintln!(
+        "[morloc-manager] note: apptainer uses host networking; nexus binds directly \
+         to host:{}",
+        ports.first().map(|(h, _)| *h).unwrap_or(8080)
+    );
+
+    let mh = CONTAINER_MORLOC_HOME;
+
+    let exe = engine_executable(ContainerEngine::Apptainer);
+    let mut argv: Vec<String> = vec!["instance".to_string(), "start".to_string()];
+    argv.push("--bind".to_string());
+    argv.push(format!("{data_dir}:{mh}"));
+    argv.push("--env".to_string());
+    argv.push(format!(
+        "PATH={mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ));
+    argv.push("--env".to_string());
+    argv.push(format!("MORLOC_HOME={mh}"));
+    for (k, v) in user_env {
+        argv.push("--env".to_string());
+        argv.push(format!("{k}={v}"));
+    }
+    for f in extra_flags {
+        argv.push(f.clone());
+    }
+    argv.push(image.to_string());
+    argv.push(instance_name.to_string());
+    // After the instance name, args are forwarded to the image's startscript.
+    // The morloc image's startscript can dispatch to `morloc-nexus --router`
+    // by reading these args, or the user supplies a custom %startscript in
+    // their .def. For the MVP we pass the standard router args.
+    argv.push("morloc-nexus".to_string());
+    argv.push("--router".to_string());
+    argv.push("--fdb".to_string());
+    argv.push(format!("{mh}/fdb"));
+    argv.push("--http-port".to_string());
+    argv.push(ports.first().map(|(_, c)| c.to_string()).unwrap_or_else(|| "8080".to_string()));
+
+    if verbose {
+        let quoted: Vec<String> = argv
+            .iter()
+            .map(|a| if a.contains(' ') { format!("'{a}'") } else { a.clone() })
+            .collect();
+        eprintln!("[morloc-manager] {exe} {}", quoted.join(" "));
+    }
+
+    let status = Command::new(exe)
+        .args(&argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| ManagerError::EnvError(format!("Failed to spawn apptainer: {e}")))?;
+    if !status.success() {
+        return Err(ManagerError::EngineError {
+            engine: ContainerEngine::Apptainer,
+            code: exit_code_to_int(status),
+            stderr: "apptainer instance start failed (see output above)".to_string(),
+        });
+    }
+
+    eprintln!("Instance {instance_name} started");
+    eprintln!("  Logs:   morloc-manager logs");
+    eprintln!("  Stop:   morloc-manager stop");
+    eprintln!("  Status: morloc-manager status");
+    Ok(())
+}
+
+/// Stop a running Apptainer instance by name. Returns Ok(()) when no such
+/// instance exists -- mirrors the pre-emptive cleanup model used by the OCI
+/// path.
+pub fn apptainer_instance_stop(name: &str) -> Result<()> {
+    let exe = engine_executable(ContainerEngine::Apptainer);
+    let _ = Command::new(exe)
+        .args(["instance", "stop", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    Ok(())
+}
+
+/// List Apptainer instances whose names begin with the morloc serve prefix.
+/// Parses `apptainer instance list --json`.
+pub fn apptainer_list_serve_instances() -> Vec<ServeContainerInfo> {
+    let exe = engine_executable(ContainerEngine::Apptainer);
+    let output = Command::new(exe)
+        .args(["instance", "list", "--json"])
+        .current_dir("/tmp")
+        .output();
+    let Ok(o) = output else {
+        return Vec::new();
+    };
+    if !o.status.success() {
+        return Vec::new();
+    }
+    // Apptainer's JSON is `{"instances": [{"instance": "name", ...}, ...]}`.
+    let text = String::from_utf8_lossy(&o.stdout);
+    let parsed: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let prefix = serve_container_prefix();
+    let mut result = Vec::new();
+    if let Some(arr) = parsed.get("instances").and_then(|v| v.as_array()) {
+        for entry in arr {
+            let name = entry
+                .get("instance")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let env = env_name_from_container(&name).to_string();
+            result.push(ServeContainerInfo {
+                name,
+                env,
+                ports: "-".to_string(),
+                status: "Up".to_string(),
+            });
+        }
+    }
+    result
+}
+
+/// Read the Apptainer per-instance log file. Apptainer has no `logs`
+/// subcommand; logs live at
+/// `~/.apptainer/instances/logs/<host>/<user>/<instance>/<instance>.{out,err}`.
+///
+/// `follow` is honored on a best-effort basis: if true, we tail -f the .out
+/// file (mirroring the OCI path which interleaves stdout/stderr to stdout).
+pub fn apptainer_logs(instance_name: &str, follow: bool) -> Result<()> {
+    // Read the kernel-exported hostname directly. Cheaper than spawning
+    // /bin/hostname and avoids dragging in a new nix feature.
+    let host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let home = dirs::home_dir().ok_or_else(|| {
+        ManagerError::EnvError("Cannot determine home directory".to_string())
+    })?;
+    let log_dir = home
+        .join(".apptainer/instances/logs")
+        .join(host)
+        .join(&user)
+        .join(instance_name);
+    let out_path = log_dir.join(format!("{instance_name}.out"));
+    let err_path = log_dir.join(format!("{instance_name}.err"));
+
+    if !out_path.exists() && !err_path.exists() {
+        return Err(ManagerError::EnvError(format!(
+            "No log files found for instance '{instance_name}'. \
+             Expected under {}",
+            log_dir.display()
+        )));
+    }
+
+    if follow {
+        // Use `tail -F` for follow mode; works regardless of file rotation.
+        let mut argv = vec!["-F".to_string()];
+        if out_path.exists() {
+            argv.push(out_path.to_string_lossy().to_string());
+        }
+        if err_path.exists() {
+            argv.push(err_path.to_string_lossy().to_string());
+        }
+        let status = Command::new("tail")
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| ManagerError::EnvError(format!("Failed to spawn tail: {e}")))?;
+        if !status.success() {
+            return Err(ManagerError::EngineError {
+                engine: ContainerEngine::Apptainer,
+                code: exit_code_to_int(status),
+                stderr: "tail failed".to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    // Non-follow: dump out then err to stdout (stderr-as-stdout merge mirrors
+    // what the OCI path does via stderr-as-stdout redirection).
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    if let Ok(buf) = fs::read(&out_path) {
+        let _ = lock.write_all(&buf);
+    }
+    if let Ok(buf) = fs::read(&err_path) {
+        let _ = lock.write_all(&buf);
+    }
+    Ok(())
 }

@@ -1,0 +1,9 @@
+labeled-groups:
+  big:
+    cache: false
+    benchmark: false
+    remote:
+      threads: 1
+      memory: 1
+      time: 60
+      gpus: 0

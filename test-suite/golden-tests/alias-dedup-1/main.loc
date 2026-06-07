@@ -11,7 +11,9 @@ import root-cpp
 -- Each alias supports different typeclasses:
 --   List:   Functor, Foldable, Indexed, Stack, Queue
 --   Deque:  Functor, Foldable, Stack, Queue
---   Array:  Functor, Foldable, Indexed
+
+-- this is simple alias for list
+type Array a = List a
 
 -- Functor (all aliases have it)
 mapDeque :: Deque Int -> Deque Int
@@ -27,12 +29,12 @@ foldDeque xs = fold (\a x -> a + x) 0 xs
 foldArray :: Array Int -> Int
 foldArray xs = fold (\a x -> a + x) 0 xs
 
--- Indexed (List, Array -- NOT Deque)
+-- Indexable (List, Array -- NOT Deque)
 indexList :: [Int] -> Int
-indexList xs = at 0 xs
+indexList xs = .[0] xs
 
 indexArray :: Array Int -> Int
-indexArray xs = at 0 xs
+indexArray xs = .[0] xs
 
 -- Stack (List, Deque -- NOT Array)
 consDeque :: Deque Int -> Deque Int
@@ -53,14 +55,14 @@ chainDeque xs =
       zs = cons 0 ys
   in fold (\a x -> a + x) 0 zs
 
--- List: map (Functor) + snoc (Queue) + at (Indexed)
+-- List: map (Functor) + snoc (Queue) + index (Indexable)
 chainList :: [Int] -> Int
 chainList xs =
   let ys = map (\x -> x + 1) xs
       zs = snoc ys 100
-  in at 0 zs
+  in .[0] zs
 
--- Array: map (Functor) + at (Indexed) + fold (Foldable)
+-- Array: map (Functor) + index (Indexable) + fold (Foldable)
 chainArray :: Array Int -> Int
 chainArray xs =
   let ys = map (\x -> x * 2) xs
@@ -140,7 +142,7 @@ testAliasCpp =
 testInt32Cpp :: Bool
 testInt32Cpp =
   let t1 = add32 10 20 == 30
-      t2 = mul64 100 200 == 20000
+  let t2 = mul64 100 200 == 20000
   in t1 && t2
 
 testDeepChainPy :: Int

@@ -190,6 +190,39 @@ pub fn is_active() -> bool {
     ARENA.with(|cell| cell.borrow().is_some())
 }
 
+// ── C-ABI wrappers for cross-library access ────────────────────────────────
+//
+// The arena owns a `thread_local!`, which is per-process state with no
+// cross-library sharing. The nexus runs its dispatch inside the arena
+// to scope SHM allocations to a single command; without a C-ABI handle
+// the nexus would have to either link the rlib (creating its own
+// disjoint ARENA that shm::shmalloc inside libmorloc.so wouldn't see)
+// or skip the arena entirely (leaking SHM per command). Both are wrong;
+// the begin/end pair below lets the nexus enter and exit libmorloc.so's
+// ARENA while preserving RAII semantics on the nexus side via a small
+// Drop wrapper around the returned handle.
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_eval_arena_enter(
+    errmsg: *mut *mut std::ffi::c_char,
+) -> *mut std::ffi::c_void {
+    crate::error::clear_errmsg(errmsg);
+    match enter() {
+        Ok(guard) => Box::into_raw(Box::new(guard)) as *mut std::ffi::c_void,
+        Err(e) => {
+            crate::error::set_errmsg(errmsg, &e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_eval_arena_exit(handle: *mut std::ffi::c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle as *mut ArenaGuard));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! These tests exercise the arena's bookkeeping primitives directly

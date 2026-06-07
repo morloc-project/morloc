@@ -16,12 +16,12 @@ all:
 	./nexus testDequeUncons >> obs.txt 2>> obs.err
 	./nexus testDequeSnoc >> obs.txt 2>> obs.err
 	./nexus testDequeUnsnoc >> obs.txt 2>> obs.err
-	./nexus testVectorLiteral >> obs.txt 2>> obs.err
-	./nexus testVectorAppend >> obs.txt 2>> obs.err
-	./nexus testVectorCons >> obs.txt 2>> obs.err
-	./nexus testVectorUncons >> obs.txt 2>> obs.err
-	./nexus testVectorSnoc >> obs.txt 2>> obs.err
-	./nexus testVectorUnsnoc >> obs.txt 2>> obs.err
+	./nexus testArrayLiteral >> obs.txt 2>> obs.err
+	./nexus testArrayAppend >> obs.txt 2>> obs.err
+	./nexus testArrayCons >> obs.txt 2>> obs.err
+	./nexus testArrayUncons >> obs.txt 2>> obs.err
+	./nexus testArraySnoc >> obs.txt 2>> obs.err
+	./nexus testArrayUnsnoc >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__

@@ -1,6 +1,6 @@
 [package]
 name = "morloc-runtime"
-version = "0.87.0"
+version = "0.88.0"
 edition = "2021"
 description = "Morloc runtime library: shared memory, serialization, IPC, packet protocol"
 # Version is intentionally synchronized with the morloc compiler version
@@ -10,10 +10,20 @@ description = "Morloc runtime library: shared memory, serialization, IPC, packet
 # requires bumping this version in lockstep.
 
 [lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
+# Intentionally no "rlib" -- removing it forces every Rust caller in
+# the workspace (notably morloc-nexus) to go through libmorloc.so via
+# the C ABI (DT_NEEDED dynamic link) for any state-touching call. The
+# rlib path used to be the cause of a state-divergence bug: nexus
+# statically linked the rlib AND dlopen'd the cdylib, ending up with
+# two disjoint copies of every static (VOLUMES, COMMON_BASENAME,
+# RECOVERY_IN_PROGRESS, ARENA, etc.). Stateless types and pure
+# functions live in the separate `morloc-runtime-types` rlib so they
+# can still be shared without duplicating state.
+crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 morloc-manifest = { path = "../morloc-manifest" }
+morloc-runtime-types = { path = "../morloc-runtime-types" }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

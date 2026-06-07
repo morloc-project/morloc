@@ -20,6 +20,8 @@ module Morloc.TypeEval
   , reduceType
   , reduceTypeLeaves
   , expandHeadOnly
+  , expandWireParent
+  , wireParentRoot
   , expandLeavesOnce
   ) where
 
@@ -66,8 +68,41 @@ pairEval cscope gscope =
             -- if it fails, return to the concrete scope to handle failure without
             -- general resolution option
             else generalTransformType Set.empty id resolveFail cscope t
-        -- if no resolution is possible, propagate the error
-        e -> e
+        -- gscope's general walk failed (typically because the head is
+        -- a non-NamU newtype, which 'generalTransformType' treats as
+        -- nominally opaque). For per-language form derivation, a
+        -- newtype without an explicit @type Lang => N = "..."@
+        -- override should fall through to its body's per-language
+        -- form (e.g. @newtype Filename = Str@ inherits Str's "str"
+        -- mapping). Try one-step body expansion; if that succeeds,
+        -- continue the cscope walk on the body.
+        Left _ ->
+          case expandNewtypeBodyOneStep gscope t of
+            Just t' -> f (bumpBnd t bnd) t'
+            Nothing -> generalTransformType Set.empty id resolveFail cscope t
+
+    -- One-step body expansion for non-NamU newtypes. Returns Nothing
+    -- for everything else (NamU newtypes are handled by the main walk
+    -- via 'generalTransformType'; primitives and unknowns leave the
+    -- type alone).
+    expandNewtypeBodyOneStep :: Scope -> TypeU -> Maybe TypeU
+    expandNewtypeBodyOneStep scope (VarU v) = case Map.lookup v scope of
+      Just (([], body, _, _, TypedefNewtype) : _) -> case body of
+        NamU{} -> Nothing
+        _      -> Just body
+      _ -> Nothing
+    expandNewtypeBodyOneStep scope (AppU (VarU v) ts) = case Map.lookup v scope of
+      Just ((paramKinds, body, _, _, TypedefNewtype) : _) -> case body of
+        NamU{} -> Nothing
+        _
+          | length paramKinds == length ts ->
+              let params = [p | Left (p, _) <- paramKinds]
+              in if length params == length ts
+                   then Just (foldr parsub body (zip params ts))
+                   else Nothing
+          | otherwise -> Nothing
+      _ -> Nothing
+    expandNewtypeBodyOneStep _ _ = Nothing
 
     bumpBnd :: TypeU -> Set.Set TVar -> Set.Set TVar
     bumpBnd (AppU (VarU v) _) bnd = Set.insert v bnd
@@ -200,7 +235,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (NamU o n ps rs) = do
       (n', o') <- case Map.lookup n scope of
         -- If the record type itself is aliased, substitute the name and record form
-        (Just [(_, NamU o'' n'' _ _, _, _)]) -> return (n'', o'')
+        (Just [(_, NamU o'' n'' _ _, _, _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
         _ -> return (n, o)
       -- Bind BOTH the original and the substituted name inside the
@@ -217,6 +252,12 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       ts' <- mapM (recurse bnd' . snd) rs
       ps' <- mapM (recurse bnd') ps
       return $ NamU o' n' ps' (zip (map fst rs) ts')
+    -- Flatten nested AppU heads first. Substituting a partial-applied
+    -- class head into a method's @f a@ signature produces @AppU (AppU H
+    -- [n]) [a]@; the parser-produced canonical shape is @AppU H [n,
+    -- a]@. Normalising here lets the @AppU (VarU v) ts@ branch below
+    -- match either input shape.
+    f bnd (AppU (AppU h innerArgs) outerArgs) = f bnd (AppU h (innerArgs ++ outerArgs))
     f bnd t0@(AppU (VarU v) ts)
       -- Handle generic case:
       --   type Cpp => A a b = "map<$1,$2>" a b
@@ -246,12 +287,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                 -- (@List (List Real)@) hits the bnd guard at the inner
                 -- level and is left unevaluated, leaking the morloc
                 -- general name into generated code.
-                (Just (vs, newType, _, isTerminal)) ->
+                (Just (vs, newType, _, isTerminal, kind)) ->
                   let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
-                  in case isTerminal of
-                       True -> terminate bnd' $ foldr parsub newType (zip vs ts)
-                       -- substitute the head term and re-evaluate
-                       False -> recurse bnd' $ foldr parsub newType (zip vs ts)
+                      substituted = foldr parsub newType (zip vs ts)
+                  in case (kind, isTerminal) of
+                       -- Newtype and primitive are nominal for typeclass
+                       -- instance lookup, but a record newtype's per-language
+                       -- form is its structural NamU body (dict / struct /
+                       -- named-list etc.). Treat NamU-bodied newtypes
+                       -- transparently here so cscope/pairEval can reach the
+                       -- record's structural representation without requiring
+                       -- an explicit per-language form for every record.
+                       -- Non-record newtypes remain opaque; schema generation
+                       -- walks through them via 'expandWireParent' (see
+                       -- Serial.hs).
+                       (TypedefNewtype, _) -> case substituted of
+                         NamU{} -> recurse bnd' substituted
+                         _ -> resolve bnd t0
+                       (TypedefPrimitive, _) -> resolve bnd t0
+                       (TypedefAlias, True) -> terminate bnd' substituted
+                       (TypedefAlias, False) -> recurse bnd' substituted
                 Nothing ->
                   MM.throwSystemError $
                     "No matching alias found for" <+> pretty t0
@@ -286,11 +341,20 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
               -- alias like @type Foo = Bar@ neither needs nor wants
               -- @Foo@ in bnd. See `isSelfRecursive` for the structural
               -- check.
-              (Just (_, t2, _, isTerminal)) ->
+              (Just (_, t2, _, isTerminal, kind)) ->
                 let bnd' = if isSelfRecursive v t2 then Set.insert v bnd else bnd
-                in if isTerminal
-                     then terminate bnd' t2
-                     else recurse bnd' t2
+                in case kind of
+                     -- Newtype: opaque for instance lookup, but a record
+                     -- newtype (NamU body) is transparent for per-language
+                     -- form lookup. See the AppU branch above for the
+                     -- detailed rationale.
+                     TypedefNewtype -> case t2 of
+                       NamU{} -> recurse bnd' t2
+                       _ -> resolve bnd t0
+                     TypedefPrimitive -> resolve bnd t0
+                     TypedefAlias
+                       | isTerminal -> terminate bnd' t2
+                       | otherwise -> recurse bnd' t2
               Nothing ->
                 MM.throwSystemError $
                   "No matching alias found for" <+> pretty t0
@@ -360,22 +424,22 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
     renameTypedefs ::
-      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) -> ([TVar], TypeU, ArgDoc, Bool)
-    renameTypedefs _ ([], t, d, isTerminal) = ([], t, d, isTerminal)
-    renameTypedefs bnd (Left (v@(TV x), _) : vs, t, d, isTerminal)
+      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([TVar], TypeU, ArgDoc, Bool, TypedefKind)
+    renameTypedefs _ ([], t, d, isTerminal, kind) = ([], t, d, isTerminal, kind)
+    renameTypedefs bnd (Left (v@(TV x), _) : vs, t, d, isTerminal, kind)
       | Set.member v bnd =
-          let (vs', t', d', isTerminal') = renameTypedefs bnd (vs, t, d, isTerminal)
+          let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
               v' =
                 head
                   [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), x' `notElem` vs'
                   ]
               t'' = substituteTVar v (VarU v') t'
-           in (v' : vs', t'', d', isTerminal')
+           in (v' : vs', t'', d', isTerminal', kind')
       | otherwise =
-          let (vs', t', d', isTerminal') = renameTypedefs bnd (vs, t, d, isTerminal)
-           in (v : vs', t', d', isTerminal')
-    renameTypedefs bnd (Right _ : vs, t, d, isTerminal) =
-      renameTypedefs bnd (vs, t, d, isTerminal)
+          let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
+           in (v : vs', t', d', isTerminal', kind')
+    renameTypedefs bnd (Right _ : vs, t, d, isTerminal, kind) =
+      renameTypedefs bnd (vs, t, d, isTerminal, kind)
 
     -- True iff the substituted body contains a back-reference to the
     -- alias's own name (e.g. @record LL where tail :: ?LL@'s body
@@ -409,9 +473,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     -- When a type alias is imported from two places, this function reconciles them, if possible
     mergeAliases ::
       [TypeU] ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
-      Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool))
+      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+      Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
     mergeAliases _ Nothing Nothing = Right Nothing
     mergeAliases tsMain Nothing (Just b)
       | checkAlias tsMain b = Right (Just b)
@@ -420,7 +484,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       | checkAlias tsMain a = Right (Just a)
       | otherwise = Right Nothing
     -- TODO: should the docstring args be considered here?
-    mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1)) (Just b@(ts2, t2, _, isTerminal2))
+    mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1, kind1)) (Just b@(ts2, t2, _, isTerminal2, kind2))
       -- if both are invalid, return nothing
       | not aIsValid && not bIsValid = Right Nothing
       -- if one is valid and the other isn't, return the valid one
@@ -433,10 +497,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
           -- there is no specialization
           && nonspecialized
           -- the return type is concrete, not an alias for something else
-          && isTerminal1 == isTerminal2 =
+          && isTerminal1 == isTerminal2
+          -- and both are the same kind of definition (alias vs newtype)
+          && kind1 == kind2 =
           return (Just a)
       -- handle specialization
       | not nonspecialized = return $ selectSpecialization a b
+      -- Two fully-generic terminal alias bodies for the same nominal
+      -- type, with different concrete forms. This happens when distinct
+      -- modules each declare their own per-language override for the
+      -- newtype (e.g. table-py maps @Vector@ to a Python @list@ for
+      -- table operations, while vector-py maps it to @numpy.ndarray@).
+      -- The bodies are NOT subtype-comparable here -- they are concrete
+      -- forms in disjoint spaces -- so a per-language conflict is a
+      -- user's choice between competing definitions, not a type error.
+      -- Keep the first definition; the order is determined by import
+      -- order at scope-build time.
+      | nonspecialized
+      , isTerminal1 && isTerminal2
+      , kind1 == TypedefAlias && kind2 == TypedefAlias =
+          return (Just a)
       | otherwise =
           MM.throwSystemError $
             "Cannot merge conflicting type aliases:"
@@ -452,10 +532,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
             (zip ts1 ts2)
 
     selectSpecialization ::
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool)
-    selectSpecialization a@(aps0, _, _, _) b@(bps0, _, _, _) = g aps0 bps0
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)
+    selectSpecialization a@(aps0, _, _, _, _) b@(bps0, _, _, _, _) = g aps0 bps0
       where
         g [] _ = Just a
         g _ [] = Just b
@@ -470,9 +550,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
 
     checkAlias ::
       [TypeU] ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool) ->
+      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
       Bool
-    checkAlias ts1 (ts2, _, _, _) =
+    checkAlias ts1 (ts2, _, _, _, _) =
       length ts1 == length ts2
         && all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zip ts1 ts2)
 
@@ -537,10 +617,34 @@ parsub pair (LabeledU n t) = LabeledU n (parsub pair t)
 -- `[1.0,2.0,3.0,4.0] :: Vector 4 Real` arrives as `AppU Vector [Real]`
 -- (1 arg) while the alias is `Vector n a = List a` (2 params). Substituting
 -- only `a -> Real` still produces `List Real`.
+--
+-- Newtypes are opaque to this function: a newtype head returns Nothing
+-- because the typechecker and instance-resolution must see the newtype as
+-- a distinct nominal type. Use 'expandWireParent' to follow newtypes for
+-- schema generation, where the wire format is shared with the body.
 expandHeadOnly :: Scope -> TypeU -> Maybe TypeU
-expandHeadOnly scope (AppU (VarU v) args) =
+expandHeadOnly = expandHeadWith stopAtNominalBoundary
+
+-- | Like 'expandHeadOnly' but follows newtype wire-parent edges. Used by
+-- schema generation in 'Morloc.CodeGenerator.Serial': a @newtype Foo = Bar@
+-- has Bar's wire format, so schema walks descend through the newtype
+-- boundary even though the typechecker treats them as nominally distinct.
+-- Still halts at primitives -- those are the leaves of the wire-parent
+-- chain.
+expandWireParent :: Scope -> TypeU -> Maybe TypeU
+expandWireParent = expandHeadWith stopAtPrimitive
+
+-- Internal: shared body of 'expandHeadOnly' (stopAtNewtype=True) and
+-- 'expandWireParent' (stopAtNewtype=False).
+-- @stopAt@ predicate determines which kinds halt expansion. For
+-- 'expandHeadOnly' this is newtype-or-primitive (both are opaque to the
+-- typechecker). For 'expandWireParent' it is primitive only -- newtypes
+-- are walked through to reach the wire format.
+expandHeadWith :: (TypedefKind -> Bool) -> Scope -> TypeU -> Maybe TypeU
+expandHeadWith stopAt scope (AppU (VarU v) args) =
   case Map.lookup v scope of
-    (Just ((paramKinds, body, _, _) : _))
+    (Just ((paramKinds, body, _, _, kind) : _))
+      | stopAt kind -> Nothing
       | length paramKinds == length args ->
           let params = [p | Left (p, _) <- paramKinds]
           in if length params == length args
@@ -548,21 +652,58 @@ expandHeadOnly scope (AppU (VarU v) args) =
              else Nothing
       | length args < length paramKinds ->
           -- Kind-based realignment: bind type-kinded params from `args`
-          -- in order, fill Nat-kinded params with NatVoidU sentinels.
+          -- in order, fill kind-kinded params (Nat/Str) with their
+          -- void sentinels. This mirrors the macro indexing convention:
+          -- $N counts TYPE params only, so when @args@ is shorter than
+          -- @paramKinds@ the missing positions are always kind-kinded.
           let typeParams = [p | Left (p, KindType) <- paramKinds]
               natParams  = [p | Left (p, KindNat)  <- paramKinds]
+              strParams  = [p | Left (p, KindStr)  <- paramKinds]
           in if length typeParams == length args
              then Just $ foldr parsub body
                     (zip typeParams args
-                      ++ [(p, NatVoidU) | p <- natParams])
+                      ++ [(p, NatVoidU) | p <- natParams]
+                      ++ [(p, StrVoidU) | p <- strParams])
              else Nothing
       | otherwise -> Nothing
     _ -> Nothing
-expandHeadOnly scope (VarU v) =
+expandHeadWith stopAt scope (VarU v) =
   case Map.lookup v scope of
-    (Just (([], body, _, _) : _)) -> Just body
+    (Just (([], body, _, _, kind) : _))
+      | stopAt kind -> Nothing
+      | otherwise -> Just body
     _ -> Nothing
-expandHeadOnly _ _ = Nothing
+expandHeadWith _ _ _ = Nothing
+
+-- | Walk the wire-parent chain to the structural root: repeatedly
+-- expand transparent aliases and newtype wire-parents until a
+-- primitive (or otherwise non-reducible) type is reached. Used by the
+-- typechecker's literal-check rules to see whether a possibly-newtyped
+-- expected type has the structural shape of the literal's natural
+-- primitive (e.g. is @Vector 5 Real@ ultimately list-shaped at the
+-- wire level, so a list literal can inhabit it).
+--
+-- Unlike 'expandWireParent', this walks repeatedly until fixed point.
+-- The outer constructor (which determines literal acceptance) is what
+-- callers inspect on the result; argument types are propagated by the
+-- caller's element-typing rules.
+wireParentRoot :: Scope -> TypeU -> TypeU
+wireParentRoot scope t = case expandWireParent scope t of
+  Just t' | t' /= t -> wireParentRoot scope t'
+  _ -> t
+
+-- | Halt at newtypes and primitives -- the typechecker sees them as
+-- nominally distinct base forms.
+stopAtNominalBoundary :: TypedefKind -> Bool
+stopAtNominalBoundary TypedefNewtype = True
+stopAtNominalBoundary TypedefPrimitive = True
+stopAtNominalBoundary TypedefAlias = False
+
+-- | Halt only at primitives. Used by schema generation, which follows the
+-- wire-parent chain through newtypes to find the underlying wire format.
+stopAtPrimitive :: TypedefKind -> Bool
+stopAtPrimitive TypedefPrimitive = True
+stopAtPrimitive _ = False
 
 -- | Like reduceTypeLeaves, but uses one-step head substitution
 -- (expandHeadOnly) at each position rather than full evaluateStep. This is

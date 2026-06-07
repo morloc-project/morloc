@@ -48,7 +48,7 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 90
+%expect 92
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -89,6 +89,7 @@ import qualified Morloc.BaseTypes as BT
   'True'     { Located _ TokTrue _ }
   'False'    { Located _ TokFalse _ }
   'type'     { Located _ TokType _ }
+  'newtype'  { Located _ TokNewtype _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
   'class'    { Located _ TokClass _ }
@@ -291,6 +292,20 @@ typedef_decl :: { Loc CstExpr }
   | 'type' '(' UPPER typedef_params ')' '=' type
       { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $3), $4) ($7, False))) }
   | 'type' '(' UPPER typedef_params ')'
+      { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
+  | 'newtype' UPPER typedef_params '=' type
+      { at $1 (CTypE (CstNewtype (TV (getName $2), $3) $5)) }
+  | 'newtype' '(' UPPER typedef_params ')' '=' type
+      { at $1 (CTypE (CstNewtype (TV (getName $3), $4) $7)) }
+  -- @newtype X@ / @newtype (X a)@ with no RHS is a built-in primitive
+  -- declaration: nominal, opaque, owns its per-language forms. Reuses
+  -- 'CstTypeAliasForward' since the desugar is identical
+  -- (TypedefPrimitive). The 'newtype' keyword reads better than 'type'
+  -- for these declarations because primitives behave structurally like
+  -- newtypes (no typeclass inheritance, own per-language forms).
+  | 'newtype' UPPER typedef_params
+      { at $1 (CTypE (CstTypeAliasForward (TV (getName $2), $3))) }
+  | 'newtype' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
       {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }
@@ -693,9 +708,10 @@ getter_expr :: { Loc CstExpr }
   | GDOTCHAIN accessor_body { at $1 (CAccessorE $2) }
 
 accessor_body :: { CstAccessorBody }
-  : LOWER accessor_tail           { CABKey (getName $1) $2 }
-  | INTEGER accessor_tail         { CABIdx (fromInteger (getInt $1)) $2 }
-  | '(' grouped_accessors ')'    { CABGroup $2 }
+  : LOWER accessor_tail                       { CABKey (getName $1) $2 }
+  | INTEGER accessor_tail                     { CABIdx (fromInteger (getInt $1)) $2 }
+  | '(' grouped_accessors ')'                 { CABGroup $2 }
+  | '[' bracket_axes ']' accessor_tail        { CABBracket $2 $4 }
 
 accessor_tail :: { CstAccessorTail }
   : {- empty -}                   { CATEnd }
@@ -709,6 +725,30 @@ grouped_accessors :: { [CstAccessorBody] }
 grouped_accessor :: { CstAccessorBody }
   : GDOT accessor_body      { $2 }
   | GDOTCHAIN accessor_body { $2 }
+
+bracket_axes :: { [CstBracketAxis] }
+  : bracket_axis                              { [$1] }
+  | bracket_axes ',' bracket_axis             { $1 ++ [$3] }
+
+-- Python-style axis: either a single index expression, or a start:stop[:step]
+-- slice with every component optional. Each branch is enumerated explicitly to
+-- keep the grammar LALR(1)-friendly; epsilon-productions for the slice bounds
+-- would force Happy to predict on a one-token lookahead that doesn't tell it
+-- whether a leading expr is coming.
+bracket_axis :: { CstBracketAxis }
+  : expr                              { BAxIdx $1 }
+  | expr ':'                          { BAxSlice (Just $1) Nothing Nothing }
+  | expr ':' expr                     { BAxSlice (Just $1) (Just $3) Nothing }
+  | expr ':' ':'                      { BAxSlice (Just $1) Nothing Nothing }
+  | expr ':' ':' expr                 { BAxSlice (Just $1) Nothing (Just $4) }
+  | expr ':' expr ':'                 { BAxSlice (Just $1) (Just $3) Nothing }
+  | expr ':' expr ':' expr            { BAxSlice (Just $1) (Just $3) (Just $5) }
+  | ':'                               { BAxSlice Nothing Nothing Nothing }
+  | ':' expr                          { BAxSlice Nothing (Just $2) Nothing }
+  | ':' ':'                           { BAxSlice Nothing Nothing Nothing }
+  | ':' ':' expr                      { BAxSlice Nothing Nothing (Just $3) }
+  | ':' expr ':'                      { BAxSlice Nothing (Just $2) Nothing }
+  | ':' expr ':' expr                 { BAxSlice Nothing (Just $2) (Just $4) }
 
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }

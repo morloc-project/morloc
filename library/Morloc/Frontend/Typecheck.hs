@@ -44,6 +44,76 @@ isPrimitiveConstraint (CMember _ _) = True
 isPrimitiveConstraint (CSubset _ _) = True
 isPrimitiveConstraint (CDisjoint _ _) = True
 
+-- | Resolve all deferred numeric literals at end of typecheck.
+--
+-- The queue contains @(idx, v, kind)@ tuples: an @IntS@ or @RealS@ at
+-- source index @idx@ was checked against unsolved existential @v@. The
+-- resolution is two-pass so that the outcome is independent of the
+-- order args were processed:
+--
+-- (1) RealDefault first. A @RealS@ literal cannot demote to an integer
+--     type, so any existential touched by RealS must be pinned to
+--     @Real@ before IntDefault entries get a chance to default it.
+-- (2) IntDefault second. An @IntS@ literal accepts either an integer
+--     base type or a real base type (integer-to-real promotion), so by
+--     the time we get here any existential already solved to @Real@
+--     by phase 1 is fine, and any still-unsolved existential gets the
+--     @Int@ default.
+--
+-- For each entry: if @v@ is already solved to a compatible base type,
+-- accept; if solved to an incompatible type (Bool / Str / etc.), emit
+-- a sourced error; if unsolved, solve with the phase's default.
+resolvePendingNumLits :: Gamma -> [(Int, TVar, NumLitKind)] -> MorlocMonad Gamma
+resolvePendingNumLits g0 entries = do
+  let (intLits, realLits) = partition (\(_, _, k) -> k == IntDefault) entries
+  g1 <- foldlM (resolveOne BT.isRealBaseType BT.realU) g0 realLits
+  foldlM (resolveOne acceptableForInt BT.intU) g1 intLits
+  where
+    -- An IntS literal can adopt any integer base type OR any real base
+    -- type (via promotion). The check-mode rule for @IntS@ above mirrors
+    -- this acceptance.
+    acceptableForInt t = BT.isIntegerBaseType t || BT.isRealBaseType t
+
+    resolveOne :: (TypeU -> Bool) -> TypeU -> Gamma -> (Int, TVar, NumLitKind) -> MorlocMonad Gamma
+    resolveOne baseOK defaultT g (i, v, _) =
+      -- Chain-walk via apply: when the deferred existential @v@ was
+      -- unified with another existential (e.g. a lambda-parameter
+      -- existential), @lookupU v@ only returns the immediate
+      -- solution, leaving the chain head as another @ExistU@. @apply@
+      -- walks the chain to its end -- either a concrete type or the
+      -- innermost unsolved existential, both of which the cases below
+      -- handle. Effect wrappers @<E> T@ are also peeled: a do-block's
+      -- final expression carries an effectful return type, and the
+      -- literal living inside that expression should be judged on the
+      -- payload type, not on the @EffectU@ envelope.
+      let original = ExistU v ([], Open) ([], Open)
+          resolved = peelWrappers (apply g original)
+      in case resolved of
+           ExistU vEnd _ _ ->
+             -- Chain end is still unsolved: apply the default there.
+             -- Solving the chain end propagates through every
+             -- intermediate link via subsequent applies.
+             case solveExist vEnd defaultT g of
+               Left err        -> MM.throwSystemError err
+               Right Nothing   -> return g
+               Right (Just g') -> return g'
+           t
+             | baseOK t  -> return g
+             | otherwise -> MM.throwSourcedError i $
+                 "Numeric literal cannot have type " <> prettyTypeU t
+
+    -- | Strip @EffectU@ and @OptionalU@ wrappers from a type. A
+    -- numeric literal embedded in a do-block has its containing
+    -- expression typed @<E> T@ where T is what the literal should
+    -- inhabit; similarly for optional return positions where the
+    -- literal flows through a @?T@ coercion. Pre-existing checkE
+    -- rules for these wrappers handle the standalone case, so by the
+    -- time we get here only the chain-end wrappers remain.
+    peelWrappers :: TypeU -> TypeU
+    peelWrappers (EffectU _ t)  = peelWrappers t
+    peelWrappers (OptionalU t)  = peelWrappers t
+    peelWrappers t              = t
+
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
@@ -52,8 +122,19 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty}
-      (g1, _, e1) <- synthG g0 e0
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaNatSubs = Map.empty, gammaStrSubs = Map.empty, gammaRecSubs = Map.empty, gammaListSubs = Map.empty, gammaSetSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty, gammaPendingNumLits = []}
+      (g1raw, _, e1) <- synthG g0 e0
+
+      -- Resolve numeric literals that were checked against unsolved
+      -- existentials BEFORE instance resolution. Typeclass dispatch
+      -- (@(+)@, @(<=)@, etc.) needs concrete types; a literal like
+      -- @3 <= 5@ leaves the comparator's @a@ existential unsolved
+      -- after argument processing, so without applying the @Int@
+      -- default here @resolveInstances@ would fail with "No instance
+      -- found for Ord::<=". Order: synth -> numeric defaults ->
+      -- instance resolution -> Nat-deferral recheck.
+      g1 <- resolvePendingNumLits g1raw (gammaPendingNumLits g1raw)
+
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g1:"
       seeGamma g1
@@ -117,7 +198,13 @@ typecheck = mapM run
 
       -- perform a final application of gamma the final expression and return
       -- (is this necessary?)
-      return (applyGen g3 e3)
+      --
+      -- Renormalise after applyGen: substituting a partial-applied
+      -- existential solution back through the tree can produce nested
+      -- AppU shapes (@AppU (AppU H [n]) [a]@); downstream codegen
+      -- (weave, evaluateStep, inferConcreteType) only understands the
+      -- flat canonical shape.
+      return (mapAnnoSG (fmap normalizeType) (applyGen g3 e3))
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -184,7 +271,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty []
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -301,17 +388,15 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
           | singleGroup -> connectInstance singleGroup g1 es
           | otherwise   -> connectInstance singleGroup g0 es
 
--- | Filter typeclass instances to only those reachable from gt by walking
--- the alias chain. This prevents sibling aliases from inheriting each
--- other's instances: walking A' -> Str never reaches A (a sibling),
--- but walking B -> A does reach A (a parent).
---
--- This walks gt's chain only. Walking the instance's chain too (so that
--- e.g. an instance with head `Vector (d1*d2) a` matches a call site with
--- head `List a`) was tried and reverted: it broke nominal-distinct
--- aliases like Deque a / Array a / Vector n a -- all alias to List a,
--- but each has its own typeclass instances that should NOT be applied
--- to List call sites. Bidirectional walking conflates them.
+-- | Filter typeclass instances to only those reachable from @gt@ by
+-- walking its alias chain to a matching root-headed candidate.
+-- Invariant 3 (frontend) guarantees every instance head is a newtype,
+-- a primitive, or a bare type variable -- never a transparent alias.
+-- So all cousins on a tree converge at the same root; walking @gt@'s
+-- chain alone is enough to find the shared instance. Walking the
+-- instance's chain too would erase the nominal boundary between
+-- sibling newtypes (Deque a / Array a / Vector n a) that all share
+-- @List a@ as their wire-parent body but each own their own instances.
 filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
 filterByAliasChain scope gt0 candidates = go gt0
   where
@@ -358,10 +443,28 @@ compatibleTypeU = go Set.empty Set.empty
       length as1 == length as2
         && all (uncurry (go b1 b2)) (zip as1 as2)
         && go b1 b2 r1 r2
-    go b1 b2 (AppU h1 ps1) (AppU h2 ps2) =
-      go b1 b2 h1 h2
-        && length ps1 == length ps2
-        && all (uncurry (go b1 b2)) (zip ps1 ps2)
+    go b1 b2 (AppU h1 ps1) (AppU h2 ps2)
+      | length ps1 == length ps2 =
+          go b1 b2 h1 h2
+            && all (uncurry (go b1 b2)) (zip ps1 ps2)
+      -- Partial-application match: the side with more args has a
+      -- prefix-applied head that should unify with the shorter side's
+      -- head. Mirrors the partial-app rule in 'subtype' so an
+      -- instance like @Foldable (Vector n)@ (whose method's
+      -- @Vector n a@ has two args at the leaf) is recognised as
+      -- compatible with a call site at @f a@ (one arg) when @f@ is
+      -- an existential or bound TVar.
+      | length ps1 > length ps2
+      , let k = length ps1 - length ps2
+            (ps1prefix, ps1suffix) = splitAt k ps1
+      = go b1 b2 (AppU h1 ps1prefix) h2
+          && all (uncurry (go b1 b2)) (zip ps1suffix ps2)
+      | length ps2 > length ps1
+      , let k = length ps2 - length ps1
+            (ps2prefix, ps2suffix) = splitAt k ps2
+      = go b1 b2 h1 (AppU h2 ps2prefix)
+          && all (uncurry (go b1 b2)) (zip ps1 ps2suffix)
+      | otherwise = False
     go b1 b2 (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2) =
       o1 == o2 && n1 == n2
         && length ps1 == length ps2
@@ -384,6 +487,35 @@ compatibleTypeU = go Set.empty Set.empty
     isNatExprT (NatDivU _ _) = True
     isNatExprT NatVoidU = True
     isNatExprT _ = False
+
+-- | Result type of bracket slicing on a container. For @AppU h args@,
+-- if the first arg is Nat-kinded (Vector-style: @Vector n a@), replace
+-- it with 'NatVoidU' (the erased-phantom-Nat wildcard) so the output
+-- length is independent of the input length AND two slice results
+-- compare equal at the Nat slot. A fresh existential here would never
+-- get solved -- there is no constraint that pins it -- and would
+-- propagate to downstream stages as @forall bslice_dim_N . _@, breaking
+-- instance dispatch and Eq comparisons between independent slices.
+-- 'NatVoidU' is the right granularity: "this Nat is unknown; treat as
+-- wildcard against any other Nat" (see Typecheck/Internal.hs NatVoidU
+-- subtype rule). Non-Nat-parameterized containers (List-style) pass
+-- through.
+bracketSliceResultType :: Gamma -> TypeU -> (Gamma, TypeU)
+bracketSliceResultType g t@(AppU h args) = case args of
+  (a : rest) | isKindTypeU' a ->
+    (g, AppU h (NatVoidU : rest))
+  _ -> (g, t)
+bracketSliceResultType g t = (g, t)
+
+isKindTypeU' :: TypeU -> Bool
+isKindTypeU' (NatLitU _) = True
+isKindTypeU' (NatVarU _) = True
+isKindTypeU' (NatAddU _ _) = True
+isKindTypeU' (NatMulU _ _) = True
+isKindTypeU' (NatSubU _ _) = True
+isKindTypeU' (NatDivU _ _) = True
+isKindTypeU' NatVoidU = True
+isKindTypeU' _ = False
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a
@@ -561,6 +693,72 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
   return (g, t, ExeS (PatCall (PatternText s ss)))
+
+-- Bracket-index pattern (xs[i]). Args: [index, receiver]. The index type
+-- is left as a fresh existential so the user can supply any integral
+-- type: the pool-dispatch codegen path resolves a per-instance
+-- __to_index__ cast, the pure-runtime path requires an integral wire
+-- type. The receiver shape is "container of elemType" with both the
+-- container constructor and the element type left as existentials so
+-- chained record/bracket accessors propagate constraints correctly.
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExpr, rcvExpr]) = do
+  let (g1, elemType) = newvar "bidx_elem_" g0
+      (g2, fExist)   = newvar "bidx_f_" g1
+      (g3, idxType)  = newvar "bidx_idx_" g2
+      expectedRcv    = AppU fExist [elemType]
+  (g4, _, rcv') <- checkG g3 rcvExpr expectedRcv
+  (g5, _, i')   <- checkG g4 iExpr idxType
+  let ft = FunU [apply g5 idxType, apply g5 expectedRcv] (apply g5 elemType)
+      f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
+  return (g5, apply g5 elemType, AppS f1 [i', rcv'])
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
+  error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
+
+-- Bracket-slice pattern (xs[i:j:k]). Args: [start, stop, step, receiver].
+-- Each bound is checked against a fresh bare existential so user
+-- expressions of any type unify naturally (Null bounds synth as
+-- OptionalU v and solve the existential to that; integer literals
+-- solve it to Int; user-annotated values solve it to their stated
+-- type). The "optional" nature of each slot is structural -- carried
+-- by NullS vs non-Null at the AST level -- not type-level. Codegen
+-- enforces semantic validity: pool dispatch resolves each non-Null
+-- bound's __to_index__ instance; pure-runtime evaluation requires a
+-- known wire integer. Result type is the receiver type with the outer
+-- Nat parameter replaced by a fresh existential (for Nat-parameterized
+-- containers like Vector); otherwise the receiver type is preserved.
+synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [startE, stopE, stepE, rcvExpr]) = do
+  (g1, rcvType, rcv') <- synthG g0 rcvExpr
+  let rcvType' = apply g1 rcvType
+      (g1a, resultType) = bracketSliceResultType g1 rcvType'
+      (g2, startTy) = newvar "bslice_start_" g1a
+      (g3, stopTy)  = newvar "bslice_stop_"  g2
+      (g4, stepTy)  = newvar "bslice_step_"  g3
+  (g5, _, s1) <- checkG g4 startE startTy
+  (g6, _, s2) <- checkG g5 stopE  stopTy
+  (g7, _, s3) <- checkG g6 stepE  stepTy
+  let ft = FunU [apply g7 startTy, apply g7 stopTy, apply g7 stepTy, rcvType']
+              resultType
+      f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketSlice))
+  return (g7, apply g7 resultType, AppS f1 [s1, s2, s3, rcv'])
+synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) args) =
+  error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
+
+-- Bare bracket patterns (when used as values, not applied). The
+-- function types match the AppS arities above; index and bound types
+-- are polymorphic existentials, resolved at the application site.
+synthE _ g (ExeS (PatCall PatternBracketIndex)) = do
+  let (g1, a) = newvar "bidx_elem_" g
+      (g2, r) = newvar "bidx_recv_" g1
+      (g3, i) = newvar "bidx_idx_"  g2
+      ft = FunU [i, r] a
+  return (g3, ft, ExeS (PatCall PatternBracketIndex))
+synthE _ g (ExeS (PatCall PatternBracketSlice)) = do
+  let (g1, a) = newvar "bslice_recv_"  g
+      (g2, s) = newvar "bslice_start_" g1
+      (g3, t) = newvar "bslice_stop_"  g2
+      (g4, p) = newvar "bslice_step_"  g3
+      ft = FunU [OptionalU s, OptionalU t, OptionalU p, a] a
+  return (g4, ft, ExeS (PatCall PatternBracketSlice))
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -901,6 +1099,24 @@ synthE i g (EvalS e) = do
       "Cannot force a non-effectful value (got type" <+> pretty t <> ")."
       <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
       <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
+-- IntrMap: the desugar-inserted implicit map for bracket-accessor
+-- chains. Typed as @(a -> b) -> f a -> f b@: the container head @f@
+-- is a fresh existential so the same intrinsic covers @List@,
+-- @Vector m@, and any future Functor instance. @a@ and @b@ are
+-- existentials solved by checking the function and the receiver
+-- against their expected shapes.
+synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
+  let (g1, a) = newvar "map_elem_"      g
+      (g2, b) = newvar "map_result_"    g1
+      (g3, f) = newvar "map_container_" g2
+      funcExpectedT = FunU [a] b
+      listExpectedT = AppU f [a]
+      resultT       = AppU f [b]
+  (g4, _, funcE') <- checkG g3 funcE funcExpectedT
+  (g5, _, listE') <- checkG g4 listE listExpectedT
+  return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
+synthE _ _ (IntrinsicS IntrMap args) =
+  error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -938,6 +1154,9 @@ intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
 intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
+-- IntrMap is handled by its own synthE clause and never reaches this fallback.
+intrinsicType IntrMap =
+  error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 
@@ -1012,7 +1231,19 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
     _ -> return ()
 
   -- Process available args through application (no re-synthesis)
-  (g2, funType1, inputExprs) <- application' i g1 xs0 normalType
+  (g2raw, funType1, inputExprs) <- application' i g1 xs0 normalType
+
+  -- Resolve any pending numeric literals locally now that this
+  -- application's arguments are fully processed. Without this, the
+  -- AppS result type stays as an unsolved existential, and a
+  -- downstream context (e.g. a do-block checking against @<IO> Int@)
+  -- can instantiate the existential to the WRAPPED type @<IO> Int@
+  -- via the InstantiateL rule that absorbs effects into bare
+  -- existentials. Resolving here pins the existential to a concrete
+  -- numeric type (or to whatever a sibling arg already pinned it to)
+  -- so the propagated return type is correct and instance resolution
+  -- can dispatch later.
+  g2 <- resolvePendingNumLits g2raw (gammaPendingNumLits g2raw)
 
   MM.sayVVV $
     "  funType1:" <+> pretty funType1
@@ -1213,12 +1444,22 @@ checkE ::
 -- dimension, not an element type, and forcing list elements to subtype
 -- it produces a confusing kind mismatch). Falls through to the LstS
 -- catch-all (line ~1230) which handles dimension checking via getNatArgs.
-checkE i g1 (LstS (e : es)) (AppU v [t])
-  | not (isNatExpr t || isStrExpr t || isRecExpr t
+-- Element propagation when the expected type IS the canonical list
+-- constructor. Restricting to @BT.list@ here ensures that single-arg
+-- newtypes like @newtype MyVec a = List a@ -- whose @AppU MyVec [a]@
+-- shape would otherwise match this pattern -- get routed to the
+-- general LstS rule (below) which walks the newtype wire-parent
+-- before propagating element types. Without the guard, the empty-list
+-- base case at the bottom of this recursion would fall to
+-- synth+subtype with @List <: MyVec@, which fails because newtypes
+-- are nominal.
+checkE i g1 (LstS (e : es)) (AppU (VarU v) [t])
+  | v == BT.list
+  , not (isNatExpr t || isStrExpr t || isRecExpr t
          || isListExpr t || isSetExpr t) = do
       (g2, t2, e') <- checkG g1 e t
       -- LstS [] will go to the normal Sub case
-      (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU v [t2])
+      (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU (VarU v) [t2])
       return (g3, t3, LstS (map (applyGen g3) (e' : es')))
 checkE i g0 e0@(LamS vs body) t@(FunU as b)
   | length vs == length as = do
@@ -1283,24 +1524,47 @@ checkE i g e t@(ExistU v _ _)
 -- are then checked against the *original* `b` so that `Vector 4 ...`
 -- still length-checks at 4. Unsolved existentials in the element slot
 -- fall through to the synth path for more flexible inference.
-checkE i g1 e1@(LstS xs) b = do
+checkE i g1 e1@(LstS _) b = do
   scope <- MM.getGeneralScope i
-  let bEval = either (const b) id (TE.evaluateType scope b)
-      canPropagate = case bEval of
+  -- Apply the current gamma before consulting wire forms: when a
+  -- containing context (e.g. a @(expr :: T)@ annotation) already
+  -- solved the existentials in @b@, the solved type is the one we
+  -- need to walk the wire-parent on.
+  let bApplied = apply g1 b
+  -- Walk through transparent aliases AND newtype wire-parents to find
+  -- the structural wire-form of the expected type. A list literal can
+  -- inhabit a newtype like @Vector 5 Real@ if its wire-parent chain
+  -- bottoms out at a list shape (e.g. @List Real@). If the wire-parent
+  -- walk does not yield a list shape (e.g. for @Map a b@ with no
+  -- newtype body), fall back to the @Packable@ instance's wire form.
+  --
+  -- Use 'wireParentRoot' directly rather than 'evaluateType' here:
+  -- 'evaluateType' descends into and re-expands type args (e.g. for
+  -- @type Pat = [Pat]@, each call peels one more inner @Pat@ layer,
+  -- which makes the @bWire /= bApplied@ termination check loop).
+  -- 'wireParentRoot' only walks the outer head and halts at the
+  -- primitive list constructor, which is exactly what we need.
+  let bWire = TE.wireParentRoot scope bApplied
+      isListShape w = case w of
         AppU _ [elemT] ->
-          not (null xs)
-          && not (isNatExpr elemT || isStrExpr elemT || isRecExpr elemT
-                  || isListExpr elemT || isSetExpr elemT)
-          && not (case elemT of { ExistU{} -> True; _ -> False })
+          not (isNatExpr elemT || isStrExpr elemT || isRecExpr elemT
+               || isListExpr elemT || isSetExpr elemT)
         _ -> False
-  if canPropagate
-    then do
-      (g2, _, e2) <- checkE' i g1 e1 bEval
+      tier1Ok = isListShape bWire && bWire /= bApplied
+  tier2 <- if tier1Ok then return Nothing else findPackableWireForm bApplied
+  let effectiveWire = if tier1Ok
+        then Just bWire
+        else case tier2 of
+          Just w | isListShape w -> Just w
+          _                      -> Nothing
+  case effectiveWire of
+    Just w -> do
+      (g2, _, e2) <- checkE' i g1 e1 w
       let natArgs = getNatArgs scope b
-          anno = AnnoS (Idx i (apply g2 bEval)) i e2
+          anno = AnnoS (Idx i (apply g2 bApplied)) i e2
       g3 <- checkListNatDims g2 natArgs anno
       return (g3, apply g3 b, e2)
-    else do
+    Nothing -> do
       (g2, a, e2) <- synthE' i g1 e1
       let a' = apply g2 a
           b' = apply g2 b
@@ -1349,7 +1613,7 @@ checkE i g1 e1@(LstS xs) b = do
 -- needing @BTree Int -> ?(BTree Int)@) never gets to run. Mirrors
 -- @synthE LetS@ but uses @checkG@ for the body so the expected type
 -- threads through to the literal that consumes it.
-checkE i g (LetS v e1 e2) t = do
+checkE _ g (LetS v e1 e2) t = do
   (g1, t1, e1') <- synthG g e1
   let g2 = g1 ++> [AnnG v t1]
       g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of
@@ -1415,7 +1679,12 @@ checkE i g (TupS xs) t = do
         _ -> Nothing
       tsOpt = case tryMatch tApplied of
         Just ts -> Just ts
-        Nothing -> TE.reduceType scope tApplied >>= tryMatch
+        Nothing -> case TE.reduceType scope tApplied >>= tryMatch of
+          Just ts -> Just ts
+          -- Walk through newtype boundaries (e.g. @newtype Pair a = (a, a)@
+          -- has a tuple wire-parent that 'reduceType' won't expose, since
+          -- it halts at newtype heads).
+          Nothing -> tryMatch (TE.wireParentRoot scope tApplied)
   case tsOpt of
     Just ts -> do
       let go gAcc acc [] [] = return (gAcc, reverse acc)
@@ -1437,9 +1706,20 @@ checkE i g (TupS xs) t = do
 -- (e.g. {outer={inner={...}}}) also get reordered.
 checkE i g (NamS rs) t = do
   scope <- MM.getGeneralScope i
-  let tEval = either (const (apply g t)) id (TE.evaluateType scope (apply g t))
-  case tEval of
-    NamU _ _ _ declared | not (null declared) -> do
+  let tApplied = apply g t
+      tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
+      -- Walk through newtype boundaries as well (e.g. @record Bar where
+      -- {...}@ is a newtype whose body is the @NamU@ shape the literal
+      -- inhabits). 'evaluateType' halts at newtypes; 'wireParentRoot'
+      -- expands them.
+      tWire = TE.wireParentRoot scope tApplied
+      pickNamU candidate = case candidate of
+        NamU _ _ _ declared | not (null declared) -> Just (candidate, declared)
+        _ -> Nothing
+      namMatch = pickNamU tEval `orElse` pickNamU tWire
+      orElse x y = case x of { Just _ -> x; Nothing -> y }
+  case namMatch of
+    Just (matchedT, declared) -> do
       let litKeys = map fst rs
           declKeys = map fst declared
           litSet = Set.fromList litKeys
@@ -1454,7 +1734,7 @@ checkE i g (NamS rs) t = do
                 (gNext, _, v') <- checkG gAcc v fieldT
                 go gNext ((k, v') : acc) rest
           (gFinal, fields) <- go g [] triples
-          return (gFinal, apply gFinal tEval, NamS fields)
+          return (gFinal, apply gFinal matchedT, NamS fields)
         else
           let missing = Set.toList (Set.difference declSet litSet)
               extra = Set.toList (Set.difference litSet declSet)
@@ -1470,20 +1750,75 @@ checkE i g (NamS rs) t = do
                     <+> hsep (punctuate "," (map pretty extra))
            in MM.throwSourcedError i $
                 "Record literal does not match declared type"
-                <+> prettyTypeU tEval <> ":" <> missingPart <> extraPart
-    _ -> checkEFallback i g (NamS rs) t
+                <+> prettyTypeU matchedT <> ":" <> missingPart <> extraPart
+    Nothing -> checkEFallback i g (NamS rs) t
+-- Integer / real literal acceptance. The literal inhabits an expected
+-- type @t@ when @t@'s wire-parent chain (transparent aliases + newtype
+-- wire-parents) reaches a member of the integer (or real) base-type
+-- family. The literal types at @t@ itself (the user's annotated form);
+-- codegen handles per-language conversion when @t@'s effective
+-- per-language form differs from the wire-parent's via the appropriate
+-- @*Like@ instance.
 checkE i g (IntS si x) t = do
   scope <- MM.getGeneralScope i
-  let tEval = either (const t) id (TE.evaluateType scope t)
-  if BT.isIntegerBaseType t || BT.isIntegerBaseType tEval
-    then return (g, t, IntS si x)
-    else checkEFallback i g (IntS si x) t
+  let tApplied = apply g t
+      tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
+      tWire = TE.wireParentRoot scope tEval
+      -- Integer literal can inhabit any integer base type (Int / Int8..Int64
+      -- / UInt8..UInt64) directly, AND any real base type (Real / Float32 /
+      -- Float64) via integer-to-real promotion. This is what lets @4 + 2.3@
+      -- typecheck: the @4@ is checked against the same type slot as @2.3@,
+      -- so when that slot resolves to @Real@, the integer literal adopts
+      -- @Real@ as well.
+      acceptable u = BT.isIntegerBaseType u || BT.isRealBaseType u
+  if acceptable tApplied || acceptable tEval || acceptable tWire
+    then return (g, tApplied, IntS si x)
+    else case tApplied of
+      -- Numeric literal checked against an unsolved existential: defer
+      -- the type commitment. A later arg (e.g. @vec :: Vector n Int8@)
+      -- may pin the existential, at which point the literal adopts that
+      -- type via the deferred-numeric-literal resolution at the end of
+      -- typechecking. If nothing pins it, apply the @Int@ default.
+      ExistU v _ _ ->
+        let g' = g { gammaPendingNumLits = (i, v, IntDefault) : gammaPendingNumLits g }
+        in return (g', tApplied, IntS si x)
+      _ -> checkEFallback i g (IntS si x) t
 checkE i g (RealS si x) t = do
   scope <- MM.getGeneralScope i
+  let tApplied = apply g t
+      tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
+      tWire = TE.wireParentRoot scope tEval
+  if BT.isRealBaseType tApplied || BT.isRealBaseType tEval || BT.isRealBaseType tWire
+    then return (g, tApplied, RealS si x)
+    else case tApplied of
+      ExistU v _ _ ->
+        let g' = g { gammaPendingNumLits = (i, v, RealDefault) : gammaPendingNumLits g }
+        in return (g', tApplied, RealS si x)
+      _ -> checkEFallback i g (RealS si x) t
+-- String, boolean, and unit literal acceptance. Same wire-parent walk
+-- pattern as IntS/RealS above: a literal inhabits a newtype if the
+-- newtype's wire-parent chain reaches the literal's natural primitive.
+checkE i g (StrS x) t = do
+  scope <- MM.getGeneralScope i
   let tEval = either (const t) id (TE.evaluateType scope t)
-  if BT.isRealBaseType t || BT.isRealBaseType tEval
-    then return (g, t, RealS si x)
-    else checkEFallback i g (RealS si x) t
+      tWire = TE.wireParentRoot scope tEval
+  if t == BT.strU || tEval == BT.strU || tWire == BT.strU
+    then return (g, t, StrS x)
+    else checkEFallback i g (StrS x) t
+checkE i g (LogS x) t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const t) id (TE.evaluateType scope t)
+      tWire = TE.wireParentRoot scope tEval
+  if t == BT.boolU || tEval == BT.boolU || tWire == BT.boolU
+    then return (g, t, LogS x)
+    else checkEFallback i g (LogS x) t
+checkE i g UniS t = do
+  scope <- MM.getGeneralScope i
+  let tEval = either (const t) id (TE.evaluateType scope t)
+      tWire = TE.wireParentRoot scope tEval
+  if t == BT.unitU || tEval == BT.unitU || tWire == BT.unitU
+    then return (g, t, UniS)
+    else checkEFallback i g UniS t
 -- Bidirectional-checking rule for function application. Standard
 -- App-Check from Dunfield-Krishnaswami: synthesise f, instantiate
 -- its Foralls to fresh existentials, then unify the function's
@@ -1523,6 +1858,15 @@ checkE i g (RealS si x) t = do
 -- to checkEFallback, preserving the existing synth-and-subtype
 -- behaviour.
 checkE i g0 e@(AppS (AnnoS _ _ (ExeS _)) _) t = checkEFallback i g0 e t
+-- If the expected type is wrapped in OptionalU, the App-Check shortcut
+-- would pin the function's bare-existential return to the FULL optional
+-- type, which then propagates the OptionalU into the function's
+-- parameter existentials (e.g. for at :: f a -> a, ea := ?alpha forces
+-- xs :: f ?alpha against the actual xs :: [alpha], producing an
+-- occurs check `alpha <: ?alpha`). Falling back lets synth pin the
+-- return at the unwrapped type and tryCoerce wrap the result at the
+-- application boundary.
+checkE i g0 e@(AppS _ _) t@(OptionalU _) = checkEFallback i g0 e t
 checkE i g0 (AppS f xs) t = do
   (g1, funType0, funExpr0) <- synthG g0 f
   let g1' = resolveNatLabels f funType0 xs g1
@@ -1596,11 +1940,14 @@ checkEFallback i g1 e1 b = do
             (e2, apply g3 a')
             coercions
           return (g3, apply g3 b', finalExpr)
-        Nothing -> MM.throwSourcedError i $
-          "Type mismatch:"
-          <> line <> "  expected: " <> prettyTypeU b'
-          <> line <> "  inferred: " <> prettyTypeU a'
-          <> line <> err
+        Nothing -> do
+          scope2 <- MM.getGeneralScope i
+          MM.throwSourcedError i $
+            "Type mismatch:"
+            <> line <> "  expected: " <> prettyTypeU b'
+            <> line <> "  inferred: " <> prettyTypeU a'
+            <> line <> err
+            <> missingInstanceHint scope2 a' b'
 
 -- | Check a compound literal (TupS or NamS) against the inner type of an
 -- Optional expected type, then wrap the result in @CoerceToOptional@.
@@ -1672,10 +2019,47 @@ subtype' i a b g = do
 -- because reducing past the last Nat-parameterized typedef (e.g. into
 -- `List a`) drops Nat info, while staying too shallow misses
 -- intermediate wrapping.
+-- | When a 'Type mismatch' error involves a fully-applied nominal
+-- newtype on one side (the inferred type) and an existential
+-- application on the other (the expected type, typically arising
+-- from a polymorphic class method like @sum :: Foldable f => f a ->
+-- a@), the most likely cause is a missing typeclass instance for
+-- the newtype. The subtype check fails structurally because
+-- newtypes are nominally distinct from their body and the class
+-- can't dispatch without an instance. Append a hint pointing at
+-- the newtype so users don't have to decode the structural
+-- "Cannot compare" message.
+missingInstanceHint :: Scope -> TypeU -> TypeU -> MDoc
+missingInstanceHint scope inferred expected
+  | Just nativeTv <- newtypeHead scope inferred
+  , hasExistHead expected =
+      line <> "  hint:" <+> squotes (pretty nativeTv)
+        <+> "is a newtype; if a polymorphic class is expected here,"
+        <+> "the newtype needs an explicit instance"
+        <+> "(declare e.g. 'instance ClassName"
+        <+> pretty nativeTv <> "' alongside the newtype)."
+  | otherwise = mempty
+  where
+    newtypeHead :: Scope -> TypeU -> Maybe TVar
+    newtypeHead s t = case t of
+      VarU v          -> isNewtypeKind s v
+      AppU (VarU v) _ -> isNewtypeKind s v
+      _               -> Nothing
+
+    isNewtypeKind :: Scope -> TVar -> Maybe TVar
+    isNewtypeKind s v = case Map.lookup v s of
+      Just ((_, _, _, _, TypedefNewtype) : _) -> Just v
+      _ -> Nothing
+
+    hasExistHead :: TypeU -> Bool
+    hasExistHead (AppU (ExistU _ _ _) _) = True
+    hasExistHead (ExistU _ _ _)          = True
+    hasExistHead _                       = False
+
 getNatArgs :: Scope -> TypeU -> [TypeU]
 getNatArgs scope (AppU (VarU v) args) =
   case Map.lookup v scope of
-    Just ((params, _, _, _) : _) ->
+    Just ((params, _, _, _, _) : _) ->
       let myNatArgs = [arg | (Left (_, KindNat), arg) <- zip params args]
       in case TE.reduceType scope (AppU (VarU v) args) of
            Just t' -> case getNatArgs scope t' of
@@ -2163,3 +2547,4 @@ peakSExpr (EvalS _) = "EvalS"
 peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (IfS _ _ _) = "IfS"
 peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)
+

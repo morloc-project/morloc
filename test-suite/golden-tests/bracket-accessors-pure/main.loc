@@ -1,0 +1,125 @@
+module main (
+    indexPos
+  , sliceFull
+  , sliceFullStep
+  , sliceOpenLeft
+  , sliceOpenRight
+  , sliceClosed
+  , sliceStep
+  , sliceStepClosed
+  , sliceEmpty
+  , indexAnnotInt8
+  , indexAnnotUInt32
+  , sliceAnnotBound
+  , sliceAnnotNull
+  , chainSliceField
+  , chainSliceSlice
+  , chainSliceSliceIdx
+  , chainIndexField
+  , chainSliceFieldTuple
+  )
+
+-- This test imports nothing. Every result below is produced by the
+-- nexus runtime exclusively. It exercises the bracket_index,
+-- bracket_slice, and Map intrinsic evaluator branches, plus pattern
+-- (record-field) accessors composed inside the Map's lambda body.
+--
+-- The deliberate absence of imports is the point: there is no
+-- Sliceable / Indexable / IndexLike / Functor instance to look up at
+-- codegen and no pool to fall back on. If anything below fails, the
+-- pure-path runtime is at fault.
+
+record Pt where
+  x :: Int
+  y :: Int
+
+ten :: [Int]
+ten = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+pts :: [Pt]
+pts =
+  [ {x = 10, y = 100}
+  , {x = 20, y = 200}
+  , {x = 30, y = 300}
+  , {x = 40, y = 400}
+  , {x = 50, y = 500}
+  ]
+
+nested :: [[Int]]
+nested = [[1,2,3], [4,5,6], [7,8,9]]
+
+-- ----- Indexing ------------------------------------------------------------
+
+indexPos :: Int
+indexPos = .[2] ten
+
+-- ----- Slicing -------------------------------------------------------------
+
+sliceFull :: [Int]
+sliceFull = .[:] ten
+
+sliceFullStep :: [Int]
+sliceFullStep = .[::] ten
+
+sliceOpenLeft :: [Int]
+sliceOpenLeft = .[3:] ten
+
+sliceOpenRight :: [Int]
+sliceOpenRight = .[:3] ten
+
+sliceClosed :: [Int]
+sliceClosed = .[2:5] ten
+
+sliceStep :: [Int]
+sliceStep = .[::2] ten
+
+sliceStepClosed :: [Int]
+sliceStepClosed = .[1:7:2] ten
+
+sliceEmpty :: [Int]
+sliceEmpty = .[5:1] ten
+
+-- ----- Annotated bounds (various integer widths + explicit Null) -----------
+
+indexAnnotInt8 :: Int
+indexAnnotInt8 = .[(2 :: Int8)] ten
+
+indexAnnotUInt32 :: Int
+indexAnnotUInt32 = .[(3 :: UInt32)] ten
+
+sliceAnnotBound :: [Int]
+sliceAnnotBound = .[(0 :: Int8):3] ten
+
+-- A bound that is structurally Null with an explicit ?Int64 annotation
+-- is the same shape the desugar produces for an empty slice position
+-- (.[:3] -> .[(Null :: ?Int64):3]). Testing it here verifies the
+-- Optional default flow end-to-end without an empty-position desugar
+-- step in between.
+sliceAnnotNull :: [Int]
+sliceAnnotNull = .[(Null :: ?Int64):3] ten
+
+-- ----- Chained: slice + field (one implicit Map over records) --------------
+
+chainSliceField :: [Int]
+chainSliceField = .[1:3].x pts
+
+-- ----- Chained: slice + slice (one implicit Map; body is another slice) ----
+
+chainSliceSlice :: [[Int]]
+chainSliceSlice = .[0:2].[0:2] nested
+
+-- ----- Chained: slice + bracket-index (Map body is an index) --------------
+
+chainSliceSliceIdx :: [Int]
+chainSliceSliceIdx = .[0:2].[1] nested
+
+-- ----- Chained: index + field (single record projection on one element) ---
+
+chainIndexField :: Int
+chainIndexField = .[1].y pts
+
+-- ----- Chained: slice + group of fields (each elem becomes a tuple) -------
+-- The Map's lambda body returns a tuple built from two field accessors.
+
+chainSliceFieldTuple :: [(Int, Int)]
+chainSliceFieldTuple = .[1:3].(.x, .y) pts

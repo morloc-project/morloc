@@ -1,0 +1,19 @@
+-- Negative test for R1: declaring an @instance@ on a transparent
+-- @type@ alias is rejected. To opt the leaf out of the root's
+-- instances, the user must convert @type Foo = Bar@ to
+-- @newtype Foo = Bar@.
+
+module main (shouldFail)
+
+import root-py
+
+type Email = Str
+
+class Greet a where
+  greet :: a -> Str
+
+-- R1 violation: instance on transparent alias.
+instance Greet Email where
+  source Py from "helpers.py" ("greet_email" as greet)
+
+shouldFail = greet ("user@example.com" :: Email)

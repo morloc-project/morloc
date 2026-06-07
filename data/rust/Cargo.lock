@@ -345,6 +345,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -786,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manager"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "chrono",
  "clap",
@@ -794,6 +795,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "tempfile",
  "thiserror",
@@ -801,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manifest"
-version = "0.86.1"
+version = "0.87.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -809,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.86.1"
+version = "0.87.0"
 dependencies = [
  "clap",
  "libc",
@@ -823,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.86.1"
+version = "0.87.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1196,6 +1198,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1238,6 +1253,16 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
  "rustix",
  "windows-sys",
 ]
@@ -1349,6 +1374,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "utf8parse"

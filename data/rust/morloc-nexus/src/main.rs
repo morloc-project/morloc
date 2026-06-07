@@ -81,9 +81,9 @@ fn main() {
     // Env vars are inherited by every pool process the nexus later
     // execvp's, and libmorloc reads them once on first packet operation
     // (via packet::ensure_config_loaded). Setting both before the
-    // dlopen-and-shinit block below guarantees the nexus's own libmorloc
-    // instance sees them too (its first read of the atomics will trip
-    // the Once and pull these values in).
+    // shinit call below guarantees the nexus's own libmorloc.so sees
+    // them too (its first read of the atomics will trip the Once and
+    // pull these values in).
     if let Some(n) = manifest.inline_size {
         std::env::set_var("MORLOC_INLINE_SIZE", n.to_string());
     }
@@ -92,6 +92,20 @@ fn main() {
     }
     if let Some(ref dir) = manifest.tmpdir {
         std::env::set_var("MORLOC_TMPDIR", dir);
+    }
+
+    // Propagate nexus + manifest absolute paths to pools. SLURM remote
+    // dispatch (libmorloc.so::remote_call) needs MORLOC_NEXUS_PATH to
+    // wrap a sbatch invocation of `<nexus> --call-packet ...`. Both
+    // paths are also useful handles for any future per-program tooling
+    // that needs to re-enter the same nexus from a worker.
+    if let Ok(exe) = std::env::current_exe() {
+        std::env::set_var("MORLOC_NEXUS_PATH", &exe);
+    }
+    if let Ok(abs_manifest) = std::fs::canonicalize(&manifest_path) {
+        std::env::set_var("MORLOC_MANIFEST_PATH", &abs_manifest);
+    } else {
+        std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path);
     }
 
     let single_command = manifest.commands.len() == 1 && manifest.groups.is_empty();
@@ -144,45 +158,29 @@ fn main() {
     // orphans without reading the SHM headers.
     let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
 
-    // Initialize shared memory via libmorloc.so using dlsym.
-    // CRITICAL: We must use dlsym to call the CDYLIB's shinit, not the rlib's.
-    // The rlib and cdylib have separate static globals (VOLUMES, ALLOC_MUTEX, etc.).
-    // All SHM operations in pool-facing C code go through the cdylib's globals.
-    // If we call the rlib's shinit, the cdylib's globals stay uninitialized.
+    // Initialize shared memory. The nexus no longer statically links
+    // morloc-runtime as an rlib, so these `extern "C"` symbols resolve
+    // at load time via DT_NEEDED against the single process-shared
+    // copy in libmorloc.so. The dlsym workaround that used to live
+    // here is gone -- it existed only to bypass symbol shadowing by
+    // the rlib's static copy of shinit, which is now absent.
     {
-        let _lib = unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_NOW) };
-        // RTLD_DEFAULT (NULL handle) searches in order: executable, then loaded libs
-        // But the rlib symbols come first. Use RTLD_NEXT-style lookup via the .so path.
-        let lib_path = std::ffi::CString::new(
-            format!("{}/lib/libmorloc.so", morloc_home())
-        ).unwrap();
-        let lib = unsafe { libc::dlopen(lib_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-        if lib.is_null() {
-            let err = unsafe { libc::dlerror() };
-            let err_msg = if err.is_null() {
-                "unknown error".to_string()
-            } else {
-                unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned()
-            };
-            eprintln!("Error: failed to load libmorloc.so: {}", err_msg);
-            process::clean_exit(1);
+        extern "C" {
+            fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
+            fn shinit(
+                shm_basename: *const std::ffi::c_char,
+                volume_index: usize,
+                shm_size: usize,
+                errmsg: *mut *mut std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
         }
-
-        type ShmSetFallbackFn = unsafe extern "C" fn(*const std::ffi::c_char);
-        type ShinitFn = unsafe extern "C" fn(*const std::ffi::c_char, usize, usize, *mut *mut std::ffi::c_char) -> *mut std::ffi::c_void;
-
-        let set_fb_sym = std::ffi::CString::new("shm_set_fallback_dir").unwrap();
-        let shinit_sym = std::ffi::CString::new("shinit").unwrap();
-
-        let set_fb: ShmSetFallbackFn = unsafe { std::mem::transmute(libc::dlsym(lib, set_fb_sym.as_ptr())) };
-        let do_shinit: ShinitFn = unsafe { std::mem::transmute(libc::dlsym(lib, shinit_sym.as_ptr())) };
 
         let tmpdir_c = std::ffi::CString::new(tmpdir.as_str()).unwrap();
         let basename_c = std::ffi::CString::new(shm_basename.as_str()).unwrap();
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
         unsafe {
-            set_fb(tmpdir_c.as_ptr());
-            let shm = do_shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
+            shm_set_fallback_dir(tmpdir_c.as_ptr());
+            let shm = shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
             if shm.is_null() {
                 let msg = if !errmsg.is_null() {
                     let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
@@ -195,7 +193,6 @@ fn main() {
                 process::clean_exit(1);
             }
         }
-        unsafe { libc::dlclose(lib) };
     }
 
     // Become subreaper for orphaned grandchildren
@@ -298,8 +295,28 @@ fn main() {
         }
     } else {
         // Call-packet mode: read a pre-built call packet from file,
-        // send to the appropriate pool, write result as MessagePack.
+        // send to the appropriate pool, write the result packet.
         // Used by SLURM workers on remote compute nodes.
+        //
+        // Compute-node nexuses come up cold -- no driver-side pool is
+        // reachable here -- so each manifest-declared pool whose
+        // socket isn't already alive needs to be started. The
+        // already-alive check is what makes same-host development /
+        // mock-test setups still work: when a parent nexus is the one
+        // that fork-exec'd this call-packet nexus (e.g. a local SLURM
+        // mock), the parent's pool is at the target socket already
+        // and we must not try to bind a second daemon to the same
+        // path. Pools we DID start die via PR_SET_PDEATHSIG when
+        // clean_exit drops this process.
+        let to_start: Vec<usize> = (0..manifest.pools.len())
+            .filter(|&i| !socket_is_alive(&sockets[i].socket_path))
+            .collect();
+        if !to_start.is_empty() {
+            if let Err(e) = process::start_daemons(&mut sockets, &to_start) {
+                eprintln!("Error: failed to start pools for call-packet dispatch: {}", e);
+                process::clean_exit(1);
+            }
+        }
         run_call_packet(&config, &tmpdir);
     }
 
@@ -501,8 +518,22 @@ fn run_router(config: &dispatch::NexusConfig) {
     }
 }
 
+/// Quick liveness probe for a pool socket: try to connect; if the
+/// connect succeeds the socket file exists and something is listening.
+/// Used by call-packet mode to skip starting pools that a parent
+/// process (typical in same-host SLURM-mock setups) already has live.
+fn socket_is_alive(path: &str) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
 /// Run a pre-built call packet on a remote worker node (SLURM mode).
-/// Reads a call packet from file, sends it to the pool, writes result as MessagePack.
+///
+/// Reads a call packet from file, sends it to the local pool, and
+/// writes the result back to `--output-file`. The output form is the
+/// raw morloc packet: a 32-byte header plus `header.offset +
+/// header.length` payload bytes. The driver-side `slurm_ffi::remote_call`
+/// reads this file with `read_binary_file` and feeds the bytes back up
+/// the call chain as the result of the labeled call.
 fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
@@ -514,29 +545,14 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         fn send_and_receive_over_socket(
             socket_path: *const c_char, packet: *const u8, errmsg: *mut *mut c_char,
         ) -> *mut u8;
+        fn morloc_packet_size(
+            packet: *const u8, errmsg: *mut *mut c_char,
+        ) -> usize;
         fn get_morloc_data_packet_error_message(
             data: *const u8, errmsg: *mut *mut c_char,
         ) -> *mut c_char;
-        fn read_schema_from_packet_meta(
-            packet: *const u8, errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn parse_schema(
-            schema_str: *const c_char, errmsg: *mut *mut c_char,
-        ) -> *mut morloc_runtime::cschema::CSchema;
-        fn get_morloc_data_packet_value(
-            data: *const u8, schema: *const morloc_runtime::cschema::CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn pack_with_schema(
-            mlc: *const c_void, schema: *const morloc_runtime::cschema::CSchema,
-            mpkptr: *mut *mut c_char, mpk_size: *mut usize, errmsg: *mut *mut c_char,
-        ) -> i32;
         fn write_atomic(
             filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn print_morloc_data_packet(
-            packet: *const u8, schema: *const morloc_runtime::cschema::CSchema,
-            errmsg: *mut *mut c_char,
         ) -> i32;
     }
 
@@ -569,6 +585,21 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         process::clean_exit(1);
     }
 
+    // Structural check on the bytes we just read from the shared FS. A
+    // torn or corrupted call packet would otherwise propagate into the
+    // pool dispatch as garbage offsets / lengths and crash the worker.
+    {
+        let slice = unsafe { std::slice::from_raw_parts(call_packet, packet_size) };
+        if let Err(e) = morloc_runtime_types::packet::validate_packet(slice) {
+            eprintln!(
+                "Error: call packet '{}' is malformed: {}",
+                packet_path, e
+            );
+            unsafe { libc::free(call_packet as *mut c_void) };
+            process::clean_exit(1);
+        }
+    }
+
     // Send to pool and receive response
     let result_packet = unsafe {
         send_and_receive_over_socket(socket_c.as_ptr(), call_packet, &mut errmsg)
@@ -595,32 +626,36 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         process::clean_exit(1);
     }
 
-    // If output-form is "packet", write raw packet to output file
+    // Write the raw morloc packet to --output-file. The driver-side
+    // `slurm_ffi::remote_call` (libmorloc.so) reads exactly this file
+    // via `read_binary_file` and feeds the bytes back up the call
+    // chain. The previous implementation called `print_morloc_data_packet`
+    // (which prints to stdout) and wrote a sibling `.mpk` -- neither
+    // matched what the driver actually reads.
     if config.output_format == dispatch::OutputFormat::Packet {
         if let Some(ref output_path) = config.output_path {
-            let schema_str = unsafe { read_schema_from_packet_meta(result_packet, &mut errmsg) };
-            let schema = if !schema_str.is_null() {
-                unsafe { parse_schema(schema_str, &mut errmsg) }
-            } else {
-                ptr::null_mut()
-            };
-            unsafe {
-                print_morloc_data_packet(result_packet, schema, &mut errmsg);
-            };
-            // Also write as msgpack file
-            if !schema.is_null() {
-                let mlc = unsafe { get_morloc_data_packet_value(result_packet, schema, &mut errmsg) };
-                if !mlc.is_null() && errmsg.is_null() {
-                    let mut mpk_data: *mut c_char = ptr::null_mut();
-                    let mut mpk_size: usize = 0;
-                    unsafe { pack_with_schema(mlc as *const c_void, schema, &mut mpk_data, &mut mpk_size, &mut errmsg) };
-                    if !mpk_data.is_null() && errmsg.is_null() {
-                        let mpk_filename = format!("{}.mpk", output_path);
-                        let mpk_c = CString::new(mpk_filename.as_str()).unwrap();
-                        unsafe { write_atomic(mpk_c.as_ptr(), mpk_data as *const u8, mpk_size, &mut errmsg) };
-                        unsafe { libc::free(mpk_data as *mut c_void) };
-                    }
-                }
+            let packet_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
+            if !errmsg.is_null() {
+                let msg = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
+                unsafe { libc::free(errmsg as *mut c_void) };
+                eprintln!("Error: morloc_packet_size failed: {}", msg);
+                unsafe { libc::free(result_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
+
+            let output_c = CString::new(output_path.as_str()).unwrap();
+            let rc = unsafe { write_atomic(output_c.as_ptr(), result_packet, packet_size, &mut errmsg) };
+            if rc != 0 || !errmsg.is_null() {
+                let msg = if !errmsg.is_null() {
+                    let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
+                    unsafe { libc::free(errmsg as *mut c_void) };
+                    s
+                } else {
+                    format!("write_atomic returned {}", rc)
+                };
+                eprintln!("Error: failed to write result packet to '{}': {}", output_path, msg);
+                unsafe { libc::free(result_packet as *mut c_void) };
+                process::clean_exit(1);
             }
         }
     }

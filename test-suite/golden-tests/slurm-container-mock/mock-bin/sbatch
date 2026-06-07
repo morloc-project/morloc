@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Mock sbatch for the slurm-container-mock golden test.
+#
+# In container mode, the bridge composes:
+#   '<morloc-manager>' run -- <wrap_cmd>
+# and hands that string to sbatch via --wrap. On a real compute node,
+# sbatch would launch the wrap under /bin/sh; here we just exec the
+# whole thing locally. The test host already has morloc-manager on
+# PATH (the same one that spawned the driver container), so the
+# compute-side `morloc-manager run` invocation Just Works -- it
+# brings up the same env and forwards the inner nexus argv after `--`.
+# That makes the round-trip a single-host fake-out of a multi-node
+# cluster.
+set -euo pipefail
+
+out=
+err=
+wrap=
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --parsable) shift ;;
+        -o) out="$2"; shift 2 ;;
+        -e) err="$2"; shift 2 ;;
+        --wrap=*) wrap="${1#--wrap=}"; shift ;;
+        --wrap) wrap="$2"; shift 2 ;;
+        --mem=*|--time=*|--cpus-per-task=*|--gres=*) shift ;;
+        *) shift ;;
+    esac
+done
+
+if [ -z "$wrap" ]; then
+    echo "mock sbatch: no --wrap argument" >&2
+    exit 1
+fi
+
+if [ -n "$out" ]; then
+    bash -c "$wrap" >"$out" 2>"${err:-/dev/null}" || true
+else
+    bash -c "$wrap" || true
+fi
+
+echo 12345

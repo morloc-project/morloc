@@ -18,7 +18,10 @@ module Morloc.CodeGenerator.Express
   ) where
 
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.CodeGenerator.Grammars.Macro as Macro
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -26,6 +29,7 @@ import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
+import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
@@ -174,10 +178,11 @@ expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicat
   setManifoldConfig midx e
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
-  | [t] <- filter (not . isNatTypeT) ts = do
+  | [t] <- filter (not . isKindTypeT) ts = do
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
-      -- Preserve the FULL applied type args (Nat positions included) so
-      -- downstream language code generators can see phantom dims.
+      -- Preserve the FULL applied type args (kind positions included)
+      -- so downstream language code generators can see phantom dims at
+      -- the SerialList layer. Macro substitution filters kind args.
       let x = PolyList (Idx cidx v) (map (Idx cidx) ts) xs'
       return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 -- LstS at a type whose head is a type-alias (e.g. @type Pat = [Pat]@
@@ -296,6 +301,435 @@ expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _
   let e = PolyDoBlock (Idx cidx t) x'
   return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyArg l pc e = expressPolyExprWrap l pc e
+
+-- | Look up the @Packable@ @pack@ source for a native type with outer
+-- TVar @nativeTv@ in language @lang@. In @class Packable a b where
+-- pack :: a -> b@, @a@ is the decomposed/directly-serialisable form
+-- and @b@ is the wrapped form; @pack@ is the constructor direction
+-- (build the wrapped @b@ from its decomposed @a@). Pack/unpack
+-- compose recursively to marshal data toward the wire format. The
+-- instance head is identified by @pack@'s output type (the wrapped
+-- native). Returns @Nothing@ if no matching instance is present.
+findPackablePack :: Lang -> TVar -> MorlocMonad (Maybe Source)
+findPackablePack lang nativeTv = do
+  sigmap <- MM.gets stateTypeclasses
+  case Map.lookup (EV "pack") sigmap of
+    Nothing -> return Nothing
+    Just inst -> return $ listToMaybe
+      [ src
+      | TermTypes (Just et) cs _ <- instanceTerms inst
+      , termOutputHead et == nativeTv
+      , (_, Idx _ src) <- cs
+      , srcLang src == lang
+      ]
+  where
+    termOutputHead :: EType -> TVar
+    termOutputHead et = case snd (unqualify (etype et)) of
+      FunU _ out -> extractKey out
+      other      -> extractKey other
+
+-- | Look up the @IndexLike@ @__to_index__@ instance for an input type
+-- in language @lang@. In @class IndexLike i where __to_index__ :: i ->
+-- ?Int64@, instances are keyed by the WHOLE first-argument type --
+-- not just its head TVar -- because the stdlib distinguishes
+-- @IndexLike Int@ from @IndexLike (?Int)@, both of which would
+-- collapse to @TVar Int@ under 'extractKey'.
+findIndexLikeToIndex :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findIndexLikeToIndex lang inputType = do
+  sigmap <- MM.gets stateTypeclasses
+  case Map.lookup (EV "__to_index__") sigmap of
+    Nothing -> return Nothing
+    Just inst -> return $ listToMaybe
+      [ src
+      | TermTypes (Just et) cs _ <- instanceTerms inst
+      , termInputType et == Just inputType
+      , (_, Idx _ src) <- cs
+      , srcLang src == lang
+      ]
+  where
+    termInputType :: EType -> Maybe TypeU
+    termInputType et = case snd (unqualify (etype et)) of
+      FunU (firstArg : _) _ -> Just firstArg
+      _                     -> Nothing
+
+-- | Look up the @Sliceable@ @__get_slice__@ instance for a container
+-- type in language @lang@. The instance method signature is @?Int64
+-- -> ?Int64 -> ?Int64 -> f a -> f a@; the container head sits at
+-- argument index 3 (the receiver position). Receivers don't need
+-- Optional discrimination, so head-only matching ('extractKey') is
+-- sufficient.
+findSliceableGetSlice :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findSliceableGetSlice lang receiverType =
+  findInstanceByArgHead 3 (EV "__get_slice__") lang (extractKey receiverType)
+
+-- | Look up the @Indexable@ @__access_index__@ instance for a
+-- container type in language @lang@. The instance method signature is
+-- @?Int64 -> f a -> a@; the container head sits at argument index 1.
+findIndexableAccessIndex :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findIndexableAccessIndex lang receiverType =
+  findInstanceByArgHead 1 (EV "__access_index__") lang (extractKey receiverType)
+
+-- | Look up the @SliceableDim@ @__get_slice_dim__@ instance for a
+-- Nat-parameterized container. Argument position of the receiver is
+-- the same as @Sliceable@ (3): @?Int64 -> ?Int64 -> ?Int64 -> f n a ->
+-- f m a@.
+findSliceableDimGetSliceDim :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findSliceableDimGetSliceDim lang receiverType =
+  findInstanceByArgHead 3 (EV "__get_slice_dim__") lang (extractKey receiverType)
+
+-- | Look up the @Functor@ @map@ instance for a container type in
+-- language @lang@. The instance method signature is @(a -> b) -> f a
+-- -> f b@; the container head sits at argument index 1. Used by the
+-- @IntrMap@ pool-path lowering to resolve the desugar's implicit map
+-- over a bracket-accessor chain.
+findFunctorMap :: Lang -> TypeU -> MorlocMonad (Maybe Source)
+findFunctorMap lang receiverType =
+  findInstanceByArgHead 1 (EV "map") lang (extractKey receiverType)
+
+-- | Shared helper: look up the per-language source binding of a
+-- class method whose receiver type head occupies a known argument
+-- position. Used by the @Sliceable@ / @Indexable@ / @SliceableDim@ /
+-- @Functor@ helpers above.
+findInstanceByArgHead :: Int -> EVar -> Lang -> TVar -> MorlocMonad (Maybe Source)
+findInstanceByArgHead pos method lang containerTv = do
+  sigmap <- MM.gets stateTypeclasses
+  case Map.lookup method sigmap of
+    Nothing -> return Nothing
+    Just inst -> return $ listToMaybe
+      [ src
+      | TermTypes (Just et) cs _ <- instanceTerms inst
+      , receiverHead et == Just containerTv
+      , (_, Idx _ src) <- cs
+      , srcLang src == lang
+      ]
+  where
+    receiverHead :: EType -> Maybe TVar
+    receiverHead et = case snd (unqualify (etype et)) of
+      FunU args _ | length args > pos -> Just (extractKey (args !! pos))
+      _                               -> Nothing
+
+-- | The wire type for every slot the slicer / indexer expects: bounds
+-- always arrive as @?Int64@ (the return shape of @__to_index__@); a
+-- bare @Int64@ never reaches the runtime.
+optI64T :: Type
+optI64T = OptionalT (VarT (TV "Int64"))
+
+-- | Rewrite an applied @PatternBracketSlice@ into the resolved
+-- per-language @Sliceable.__get_slice__@ instance call, with each
+-- bound wrapped in its own @IndexLike.__to_index__@ cast. Used by
+-- 'expressPolyExpr' on the local-pool path.
+expressBracketSlice
+  :: Lang
+  -> Int                       -- outer manifold index, reused for the synthetic SrcCall PolyExe
+  -> [Type]                    -- bracket pattern input types: [startT, stopT, stepT, rcvT]
+  -> Type                      -- bracket pattern result type
+  -> [PolyExpr]                -- already-expressed args
+  -> MorlocMonad PolyExpr
+expressBracketSlice callLang midx inputs out xsExpr =
+  case (inputs, xsExpr) of
+    ([sT, eT, pT, rcvT], [sE, eE, pE, rcvE]) -> do
+      -- Try Sliceable first (List, Str, ...). If absent, try
+      -- SliceableDim (Vector, future Tensor ...) -- both have the same
+      -- slot shape @?Int64 -> ?Int64 -> ?Int64 -> recv -> result@
+      -- from the codegen's point of view; only the result type's Nat
+      -- dim differs, and the typechecker has already produced the
+      -- right result type via bracketSliceResultType.
+      getSliceSrc <- requireInstance midx
+        (firstJustM
+          [ resolveInstanceForType findSliceableGetSlice    callLang midx rcvT
+          , resolveInstanceForType findSliceableDimGetSliceDim callLang midx rcvT
+          ])
+        callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
+      sW <- wrapBoundInToIndex callLang midx sT sE
+      eW <- wrapBoundInToIndex callLang midx eT eE
+      pW <- wrapBoundInToIndex callLang midx pT pE
+      let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
+      return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP getSliceSrc)) [sW, eW, pW, rcvE]
+    _ -> MM.throwSourcedError midx "PatternBracketSlice expects 4 arguments"
+
+-- | Run a list of @Maybe@-returning monadic lookups in order, returning
+-- the first @Just@. Used to fan out a single bracket op across multiple
+-- typeclasses (e.g. @Sliceable@ then @SliceableDim@) when the receiver
+-- type may have an instance under either.
+firstJustM :: Monad m => [m (Maybe a)] -> m (Maybe a)
+firstJustM []       = return Nothing
+firstJustM (m : ms) = do
+  r <- m
+  case r of
+    Just _  -> return r
+    Nothing -> firstJustM ms
+
+-- | Rewrite an applied @PatternBracketIndex@ into the resolved
+-- per-language @Indexable.__access_index__@ instance call, with the
+-- index wrapped in @IndexLike.__to_index__@. @__access_index__@ takes
+-- @?Int64@ to match @__to_index__@'s return shape; the source
+-- implementations error on a Null index since an absent index has no
+-- semantic meaning at an access position (only at a slice position).
+expressBracketIndex
+  :: Lang
+  -> Int
+  -> [Type]                    -- [indexT, rcvT]
+  -> Type
+  -> [PolyExpr]                -- already-expressed args
+  -> MorlocMonad PolyExpr
+expressBracketIndex callLang midx inputs out xsExpr =
+  case (inputs, xsExpr) of
+    ([iT, rcvT], [iE, rcvE]) -> do
+      accessSrc <- requireInstance midx
+        (resolveInstanceForType findIndexableAccessIndex callLang midx rcvT)
+        callLang "Indexable.__access_index__" rcvT
+      iW <- wrapBoundInToIndex callLang midx iT iE
+      let fT = FunT [optI64T, rcvT] out
+      return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP accessSrc)) [iW, rcvE]
+    _ -> MM.throwSourcedError midx "PatternBracketIndex expects 2 arguments"
+
+-- | Resolve a typeclass-method instance for a value's type by walking
+-- the alias chain. Tests the type's outermost head TVar against the
+-- per-TVar lookup; on miss, reduces the type one alias step
+-- (via 'TE.reduceType') and retries. Returns the first hit, or
+-- 'Nothing' if the chain is exhausted. This is the key mechanism by
+-- which @type Array a = List a@ inherits @instance Indexable List@:
+-- the call site type @Array Int@ misses on @Array@, reduces to
+-- @List Int@, then hits.
+resolveInstanceForType
+  :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
+  -> Lang
+  -> Int                  -- midx, used to recover the source scope
+  -> Type
+  -> MorlocMonad (Maybe Source)
+resolveInstanceForType perTypeLookup lang midx originalType = do
+  scope <- MM.getGeneralScope midx
+  go scope (type2typeu originalType)
+  where
+    go scope t = do
+      mSrc <- perTypeLookup lang t
+      case mSrc of
+        Just src -> return (Just src)
+        Nothing -> case TE.reduceType scope t of
+          Just t' | t' /= t -> go scope t'
+          _ -> return Nothing
+
+requireInstance
+  :: Int
+  -> MorlocMonad (Maybe Source)
+  -> Lang
+  -> Text
+  -> Type
+  -> MorlocMonad Source
+requireInstance midx lookup_ lang methodLabel t = do
+  mSrc <- lookup_
+  case mSrc of
+    Just src -> return src
+    Nothing -> MM.throwSourcedError midx $
+      "No" <+> pretty methodLabel <+> "instance found for"
+      <+> pretty t <+> "in language" <+> pretty lang
+      <> line <> missingClassHint methodLabel
+
+-- | A one-line hint appended to typeclass-missing errors. Bracket
+-- patterns and the implicit-map intrinsic only exist if the user has
+-- a module that brings their backing typeclasses into scope --
+-- @IndexLike@ / @Indexable@ / @Sliceable@ / @SliceableDim@ live in
+-- @internal@; the stdlib @Functor@ lives in @root@. Concrete
+-- instances are provided by the stdlib's language-specific root
+-- modules (community alternatives are equally valid). A bare user
+-- module that uses bracket syntax without importing any of these
+-- gets a "no instance" error that is otherwise opaque about which
+-- module is missing.
+missingClassHint :: Text -> Doc ann
+missingClassHint methodLabel
+  | "IndexLike" `T.isPrefixOf` methodLabel =
+      "(class IndexLike lives in 'internal'; instances are provided by the stdlib's language-specific root modules)"
+  | "Indexable" `T.isPrefixOf` methodLabel =
+      "(class Indexable lives in 'internal'; instances are provided by the stdlib's language-specific root modules)"
+  | "Sliceable" `T.isPrefixOf` methodLabel =
+      "(class Sliceable / SliceableDim live in 'internal'; instances are provided by the stdlib's language-specific root modules)"
+  | "Functor" `T.isPrefixOf` methodLabel =
+      "(the stdlib class Functor is defined in 'root'; per-language 'map' instances are provided by the stdlib's language-specific root modules)"
+  | otherwise = ""
+
+-- | Wrap a typed bound argument in its @IndexLike.__to_index__@
+-- instance call. With @__to_index__ :: i -> ?Int64@, every bound --
+-- including Optional-typed expressions and the literal @NullS@ from
+-- the desugar's @(Null :: ?Int64)@ -- can be dispatched through the
+-- same lookup: the @IndexLike (?T)@ instance for each integer width
+-- forwards @Null@ through, and the non-Optional @IndexLike T@ instances
+-- wrap the value in @Just(cast)@. A missing instance raises a sourced
+-- codegen error with the bound's type and target language.
+wrapBoundInToIndex
+  :: Lang
+  -> Int
+  -> Type
+  -> PolyExpr
+  -> MorlocMonad PolyExpr
+wrapBoundInToIndex lang midx boundType expr = do
+  mSrc <- resolveInstanceForType findIndexLikeToIndex lang midx boundType
+  case mSrc of
+    Just src ->
+      let wrapFT = FunT [boundType] optI64T
+      in return $ PolyApp (PolyExe (Idx midx wrapFT) (SrcCallP src)) [expr]
+    Nothing -> MM.throwSourcedError midx $
+      "No IndexLike.__to_index__ instance found for" <+> pretty boundType
+      <+> "in language" <+> pretty lang
+      <+> "(needed to cast bracket bound to ?Int64)"
+      <> line <> missingClassHint "IndexLike"
+
+
+-- | Render a 'TypeF' to a flat per-language form string with macro
+-- arguments substituted at every level. Two morloc types that resolve
+-- to the same native runtime type render to the same string, which
+-- makes the literal-dispatch \"is a wrap needed?\" comparison
+-- invariant to surface-level macro position numbering (e.g.
+-- @std::vector<$2>@ for @Vector (n :: Nat) a@ and @std::vector<$1>@
+-- for @List a@ both render to @std::vector<double>@ for an
+-- element of @Real@, even though their templates differ in macro
+-- index). Multi-positional templates with transposed args still
+-- render to different strings because their arguments are
+-- substituted into different macro slots.
+--
+-- This reuses 'Macro.expandMacro' so the rendering logic stays in
+-- one place. The result is for comparison only; the codegen
+-- elsewhere uses its own language-specific renderers.
+renderConcreteForm :: TypeF -> Text
+renderConcreteForm (VarF (FV _ cv)) = unCVar cv
+renderConcreteForm (AppF (VarF (FV _ cv)) args) =
+  let (typeArgs, kindCount) = partitionKindArgsF args
+  in Macro.expandMacro (unCVar cv) (map renderConcreteForm typeArgs) kindCount
+renderConcreteForm (NamF _ (FV _ cv) _ _) = unCVar cv
+renderConcreteForm (NatLitF n) = T.pack (show n)
+renderConcreteForm NatVoidF = "_"
+renderConcreteForm (StrLitF s) = s
+renderConcreteForm StrVoidF = "_"
+renderConcreteForm (RecF (FV _ cv)) = unCVar cv
+renderConcreteForm (OptionalF t) = "?" <> renderConcreteForm t
+renderConcreteForm (EffectF _ t) = renderConcreteForm t
+renderConcreteForm (FunF ts t) =
+  "(" <> T.intercalate "," (map renderConcreteForm ts) <> ")->" <> renderConcreteForm t
+renderConcreteForm (UnkF (FV _ cv)) = unCVar cv
+renderConcreteForm (AppF h args) =
+  let (typeArgs, _) = partitionKindArgsF args
+  in renderConcreteForm h <> "<" <> T.intercalate "," (map renderConcreteForm typeArgs) <> ">"
+
+-- | Decide whether a literal at native type with outer TVar @nativeTv@
+-- and wire-form outer TVar @wireTv@ needs a @Packable@ wrap in language
+-- @lang@. A wrap is needed iff the native's per-language form differs
+-- from the wire form's. If a wrap is structurally needed but no
+-- @Packable@ instance exists for this language, throws a sourced
+-- error.
+maybePackableWrap :: Int -> Lang -> Type -> Type -> MorlocMonad (Maybe Source)
+maybePackableWrap midx lang nativeT wireT = do
+  let nativeTv = extractKey (type2typeu nativeT)
+      wireTv = extractKey (type2typeu wireT)
+  if nativeTv == wireTv
+    then return Nothing
+    else do
+      -- Compare the FULL rendered per-language form (with macros
+      -- substituted at every level), not just the outer CV templates.
+      -- A literal at @Vector 4 Real@ and the same literal at its wire
+      -- form @List Real@ both render to @std::vector<double>@ in C++,
+      -- so no wrap is needed despite the macro templates differing
+      -- (@std::vector<$2>@ vs @std::vector<$1>@). Transposed-arg cases
+      -- (e.g. @std::map<$2,$1>@ vs @std::map<$1,$2>@ applied to args
+      -- swapped accordingly) ALSO render to the same string -- which
+      -- is correct, since the user's newtype declaration explicitly
+      -- chose to swap argument positions.
+      nativeTF <- inferConcreteType lang (Idx midx nativeT)
+      wireTF   <- inferConcreteType lang (Idx midx wireT)
+      let nativeRendered = renderConcreteForm nativeTF
+          wireRendered   = renderConcreteForm wireTF
+      if nativeRendered == wireRendered
+        then return Nothing
+        else do
+          maySrc <- findPackablePack lang nativeTv
+          case maySrc of
+            Just src -> return (Just src)
+            Nothing -> MM.throwSourcedError midx $
+              "Cannot construct a value of"
+              <+> squotes (pretty nativeTv)
+              <+> "from a"
+              <+> pretty wireTv
+              <+> "literal in"
+              <+> pretty lang <> "."
+              <+> "The native per-language form"
+              <+> dquotes (pretty nativeRendered)
+              <+> "differs from the wire form's"
+              <+> dquotes (pretty wireRendered) <> ";"
+              <+> "declare 'instance Packable"
+              <+> pretty wireTv
+              <+> pretty nativeTv
+              <+> "where source"
+              <+> pretty lang
+              <+> "..."
+              <+> "(... as pack, ... as unpack)'."
+
+-- | LstS dispatch counterpart to 'dispatchPrimLit'. Computes the
+-- wire-parent root of @userT@, expects it to be list-shaped, and either
+-- emits a natural PolyList or wraps it with the @Packable@ @unpack@
+-- source. @userArgs@ is the user-annotated arg list (may be empty when
+-- the literal is annotated at a bare-VarT newtype-list); the
+-- wire-parent's arg list is used inside the wrap and as the fallback
+-- in the bare-VarT case.
+dispatchListLit ::
+  Int ->         -- midx
+  Int ->         -- cidx
+  Lang ->
+  Type ->        -- user-facing type
+  TVar ->        -- outer TVar of userT
+  [Type] ->      -- user's annotated args (empty for bare-VarT case)
+  [PolyExpr] ->  -- already-elaborated children
+  MorlocMonad PolyExpr
+dispatchListLit midx cidx lang userT userTV userArgs xs' = do
+  scope <- MM.getGeneralScope midx
+  let wireT = typeOf (TE.wireParentRoot scope (type2typeu userT))
+  case wireT of
+    AppT (VarT wireTV) wireArgs -> do
+      maySrc <- maybePackableWrap midx lang userT wireT
+      case maySrc of
+        Nothing
+          -- Bare-VarT case (e.g. @type Pat = [Pat]@ or @newtype Bytes
+          -- = List UInt8@): the user's outer TVar takes no arguments,
+          -- so tagging the @PolyList@ with @userTV@ AND attaching the
+          -- wire-parent's args would produce a malformed @AppF Pat
+          -- [List Pat]@ at @typeFof@ time. Tag with the wire-parent's
+          -- TVar (e.g. @List@) so the resulting @AppF@ has the
+          -- correct list shape; the user's alias identity is
+          -- recovered downstream by the alias-walking serialisation
+          -- pass.
+          | null userArgs ->
+              return $ PolyList (Idx cidx wireTV) (map (Idx cidx) wireArgs) xs'
+          -- Parametric case (e.g. @[1,2,3] :: Vec 3 Int@): the user
+          -- supplied an arg list, so tag with @userTV@ and keep the
+          -- user's args (including phantom Nat dims).
+          | otherwise ->
+              return $ PolyList (Idx cidx userTV) (map (Idx cidx) userArgs) xs'
+        Just src ->
+          let inner = PolyList (Idx cidx wireTV) (map (Idx cidx) wireArgs) xs'
+              funT = FunT [AppT (VarT wireTV) wireArgs] userT
+          in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner]
+    _ -> MM.throwSourcedError midx "Expected a list type"
+
+-- | Emit a primitive literal at user-facing type @userT@ (whose outer
+-- TVar is @userTV@), or wrap it with the @Packable@ @unpack@ source
+-- for @userTV@ when the native's per-language form diverges from the
+-- wire form's. @mkLit@ builds the natural literal given the TVar at
+-- which it should be tagged (user's TVar when emitting naturally,
+-- wire-form's TVar when emitting inside a wrap).
+dispatchPrimLit ::
+  Int ->                  -- midx
+  Lang ->
+  Type ->                 -- user-facing type (e.g. VarT Speed)
+  TVar ->                 -- outer TVar of userT
+  (TVar -> PolyExpr) ->   -- natural literal constructor parameterised by tag TVar
+  MorlocMonad PolyExpr
+dispatchPrimLit midx lang userT userTV mkLit = do
+  scope <- MM.getGeneralScope midx
+  let wireTU = TE.wireParentRoot scope (type2typeu userT)
+      wireTV = extractKey wireTU
+  maySrc <- maybePackableWrap midx lang userT (typeOf wireTU)
+  case maySrc of
+    Nothing -> return (mkLit userTV)
+    Just src ->
+      let funT = FunT [typeOf wireTU] userT
+      in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [mkLit wireTV]
 
 expressPolyExpr ::
   (Lang -> Lang -> Maybe RemoteForm) ->
@@ -449,19 +883,76 @@ expressPolyExpr
 -- into the parent's scope when the manifold gets inlined by codegen.
 -- Treating PatCallP like srcInline matches its semantics - it's
 -- always a leaf expression, never a real function call.
+--
+-- Bracket patterns (.[i], .[s:e:p]) are rewritten here into the
+-- resolved per-language @Sliceable@ / @Indexable@ instance call, with
+-- each non-Null bound wrapped in the @IndexLike@ instance cast for the
+-- bound's own type. This is where the polymorphism of the bound types
+-- (allowed all the way through typecheck) collapses to the language's
+-- concrete @__to_index__@ source binding. A missing instance becomes a
+-- sourced codegen error citing the type and the language.
 expressPolyExpr
   findRemote
   parentLang
-  _
+  pc
   ( AnnoS
       (Idx midx _)
-      _
-      (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (PatCall _))) xs)
+      (_, outerArgs)
+      (AppS f@(AnnoS (Idx gidxCall (FunT inputs out)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
     )
     | isLocal = do
         propagateScope gidxCall midx
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
-        expressPolyApp parentLang f xsExpr >>= stripPolyReturn
+        case pat of
+          PatternBracketSlice ->
+            expressBracketSlice callLang midx inputs out xsExpr
+          PatternBracketIndex ->
+            expressBracketIndex callLang midx inputs out xsExpr
+          _ ->
+            expressPolyApp parentLang f xsExpr >>= stripPolyReturn
+    -- Cross-pool bracket: receiver lives in one pool, surrounding
+    -- expression in another. Without this branch, the not-isLocal
+    -- generic AppS handler at the next clause would call
+    -- expressPolyApp, which builds a @PatCallP@; the per-language
+    -- Generic.hs::genericEvalPattern fallback then emits raw bracket
+    -- syntax (e.g. R's @m[[(i) + 1]]@) and skips the per-bound
+    -- @__to_index__@ cast plus the per-receiver @__access_index__@ /
+    -- @__get_slice__@ dispatch. That fallback is also semantically
+    -- broken for negative indices in R (@m[[-1]]@ means "all except
+    -- first", and @m[[0]]@ errors) and for mixed-width indices in
+    -- C++. The fix is to run the same SrcCall rewrite as the
+    -- isLocal branch, then wrap it in the cross-pool PolyManifold /
+    -- PolyRemoteInterface structure used by the generic not-isLocal
+    -- handler.
+    | not isLocal = do
+        propagateScope gidxCall midx
+        let idxInputTypes = zipWith mkIdx xs inputs
+        mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
+        let xsExpr = fromJust mayXs
+        -- The inner callLang PolyManifold body needs PolyReturn to
+        -- emit a 'return' statement in the pool source; without it C++
+        -- generates a non-void function with no return and hits a
+        -- syntax / control-reaches-end error. @expressBracketSlice@ /
+        -- @expressBracketIndex@ return a bare @PolyApp@ (suited to the
+        -- inline isLocal path that strips PolyReturn anyway), so we
+        -- wrap them here. @expressPolyApp@ already returns
+        -- PolyReturn-wrapped on the non-bracket fallback path.
+        bracketCall <- case pat of
+          PatternBracketSlice ->
+            PolyReturn <$> expressBracketSlice callLang midx inputs out xsExpr
+          PatternBracketIndex ->
+            PolyReturn <$> expressBracketIndex callLang midx inputs out xsExpr
+          _ ->
+            expressPolyApp parentLang f xsExpr
+        return
+          . PolyManifold parentLang midx (ManifoldFull (map unvalue outerArgs))
+          . PolyReturn
+          . PolyApp
+            ( PolyRemoteInterface callLang pc [] (fromJust remote)
+                . PolyManifold callLang midx (ManifoldFull (map unvalue outerArgs))
+                $ bracketCall
+            )
+          $ [PolyBndVar (A parentLang) i | Arg i _ <- outerArgs]
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -570,11 +1061,16 @@ expressPolyExpr
     e2' <- expressPolyExprWrap lang pc e2
     let e = PolyLet letId e1' e2'
     return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (RealS _ x)) = return $ PolyReal (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (IntS _ x)) = return $ PolyInt (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (LogS x)) = return $ PolyLog (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (StrS x)) = return $ PolyStr (Idx cidx v) x
-expressPolyExpr _ _ _ (AnnoS (Idx _ t@(VarT _)) (Idx cidx _, _) UniS) = return $ PolyNull (Idx cidx t)
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (RealS _ x)) =
+  dispatchPrimLit midx lang t v (\tv -> PolyReal (Idx cidx tv) x)
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (IntS _ x)) =
+  dispatchPrimLit midx lang t v (\tv -> PolyInt (Idx cidx tv) x)
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (LogS x)) =
+  dispatchPrimLit midx lang t v (\tv -> PolyLog (Idx cidx tv) x)
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) =
+  dispatchPrimLit midx lang t v (\tv -> PolyStr (Idx cidx tv) x)
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) UniS) =
+  dispatchPrimLit midx lang t v (\tv -> PolyNull (Idx cidx (VarT tv)))
 -- Null carries the full type it stands in for. Earlier this was just
 -- a @TVar@ extracted via @innerNullVar@, but a bare constructor name
 -- loses the arg list of parameterised aliases. For
@@ -614,18 +1110,66 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
 -- Extract the single non-Nat arg for typing children, but PRESERVE the
 -- full args list in PolyList so phantom dims survive into language code
 -- generators (Nat positions render as mempty in macro expansion).
-expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
-  | [t] <- filter (not . isNatTypeT) ts = do
-      xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
-      let e = PolyList (Idx cidx v) (map (Idx cidx) ts) xs'
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
+  | [tElem] <- filter (not . isKindTypeT) ts = do
+      xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x tElem) x) xs
+      e <- dispatchListLit midx cidx lang userT v ts xs'
       return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+-- LstS at a bare @VarT v@ where @v@ is a newtype (or transparent alias)
+-- whose wire-parent root is list-shaped. Use the wire-parent's element
+-- type for child typing and let 'dispatchListLit' decide whether to
+-- emit naturally (e.g. @newtype Bytes = List UInt8@ with no per-language
+-- override emits a bare list) or wrap with the @ListLike v@ converter.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang, args) (LstS xs)) = do
+  scope <- MM.getGeneralScope midx
+  let wireT = typeOf (TE.wireParentRoot scope (type2typeu userT))
+  case wireT of
+    AppT (VarT _) wireArgs
+      | [elemT] <- filter (not . isKindTypeT) wireArgs -> do
+          xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
+          e <- dispatchListLit midx cidx lang userT v [] xs'
+          return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+    _ -> MM.throwSourcedError midx "Expected a list type"
+-- A list literal at a multi-non-Nat-arg @AppT@ whose @Packable@ wire form
+-- is list-shaped. E.g. @[("a",1)] :: Map Str Int@ with @instance
+-- Packable (Map a b) (List (Tuple2 a b))@. The Packable wire form is
+-- substituted, the children are typed against the wire form's element
+-- type, and the result is wrapped with the @Packable@ @unpack@ source.
+-- This is the codegen counterpart to the typecheck-side tier-2 lookup
+-- in 'Morloc.Frontend.Typecheck.checkE'.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx cidx lang, args) (LstS xs)) = do
+  mayWire <- findPackableWireForm (type2typeu userT)
+  case mayWire of
+    Just wireTU
+      | AppT (VarT wireV) wireArgs <- typeOf wireTU
+      , [elemT] <- filter (not . isKindTypeT) wireArgs -> do
+          xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
+          maySrc <- findPackablePack lang v
+          case maySrc of
+            Just src ->
+              let inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
+                  funT = FunT [AppT (VarT wireV) wireArgs] userT
+              in return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args
+                   (PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner])
+            Nothing -> MM.throwSourcedError midx $
+              "Packable wire form for"
+              <+> squotes (pretty v)
+              <+> "is list-shaped but no 'unpack' source is declared for"
+              <+> pretty lang <> "."
+    _ -> tryReduceLstS userT
+  where
+    tryReduceLstS t = do
+      scope <- MM.getGeneralScope midx
+      case reduceType scope t of
+        Just t' -> expressPolyExprWrap parentLang pc (AnnoS (Idx midx t') (Idx cidx lang, args) (LstS xs))
+        Nothing -> MM.throwSourcedError midx "Expected a list type"
 -- A list literal whose recorded type head is a type-alias (e.g.
 -- @type Pat = [Pat]@ used at the bare-name position, recorded as
--- @VarT "Pat"@ rather than @AppT (VarT "List") [...]@). The pattern
--- above matches only when the head is already the list constructor;
--- when the head is an alias, reduce one step and retry. Mirrors the
--- @TupS@ and @NamS@ reduce-and-retry fallbacks elsewhere in this
--- function.
+-- @VarT "Pat"@ rather than @AppT (VarT "List") [...]@). The two patterns
+-- above match when the head is already the list constructor, or when
+-- the bare head's wire-parent reduces to list-shape. For aliases whose
+-- wire-parent walk doesn't expose a list outer head (transparent aliases
+-- through non-list types), fall through to one-step reduce-and-retry.
 expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(LstS _)) = do
   scope <- MM.getGeneralScope midx
   case reduceType scope t of
@@ -646,17 +1190,33 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
       xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
       let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
       return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
--- A tuple literal whose recorded type head is a type-alias (e.g.
--- @type LL a = (a, ?(LL a))@). The alias's argument list does NOT zip
--- 1:1 with the literal's entries -- the alias body does. Reduce one
--- step (LL Int -> (Int, ?(LL Int))) and retry; the reduced head is
--- the underlying tuple constructor whose arity matches the literal.
--- Mirrors the same reduce-and-retry the NamS branch performs for
--- record-shaped aliases below.
-expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(TupS _)) = do
+-- A tuple literal whose recorded type head is a type-alias or a
+-- newtype-of-tuple (e.g. @type LL a = (a, ?(LL a))@ or
+-- @newtype Matrix m n a = ((Int, Int), Vector (m * n) a)@). The
+-- outer head's argument list does NOT zip 1:1 with the literal's
+-- entries -- the body does. Walk one step through the wire-parent
+-- (@expandWireParent@ walks both transparent aliases AND newtypes,
+-- halting at primitives) to expose the tuple body.
+--
+-- If the outer type has a @Packable@ instance, we must additionally
+-- inject the pack source so the foreign call sees the wrapped
+-- native form (e.g. a @Matrix 2 3 Real@ literal materialises as a
+-- tuple-of-tuple-and-Vector at the wire level and then gets passed
+-- through @morloc_packMatrix@ to become an @mlc::Tensor2<double>@
+-- before the call). Without the pack wrap, the codegen would hand
+-- the tuple directly to a function expecting the wrapped native.
+expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = do
   scope <- MM.getGeneralScope midx
-  case reduceType scope t of
-    Just t' -> expressPolyExprWrap pl pc (AnnoS (Idx midx t') c e)
+  case TE.expandWireParent scope (type2typeu t) of
+    Just t' -> do
+      let bodyT = typeOf t'
+      maySrc <- findPackablePack lang (extractKey (type2typeu t))
+      case maySrc of
+        Just src -> do
+          inner <- expressPolyExprWrap lang (Idx cidx bodyT) (AnnoS (Idx midx bodyT) c e)
+          let funT = FunT [bodyT] t
+          return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner]
+        Nothing -> expressPolyExprWrap pl pc (AnnoS (Idx midx bodyT) c e)
     Nothing -> MM.throwSourcedError midx "Expected a tuple type"
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
   -- C3 invariant: see comment at expressCore NamT above.
@@ -714,6 +1274,24 @@ expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x)) =
   -- even if the inner expression calls into a foreign language.
   x' <- expressPolyExprWrap parentLang (Idx cidx t) x
   return $ pushForceIntoRemote (Idx cidx t) x'
+-- IntrMap (the desugar-emitted implicit map for bracket-accessor
+-- chains): for the pool path, resolve the per-language
+-- @Functor.map@ instance for the receiver's container type and
+-- replace the intrinsic with a direct SrcCall. Walks the alias chain
+-- so e.g. an @Array a = List a@ receiver picks up @instance Functor
+-- List@. Missing instance is a sourced codegen error citing the type
+-- and the language.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS IntrMap [funcE, listE])) = do
+  let AnnoS (Idx _ listT) _ _ = listE
+      AnnoS (Idx _ funcT) _ _ = funcE
+  mapSrc <- requireInstance midx
+    (resolveInstanceForType findFunctorMap lang midx listT)
+    lang "Functor.map" listT
+  funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
+  listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
+  let mapFunT = FunT [funcT, listT] t
+      e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP mapSrc)) [funcExpr, listExpr]
+  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
   let e = PolyIntrinsic (Idx cidx t) intr xs'

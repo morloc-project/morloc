@@ -1,0 +1,36 @@
+--- indexPos ---
+2
+--- sliceFull ---
+[0,1,2,3,4,5,6,7,8,9]
+--- sliceFullStep ---
+[0,1,2,3,4,5,6,7,8,9]
+--- sliceOpenLeft ---
+[3,4,5,6,7,8,9]
+--- sliceOpenRight ---
+[0,1,2]
+--- sliceClosed ---
+[2,3,4]
+--- sliceStep ---
+[0,2,4,6,8]
+--- sliceStepClosed ---
+[1,3,5]
+--- sliceEmpty ---
+[]
+--- indexAnnotInt8 ---
+2
+--- indexAnnotUInt32 ---
+3
+--- sliceAnnotBound ---
+[0,1,2]
+--- sliceAnnotNull ---
+[0,1,2]
+--- chainSliceField ---
+[20,30]
+--- chainSliceSlice ---
+[[1,2],[4,5]]
+--- chainSliceSliceIdx ---
+[2,5]
+--- chainIndexField ---
+200
+--- chainSliceFieldTuple ---
+[[20,200],[30,300]]

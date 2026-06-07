@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Mock sacct for the slurm-container-mock golden test.
+# Same shape as the bare-metal mock: the mock sbatch already ran the
+# wrap synchronously, so the result file is ready by the time the
+# runtime polls us.
+echo "COMPLETED"

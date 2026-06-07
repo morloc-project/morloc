@@ -122,6 +122,7 @@ data Token
   | TokTrue
   | TokFalse
   | TokType
+  | TokNewtype
   | TokRecord
   | TokObject
   | TokClass
@@ -228,6 +229,7 @@ showToken TokAs = "'as'"
 showToken TokTrue = "'True'"
 showToken TokFalse = "'False'"
 showToken TokType = "'type'"
+showToken TokNewtype = "'newtype'"
 showToken TokRecord = "'record'"
 showToken TokObject = "'object'"
 showToken TokClass = "'class'"

@@ -52,12 +52,11 @@ data AliasShape
 
 -- | recurse all the way to a serializable type
 --
--- For SerialList, the optional dim slot is reified as a leading Nat-kinded
--- arg when present. This keeps macro indices (`$N`) in concrete-type bodies
--- (e.g. `"std::vector<$2>" n a`) aligned positionally with the AppF args.
--- A polymorphic dim (Vector n a) still emits a `NatVoidF` placeholder so the
--- $2 slot is reachable; only true List types (no dim slot) emit a single-arg
--- AppF matching `"std::vector<$1>" a`.
+-- For SerialList, the optional dim slot is reified as a leading
+-- kind-kinded (Nat) arg when present. This preserves dimensional
+-- metadata in the wire schema. The macro layer (@expandMacro@) is
+-- independent: macro indices @$N@ count TYPE args only, so the dim
+-- slot here doesn't shift @$N@ positions in the per-language form.
 serialAstToType :: SerialAST -> TypeF
 serialAstToType (SerialPack _ (_, s)) = serialAstToType s
 serialAstToType (SerialList v (Just d) s) = AppF (VarF v) [d, serialAstToType s]
@@ -201,10 +200,32 @@ collectRecursiveNames = go
     go (SerialOptional _ s) = go s
     go _ = Set.empty
 
+-- | Emit a schema hint for a newtype boundary. For a default primitive
+-- (gv is one of the built-in base types like Int, Real, Str, etc.) the
+-- runtime already knows the native type from the schema tag (`f8`, `j`,
+-- `i1`, ...) so no hint is needed; emitting one would clutter the schema
+-- with redundant information. A non-base gv comes from a newtype or
+-- alias-with-custom-form, where the runtime needs the hint to route to
+-- the right packer/unpacker.
 addHint :: FVar -> MDoc
 addHint (FV _ (CV "")) = "" -- no hint if no concrete type is defined
--- this is helpful in the nexus
-addHint (FV _ (CV v)) = "<" <> pretty v <> ">"
+addHint (FV gv (CV v))
+  | isBuiltinBaseType gv = ""
+  | otherwise = "<" <> pretty v <> ">"
+
+-- | True iff @v@ names one of the hardwired base types whose default
+-- per-language native form is implied by the schema tag. Newtypes and
+-- user-defined aliases fall through and get a hint.
+isBuiltinBaseType :: TVar -> Bool
+isBuiltinBaseType v = v `elem`
+  [ BT.unit, BT.bool, BT.str
+  , BT.real, BT.f32, BT.f64
+  , BT.int, BT.i8, BT.i16, BT.i32, BT.i64
+  , BT.uint, BT.u8, BT.u16, BT.u32, BT.u64
+  , BT.list
+  ] || isTupleBaseType v
+  where
+    isTupleBaseType (TV name) = any (\k -> BT.tuple k == TV name) [2 .. 12]
 
 -- | get only the toplevel type
 --
@@ -405,14 +426,28 @@ makeSerialAST m lang t0 = do
         -- Bare alias body shape classifier. Mirrors the AppF branch's
         -- @aliasShape@ but for a zero-arg @VarF@: we ask gscope for
         -- the alias body and inspect its outer constructor.
-        aliasShape = case TE.expandHeadOnly gscope (VarU gv) of
-          Just expanded@(AppU (VarU h) bodyArgs)
-            | h == gv -> AliasIsNone
-            | h == BT.list, [elemU] <- bodyArgs -> AliasIsList elemU
-            | let bodyRT = bodyArgs
-            , h == BT.tuple (length bodyRT) -> AliasIsTuple bodyRT
-            | otherwise -> AliasIsOther expanded
-          _ -> AliasIsNone
+        -- Walk through newtype bodies as well as transparent aliases.
+        -- A newtype like @newtype Vector (n :: Nat) a = List a@ should
+        -- have its list-shape recognised here so the codegen routes
+        -- through the list dispatch instead of demanding a Packable
+        -- instance. Newtypes whose body is itself a leaf (e.g.
+        -- @newtype Bytes = Str@) still fall through to the
+        -- Packable-lookup path -- the @aliasShape@ matcher only
+        -- recognises @AppU@ shapes (List / Tuple), and a bare @VarU@
+        -- body falls under @AliasIsNone@.
+        -- When the outer type has a registered @Packable@ instance,
+        -- defer to that instance regardless of body shape (see the
+        -- AppF branch's @aliasShape@ for the rationale).
+        aliasShape
+          | Map.member gv typepackers = AliasIsNone
+          | otherwise = case TE.expandWireParent gscope (VarU gv) of
+              Just expanded@(AppU (VarU h) bodyArgs)
+                | h == gv -> AliasIsNone
+                | h == BT.list, [elemU] <- bodyArgs -> AliasIsList elemU
+                | let bodyRT = bodyArgs
+                , h == BT.tuple (length bodyRT) -> AliasIsTuple bodyRT
+                | otherwise -> AliasIsOther expanded
+              _ -> AliasIsNone
 
         -- Evaluate type aliases step-by-step, stopping at known serialization
         -- base types. This prevents aliases like Int64 = Int from collapsing
@@ -537,38 +572,43 @@ makeSerialAST m lang t0 = do
 
               -- No outer aliasing: the type is its own head. Dispatch on it
               -- directly: list / tuple / Packable lookup.
+              --
+              -- When the outer type is in @typepackers@ but its wire
+              -- form is list-shaped (e.g. @Vector n a@ with a Packable
+              -- bridge whose wire is @List a@), use 'applyDimsToList'
+              -- to re-attach the phantom Nat slots so the wire schema
+              -- carries the dim. Macro indices are unaffected (they
+              -- count type args only).
               AliasIsNone
                 | finalVar == Just BT.list ->
-                    SerialList fv Nothing <$> makeSerialAST' gscope typepackers (head runtimeTs)
+                    applyDimsToList dims . SerialList fv Nothing <$> makeSerialAST' gscope typepackers (head runtimeTs)
                 | finalVar == Just (BT.tuple (length runtimeTs)) ->
                     SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers) runtimeTs
                 | otherwise -> packableFallback
-        -- TypeU-level Nat predicate for filtering alias-body args.
-        -- (TypeF version lives in CodeGenerator.Namespace as 'isNatTypeF'.)
-        isNatLikeU :: TypeU -> Bool
-        isNatLikeU (NatLitU _) = True
-        isNatLikeU (NatVarU _) = True
-        isNatLikeU (NatAddU _ _) = True
-        isNatLikeU (NatMulU _ _) = True
-        isNatLikeU (NatSubU _ _) = True
-        isNatLikeU (NatDivU _ _) = True
-        isNatLikeU NatVoidU = True
-        isNatLikeU _ = False
-
         -- Classify the outer alias body's wire shape. Empty when the type
         -- is its own head (no aliasing); otherwise tagged by the body's
         -- structural head (List, Tuple, or anything else).
-        aliasShape = case evaluatedType of
-          Just expanded@(AppU (VarU h) bodyArgs)
-            | h == generalTypeName -> AliasIsNone   -- alias reduced to itself
-            | h == BT.list
-            , [elemU] <- filter (not . isNatLikeU) bodyArgs ->
-                AliasIsList elemU
-            | let bodyRT = filter (not . isNatLikeU) bodyArgs
-            , h == BT.tuple (length bodyRT) ->
-                AliasIsTuple bodyRT
-            | otherwise -> AliasIsOther expanded
-          _ -> AliasIsNone
+        --
+        -- When the outer type has a registered @Packable@ instance,
+        -- defer to that instance regardless of body shape: Packable
+        -- exists precisely because the native runtime type differs
+        -- from the body's structural form (e.g. @Matrix@ packs to
+        -- @mlc::Tensor2<$>@, not a tuple). Without this guard the
+        -- structural walk would emit the body shape and the
+        -- (de)serialiser would skip the pack/unpack hop.
+        aliasShape
+          | Map.member generalTypeName typepackers = AliasIsNone
+          | otherwise = case evaluatedType of
+              Just expanded@(AppU (VarU h) bodyArgs)
+                | h == generalTypeName -> AliasIsNone   -- alias reduced to itself
+                | h == BT.list
+                , [elemU] <- filter (not . isKindTypeU) bodyArgs ->
+                    AliasIsList elemU
+                | let bodyRT = filter (not . isKindTypeU) bodyArgs
+                , h == BT.tuple (length bodyRT) ->
+                    AliasIsTuple bodyRT
+                | otherwise -> AliasIsOther expanded
+              _ -> AliasIsNone
 
         -- Look up a Packable instance for the outer type and emit a
         -- SerialPack, or raise a helpful error if no instance is registered.
@@ -584,17 +624,19 @@ makeSerialAST m lang t0 = do
                  "No Packable instance for type" <+> squotes (pretty gt)
                    <> " (concrete:" <+> pretty ct <> ")."
                    <> "\nDefine an instance, e.g.:"
-                   <> "\n  instance Packable <wire> (" <> pretty generalTypeName <+> "...) where ..."
+                   <> "\n  instance Packable <unpacked> (" <> pretty generalTypeName <+> "...) where ..."
                    <> "\nor map" <+> pretty generalTypeName
                    <+> "to a primitive list / tuple / sourced type."
 
-        -- Extract dimension constraints from nat-kinded type args.
+        -- Extract dimension constraints from kind-kinded type args.
         -- Every Nat position is reified (including NatLitF 0, a valid empty
         -- dimension, and NatVoidF for polymorphic-dim sites like @Vector n a@).
-        -- Preserving each slot is what keeps positional macros in concrete-type
-        -- bodies aligned at the shallowType / serialAstToType layer.
+        -- These feed @applyDimsToList@ to annotate each SerialList nesting
+        -- level with its size constraint; the wire schema encodes them
+        -- via @encodeDim@. Macro indices are independent (they count type
+        -- args only via 'partitionKindArgsF').
         dims :: [Maybe TypeF]
-        dims = [Just t | t <- ts0, isNatTypeF t]
+        dims = [Just t | t <- ts0, isKindTypeF t]
 
         -- Apply dimension constraints to nested SerialList nodes.
         -- Each dim in the list is consumed by one nesting level.
@@ -602,7 +644,7 @@ makeSerialAST m lang t0 = do
         applyDimsToList (d:ds) (SerialList v _ inner) = SerialList v d (applyDimsToList ds inner)
         applyDimsToList _ ast = ast
 
-        runtimeTs = filter (not . isNatTypeF) ts0
+        runtimeTs = filter (not . isKindTypeF) ts0
 
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
@@ -658,7 +700,17 @@ makeSerialAST m lang t0 = do
         -- collapsing element types like Int32 into Int and producing the
         -- wrong serialization width. The downstream inferConcreteType call
         -- will resolve concrete types through both scopes correctly.
-        evaluatedType = TE.expandHeadOnly gscope generalType
+        --
+        -- Walk through newtype bodies as well as transparent aliases:
+        -- a newtype like @newtype Vector (n :: Nat) a = List a@ has
+        -- @List a@ as its wire form, and the codegen needs to see the
+        -- list shape (so @AliasIsList@ fires) rather than demanding a
+        -- Packable instance for Vector. Newtypes whose body is a leaf
+        -- (e.g. @newtype Bytes = Str@) still fall through to the
+        -- Packable-lookup path -- the @aliasShape@ matcher only
+        -- recognises @AppU@ list/tuple shapes; a bare @VarU@ body
+        -- lands in @AliasIsNone@ which routes to @packableFallback@.
+        evaluatedType = TE.expandWireParent gscope generalType
 
         finalVar = basevar $ maybe generalType id evaluatedType
 
@@ -754,7 +806,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty []) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -780,7 +832,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty []) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -838,7 +890,15 @@ unweaveTypeF StrVoidF = (StrVoidU, StrVoidU)
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
 weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
-weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (zipWith weaveTypeF tsg tsc)
+-- AppU arg-list weaving is arity-aware: the concrete side may be
+-- shorter than the general side when @pairEval@ expanded a newtype
+-- body whose body has a smaller arity than the outer (e.g.
+-- @newtype Vector n a = List a@ where Vector has 2 params but the
+-- expanded body has 1). Each general kind arg consumes a concrete
+-- kind arg if present, otherwise produces an erased sentinel without
+-- advancing the concrete cursor. Mirrors @Infer.weaveArgs@ at the
+-- Serial.hs entry point.
+weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (weaveTypeFArgs tsg tsc)
 weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
   NamF
     n
@@ -865,6 +925,35 @@ weaveTypeF nat@(NatDivU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
 weaveTypeF (LabeledU _ gt) ct = weaveTypeF gt ct
 weaveTypeF gt (LabeledU _ ct) = weaveTypeF gt ct
 weaveTypeF gt ct = error . show $ (gt, ct)
+
+-- | Weave two arg lists, allowing the concrete list to be SHORTER
+-- than the general list when the missing positions are kind-kinded
+-- (the body's per-language form may have dropped them during
+-- newtype expansion). Each general kind arg consumes a concrete
+-- kind head if present, otherwise produces the erased sentinel
+-- without advancing the concrete cursor.
+weaveTypeFArgs :: [TypeU] -> [TypeU] -> [TypeF]
+weaveTypeFArgs [] _ = []
+weaveTypeFArgs (NatLitU n : gs) cs = NatLitF n : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (NatVoidU : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (NatVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (nat@(NatAddU _ _) : gs) cs =
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (nat@(NatMulU _ _) : gs) cs =
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (nat@(NatSubU _ _) : gs) cs =
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (nat@(NatDivU _ _) : gs) cs =
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (g : gs) (c : cs) = weaveTypeF g c : weaveTypeFArgs gs cs
+weaveTypeFArgs gs [] =
+  error $ "weaveTypeFArgs: concrete arg list exhausted with non-kind general args remaining: " <> show gs
+
+-- | Drop a leading kind-kinded arg from the concrete cursor, if
+-- present. Non-kind heads leave the cursor alone.
+dropKindHeadU :: [TypeU] -> [TypeU]
+dropKindHeadU (c : cs) | isKindTypeU c = cs
+dropKindHeadU cs = cs
 
 -- Recursively evaluate a Nat expression to an Integer. Returns Nothing if
 -- the expression contains an unresolvable leaf (NatVar / NatVoid / non-Nat

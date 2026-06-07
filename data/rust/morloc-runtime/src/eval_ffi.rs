@@ -318,6 +318,9 @@ unsafe fn count_pattern_terminals(pattern: *mut MorlocPattern) -> usize {
             }
             total
         }
+        // Bracket patterns are leaves with no selector tree; the
+        // bracket-dispatch path never enters the getter/setter walk.
+        MorlocPatternType::BracketIndex | MorlocPatternType::BracketSlice => 0,
     }
 }
 
@@ -366,6 +369,11 @@ unsafe fn apply_getter(
             };
             *return_index += 1;
             ptr::copy_nonoverlapping(value, element_dest, element_width);
+        }
+        MorlocPatternType::BracketIndex | MorlocPatternType::BracketSlice => {
+            return Err(MorlocError::Other(
+                "Bracket pattern reached apply_getter; should have been dispatched earlier".into()
+            ));
         }
     }
 
@@ -417,6 +425,11 @@ unsafe fn apply_setter_copy(
             }
         }
         MorlocPatternType::End => {}
+        MorlocPatternType::BracketIndex | MorlocPatternType::BracketSlice => {
+            return Err(MorlocError::Other(
+                "Bracket pattern reached apply_setter_copy; should have been dispatched earlier".into()
+            ));
+        }
     }
     Ok(())
 }
@@ -457,7 +470,206 @@ unsafe fn apply_setter_set(
         MorlocPatternType::ByKey => {
             return Err(MorlocError::Other("Key patterns should have been resolved in copy step".into()));
         }
+        MorlocPatternType::BracketIndex | MorlocPatternType::BracketSlice => {
+            return Err(MorlocError::Other(
+                "Bracket pattern reached apply_setter_set; should have been dispatched earlier".into()
+            ));
+        }
     }
+    Ok(())
+}
+
+/// Read an integer value from a typed buffer, casting to i64. Returns
+/// an error for non-integer schemas. BigInt values whose decimal does
+/// not fit in i64 (more than 1 limb) also error -- bracket indices
+/// have no semantically valid representation beyond i64 range.
+unsafe fn read_int_as_i64(
+    ptr: AbsPtr,
+    schema: *const CSchema,
+) -> Result<i64, MorlocError> {
+    use crate::schema::SerialType;
+    let stype = (*schema).serial_type;
+    if stype == SerialType::Sint8 as u32 {
+        Ok(*(ptr as *const i8) as i64)
+    } else if stype == SerialType::Sint16 as u32 {
+        Ok(*(ptr as *const i16) as i64)
+    } else if stype == SerialType::Sint32 as u32 {
+        Ok(*(ptr as *const i32) as i64)
+    } else if stype == SerialType::Sint64 as u32 {
+        Ok(*(ptr as *const i64))
+    } else if stype == SerialType::Uint8 as u32 {
+        Ok(*(ptr as *const u8) as i64)
+    } else if stype == SerialType::Uint16 as u32 {
+        Ok(*(ptr as *const u16) as i64)
+    } else if stype == SerialType::Uint32 as u32 {
+        Ok(*(ptr as *const u32) as i64)
+    } else if stype == SerialType::Uint64 as u32 {
+        Ok(*(ptr as *const u64) as i64)
+    } else if stype == SerialType::Int as u32 {
+        // Inline BigInt: [size, value_or_relptr]. Sizes 0 and 1 fit i64.
+        let size = *(ptr as *const usize);
+        if size == 0 {
+            Ok(0)
+        } else if size == 1 {
+            let off = std::mem::size_of::<usize>();
+            Ok(*(ptr.add(off) as *const i64))
+        } else {
+            Err(MorlocError::Other(
+                "Bracket bound: BigInt with more than 1 limb does not fit in i64".into()
+            ))
+        }
+    } else {
+        Err(MorlocError::Other(format!(
+            "Bracket bound has non-integer serial type {}", stype
+        )))
+    }
+}
+
+/// Read an optional integer slot. RELNULL (or empty Optional schema)
+/// returns `None`; a present value returns `Some(read_int_as_i64)`.
+/// Non-Optional integer schemas pass through to `read_int_as_i64`.
+unsafe fn read_optional_int(
+    ptr: AbsPtr,
+    schema: *const CSchema,
+) -> Result<Option<i64>, MorlocError> {
+    use crate::schema::SerialType;
+    if (*schema).serial_type == SerialType::Optional as u32 {
+        let relptr = *(ptr as *const shm::RelPtr);
+        if relptr == shm::RELNULL || (*schema).size == 0 {
+            return Ok(None);
+        }
+        let inner_abs = shm::rel2abs(relptr)?;
+        let inner_schema = *(*schema).parameters as *const CSchema;
+        Ok(Some(read_int_as_i64(inner_abs, inner_schema)?))
+    } else {
+        Ok(Some(read_int_as_i64(ptr, schema)?))
+    }
+}
+
+/// Bracket-index evaluator: `arr[i]`. Reads `i` as an integer (any
+/// integer wire type; negative wraps from the end), bounds-checks, and
+/// deep-copies the selected element into `dest`. The receiver must be
+/// an Array; the result schema is the element schema.
+unsafe fn apply_bracket_index(
+    dest: AbsPtr,
+    _result_schema: *const CSchema,
+    idx_ptr: AbsPtr,
+    idx_schema: *const CSchema,
+    arr_ptr: AbsPtr,
+    arr_schema: *const CSchema,
+) -> Result<(), MorlocError> {
+    let elem_schema = *(*arr_schema).parameters as *const CSchema;
+    let elem_width = (*elem_schema).width;
+    let arr = &*(arr_ptr as *const shm::Array);
+    let n = arr.size as i64;
+
+    let idx_raw = read_optional_int(idx_ptr, idx_schema)?
+        .ok_or_else(|| MorlocError::Other("Bracket index cannot be Null".into()))?;
+    let idx = if idx_raw < 0 { idx_raw + n } else { idx_raw };
+    if idx < 0 || idx >= n {
+        return Err(MorlocError::Other(format!(
+            "Bracket index {} out of bounds for array of size {}",
+            idx_raw, n
+        )));
+    }
+
+    let arr_data = shm::rel2abs(arr.data)?;
+    let src_elem = arr_data.add(idx as usize * elem_width);
+    let elem_rs = crate::cschema::CSchema::to_rust(elem_schema);
+    crate::voidstar::deep_copy(src_elem, dest, &elem_rs)?;
+    Ok(())
+}
+
+/// Bracket-slice evaluator: `arr[start:stop:step]`. Each bound is
+/// optional; defaults are decided by step sign (Python semantics).
+/// Negative bounds wrap from the end. Step 0 is a runtime error.
+/// Allocates a fresh output Array of `n_out * elem_width` bytes,
+/// deep-copying each selected element, and writes the Array header
+/// (size+relptr) into `dest`.
+unsafe fn apply_bracket_slice(
+    dest: AbsPtr,
+    width: usize,
+    _result_schema: *const CSchema,
+    start_ptr: AbsPtr,
+    start_schema: *const CSchema,
+    stop_ptr: AbsPtr,
+    stop_schema: *const CSchema,
+    step_ptr: AbsPtr,
+    step_schema: *const CSchema,
+    arr_ptr: AbsPtr,
+    arr_schema: *const CSchema,
+) -> Result<(), MorlocError> {
+    let elem_schema = *(*arr_schema).parameters as *const CSchema;
+    let elem_width = (*elem_schema).width;
+    let arr = &*(arr_ptr as *const shm::Array);
+    let n = arr.size as i64;
+
+    let start_raw = read_optional_int(start_ptr, start_schema)?;
+    let stop_raw  = read_optional_int(stop_ptr,  stop_schema)?;
+    let step_raw  = read_optional_int(step_ptr,  step_schema)?;
+
+    let step: i64 = step_raw.unwrap_or(1);
+    if step == 0 {
+        return Err(MorlocError::Other("Bracket slice step cannot be 0".into()));
+    }
+
+    // Python-style normalization: negative values wrap from the end.
+    // Defaults depend on step direction; explicit user values are
+    // normalized and clamped, so the in-band sentinel -1 (default
+    // exclusive lower bound for negative step) is distinguishable
+    // from an explicit -1 (which wraps to n-1).
+    let normalize = |v: i64| if v < 0 { v + n } else { v };
+    let clamp = |v: i64| -> i64 {
+        if step > 0 {
+            v.max(0).min(n)
+        } else {
+            v.max(-1).min(n - 1)
+        }
+    };
+    let start_norm: i64 = match start_raw {
+        Some(v) => clamp(normalize(v)),
+        None    => if step > 0 { 0 } else { n - 1 },
+    };
+    let stop_norm: i64 = match stop_raw {
+        Some(v) => clamp(normalize(v)),
+        None    => if step > 0 { n } else { -1 },
+    };
+
+    let mut indices: Vec<i64> = Vec::new();
+    let mut i = start_norm;
+    if step > 0 {
+        while i < stop_norm {
+            indices.push(i);
+            i += step;
+        }
+    } else {
+        while i > stop_norm {
+            indices.push(i);
+            i += step;
+        }
+    }
+    let out_size = indices.len();
+
+    let out_relptr: shm::RelPtr = if out_size == 0 {
+        shm::RELNULL
+    } else {
+        let arr_data = shm::rel2abs(arr.data)?;
+        let buf = shm::shcalloc(out_size, elem_width)?;
+        let elem_rs = crate::cschema::CSchema::to_rust(elem_schema);
+        for (out_i, &src_idx) in indices.iter().enumerate() {
+            let src_elem = arr_data.add(src_idx as usize * elem_width);
+            let dst_elem = buf.add(out_i * elem_width);
+            crate::voidstar::deep_copy(src_elem, dst_elem, &elem_rs)?;
+        }
+        shm::abs2rel(buf)?
+    };
+
+    let header = shm::Array { size: out_size, data: out_relptr };
+    ptr::copy_nonoverlapping(
+        &header as *const shm::Array as *const u8,
+        dest,
+        width,
+    );
     Ok(())
 }
 
@@ -611,35 +823,66 @@ unsafe fn morloc_eval_r(
 
             match (*app).atype {
                 MorlocAppExpressionType::Pattern => {
-                    if nargs == 1 {
-                        let mut return_index: usize = 0;
-                        let multi_terminal =
-                            count_pattern_terminals((*app).function.pattern) > 1;
-                        apply_getter(
-                            dest, &mut return_index, schema, multi_terminal,
-                            (*app).function.pattern,
-                            (*(*(*app).args)).schema,
-                            arg_results[0],
-                        )?;
-                    } else if nargs > 1 {
-                        // Setter: first arg is the value, rest are set values
-                        let mut set_schemas: Vec<*mut CSchema> = Vec::with_capacity(nargs - 1);
-                        for i in 1..nargs {
-                            set_schemas.push((*(*(*app).args.add(i))).schema);
+                    let pattern = (*app).function.pattern;
+                    match (*pattern).ptype {
+                        MorlocPatternType::BracketIndex => {
+                            if nargs != 2 {
+                                return Err(MorlocError::Other(
+                                    "BracketIndex expects 2 args (index, receiver)".into(),
+                                ));
+                            }
+                            apply_bracket_index(
+                                dest, schema,
+                                arg_results[0], (*(*(*app).args)).schema,
+                                arg_results[1], (*(*(*app).args.add(1))).schema,
+                            )?;
                         }
-                        apply_setter_copy(
-                            dest, schema, (*app).function.pattern,
-                            (*(*(*app).args)).schema, arg_results[0],
-                        )?;
-                        let mut set_idx: usize = 0;
-                        apply_setter_set(
-                            dest, schema, (*app).function.pattern,
-                            (*(*(*app).args)).schema, arg_results[0],
-                            set_schemas.as_mut_ptr(), arg_results[1..].as_ptr() as *mut AbsPtr,
-                            &mut set_idx,
-                        )?;
-                    } else {
-                        return Err(MorlocError::Other("No arguments provided to pattern".into()));
+                        MorlocPatternType::BracketSlice => {
+                            if nargs != 4 {
+                                return Err(MorlocError::Other(
+                                    "BracketSlice expects 4 args (start, stop, step, receiver)".into(),
+                                ));
+                            }
+                            apply_bracket_slice(
+                                dest, width, schema,
+                                arg_results[0], (*(*(*app).args)).schema,
+                                arg_results[1], (*(*(*app).args.add(1))).schema,
+                                arg_results[2], (*(*(*app).args.add(2))).schema,
+                                arg_results[3], (*(*(*app).args.add(3))).schema,
+                            )?;
+                        }
+                        _ => {
+                            if nargs == 1 {
+                                let mut return_index: usize = 0;
+                                let multi_terminal =
+                                    count_pattern_terminals(pattern) > 1;
+                                apply_getter(
+                                    dest, &mut return_index, schema, multi_terminal,
+                                    pattern,
+                                    (*(*(*app).args)).schema,
+                                    arg_results[0],
+                                )?;
+                            } else if nargs > 1 {
+                                // Setter: first arg is the value, rest are set values
+                                let mut set_schemas: Vec<*mut CSchema> = Vec::with_capacity(nargs - 1);
+                                for i in 1..nargs {
+                                    set_schemas.push((*(*(*app).args.add(i))).schema);
+                                }
+                                apply_setter_copy(
+                                    dest, schema, pattern,
+                                    (*(*(*app).args)).schema, arg_results[0],
+                                )?;
+                                let mut set_idx: usize = 0;
+                                apply_setter_set(
+                                    dest, schema, pattern,
+                                    (*(*(*app).args)).schema, arg_results[0],
+                                    set_schemas.as_mut_ptr(), arg_results[1..].as_ptr() as *mut AbsPtr,
+                                    &mut set_idx,
+                                )?;
+                            } else {
+                                return Err(MorlocError::Other("No arguments provided to pattern".into()));
+                            }
+                        }
                     }
                 }
 
@@ -925,6 +1168,70 @@ unsafe fn morloc_eval_r(
                     }
                 }
             }
+        }
+
+        MorlocExpressionType::Map => {
+            // Pure-morloc list map. Apply `func` (a one-parameter lambda)
+            // to each element of `list`, producing a fresh Array. The
+            // output element stride is fixed by the output schema's
+            // element width: variable-width content inside each element
+            // (Array data buffers, Optional inner T, BigInt limbs) lives
+            // out-of-line via relptrs allocated by the per-element
+            // recursive eval, mirroring the array-literal path above.
+            let me = (*expr).expr.map_expr;
+            let func_expr = (*me).func;
+            let list_expr = (*me).list;
+
+            // Output element schema/width from the surrounding Map node's schema.
+            let b_schema = *(*schema).parameters;
+            let b_width = (*b_schema).width;
+
+            // Input element width from the list expression's own schema.
+            let list_csch = (*list_expr).schema;
+            let a_schema = *(*list_csch).parameters;
+            let a_width = (*a_schema).width;
+
+            // Evaluate the list. The result is a fresh AbsPtr to an Array header.
+            let in_ptr = morloc_eval_r(list_expr, ptr::null_mut(), 0, bndvars)?;
+            let in_arr = &*(in_ptr as *const shm::Array);
+            let n = in_arr.size;
+
+            let out_relptr: RelPtr = if n == 0 {
+                shm::RELNULL
+            } else {
+                let in_data = shm::rel2abs(in_arr.data)?;
+                let out_data = shm::shcalloc(n, b_width)?;
+
+                if (*func_expr).etype != MorlocExpressionType::Lam {
+                    return Err(MorlocError::Other(
+                        "Map func must be a lambda".into(),
+                    ));
+                }
+                let lam = (*func_expr).expr.lam_expr;
+                if (*lam).nargs != 1 {
+                    return Err(MorlocError::Other(
+                        "Map lambda must take exactly one argument".into(),
+                    ));
+                }
+                let param = CStr::from_ptr(*(*lam).args).to_str().unwrap_or("");
+                let body = (*lam).body;
+
+                for i in 0..n {
+                    let in_elem = in_data.add(i * a_width);
+                    let out_elem = out_data.add(i * b_width);
+                    bndvars.insert(param, in_elem);
+                    morloc_eval_r(body, out_elem, b_width, bndvars)?;
+                    bndvars.remove(param);
+                }
+                shm::abs2rel(out_data)?
+            };
+
+            let header = shm::Array { size: n, data: out_relptr };
+            ptr::copy_nonoverlapping(
+                &header as *const shm::Array as *const u8,
+                dest,
+                width,
+            );
         }
 
         _ => {

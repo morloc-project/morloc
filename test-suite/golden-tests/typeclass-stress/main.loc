@@ -16,9 +16,9 @@ mapList xs = map (\x -> x + 1) xs
 foldList :: [Int] -> Int
 foldList = fold (\acc x -> acc + x) 0
 
--- Use Indexed (at)
+-- Use Indexable (.[0])
 atList :: [Int] -> Int
-atList xs = at 0 xs
+atList xs = .[0] xs
 
 -- Use multiple typeclasses: map then fold
 mapThenFold :: [Int] -> Int
@@ -38,7 +38,7 @@ consMapFold xs = fold (\a x -> a + x) 0 (map (\x -> x * 3) (cons 0 xs))
 
 -- snoc (Queue) + reverse + map (Functor)
 snocReverse :: [Int] -> [Int]
-snocReverse xs = reverse (map (\x -> x + 1) (snoc xs 99))
+snocReverse xs = .[::-1] (map (\x -> x + 1) (snoc xs 99))
 
 -- Eq instance on lists
 eqList :: Bool

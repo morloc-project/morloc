@@ -74,13 +74,13 @@ pmap a b :: (a -> b) -> [a] -> [b]
 source Cpp from "foo.hpp" ("sum")
 sum :: [Real] -> Real
 
---' Input numeric vectors that will be summed in parallel
---' metavar: VECTORS
-type Vectors = [[Real]]
+--' Input numeric lists that will be summed in parallel
+--' metavar: LISTS 
+type Lists = [[Real]]
 
---' Sum a list of numeric vectors
---' return: Final sum of all elements in all vectors
-vsum :: Vectors -> Real
+--' Sum a list of numeric lists
+--' return: Final sum of all elements in all lists 
+vsum :: Lists -> Real
 vsum = sum . pmap sum 
 ```
 
@@ -120,20 +120,20 @@ def pmap(f, xs):
 This program can be compiled and run as below:
 
 ```
-$ menv morloc make main.loc
+$ morloc make main.loc
 
-$ menv ./nexus vsum -h
-Usage: ./nexus vsum VECTORS
+$ ./nexus vsum -h
+Usage: ./nexus vsum LISTS
 
-Sum a list of numeric vectors
+Sum a list of numeric lists 
 
 Positional arguments:
-  VECTORS  Input numeric vectors that will be summed in parallel
-           type: [[Real]]
+  LISTS  Input numeric lists that will be summed in parallel
+         type: [[Real]]
 
 Return: Real
-  Final sum of all elements in all vectors
+  Final sum of all elements in all lists
 
-$ menv ./nexus vsum [[1.2],[0,0.1]]
+$ ./nexus vsum [[1.2],[0,0.1]]
 1.3
 ```

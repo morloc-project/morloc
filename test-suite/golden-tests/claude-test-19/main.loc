@@ -8,7 +8,7 @@ module main (foo, bar, baz)
 
 import root-py
 
-type SizedList n a = [a]
+newtype SizedList n a = [a]
 type Py => (SizedList n a) = "list" a
 
 myAppend :: SizedList m a -> SizedList n a -> SizedList (m + n) a

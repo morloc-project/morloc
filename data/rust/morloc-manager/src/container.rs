@@ -1,5 +1,8 @@
 use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 
 use crate::types::ContainerEngine;
 
@@ -50,17 +53,124 @@ pub struct BuildConfig {
     pub context: String,
     pub tag: String,
     pub build_args: Vec<(String, String)>,
+    /// User-supplied build-engine flags (from env.flags.yaml `build` section
+    /// plus any one-shot CLI overrides). Forwarded verbatim into the build
+    /// argv after `--build-arg` pairs, before the context.
+    pub extra_flags: Vec<String>,
+}
+
+/// Configuration for an Apptainer native build from a Singularity .def file.
+/// Does not require Docker or Podman on the host -- the native `apptainer
+/// build` is used.
+#[derive(Debug, Clone)]
+pub struct ApptainerNativeBuildConfig {
+    /// Path to the .def file.
+    pub deffile: String,
+    /// Output .sif path. Built to `<output>.tmp.sif` first and renamed on
+    /// success.
+    pub output_sif: String,
+    /// `--build-arg` pairs forwarded to `apptainer build`.
+    pub build_args: Vec<(String, String)>,
+    /// User-supplied build flags (from env.flags.yaml `build.apptainer` plus
+    /// any one-shot CLI overrides). Inserted into the argv between
+    /// `--force` and the build-args, so they apply to mode-selection
+    /// flags like `--ignore-subuid` / `--fakeroot`.
+    pub extra_flags: Vec<String>,
+}
+
+/// Configuration for converting an existing OCI image (in the local
+/// docker/podman daemon) to a .sif. Used as the Apptainer-engine fallback
+/// when only a Dockerfile is present and an OCI builder is available.
+#[derive(Debug, Clone)]
+pub struct ApptainerOciConvertConfig {
+    /// OCI engine that holds the source image (docker or podman).
+    pub source_engine: ContainerEngine,
+    /// Local OCI image tag the source engine has built (e.g.
+    /// `localhost/morloc-env:dnd`).
+    pub source_tag: String,
+    /// Output .sif path.
+    pub output_sif: String,
+    /// User-supplied build flags forwarded to `apptainer build` during the
+    /// OCI-to-SIF conversion step.
+    pub extra_flags: Vec<String>,
 }
 
 // ======================================================================
 // Engine detection
 // ======================================================================
 
+/// Returns the executable name for the given engine. For Apptainer, runtime-
+/// detects `apptainer` (preferred) then `singularity`; result is cached for
+/// the lifetime of the process.
 pub fn engine_executable(engine: ContainerEngine) -> &'static str {
     match engine {
         ContainerEngine::Docker => "docker",
         ContainerEngine::Podman => "podman",
+        ContainerEngine::Apptainer => apptainer_executable(),
     }
+}
+
+/// Cached selection of the Apptainer binary. Resolved once per process.
+fn apptainer_executable() -> &'static str {
+    static EXE: OnceLock<&'static str> = OnceLock::new();
+    EXE.get_or_init(|| {
+        if has_on_path("apptainer") {
+            "apptainer"
+        } else if has_on_path("singularity") {
+            "singularity"
+        } else {
+            // Fall through to "apptainer"; the actual exec will fail loudly
+            // with a "command not found" the user can act on. Better than a
+            // silent compile-time decision.
+            "apptainer"
+        }
+    })
+}
+
+/// Returns true if either Docker or Podman is reachable on $PATH. Used by
+/// the Apptainer-engine fallback build path that converts an OCI image to a
+/// .sif. Prefers docker when both are present (matches the existing morloc
+/// preference order in setup).
+pub fn detect_oci_builder() -> Option<ContainerEngine> {
+    if has_on_path("docker") {
+        Some(ContainerEngine::Docker)
+    } else if has_on_path("podman") {
+        Some(ContainerEngine::Podman)
+    } else {
+        None
+    }
+}
+
+/// Internal: argv-shape used by the dispatch in build_run_args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgStyle {
+    /// Docker/Podman `run` semantics.
+    Oci,
+    /// Apptainer `exec`/`shell` semantics.
+    Apptainer,
+}
+
+fn argstyle(engine: ContainerEngine) -> ArgStyle {
+    match engine {
+        ContainerEngine::Docker | ContainerEngine::Podman => ArgStyle::Oci,
+        ContainerEngine::Apptainer => ArgStyle::Apptainer,
+    }
+}
+
+/// Check $PATH for an executable named `exe`. Reads PATH directly rather than
+/// shelling out: avoids the cost of a process spawn and makes the check
+/// hermetic against shell aliases.
+fn has_on_path(exe: &str) -> bool {
+    let Ok(path) = std::env::var("PATH") else { return false };
+    for dir in path.split(':') {
+        let candidate = Path::new(dir).join(exe);
+        if let Ok(meta) = candidate.metadata() {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ======================================================================
@@ -123,7 +233,8 @@ pub fn container_build(engine: ContainerEngine, cfg: &BuildConfig) -> (ExitStatu
 
 pub fn container_pull(engine: ContainerEngine, image: &str) -> (ExitStatus, String, String) {
     let exe = engine_executable(engine);
-    run_process(exe, &["pull".to_string(), image.to_string()])
+    let args = pull_argv(engine, image, None);
+    run_process(exe, &args)
 }
 
 /// Build a container image with all output (stdout+stderr) redirected to stderr.
@@ -138,18 +249,65 @@ pub fn container_build_visible(engine: ContainerEngine, cfg: &BuildConfig) -> Ex
 /// Use for IO () commands where stdout must stay clean.
 pub fn container_pull_visible(engine: ContainerEngine, image: &str) -> ExitStatus {
     let exe = engine_executable(engine);
-    run_process_to_stderr(exe, &["pull".to_string(), image.to_string()])
+    let args = pull_argv(engine, image, None);
+    run_process_to_stderr(exe, &args)
+}
+
+/// Pull an image to a specific local file path. For docker/podman this is
+/// not meaningful (the daemon owns image storage) and `target_path` is
+/// ignored. For apptainer, `target_path` is required and is the local .sif
+/// destination.
+pub fn container_pull_to_path(
+    engine: ContainerEngine,
+    image: &str,
+    target_path: &str,
+) -> ExitStatus {
+    let exe = engine_executable(engine);
+    let args = pull_argv(engine, image, Some(target_path));
+    run_process_to_stderr(exe, &args)
+}
+
+/// Build the argv for `pull`. For OCI engines this is `pull <image>`. For
+/// Apptainer it is `pull <output.sif> docker://<image>` (the `docker://`
+/// scheme triggers OCI conversion).
+fn pull_argv(engine: ContainerEngine, image: &str, target_path: Option<&str>) -> Vec<String> {
+    match argstyle(engine) {
+        ArgStyle::Oci => vec!["pull".to_string(), image.to_string()],
+        ArgStyle::Apptainer => {
+            let mut args = vec!["pull".to_string()];
+            if let Some(path) = target_path {
+                args.push(path.to_string());
+            }
+            // Treat any caller-supplied scheme (docker://, oras://, library://,
+            // docker-daemon://, oci-archive://) as-is. Otherwise default to
+            // docker:// so a bare OCI ref like ghcr.io/foo/bar:tag works.
+            let normalized = if image.contains("://") {
+                image.to_string()
+            } else {
+                format!("docker://{image}")
+            };
+            args.push(normalized);
+            args
+        }
+    }
 }
 
 pub fn image_exists_locally(engine: ContainerEngine, image: &str) -> bool {
-    let exe = engine_executable(engine);
-    Command::new(exe)
-        .args(["image", "inspect", image])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            Command::new(exe)
+                .args(["image", "inspect", image])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+        // For Apptainer, "image" is a .sif file path on disk. A file's
+        // existence is the same as the image being available.
+        ArgStyle::Apptainer => Path::new(image).is_file(),
+    }
 }
 
 /// Run `image inspect` and return the stderr if it fails.
@@ -180,67 +338,129 @@ pub enum RemoteImageStatus {
 }
 
 pub fn check_remote_image(engine: ContainerEngine, image: &str) -> RemoteImageStatus {
-    let exe = engine_executable(engine);
-    let output = Command::new(exe)
-        .args(["manifest", "inspect", image])
-        .stdout(Stdio::null())
-        .output();
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            let output = Command::new(exe)
+                .args(["manifest", "inspect", image])
+                .stdout(Stdio::null())
+                .output();
 
-    match output {
-        Ok(o) if o.status.success() => RemoteImageStatus::Exists,
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            let lower = stderr.to_lowercase();
-            // "manifest unknown" / "not found" / "name unknown" indicate
-            // the registry was reachable but the image doesn't exist.
-            if lower.contains("manifest unknown")
-                || lower.contains("not found")
-                || lower.contains("name unknown")
-            {
-                RemoteImageStatus::NotFound
-            } else {
-                RemoteImageStatus::Unknown(stderr)
+            match output {
+                Ok(o) if o.status.success() => RemoteImageStatus::Exists,
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                    let lower = stderr.to_lowercase();
+                    if lower.contains("manifest unknown")
+                        || lower.contains("not found")
+                        || lower.contains("name unknown")
+                    {
+                        RemoteImageStatus::NotFound
+                    } else {
+                        RemoteImageStatus::Unknown(stderr)
+                    }
+                }
+                Err(e) => RemoteImageStatus::Unknown(format!("Failed to execute {exe}: {e}")),
             }
         }
-        Err(e) => RemoteImageStatus::Unknown(format!("Failed to execute {exe}: {e}")),
+        // Apptainer has no `manifest inspect` analog. Best-effort: assume the
+        // remote exists and let the subsequent `apptainer pull` fail loudly
+        // with the registry's own error if it does not. This trades
+        // pre-flight precision for not needing skopeo on the build host.
+        ArgStyle::Apptainer => RemoteImageStatus::Exists,
     }
 }
 
 pub fn container_stop(engine: ContainerEngine, name_or_id: &str) -> (ExitStatus, String) {
-    let exe = engine_executable(engine);
-    let (code, _, err) = run_process(exe, &["stop".to_string(), name_or_id.to_string()]);
-    (code, err)
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            let (code, _, err) = run_process(exe, &["stop".to_string(), name_or_id.to_string()]);
+            (code, err)
+        }
+        // For Apptainer, `morloc-manager run` is one-shot; there is nothing
+        // to stop. Long-running instances are managed in serve.rs via
+        // `apptainer instance stop`. Return a successful no-op so callers
+        // doing pre-emptive cleanup (e.g. remove_environment) succeed.
+        ArgStyle::Apptainer => (no_op_exit_status(), String::new()),
+    }
 }
 
 pub fn container_remove(engine: ContainerEngine, name_or_id: &str) -> ExitStatus {
-    let exe = engine_executable(engine);
-    let (code, _, _) = run_process(exe, &["rm".to_string(), "-f".to_string(), name_or_id.to_string()]);
-    code
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            let (code, _, _) = run_process(
+                exe,
+                &["rm".to_string(), "-f".to_string(), name_or_id.to_string()],
+            );
+            code
+        }
+        ArgStyle::Apptainer => no_op_exit_status(),
+    }
 }
 
 /// Quiet container removal: suppresses stderr (for pre-emptive cleanup).
 pub fn container_remove_quiet(engine: ContainerEngine, name_or_id: &str) -> ExitStatus {
-    let exe = engine_executable(engine);
-    let (code, _, _) = run_process_quiet(exe, &["rm".to_string(), "-f".to_string(), name_or_id.to_string()]);
-    code
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            let (code, _, _) = run_process_quiet(
+                exe,
+                &["rm".to_string(), "-f".to_string(), name_or_id.to_string()],
+            );
+            code
+        }
+        ArgStyle::Apptainer => no_op_exit_status(),
+    }
 }
 
 /// Check whether a container with this name exists (running or stopped).
 pub fn container_exists(engine: ContainerEngine, name: &str) -> bool {
-    let exe = engine_executable(engine);
-    Command::new(exe)
-        .args(["container", "inspect", name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            Command::new(exe)
+                .args(["container", "inspect", name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+        // For Apptainer, persistent containers live as instances and are
+        // queried via serve.rs. The generic container_exists check on the
+        // OCI side is only meaningful in the OCI world, so report false
+        // here -- callers should go through serve::query_serve_containers
+        // for the Apptainer path.
+        ArgStyle::Apptainer => false,
+    }
 }
 
 pub fn remove_image(engine: ContainerEngine, tag: &str) -> bool {
-    let exe = engine_executable(engine);
-    let (status, _, _) = run_process(exe, &["rmi".to_string(), tag.to_string()]);
-    status.success()
+    match argstyle(engine) {
+        ArgStyle::Oci => {
+            let exe = engine_executable(engine);
+            let (status, _, _) = run_process(exe, &["rmi".to_string(), tag.to_string()]);
+            status.success()
+        }
+        // For Apptainer the "image" is a .sif file on disk. Removing the
+        // image is just deleting the file. Treat tag as a path here -- the
+        // env-cleanup caller in environment.rs already has the right path
+        // because it comes from EnvironmentConfig::layered_sif.
+        ArgStyle::Apptainer => {
+            std::fs::remove_file(Path::new(tag)).is_ok()
+        }
+    }
+}
+
+/// Produce a synthetic ExitStatus(0) for engine no-ops. The standard library
+/// does not expose a constructor for ExitStatus, so we run `true` -- a
+/// guaranteed-fast successful no-op available on every POSIX system.
+fn no_op_exit_status() -> ExitStatus {
+    Command::new("true")
+        .status()
+        .unwrap_or_else(|_| std::process::exit(1))
 }
 
 // ======================================================================
@@ -248,6 +468,19 @@ pub fn remove_image(engine: ContainerEngine, tag: &str) -> bool {
 // ======================================================================
 
 pub fn build_run_args(
+    engine: ContainerEngine,
+    extra_engine_flags: &[String],
+    cfg: &RunConfig,
+) -> Vec<String> {
+    match argstyle(engine) {
+        ArgStyle::Oci => build_oci_run_args(engine, extra_engine_flags, cfg),
+        ArgStyle::Apptainer => build_apptainer_args(extra_engine_flags, cfg),
+    }
+}
+
+/// Today's `docker run`-style argv builder. Behavior is unchanged from before
+/// the Apptainer addition.
+fn build_oci_run_args(
     engine: ContainerEngine,
     extra_engine_flags: &[String],
     cfg: &RunConfig,
@@ -305,6 +538,106 @@ pub fn build_run_args(
     args
 }
 
+/// Apptainer/Singularity argv builder. Translates RunConfig to `apptainer
+/// exec`, `apptainer shell`, or `apptainer run` semantics. Image is the path
+/// to a local .sif file.
+///
+/// Subcommand selection:
+/// * `interactive=true` + cmd=Some(["/bin/bash"]) => `shell` (matches the
+///   `--shell` UX in run_with_config).
+/// * cmd=Some(other) => `exec` (run the command directly, bypassing any
+///   runscript).
+/// * cmd=None => `run` (invoke the image's runscript).
+///
+/// Flag translation (see plan):
+/// * `-v` => `--bind` (selinux suffixes preserved)
+/// * `-e` => `--env`
+/// * `-w` => `--pwd`
+/// * `--rm`, `-i`/`-t`, `--name`, `--read-only`, `--tmpfs`, `--user`,
+///   `--userns=keep-id` => dropped (Apptainer semantics make them
+///   redundant or nonsensical).
+/// * `--shm-size` => dropped silently. Apptainer shares host /dev/shm.
+/// * `-p H:C` with H==C => dropped silently. Apptainer uses host network.
+/// * `-p H:C` with H!=C => dropped here with a warning; callers that care
+///   about exact port mapping (e.g. serve) should validate before reaching
+///   this function.
+fn build_apptainer_args(extra_engine_flags: &[String], cfg: &RunConfig) -> Vec<String> {
+    let is_shell = cfg.interactive
+        && cfg
+            .command
+            .as_ref()
+            .map(|c| c.as_slice() == ["/bin/bash"])
+            .unwrap_or(false);
+
+    let subcommand = if is_shell {
+        "shell"
+    } else if cfg.command.is_some() {
+        "exec"
+    } else {
+        "run"
+    };
+    let mut args = vec![subcommand.to_string()];
+    args.extend(extra_engine_flags.iter().cloned());
+
+    if let Some(ref w) = cfg.work_dir {
+        args.push("--pwd".to_string());
+        args.push(w.clone());
+    }
+    for (host, container) in &cfg.bind_mounts {
+        // Selinux suffix passes through identically (Apptainer ignores it on
+        // non-selinux systems; on selinux systems the kernel honors it).
+        args.push("--bind".to_string());
+        args.push(format!("{host}:{container}{}", cfg.selinux_suffix));
+    }
+    for (key, val) in &cfg.env {
+        args.push("--env".to_string());
+        args.push(format!("{key}={val}"));
+    }
+
+    // Port mapping: Apptainer shares the host network namespace. H==C is a
+    // no-op (the inside-container port is the host port). H!=C cannot be
+    // expressed; we surface the impossibility once per invocation and drop
+    // the flag rather than silently rewrite.
+    for (host_port, container_port) in &cfg.ports {
+        if host_port != container_port {
+            warn_dropped(&format!(
+                "-p {host_port}:{container_port}: apptainer uses host networking; \
+                 H!=C port mapping is not supported. Bind the container service \
+                 directly to host port {host_port} or change --port to a matching pair."
+            ));
+        }
+        // No flag emitted either way.
+    }
+
+    if cfg.shm_size.is_some() {
+        // Drop silently per plan: Apptainer shares host /dev/shm so
+        // --shm-size has no analog and the user's intent (large SHM) is
+        // already satisfied.
+    }
+
+    args.extend(cfg.extra_flags.iter().cloned());
+    args.push(cfg.image.clone());
+    if !is_shell {
+        if let Some(ref cmd) = cfg.command {
+            args.extend(cmd.iter().cloned());
+        }
+    }
+    args
+}
+
+/// Print a warning to stderr once per (process, message). Used by the
+/// Apptainer translation layer to surface dropped flags without spamming
+/// repeated invocations.
+fn warn_dropped(message: &str) {
+    use std::sync::Mutex;
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut guard = seen.lock().unwrap();
+    if guard.insert(message.to_string()) {
+        eprintln!("[morloc-manager] note: {message}");
+    }
+}
+
 pub fn engine_specific_run_flags_io(engine: ContainerEngine) -> Vec<String> {
     let uid = nix::unistd::getuid();
     match engine {
@@ -323,6 +656,8 @@ pub fn engine_specific_run_flags_io(engine: ContainerEngine) -> Vec<String> {
                 vec!["--user".to_string(), format!("{}:{}", uid, gid)]
             }
         }
+        // Apptainer runs as the calling user and ignores --user/--userns.
+        ContainerEngine::Apptainer => Vec::new(),
     }
 }
 
@@ -332,6 +667,7 @@ pub fn engine_specific_run_flags(engine: ContainerEngine) -> Vec<String> {
     match engine {
         ContainerEngine::Podman => vec!["--userns=keep-id".to_string()],
         ContainerEngine::Docker => Vec::new(),
+        ContainerEngine::Apptainer => Vec::new(),
     }
 }
 
@@ -347,8 +683,99 @@ pub fn build_build_args(cfg: &BuildConfig) -> Vec<String> {
         args.push("--build-arg".to_string());
         args.push(format!("{key}={val}"));
     }
+    args.extend(cfg.extra_flags.iter().cloned());
     args.push(cfg.context.clone());
     args
+}
+
+// ======================================================================
+// Apptainer build operations
+// ======================================================================
+
+/// Build a .sif natively from a Singularity .def file. Requires only the
+/// Apptainer binary on $PATH -- no Docker daemon, no Podman. Atomic write:
+/// builds to `<output>.tmp.sif` and renames on success so a failed build
+/// never leaves a corrupt .sif behind.
+pub fn apptainer_build_native(cfg: &ApptainerNativeBuildConfig) -> ExitStatus {
+    let exe = engine_executable(ContainerEngine::Apptainer);
+    let argv = build_apptainer_native_argv(cfg);
+
+    let status = run_process_to_stderr(exe, &argv);
+    if status.success() {
+        finalize_sif_atomic(&cfg.output_sif);
+    }
+    status
+}
+
+/// Build a .sif by converting an OCI image that already exists in a
+/// docker/podman daemon. This is the Apptainer-engine *fallback* path used
+/// when the user has only a Dockerfile recipe. Atomic write as above.
+pub fn apptainer_build_from_oci_daemon(cfg: &ApptainerOciConvertConfig) -> ExitStatus {
+    let exe = engine_executable(ContainerEngine::Apptainer);
+    let argv = build_apptainer_oci_convert_argv(cfg);
+
+    let status = run_process_to_stderr(exe, &argv);
+    if status.success() {
+        finalize_sif_atomic(&cfg.output_sif);
+    }
+    status
+}
+
+/// Pure-function argv builder for the native .def path. Kept separate so
+/// tests can assert on the exact argv without spawning Apptainer.
+///
+/// No mode-selecting flags (`--fakeroot`, `--ignore-subuid`,
+/// `--ignore-fakeroot-command`) are passed by default. Apptainer's own
+/// defaults apply; on hosts where those defaults fail, the user supplies
+/// the needed flags via `env.flags.yaml` (`build.apptainer: [...]`) or
+/// the one-shot `update --reinit --reinit-arg ...`. This keeps
+/// build-policy choices in the user's hands and out of the tool.
+pub fn build_apptainer_native_argv(cfg: &ApptainerNativeBuildConfig) -> Vec<String> {
+    let mut argv = vec![
+        "build".to_string(),
+        "--force".to_string(),
+    ];
+    argv.extend(cfg.extra_flags.iter().cloned());
+    for (key, val) in &cfg.build_args {
+        argv.push("--build-arg".to_string());
+        argv.push(format!("{key}={val}"));
+    }
+    argv.push(tmp_sif_path(&cfg.output_sif));
+    argv.push(cfg.deffile.clone());
+    argv
+}
+
+/// Pure-function argv builder for the OCI-conversion path.
+pub fn build_apptainer_oci_convert_argv(cfg: &ApptainerOciConvertConfig) -> Vec<String> {
+    let scheme = match cfg.source_engine {
+        ContainerEngine::Docker => "docker-daemon",
+        ContainerEngine::Podman => "podman-daemon",
+        // Apptainer cannot be the source of an OCI image; reject by code.
+        ContainerEngine::Apptainer => "docker-daemon",
+    };
+    let mut argv = vec![
+        "build".to_string(),
+        "--force".to_string(),
+    ];
+    argv.extend(cfg.extra_flags.iter().cloned());
+    argv.push(tmp_sif_path(&cfg.output_sif));
+    argv.push(format!("{scheme}://{}", cfg.source_tag));
+    argv
+}
+
+fn tmp_sif_path(final_path: &str) -> String {
+    format!("{final_path}.tmp.sif")
+}
+
+/// Rename `<output>.tmp.sif` -> `<output>`, replacing any existing file.
+/// Best-effort: if the rename fails, the .tmp.sif is left in place so the
+/// user can inspect what was produced.
+fn finalize_sif_atomic(output_sif: &str) {
+    let tmp = tmp_sif_path(output_sif);
+    if let Some(parent) = Path::new(output_sif).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(&tmp, output_sif);
 }
 
 // ======================================================================

@@ -1,0 +1,16 @@
+[package]
+name = "morloc-runtime-types"
+version = "0.87.0"
+edition = "2021"
+description = "Stateless morloc runtime types and pure functions shared between libmorloc.so and morloc-nexus"
+# Version locked with morloc-runtime / morloc-nexus for ABI compatibility.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+twox-hash = { workspace = true }
+thiserror = { workspace = true }

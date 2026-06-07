@@ -1,24 +1,16 @@
---- testArrayInt32Cp ---
-108
---- testArrayInt32Pc ---
-108
---- testArrayInt64Cp ---
-108
---- testArrayInt64Pc ---
-108
---- testArrayFloat32Cp ---
-7.5
---- testArrayFloat32Pc ---
-7.5
---- testArrayFloat64Cp ---
-7.5
---- testArrayFloat64Pc ---
-7.5
 --- testDequeInt32Cp ---
 108
 --- testDequeInt32Pc ---
 108
+--- testDequeInt64Cp ---
+108
+--- testDequeInt64Pc ---
+108
 --- testDequeFloat32Cp ---
 7.5
 --- testDequeFloat32Pc ---
+7.5
+--- testDequeFloat64Cp ---
+7.5
+--- testDequeFloat64Pc ---
 7.5

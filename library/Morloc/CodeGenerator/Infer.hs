@@ -190,7 +190,7 @@ weave gscope = w
     weaveArgs :: [TypeU] -> [TypeU] -> Either MDoc [TypeF]
     weaveArgs [] [] = Right []
     weaveArgs [] cs
-      | all isNatLikeU cs = Right []  -- trailing Nat args in concrete only
+      | all isKindTypeU cs = Right []  -- trailing kind args in concrete only
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
     weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs (dropNatHead cs)
     weaveArgs (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
@@ -204,19 +204,9 @@ weave gscope = w
     weaveArgs (g:gs) (c:cs) = (:) <$> w g c <*> weaveArgs gs cs
     weaveArgs _ [] = Left "general type has more non-Nat args than concrete type in weave"
 
-    isNatLikeU :: TypeU -> Bool
-    isNatLikeU (NatLitU _) = True
-    isNatLikeU (NatVarU _) = True
-    isNatLikeU (NatAddU _ _) = True
-    isNatLikeU (NatMulU _ _) = True
-    isNatLikeU (NatSubU _ _) = True
-    isNatLikeU (NatDivU _ _) = True
-    isNatLikeU NatVoidU = True
-    isNatLikeU _ = False
-
-    -- Drop a leading Nat-shaped concrete arg, if present.
+    -- Drop a leading kind-shaped concrete arg, if present.
     dropNatHead :: [TypeU] -> [TypeU]
-    dropNatHead (c : cs) | isNatLikeU c = cs
+    dropNatHead (c : cs) | isKindTypeU c = cs
     dropNatHead cs = cs
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
@@ -225,22 +215,22 @@ inferConcreteVar lang t0@(Idx i v) = do
   localScope <- MM.getConcreteScope i lang
   globalScope <- MM.getConcreteUniversalScope lang
   case Map.lookup v localScope of
-    (Just ((_, t, _, True) : _)) -> return $ FV v (CV . unTVar $ extractKey t)
+    (Just ((_, t, _, True, _) : _)) -> return $ FV v (CV . unTVar $ extractKey t)
     -- Non-terminal concrete alias: e.g. `type Cpp => Array a = List a`.
     -- Follow through the body's head (recursively) until a terminal entry
     -- is reached, then pair the *original* v with the resolved concrete
     -- name. This preserves the morloc-level identity (Array stays Array)
     -- while picking up the runtime concrete (std::vector here).
-    (Just ((_, t, _, False) : _)) -> do
+    (Just ((_, t, _, False, _) : _)) -> do
       FV _ cv <- inferConcreteVar lang (Idx i (extractKey t))
       return $ FV v cv
     _ -> case Map.lookup v globalScope of
-      (Just ((_, t, _, True) : _)) -> do
+      (Just ((_, t, _, True, _) : _)) -> do
         -- TODO fix this, the types should be in scope
         MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
         return $ FV v (CV . unTVar $ extractKey t)
       -- Same recursive resolution at the global scope level.
-      (Just ((_, t, _, False) : _)) -> do
+      (Just ((_, t, _, False, _) : _)) -> do
         FV _ cv <- inferConcreteVar lang (Idx i (extractKey t))
         return $ FV v cv
       _ -> do
@@ -267,7 +257,7 @@ inferConcreteVar lang t0@(Idx i v) = do
           -- "No concrete <lang> type for <v>" error naming the
           -- missing instance.
           gscopeBody = case Map.lookup v gscopeUni of
-            (Just ((_, body, _, _) : _)) | extractKey body /= v -> Just (extractKey body)
+            (Just ((_, body, _, _, _) : _)) | extractKey body /= v -> Just (extractKey body)
             _ -> Nothing
         case gscopeBody of
           Just bodyKey -> do

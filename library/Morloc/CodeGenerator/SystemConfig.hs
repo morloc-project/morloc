@@ -106,9 +106,9 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   let nexusBinDir = homeDir </> "bin"
       nexusBinPath = nexusBinDir </> "morloc-nexus"
   createDirectoryIfMissing True nexusBinDir
-  -- Symlink to ~/.local/bin/ if that directory exists
+  -- Resolve the user's home for the legacy ~/.local/bin/ symlink fallback
+  -- (see the MORLOC_BIN_LINK_DIR handling below).
   userHome <- getHomeDirectory
-  let userBinDir = userHome </> ".local" </> "bin"
 
   rustBinEnv <- lookupEnv "MORLOC_RUST_BIN"
   case rustBinEnv of
@@ -212,14 +212,41 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         Nothing -> return ()
 
 
-  -- Symlink binaries to ~/.local/bin/ if it exists
-  userBinExists <- doesDirectoryExist userBinDir
-  when userBinExists $ do
-    symlinkBinary nexusBinPath (userBinDir </> "morloc-nexus")
-    let managerSrc = nexusBinDir </> "morloc-manager"
-    managerExists <- doesFileExist managerSrc
-    when managerExists $
-      symlinkBinary managerSrc (userBinDir </> "morloc-manager")
+  -- Symlink the newly installed binaries into a "user bin" directory so
+  -- they end up on PATH. The directory is selected by the
+  -- MORLOC_BIN_LINK_DIR environment variable:
+  --
+  --   Just <non-empty path>  - create that directory if missing and
+  --                            symlink into it (caller-controlled target)
+  --   Just ""                - explicit skip, no symlinks created
+  --   Nothing                - legacy default: symlink into ~/.local/bin/
+  --                            iff that directory already exists
+  --
+  -- The skip-on-empty case lets a caller (e.g. morloc-manager when running
+  -- this init inside a container) suppress symlinking without baking
+  -- container-awareness into this module. The container harness sets
+  -- MORLOC_BIN_LINK_DIR to a morloc-owned subtree such as
+  -- $HOME/.local/share/morloc/bin so the resulting symlinks land in a
+  -- non-shared location instead of clobbering files in the user's
+  -- general-purpose ~/.local/bin/.
+  linkDirEnv <- lookupEnv "MORLOC_BIN_LINK_DIR"
+  mLinkDir <- case linkDirEnv of
+    Just "" -> return Nothing
+    Just dir -> do
+      createDirectoryIfMissing True dir
+      return (Just dir)
+    Nothing -> do
+      let defaultBin = userHome </> ".local" </> "bin"
+      exists <- doesDirectoryExist defaultBin
+      return $ if exists then Just defaultBin else Nothing
+  case mLinkDir of
+    Nothing -> return ()
+    Just linkDir -> do
+      symlinkBinary nexusBinPath (linkDir </> "morloc-nexus")
+      let managerSrc = nexusBinDir </> "morloc-manager"
+      managerExists <- doesFileExist managerSrc
+      when managerExists $
+        symlinkBinary managerSrc (linkDir </> "morloc-manager")
 
   -- Create exe/ and fdb/ directories
   let exeDir = homeDir </> "exe"
