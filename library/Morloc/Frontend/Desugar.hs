@@ -22,7 +22,6 @@ module Morloc.Frontend.Desugar
   , showParseError
   ) where
 
-import Control.Monad (when)
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set

@@ -48,4 +48,4 @@ picked n = selectColsDyn ["y"] (mkData n)
 reversed_ :: Int -> Table n {x=Int, y=Str}
 reversed_ n =
   let t = mkData n
-  in pickRows (pack (reverse (range 0 (nrow t))) :: Vector n Int) t
+  in pickRows (pack (.[::-1] (range 0 (nrow t))) :: Vector n Int) t

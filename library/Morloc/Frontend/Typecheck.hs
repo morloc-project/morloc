@@ -22,7 +22,6 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
-import Data.List (partition)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -488,18 +487,6 @@ compatibleTypeU = go Set.empty Set.empty
     isNatExprT (NatDivU _ _) = True
     isNatExprT NatVoidU = True
     isNatExprT _ = False
-
--- | Result type of bracket indexing on a container. For a container of
--- shape @AppU h args@, the element type is the LAST non-Nat-kinded arg
--- (Vector has [Nat, a]; List has [a]; both yield @a@). When the shape
--- isn't yet known (receiver is an existential or other non-AppU form),
--- introduce a fresh existential so downstream unification can pin it
--- down.
-bracketElementType :: Gamma -> TypeU -> (Gamma, TypeU)
-bracketElementType g (AppU _ args) = case filter (not . isKindTypeU') args of
-  []  -> newvar "bidx_elem_" g
-  ts  -> (g, last ts)
-bracketElementType g _ = newvar "bidx_elem_" g
 
 -- | Result type of bracket slicing on a container. For @AppU h args@,
 -- if the first arg is Nat-kinded (Vector-style: @Vector n a@), replace
@@ -1167,6 +1154,9 @@ intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
 intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
+-- IntrMap is handled by its own synthE clause and never reaches this fallback.
+intrinsicType IntrMap =
+  error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 
@@ -1534,7 +1524,7 @@ checkE i g e t@(ExistU v _ _)
 -- are then checked against the *original* `b` so that `Vector 4 ...`
 -- still length-checks at 4. Unsolved existentials in the element slot
 -- fall through to the synth path for more flexible inference.
-checkE i g1 e1@(LstS xs) b = do
+checkE i g1 e1@(LstS _) b = do
   scope <- MM.getGeneralScope i
   -- Apply the current gamma before consulting wire forms: when a
   -- containing context (e.g. a @(expr :: T)@ annotation) already
@@ -1623,7 +1613,7 @@ checkE i g1 e1@(LstS xs) b = do
 -- needing @BTree Int -> ?(BTree Int)@) never gets to run. Mirrors
 -- @synthE LetS@ but uses @checkG@ for the body so the expected type
 -- threads through to the literal that consumes it.
-checkE i g (LetS v e1 e2) t = do
+checkE _ g (LetS v e1 e2) t = do
   (g1, t1, e1') <- synthG g e1
   let g2 = g1 ++> [AnnG v t1]
       g2' = case tryEvalConst g2 (let AnnoS _ _ e = e1' in e) of

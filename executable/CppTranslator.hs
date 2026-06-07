@@ -911,11 +911,11 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
           isTypeParam (Left (_, KindNat)) = False
           isTypeParam (Left (_, KindStr)) = False
           isTypeParam _ = True
-          typeParams = filter isTypeParam ps
-          kindCount = length ps - length typeParams
+          typeParamSlots = filter isTypeParam ps
+          kindCount = length ps - length typeParamSlots
           paramAt (Left (p, _)) = "T" <> pretty p
           paramAt (Right t) = showDefType selfName ps (typeOf (evaluateTypeU scope t))
-          allParams = map paramAt typeParams
+          allParams = map paramAt typeParamSlots
           -- templateTerms drives @template <class T...>@. Only Left
           -- type-kinded positions declare template parameters; Right
           -- positions are already-bound concrete types and must not

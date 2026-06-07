@@ -147,7 +147,6 @@ module Morloc.CodeGenerator.Namespace
   ) where
 
 import Control.Monad.Identity (runIdentity)
-import Data.Scientific (Scientific)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Morloc.Data.Doc

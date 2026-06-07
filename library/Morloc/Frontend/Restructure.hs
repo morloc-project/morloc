@@ -19,7 +19,6 @@ type declarations, and collects type definitions and source mappings into
 module Morloc.Frontend.Restructure (restructure) where
 
 import qualified Data.Graph as Graph
-import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)

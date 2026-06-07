@@ -631,6 +631,8 @@ instance Pretty E where
   pretty (LitP _ l) = pretty l
   pretty (SrcP _ src) = pretty src
   pretty (PatP _ s) = pretty (PatternStruct s)
+  pretty (BracketIndexP _) = pretty PatternBracketIndex
+  pretty (BracketSliceP _) = pretty PatternBracketSlice
   pretty (IfP _ c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
   pretty (DoBlockP _ e) = "{" <> pretty e <> "}"
   pretty (EvalP _ e) = "!" <> pretty e
@@ -701,18 +703,16 @@ instance Pretty Expr where
         <> "@"
         <> pretty v
           <+> sep (map (either pretty (parens . pretty)) vs)
-    _ ->
-      keyword <+> pretty lang
-        <> "@"
-        <> pretty v
-          <+> sep (map (either pretty (parens . pretty)) vs)
-          <+> "="
-          <+> pretty t
-      where
-        keyword = case kind of
-          TypedefAlias -> "type"
-          TypedefNewtype -> "newtype"
-          TypedefPrimitive -> "type"  -- unreachable, handled above
+    TypedefAlias -> body "type"
+    TypedefNewtype -> body "newtype"
+    where
+      body keyword =
+        keyword <+> pretty lang
+          <> "@"
+          <> pretty v
+            <+> sep (map (either pretty (parens . pretty)) vs)
+            <+> "="
+            <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m
   pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE ExportAll) = "export *"

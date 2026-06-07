@@ -1367,11 +1367,11 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
 -- exactly the bug behind "No instance found for Indexable::__access_index__"
 -- when a let-bound record literal is sliced and a multi-branch group on its
 -- fields uses bracket accessors.
-instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(ExistU v ps@([], _) ([], _)) g1
+instantiate scope ta@(ExistU _ _ (_ : _, _)) (ExistU v ps@([], _) ([], _)) g1
   | rs <- accumulatedRecords v g1, not (null rs) =
       instantiate scope ta (ExistU v ps (rs, Open)) g1
   | otherwise = solveExist v ta g1 >>= maybe (return g1) return
-instantiate scope ta@(ExistU v ps@([], _) ([], _)) tb@(ExistU _ _ (_ : _, _)) g1
+instantiate scope (ExistU v ps@([], _) ([], _)) tb@(ExistU _ _ (_ : _, _)) g1
   | rs <- accumulatedRecords v g1, not (null rs) =
       instantiate scope (ExistU v ps (rs, Open)) tb g1
   | otherwise = solveExist v tb g1 >>= maybe (return g1) return
@@ -1387,7 +1387,7 @@ instantiate scope ta@(ExistU _ _ _) (ForallU v2 t2) g1 =
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate scope ta0@(ExistU v1 (ps1, pc1) (rs1_expr, rc1)) tb0@(ExistU v2 (ps2, pc2) (rs2_expr, rc2)) g1 = do
+instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (rs2_expr, rc2)) g1 = do
   -- Fast path: when both sides have no expression records AND no
   -- accumulated records anywhere, the merging step below is a no-op that
   -- still costs us a Set.fromList + record-list reconstruction per call.
