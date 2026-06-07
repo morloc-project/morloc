@@ -1,3 +1,4 @@
+mod bridge;
 mod config;
 mod container;
 mod doctor;
@@ -29,6 +30,11 @@ use crate::types::*;
 /// relative path because the absolute form depends on the in-container $HOME,
 /// which morloc-manager computes per-invocation.
 const MORLOC_BIN_LINK_REL: &str = ".local/share/morloc/bin";
+
+/// Fixed in-container path the SLURM bridge socket is bind-mounted to.
+/// libmorloc.so reads this via `MORLOC_BRIDGE_SOCKET` (set when
+/// `morloc-manager run --slurm-bridge` is in effect).
+const BRIDGE_SOCK_IN_CONTAINER: &str = "/run/morloc-bridge.sock";
 
 // ======================================================================
 // CLI types
@@ -163,6 +169,14 @@ enum Cmd {
         /// Skip interactive wizard, use defaults for unspecified options
         #[arg(long)]
         non_interactive: bool,
+        /// Extra argument to pass through to the in-container
+        /// `morloc init -f` invocation (repeatable). Typical uses:
+        /// `--init-arg --slurm` to enable SLURM-dispatch codegen,
+        /// `--init-arg --sanitize` for libmorloc.so built with ASan.
+        /// Generic mechanism: any compiler init flag works without a
+        /// new morloc-manager flag.
+        #[arg(long = "init-arg", allow_hyphen_values = true)]
+        init_args: Vec<String>,
     },
     /// Run a command in the active environment
     #[command(display_order = 2)]
@@ -191,6 +205,18 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// for this invocation only (repeatable; not persisted)
         #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
         engine_arg: Vec<String>,
+        /// Expose a SLURM submission bridge inside the container so
+        /// labeled remote calls (`big:fn x`) can submit jobs to the
+        /// host's sbatch. Requires the active environment to use the
+        /// Apptainer engine. Each remote job is launched on its
+        /// compute node via `morloc-manager run -- <nexus>
+        /// --call-packet ...`, so the same env (same .sif, same
+        /// MORLOC_HOME) is used on driver and worker; the
+        /// morloc-manager binary must be reachable at the same path
+        /// on every compute node (typical: `~/.local/bin` on
+        /// NFS-shared $HOME).
+        #[arg(long)]
+        slurm_bridge: bool,
     },
     /// Remove a morloc environment
     #[command(display_order = 3)]
@@ -304,6 +330,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Re-run morloc init
         #[arg(long)]
         reinit: bool,
+        /// Extra argument to pass through to the in-container
+        /// `morloc init -f` invocation when `--reinit` is set
+        /// (repeatable). Same shape as `new --init-arg`. Typical:
+        /// `--init-arg --slurm` to enable SLURM-dispatch codegen.
+        #[arg(long = "init-arg", allow_hyphen_values = true, requires = "reinit")]
+        init_args: Vec<String>,
         /// Accepted for scripting uniformity with `new` (no effect)
         #[arg(long, hide = true)]
         non_interactive: bool,
@@ -415,6 +447,13 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Treat warnings as errors (non-zero exit on warnings)
         #[arg(long)]
         strict: bool,
+        /// Additionally check SLURM-bridge prerequisites (sbatch on
+        /// PATH, build.yaml has slurm-support, env image resolvable,
+        /// morloc-manager binary path mirrorable, runtime dir
+        /// writable). Run this before relying on `--slurm-bridge` on
+        /// a new cluster.
+        #[arg(long)]
+        slurm: bool,
     },
 }
 
@@ -817,6 +856,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             system,
             no_init,
             non_interactive,
+            init_args,
         } => {
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
@@ -1141,7 +1181,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             // Run morloc init, passing the env explicitly (no active env needed)
             if !no_init {
                 let ec = cfg::read_env_config(scope, &env_name)?;
-                run_morloc_init_for(Some((env_name.clone(), scope, ec)), verbose)?;
+                run_morloc_init_for(Some((env_name.clone(), scope, ec)), verbose, &init_args)?;
             } else {
                 eprintln!("Warning: --no-init was used. Run 'morloc-manager run -- morloc init -f' before building morloc programs.");
             }
@@ -1158,12 +1198,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- run ----
-        Cmd::Run { command, shell, env_vars, env_file, engine_arg } => {
+        Cmd::Run { command, shell, env_vars, env_file, engine_arg, slurm_bridge } => {
             if !shell && command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
             let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
-            run_in_container(verbose, shell, &command, &user_env, &engine_arg).map_err(|e| match e {
+            run_in_container(verbose, shell, &command, &user_env, &engine_arg, slurm_bridge).map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -1748,7 +1788,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::Update {
             name, image, version, tag, dockerfile, deffile, dockerfile_stub, deffile_stub,
             force, include, flagfile,
-            reinit_arg, engine, shm_size, no_build, reinit, non_interactive: _,
+            reinit_arg, engine, shm_size, no_build, reinit, init_args, non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
                 Some(n) => {
@@ -1911,7 +1951,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     )));
                 }
 
-                run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose)?;
+                run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose, &init_args)?;
             }
 
             eprintln!("{}", bold_green(&format!("Environment '{env_name}' updated.")));
@@ -2223,7 +2263,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- doctor ----
-        Cmd::Doctor { name, system, deep, strict } => {
+        Cmd::Doctor { name, system, deep, strict, slurm } => {
             let (env_name, env_scope, ec) = if let Some(ref n) = name {
                 let s = if system { Scope::System } else { cfg::find_env_scope(n)? };
                 let c = cfg::read_env_config(s, n)?;
@@ -2231,7 +2271,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 resolve_env_or_active(None)?
             };
-            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict, json)
+            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict, slurm, json)
         }
 
     }
@@ -2294,8 +2334,77 @@ fn run_in_container(
     args: &[String],
     user_env: &[(String, String)],
     cli_engine_args: &[String],
+    slurm_bridge: bool,
 ) -> Result<()> {
-    run_in_container_for(None, verbose, shell, args, user_env, cli_engine_args, Phase::Run)
+    run_in_container_for(None, verbose, shell, args, user_env, cli_engine_args, Phase::Run, slurm_bridge)
+}
+
+/// Validate the active env can host a SLURM bridge and spawn one. The
+/// returned handle owns the listener thread + socket; dropping it
+/// shuts the bridge down and unlinks the socket.
+///
+/// The bridge does NOT directly invoke `apptainer exec` on the compute
+/// node; the wrap command is `morloc-manager run --slurm-bridge --
+/// <nexus> --call-packet ...` so each compute-node nexus comes up
+/// under the same env machinery the driver uses (and can recursively
+/// dispatch further remote calls). The only thing the bridge needs to
+/// carry is the absolute path to the morloc-manager binary itself,
+/// which is the path of the currently-running process (we are
+/// morloc-manager).
+fn setup_slurm_bridge(ec: &EnvironmentConfig) -> Result<bridge::BridgeHandle> {
+    // Apptainer is the recommended engine for HPC -- its `.sif` is a
+    // single shared-FS file and `$HOME` auto-mount makes path mirroring
+    // automatic. Other engines work as long as the user can get the
+    // image onto every compute node (registry pull or pre-populated
+    // store); warn but don't reject so users on Podman/Docker clusters
+    // aren't forced to recreate envs.
+    if ec.engine != ContainerEngine::Apptainer {
+        eprintln!(
+            "warning: SLURM bridge with engine {:?}: ensure the env's image is \
+             reachable from every compute node (registry or pre-populated \
+             store). Apptainer is the recommended engine on HPC clusters.",
+            ec.engine,
+        );
+    }
+
+    // Sanity: confirm the env was actually built so the compute-node
+    // `morloc-manager run` won't fail at image lookup. Equivalent to
+    // `active_image()` resolving to a real path/tag.
+    let image = ec.active_image();
+    if image.is_empty() {
+        return Err(ManagerError::EnvError(
+            "Environment has no resolvable image. Run `morloc-manager update` first.".into(),
+        ));
+    }
+
+    // The wrap command on the compute node is
+    //   <this morloc-manager> run --slurm-bridge -- <nexus> --call-packet ...
+    // For path-mirroring to work, this binary must be at the same
+    // absolute path on every compute node. The typical setup is
+    // `~/.local/bin/morloc-manager` on NFS-mounted $HOME; users with a
+    // non-mirrored layout need to install morloc-manager at a path
+    // visible to every node.
+    let morloc_manager_exe = std::env::current_exe().map_err(|e| {
+        ManagerError::EnvError(format!("resolve morloc-manager path: {e}"))
+    })?;
+
+    let sock_path = bridge_socket_path();
+    bridge::spawn_bridge(
+        &sock_path,
+        bridge::BridgeConfig { morloc_manager_exe },
+    )
+    .map_err(|e| ManagerError::EnvError(format!("spawn slurm bridge: {e}")))
+}
+
+/// Pick a per-process socket path under `$XDG_RUNTIME_DIR` (or `/tmp`
+/// fallback). The pid suffix avoids collisions across concurrent
+/// `morloc-manager run --slurm-bridge` invocations.
+fn bridge_socket_path() -> std::path::PathBuf {
+    let dir = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    std::path::PathBuf::from(dir).join(format!("morloc-bridge-{}.sock", std::process::id()))
 }
 
 fn run_in_container_for(
@@ -2306,6 +2415,7 @@ fn run_in_container_for(
     user_env: &[(String, String)],
     cli_engine_args: &[String],
     phase: Phase,
+    slurm_bridge: bool,
 ) -> Result<()> {
     let (env_name, env_scope, ec) = match target {
         Some(t) => t,
@@ -2315,6 +2425,18 @@ fn run_in_container_for(
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
     let v_data_dir = data_dir.to_string_lossy().to_string();
+
+    // Optional SLURM submission bridge. The handle's drop tears the
+    // listener down and unlinks the UDS at function exit (which only
+    // happens after the container has exited synchronously, so the
+    // bridge stays alive for the lifetime of every nested remote
+    // call).
+    let _bridge_guard = if slurm_bridge {
+        Some(setup_slurm_bridge(&ec)?)
+    } else {
+        None
+    };
+    let bridge_mount = _bridge_guard.as_ref().map(|h| h.sock_path().to_path_buf());
 
     // Warn if a Dockerfile is configured but the layered image hasn't been built
     if ec.dockerfile.is_some() && ec.built_image.is_none() {
@@ -2389,6 +2511,7 @@ fn run_in_container_for(
         run_with_config(
             engine, verbose, &image, &v_data_dir, &home, &cwd, suffix,
             shell, args, false, &ec.shm_size, &extra_flags, user_env,
+            bridge_mount.as_deref(),
         )
     } else {
         let (cwd_final, skip_work_mount) = if is_home_dir && !suffix.is_empty() && !is_init {
@@ -2402,6 +2525,7 @@ fn run_in_container_for(
         run_with_config(
             engine, verbose, &image, &v_data_dir, &home, &cwd_final, suffix,
             shell, args, is_init || skip_work_mount, &ec.shm_size, &extra_flags, user_env,
+            bridge_mount.as_deref(),
         )
     }
 }
@@ -2420,6 +2544,7 @@ fn run_with_config(
     shm_size: &str,
     extra_flags: &[String],
     user_env: &[(String, String)],
+    bridge_socket: Option<&std::path::Path>,
 ) -> Result<()> {
     if shell {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -2440,7 +2565,20 @@ fn run_with_config(
     } else {
         vec![(cwd.to_string(), cwd.to_string())]
     };
-    let all_mounts: Vec<(String, String)> = base_mounts.into_iter().chain(work_mount).collect();
+    // Bridge socket bind-mount goes into a fixed in-container path so
+    // libmorloc.so finds it via MORLOC_BRIDGE_SOCKET (set below).
+    let bridge_mount: Vec<(String, String)> = match bridge_socket {
+        Some(host) => vec![(
+            host.to_string_lossy().to_string(),
+            BRIDGE_SOCK_IN_CONTAINER.to_string(),
+        )],
+        None => Vec::new(),
+    };
+    let all_mounts: Vec<(String, String)> = base_mounts
+        .into_iter()
+        .chain(work_mount)
+        .chain(bridge_mount)
+        .collect();
     let work_dir = if is_init {
         mh.to_string()
     } else {
@@ -2473,6 +2611,12 @@ fn run_with_config(
             format!("{link_dir}:{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ),
     ];
+    if bridge_socket.is_some() {
+        env_vars.push((
+            "MORLOC_BRIDGE_SOCKET".to_string(),
+            BRIDGE_SOCK_IN_CONTAINER.to_string(),
+        ));
+    }
     env_vars.extend(user_env.iter().cloned());
     let cmd = if shell {
         Some(vec!["/bin/bash".to_string()])
@@ -2515,17 +2659,19 @@ fn run_with_config(
 fn run_morloc_init_for(
     target: Option<(String, Scope, EnvironmentConfig)>,
     verbose: bool,
+    extra_init_args: &[String],
 ) -> Result<()> {
-    let init_args: Vec<String> = if verbose {
+    let mut argv: Vec<String> = if verbose {
         ["morloc", "init", "-f"].iter().map(|s| s.to_string()).collect()
     } else {
         ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
     };
+    argv.extend(extra_init_args.iter().cloned());
     eprintln!("Initializing morloc (this may take several minutes)...");
     // `morloc init` is a run-style invocation (it execs inside the
     // container); it picks up `run.<engine>` flags from env.flags.yaml.
     // No CLI engine-args here (the inner command is set by morloc-manager).
-    run_in_container_for(target, verbose, false, &init_args, &[], &[], Phase::Run)
+    run_in_container_for(target, verbose, false, &argv, &[], &[], Phase::Run, false)
 }
 
 fn normalize_trailing(p: &str) -> String {

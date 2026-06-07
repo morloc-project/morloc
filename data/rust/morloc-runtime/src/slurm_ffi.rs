@@ -140,6 +140,18 @@ pub unsafe extern "C" fn parse_morloc_call_arguments(
 
 #[no_mangle]
 pub unsafe extern "C" fn slurm_job_is_complete(job_id: u32) -> bool {
+    // Containerized path: ask the host-side bridge instead of shelling
+    // out to sacct (which isn't on the container's PATH). Any transport
+    // error here returns false so the caller keeps polling -- the
+    // submit-time error path is the one that surfaces bridge problems
+    // to the user.
+    if let Some(sock) = crate::slurm_bridge::socket_from_env() {
+        return match crate::slurm_bridge::status(&sock, job_id) {
+            Ok(state) => state.is_terminal(),
+            Err(_) => false,
+        };
+    }
+
     let cmd = format!("sacct -j {} --format=State --noheader\0", job_id);
     let sacct = libc::popen(cmd.as_ptr() as *const c_char, b"r\0".as_ptr() as *const c_char);
     if sacct.is_null() { return false; }
@@ -220,21 +232,58 @@ pub unsafe extern "C" fn submit_morloc_slurm_job(
     let cpus_arg = format!("--cpus-per-task={}", res.cpus);
     let gpus_arg = format!("--gres=gpu:{}", res.gpus);
 
-    let esc_nexus = shell_escape(&nexus);
-    let esc_call = shell_escape(&call);
-    let esc_socket = shell_escape(&socket);
-    let esc_result = shell_escape(&result_cache);
+    // Build the inner command as an argv vector. The bridge takes this
+    // as-is over JSON (no shell quoting on the wire); the direct-shell
+    // path below shell-escapes it once for sbatch --wrap. Same source
+    // of truth for both transports.
+    let inner_argv: Vec<String> = vec![
+        nexus.to_string(),
+        "--call-packet".to_string(),
+        call.to_string(),
+        "--socket-base".to_string(),
+        socket.to_string(),
+        "--output-file".to_string(),
+        result_cache.to_string(),
+        "--output-form".to_string(),
+        "packet".to_string(),
+    ];
 
-    let wrap_cmd = format!(
-        "{} --call-packet {} --socket-base {} --output-file {} --output-form packet",
-        esc_nexus, esc_call, esc_socket, esc_result
-    );
+    // Containerized path: send the structured argv to morloc-manager
+    // via the UDS bridge. The bridge prepends `morloc-manager run
+    // --slurm-bridge --` and shell-escapes once for sbatch.
+    if let Some(sock) = crate::slurm_bridge::socket_from_env() {
+        let res_spec = crate::slurm_bridge::ResourceSpec {
+            mem_gb: res.memory,
+            time_s: res.time,
+            cpus: res.cpus,
+            gpus: res.gpus,
+        };
+        match crate::slurm_bridge::submit(
+            &sock,
+            &inner_argv,
+            output.as_ref(),
+            error.as_ref(),
+            res_spec,
+        ) {
+            Ok(job_id) => return job_id,
+            Err(msg) => {
+                set_errmsg(errmsg, &MorlocError::Other(format!("slurm bridge: {}", msg)));
+                return 0;
+            }
+        }
+    }
 
+    // Direct (bare-metal) path: shell-escape the argv into the --wrap
+    // string sbatch expects.
+    let wrap_cmd: String = inner_argv
+        .iter()
+        .map(|a| shell_escape(a))
+        .collect::<Vec<_>>()
+        .join(" ");
     if wrap_cmd.len() >= MAX_SLURM_COMMAND_LENGTH {
         set_errmsg(errmsg, &MorlocError::Other("Wrap command too long".into()));
         return 0;
     }
-
     let wrap_arg = format!("--wrap={}", wrap_cmd);
 
     // Fork/exec sbatch
@@ -350,6 +399,32 @@ pub unsafe extern "C" fn remote_call(
     let seed = midx as u64;
     let mut err: *mut c_char = ptr::null_mut();
 
+    // Resolve cache_path to an absolute path once. The compiler-generated
+    // pool code passes `.morloc-cache` (relative to the pool's cwd, which
+    // is the user's project dir under morloc-manager run). The compute-node
+    // nexus, brought up by sbatch on a different host, will have a
+    // different cwd (typically $HOME) -- the wrap command needs absolute
+    // paths to find the call packet on the shared FS. Canonicalize here
+    // and reuse the absolute form for every cache-path-keyed FFI call.
+    let _cache_owned: CString = {
+        let cp_str = CStr::from_ptr(cache_path).to_string_lossy().into_owned();
+        let p = std::path::PathBuf::from(&cp_str);
+        let abs = if p.is_absolute() {
+            p
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")).join(p)
+        };
+        match CString::new(abs.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => {
+                set_errmsg(errmsg, &MorlocError::Other(
+                    "cache_path contains an interior NUL".into()));
+                return ptr::null_mut();
+            }
+        }
+    };
+    let cache_path: *const c_char = _cache_owned.as_ptr();
+
     // Cleanup tracking
     let mut return_packet: *mut u8 = ptr::null_mut();
     let mut arg_hashes: Vec<u64> = vec![0; nargs];
@@ -435,8 +510,23 @@ pub unsafe extern "C" fn remote_call(
         let output_filename = make_cache_filename_ext(function_hash, cache_path, out_ext.as_ptr(), &mut err);
         let error_filename = make_cache_filename_ext(function_hash, cache_path, err_ext.as_ptr(), &mut err);
 
-        // Submit SLURM job
-        let nexus_c = CString::new("./nexus").unwrap();
+        // Resolve the nexus path. MORLOC_NEXUS_PATH is exported by the
+        // nexus itself (main.rs) to every pool it spawns, so the
+        // wrap command we hand to sbatch is the same absolute binary
+        // path that ran us. No relative-path assumptions about the
+        // sbatch working directory.
+        let nexus_path = match std::env::var("MORLOC_NEXUS_PATH") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                set_errmsg(
+                    &mut err as *mut *mut c_char,
+                    &MorlocError::Other(
+                        "MORLOC_NEXUS_PATH is unset; remote dispatch requires \
+                         the pool to be spawned by a morloc nexus".into()));
+                goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+            }
+        };
+        let nexus_c = CString::new(nexus_path).unwrap();
         let pid = submit_morloc_slurm_job(
             nexus_c.as_ptr(), socket_basename, call_packet_filename,
             result_cache_filename, output_filename, error_filename,
@@ -456,6 +546,26 @@ pub unsafe extern "C" fn remote_call(
 
         let mut return_packet_size: usize = 0;
         return_packet = read_binary_file(result_cache_filename, &mut return_packet_size, &mut err);
+        if return_packet.is_null() || !err.is_null() {
+            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+        }
+
+        // Structural check: the result file may be torn if the compute-node
+        // nexus crashed mid-write. Without this, downstream parsers would
+        // read past the end of the buffer or interpret garbage as headers.
+        let result_slice = std::slice::from_raw_parts(return_packet, return_packet_size);
+        if let Err(ve) = crate::packet::validate_packet(result_slice) {
+            set_errmsg(
+                &mut err as *mut *mut c_char,
+                &MorlocError::Packet(format!(
+                    "result packet for slurm job {} is malformed ({}); inspect the job's stderr",
+                    pid, ve
+                )),
+            );
+            // Drop the bogus result so a re-run actually re-runs.
+            libc::unlink(result_cache_filename);
+            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+        }
 
         let failure = get_morloc_data_packet_error_message(return_packet, &mut err);
         if !failure.is_null() {

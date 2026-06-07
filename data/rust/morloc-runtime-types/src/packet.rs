@@ -338,6 +338,47 @@ impl PacketHeader {
     }
 }
 
+// ── Full-packet validity check ──────────────────────────────────────────────
+
+/// Confirm that a byte slice is a structurally complete morloc packet:
+/// a valid 32-byte header, with body length matching exactly
+/// `header.offset + header.length`. Intended for use on bytes that
+/// just came from disk (or any other untrusted source) before any
+/// downstream code dereferences offsets into the buffer. Inter-pool
+/// UDS-stream paths do NOT need to call this -- they ingest bytes
+/// produced by morloc itself one process away, so the cost is not
+/// worth paying on the hot path.
+///
+/// Returns the parsed header on success; on any structural problem
+/// returns a `MorlocError::Packet` with a single-sentence
+/// machine-and-human-readable summary that callers can surface
+/// directly via `set_errmsg`.
+pub fn validate_packet(bytes: &[u8]) -> Result<PacketHeader, MorlocError> {
+    if bytes.len() < 32 {
+        return Err(MorlocError::Packet(format!(
+            "packet truncated: got {} bytes (header alone is 32)",
+            bytes.len()
+        )));
+    }
+    let mut hdr_buf = [0u8; 32];
+    hdr_buf.copy_from_slice(&bytes[..32]);
+    let hdr = PacketHeader::from_bytes(&hdr_buf)?;
+    let offset = hdr.offset as usize;
+    let length = hdr.length as usize;
+    let expected = 32usize.checked_add(offset)
+        .and_then(|n| n.checked_add(length))
+        .ok_or_else(|| MorlocError::Packet(format!(
+            "packet header reports offset + length overflow (offset={offset} length={length})"
+        )))?;
+    if bytes.len() != expected {
+        return Err(MorlocError::Packet(format!(
+            "packet size mismatch: header says {} bytes (32 header + {} metadata + {} payload), got {}",
+            expected, offset, length, bytes.len()
+        )));
+    }
+    Ok(hdr)
+}
+
 // ── Full packet construction (header + metadata + payload) ─────────────────
 
 /// Build a complete data packet with schema metadata and relptr payload.

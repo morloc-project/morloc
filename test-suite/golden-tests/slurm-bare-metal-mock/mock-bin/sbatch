@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Mock sbatch for the slurm-bare-metal-mock golden test.
+#
+# Real sbatch:
+#   sbatch --parsable -o <out> -e <err> --mem=NG --time=... --cpus-per-task=N
+#          --gres=gpu:N --wrap='<cmd>'
+#   prints "<jobid>\n" and the command runs asynchronously on a compute node.
+#
+# This shim instead runs the inner wrap synchronously (so the result
+# packet lands in the cache before sacct ever reports COMPLETED), then
+# prints a fake job id. That lets the bare-metal `slurm_ffi::remote_call`
+# path round-trip on the same host as the driver, exercising
+# submit_morloc_slurm_job -> slurm_job_is_complete -> result-file
+# readback without a real cluster.
+set -euo pipefail
+
+out=
+err=
+wrap=
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --parsable) shift ;;
+        -o) out="$2"; shift 2 ;;
+        -e) err="$2"; shift 2 ;;
+        --wrap=*) wrap="${1#--wrap=}"; shift ;;
+        --wrap) wrap="$2"; shift 2 ;;
+        --mem=*|--time=*|--cpus-per-task=*|--gres=*) shift ;;
+        *) shift ;;
+    esac
+done
+
+if [ -z "$wrap" ]; then
+    echo "mock sbatch: no --wrap argument" >&2
+    exit 1
+fi
+
+# Run the wrap (a `<nexus> --call-packet ...` invocation) synchronously
+# under the same env, capturing its stdout/stderr where sbatch would
+# have. We do not check the exit code; the morloc cache layer detects
+# missing/error results via the packet contents.
+if [ -n "$out" ]; then
+    bash -c "$wrap" >"$out" 2>"${err:-/dev/null}" || true
+else
+    bash -c "$wrap" || true
+fi
+
+# Fake job id. The slurm-bare-metal-mock test passes this through
+# unchanged; the mock sacct returns COMPLETED for any id.
+echo 12345

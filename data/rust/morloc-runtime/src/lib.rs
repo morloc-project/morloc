@@ -35,6 +35,7 @@ pub mod packet_ffi;
 pub mod ipc_ffi;
 pub mod http_ffi;
 pub mod slurm_ffi;
+pub mod slurm_bridge;
 pub mod manifest_ffi;
 pub mod eval_arena;
 pub mod eval_ffi;

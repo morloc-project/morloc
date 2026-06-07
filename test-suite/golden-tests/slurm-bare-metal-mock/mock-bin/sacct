@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Mock sacct for the slurm-bare-metal-mock golden test.
+#
+# The mock sbatch already ran the wrap synchronously, so by the time
+# the morloc runtime polls us the result is on disk. We unconditionally
+# report COMPLETED so `slurm_job_is_complete` returns true on the
+# first call.
+echo "COMPLETED"
