@@ -1,5 +1,31 @@
-0.88.0 [2026-05-31]
+0.88.0 [2026-07-07]
+-------------------
+
+Slurm support
+ - add support for containerized SLURM job submission
+
+Apptainer support
+ - add support to `morloc-manager` for Apptainer/Singularity
+
+Slicer syntax
+ - add support for array indexing patterns for any type with an Indexable
+   instance
+ - add support for full Python-style list slicing patterns for any type with a
+   Sliceable or SliceableDim instance
+ - indices may be any type with an Indexlike instance
+
+Add newtype semantics
+ - `newtype` creates a type that may inherit wire format from a parent but does
+   not inherit typeclasses or native type relations
+ - now `type` creates genuine aliases that are guaranteed to be compatible with
+   the parent apart from docstrings
+
+Numerics
  - fix numeric type inference (now `4 + 4.0` typechecks)
+
+Other
+ - add `cxx-flags` field to package.yaml
+ - propagate cross-pool errors as tracebacks
 
 
 0.87.0 [2026-05-25]
