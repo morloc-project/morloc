@@ -42,6 +42,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.LanguageDescriptor
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Map.Strict as Map
 import qualified Morloc.Config as MC
@@ -108,7 +109,8 @@ translateBuiltin lang desc srcs es = do
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
-  let program = buildProgram labels allSources mDocs es schemas
+  templates <- collectRenderedTemplates lang
+  let program = buildProgram labels templates allSources mDocs es schemas
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -156,7 +158,8 @@ translateExternal cmd lang desc srcs es = do
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
-  let program = buildProgram labels includeDocs mDocs es schemas
+  templates <- collectRenderedTemplates lang
+  let program = buildProgram labels templates includeDocs mDocs es schemas
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -849,18 +852,33 @@ printProgram desc prog =
     -- immediately after the manifold definitions so any later reference
     -- (other manifolds calling this one, the dispatch table, partials
     -- passed into higher-order stdlib functions) resolves to the wrapped
-    -- version. The wrap template comes from 'ldLogWrap'; empty means
-    -- the language opts out (no logging emitted even if labels are set).
+    -- version. The shim is the per-language @__mlc_wrap_log@ helper; the
+    -- three template strings are passed as arguments and the helper
+    -- formats them on emission with the runtime values for @{date}@,
+    -- @{runtime}@, and @{id}@.
     logRebindings :: [MDoc]
     logRebindings
       | T.null (ldLogWrap desc) = []
       | otherwise =
-          [ pretty $
-              substituteT
-                (ldLogWrap desc)
-                [("name", render (manNamer i)), ("label", lbl)]
-          | (i, lbl) <- Map.toAscList (ipLogLabels prog)
+          [ manNamer i <+> pretty (ldAssignOp desc) <+> wrapFn desc
+              <> tupled
+                [ quoteOrNone (renderedStart tmpl)
+                , quoteOrNone (renderedPass tmpl)
+                , quoteOrNone (renderedFail tmpl)
+                , manNamer i
+                ]
+          | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)
           ]
+
+    -- The wrap helper name varies per language (Python: @__mlc_wrap_log@;
+    -- R: @.mlc_wrap_log@). The 'ldLogWrap' field carries the bare helper
+    -- name; an empty string opts the language out of logging.
+    wrapFn :: LangDescriptor -> MDoc
+    wrapFn d = pretty (ldLogWrap d)
+
+    quoteOrNone :: Maybe Text -> MDoc
+    quoteOrNone Nothing = pretty (ldNullLiteral desc)
+    quoteOrNone (Just t) = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
 
     schemaTableInit
       | null (ipSchemaTable prog) = mempty

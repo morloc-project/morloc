@@ -93,7 +93,7 @@ ldDispatchLocalFooter: ""
 ldDispatchRemoteHeader: ".remote_dispatch <- list()"
 ldDispatchRemoteEntry: ".remote_dispatch[[{{mid}}L]] <- {{name}}_remote"
 ldDispatchRemoteFooter: ""
-ldLogWrap: "{{name}} <- .mlc_log(\"{{label}}\", {{name}})"
+ldLogWrap: ".mlc_wrap_log"
 
 # Pool template (loaded from pool.R, left empty here)
 ldPoolTemplate: ""

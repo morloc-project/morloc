@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manager"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "chrono",
  "clap",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manifest"
-version = "0.87.0"
+version = "0.88.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -811,12 +811,12 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.87.0"
+version = "0.88.0"
 dependencies = [
  "clap",
  "libc",
  "morloc-manifest",
- "morloc-runtime",
+ "morloc-runtime-types",
  "nix",
  "serde",
  "serde_json",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.87.0"
+version = "0.88.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -837,13 +837,26 @@ dependencies = [
  "arrow-select",
  "bytes",
  "cbindgen",
+ "chrono",
  "indexmap",
  "libc",
  "morloc-manifest",
+ "morloc-runtime-types",
  "nix",
  "parquet",
  "rmp",
  "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "twox-hash",
+]
+
+[[package]]
+name = "morloc-runtime-types"
+version = "0.87.0"
+dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

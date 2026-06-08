@@ -94,6 +94,7 @@ copyState oldIndex newIndex = do
       , stateName = updateMap (stateName s)
       , stateTermDocs = stateTermDocs s
       , stateManifoldConfig = updateMap (stateManifoldConfig s)
+      , stateLogTemplate = stateLogTemplate s
       , stateSourceMap = updateMap (stateSourceMap s)
       , stateSourceText = stateSourceText s
       , stateBuildConfig = stateBuildConfig s

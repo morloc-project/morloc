@@ -294,6 +294,27 @@ bool morloc_get_shm_enabled(void);
 // surrounding eval scope ends via eval_arena.
 void morloc_set_tmpdir(const char* path);
 
+// ========================================================================
+// Log emission for `log: true` labeled manifolds
+// ========================================================================
+
+// Allocate a fresh call id for pairing start / pass / fail log lines.
+// The returned u64 is opaque to the pool; internally morloc_log_emit
+// renders it as "{pid}:{counter}" for the {id} placeholder.
+uint64_t morloc_log_next_id(void);
+
+// Emit one formatted log line to stderr. `tmpl` is a null-terminated
+// pre-rendered template (the morloc compiler has already substituted
+// static placeholders like {name}, {module}, and the ANSI color codes
+// from {c:red}). This function fills in the runtime placeholders
+// ({date}, {runtime}, {id}), strips ANSI CSI sequences when stderr is
+// not a TTY (or when NO_COLOR is set), and writes the line + newline
+// atomically. `runtime_seconds` is the duration to substitute into
+// {runtime}; pass 0.0 for start events. `call_id` should come from
+// morloc_log_next_id and be reused across the start/pass/fail trio
+// for one invocation. NULL tmpl is a no-op.
+void morloc_log_emit(const char* tmpl, double runtime_seconds, uint64_t call_id);
+
 // Metadata sub-header in packet metadata sections.
 #define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01
 #define MORLOC_METADATA_TYPE_XXHASH        0x02

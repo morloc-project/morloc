@@ -60,29 +60,31 @@ morloc_foreign_call <- function(...) {
   .orig_foreign_call(...)
 }
 
-# Wrap a dispatch callable to emit start/done lines on stderr. Applied at
-# codegen for manifolds whose source binding had `log: true`. Defined before
-# the manifolds section so the codegen-emitted rebinding lines (which run
-# at source-load time, right after the manifold defs) can reference it.
-.mlc_log <- function(label, fn) {
+.mlc_wrap_log <- function(start_tmpl, pass_tmpl, fail_tmpl, fn) {
   # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
-  # rebinding pattern `mN <- .mlc_log("X", mN)` reassigns the global mN to
-  # this wrapper; without force(), R's lazy promise for `fn` only resolves
-  # when first used inside the wrapper, by which point mN points at the
-  # wrapper itself -- the wrapper calls itself, infinite recursion.
-  force(label)
-  force(fn)
+  # rebinding pattern `mN <- .mlc_wrap_log(..., mN)` reassigns the global
+  # mN to this wrapper; without force(), R's lazy promise for `fn` only
+  # resolves when first used inside the wrapper, by which point mN points
+  # at the wrapper itself -- the wrapper calls itself, infinite recursion.
+  force(start_tmpl); force(pass_tmpl); force(fail_tmpl); force(fn)
   function(...) {
+    call_id <- .Call("r_morloc_log_next_id")
     t0 <- Sys.time()
-    cat(sprintf("[morloc] %s: start\n", label), file = stderr())
+    if (!is.null(start_tmpl)) {
+      .Call("r_morloc_log_emit", start_tmpl, 0, call_id)
+    }
     tryCatch({
       r <- fn(...)
-      dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-      cat(sprintf("[morloc] %s: done in %.3fs\n", label, dt), file = stderr())
+      if (!is.null(pass_tmpl)) {
+        dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        .Call("r_morloc_log_emit", pass_tmpl, dt, call_id)
+      }
       r
     }, error = function(e) {
-      dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-      cat(sprintf("[morloc] %s: FAILED after %.3fs\n", label, dt), file = stderr())
+      if (!is.null(fail_tmpl)) {
+        dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        .Call("r_morloc_log_emit", fail_tmpl, dt, call_id)
+      }
       stop(e)
     })
   }

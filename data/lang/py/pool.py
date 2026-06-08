@@ -52,24 +52,20 @@ def _tracked_foreign_call(*args):
     finally:
         _busy_ref.value -= 1
 
-# Decorator that emits start/done lines on stderr around a dispatch entry.
-# Applied at codegen for manifolds whose source binding had `log: true` in
-# the YAML config. Defined before the manifolds section so the codegen-emitted
-# rebinding lines (which run at import time, right after the manifold defs)
-# can reference it.
-def __mlc_log(label, fn):
+def __mlc_wrap_log(start_tmpl, pass_tmpl, fail_tmpl, fn):
     def go(*args):
+        call_id = morloc.log_next_id()
         t0 = time.monotonic()
-        sys.stderr.write("[morloc] " + label + ": start\n")
-        sys.stderr.flush()
+        if start_tmpl is not None:
+            morloc.log_emit(start_tmpl, 0.0, call_id)
         try:
             r = fn(*args)
-            dt = time.monotonic() - t0
-            sys.stderr.write("[morloc] " + label + (": done in %.3fs\n" % dt))
+            if pass_tmpl is not None:
+                morloc.log_emit(pass_tmpl, time.monotonic() - t0, call_id)
             return r
         except BaseException:
-            dt = time.monotonic() - t0
-            sys.stderr.write("[morloc] " + label + (": FAILED after %.3fs\n" % dt))
+            if fail_tmpl is not None:
+                morloc.log_emit(fail_tmpl, time.monotonic() - t0, call_id)
             raise
     return go
 

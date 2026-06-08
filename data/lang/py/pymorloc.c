@@ -1215,6 +1215,24 @@ error:
 }
 
 
+// ── log emission bridge to libmorloc.so ──────────────────────────────────
+
+static PyObject* pybinding__log_next_id(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromUnsignedLongLong((unsigned long long)morloc_log_next_id());
+}
+
+static PyObject* pybinding__log_emit(PyObject* self, PyObject* args) {
+    const char* tmpl;
+    double runtime;
+    unsigned long long call_id;
+    if (!PyArg_ParseTuple(args, "sdK", &tmpl, &runtime, &call_id)) {
+        return NULL;
+    }
+    morloc_log_emit(tmpl, runtime, (uint64_t)call_id);
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* daemon_capsule;
 
@@ -2272,6 +2290,8 @@ error:
 }
 
 static PyMethodDef Methods[] = {
+    {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
+    {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},

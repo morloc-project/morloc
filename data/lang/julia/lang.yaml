@@ -81,7 +81,7 @@ ldDispatchLocalFooter: ")"
 ldDispatchRemoteHeader: "remote_dispatch = Dict("
 ldDispatchRemoteEntry: "    {{mid}} => {{name}}_remote,"
 ldDispatchRemoteFooter: ")"
-ldLogWrap: "{{name}} = __mlc_log(\"{{label}}\", {{name}})"
+ldLogWrap: ""
 
 # Pool template (loaded from pool.jl at runtime, left empty here)
 ldPoolTemplate: ""

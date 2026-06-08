@@ -1,8 +1,16 @@
+# Program-wide log template. The compiler resolves the per-label
+# 'log-template' (if any), then this default, then the built-in.
+# Variables: {name} (term name), {group} (label-group name), {lang},
+# {module}, {line}, {column}, {index}, {date}, {runtime}, {id}.
+log-template:
+  start: "[morloc] {group}: start"
+  pass:  "[morloc] {group}: done in {runtime}s id={id}"
+  fail:  "[morloc] {group}: FAILED after {runtime}s id={id}"
+
 labeled-groups:
   # Trilang baseline
-  a:
-    log: true
-  b:     { log: true }
+  a:         { log: true }
+  b:         { log: true }
   # Per-call-site labels (tupTest)
   tup_left:  { log: true }
   tup_right: { log: true }

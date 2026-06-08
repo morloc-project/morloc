@@ -52,6 +52,12 @@ parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
   langMap <- buildLangMap'
 
+  -- The main module's @log-template@ becomes the program-wide default
+  -- log message template. Per-label overrides win over this; the
+  -- built-in defaults in 'Morloc.CodeGenerator.LogTemplate' fill any
+  -- subfield neither this nor the per-label config supplies.
+  MM.modify (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
+
   -- Compute project root from entry-point file path
   let projectRoot = fmap MS.takeDirectory f
 

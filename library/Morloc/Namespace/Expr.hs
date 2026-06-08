@@ -24,6 +24,7 @@ module Morloc.Namespace.Expr
     Source (..)
   , RemoteResources (..)
   , ManifoldConfig (..)
+  , LogTemplate (..)
   , ModuleConfig (..)
   , BuildConfig (..)
 
@@ -116,18 +117,43 @@ data RemoteResources = RemoteResources
   }
   deriving (Show, Ord, Eq, Generic)
 
+-- | Per-event log-message templates. Each subfield is the format string
+-- for the start, pass, and fail log lines respectively. 'Nothing' for a
+-- subfield means \"emit nothing for this event\". The compiler resolves
+-- the effective template per labeled manifold by merging in this order:
+--   per-label 'manifoldConfigLogTemplate'
+--      > module-level 'moduleConfigLogTemplate'
+--      > built-in default ('defaultLogTemplate')
+-- per-subfield. Each subfield supports @{name}@-style placeholder
+-- substitution; see 'Morloc.CodeGenerator.LogTemplate' for the
+-- available variables and the rendering pipeline.
+data LogTemplate = LogTemplate
+  { logTemplateStart :: Maybe Text
+  , logTemplatePass :: Maybe Text
+  , logTemplateFail :: Maybe Text
+  }
+  deriving (Show, Ord, Eq, Generic)
+
 data ManifoldConfig = ManifoldConfig
   { manifoldConfigCache :: Maybe Bool
   , manifoldConfigBenchmark :: Maybe Bool
   , manifoldConfigRemote :: Maybe RemoteResources
   , manifoldConfigLog :: Maybe Bool
   , manifoldConfigLabel :: Maybe Text
+  , manifoldConfigLogTemplate :: Maybe LogTemplate
+  , manifoldConfigLabelIdx :: Maybe Int
+  -- ^ The ExprI index where the label was attached. Set by 'collectTags'
+  -- when a labeled VarE is registered and preserved by
+  -- 'propagateManifoldLabel'. Used at codegen to look up the source
+  -- position (for @{module}@/@{line}@/@{column}@) and the term name
+  -- (for @{name}@). Not user-facing; absent from YAML.
   }
   deriving (Show, Ord, Eq, Generic)
 
 data ModuleConfig = ModuleConfig
   { moduleConfigDefaultGroup :: Maybe ManifoldConfig
   , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
+  , moduleConfigLogTemplate :: Maybe LogTemplate
   }
   deriving (Show, Generic)
 
@@ -477,6 +503,15 @@ instance Defaultable ModuleConfig where
     ModuleConfig
       { moduleConfigDefaultGroup = Nothing
       , moduleConfigLabeledGroups = Map.empty
+      , moduleConfigLogTemplate = Nothing
+      }
+
+instance Defaultable LogTemplate where
+  defaultValue =
+    LogTemplate
+      { logTemplateStart = Nothing
+      , logTemplatePass = Nothing
+      , logTemplateFail = Nothing
       }
 
 instance Defaultable BuildConfig where
@@ -503,6 +538,8 @@ instance Defaultable ManifoldConfig where
       , manifoldConfigRemote = Nothing
       , manifoldConfigLog = Just False
       , manifoldConfigLabel = Nothing
+      , manifoldConfigLogTemplate = Nothing
+      , manifoldConfigLabelIdx = Nothing
       }
 
 instance FromJSON ModuleConfig where
@@ -514,6 +551,11 @@ instance FromJSON ManifoldConfig where
   parseJSON =
     Aeson.genericParseJSON $
       defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "manifoldConfig"}
+
+instance FromJSON LogTemplate where
+  parseJSON =
+    Aeson.genericParseJSON $
+      defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "logTemplate"}
 
 instance FromJSON RemoteResources where
   parseJSON =

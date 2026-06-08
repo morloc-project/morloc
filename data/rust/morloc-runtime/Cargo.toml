@@ -43,6 +43,7 @@ parquet = { version = "58", default-features = false, features = ["arrow"] }
 arrow-csv = "58"
 arrow-cast = "58"
 bytes = "1"
+chrono = "0.4"
 
 [build-dependencies]
 cbindgen = "0.28"

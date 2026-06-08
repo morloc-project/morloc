@@ -1858,6 +1858,27 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
 }
 
 
+// ── log emission bridge to libmorloc.so ──────────────────────────────────
+
+SEXP morloc_log_next_id_r(void) {
+    uint64_t id = morloc_log_next_id();
+    // R's numeric is double; for our pid:counter values this is safe up
+    // to 2^53. The pool round-trips the id back into morloc_log_emit_r
+    // without inspecting it.
+    return ScalarReal((double)id);
+}
+
+SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP runtime_r, SEXP call_id_r) {
+    if (TYPEOF(tmpl_r) != STRSXP || LENGTH(tmpl_r) != 1) {
+        MORLOC_ERROR("log_emit: template must be a single string");
+    }
+    const char* tmpl = CHAR(STRING_ELT(tmpl_r, 0));
+    double runtime = asReal(runtime_r);
+    uint64_t call_id = (uint64_t)asReal(call_id_r);
+    morloc_log_emit(tmpl, runtime, call_id);
+    return R_NilValue;
+}
+
 SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
@@ -2403,7 +2424,17 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_
 // }}} exported functions
 
 
-void R_init_rmorloc(DllInfo *info) {
+// R extracts the package name from the .so filename by stripping the "lib"
+// prefix and ".so" suffix and looks for R_init_<that name>. Our shared
+// library is installed as "librmorloc.so", so the expected initializer is
+// "R_init_librmorloc" -- not "R_init_rmorloc". We expose both names as
+// aliases for the same body so the registration runs regardless of which
+// stripping convention a given R build follows.
+static void __attribute__((unused)) _r_init_impl(DllInfo *info);
+void R_init_librmorloc(DllInfo *info) { _r_init_impl(info); }
+void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
+
+static void _r_init_impl(DllInfo *info) {
     R_CallMethodDef callMethods[] = {
         {"morloc_start_daemon", (DL_FUNC) &morloc_start_daemon, 4},
         {"morloc_wait_for_client", (DL_FUNC) &morloc_wait_for_client, 1},
@@ -2415,6 +2446,8 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 2},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
+        {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
+        {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 3},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},

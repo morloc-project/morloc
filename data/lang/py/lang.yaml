@@ -90,7 +90,7 @@ ldDispatchLocalFooter: "}"
 ldDispatchRemoteHeader: "remote_dispatch = {"
 ldDispatchRemoteEntry: "    {{mid}}: {{name}}_remote,"
 ldDispatchRemoteFooter: "}"
-ldLogWrap: "{{name}} = __mlc_log(\"{{label}}\", {{name}})"
+ldLogWrap: "__mlc_wrap_log"
 
 # Pool template (loaded from pool.py, left empty here)
 ldPoolTemplate: ""

@@ -79,6 +79,7 @@ import Morloc.CodeGenerator.Grammars.Common
   , provideClosure
   , svarNamer
   )
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
@@ -211,10 +212,8 @@ data IProgram = IProgram
   , ipLocalDispatch :: [DispatchEntry]
   , ipRemoteDispatch :: [DispatchEntry]
   , ipSchemaTable :: [Text]  -- ordered list of schema strings; index = schema ID
-  , ipLogLabels :: Map.Map Int Text
-    -- ^ (manifold-id -> log label) for @log: true@ manifolds. Rebinding
-    -- (not dispatch-table wrapping) is needed so partials passed into
-    -- higher-order stdlib functions also log.
+  , ipLogTemplates :: Map.Map Int RenderedTemplate
+    -- ^ Per-labeled-midx pre-rendered log templates. See 'LogTemplate'.
   }
   deriving (Generic)
 
@@ -222,31 +221,49 @@ instance Binary IProgram
 
 -- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
 --
--- Foreign-callee midxes are stripped from the label map: a cross-pool labeled
--- call exists once in each pool, and the caller's wrap already measures the
--- full call (socket round-trip included). Wrapping the callee would double-count.
-buildProgram :: Map.Map Int Text -> [MDoc] -> [MDoc] -> [SerialManifold] -> [Text] -> IProgram
-buildProgram labels sources manifolds es schemas =
+-- Foreign-callee midxes are stripped from the templates map: a cross-pool
+-- labeled call exists once in each pool, and the caller's wrap already
+-- measures the full call (socket round-trip included). Wrapping the callee
+-- would double-count.
+buildProgram ::
+  Map.Map Int Text ->
+  Map.Map Int RenderedTemplate ->
+  [MDoc] ->
+  [MDoc] ->
+  [SerialManifold] ->
+  [Text] ->
+  IProgram
+buildProgram labels templates sources manifolds es schemas =
   let definedIds = collectManifoldIds es
       foreignCalleeIds =
         Set.fromList [i | SerialManifold i _ _ f _ <- es, isForeignCalleeForm (Just f)]
       labels' = Map.restrictKeys labels definedIds
                   `Map.withoutKeys` foreignCalleeIds
+      templates' = Map.restrictKeys templates definedIds
+                     `Map.withoutKeys` foreignCalleeIds
    in IProgram
         { ipSources = map render sources
         , ipManifolds = map render manifolds
         , ipLocalDispatch = extractLocalDispatch labels' es
         , ipRemoteDispatch = extractRemoteDispatch labels' es
         , ipSchemaTable = schemas
-        , ipLogLabels = labels'
+        , ipLogTemplates = templates'
         }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
-buildProgramM :: (Monad m) => Map.Map Int Text -> [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m [Text] -> m IProgram
-buildProgramM labels sources es translateSeg getSchemas = do
+buildProgramM ::
+  (Monad m) =>
+  Map.Map Int Text ->
+  Map.Map Int RenderedTemplate ->
+  [MDoc] ->
+  [SerialManifold] ->
+  (SerialManifold -> m MDoc) ->
+  m [Text] ->
+  m IProgram
+buildProgramM labels templates sources es translateSeg getSchemas = do
   manifolds <- mapM translateSeg es
   schemas <- getSchemas
-  return $ buildProgram labels sources manifolds es schemas
+  return $ buildProgram labels templates sources manifolds es schemas
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig

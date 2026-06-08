@@ -115,6 +115,10 @@ data MorlocState = MorlocState
   -- ^ Declaration-level docstrings keyed by term name. Takes precedence over
   -- signature docstrings for the command-level description.
   , stateManifoldConfig :: Map Int ManifoldConfig
+  , stateLogTemplate :: Maybe LogTemplate
+  -- ^ Program-wide log message template from the main module's YAML
+  -- @log-template@ field. Per-label overrides live in 'ManifoldConfig';
+  -- the resolution order is per-label > this field > built-in default.
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
@@ -414,6 +418,7 @@ instance Defaultable MorlocState where
       , stateName = Map.empty
       , stateTermDocs = Map.empty
       , stateManifoldConfig = Map.empty
+      , stateLogTemplate = Nothing
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue
