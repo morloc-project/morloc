@@ -1224,12 +1224,14 @@ static PyObject* pybinding__log_next_id(PyObject* self, PyObject* args) {
 
 static PyObject* pybinding__log_emit(PyObject* self, PyObject* args) {
     const char* tmpl;
+    const char* group;
     double runtime;
     unsigned long long call_id;
-    if (!PyArg_ParseTuple(args, "sdK", &tmpl, &runtime, &call_id)) {
+    // group accepts None as well as an empty string -- both mean "skip tee".
+    if (!PyArg_ParseTuple(args, "szdK", &tmpl, &group, &runtime, &call_id)) {
         return NULL;
     }
-    morloc_log_emit(tmpl, runtime, (uint64_t)call_id);
+    morloc_log_emit(tmpl, group, runtime, (uint64_t)call_id);
     Py_RETURN_NONE;
 }
 

@@ -58,6 +58,12 @@ data RenderedTemplate = RenderedTemplate
   { renderedStart :: Maybe Text
   , renderedPass :: Maybe Text
   , renderedFail :: Maybe Text
+  , renderedGroup :: Text
+    -- ^ The label group name (e.g. @\"a\"@ for @a:foo@). Passed through
+    -- to the pool's log emit helper so a per-label log file under
+    -- @$MORLOC_RUN_DIR/<group>/log@ can be opened. Empty when the
+    -- manifold somehow lacks a label, in which case the per-label tee
+    -- is suppressed at runtime.
   }
   deriving (Show, Eq, Generic)
 
@@ -117,10 +123,14 @@ renderOne lang programDefault names srcMap (midx, cfg) = do
   let effective = mergeTemplates (manifoldConfigLogTemplate cfg) programDefault defaultLogTemplate
       staticVars = staticBindings lang names srcMap cfg midx
       render' picker = traverse (\t -> renderStatic t staticVars srcIdx) (picker effective)
+      groupTxt = case manifoldConfigLabel cfg of
+        Just g -> g
+        Nothing -> ""
   RenderedTemplate
     <$> render' logTemplateStart
     <*> render' logTemplatePass
     <*> render' logTemplateFail
+    <*> pure groupTxt
     >>= \r -> return (midx, r)
   where
     srcIdx = fromMaybe midx (manifoldConfigLabelIdx cfg)

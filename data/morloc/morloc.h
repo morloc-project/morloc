@@ -312,8 +312,33 @@ uint64_t morloc_log_next_id(void);
 // atomically. `runtime_seconds` is the duration to substitute into
 // {runtime}; pass 0.0 for start events. `call_id` should come from
 // morloc_log_next_id and be reused across the start/pass/fail trio
-// for one invocation. NULL tmpl is a no-op.
-void morloc_log_emit(const char* tmpl, double runtime_seconds, uint64_t call_id);
+// for one invocation. `group` is the label group (e.g. "a" for an
+// a:foo reference); when MORLOC_RUN_DIR is set, the color-stripped
+// line is also appended to $MORLOC_RUN_DIR/<group>/log. NULL or empty
+// `group` skips the tee. NULL `tmpl` is a no-op.
+void morloc_log_emit(
+    const char* tmpl,
+    const char* group,
+    double runtime_seconds,
+    uint64_t call_id
+);
+
+// ========================================================================
+// Per-run workdir lifecycle
+// ========================================================================
+
+// Force resolution of the run id and republish the
+// MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID env vars
+// for child processes (pools, nested morloc programs) to inherit.
+// Called from the nexus at startup. The actual filesystem directory
+// is NOT created here -- materialization is lazy on first writer.
+void morloc_run_init(void);
+
+// Write summary.json (if the run directory has been materialized) and
+// flush any per-label log tee handles. Called from the nexus's
+// clean_exit after pool teardown so any final pool-side log writes
+// land in the per-label files before the handles close.
+void morloc_run_finalize(int exit_code);
 
 // Metadata sub-header in packet metadata sections.
 #define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01

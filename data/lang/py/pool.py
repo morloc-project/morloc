@@ -52,20 +52,20 @@ def _tracked_foreign_call(*args):
     finally:
         _busy_ref.value -= 1
 
-def __mlc_wrap_log(start_tmpl, pass_tmpl, fail_tmpl, fn):
+def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
     def go(*args):
         call_id = morloc.log_next_id()
         t0 = time.monotonic()
         if start_tmpl is not None:
-            morloc.log_emit(start_tmpl, 0.0, call_id)
+            morloc.log_emit(start_tmpl, group, 0.0, call_id)
         try:
             r = fn(*args)
             if pass_tmpl is not None:
-                morloc.log_emit(pass_tmpl, time.monotonic() - t0, call_id)
+                morloc.log_emit(pass_tmpl, group, time.monotonic() - t0, call_id)
             return r
         except BaseException:
             if fail_tmpl is not None:
-                morloc.log_emit(fail_tmpl, time.monotonic() - t0, call_id)
+                morloc.log_emit(fail_tmpl, group, time.monotonic() - t0, call_id)
             raise
     return go
 

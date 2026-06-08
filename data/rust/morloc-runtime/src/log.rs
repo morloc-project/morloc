@@ -6,9 +6,19 @@
 //! strips CSI sequences when stderr is not a TTY or NO_COLOR is set,
 //! and writes the result + newline to stderr atomically.
 //!
+//! When `MORLOC_RUN_DIR` is set, the plain-text (color-stripped) form
+//! of every emitted line is also appended to `$MORLOC_RUN_DIR/$group/log`
+//! via the runtime [`crate::run::tee_log_line`] helper. The tee is keyed
+//! by the user-chosen label group (e.g. `"a"` from `a:map`), so per-
+//! label tail/grep workflows survive across labels and processes.
+//!
 //! ```c
 //! uint64_t morloc_log_next_id(void);
-//! void morloc_log_emit(const char* tmpl, double runtime_seconds, uint64_t call_id);
+//! void morloc_log_emit(
+//!     const char* tmpl,
+//!     const char* group,
+//!     double runtime_seconds,
+//!     uint64_t call_id);
 //! ```
 
 use chrono::Utc;
@@ -72,10 +82,12 @@ fn strip_csi(s: &str) -> String {
 }
 
 /// Safety: `tmpl` must be a null-terminated UTF-8 byte sequence. A null
-/// pointer is treated as a no-op.
+/// pointer is treated as a no-op. `group` may be NULL or empty -- if so,
+/// the per-label tee is skipped; the stderr emission still happens.
 #[no_mangle]
 pub unsafe extern "C" fn morloc_log_emit(
     tmpl: *const c_char,
+    group: *const c_char,
     runtime_seconds: f64,
     call_id: u64,
 ) {
@@ -86,6 +98,11 @@ pub unsafe extern "C" fn morloc_log_emit(
         Ok(s) => s,
         Err(_) => return,
     };
+    let group_str: Option<&str> = if group.is_null() {
+        None
+    } else {
+        CStr::from_ptr(group).to_str().ok()
+    };
 
     let date = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let id_str = format!("{}:{}", pool_pid(), call_id);
@@ -95,13 +112,22 @@ pub unsafe extern "C" fn morloc_log_emit(
     s = s.replace("{runtime}", &runtime_str);
     s = s.replace("{id}", &id_str);
 
-    if !color_enabled() {
-        s = strip_csi(&s);
+    // Always compute the plain form -- it's what the tee writes, and
+    // it's what stderr writes when color is suppressed. strip_csi has a
+    // fast path when the string has no ESC bytes, so this is free for
+    // the common no-color template.
+    let plain = strip_csi(&s);
+
+    {
+        let stderr = io::stderr();
+        let mut handle = stderr.lock();
+        let text: &str = if color_enabled() { &s } else { &plain };
+        let _ = writeln!(handle, "{}", text);
     }
 
-    let stderr = io::stderr();
-    let mut handle = stderr.lock();
-    let _ = writeln!(handle, "{}", s);
+    if let Some(g) = group_str {
+        crate::run::tee_log_line(g, &plain);
+    }
 }
 
 #[cfg(test)]
@@ -116,8 +142,16 @@ mod tests {
 
     #[test]
     fn strip_csi_leaves_unicode_intact() {
-        let s = "\x1b[1mLet's eat π\x1b[0m";
-        assert_eq!(strip_csi(s), "Let's eat π");
+        // "caf" + U+00E9 (e-acute, UTF-8 0xC3 0xA9) inside CSI. The
+        // byte-level CSI walker must skip ESC..letter but pass through
+        // 0xC3 0xA9 unchanged.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"\x1b[1mcaf");
+        bytes.extend_from_slice(&[0xC3, 0xA9]);
+        bytes.extend_from_slice(b"\x1b[0m");
+        let s = std::str::from_utf8(&bytes).unwrap();
+        let expected = String::from_utf8(vec![b'c', b'a', b'f', 0xC3, 0xA9]).unwrap();
+        assert_eq!(strip_csi(s), expected);
     }
 
     #[test]

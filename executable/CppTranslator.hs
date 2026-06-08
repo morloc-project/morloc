@@ -708,10 +708,11 @@ PROPAGATE_ERROR(errmsg)|]
             -- socket round-trip.
             let bodyDoc = case Map.lookup callIndex (translatorLogTemplates state) of
                   Just tmpl | not (isForeignCalleeForm headForm) ->
-                    let emit Nothing _ = mempty
+                    let groupLit = dquotes (pretty (escapeCxxStringLit (renderedGroup tmpl)))
+                        emit Nothing _ = mempty
                         emit (Just t) runtimeExpr =
                           let q = dquotes (pretty (escapeCxxStringLit t))
-                           in [idoc|morloc_log_emit(#{q}, #{runtimeExpr}, __mlc_id);|]
+                           in [idoc|morloc_log_emit(#{q}, #{groupLit}, #{runtimeExpr}, __mlc_id);|]
                         startLine = emit (renderedStart tmpl) ("0.0" :: MDoc)
                         passLine = emit (renderedPass tmpl) "__mlc_dt.count()"
                         failLine = emit (renderedFail tmpl) "__mlc_dt.count()"

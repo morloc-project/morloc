@@ -501,6 +501,15 @@ pub fn clean_exit(exit_code: i32) -> ! {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // Write summary.json (if the run dir was materialized) and drop
+    // any per-label tee handles still held by the nexus. Pool-side
+    // handles were closed when those processes died above; this only
+    // touches state owned by the nexus itself.
+    extern "C" {
+        fn morloc_run_finalize(exit_code: i32);
+    }
+    unsafe { morloc_run_finalize(exit_code) };
+
     std::process::exit(exit_code);
 }
 

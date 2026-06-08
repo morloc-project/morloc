@@ -108,6 +108,18 @@ fn main() {
         std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path);
     }
 
+    // Resolve the per-run identity now so pools inherit a fully-published
+    // env (MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID).
+    // No filesystem directory is materialized here -- creation is lazy
+    // on the first writer (log tee, future cache or SLURM artifacts).
+    // A nested invocation (this nexus's parent is itself a morloc
+    // process) detects that via MORLOC_RUN_PARENT_PID matching getppid()
+    // and inherits the parent's run dir; otherwise a fresh id is minted.
+    extern "C" {
+        fn morloc_run_init();
+    }
+    unsafe { morloc_run_init() };
+
     let single_command = manifest.commands.len() == 1 && manifest.groups.is_empty();
 
     // Second pass: parse options after manifest path (skip in single-command mode)

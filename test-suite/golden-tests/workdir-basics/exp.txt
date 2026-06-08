@@ -1,0 +1,15 @@
+6.5
+6.5
+run_dirs_after_foo: 2
+files: a start.json summary.json
+files: a start.json summary.json
+a_log_lines: 2
+a_log_lines: 2
+start_run_id_field: 1
+start_pid_field: 1
+summary_exit_0: 1
+start_run_id_field: 1
+start_pid_field: 1
+summary_exit_0: 1
+6.5
+run_dirs_after_bar: 2

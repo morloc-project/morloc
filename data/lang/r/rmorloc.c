@@ -1868,14 +1868,26 @@ SEXP morloc_log_next_id_r(void) {
     return ScalarReal((double)id);
 }
 
-SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP runtime_r, SEXP call_id_r) {
+SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP group_r, SEXP runtime_r, SEXP call_id_r) {
     if (TYPEOF(tmpl_r) != STRSXP || LENGTH(tmpl_r) != 1) {
         MORLOC_ERROR("log_emit: template must be a single string");
     }
     const char* tmpl = CHAR(STRING_ELT(tmpl_r, 0));
+    // group may be NA or an empty string -- both translate to a NULL
+    // C pointer so the tee is skipped.
+    const char* group = NULL;
+    if (TYPEOF(group_r) == STRSXP && LENGTH(group_r) == 1) {
+        SEXP s = STRING_ELT(group_r, 0);
+        if (s != NA_STRING) {
+            const char* g = CHAR(s);
+            if (g && g[0] != '\0') {
+                group = g;
+            }
+        }
+    }
     double runtime = asReal(runtime_r);
     uint64_t call_id = (uint64_t)asReal(call_id_r);
-    morloc_log_emit(tmpl, runtime, call_id);
+    morloc_log_emit(tmpl, group, runtime, call_id);
     return R_NilValue;
 }
 
@@ -2447,7 +2459,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
-        {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 3},
+        {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},

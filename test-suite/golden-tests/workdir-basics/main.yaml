@@ -1,0 +1,7 @@
+log-template:
+  start: "[morloc] {group}: start"
+  pass:  "[morloc] {group}: pass"
+  fail:  "[morloc] {group}: fail"
+
+labeled-groups:
+  a: { log: true }

@@ -862,7 +862,8 @@ printProgram desc prog =
       | otherwise =
           [ manNamer i <+> pretty (ldAssignOp desc) <+> wrapFn desc
               <> tupled
-                [ quoteOrNone (renderedStart tmpl)
+                [ quoteString (renderedGroup tmpl)
+                , quoteOrNone (renderedStart tmpl)
                 , quoteOrNone (renderedPass tmpl)
                 , quoteOrNone (renderedFail tmpl)
                 , manNamer i
@@ -879,6 +880,12 @@ printProgram desc prog =
     quoteOrNone :: Maybe Text -> MDoc
     quoteOrNone Nothing = pretty (ldNullLiteral desc)
     quoteOrNone (Just t) = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
+
+    -- Always-present string (e.g. the label group name). Empty strings
+    -- render as a normal "" literal; downstream pool helpers treat
+    -- empty as "skip the per-label tee".
+    quoteString :: Text -> MDoc
+    quoteString t = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
 
     schemaTableInit
       | null (ipSchemaTable prog) = mempty

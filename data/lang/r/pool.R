@@ -60,30 +60,30 @@ morloc_foreign_call <- function(...) {
   .orig_foreign_call(...)
 }
 
-.mlc_wrap_log <- function(start_tmpl, pass_tmpl, fail_tmpl, fn) {
+.mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, fn) {
   # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
   # rebinding pattern `mN <- .mlc_wrap_log(..., mN)` reassigns the global
   # mN to this wrapper; without force(), R's lazy promise for `fn` only
   # resolves when first used inside the wrapper, by which point mN points
   # at the wrapper itself -- the wrapper calls itself, infinite recursion.
-  force(start_tmpl); force(pass_tmpl); force(fail_tmpl); force(fn)
+  force(group); force(start_tmpl); force(pass_tmpl); force(fail_tmpl); force(fn)
   function(...) {
     call_id <- .Call("r_morloc_log_next_id")
     t0 <- Sys.time()
     if (!is.null(start_tmpl)) {
-      .Call("r_morloc_log_emit", start_tmpl, 0, call_id)
+      .Call("r_morloc_log_emit", start_tmpl, group, 0, call_id)
     }
     tryCatch({
       r <- fn(...)
       if (!is.null(pass_tmpl)) {
         dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-        .Call("r_morloc_log_emit", pass_tmpl, dt, call_id)
+        .Call("r_morloc_log_emit", pass_tmpl, group, dt, call_id)
       }
       r
     }, error = function(e) {
       if (!is.null(fail_tmpl)) {
         dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-        .Call("r_morloc_log_emit", fail_tmpl, dt, call_id)
+        .Call("r_morloc_log_emit", fail_tmpl, group, dt, call_id)
       }
       stop(e)
     })
