@@ -926,7 +926,7 @@ desugarExpr :: Loc CstExpr -> D ExprI
 desugarExpr (Loc sp (CLabeledVarE label v)) = do
   moduleConfig <- State.gets dsModuleConfig
   case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
-    Just config -> freshExprSpan sp (VarE config v)
+    Just config -> freshExprSpan sp (VarE (config { manifoldConfigLabel = Just label }) v)
     Nothing -> dfail (startPos sp)
       ("Undefined label '" ++ T.unpack label
        ++ "': no matching entry in module config labeled-groups")

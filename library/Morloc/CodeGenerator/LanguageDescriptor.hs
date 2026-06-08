@@ -193,8 +193,14 @@ data LangDescriptor = LangDescriptor
   , ldDispatchLocalEntry :: !Text -- e.g. "    {{mid}}: {{name}},"
   , ldDispatchLocalFooter :: !Text -- e.g. "}"
   , ldDispatchRemoteHeader :: !Text -- e.g. "remote_dispatch = {"
-  , ldDispatchRemoteEntry :: !Text -- e.g. "    {{mid}}: {{name}}_remote,"
+  , ldDispatchRemoteEntry :: !Text -- e.g. "    {{mid}}: {{name}},"
   , ldDispatchRemoteFooter :: !Text -- e.g. "}"
+  , ldLogWrap :: !Text
+    -- ^ Wrap a dispatch entry's callable expression for per-label logging.
+    -- Substitutions: {{label}} (the label string literal value) and {{inner}}
+    -- (the unwrapped callable expression, including any "_remote" suffix).
+    -- Empty disables wrapping. Example for Python:
+    -- @"__mlc_log(\"{{label}}\", {{inner}})"@.
   }
   deriving (Eq, Show, Generic)
 
@@ -309,6 +315,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteHeader" (Y.String "")
             . ins "ldDispatchRemoteEntry" (Y.String "")
             . ins "ldDispatchRemoteFooter" (Y.String "")
+            . ins "ldLogWrap" (Y.String "")
             $ obj
     Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
 
@@ -398,6 +405,7 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteHeader = ""
     , ldDispatchRemoteEntry = ""
     , ldDispatchRemoteFooter = ""
+    , ldLogWrap = ""
     }
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the

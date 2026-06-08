@@ -650,6 +650,10 @@ collectTags fullDag = do
     f (ExprI _ (LamE _ e)) = f e
     f (ExprI _ (AnnE e _)) = f e
     f (ExprI _ (LetE bindings body)) = mapM_ (f . snd) bindings >> f body
+    f (ExprI _ (IfE c t e)) = f c >> f t >> f e
+    f (ExprI _ (DoBlockE e)) = f e
+    f (ExprI _ (EvalE e)) = f e
+    f (ExprI _ (IntrinsicE _ es)) = mapM_ f es
     f _ = return ()
 
 type GCMap = (Scope, Map Lang Scope)

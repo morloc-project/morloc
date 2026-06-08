@@ -93,9 +93,30 @@ loadModuleConfig (Just configFile) = do
               <> pretty configFile
               <> "': "
               <> pretty (Y.prettyPrintParseException errMsg)
-        Right config -> return config
+        Right config -> validateLabels moduleConfigFile config
     else
       return defaultValue
+
+-- | Reject labels containing characters that would break the code emitted
+-- around them. Labels become string literals in Python/R/C++ wrap shims and
+-- are used unquoted in shell glob patterns; restricting them to a portable
+-- alphanumeric set avoids quoting/escaping bugs and shell-injection holes
+-- at codegen time. Allowed characters: A-Z, a-z, 0-9, '_', '-'. The label
+-- must also be non-empty.
+validateLabels :: Path -> ModuleConfig -> MorlocMonad ModuleConfig
+validateLabels path mc = do
+  let bad = [lbl | lbl <- Map.keys (moduleConfigLabeledGroups mc), not (validLabel lbl)]
+  case bad of
+    [] -> return mc
+    xs ->
+      MM.throwSystemError $
+        "Invalid label name(s) in '" <> pretty path <> "': "
+          <> hsep (punctuate "," (map (dquotes . pretty) xs))
+          <> ". Labels must match [A-Za-z0-9_-]+."
+  where
+    validLabel t = not (MT.null t) && MT.all isOk t
+    isOk c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+          || (c >= '0' && c <= '9') || c == '_' || c == '-'
 
 loadBuildConfig :: Config -> IO BuildConfig
 loadBuildConfig config = do

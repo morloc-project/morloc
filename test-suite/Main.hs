@@ -329,6 +329,8 @@ main = do
         golden "manifold-form-7_c" "manifold-form-7_c"
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
+      , -- per-label logging (log: true) across all three pool languages
+        golden "log-labels" "log-labels"
       , -- test records
         golden "records-primitive" "records-primitive"
       , golden "records-complex-1" "records-complex-1"

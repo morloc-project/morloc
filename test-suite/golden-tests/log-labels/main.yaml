@@ -1,0 +1,21 @@
+labeled-groups:
+  # Trilang baseline
+  a:
+    log: true
+  b:     { log: true }
+  # Per-call-site labels (tupTest)
+  tup_left:  { log: true }
+  tup_right: { log: true }
+  # If-then-else branches
+  then_lbl:  { log: true }
+  else_lbl:  { log: true }
+  then2:     { log: true }
+  else2:     { log: true }
+  # Nested
+  outer:     { log: true }
+  inner:     { log: true }
+  # Recursive
+  recur:     { log: true }
+  # Let bindings
+  let_in:    { log: true }
+  let_out:   { log: true }

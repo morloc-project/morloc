@@ -1,0 +1,78 @@
+module main
+  ( mapsumP
+  , mapsumC
+  , mapsumR
+  , tupTest
+  , ifPos
+  , ifNeg
+  , nested
+  , factP
+  , factC
+  , factR
+  , letTest
+  )
+
+import root-py
+import root-cpp
+import root-r
+
+sum :: [Real] -> Real
+sum = fold (+) 0.0
+
+-- (1) Forced trilang baseline: each branch is its own pool.
+mapsumP :: [[Real]] -> [Real]
+mapsumP xs = idpy (a:map  b:sum  xs)
+
+mapsumC :: [[Real]] -> [Real]
+mapsumC xs = idcpp (a:map b:sum xs)
+
+mapsumR :: [[Real]] -> [Real]
+mapsumR xs = idr (a:map b:sum xs)
+
+-- (2) Per-call-site labels: same function 'sum' at two call sites in a tuple.
+-- Each labeled call site is its own manifold so tup_left and tup_right each
+-- fire exactly once.
+tupTest :: [[Real]] -> (Real, Real)
+tupTest xs = let ys = map sum xs
+             in (tup_left:sum ys, tup_right:sum ys)
+
+-- (3) Labels on guard branches (desugar to IfE): the taken branch's labeled
+-- manifold fires; the untaken branch's does not.
+ifPos :: [[Real]] -> Real
+ifPos xs ? 0.0 < sum (map sum xs) = then_lbl:idpy (sum (map sum xs))
+         : else_lbl:idpy (sum (map sum xs))
+
+ifNeg :: [[Real]] -> Real
+ifNeg xs ? 0.0 < neg (sum (map sum xs)) = then2:idpy (neg (sum (map sum xs)))
+         : else2:idpy (neg (sum (map sum xs)))
+
+-- (4) Nested-label case: outer wraps an inner labeled call. Both labels
+-- attach to their own manifolds.
+double :: [Real] -> [Real]
+double = map (\x -> x + x)
+
+nested :: [[Real]] -> [Real]
+nested xs = outer:double (inner:map sum xs)
+
+-- (5) Recursive labeled call: 'recur' fires once per recursion level.
+-- For input 5: 4 recursive calls (fact 4 -> 3 -> 2 -> 1) per language.
+-- Each function uses idpy/idcpp/idr to pin its body's language; without
+-- this the compiler unifies all three exports onto one cheapest-language
+-- implementation and the cross-pool dispatch shows up as a single language.
+factP :: Int -> Int
+factP n ? n <= 1 = idpy 1
+        : idpy (n * recur:factP (n - 1))
+
+factC :: Int -> Int
+factC n ? n <= 1 = idcpp 1
+        : idcpp (n * recur:factC (n - 1))
+
+factR :: Int -> Int
+factR n ? n <= 1 = idr 1
+        : idr (n * recur:factR (n - 1))
+
+-- (6) Let bindings: labels on call sites in the let-value (let_in) and the
+-- let-body (let_out) each propagate to their own call-site manifolds.
+letTest :: [[Real]] -> Real
+letTest xs = let ys = let_in:map sum xs
+             in let_out:sum ys

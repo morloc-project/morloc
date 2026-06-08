@@ -54,6 +54,7 @@ module Morloc.CodeGenerator.Namespace
   , ArgGeneral (..)
   , ManifoldForm (..)
   , HeadManifoldForm (..)
+  , ManifoldKind (..)
   , manifoldContext
   , manifoldBound
   , ArgTypes (..)
@@ -528,12 +529,28 @@ data HeadManifoldForm
   | HeadManifoldFormLocalForeign
   deriving (Show, Eq)
 
+-- | Whether a manifold's identity must survive downstream optimization
+-- passes. 'Preserved' manifolds carry observability hooks (logging, caching,
+-- remote dispatch, debug traces) and codegen must emit them as real
+-- functions. 'Transparent' manifolds are purely organizational and may be
+-- inlined, fused into let-bindings, or otherwise dissolved.
+--
+-- Set once when the 'PolyManifold' is constructed (see 'mkPolyManifold')
+-- and threaded through 'MonoManifold' to the strip sites in
+-- 'Morloc.CodeGenerator.Serialize'. New observability hooks (cache,
+-- remote, debug) extend the @Preserved@ predicate at construction time
+-- and do not need to add their own checks at each optimization pass.
+data ManifoldKind
+  = Transparent
+  | Preserved
+  deriving (Show, Eq)
+
 data PolyHead = PolyHead Lang Int [Arg None] PolyExpr
 
 -- no serialization and no argument types
 data PolyExpr
   = -- organizational terms that may have undefined types
-    PolyManifold Lang Int (ManifoldForm None (Maybe Type)) PolyExpr
+    PolyManifold Lang Int (ManifoldForm None (Maybe Type)) ManifoldKind PolyExpr
   | PolyRemoteInterface
       Lang -- foreign language
       (Indexed Type) -- return type in calling language
@@ -589,7 +606,7 @@ data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
 
 data MonoExpr
   = -- organizational terms that may have undefined types
-    MonoManifold Int (ManifoldForm None (Maybe Type)) MonoExpr
+    MonoManifold Int (ManifoldForm None (Maybe Type)) ManifoldKind MonoExpr
   | MonoPoolCall
       (Indexed Type) -- return type in calling language
       Int -- foreign manifold id
@@ -1445,7 +1462,7 @@ instance Pretty PolyHead where
   pretty _ = "PolyHead stub"
 
 instance Pretty PolyExpr where
-  pretty (PolyManifold _ _ _ _) = "PolyManifold"
+  pretty (PolyManifold _ _ _ _ _) = "PolyManifold"
   pretty (PolyRemoteInterface _ _ _ _ _) = "PolyRemoteInterface"
   pretty (PolyLet i e1 e2) = "PolyLet<" <> pretty i <> ">" <+> list [pretty e1, pretty e2]
   pretty (PolyReturn e) = "PolyReturn" <+> parens (pretty e)
@@ -1471,7 +1488,7 @@ instance Pretty PolyExpr where
   pretty (PolyIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)
 
 instance Pretty MonoExpr where
-  pretty (MonoManifold i form e) =
+  pretty (MonoManifold i form _ e) =
     block 4 ("m" <> pretty i <> tupled (abilist contextArg boundArg form)) (pretty e)
     where
       contextArg j _ = "c" <> pretty j

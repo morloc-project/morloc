@@ -82,7 +82,30 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialExpr
-    serialExpr _ (MonoManifold m _ e) = serialExpr m e
+    serialExpr currentM orig@(MonoManifold m _ kind inner)
+      -- 'Preserved' manifolds carry observability hooks (logging etc.) and
+      -- must survive into codegen as real function definitions. Route
+      -- through 'nativeExpr' (which preserves the structure as
+      -- NativeManifold) and serialize the result.
+      --
+      -- The 'm /= currentM' guard avoids a self-wrap collision at the
+      -- export root: 'expressDefault' produces a 'PolyHead m ...
+      -- (PolyManifold m ...)' pair for labeled exports, and the outer
+      -- 'SerialManifold m' will already carry the log wrap via
+      -- 'lcMakeFunction'. Preserving the inner manifold at the same midx
+      -- would emit a second function with native signature, colliding
+      -- with the export's serial signature.
+      | kind == Preserved && m /= currentM = do
+          ne <- nativeExpr m orig
+          se <- serializeS "preserved manifold" m (forceThunk ne)
+          -- If the body was 'MonoReturn'-wrapped (standard shape from
+          -- 'ensurePolyReturn'), the inner 'ReturnN' lives inside the
+          -- NativeManifold function; surface 'ReturnS' here so the
+          -- enclosing manifold emits its own 'return' statement.
+          case inner of
+            MonoReturn _ -> return (ReturnS se)
+            _ -> return se
+      | otherwise = serialExpr m inner
     serialExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
        in case inferState e1 of
@@ -133,7 +156,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialArg
-    serialArg _ e@(MonoManifold m _ _) = do
+    serialArg _ e@(MonoManifold m _ _ _) = do
       se <- serialExpr m e
       case se of
         (ManS sm) -> return $ SerialArgManifold sm
@@ -147,7 +170,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad NativeArg
-    nativeArg _ e@(MonoManifold m _ _) = do
+    nativeArg _ e@(MonoManifold m _ _ _) = do
       ne <- nativeExpr m e
       case ne of
         (ManN nm) -> return $ NativeArgManifold nm
@@ -161,7 +184,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad NativeExpr
-    nativeExpr _ (MonoManifold m form e) = do
+    nativeExpr _ (MonoManifold m form _ e) = do
       ne <- nativeExpr m e
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
       return . ManN $ NativeManifold m lang form' ne
@@ -441,7 +464,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap _ (MonoLetVar t i) = Map.singleton i (Right t)
     makeTypemap parentIndex (MonoBndVar (B t) i) = Map.singleton i (Right (Idx parentIndex t))
     makeTypemap _ (MonoBndVar (C t) i) = Map.singleton i (Right t)
-    makeTypemap _ (MonoManifold midx (manifoldBound -> ys) e) =
+    makeTypemap _ (MonoManifold midx (manifoldBound -> ys) _ e) =
       Map.union (Map.fromList [(i, Left t) | (Arg i (Just t)) <- ys]) (makeTypemap midx e)
     makeTypemap parentIdx (MonoLet _ e1 e2) = Map.union (makeTypemap parentIdx e1) (makeTypemap parentIdx e2)
     makeTypemap parentIdx (MonoReturn e) = makeTypemap parentIdx e
@@ -470,10 +493,10 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState :: MonoExpr -> SerializationState
     inferState (MonoApp MonoPoolCall {} _) = Serialized
     inferState (MonoApp MonoExe {} _) = Unserialized
-    inferState (MonoApp (MonoManifold _ _ e) _) = inferState e
+    inferState (MonoApp (MonoManifold _ _ _ e) _) = inferState e
     inferState (MonoLet _ _ e) = inferState e
     inferState (MonoReturn e) = inferState e
-    inferState (MonoManifold _ _ e) = inferState e
+    inferState (MonoManifold _ _ _ e) = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE
     inferState MonoPoolCall {} = Unserialized
     inferState MonoBndVar {} = Unserialized
@@ -482,10 +505,17 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
 {- | Unwrap structural MonoManifold/MonoReturn wrappers from a let definition.
 MonoManifold contributes its index (for type lookups); MonoReturn is the
 manifold's return semantics, which is meaningless in a let-binding context.
+
+Manifolds tagged 'Preserved' carry observability hooks and survive the
+strip -- the kind was set once at 'PolyManifold' construction in
+'Express.hs' and threaded through 'Segment.hs'. The 'm /= currentM'
+guard is the same self-wrap collision guard used in 'serialExpr'.
 -}
 unwrapLetDef :: Int -> MonoExpr -> (Int, MonoExpr)
-unwrapLetDef _ (MonoManifold m _ (MonoReturn e)) = (m, e)
-unwrapLetDef _ (MonoManifold m _ e) = (m, e)
+unwrapLetDef currentM orig@(MonoManifold m _ kind _)
+  | kind == Preserved && m /= currentM = (m, orig)
+unwrapLetDef _ (MonoManifold m _ _ (MonoReturn e)) = (m, e)
+unwrapLetDef _ (MonoManifold m _ _ e) = (m, e)
 unwrapLetDef m (MonoReturn e) = (m, e)
 unwrapLetDef m e = (m, e)
 

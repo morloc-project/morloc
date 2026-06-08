@@ -22,6 +22,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.CodeGenerator.Grammars.Macro as Macro
+import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel, hasManifoldLabel)
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -33,6 +34,19 @@ import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
+
+-- | Smart constructor that classifies a PolyManifold by whether its midx
+-- carries observability hooks. Currently the only hook is the log label
+-- (Stage 1); when caching, remote dispatch, and debug-trace land, extend
+-- the @observable@ predicate here -- downstream optimization passes
+-- (strip sites in 'Serialize.hs', plus future passes) read the
+-- 'ManifoldKind' field rather than re-checking config flags.
+mkPolyManifold ::
+  Lang -> Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> MorlocMonad PolyExpr
+mkPolyManifold lang midx form body = do
+  observable <- hasManifoldLabel midx
+  let kind = if observable then Preserved else Transparent
+  return $ PolyManifold lang midx form kind body
 
 -- C3 invariant: the record literal's key order must match the declared
 -- schema's key order. The bidirectional checkE rule in
@@ -49,29 +63,29 @@ assertRecordKeyOrder midx entries rs
       <+> "Literal keys:" <+> hsep (punctuate "," (map (pretty . fst) entries))
       <> "; declared keys:" <+> hsep (punctuate "," (map (pretty . fst) rs))
 
+-- | Walk a manifold's body searching for a USER-LABELED source index and
+-- attach its config to @midx@. Only inspects the manifold's HEAD chain:
+-- the AnnoS' own outer idx, then for 'AppS' the head's outer idx (which
+-- carries the labeled VarS' idx after 'Realize.removeVarS' unwraps the
+-- wrapper). Does NOT recurse into arguments -- nested labeled calls each
+-- have their own manifold midx and pick up their own label via their
+-- own 'expressPolyExprWrap' / 'setManifoldConfig' pass.
 setManifoldConfig ::
   Int ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
-  MorlocMonad ()
-setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _)) = linkConfigIndex midx fidx
-setManifoldConfig midx (AnnoS _ _ (AppS (AnnoS (Idx fidx _) _ (ExeS _)) _)) = linkConfigIndex midx fidx
-setManifoldConfig midx (AnnoS _ _ (AppS e _)) = setManifoldConfig midx e
-setManifoldConfig midx (AnnoS _ _ (LamS _ e)) = setManifoldConfig midx e
-setManifoldConfig midx (AnnoS _ _ (DoBlockS e)) = setManifoldConfig midx e
-setManifoldConfig midx (AnnoS _ _ (EvalS e)) = setManifoldConfig midx e
-setManifoldConfig midx (AnnoS _ _ (CoerceS _ e)) = setManifoldConfig midx e
-setManifoldConfig _ (AnnoS _ _ (IntrinsicS _ _)) = return ()
-setManifoldConfig midx (AnnoS _ _ (IfS _ t _)) = setManifoldConfig midx t
-setManifoldConfig _ (AnnoS _ _ (CallS _)) = return ()
-setManifoldConfig _ _ = return ()
-
-linkConfigIndex :: Int -> Int -> MorlocMonad ()
-linkConfigIndex midx fidx = do
-  s <- MM.get
-  case Map.lookup fidx (stateManifoldConfig s) of
-    Nothing -> return ()
-    (Just mconfig) -> do
-      MM.put (s {stateManifoldConfig = Map.insert midx mconfig (stateManifoldConfig s)})
+  MorlocMonad Bool
+setManifoldConfig midx (AnnoS (Idx outerIdx _) _ inner) = do
+  outerLinked <- propagateManifoldLabel midx outerIdx
+  if outerLinked then return True
+  else case inner of
+    AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _ -> propagateManifoldLabel midx fidx
+    AppS (AnnoS (Idx fidx _) _ (ExeS _)) _ -> propagateManifoldLabel midx fidx
+    AppS e _ -> setManifoldConfig midx e
+    LamS _ e -> setManifoldConfig midx e
+    DoBlockS e -> setManifoldConfig midx e
+    EvalS e -> setManifoldConfig midx e
+    CoerceS _ e -> setManifoldConfig midx e
+    _ -> return False
 
 propagateScope :: Int -> Int -> MorlocMonad ()
 propagateScope calleeIdx appIdx = do
@@ -112,7 +126,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
 
     goExpr ids (PolyBndVar (C (Idx ci (EffectT effs inner))) i)
       | i `elem` ids = wrapSuspends ci (EffectT effs inner) i
-    goExpr ids (PolyManifold l m f e) = PolyManifold l m f (goExpr ids e)
+    goExpr ids (PolyManifold l m f k e) = PolyManifold l m f k (goExpr ids e)
     goExpr ids (PolyLet i e1 e2) = PolyLet i (goExpr ids e1) (goExpr ids e2)
     goExpr ids (PolyReturn e) = PolyReturn (goExpr ids e)
     goExpr ids (PolyApp e es) = PolyApp (goExpr ids e) (map (goExpr ids) es)
@@ -134,7 +148,7 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     wrapSuspends ci inner i = PolyBndVar (C (Idx ci inner)) i
 
     forceAtReturn c rt (PolyReturn e) = PolyReturn (wrapForces c rt e)
-    forceAtReturn c rt (PolyManifold l m f e) = PolyManifold l m f (forceAtReturn c rt e)
+    forceAtReturn c rt (PolyManifold l m f k e) = PolyManifold l m f k (forceAtReturn c rt e)
     forceAtReturn c rt (PolyLet i e1 e2) = PolyLet i e1 (forceAtReturn c rt e2)
     forceAtReturn c rt e = wrapForces c rt e
 
@@ -175,7 +189,7 @@ expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) 
         . PolyReturn
         $ PolyApp (PolyExe (Idx midx c) (RecCallP mid crossLang)) lambdaVals
 expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
-  setManifoldConfig midx e
+  _ <- setManifoldConfig midx e
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
   | [t] <- filter (not . isKindTypeT) ts = do
@@ -247,7 +261,7 @@ expressDefault e0@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
     -- ensure the manifold body has PolyReturn at the return position
     ensurePolyReturn (PolyReturn x) = PolyReturn x
     ensurePolyReturn (PolyLet i e1 e2) = PolyLet i e1 (ensurePolyReturn e2)
-    ensurePolyReturn (PolyManifold l m f e) = PolyManifold l m f (ensurePolyReturn e)
+    ensurePolyReturn (PolyManifold l m f k e) = PolyManifold l m f k (ensurePolyReturn e)
     ensurePolyReturn x = PolyReturn x
 
 expressPolyExprWrap ::
@@ -255,10 +269,14 @@ expressPolyExprWrap ::
   Indexed Type ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   MorlocMonad PolyExpr
-expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ (LamS _ lamExpr)) = do
-  setManifoldConfig midx lamExpr
+-- Call setManifoldConfig on every manifold's body, regardless of whether
+-- the body is wrapped in a 'LamS'. Pointfree top-level definitions
+-- (e.g. @mapsumP = idpy . a_py:map b_py:sum@) don't have an outer LamS
+-- by the time we get here, but their bodies still contain labeled call
+-- sites that need to propagate.
+expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ _) = do
+  _ <- setManifoldConfig midx e
   expressPolyExprWrapCommon l t e
-expressPolyExprWrap l t e = expressPolyExprWrapCommon l t e
 
 expressPolyExprWrapCommon ::
   Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
@@ -275,11 +293,11 @@ decideRemoteness :: BuildConfig -> Maybe ManifoldConfig -> Lang -> Lang -> Maybe
 decideRemoteness _ Nothing l1 l2
   | l1 == l2 = Nothing
   | otherwise = Just ForeignCall
-decideRemoteness _ (Just (ManifoldConfig _ _ Nothing)) l1 l2
-  | l1 == l2 = Nothing
-  | otherwise = Just ForeignCall
-decideRemoteness bconf (Just (ManifoldConfig _ _ (Just res))) l1 l2 =
-  case (buildConfigSlurmSupport bconf, l1 /= l2) of
+decideRemoteness bconf (Just mconfig) l1 l2 = case manifoldConfigRemote mconfig of
+  Nothing
+    | l1 == l2 -> Nothing
+    | otherwise -> Just ForeignCall
+  Just res -> case (buildConfigSlurmSupport bconf, l1 /= l2) of
     (Just True, _) -> Just $ RemoteCall res
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
@@ -299,7 +317,7 @@ expressPolyArg ::
 expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _ _)) (Idx cidx lang, args) (DoBlockS x)) = do
   x' <- expressPolyExprWrap lang (mkIdx x t) x
   let e = PolyDoBlock (Idx cidx t) x'
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyArg l pc e = expressPolyExprWrap l pc e
 
 -- | Look up the @Packable@ @pack@ source for a native type with outer
@@ -772,9 +790,7 @@ expressPolyExpr
 
         call <- expressPolyApp parentLang funExpr xs'
 
-        return
-          . PolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs)
-          $ call
+        mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) call
     | not isLocal = do
         propagateScope gidxCall midx
 
@@ -802,16 +818,14 @@ expressPolyExpr
 
         call <- expressPolyApp parentLang funExpr xs'
 
-        return
-          . PolyManifold parentLang midx localForm
-          . chain lets
-          . PolyReturn
-          . PolyApp
-            ( PolyRemoteInterface callLang (Idx cidxLam lamOutType) passedParentArgs (fromJust remote)
-                . PolyManifold callLang midx foreignForm
-                $ call
-            )
-          $ boundVars
+        innerWrap <- mkPolyManifold callLang midx foreignForm call
+        let remoteApp =
+              PolyApp
+                ( PolyRemoteInterface callLang (Idx cidxLam lamOutType) passedParentArgs (fromJust remote)
+                    innerWrap
+                )
+                boundVars
+        mkPolyManifold parentLang midx localForm (chain lets (PolyReturn remoteApp))
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -853,24 +867,33 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
       boundArguments = map unvalue $ drop (length contextArguments) manifoldArguments
       typeBoundArguments = fromJust $ safeZipWith (\t (Arg i _) -> Arg i (Just t)) inputTypes boundArguments
 
-  return
-    . PolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments)
-    . PolyReturn
-    $ body'
--- Inline source call: skip PolyManifold, emit as direct subexpression
+  mkPolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments) (PolyReturn body')
+-- Inline source call: emit directly as a subexpression, unless the call
+-- site is user-labeled. A labeled call must be a manifold for the label
+-- to attach to; using the AppS' outer index gives each call site its own
+-- midx so per-call-site labels (@(a:foo x, a:foo y)@) stay distinct.
 expressPolyExpr
   findRemote
   parentLang
   _
   ( AnnoS
       (Idx midx _)
-      _
+      (_, outerArgs)
       (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (SrcCall src))) xs)
     )
     | srcInline src && isLocal = do
         propagateScope gidxCall midx
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
-        expressPolyApp parentLang f xsExpr >>= stripPolyReturn
+        -- 'setManifoldConfig' (called from 'expressPolyExprWrap') already
+        -- linked the head's label onto @midx@ if present; 'applyLambdas'
+        -- may also have linked it from a beta-reduced LamS head. Either
+        -- way, @midx@ carries the label by now.
+        labeled <- hasManifoldLabel midx
+        if labeled
+          then do
+            func <- expressPolyApp parentLang f xsExpr
+            mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) func
+          else expressPolyApp parentLang f xsExpr >>= stripPolyReturn
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -944,15 +967,12 @@ expressPolyExpr
             PolyReturn <$> expressBracketIndex callLang midx inputs out xsExpr
           _ ->
             expressPolyApp parentLang f xsExpr
-        return
-          . PolyManifold parentLang midx (ManifoldFull (map unvalue outerArgs))
-          . PolyReturn
-          . PolyApp
-            ( PolyRemoteInterface callLang pc [] (fromJust remote)
-                . PolyManifold callLang midx (ManifoldFull (map unvalue outerArgs))
-                $ bracketCall
-            )
-          $ [PolyBndVar (A parentLang) i | Arg i _ <- outerArgs]
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) bracketCall
+        let remoteApp =
+              PolyReturn $ PolyApp
+                ( PolyRemoteInterface callLang pc [] (fromJust remote) innerWrap )
+                [PolyBndVar (A parentLang) i | Arg i _ <- outerArgs]
+        mkPolyManifold parentLang midx (ManifoldFull (map unvalue outerArgs)) remoteApp
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -972,23 +992,18 @@ expressPolyExpr
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
 
         func <- expressPolyApp parentLang f xsExpr
-        return
-          . PolyManifold callLang midx (ManifoldFull (map unvalue args))
-          $ func
+        mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) func
     | not isLocal = do
         propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         func <- expressPolyApp parentLang f (fromJust mayXs)
-        return
-          . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
-          . PolyReturn
-          . PolyApp
-            ( PolyRemoteInterface callLang pc [] (fromJust remote)
-                . PolyManifold callLang midx (ManifoldFull (map unvalue args))
-                $ func
-            )
-          $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) func
+        let remoteApp =
+              PolyReturn $ PolyApp
+                ( PolyRemoteInterface callLang pc [] (fromJust remote) innerWrap )
+                [PolyBndVar (A parentLang) i | Arg i _ <- args]
+        mkPolyManifold parentLang midx (ManifoldFull (map unvalue args)) remoteApp
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -1002,25 +1017,23 @@ expressPolyExpr
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
         retapp <- expressPolyApp parentLang e lambdaVals
-        return
-          . PolyManifold callLang midx (ManifoldPass lambdaTypedArgs)
-          $ retapp
+        mkPolyManifold callLang midx (ManifoldPass lambdaTypedArgs) retapp
     | otherwise = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
         retapp <- expressPolyApp callLang e callVals
-        return
-          . PolyManifold parentLang midx (ManifoldPass lambdaTypedArgs)
-          . PolyReturn
-          . PolyApp
-            ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
-                . PolyManifold callLang midx (ManifoldFull lambdaArgs)
-                $ retapp
-            )
-          $ fromJust
-          $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) retapp
+        let remoteApp =
+              PolyReturn $ PolyApp
+                ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
+                    innerWrap
+                )
+                ( fromJust
+                  $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
+                )
+        mkPolyManifold parentLang midx (ManifoldPass lambdaTypedArgs) remoteApp
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -1060,7 +1073,7 @@ expressPolyExpr
     e1' <- expressPolyExprWrap lang e1Type e1
     e2' <- expressPolyExprWrap lang pc e2
     let e = PolyLet letId e1' e2'
-    return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+    expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (RealS _ x)) =
   dispatchPrimLit midx lang t v (\tv -> PolyReal (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (IntS _ x)) =
@@ -1114,7 +1127,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) ts)) (Idx 
   | [tElem] <- filter (not . isKindTypeT) ts = do
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x tElem) x) xs
       e <- dispatchListLit midx cidx lang userT v ts xs'
-      return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+      expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 -- LstS at a bare @VarT v@ where @v@ is a newtype (or transparent alias)
 -- whose wire-parent root is list-shaped. Use the wire-parent's element
 -- type for child typing and let 'dispatchListLit' decide whether to
@@ -1128,7 +1141,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang,
       | [elemT] <- filter (not . isKindTypeT) wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
           e <- dispatchListLit midx cidx lang userT v [] xs'
-          return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+          expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
     _ -> MM.throwSourcedError midx "Expected a list type"
 -- A list literal at a multi-non-Nat-arg @AppT@ whose @Packable@ wire form
 -- is list-shaped. E.g. @[("a",1)] :: Map Str Int@ with @instance
@@ -1149,7 +1162,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx c
             Just src ->
               let inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
                   funT = FunT [AppT (VarT wireV) wireArgs] userT
-              in return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args
+              in expressContainer pc (Idx midx parentLang) (Idx cidx lang) args
                    (PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner])
             Nothing -> MM.throwSourcedError midx $
               "Packable wire form for"
@@ -1189,7 +1202,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
       let idxTs = zipWith mkIdx xs ts
       xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) idxTs xs
       let e = PolyTuple (Idx cidx v) (fromJust $ safeZip idxTs xs')
-      return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+      expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 -- A tuple literal whose recorded type head is a type-alias or a
 -- newtype-of-tuple (e.g. @type LL a = (a, ?(LL a))@ or
 -- @newtype Matrix m n a = ((Int, Int), Vector (m * n) a)@). The
@@ -1224,7 +1237,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lan
   let tsIdx = zipWith mkIdx (map snd entries) (map snd rs)
   xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap lang) tsIdx (map snd entries)
   let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   scope <- MM.getGeneralScope i
   case reduceType scope t of
@@ -1251,7 +1264,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IfS c
   thenE' <- expressPolyExprWrap lang (mkIdx thenE t) thenE
   elseE' <- expressPolyExprWrap lang (mkIdx elseE t) elseE
   let e = PolyIf cond' thenE' elseE'
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (DoBlockS x)) = do
   -- The inner expression has the unwrapped type (without EffectT).
   -- Passing EffectT through would cause cross-language calls to generate
@@ -1259,7 +1272,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (DoBlo
   let innerT = case t of EffectT _ inner -> inner; _ -> t
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
   let e = PolyDoBlock (Idx cidx t) x'
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x)) = do
   let innerType = unapplyCoercion coercion t
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
@@ -1291,11 +1304,11 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (Intri
   listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
   let mapFunT = FunT [funcT, listT] t
       e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP mapSrc)) [funcExpr, listExpr]
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
   let e = PolyIntrinsic (Idx cidx t) intr xs'
-  return $ expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 
 -- Nullary source/pattern call (e.g., clockResNs :: {Int})
 expressPolyExpr
@@ -1305,20 +1318,15 @@ expressPolyExpr
   f@(AnnoS (Idx midx _) (Idx _ callLang, args) (ExeS _))
     | isLocal = do
         call <- expressPolyApp parentLang f []
-        return
-          . PolyManifold callLang midx (ManifoldFull (map unvalue args))
-          $ call
+        mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) call
     | otherwise = do
         call <- expressPolyApp callLang f []
-        return
-          . PolyManifold parentLang midx (ManifoldFull (map unvalue args))
-          . PolyReturn
-          . PolyApp
-            ( PolyRemoteInterface callLang pc [] (fromJust remote)
-                . PolyManifold callLang midx (ManifoldFull (map unvalue args))
-                $ call
-            )
-          $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) call
+        let remoteApp =
+              PolyReturn $ PolyApp
+                ( PolyRemoteInterface callLang pc [] (fromJust remote) innerWrap )
+                [PolyBndVar (A parentLang) i | Arg i _ <- args]
+        mkPolyManifold parentLang midx (ManifoldFull (map unvalue args)) remoteApp
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -1403,16 +1411,14 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (IntrinsicS _ _) = "IntrinsicS"
 
 expressContainer ::
-  Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> PolyExpr
+  Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> MorlocMonad PolyExpr
 expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
-  | parentLang /= lang =
-      PolyApp
-        ( PolyRemoteInterface lang pc [i | Arg i _ <- args] ForeignCall
-            . PolyManifold lang midx (ManifoldFull (map unvalue args))
-            $ wrapReturn e
-        )
-        $ [PolyBndVar (A parentLang) i | Arg i _ <- args]
-  | otherwise = e
+  | parentLang /= lang = do
+      innerWrap <- mkPolyManifold lang midx (ManifoldFull (map unvalue args)) (wrapReturn e)
+      return $ PolyApp
+        ( PolyRemoteInterface lang pc [i | Arg i _ <- args] ForeignCall innerWrap )
+        [PolyBndVar (A parentLang) i | Arg i _ <- args]
+  | otherwise = return e
   where
     -- Push PolyReturn through PolyLet to the tail. Skip wrap if the tail
     -- is already a PolyReturn or a PolyManifold (whose own body produces a
@@ -1420,7 +1426,7 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
     -- `return(return(...))` in generated pools.
     wrapReturn (PolyLet i e1 e2) = PolyLet i e1 (wrapReturn e2)
     wrapReturn r@(PolyReturn _) = r
-    wrapReturn r@(PolyManifold _ _ _ _) = r
+    wrapReturn r@(PolyManifold _ _ _ _ _) = r
     wrapReturn x = PolyReturn x
 
 unvalue :: Arg a -> Arg None
@@ -1435,7 +1441,7 @@ If no PolyRemoteInterface is found, falls back to wrapping in PolyEval.
 pushForceIntoRemote :: Indexed Type -> PolyExpr -> PolyExpr
 pushForceIntoRemote t = go
   where
-    go (PolyManifold l m f e) = PolyManifold l m f (go e)
+    go (PolyManifold l m f k e) = PolyManifold l m f k (go e)
     go (PolyReturn e) = PolyReturn (go e)
     go (PolyLet i e1 e2) = PolyLet i e1 (go e2)
     go (PolyApp (PolyRemoteInterface lang _ args remote callee) xs) =
@@ -1443,7 +1449,7 @@ pushForceIntoRemote t = go
     go e = PolyEval t e -- fallback for local expressions
 
     -- Strip EffectT from the function's return type inside the callee manifold
-    stripThunkReturn (PolyManifold l m f body) = PolyManifold l m f (stripInBody body)
+    stripThunkReturn (PolyManifold l m f k body) = PolyManifold l m f k (stripInBody body)
     stripThunkReturn e = stripInBody e
 
     stripInBody (PolyReturn e) = PolyReturn (stripInExe e)

@@ -60,6 +60,34 @@ morloc_foreign_call <- function(...) {
   .orig_foreign_call(...)
 }
 
+# Wrap a dispatch callable to emit start/done lines on stderr. Applied at
+# codegen for manifolds whose source binding had `log: true`. Defined before
+# the manifolds section so the codegen-emitted rebinding lines (which run
+# at source-load time, right after the manifold defs) can reference it.
+.mlc_log <- function(label, fn) {
+  # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
+  # rebinding pattern `mN <- .mlc_log("X", mN)` reassigns the global mN to
+  # this wrapper; without force(), R's lazy promise for `fn` only resolves
+  # when first used inside the wrapper, by which point mN points at the
+  # wrapper itself -- the wrapper calls itself, infinite recursion.
+  force(label)
+  force(fn)
+  function(...) {
+    t0 <- Sys.time()
+    cat(sprintf("[morloc] %s: start\n", label), file = stderr())
+    tryCatch({
+      r <- fn(...)
+      dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+      cat(sprintf("[morloc] %s: done in %.3fs\n", label, dt), file = stderr())
+      r
+    }, error = function(e) {
+      dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+      cat(sprintf("[morloc] %s: FAILED after %.3fs\n", label, dt), file = stderr())
+      stop(e)
+    })
+  }
+}
+
 # AUTO include manifolds start
 # <<<BREAK>>>
 # AUTO include manifolds end

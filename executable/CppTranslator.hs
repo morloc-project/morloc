@@ -288,6 +288,10 @@ data CppTranslatorState = CppTranslatorState
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
+  , translatorLogLabels :: Map.Map Int Text
+  -- ^ (manifold-id -> log label) for @log: true@ manifolds. Wrapping at
+  -- the definition site (not the dispatch table) catches inner manifolds
+  -- referenced by symbol (@std::bind(m1043, _1)@) that can't be rebound.
   , translatorSchemas :: Map.Map Text Int
   -- The merged C++ concrete scope (the same scope @pairEval@ consults).
   -- 'cppTypeOf' uses it as ground truth to distinguish two cases that
@@ -312,6 +316,7 @@ instance Defaultable CppTranslatorState where
       , translatorRemoteManifoldSet = Set.empty
       , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
       , translatorEffectLabels = Map.empty
+      , translatorLogLabels = Map.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
       }
@@ -374,10 +379,14 @@ translate srcs es = do
   -- `-I/abs/src` because the `src/` prefix was duplicated.
   (srcs', _, _) <- handleFlagsAndPaths srcs
 
+  labels <-
+    collectLogLabels <$> MM.gets stateManifoldConfig
+
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
         { translatorRecmap = recmap
         , translatorEffectLabels = effectMap
+        , translatorLogLabels = labels
         , translatorCScope = mergedCppScope
         }
       code = CMS.evalState (makeCppCode srcs' es universalScopeMap scopeMap) translatorState
@@ -401,7 +410,7 @@ makeCppCode ::
   GMap Int MVar (Map.Map Lang Scope) ->
   CppTranslator MDoc
 makeCppCode srcs es univeralScopeMap scopeMap = do
-  -- ([MDoc], [MDoc])
+  labels <- CMS.gets translatorLogLabels
   (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
   -- write include statements for sources
@@ -413,7 +422,7 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
   -- build the program (translates each manifold tree)
-  program <- buildProgramM includeDocs es translateSegment getCppSchemaTable
+  program <- buildProgramM labels includeDocs es translateSegment getCppSchemaTable
 
   -- create and return complete pool script
   return $ CP.printProgram serializationCode signatures program
@@ -683,7 +692,40 @@ PROPAGATE_ERROR(errmsg)|]
                           ]
                      in block 4 "catch (const std::exception& e)" throwStatement
                   | otherwise = block 4 "catch (...)" "throw;"
-            return . Just . block 4 decl . vsep $ [tryBody <+> catchBody]
+                innerBlock = tryBody <+> catchBody
+            -- Wrap labeled manifolds with a chrono start/done shim. Wrapping at
+            -- the definition site (rather than the dispatch table) is required
+            -- because inner manifolds are referenced by symbol (std::bind) and
+            -- can't be rebound after definition. The IIFE captures the body's
+            -- `return X;` so the wrap can log after the result is computed.
+            -- The foreign-callee side is skipped: the caller pool already
+            -- wraps the cross-pool call and includes the socket round-trip.
+            let bodyDoc = case Map.lookup callIndex (translatorLogLabels state) of
+                  Just label | not (isForeignCalleeForm headForm) ->
+                    let q = dquotes (pretty label)
+                        startLine = [idoc|std::cerr << "[morloc] " << #{q} << ": start\n" << std::flush;|]
+                        dtDecl = "std::chrono::duration<double> __mlc_dt = std::chrono::steady_clock::now() - __mlc_t0;"
+                        doneLine = [idoc|std::cerr << "[morloc] " << #{q} << ": done in " << __mlc_dt.count() << "s\n";|]
+                        failedLine = [idoc|std::cerr << "[morloc] " << #{q} << ": FAILED after " << __mlc_dt.count() << "s\n";|]
+                        innerLambda = "[&]()" <> line <> "{" <> nest 4 (line <> innerBlock) <> line <> "}()"
+                        outerTry = block 4 "try" $ vsep
+                          [ "auto __mlc_result =" <+> innerLambda <> ";"
+                          , dtDecl
+                          , doneLine
+                          , "return __mlc_result;"
+                          ]
+                        outerCatch = block 4 "catch (...)" $ vsep
+                          [ dtDecl
+                          , failedLine
+                          , "throw;"
+                          ]
+                     in vsep
+                          [ "auto __mlc_t0 = std::chrono::steady_clock::now();"
+                          , startLine
+                          , outerTry <+> outerCatch
+                          ]
+                  _ -> innerBlock
+            return . Just . block 4 decl $ bodyDoc
     , lcMakeLambda = \mname contextArgs boundArgs ->
         let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
          in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]

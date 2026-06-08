@@ -41,7 +41,7 @@ segmentExpr
       callingType
       cargs
       remoteCall
-      e@(PolyManifold _ m (ManifoldFull foreignArgs) _)
+      e@(PolyManifold _ m (ManifoldFull foreignArgs) _ _)
     ) = do
     MM.sayVVV $
       "segmentExpr PolyRemoteInterface PolyManifold m"
@@ -79,9 +79,9 @@ segmentExpr m _ (PolyRemoteInterface lang callingType args remoteCall e) = do
       localFun = MonoApp (MonoPoolCall callingType m socket remoteCall [Arg i None | i <- args]) es'
 
   return (foreignHead : ms, (Nothing, localFun))
-segmentExpr _ _ (PolyManifold lang m form e) = do
+segmentExpr _ _ (PolyManifold lang m form kind e) = do
   (ms, (_, e')) <- segmentExpr m (abilist const const form) e
-  return (ms, (Just lang, MonoManifold m form e'))
+  return (ms, (Just lang, MonoManifold m form kind e'))
 segmentExpr m args (PolyApp e es) = do
   (ms, (lang, e')) <- segmentExpr m args e
   (mss, es') <- mapM (segmentExpr m args) es |>> unzip

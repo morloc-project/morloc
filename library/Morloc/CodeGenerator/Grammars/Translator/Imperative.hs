@@ -59,6 +59,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -66,9 +68,11 @@ import Morloc.CodeGenerator.Grammars.Common
   ( DispatchEntry (..)
   , PoolDocs (..)
   , argNamer
+  , collectManifoldIds
   , extractLocalDispatch
   , extractRemoteDispatch
   , helperNamer
+  , isForeignCalleeForm
   , manNamer
   , mergePoolDocs
   , nvarNamer
@@ -207,28 +211,42 @@ data IProgram = IProgram
   , ipLocalDispatch :: [DispatchEntry]
   , ipRemoteDispatch :: [DispatchEntry]
   , ipSchemaTable :: [Text]  -- ordered list of schema strings; index = schema ID
+  , ipLogLabels :: Map.Map Int Text
+    -- ^ (manifold-id -> log label) for @log: true@ manifolds. Rebinding
+    -- (not dispatch-table wrapping) is needed so partials passed into
+    -- higher-order stdlib functions also log.
   }
   deriving (Generic)
 
 instance Binary IProgram
 
 -- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
-buildProgram :: [MDoc] -> [MDoc] -> [SerialManifold] -> [Text] -> IProgram
-buildProgram sources manifolds es schemas =
-  IProgram
-    { ipSources = map render sources
-    , ipManifolds = map render manifolds
-    , ipLocalDispatch = extractLocalDispatch es
-    , ipRemoteDispatch = extractRemoteDispatch es
-    , ipSchemaTable = schemas
-    }
+--
+-- Foreign-callee midxes are stripped from the label map: a cross-pool labeled
+-- call exists once in each pool, and the caller's wrap already measures the
+-- full call (socket round-trip included). Wrapping the callee would double-count.
+buildProgram :: Map.Map Int Text -> [MDoc] -> [MDoc] -> [SerialManifold] -> [Text] -> IProgram
+buildProgram labels sources manifolds es schemas =
+  let definedIds = collectManifoldIds es
+      foreignCalleeIds =
+        Set.fromList [i | SerialManifold i _ _ f _ <- es, isForeignCalleeForm (Just f)]
+      labels' = Map.restrictKeys labels definedIds
+                  `Map.withoutKeys` foreignCalleeIds
+   in IProgram
+        { ipSources = map render sources
+        , ipManifolds = map render manifolds
+        , ipLocalDispatch = extractLocalDispatch labels' es
+        , ipRemoteDispatch = extractRemoteDispatch labels' es
+        , ipSchemaTable = schemas
+        , ipLogLabels = labels'
+        }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
-buildProgramM :: (Monad m) => [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m [Text] -> m IProgram
-buildProgramM sources es translateSeg getSchemas = do
+buildProgramM :: (Monad m) => Map.Map Int Text -> [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m [Text] -> m IProgram
+buildProgramM labels sources es translateSeg getSchemas = do
   manifolds <- mapM translateSeg es
   schemas <- getSchemas
-  return $ buildProgram sources manifolds es schemas
+  return $ buildProgram labels sources manifolds es schemas
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig

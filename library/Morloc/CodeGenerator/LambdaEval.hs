@@ -17,6 +17,8 @@ module Morloc.CodeGenerator.LambdaEval
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
+import Control.Monad (void)
 
 -- {- | Remove lambdas introduced through substitution
 --
@@ -112,10 +114,16 @@ import Morloc.CodeGenerator.Namespace
 applyLambdas ::
   AnnoS (Indexed Type) One a ->
   MorlocMonad (AnnoS (Indexed Type) One a)
--- eliminate empty lambdas
-applyLambdas (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) = applyLambdas $ AnnoS g1 c2 e
--- eliminate empty applications
-applyLambdas (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) = applyLambdas $ AnnoS g1 c2 e
+-- Beta-reduce empty lambdas and empty applications. The discarded head
+-- AnnoS may carry a user label (e.g. a labeled pointfree reference like
+-- @big:sum@ whose body was eta-expanded by typecheck); transfer the
+-- label to the surviving outer index so codegen still sees it.
+applyLambdas (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
+  void (propagateManifoldLabel g1Idx lamIdx)
+  applyLambdas $ AnnoS g1 c2 e
+applyLambdas (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
+  void (propagateManifoldLabel g1Idx headIdx)
+  applyLambdas $ AnnoS g1 c2 e
 -- Push an application through a let in function position. A let-expression
 -- whose body evaluates to a function (e.g. a top-level binding written as
 -- `f = let v = ... in <function>`) ends up in function position when f is

@@ -120,6 +120,8 @@ data ManifoldConfig = ManifoldConfig
   { manifoldConfigCache :: Maybe Bool
   , manifoldConfigBenchmark :: Maybe Bool
   , manifoldConfigRemote :: Maybe RemoteResources
+  , manifoldConfigLog :: Maybe Bool
+  , manifoldConfigLabel :: Maybe Text
   }
   deriving (Show, Ord, Eq, Generic)
 
@@ -499,6 +501,8 @@ instance Defaultable ManifoldConfig where
       { manifoldConfigCache = Just False
       , manifoldConfigBenchmark = Just False
       , manifoldConfigRemote = Nothing
+      , manifoldConfigLog = Just False
+      , manifoldConfigLabel = Nothing
       }
 
 instance FromJSON ModuleConfig where

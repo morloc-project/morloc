@@ -107,7 +107,8 @@ translateBuiltin lang desc srcs es = do
         docs <- mapM (translateSegment desc srcNamer) es
         tbl <- getSchemaTable
         return (docs, tbl)
-      program = buildProgram allSources mDocs es schemas
+  labels <- collectLogLabels <$> gets stateManifoldConfig
+  let program = buildProgram labels allSources mDocs es schemas
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -154,7 +155,8 @@ translateExternal cmd lang desc srcs es = do
         docs <- mapM (translateSegment desc srcNamer) es
         tbl <- getSchemaTable
         return (docs, tbl)
-      program = buildProgram includeDocs mDocs es schemas
+  labels <- collectLogLabels <$> gets stateManifoldConfig
+  let program = buildProgram labels includeDocs mDocs es schemas
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -839,9 +841,26 @@ printProgram desc prog =
   where
     sections =
       [ vsep (map pretty (ipSources prog) ++ [schemaTableInit])
-      , vsep (map pretty (ipManifolds prog))
+      , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
       ]
+
+    -- Rebind each labeled manifold function name to a logging shim. Placed
+    -- immediately after the manifold definitions so any later reference
+    -- (other manifolds calling this one, the dispatch table, partials
+    -- passed into higher-order stdlib functions) resolves to the wrapped
+    -- version. The wrap template comes from 'ldLogWrap'; empty means
+    -- the language opts out (no logging emitted even if labels are set).
+    logRebindings :: [MDoc]
+    logRebindings
+      | T.null (ldLogWrap desc) = []
+      | otherwise =
+          [ pretty $
+              substituteT
+                (ldLogWrap desc)
+                [("name", render (manNamer i)), ("label", lbl)]
+          | (i, lbl) <- Map.toAscList (ipLogLabels prog)
+          ]
 
     schemaTableInit
       | null (ipSchemaTable prog) = mempty
@@ -854,21 +873,16 @@ printProgram desc prog =
 
     templateDispatch = vsep [localD, remoteD]
       where
+        renderEntry :: Text -> DispatchEntry -> MDoc
+        renderEntry entryTmpl (DispatchEntry i _ _) =
+          pretty $
+            substituteT entryTmpl [("mid", T.pack (show i)), ("name", render (manNamer i))]
+
         localD =
           let hdr = ldDispatchLocalHeader desc
               entryTmpl = ldDispatchLocalEntry desc
               ftr = ldDispatchLocalFooter desc
-              entries =
-                map
-                  ( \(DispatchEntry i _) ->
-                      pretty $
-                        substituteT
-                          entryTmpl
-                          [ ("mid", T.pack (show i))
-                          , ("name", render (manNamer i))
-                          ]
-                  )
-                  (ipLocalDispatch prog)
+              entries = map (renderEntry entryTmpl) (ipLocalDispatch prog)
            in if T.null hdr && T.null entryTmpl
                 then mempty
                 else
@@ -884,17 +898,7 @@ printProgram desc prog =
           let hdr = ldDispatchRemoteHeader desc
               entryTmpl = ldDispatchRemoteEntry desc
               ftr = ldDispatchRemoteFooter desc
-              entries =
-                map
-                  ( \(DispatchEntry i _) ->
-                      pretty $
-                        substituteT
-                          entryTmpl
-                          [ ("mid", T.pack (show i))
-                          , ("name", render (manNamer i))
-                          ]
-                  )
-                  (ipRemoteDispatch prog)
+              entries = map (renderEntry entryTmpl) (ipRemoteDispatch prog)
            in if T.null hdr && T.null entryTmpl
                 then mempty
                 else
