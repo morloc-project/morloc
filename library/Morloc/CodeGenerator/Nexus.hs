@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
@@ -942,40 +943,46 @@ litSchemaStr IntX = "j"
 -- Manifest builder
 -- ======================================================================
 
-buildManifest ::
-  Config ->
-  LangRegistry ->
-  String ->
-  String ->
-  Int ->
-  [(Lang, Socket)] ->
-  [FData] ->
-  [GastData] ->
-  (Lang -> Int) ->
-  Map.Map Int Text ->
-  Map.Map Text [Text] ->
-  [Text] ->
-  [[Text]] ->
-  Bool ->
-  Maybe Int64 ->
-  Bool ->
-  Maybe Path ->
-  Maybe RenderedRunLog ->
-  Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck inlineSize noShm tmpdir runLog =
+-- | Bag of inputs to 'buildManifest'. New top-level manifest fields
+-- get a record field here and a corresponding emission in the JSON
+-- object below; the call site changes once and the function arity
+-- stays at one.
+data ManifestInputs = ManifestInputs
+  { miConfig              :: !Config
+  , miRegistry            :: !LangRegistry
+  , miProgramName         :: !String
+  , miBuildDir            :: !String
+  , miBuildTime           :: !Int
+  , miDaemonSets          :: ![(Lang, Socket)]
+  , miFData               :: ![FData]
+  , miGasts               :: ![GastData]
+  , miLangToPool          :: !(Lang -> Int)
+  , miIndexToGroup        :: !(Map.Map Int Text)
+  , miGroupDescs          :: !(Map.Map Text [Text])
+  , miModuleDoc           :: ![Text]
+  , miModuleEpilogues     :: ![[Text]]
+  , miUnsafeSkipNullCheck :: !Bool
+  , miInlineSize          :: !(Maybe Int64)
+  , miNoShm               :: !Bool
+  , miTmpdir              :: !(Maybe Path)
+  , miRunLog              :: !(Maybe RenderedRunLog)
+  }
+
+buildManifest :: ManifestInputs -> Text
+buildManifest ManifestInputs{..} =
   jsonObj
-    [ ("name", jsonStr (MT.pack programName))
+    [ ("name", jsonStr (MT.pack miProgramName))
     , ("build", buildJson)
-    , ("pools", jsonArr (map poolJson daemonSets))
-    , ("commands", jsonArr (map remoteCmdJson fdata ++ map pureCmdJson gasts))
-    , ("groups", jsonArr (map groupJson (Map.toList groupDescs)))
-    , ("desc", jsonStrArr moduleDoc)
-    , ("epilogues", jsonArr (map jsonStrArr moduleEpilogues))
-    , ("unsafe_skip_null_check", jsonBool unsafeSkipNullCheck)
-    , ("inline_size", maybe jsonNull jsonInt64 inlineSize)
-    , ("no_shm", jsonBool noShm)
-    , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) tmpdir)
-    , ("run_log", runLogJson runLog)
+    , ("pools", jsonArr (map poolJson miDaemonSets))
+    , ("commands", jsonArr (map remoteCmdJson miFData ++ map pureCmdJson miGasts))
+    , ("groups", jsonArr (map groupJson (Map.toList miGroupDescs)))
+    , ("desc", jsonStrArr miModuleDoc)
+    , ("epilogues", jsonArr (map jsonStrArr miModuleEpilogues))
+    , ("unsafe_skip_null_check", jsonBool miUnsafeSkipNullCheck)
+    , ("inline_size", maybe jsonNull jsonInt64 miInlineSize)
+    , ("no_shm", jsonBool miNoShm)
+    , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) miTmpdir)
+    , ("run_log", runLogJson miRunLog)
     , ("metadata", metadataEmpty)
     ]
   where
@@ -985,8 +992,8 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     buildJson :: Text
     buildJson =
       jsonObj
-        [ ("path", jsonStr (MT.pack buildDir))
-        , ("time", jsonInt buildTime)
+        [ ("path", jsonStr (MT.pack miBuildDir))
+        , ("time", jsonInt miBuildTime)
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
         ]
 
@@ -1004,18 +1011,18 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         -- so a source edit invalidates stale entries.
         , ("pool_hash", jsonStr ("<MORLOC_POOL_HASH:" <> ML.showLangName lang <> ">"))
         , ("allow_string_null",
-            jsonBool (LR.registryAllowStringNull registry (ML.langName lang)))
+            jsonBool (LR.registryAllowStringNull miRegistry (ML.langName lang)))
         , ("metadata", metadataEmpty)
         ]
 
     makeExecArgs :: Lang -> [String]
     makeExecArgs lang =
       let name = ML.langName lang
-          isCompiled = LR.registryIsCompiled registry name
-          runCmd = case Map.lookup name (MC.configLangOverrides config) of
+          isCompiled = LR.registryIsCompiled miRegistry name
+          runCmd = case Map.lookup name (MC.configLangOverrides miConfig) of
             Just cmd -> map MT.unpack cmd
-            Nothing -> map MT.unpack (LR.registryRunCommand registry name)
-          poolExe = buildDir </> "pools" </> programName </> ML.makeExecutablePoolName lang
+            Nothing -> map MT.unpack (LR.registryRunCommand miRegistry name)
+          poolExe = miBuildDir </> "pools" </> miProgramName </> ML.makeExecutablePoolName lang
        in if isCompiled
             then [poolExe]
             else
@@ -1052,7 +1059,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     -- Look up by manifold ID rather than subcommand name, since the
     -- subcommand may be renamed via --' name: docstrings.
     cmdGroupField :: Int -> (Text, Text)
-    cmdGroupField mid = case Map.lookup mid indexToGroup of
+    cmdGroupField mid = case Map.lookup mid miIndexToGroup of
       Just gname -> ("group", jsonStr gname)
       Nothing -> ("group", jsonNull)
 
@@ -1062,8 +1069,8 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         [ ("name", jsonStr (fdataSubcommand fd))
         , ("type", jsonStr "remote")
         , ("mid", jsonInt (fdataMid fd))
-        , ("pool", jsonInt (langToPool (socketLang (fdataSocket fd))))
-        , ("needed_pools", jsonArr (map (jsonInt . langToPool . socketLang) (fdataSubSockets fd)))
+        , ("pool", jsonInt (miLangToPool (socketLang (fdataSocket fd))))
+        , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
@@ -1210,24 +1217,26 @@ generate cs rASTs = do
 
   let manifestJson =
         buildManifest
-          config
-          registry
-          programName
-          buildDir
-          buildTime
-          daemonSets
-          fdata
-          gasts
-          langToPoolIndex
-          indexToGroup
-          groupDescs
-          moduleDoc
-          moduleEpilogues
-          unsafeSkipNullCheck
-          inlineSize
-          noShm
-          tmpdir
-          runLog
+          ManifestInputs
+            { miConfig              = config
+            , miRegistry            = registry
+            , miProgramName         = programName
+            , miBuildDir            = buildDir
+            , miBuildTime           = buildTime
+            , miDaemonSets          = daemonSets
+            , miFData               = fdata
+            , miGasts               = gasts
+            , miLangToPool          = langToPoolIndex
+            , miIndexToGroup        = indexToGroup
+            , miGroupDescs          = groupDescs
+            , miModuleDoc           = moduleDoc
+            , miModuleEpilogues     = moduleEpilogues
+            , miUnsafeSkipNullCheck = unsafeSkipNullCheck
+            , miInlineSize          = inlineSize
+            , miNoShm               = noShm
+            , miTmpdir              = tmpdir
+            , miRunLog              = runLog
+            }
       wrapperScript = makeWrapperScript manifestJson
 
   return $
