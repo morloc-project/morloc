@@ -15,6 +15,7 @@ parameters are fully instantiated.
 -}
 module Morloc.CodeGenerator.Express
   ( express
+  , addCacheWraps
   ) where
 
 import qualified Data.Set as Set
@@ -76,16 +77,24 @@ setManifoldConfig ::
   MorlocMonad Bool
 setManifoldConfig midx (AnnoS (Idx outerIdx _) _ inner) = do
   outerLinked <- propagateManifoldLabel midx outerIdx
-  if outerLinked then return True
-  else case inner of
-    AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _ -> propagateManifoldLabel midx fidx
-    AppS (AnnoS (Idx fidx _) _ (ExeS _)) _ -> propagateManifoldLabel midx fidx
-    AppS e _ -> setManifoldConfig midx e
-    LamS _ e -> setManifoldConfig midx e
-    DoBlockS e -> setManifoldConfig midx e
-    EvalS e -> setManifoldConfig midx e
-    CoerceS _ e -> setManifoldConfig midx e
-    _ -> return False
+  if outerLinked
+    then return True
+    else case inner of
+      -- Spine walk: a labeled call site usually has its label on the
+      -- head VarE/ExeS or on a transparent wrapper (LamS, VarS, etc.)
+      -- enclosing it. Do NOT walk into compound spines (TupS, IfS,
+      -- LstS, NamS, LetS) -- a label found inside those belongs to
+      -- a nested call site that has its own surrounding manifold,
+      -- and copying it here would emit the wrap twice.
+      AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _ -> propagateManifoldLabel midx fidx
+      AppS (AnnoS (Idx fidx _) _ (ExeS _)) _ -> propagateManifoldLabel midx fidx
+      AppS e _ -> setManifoldConfig midx e
+      LamS _ e -> setManifoldConfig midx e
+      DoBlockS e -> setManifoldConfig midx e
+      EvalS e -> setManifoldConfig midx e
+      CoerceS _ e -> setManifoldConfig midx e
+      VarS _ (One inner_anno) -> setManifoldConfig midx inner_anno
+      _ -> return False
 
 propagateScope :: Int -> Int -> MorlocMonad ()
 propagateScope calleeIdx appIdx = do
@@ -104,6 +113,110 @@ express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
     extractReturnEffects (FunT _ (EffectT effs _)) = effs
     extractReturnEffects (EffectT effs _) = effs
     extractReturnEffects _ = Set.empty
+
+-- | Post-pass: walk every 'PolyHead' and wrap the body of any
+-- 'PolyManifold' whose midx is configured @cache: true@ with a
+-- 'PolyCacheBody'. The wrap fires once per call into the labeled
+-- manifold -- regardless of whether the call originated from a
+-- socket dispatch or from another manifold in the same pool -- so a
+-- single insertion point covers both observability paths.
+--
+-- The cache decision lives entirely in 'stateManifoldConfig'; no
+-- per-language code generator needs to re-check the YAML or thread
+-- labels through its own pipeline. Centralising it here also makes
+-- the dead-code analyser happy: the 'PolyCacheBody' constructor is
+-- the only producer, and downstream passes only need a single new
+-- case per IR transformation.
+--
+-- Run after 'express' and before 'segment' so the new node propagates
+-- through monomorphisation and serialization alongside the existing
+-- IR.
+addCacheWraps :: PolyHead -> MorlocMonad PolyHead
+addCacheWraps (PolyHead lang midx args body) = do
+  body' <- cacheWrapExpr body
+  -- The PolyHead's own midx can carry @cache: true@ for point-free
+  -- exports (e.g. @foo = a:sum@), where 'expressCore' emits a bare
+  -- @PolyApp@ body with no enclosing 'PolyManifold' for the inner
+  -- walker to match. Detect that case and wrap inside the
+  -- 'PolyReturn'. If 'cacheWrapExpr' already produced a
+  -- 'PolyCacheBody' for this midx (because the body did contain a
+  -- 'PolyManifold' at the same midx) we skip the head wrap to
+  -- avoid double-wrapping.
+  mLbl <- cacheLabelOfMidx midx
+  let body'' = case mLbl of
+        Just lbl
+          | not (hasCacheWrapAt midx body') ->
+              wrapHeadBody lbl midx args body'
+        _ -> body'
+  return $ PolyHead lang midx args body''
+  where
+    wrapHeadBody :: Text -> Int -> [Arg None] -> PolyExpr -> PolyExpr
+    wrapHeadBody lbl m as e = PolyCacheBody lbl m as e
+
+    hasCacheWrapAt :: Int -> PolyExpr -> Bool
+    hasCacheWrapAt m (PolyCacheBody _ m' _ _) | m == m' = True
+    hasCacheWrapAt m (PolyCacheBody _ _ _ inner) = hasCacheWrapAt m inner
+    hasCacheWrapAt m (PolyManifold _ _ _ _ inner) = hasCacheWrapAt m inner
+    hasCacheWrapAt m (PolyReturn e) = hasCacheWrapAt m e
+    hasCacheWrapAt m (PolyLet _ e1 e2) = hasCacheWrapAt m e1 || hasCacheWrapAt m e2
+    hasCacheWrapAt m (PolyApp h xs) = hasCacheWrapAt m h || any (hasCacheWrapAt m) xs
+    hasCacheWrapAt m (PolyDoBlock _ e) = hasCacheWrapAt m e
+    hasCacheWrapAt m (PolyEval _ e) = hasCacheWrapAt m e
+    hasCacheWrapAt m (PolyCoerce _ _ e) = hasCacheWrapAt m e
+    hasCacheWrapAt m (PolyIf a b c) = hasCacheWrapAt m a || hasCacheWrapAt m b || hasCacheWrapAt m c
+    hasCacheWrapAt _ _ = False
+
+cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
+cacheWrapExpr (PolyManifold l m form k inner) = do
+  inner' <- cacheWrapExpr inner
+  mLbl <- cacheLabelOfMidx m
+  let argsList = collectArgs form
+  return $ case mLbl of
+    Just lbl ->
+      PolyManifold l m form k (PolyCacheBody lbl m argsList inner')
+    Nothing -> PolyManifold l m form k inner'
+cacheWrapExpr (PolyApp head args) =
+  PolyApp <$> cacheWrapExpr head <*> mapM cacheWrapExpr args
+cacheWrapExpr (PolyCacheBody lbl m args body) =
+  PolyCacheBody lbl m args <$> cacheWrapExpr body
+cacheWrapExpr (PolyLet i e1 e2) =
+  PolyLet i <$> cacheWrapExpr e1 <*> cacheWrapExpr e2
+cacheWrapExpr (PolyReturn x) = PolyReturn <$> cacheWrapExpr x
+cacheWrapExpr (PolyIf c t' e) =
+  PolyIf <$> cacheWrapExpr c <*> cacheWrapExpr t' <*> cacheWrapExpr e
+cacheWrapExpr (PolyDoBlock ti x) = PolyDoBlock ti <$> cacheWrapExpr x
+cacheWrapExpr (PolyEval ti x) = PolyEval ti <$> cacheWrapExpr x
+cacheWrapExpr (PolyCoerce c ti x) = PolyCoerce c ti <$> cacheWrapExpr x
+cacheWrapExpr (PolyList v ts xs) = PolyList v ts <$> mapM cacheWrapExpr xs
+cacheWrapExpr (PolyTuple v xs) =
+  PolyTuple v <$> mapM (\(t, x) -> (,) t <$> cacheWrapExpr x) xs
+cacheWrapExpr (PolyRecord o v ps rs) =
+  PolyRecord o v ps <$>
+    mapM (\(k, (t, x)) -> (,) k . (,) t <$> cacheWrapExpr x) rs
+cacheWrapExpr (PolyIntrinsic ti intr xs) =
+  PolyIntrinsic ti intr <$> mapM cacheWrapExpr xs
+cacheWrapExpr (PolyRemoteInterface l ti is rf inner) =
+  PolyRemoteInterface l ti is rf <$> cacheWrapExpr inner
+cacheWrapExpr leaf = return leaf
+
+-- | Look up @midx@ in 'stateManifoldConfig'; return its label group
+-- when the manifold has @cache: true@ AND a label, otherwise
+-- 'Nothing'. Everything cache-related lives in this map; nothing
+-- else needs to know about it.
+cacheLabelOfMidx :: Int -> MorlocMonad (Maybe Text)
+cacheLabelOfMidx midx = do
+  mcfg <- MM.gets (Map.lookup midx . stateManifoldConfig)
+  return $ case mcfg of
+    Just cfg
+      | manifoldConfigCache cfg == Just True
+      , Just lbl <- manifoldConfigLabel cfg ->
+          Just lbl
+    _ -> Nothing
+
+-- | Extract the manifold's bound args as a flat @[Arg None]@ list so
+-- the cache wrap can reference them by name at codegen.
+collectArgs :: ManifoldForm None (Maybe Type) -> [Arg None]
+collectArgs = abilist (\i _ -> Arg i None) (\i _ -> Arg i None)
 
 -- At the export boundary, thunks cannot be serialized. This function:
 --   1. Wraps thunk-typed args in PolyDoBlock so they are received as plain
@@ -130,6 +243,8 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyLet i e1 e2) = PolyLet i (goExpr ids e1) (goExpr ids e2)
     goExpr ids (PolyReturn e) = PolyReturn (goExpr ids e)
     goExpr ids (PolyApp e es) = PolyApp (goExpr ids e) (map (goExpr ids) es)
+    goExpr ids (PolyCacheBody lbl midx args e) =
+      PolyCacheBody lbl midx args (goExpr ids e)
     goExpr ids (PolyEval ti e) = PolyEval ti (goExpr ids e)
     goExpr ids (PolyDoBlock ti e) = PolyDoBlock ti (goExpr ids e)
     goExpr ids (PolyCoerce c ti e) = PolyCoerce c ti (goExpr ids e)

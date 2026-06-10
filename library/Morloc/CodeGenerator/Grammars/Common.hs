@@ -319,6 +319,7 @@ renameSE old new = go where
   go (AppPoolS t p args) = AppPoolS t (renamePoolCall old new p) (map goA args)
   go (AppRecS t m es) = AppRecS t m (map go es)
   go (AppForeignRecS t m s es) = AppForeignRecS t m s (map go es)
+  go (CacheBodyS t resSa lbl m args body) = CacheBodyS t resSa lbl m args (go body)
   go (ReturnS se) = ReturnS (go se)
   go (SerialLetS i se1 se2) = SerialLetS (ri i) (go se1) (go se2)
   go (NativeLetS i ne se) = NativeLetS (ri i) (renameNE old new ne) (go se)
@@ -412,6 +413,16 @@ invertSerialManifold sm0 =
       let serialExprs' = map unD serialExprs
           deps = concatMap getDeps serialExprs
       atomize (AppForeignRecS t mid socket serialExprs') deps
+    invertSerialExprM (CacheBodyS_ t resSa lbl mid args (D body lets)) =
+      -- KEEP the body's let-bindings INSIDE the cache wrap by
+      -- weaving them around the body before returning. If we used
+      -- 'atomize' instead, the lets (carrying the deserialization +
+      -- computation shared by every call of this manifold) would be
+      -- hoisted to the enclosing scope and run unconditionally,
+      -- defeating the cache hit's purpose. 'weave' produces the
+      -- correct let nesting (head of list = innermost = earliest in
+      -- Python statement order).
+      return $ D (CacheBodyS t resSa lbl mid args (weave (D body lets))) []
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
     invertNativeExprM ::

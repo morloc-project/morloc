@@ -1,0 +1,17 @@
+module main (fooP, fooR, fooC)
+
+import root-py
+import root-cpp
+import root-r
+
+sum :: [Real] -> Real
+sum = fold (+) 0.0
+
+fooP :: [[Real]] -> [Real]
+fooP xs = idpy (a:map b:sum xs)
+
+fooR :: [[Real]] -> [Real]
+fooR xs = idr (a:map b:sum xs)
+
+fooC :: [[Real]] -> [Real]
+fooC xs = idcpp (a:map b:sum xs)

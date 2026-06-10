@@ -1051,6 +1051,69 @@ uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 bool del_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 
+// Per-pool source fingerprint, parsed once from MORLOC_POOL_HASH at
+// first call and cached. Returns 0 when the env var is absent. The
+// pool's cache wrap mixes this into every cache key so editing the
+// morloc source (or any declared hash-include file) invalidates every
+// stale entry from this pool.
+uint64_t morloc_pool_hash(void);
+
+// Resolve and create the per-label cache directory beneath the unified
+// base ($MORLOC_CACHE_BASE, $XDG_CACHE_HOME/morloc/cache, or
+// ~/.cache/morloc/cache by default). A NULL or empty `label` resolves
+// to a synthetic `_unlabeled` subdirectory. Returns a heap-allocated
+// path string the caller frees via libc::free, NULL on failure.
+char* morloc_cache_path(const char* label, ERRMSG);
+
+// Counters consumed by the run summary (Stage 4). Each event is
+// independent: a `record_miss` followed by a successful compute and
+// store fires `record_store` as well. NULL out-pointers in
+// `morloc_cache_stats` are ignored.
+void morloc_cache_record_hit(void);
+void morloc_cache_record_miss(void);
+void morloc_cache_record_store(void);
+void morloc_cache_stats(uint64_t* hits_out, uint64_t* misses_out, uint64_t* stores_out);
+
+// Compute the cache key from a manifold id and N byte slices, one per
+// argument's content (resolved through the schema so SHM-backed packets
+// hash their actual values, NEVER raw relptr bits). The seed chain
+// mixes in pool_hash (read once from MORLOC_POOL_HASH) so source edits
+// invalidate cache entries. Each `arg_schemas[i]` must be a non-null,
+// well-formed schema string for `arg_packets[i]`; on any null or
+// unparseable schema the function returns 0 and sets *errmsg.
+uint64_t morloc_cache_key_compute(
+    uint32_t midx,
+    const uint8_t* const* arg_packets,
+    const char* const* arg_schemas,
+    size_t n_args,
+    ERRMSG
+);
+
+// Look up a cached result packet under <label>/<key>.packet. Returns
+// heap bytes (caller frees with free()) and writes the byte length to
+// *size_out on hit. NULL on miss (not an error) or on I/O failure
+// (errmsg set). Does NOT call morloc_cache_record_hit() -- the wrap
+// records hits/misses explicitly so the dispatch-loop and call_cached
+// paths attribute their own results.
+uint8_t* morloc_cache_lookup(uint64_t key, const char* label, size_t* size_out, ERRMSG);
+
+// Store the value carried by a packet under <label>/<key>.packet,
+// materializing the packet to a self-contained inline-msgpack form
+// before writing so SHM-backed (PACKET_SOURCE_RPTR) and file-backed
+// (PACKET_SOURCE_FILE) payloads survive across processes. `schema_str`
+// must describe the packet payload; on schema-parse or
+// materialization failure the store fails and *errmsg is set. Atomic
+// write. Returns true on success. Does NOT call
+// morloc_cache_record_store().
+bool morloc_cache_store(
+    uint64_t key,
+    const char* label,
+    const uint8_t* data,
+    size_t size,
+    const char* schema_str,
+    ERRMSG
+);
+
 // ========================================================================
 // Section 22: Function declarations -- CLI / argument parsing
 // ========================================================================

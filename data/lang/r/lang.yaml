@@ -42,6 +42,7 @@ ldSerializeFn: "morloc_put_value"
 ldDeserializeFn: "morloc_get_value"
 ldReleasePacketFn: "morloc_release_packet_shm"
 ldIntrinsicPrefix: "morloc_"
+ldHelperVarPrefix: ".morloc_"
 
 # Foreign call
 ldForeignCallFn: "morloc_foreign_call"

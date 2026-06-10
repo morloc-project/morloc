@@ -377,7 +377,24 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           -- bound variable is unused) don't collide across inlinings.
           e2@(ExprI ci _) <- reindexExprI e
           (n', e') <- collectExprS n e2
+          -- The labeled call config 'Restructure.collectTags' parked at
+          -- the source VarE's idx gets propagated by reindexExprI's
+          -- copyState to @ci@, but the wrapping AnnoS here uses @gi0@
+          -- as its outer idx -- so without an extra copy from @ci@ to
+          -- @gi0@ the label config sits at an idx that no AnnoS in
+          -- the rAST references, leaving downstream codegen unable to
+          -- detect the labeled call (this manifests as @cache: true@
+          -- or @log: true@ silently failing on point-free bindings).
+          st <- MM.get
+          case Map.lookup ci (stateManifoldConfig st) of
+            Just cfg | hasLabel cfg ->
+              MM.modify (\s -> s {stateManifoldConfig = Map.insert gi0 cfg (stateManifoldConfig s)})
+            _ -> return ()
           return (n', AnnoS gi0 ci e')
+          where
+            hasLabel cfg = case manifoldConfigLabel cfg of
+              Just _ -> True
+              Nothing -> False
     f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
     f namer (TupE es) = statefulMapM collectAnnoS namer es |>> second TupS
     f namer (NamE rs) = do

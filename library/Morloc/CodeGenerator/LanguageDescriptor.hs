@@ -120,6 +120,11 @@ data LangDescriptor = LangDescriptor
   , ldReleasePacketFn :: !Text -- "morloc.release_packet_shm" or equivalent
   , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
     ldIntrinsicPrefix :: !Text -- "morloc." or "morloc_" or "MorlocRuntime."
+  , -- Prefix for codegen-emitted helper variable names. Used to keep
+    -- internal vars (cache wraps, log shims, etc.) out of any source
+    -- namespace a user might claim. Languages that forbid leading
+    -- underscore in identifiers (R) use a leading dot instead.
+    ldHelperVarPrefix :: !Text -- "__morloc_" for Python/C++, ".morloc_" for R
   , -- Foreign call template
     ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
@@ -276,6 +281,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldRealNaN" (Y.String "")
             . ins "ldIntLiteralSuffix" (Y.String "")
             . ins "ldIntrinsicPrefix" (Y.String "")
+            . ins "ldHelperVarPrefix" (Y.String "__morloc_")
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldReleasePacketFn" (Y.String "morloc.release_packet_shm")
             . ins "ldDictStyleRecords" (Y.Bool False)
@@ -360,6 +366,7 @@ defaultLangDescriptor name ext =
     , ldDeserializeFn = "morloc.get_value"
     , ldReleasePacketFn = "morloc.release_packet_shm"
     , ldIntrinsicPrefix = ""
+    , ldHelperVarPrefix = "__morloc_"
     , ldForeignCallFn = "morloc.foreign_call"
     , ldForeignCallIntSuffix = ""
     , ldIntLiteralSuffix = ""

@@ -47,6 +47,7 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
+  , serialAstToMsgpackSchema
   , shallowType
   )
 import Morloc.Data.Doc
@@ -592,6 +593,7 @@ cppLowerConfig =
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
          in [idoc|foreign_call#{tupled argList}|]
+    , lcCacheBody = cppCacheBody
     , lcRemoteCall = \socketFile mid res args -> do
         let resMem = pretty $ fromMaybe (-1) (remoteResourcesMemory res)
             resTime = pretty $ maybe (-1) unTimeInSeconds (remoteResourcesTime res)
@@ -796,6 +798,143 @@ serialize v s = do
       , poolPriorExprs = []
       , poolReturnFlag = False
       }
+
+-- | C++ cache wrap. Mirrors the Python/R generic version but emits
+-- C++ syntax and routes through the runtime's C ABI directly (the
+-- pool already links libmorloc.so). Native args are serialized via
+-- '_put_value' to packets first; serial args pass through. Schema
+-- strings are inlined as C string literals since each lcCacheBody
+-- call happens once at codegen time -- no need to thread them
+-- through a global table.
+cppCacheBody ::
+  SerialAST ->
+  Text ->
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  CppTranslator PoolDocs
+cppCacheBody resSa lbl midx args bodyPool = do
+  wrapIdx <- getCounter
+  let suffix = pretty wrapIdx
+      hp = "__morloc_"
+      keyVar = hp <> "ck_" <> suffix
+      cachedVar = hp <> "cd_" <> suffix
+      resultVar = hp <> "cr_" <> suffix
+      errVar = hp <> "ce_" <> suffix
+      sizeVar = hp <> "cs_" <> suffix
+      storeSizeVar = hp <> "css_" <> suffix
+      storeOkVar = hp <> "cok_" <> suffix
+      packetsVar = hp <> "cpk_" <> suffix
+      schemasVar = hp <> "csc_" <> suffix
+      labelLit = dquotes (pretty lbl)
+      n = length args
+      resSchema = render (serialAstToMsgpackSchema resSa)
+  -- Per-arg setup: serialize native bindings to packets, route serial
+  -- bindings through by name; both feed the packets array.
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      argSchemas = [s | (_, s, _) <- preparedArgs]
+      argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
+      packetsDecl = "const uint8_t*" <+> packetsVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", " argRefs <> ";"
+      schemasDecl = "const char*" <+> schemasVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", "
+          [dquotes (pretty (cppEscapeString s)) | s <- argSchemas]
+        <> ";"
+      errDecl = "char*" <+> errVar <+> "= nullptr;"
+      keyStmt = vsep
+        [ "uint64_t" <+> keyVar <+> "= morloc_cache_key_compute("
+            <> pretty midx <> ", " <> packetsVar <> ", " <> schemasVar
+            <> ", " <> pretty n <> ", &" <> errVar <> ");"
+        , "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+        ]
+      sizeDecl = "size_t" <+> sizeVar <+> "= 0;"
+      lookupStmt = vsep
+        [ "uint8_t*" <+> cachedVar <+> "= morloc_cache_lookup("
+            <> keyVar <> ", " <> labelLit <> ", &" <> sizeVar
+            <> ", &" <> errVar <> ");"
+        , "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+        ]
+      resultDecl = "uint8_t*" <+> resultVar <> ";"
+      hitLines = vsep
+        [ "morloc_cache_record_hit();"
+        , resultVar <+> "=" <+> cachedVar <> ";"
+        ]
+      missBodyLines = poolPriorLines bodyPool
+        ++ [ resultVar <+> "=" <+> poolExpr bodyPool <> ";"
+           , "size_t" <+> storeSizeVar <+> "= morloc_packet_size("
+               <> resultVar <> ", &" <> errVar <> ");"
+           , "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+           , "bool" <+> storeOkVar <+> "= morloc_cache_store("
+               <> keyVar <> ", " <> labelLit <> ", " <> resultVar
+               <> ", " <> storeSizeVar <> ", "
+               <> dquotes (pretty (cppEscapeString resSchema))
+               <> ", &" <> errVar <> ");"
+           , "if (!" <> storeOkVar <> ") {"
+           , indent 4 $ vsep
+               [ "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+               , "throw std::runtime_error(\"cache_store failed\");"
+               ]
+           , "}"
+           , "morloc_cache_record_store();"
+           ]
+      missLines = vsep ("morloc_cache_record_miss();" : missBodyLines)
+      ifStmt = vsep
+        [ "if (" <> cachedVar <+> "!= nullptr) {"
+        , indent 4 hitLines
+        , "} else {"
+        , indent 4 missLines
+        , "}"
+        ]
+      prior = argSetupLines
+        ++ [ errDecl
+           , packetsDecl
+           , schemasDecl
+           , keyStmt
+           , sizeDecl
+           , lookupStmt
+           , resultDecl
+           , ifStmt
+           ]
+  return $ PoolDocs
+    { poolExpr = resultVar
+    , poolPriorLines = prior
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | Serialize a single C++ cache arg. Native bindings are routed
+-- through '_put_value' into a temporary packet; serial bindings
+-- pass through by name. The returned schema text is the same schema
+-- that the surrounding wrap will register and inline.
+prepareCppCacheArg ::
+  Int ->
+  (Int, (Arg TypeM, SerialAST)) ->
+  CppTranslator (MDoc, Text, [MDoc])
+prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
+  let schemaStr = render (serialAstToMsgpackSchema sa)
+  case tm of
+    Native _ -> do
+      sid <- cppRegisterSchema schemaStr
+      let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
+          decl = "uint8_t*" <+> argVar <+> "= _put_value("
+            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]);"
+      return (argVar, schemaStr, [decl])
+    _ -> return (argNamer a, schemaStr, [])
+
+-- | Escape a string for a C++ string literal. Conservative: only
+-- handles characters the morloc msgpack-schema serializer emits
+-- (backslash, double-quote). Other ASCII passes through; non-ASCII
+-- is not produced by the schema serializer.
+cppEscapeString :: Text -> Text
+cppEscapeString = T.concatMap esc
+  where
+    esc '\\' = "\\\\"
+    esc '"' = "\\\""
+    esc c = T.singleton c
 
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])

@@ -86,6 +86,9 @@ segmentExpr m args (PolyApp e es) = do
   (ms, (lang, e')) <- segmentExpr m args e
   (mss, es') <- mapM (segmentExpr m args) es |>> unzip
   return (ms ++ concat mss, (lang, MonoApp e' (map snd es')))
+segmentExpr m args (PolyCacheBody lbl midx cargs e) = do
+  (ms, (lang, e')) <- segmentExpr m args e
+  return (ms, (lang, MonoCacheBody lbl midx cargs e'))
 segmentExpr m args (PolyLet i e1 e2) = do
   MM.sayVVV "segmentExpr PolyLet"
   (ms1, (_, e1')) <- segmentExpr m args e1

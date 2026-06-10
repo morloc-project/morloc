@@ -1235,6 +1235,184 @@ static PyObject* pybinding__log_emit(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+
+// ── cache bridge to libmorloc.so ─────────────────────────────────────────
+
+static PyObject* pybinding__pool_hash(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromUnsignedLongLong((unsigned long long)morloc_pool_hash());
+}
+
+static PyObject* pybinding__cache_path(PyObject* self, PyObject* args) {
+    const char* label;
+    if (!PyArg_ParseTuple(args, "z", &label)) {
+        return NULL;
+    }
+    char* errmsg = NULL;
+    char* path = morloc_cache_path(label, &errmsg);
+    if (!path) {
+        if (errmsg) {
+            PyErr_SetString(PyExc_RuntimeError, errmsg);
+            free(errmsg);
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "morloc_cache_path failed");
+        }
+        return NULL;
+    }
+    PyObject* result = PyUnicode_FromString(path);
+    free(path);
+    return result;
+}
+
+static PyObject* pybinding__cache_lookup(PyObject* self, PyObject* args) {
+    unsigned long long key;
+    const char* label;
+    if (!PyArg_ParseTuple(args, "Ks", &key, &label)) {
+        return NULL;
+    }
+    size_t size = 0;
+    char* errmsg = NULL;
+    uint8_t* data = morloc_cache_lookup((uint64_t)key, label, &size, &errmsg);
+    if (!data) {
+        if (errmsg) {
+            PyErr_SetString(PyExc_RuntimeError, errmsg);
+            free(errmsg);
+            return NULL;
+        }
+        Py_RETURN_NONE; // cache miss
+    }
+    PyObject* result = PyBytes_FromStringAndSize((const char*)data, (Py_ssize_t)size);
+    free(data);
+    return result;
+}
+
+static PyObject* pybinding__cache_store(PyObject* self, PyObject* args) {
+    unsigned long long key;
+    const char* label;
+    Py_buffer buf;
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "Ksy*s", &key, &label, &buf, &schema_str)) {
+        return NULL;
+    }
+    char* errmsg = NULL;
+    bool ok = morloc_cache_store(
+        (uint64_t)key, label,
+        (const uint8_t*)buf.buf, (size_t)buf.len,
+        schema_str,
+        &errmsg
+    );
+    PyBuffer_Release(&buf);
+    if (!ok) {
+        if (errmsg) {
+            PyErr_SetString(PyExc_RuntimeError, errmsg);
+            free(errmsg);
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "morloc_cache_store failed");
+        }
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject* pybinding__cache_key_compute(PyObject* self, PyObject* args) {
+    unsigned int midx;
+    PyObject* bytes_list;
+    PyObject* schema_list;
+    if (!PyArg_ParseTuple(args, "IOO", &midx, &bytes_list, &schema_list)) {
+        return NULL;
+    }
+    if (!PyList_Check(bytes_list) && !PyTuple_Check(bytes_list)) {
+        PyErr_SetString(PyExc_TypeError,
+            "cache_key_compute: first arg must be a list/tuple of packet bytes");
+        return NULL;
+    }
+    if (!PyList_Check(schema_list) && !PyTuple_Check(schema_list)) {
+        PyErr_SetString(PyExc_TypeError,
+            "cache_key_compute: second arg must be a list/tuple of schema strings");
+        return NULL;
+    }
+    Py_ssize_t n_args = PySequence_Fast_GET_SIZE(bytes_list);
+    if (PySequence_Fast_GET_SIZE(schema_list) != n_args) {
+        PyErr_SetString(PyExc_ValueError,
+            "cache_key_compute: packet list and schema list must have equal length");
+        return NULL;
+    }
+
+    // Build parallel arrays of packet pointers + schema cstrings. Hold
+    // Py_buffer views for the lifetime of the call so the byte pointers
+    // stay live; schema cstrings are owned by their PyObjects in
+    // schema_list.
+    Py_buffer* views = (Py_buffer*)calloc((size_t)n_args, sizeof(Py_buffer));
+    const uint8_t** packet_ptrs = (const uint8_t**)calloc((size_t)n_args, sizeof(uint8_t*));
+    const char** schema_ptrs = (const char**)calloc((size_t)n_args, sizeof(char*));
+    if (!views || !packet_ptrs || !schema_ptrs) {
+        free(views); free(packet_ptrs); free(schema_ptrs);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    Py_ssize_t acquired = 0;
+    for (Py_ssize_t i = 0; i < n_args; i++) {
+        PyObject* packet_item = PySequence_Fast_GET_ITEM(bytes_list, i);
+        PyObject* schema_item = PySequence_Fast_GET_ITEM(schema_list, i);
+
+        if (PyObject_GetBuffer(packet_item, &views[i], PyBUF_SIMPLE) != 0) {
+            for (Py_ssize_t j = 0; j < acquired; j++) {
+                PyBuffer_Release(&views[j]);
+            }
+            free(views); free(packet_ptrs); free(schema_ptrs);
+            return NULL;
+        }
+        acquired++;
+        packet_ptrs[i] = (const uint8_t*)views[i].buf;
+
+        const char* schema_cstr = PyUnicode_AsUTF8(schema_item);
+        if (!schema_cstr) {
+            for (Py_ssize_t j = 0; j < acquired; j++) {
+                PyBuffer_Release(&views[j]);
+            }
+            free(views); free(packet_ptrs); free(schema_ptrs);
+            return NULL;
+        }
+        schema_ptrs[i] = schema_cstr;
+    }
+
+    char* errmsg = NULL;
+    uint64_t key = morloc_cache_key_compute(
+        (uint32_t)midx, packet_ptrs, schema_ptrs, (size_t)n_args, &errmsg
+    );
+
+    for (Py_ssize_t i = 0; i < acquired; i++) {
+        PyBuffer_Release(&views[i]);
+    }
+    free(views); free(packet_ptrs); free(schema_ptrs);
+
+    if (errmsg) {
+        PyErr_SetString(PyExc_RuntimeError, errmsg);
+        free(errmsg);
+        return NULL;
+    }
+
+    return PyLong_FromUnsignedLongLong((unsigned long long)key);
+}
+
+static PyObject* pybinding__cache_record_hit(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    morloc_cache_record_hit();
+    Py_RETURN_NONE;
+}
+
+static PyObject* pybinding__cache_record_miss(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    morloc_cache_record_miss();
+    Py_RETURN_NONE;
+}
+
+static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    morloc_cache_record_store();
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* daemon_capsule;
 
@@ -2294,6 +2472,14 @@ error:
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
+    {"pool_hash", pybinding__pool_hash, METH_NOARGS, "Return the pool's source fingerprint"},
+    {"cache_path", pybinding__cache_path, METH_VARARGS, "Resolve per-label cache directory"},
+    {"cache_lookup", pybinding__cache_lookup, METH_VARARGS, "Cache lookup; returns bytes or None"},
+    {"cache_store", pybinding__cache_store, METH_VARARGS, "Atomically store packet bytes in cache"},
+    {"cache_key_compute", pybinding__cache_key_compute, METH_VARARGS, "Compute cache key from midx + per-arg bytes"},
+    {"cache_record_hit", pybinding__cache_record_hit, METH_NOARGS, "Increment the cache hit counter"},
+    {"cache_record_miss", pybinding__cache_record_miss, METH_NOARGS, "Increment the cache miss counter"},
+    {"cache_record_store", pybinding__cache_record_store, METH_NOARGS, "Increment the cache store counter"},
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},

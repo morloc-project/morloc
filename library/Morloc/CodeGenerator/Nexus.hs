@@ -993,6 +993,13 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         [ ("lang", jsonStr (ML.showLangName lang))
         , ("exec", jsonStrArr (map MT.pack (makeExecArgs lang)))
         , ("socket", jsonStr ("pipe-" <> ML.showLangName lang))
+        -- Per-pool source fingerprint. The compiler emits a placeholder
+        -- token here and overwrites it after the pool sources are
+        -- rendered ('Morloc.patchManifestPoolHashes'). The runtime nexus
+        -- exports the resolved hex via @MORLOC_POOL_HASH@ to each pool
+        -- on spawn; the pool's cache wrap mixes it into every cache key
+        -- so a source edit invalidates stale entries.
+        , ("pool_hash", jsonStr ("<MORLOC_POOL_HASH:" <> ML.showLangName lang <> ">"))
         , ("allow_string_null",
             jsonBool (LR.registryAllowStringNull registry (ML.langName lang)))
         , ("metadata", metadataEmpty)

@@ -171,6 +171,14 @@ pub struct Pool {
     /// without the field stay permissive.
     #[serde(default = "default_allow_string_null")]
     pub allow_string_null: bool,
+    /// XXH64 fingerprint of the pool's emitted source plus any files
+    /// listed under the program YAML's `hash-include`. Stored as a
+    /// 16-character lowercase hex string. The nexus exports this to
+    /// the pool process via `MORLOC_POOL_HASH` so the runtime cache
+    /// key changes whenever the source (or a declared external
+    /// dependency) changes. Empty string when absent (older manifests).
+    #[serde(default)]
+    pub pool_hash: String,
     /// **Reserved.** Per-pool metadata. Future slots: `resource`
     /// (cpu/memory limits), `env` (environment variables),
     /// `startup_timeout`, `health_check`.

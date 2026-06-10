@@ -84,6 +84,7 @@ dependencies:
   - time
   - unordered-containers
   - vector
+  - xxhash-ffi
   - yaml
   - zip-archive
 

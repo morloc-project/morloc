@@ -66,6 +66,15 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "cache-basics" "cache-basics"
+      , golden "cache-concurrent" "cache-concurrent"
+      , golden "cache-body-exception" "cache-body-exception"
+      , golden "cache-nested" "cache-nested"
+      , golden "cache-pool-hash" "cache-pool-hash"
+      , golden "cache-shm-backed" "cache-shm-backed"
+      , golden "cache-hash-include" "cache-hash-include"
+      , golden "cache-distinct-inputs" "cache-distinct-inputs"
+
       , golden "bracket-accessors" "bracket-accessors"
       , golden "bracket-accessors-pure" "bracket-accessors-pure"
 

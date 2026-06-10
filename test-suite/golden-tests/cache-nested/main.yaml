@@ -1,0 +1,5 @@
+labeled-groups:
+  a:
+    cache: true
+  b:
+    cache: true

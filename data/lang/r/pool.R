@@ -39,6 +39,12 @@ morloc_close_fd                      <- function(...){ .Call("morloc_close_fd", 
 morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
 morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
 morloc_exit                          <- function(...){ .Call("morloc_exit",                          ...) }
+morloc_cache_key_compute             <- function(...){ .Call("r_morloc_cache_key_compute",           ...) }
+morloc_cache_lookup                  <- function(...){ .Call("r_morloc_cache_lookup",                ...) }
+morloc_cache_store                   <- function(...){ .Call("r_morloc_cache_store",                 ...) }
+morloc_cache_record_hit              <- function( ){ .Call("r_morloc_cache_record_hit"             ) }
+morloc_cache_record_miss             <- function( ){ .Call("r_morloc_cache_record_miss"            ) }
+morloc_cache_record_store            <- function( ){ .Call("r_morloc_cache_record_store"           ) }
 
 global_state <- list()
 

@@ -1,0 +1,8 @@
+run1_P_raised: 1
+run2_P_raised: 1
+run1_R_raised: 1
+run2_R_raised: 1
+run1_C_raised: 1
+run2_C_raised: 1
+a_packets: 0
+dats:      0

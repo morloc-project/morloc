@@ -1,0 +1,22 @@
+module main (fooP, fooR, fooC)
+
+import root-py
+import root-cpp
+import root-r
+
+source Py from "main.py" ("crashy_py")
+source R  from "main.R"  ("crashy_r")
+source Cpp from "main.hpp" ("crashy_cpp")
+
+crashy_py  :: Real -> Real
+crashy_r   :: Real -> Real
+crashy_cpp :: Real -> Real
+
+fooP :: Real -> Real
+fooP = a:crashy_py
+
+fooR :: Real -> Real
+fooR = a:crashy_r
+
+fooC :: Real -> Real
+fooC = a:crashy_cpp

@@ -2433,6 +2433,135 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_
 
 // }}} C-level worker loop
 
+// ── Cache bridge to libmorloc.so ───────────────────────────────────────────
+
+// Compute a cache key. Inputs:
+//   midx_r:     integer manifold id
+//   packets_r:  list of raw vectors (one packet per arg)
+//   schemas_r:  character vector of schema strings (one per arg, same length)
+// Returns a length-1 numeric (the 64-bit key cast to double; bit-exact up to
+// 2^53, fine for our xxh64 keys round-tripping back into other cache calls).
+SEXP morloc_cache_key_compute_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
+    if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
+        MORLOC_ERROR("cache_key_compute: midx must be a single integer");
+    }
+    if (TYPEOF(packets_r) != VECSXP) {
+        MORLOC_ERROR("cache_key_compute: packets must be a list of raw vectors");
+    }
+    if (TYPEOF(schemas_r) != STRSXP) {
+        MORLOC_ERROR("cache_key_compute: schemas must be a character vector");
+    }
+    R_xlen_t n_args = XLENGTH(packets_r);
+    if (XLENGTH(schemas_r) != n_args) {
+        MORLOC_ERROR("cache_key_compute: packets and schemas must have equal length");
+    }
+
+    const uint8_t** packet_ptrs = (const uint8_t**)R_alloc(n_args, sizeof(uint8_t*));
+    const char** schema_ptrs = (const char**)R_alloc(n_args, sizeof(char*));
+    for (R_xlen_t i = 0; i < n_args; i++) {
+        SEXP p = VECTOR_ELT(packets_r, i);
+        if (TYPEOF(p) != RAWSXP) {
+            MORLOC_ERROR("cache_key_compute: packet %lld must be a raw vector",
+                (long long)i);
+        }
+        packet_ptrs[i] = (const uint8_t*)RAW(p);
+        SEXP s = STRING_ELT(schemas_r, i);
+        if (s == NA_STRING) {
+            MORLOC_ERROR("cache_key_compute: schema %lld is NA", (long long)i);
+        }
+        schema_ptrs[i] = CHAR(s);
+    }
+
+    char* errmsg = NULL;
+    uint64_t key = morloc_cache_key_compute(
+        (uint32_t)INTEGER(midx_r)[0],
+        packet_ptrs,
+        schema_ptrs,
+        (size_t)n_args,
+        &errmsg
+    );
+    if (errmsg) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "%s", errmsg);
+        free(errmsg);
+        MORLOC_ERROR("cache_key_compute failed: %s", buf);
+    }
+    return ScalarReal((double)key);
+}
+
+SEXP morloc_cache_lookup_r(SEXP key_r, SEXP label_r) {
+    uint64_t key = (uint64_t)asReal(key_r);
+    if (TYPEOF(label_r) != STRSXP || LENGTH(label_r) != 1) {
+        MORLOC_ERROR("cache_lookup: label must be a single string");
+    }
+    const char* label = CHAR(STRING_ELT(label_r, 0));
+    size_t size = 0;
+    char* errmsg = NULL;
+    uint8_t* data = morloc_cache_lookup(key, label, &size, &errmsg);
+    if (errmsg) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "%s", errmsg);
+        free(errmsg);
+        MORLOC_ERROR("cache_lookup failed: %s", buf);
+    }
+    if (!data) {
+        return R_NilValue;
+    }
+    SEXP result = PROTECT(allocVector(RAWSXP, size));
+    memcpy(RAW(result), data, size);
+    free(data);
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_cache_store_r(SEXP key_r, SEXP label_r, SEXP packet_r, SEXP schema_r) {
+    uint64_t key = (uint64_t)asReal(key_r);
+    if (TYPEOF(label_r) != STRSXP || LENGTH(label_r) != 1) {
+        MORLOC_ERROR("cache_store: label must be a single string");
+    }
+    if (TYPEOF(packet_r) != RAWSXP) {
+        MORLOC_ERROR("cache_store: packet must be a raw vector");
+    }
+    if (TYPEOF(schema_r) != STRSXP || LENGTH(schema_r) != 1) {
+        MORLOC_ERROR("cache_store: schema must be a single string");
+    }
+    const char* label = CHAR(STRING_ELT(label_r, 0));
+    const char* schema = CHAR(STRING_ELT(schema_r, 0));
+    char* errmsg = NULL;
+    bool ok = morloc_cache_store(
+        key, label,
+        (const uint8_t*)RAW(packet_r),
+        (size_t)XLENGTH(packet_r),
+        schema,
+        &errmsg
+    );
+    if (!ok) {
+        if (errmsg) {
+            char buf[1024];
+            snprintf(buf, sizeof(buf), "%s", errmsg);
+            free(errmsg);
+            MORLOC_ERROR("cache_store failed: %s", buf);
+        }
+        MORLOC_ERROR("cache_store failed");
+    }
+    return R_NilValue;
+}
+
+SEXP morloc_cache_record_hit_r(void) {
+    morloc_cache_record_hit();
+    return R_NilValue;
+}
+
+SEXP morloc_cache_record_miss_r(void) {
+    morloc_cache_record_miss();
+    return R_NilValue;
+}
+
+SEXP morloc_cache_record_store_r(void) {
+    morloc_cache_record_store();
+    return R_NilValue;
+}
+
 // }}} exported functions
 
 
@@ -2488,6 +2617,12 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
         {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
+        {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
+        {"r_morloc_cache_lookup", (DL_FUNC) &morloc_cache_lookup_r, 2},
+        {"r_morloc_cache_store", (DL_FUNC) &morloc_cache_store_r, 4},
+        {"r_morloc_cache_record_hit", (DL_FUNC) &morloc_cache_record_hit_r, 0},
+        {"r_morloc_cache_record_miss", (DL_FUNC) &morloc_cache_record_miss_r, 0},
+        {"r_morloc_cache_record_store", (DL_FUNC) &morloc_cache_record_store_r, 0},
         {NULL, NULL, 0}
     };
 

@@ -109,11 +109,23 @@ pub unsafe extern "C" fn write_atomic(
     let path_str = CStr::from_ptr(filename).to_string_lossy();
     let path = std::path::Path::new(path_str.as_ref());
 
-    // Get parent directory
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
 
-    // Create temp file in same directory
-    let tmp_path = dir.join(format!("morloc-tmp_{}", std::process::id()));
+    // Basename + PID + monotonic counter avoids tmp-file collisions
+    // between concurrent writes to the same directory.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let basename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("out"));
+    let tmp_path = dir.join(format!(
+        ".{}.tmp.{}.{}",
+        basename,
+        std::process::id(),
+        seq
+    ));
 
     let result = (|| -> Result<(), std::io::Error> {
         // Write to temp file

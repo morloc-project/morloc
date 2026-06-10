@@ -42,6 +42,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.LanguageDescriptor
+import qualified Morloc.CodeGenerator.Serial as Serial
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Map.Strict as Map
@@ -417,6 +418,7 @@ genericLowerConfig desc srcNamer = cfg
              in pretty (ldForeignCallFn desc)
                   <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
         , lcRemoteCall = genericRemoteCall desc
+        , lcCacheBody = genericCacheBody desc cfg
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
@@ -486,6 +488,121 @@ genericRecordAccessor desc namType _constructor record field
   | otherwise = case ldFieldAccess desc of
       DotAccess -> record <> "." <> field
       DollarAccess -> record <> "$" <> field
+
+-- | Reference an entry of the per-pool 'mlc_schema_table' literal by
+-- the schema ID returned from 'lcRegisterSchema'. Adjusts the index
+-- for languages whose container literals are 1-based.
+genericSchemaRef :: LangDescriptor -> Int -> MDoc
+genericSchemaRef desc sid = case ldIndexStyle desc of
+  ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
+  OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
+  OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+
+-- | Wrap a labeled manifold's body in a cache check. The body's
+-- serialized result is what lands on disk, so cross-pool and
+-- intra-pool callers share the same format. Syntax (if/else shape,
+-- null literal, assignment operator) is taken from the language
+-- descriptor.
+genericCacheBody ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  SerialAST ->
+  Text ->
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  IndexM PoolDocs
+genericCacheBody desc cfg resSa lbl midx args bodyPool = do
+  let intr = pretty (ldIntrinsicPrefix desc)
+      assign = pretty (ldAssignOp desc)
+      hp = pretty (ldHelperVarPrefix desc)
+      keyVar = hp <> "cache_key"
+      cachedVar = hp <> "cached"
+      resultVar = hp <> "cache_result"
+      labelLit = dquotes (pretty lbl)
+  preparedArgs <- mapM (prepareCacheArg desc cfg) args
+  resSchemaId <- lcRegisterSchema cfg (render $ Serial.serialAstToMsgpackSchema resSa)
+  let resSchemaRef = genericSchemaRef desc resSchemaId
+      argRefs = [r | (r, _, _) <- preparedArgs]
+      schemaRefs = [s | (_, s, _) <- preparedArgs]
+      serializeStmts = concatMap (\(_, _, ss) -> ss) preparedArgs
+      -- Packets are heterogeneous (R: raw vectors must go through
+      -- list()); schemas are a homogeneous character vector (R: c()).
+      genericList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldGenericListFn desc) <> tupled xs
+      atomicList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldAtomicListFn desc) <> tupled xs
+      packetList = genericList argRefs
+      schemaList = atomicList schemaRefs
+      assignLine v rhs = v <+> assign <+> rhs
+      midxLit = pretty midx <> pretty (ldIntLiteralSuffix desc)
+      keyCompute = assignLine keyVar
+        (intr <> "cache_key_compute" <> tupled [midxLit, packetList, schemaList])
+      cacheLookup = assignLine cachedVar
+        (intr <> "cache_lookup" <> tupled [keyVar, labelLit])
+      hitLines =
+        [ intr <> "cache_record_hit()"
+        , assignLine resultVar cachedVar
+        ]
+      missLines =
+        [ intr <> "cache_record_miss()" ]
+        ++ poolPriorLines bodyPool
+        ++ [ assignLine resultVar (poolExpr bodyPool)
+           , intr <> "cache_store"
+               <> tupled [keyVar, labelLit, resultVar, resSchemaRef]
+           , intr <> "cache_record_store()"
+           ]
+      condE = pretty $ substituteT (ldNullCheckTemplate desc)
+        [("expr", render cachedVar)]
+      ifBlock = case ldBlockStyle desc of
+        IndentBlock -> vsep
+          [ "if" <+> condE <> ":"
+          , indent 4 (vsep hitLines)
+          , "else:"
+          , indent 4 (vsep missLines)
+          ]
+        BraceBlock -> vsep
+          [ "if" <+> parens condE <+> "{"
+          , indent 4 (vsep hitLines)
+          , "} else {"
+          , indent 4 (vsep missLines)
+          , "}"
+          ]
+        EndKeywordBlock -> vsep
+          [ "if" <+> condE
+          , indent 4 (vsep hitLines)
+          , "else"
+          , indent 4 (vsep missLines)
+          , "end"
+          ]
+      priorLines = serializeStmts ++ [keyCompute, cacheLookup, ifBlock]
+  return $ defaultValue
+    { poolExpr = resultVar
+    , poolPriorLines = priorLines
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | For a single cache arg produce: (the packet expression, the
+-- schema-string expression, any supporting statements). Native args
+-- are serialized through 'lcSerialize' into a packet; serial args
+-- pass through by name.
+prepareCacheArg ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  (Arg TypeM, SerialAST) ->
+  IndexM (MDoc, MDoc, [MDoc])
+prepareCacheArg desc cfg (a@(Arg _ tm), sa) = do
+  schemaId <- lcRegisterSchema cfg (render $ Serial.serialAstToMsgpackSchema sa)
+  let schemaRef = genericSchemaRef desc schemaId
+  case tm of
+    Native _ -> do
+      pd <- lcSerialize cfg (argNamer a) sa
+      return (poolExpr pd, schemaRef, poolPriorLines pd)
+    _ -> return (argNamer a, schemaRef, [])
 
 -- | Remote call with template-driven resource packing
 genericRemoteCall :: LangDescriptor -> MDoc -> Int -> RemoteResources -> [MDoc] -> IndexM PoolDocs
@@ -697,10 +814,7 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_read(" <> schemaRef sid <> ", " <> go e <> ")"
 
-    schemaRef sid = case ldIndexStyle desc of
-      ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
-      OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
-      OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+    schemaRef = genericSchemaRef desc
 
     -- Languages that opt out of NUL-in-Str (allow_string_null = false)
     -- cannot represent a `\0` inside a source-level string literal: R

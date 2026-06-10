@@ -36,6 +36,7 @@ import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.ProgramBuilder.Install as Install
 import qualified Morloc.System as MS
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 
@@ -60,6 +61,22 @@ parse f (Code code) = do
 
   -- Compute project root from entry-point file path
   let projectRoot = fmap MS.takeDirectory f
+
+  -- Resolve the main module's @hash-include@ patterns into a concrete
+  -- list of files. Their contents will be folded into every pool's
+  -- cache hash so that editing a foreign source file (or a runtime
+  -- data file the user explicitly lists) invalidates the cache. Scope
+  -- validation rejects absolute paths and @..@ traversals; the same
+  -- contract as @packageInclude@.
+  case moduleConfigHashInclude moduleConfig of
+    Just patterns | not (null patterns) -> do
+      MM.liftIO $ Install.validateIncludeScope patterns
+      case projectRoot of
+        Just root -> do
+          paths <- MM.liftIO $ Install.resolveIncludePatterns root patterns
+          MM.modify (\st -> st {stateHashIncludePaths = paths})
+        Nothing -> return ()
+    _ -> return ()
 
   let parserState =
         emptyPState

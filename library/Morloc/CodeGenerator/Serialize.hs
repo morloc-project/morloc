@@ -123,6 +123,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       es' <- mapM (serialArg m) es
       t' <- inferType t
       return $ AppPoolS t' poolCall' es'
+    serialExpr m (MonoCacheBody lbl midx args body) =
+      lowerCacheBody Serialized m lbl midx args body
     serialExpr _ (MonoBndVar (A _) i) = return $ BndVarS Nothing i
     serialExpr _ (MonoBndVar (B _) i) =
       case Map.lookup i typemap of
@@ -248,6 +250,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         [] -> inferType (Idx idx outputType)
         remaining -> inferType $ Idx idx (FunT remaining outputType)
       return $ AppExeN appType (LocalCallP i) args
+    nativeExpr m (MonoCacheBody lbl midx args body) = do
+      -- Inside a Preserved manifold the bound vars are native, so the
+      -- wrap must reference n0/n1/... -- 'serialExpr' here would emit
+      -- s0/s1/... and miscompile.
+      se <- lowerCacheBody Unserialized m lbl midx args body
+      let t' = case typeSof se of
+            SerialS tf -> tf
+            _ -> error "CacheBody body must lower to a serial form"
+      naturalizeN "MonoCacheBody" m lang t' se
     nativeExpr _ (MonoApp _ _) = error "Illegal application"
     nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
     nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
@@ -438,6 +449,36 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
         go (StrLitF s) = dquotes (pretty s)
         go StrVoidF = "_"
 
+    lowerCacheBody ::
+      SerializationState ->
+      Int ->
+      Text ->
+      Int ->
+      [Arg None] ->
+      MonoExpr ->
+      MorlocMonad SerialExpr
+    lowerCacheBody state m lbl midx args body = do
+      body' <- serialExpr m body
+      args' <- mapM (\(Arg i _) -> do
+                        arg@(Arg _ tm) <- typeArg state i
+                        sa <- case tm of
+                          Native tf -> Serial.makeSerialAST m lang tf
+                          Serial tf -> Serial.makeSerialAST m lang tf
+                          Passthrough -> MM.throwCompilerBug
+                            $ "lowerCacheBody: cannot hash a Passthrough arg (arg "
+                            <> pretty i <> "); the cache wrap needs a schema for"
+                            <+> "each arg, so passthrough args must be resolved upstream"
+                          Function _ _ -> MM.throwCompilerBug
+                            $ "lowerCacheBody: cannot hash a Function arg (arg "
+                            <> pretty i <> "); function values have no wire form"
+                        return (arg, sa)
+                    ) args
+      let t' = case typeSof body' of
+            SerialS tf -> tf
+            _ -> error "CacheBody body must lower to a serial form"
+      resSa <- Serial.makeSerialAST m lang t'
+      return $ CacheBodyS t' resSa lbl midx args' body'
+
     typeArg ::
       SerializationState ->
       Int ->
@@ -476,6 +517,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
+    makeTypemap parentIdx (MonoCacheBody _ _ _ e) = makeTypemap parentIdx e
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
@@ -528,8 +570,19 @@ class IsSerializable a where
   nativeLet :: Int -> NativeExpr -> a -> a
 
 instance IsSerializable SerialExpr where
-  serialLet = SerialLetS
-  nativeLet = NativeLetS
+  -- When the body is a 'CacheBodyS', push the new let-binding inside
+  -- the cache wrap so the wrapped computation (and its dependencies)
+  -- runs only on a cache miss. This is critical for 'cache: true':
+  -- without it, 'wireSerial.letWrap' inserts the manifold's
+  -- deserialization lets AROUND the cache check, so the
+  -- 'morloc.get_value' calls run unconditionally and defeat the
+  -- point of caching.
+  serialLet i se (CacheBodyS t resSa lbl m args inner) =
+    CacheBodyS t resSa lbl m args (SerialLetS i se inner)
+  serialLet i se body = SerialLetS i se body
+  nativeLet i ne (CacheBodyS t resSa lbl m args inner) =
+    CacheBodyS t resSa lbl m args (NativeLetS i ne inner)
+  nativeLet i ne body = NativeLetS i ne body
 
 instance IsSerializable NativeExpr where
   serialLet = SerialLetN

@@ -154,6 +154,13 @@ data ModuleConfig = ModuleConfig
   { moduleConfigDefaultGroup :: Maybe ManifoldConfig
   , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
   , moduleConfigLogTemplate :: Maybe LogTemplate
+  , moduleConfigHashInclude :: Maybe [Text]
+  -- ^ Top-level YAML field @hash-include@: a list of paths (glob-aware,
+  -- relative to the program's YAML) whose file contents are folded into
+  -- the per-pool cache key. Use this to invalidate cached results when
+  -- a foreign source file or runtime data file changes. Paths follow
+  -- the same scope rules as @packageInclude@ -- absolute paths and
+  -- @..@ traversals are rejected.
   }
   deriving (Show, Generic)
 
@@ -504,6 +511,7 @@ instance Defaultable ModuleConfig where
       { moduleConfigDefaultGroup = Nothing
       , moduleConfigLabeledGroups = Map.empty
       , moduleConfigLogTemplate = Nothing
+      , moduleConfigHashInclude = Nothing
       }
 
 instance Defaultable LogTemplate where

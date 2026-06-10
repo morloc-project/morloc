@@ -61,6 +61,8 @@ prettyFoldManifold =
       where
         makeForeignRecCall xs' =
           "__foreign_rec_call__" <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
+    makeSerialExpr _ (CacheBodyS_ _ _ lbl mid _ body) =
+      return $ body {poolExpr = "__cache<" <> pretty lbl <> ":" <> pretty mid <> ">" <> parens (poolExpr body)}
     makeSerialExpr _ (ReturnS_ x) = return $ x {poolExpr = "ReturnS(" <> poolExpr x <> ")"}
     makeSerialExpr _ (SerialLetS_ i e1 e2) = return $ makeLet letNamerS "SerialLetS" i e1 e2
     makeSerialExpr _ (NativeLetS_ i e1 e2) = return $ makeLet letNamerN "NativeLetS" i e1 e2

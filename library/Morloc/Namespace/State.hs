@@ -119,6 +119,12 @@ data MorlocState = MorlocState
   -- ^ Program-wide log message template from the main module's YAML
   -- @log-template@ field. Per-label overrides live in 'ManifoldConfig';
   -- the resolution order is per-label > this field > built-in default.
+  , stateHashIncludePaths :: [Path]
+  -- ^ Resolved (glob-expanded, scope-validated) list of files whose
+  -- contents are folded into every pool's cache hash. Sourced from the
+  -- main YAML's top-level @hash-include@ list. Paths are
+  -- lexicographically sorted for deterministic hashing across runs.
+  -- Empty (default) when no @hash-include@ is set.
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
@@ -419,6 +425,7 @@ instance Defaultable MorlocState where
       , stateTermDocs = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
+      , stateHashIncludePaths = []
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue

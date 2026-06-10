@@ -307,6 +307,14 @@ data LowerConfig m = LowerConfig
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
+  , lcCacheBody :: SerialAST -> Text -> Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
+  -- ^ Wrap a labeled manifold's body in a cache lookup. The returned
+  -- 'PoolDocs' must set 'poolExpr' to the temp holding the cached or
+  -- freshly-computed result. Args are paired with their 'SerialAST'
+  -- so the hook can serialize native bindings and pass each arg's
+  -- schema to the content-aware hash; the leading 'SerialAST' is the
+  -- result schema (used by cache_store to materialize SHM-backed
+  -- payloads before writing).
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
   , lcReleaseStmt :: Text -> MDoc
@@ -481,6 +489,8 @@ lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
+lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
+  lcCacheBody cfg resSa lbl mid args body
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value

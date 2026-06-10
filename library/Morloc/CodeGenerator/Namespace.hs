@@ -560,6 +560,15 @@ data PolyExpr
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
   | PolyApp PolyExpr [PolyExpr]
+  | PolyCacheBody Text Int [Arg None] PolyExpr
+    -- ^ Memoization wrap inserted around a labeled manifold's body
+    -- by the 'Express.addCacheWraps' post-pass when the enclosing
+    -- 'PolyManifold' has @cache: true@. Fields: label group, the
+    -- manifold's midx (used as part of the cache key), the manifold's
+    -- bound args (used to compute the per-call key), and the original
+    -- body. Every call to the labeled manifold -- cross-pool socket
+    -- entry or intra-pool native call alike -- runs this body and
+    -- therefore hits the cache hook uniformly.
   | -- variables in the original tree will all be typed
     -- but I also may need to generate passthrough terms
     PolyBndVar
@@ -617,6 +626,11 @@ data MonoExpr
   | MonoLetVar (Indexed Type) Int
   | MonoReturn MonoExpr
   | MonoApp MonoExpr [MonoExpr]
+  | MonoCacheBody Text Int [Arg None] MonoExpr
+    -- ^ Monomorphized counterpart of 'PolyCacheBody'. Carries the
+    -- label + midx + args forward to 'Serialize' which lowers it to
+    -- 'CacheBodyS' / 'CacheBodyN' wrapping the body in serial /
+    -- native form respectively.
   | -- terms that map 1:1 versus SAnno; have defined types in one language
     MonoExe (Indexed Type) ExecutableExpressionPool
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
@@ -677,6 +691,20 @@ data SerialExpr
     -- ^ Same-language recursive call: return type, manifold ID, serialized args
   | AppForeignRecS TypeF Int Socket [SerialExpr]
     -- ^ Cross-language recursive call: return type, manifold ID, socket, serialized args
+  | CacheBodyS TypeF SerialAST Text Int [(Arg TypeM, SerialAST)] SerialExpr
+    -- ^ Cache wrap around a labeled manifold's body in serial form.
+    -- Fields: result type, result SerialAST (used so cache_store can
+    -- materialize SHM/file-backed result packets to inline-msgpack
+    -- before writing to disk -- without this, the stored bytes
+    -- contain a relptr or path into per-process state that won't
+    -- exist when the cache is read back), label group, manifold midx,
+    -- manifold's bound args paired with their SerialAST (used both to
+    -- serialize native args into packets and to schema-resolve packet
+    -- content for the hash so SHM-backed packets hash their actual
+    -- values), inner body that produces the serial result. At codegen
+    -- the wrap lowers to: serialize-native-args, content-hash,
+    -- cache-lookup; on hit return cached bytes; on miss evaluate
+    -- body, materialize+store its result bytes, return them.
   | ReturnS SerialExpr
   | SerialLetS Int SerialExpr SerialExpr
   | NativeLetS Int NativeExpr SerialExpr
@@ -747,6 +775,7 @@ foldlSE f b (ManS_ x) = f b x
 foldlSE f b (AppPoolS_ _ _ xs) = foldl f b xs
 foldlSE f b (AppRecS_ _ _ xs) = foldl f b xs
 foldlSE f b (AppForeignRecS_ _ _ _ xs) = foldl f b xs
+foldlSE f b (CacheBodyS_ _ _ _ _ _ x) = f b x
 foldlSE f b (ReturnS_ x) = f b x
 foldlSE f b (SerialLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE f b (NativeLetS_ _ x1 x2) = foldl f b [x1, x2]
@@ -819,6 +848,7 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidSerialExpr' (AppPoolS_ t p (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppPoolS t p es)
     monoidSerialExpr' (AppRecS_ t m (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppRecS t m es)
     monoidSerialExpr' (AppForeignRecS_ t m s (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppForeignRecS t m s es)
+    monoidSerialExpr' (CacheBodyS_ t resSa lbl m args (req, body)) = return (req, CacheBodyS t resSa lbl m args body)
     monoidSerialExpr' (ReturnS_ (req, se)) = return (req, ReturnS se)
     monoidSerialExpr' (SerialLetS_ i (req1, se1) (req2, se2)) = return (mappend' req1 req2, SerialLetS i se1 se2)
     monoidSerialExpr' (NativeLetS_ i (req1, ne) (req2, se)) = return (mappend' req1 req2, NativeLetS i ne se)
@@ -966,6 +996,7 @@ data SerialExpr_ sm se ne sr nr
   | AppPoolS_ TypeF PoolCall [sr]
   | AppRecS_ TypeF Int [se]
   | AppForeignRecS_ TypeF Int Socket [se]
+  | CacheBodyS_ TypeF SerialAST Text Int [(Arg TypeM, SerialAST)] se
   | ReturnS_ se
   | SerialLetS_ Int se se
   | NativeLetS_ Int ne se
@@ -1123,6 +1154,9 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     f full@(AppForeignRecS t m s es) = do
       es' <- mapM (surroundFoldSerialExprM sfm fm) es
       opFoldWithSerialExprM fm full $ AppForeignRecS_ t m s es'
+    f full@(CacheBodyS t resSa lbl m args body) = do
+      body' <- surroundFoldSerialExprM sfm fm body
+      opFoldWithSerialExprM fm full $ CacheBodyS_ t resSa lbl m args body'
     f full@(ReturnS e) = do
       e' <- surroundFoldSerialExprM sfm fm e
       opFoldWithSerialExprM fm full $ ReturnS_ e'
@@ -1272,6 +1306,7 @@ instance HasTypeS SerialExpr where
   typeSof (AppPoolS t _ sargs) = FunctionS (map typeMof sargs) (SerialS t)
   typeSof (AppRecS t _ _) = SerialS t
   typeSof (AppForeignRecS t _ _ _) = SerialS t
+  typeSof (CacheBodyS t _ _ _ _ _) = SerialS t
   typeSof (ReturnS e) = typeSof e
   typeSof (SerialLetS _ _ e) = typeSof e
   typeSof (NativeLetS _ _ e) = typeSof e
@@ -1402,6 +1437,7 @@ instance MFunctor SerialExpr where
         (AppPoolS t p serialArgs) -> mapSerialExpr f $ AppPoolS t p (map (mgatedMap g f) serialArgs)
         (AppRecS t m es) -> mapSerialExpr f $ AppRecS t m (map (mgatedMap g f) es)
         (AppForeignRecS t m s es) -> mapSerialExpr f $ AppForeignRecS t m s (map (mgatedMap g f) es)
+        (CacheBodyS t resSa lbl m args body) -> mapSerialExpr f $ CacheBodyS t resSa lbl m args (mgatedMap g f body)
         (ReturnS se) -> mapSerialExpr f $ ReturnS (mgatedMap g f se)
         (SerialLetS i se1 se2) -> mapSerialExpr f $ SerialLetS i (mgatedMap g f se1) (mgatedMap g f se2)
         (NativeLetS i ne1 se2) -> mapSerialExpr f $ NativeLetS i (mgatedMap g f ne1) (mgatedMap g f se2)
@@ -1467,6 +1503,8 @@ instance Pretty PolyExpr where
   pretty (PolyLet i e1 e2) = "PolyLet<" <> pretty i <> ">" <+> list [pretty e1, pretty e2]
   pretty (PolyReturn e) = "PolyReturn" <+> parens (pretty e)
   pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e : es))
+  pretty (PolyCacheBody lbl m _ e) =
+    "PolyCacheBody<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
   pretty (PolyBndVar _ _) = "PolyBndVar"
   pretty (PolyLetVar _ _) = "PolyLetVar"
   pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
@@ -1498,6 +1536,8 @@ instance Pretty MonoExpr where
   pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
   pretty (MonoReturn e) = "return" <> parens (pretty e)
   pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
+  pretty (MonoCacheBody lbl m _ e) =
+    "cache<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
   pretty (MonoExe _ exe) = pretty exe
   pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
   pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t
