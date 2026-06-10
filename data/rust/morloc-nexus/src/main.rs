@@ -8,6 +8,7 @@ mod dispatch;
 mod help;
 mod manifest;
 mod process;
+mod runlog;
 
 use dispatch::NexusConfig;
 
@@ -22,6 +23,20 @@ fn morloc_home() -> String {
 }
 
 fn main() {
+    // Install a panic hook so a Rust panic still runs the run-scope
+    // epilogue + summary.json + tee cleanup before the process dies.
+    // Without this, panic-unwound exits skip clean_exit entirely and
+    // leave operators with a half-written rundir. Restore the
+    // default hook for the panic message itself so stack traces keep
+    // working under RUST_BACKTRACE=1.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("nexus panicked: {}", info);
+        runlog::record_error(&msg);
+        default_hook(info);
+        process::clean_exit(101);
+    }));
+
     let args: Vec<String> = std::env::args().collect();
 
     let mut config = NexusConfig::default();
@@ -108,6 +123,41 @@ fn main() {
         std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path);
     }
 
+    let single_command = manifest.commands.len() == 1 && manifest.groups.is_empty();
+
+    // Second pass: parse options after manifest path (skip in single-command mode)
+    let mut remaining_args = args.clone();
+    if !single_command {
+        arg_cursor = dispatch::parse_nexus_options(&args[opt_end..], &mut config) + opt_end;
+    } else {
+        // In single-command mode, extract daemon/server long options manually
+        dispatch::extract_global_options(&mut remaining_args, &mut config);
+    }
+
+    // Publish the run-scope activation env vars NOW (after both option
+    // passes) so the runtime sees the final config when morloc_run_init
+    // performs its env::var reads. Each flag/var is only set when
+    // explicitly requested:
+    //
+    //   * --log-dir / MORLOC_LOG_DIR -- activates rundir, log tee,
+    //     summary.json (under rundir unless --summary overrides).
+    //   * --summary / MORLOC_SUMMARY -- writes summary.json to a
+    //     specific path; works even without a rundir.
+    //   * --quiet  / MORLOC_QUIET   -- suppresses ALL morloc-emitted
+    //     log lines (prologue, epilogue, per-label).
+    //
+    // CLI flags win over env vars. Env vars that pre-existed without
+    // a matching flag are left untouched so pools inherit them.
+    if let Some(ref d) = config.log_dir {
+        std::env::set_var("MORLOC_LOG_DIR", d);
+    }
+    if let Some(ref p) = config.summary_path {
+        std::env::set_var("MORLOC_SUMMARY", p);
+    }
+    if config.quiet {
+        std::env::set_var("MORLOC_QUIET", "1");
+    }
+
     // Resolve the per-run identity now so pools inherit a fully-published
     // env (MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID).
     // No filesystem directory is materialized here -- creation is lazy
@@ -120,16 +170,10 @@ fn main() {
     }
     unsafe { morloc_run_init() };
 
-    let single_command = manifest.commands.len() == 1 && manifest.groups.is_empty();
-
-    // Second pass: parse options after manifest path (skip in single-command mode)
-    let mut remaining_args = args.clone();
-    if !single_command {
-        arg_cursor = dispatch::parse_nexus_options(&args[opt_end..], &mut config) + opt_end;
-    } else {
-        // In single-command mode, extract daemon/server long options manually
-        dispatch::extract_global_options(&mut remaining_args, &mut config);
-    }
+    // Capture run-scope log templates from the manifest. emit_prologue
+    // / emit_epilogue read this; clean_exit triggers emit_epilogue
+    // before morloc_run_finalize writes summary.json.
+    runlog::install(manifest.run_log.clone());
 
     // Pool paths in the manifest are absolute, so no chdir is needed.
     // This lets user programs resolve file paths relative to the caller's CWD.

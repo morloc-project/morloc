@@ -33,21 +33,22 @@ labeled VarE's source position.
 -}
 module Morloc.CodeGenerator.LogTemplate
   ( RenderedTemplate (..)
+  , RenderedRunLog (..)
   , defaultLogTemplate
   , collectRenderedTemplates
+  , renderRunLogTemplate
   ) where
 
 import Data.Binary (Binary)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
-import Data.Monoid (First (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
+import qualified Morloc.Version as MV
 
 -- | The per-labeled-midx rendered templates ready for codegen. Each
 -- subfield is the template with static placeholders substituted; the
@@ -122,14 +123,14 @@ renderOne lang programDefault names srcMap (midx, cfg) = do
     _ -> return ()
   let effective = mergeTemplates (manifoldConfigLogTemplate cfg) programDefault defaultLogTemplate
       staticVars = staticBindings lang names srcMap cfg midx
-      render' picker = traverse (\t -> renderStatic t staticVars srcIdx) (picker effective)
+      renderField picker = traverse (\t -> renderStatic t staticVars srcIdx) (picker effective)
       groupTxt = case manifoldConfigLabel cfg of
         Just g -> g
         Nothing -> ""
   RenderedTemplate
-    <$> render' logTemplateStart
-    <*> render' logTemplatePass
-    <*> render' logTemplateFail
+    <$> renderField logTemplateStart
+    <*> renderField logTemplatePass
+    <*> renderField logTemplateFail
     <*> pure groupTxt
     >>= \r -> return (midx, r)
   where
@@ -254,26 +255,51 @@ colorPlaceholders =
 -- pool helper substitutes them at emission time. Any other unknown
 -- placeholder is a sourced compile error.
 renderStatic :: Text -> [(Text, Text)] -> Int -> MorlocMonad Text
-renderStatic tmpl vars errIdx = do
+renderStatic tmpl vars errIdx =
+  renderStaticWith perLabelRuntimePlaceholders tmpl vars errIdx "log-template"
+
+-- | Generalized static-placeholder substitution, parameterized by the
+-- set of placeholders the runtime is responsible for filling. Reused by
+-- both per-label 'log-template' rendering and run-scope 'prologue' /
+-- 'epilogue' rendering.
+renderStaticWith :: [Text] -> Text -> [(Text, Text)] -> Int -> Text -> MorlocMonad Text
+renderStaticWith runtimeNames tmpl vars errIdx templateKind = do
   parts <- splitTemplate tmpl errIdx
   T.concat <$> mapM substitute parts
   where
     substitute :: TemplatePart -> MorlocMonad Text
     substitute (Literal t) = return t
     substitute (Placeholder name)
-      | name `elem` runtimePlaceholders = return ("{" <> name <> "}")
+      | name `elem` runtimeNames = return ("{" <> name <> "}")
       | otherwise = case lookup name vars of
           Just v -> return v
           Nothing ->
             MM.throwSourcedError errIdx $
               "Unknown placeholder" <+> pretty (T.unpack ("{" <> name <> "}"))
-              <+> "in log-template. Available static placeholders:"
+              <+> "in" <+> pretty (T.unpack templateKind) <> "."
+              <+> "Available static placeholders:"
               <+> pretty (T.unpack (T.intercalate ", " (map fst vars)))
               <> "; runtime placeholders:"
-              <+> pretty (T.unpack (T.intercalate ", " runtimePlaceholders)) <> "."
+              <+> pretty (T.unpack (T.intercalate ", " runtimeNames)) <> "."
 
-runtimePlaceholders :: [Text]
-runtimePlaceholders = ["date", "runtime", "id"]
+perLabelRuntimePlaceholders :: [Text]
+perLabelRuntimePlaceholders = ["date", "runtime", "id"]
+
+-- | Runtime placeholders for the run-scope prologue/epilogue templates.
+-- The nexus substitutes these immediately before stderr emission.
+-- Keep aligned with the Rust nexus's 'render' in @runlog.rs@.
+runScopeRuntimePlaceholders :: [Text]
+runScopeRuntimePlaceholders =
+  [ "name"
+  , "run_id"
+  , "started_at"
+  , "finished_at" -- epilogue only; empty string in prologue
+  , "runtime"     -- epilogue only
+  , "pid"
+  , "hostname"
+  , "exit_code"   -- fail epilogue only
+  , "error"       -- fail epilogue only
+  ]
 
 -- | A literal text fragment or a placeholder name. Templates parse into
 -- a list of these for substitution.
@@ -297,3 +323,75 @@ splitTemplate input errIdx = go input
                               parts <- go (T.drop 1 closeRest)
                               return $ (if T.null lit then id else (Literal lit :))
                                      $ Placeholder name : parts
+
+-- | Rendered run-scope log templates ready for emission by the nexus.
+-- Each subfield is the template with static placeholders ({module},
+-- {version}, {morloc_version}, color codes) substituted; runtime
+-- placeholders remain as @{name}@-style tokens for the nexus to fill.
+-- 'Nothing' means \"emit nothing for this event\".
+data RenderedRunLog = RenderedRunLog
+  { renderedPrologue :: Maybe Text
+  , renderedEpilogueOk :: Maybe Text
+  , renderedEpilogueFail :: Maybe Text
+  }
+  deriving (Show, Eq, Generic)
+
+instance Binary RenderedRunLog
+
+-- | Render the run-scope prologue and epilogue templates from the
+-- entry-point module. Substitutes compile-time placeholders ({module},
+-- {version}, {morloc_version}, color codes) and leaves runtime
+-- placeholders for the nexus to fill. Returns 'Nothing' when the YAML
+-- declares no run-scope templates (so the nexus has nothing to do).
+-- Unknown placeholders are a compile error.
+renderRunLogTemplate :: MorlocMonad (Maybe RenderedRunLog)
+renderRunLogTemplate = do
+  mRunLog <- MM.gets stateRunLog
+  case mRunLog of
+    Nothing -> return Nothing
+    Just rl -> do
+      bindings <- runScopeStaticBindings
+      let renderRunScope :: Text -> MorlocMonad Text
+          renderRunScope t =
+            renderStaticWith
+              runScopeRuntimePlaceholders
+              t
+              bindings
+              0           -- run-scope templates have no per-source idx
+              "prologue/epilogue template"
+      prologue <- traverse renderRunScope (runLogPrologue rl)
+      (okT, failT) <- case runLogEpilogue rl of
+        Nothing -> return (Nothing, Nothing)
+        Just et -> do
+          mOk <- traverse renderRunScope (epilogueOk et)
+          mFail <- traverse renderRunScope (epilogueFail et)
+          return (mOk, mFail)
+      return $
+        Just
+          RenderedRunLog
+            { renderedPrologue = prologue
+            , renderedEpilogueOk = okT
+            , renderedEpilogueFail = failT
+            }
+
+-- | Static placeholder bindings for run-scope templates. Pulls the
+-- entry-point module name from 'stateModuleName' and the program
+-- version from the first entry of 'statePackageMeta'. Either may be
+-- absent (no main module set yet, or no @package.yaml@), in which
+-- case the placeholder renders as @\"?\"@.
+runScopeStaticBindings :: MorlocMonad [(Text, Text)]
+runScopeStaticBindings = do
+  mModName <- MM.gets stateModuleName
+  pkgMeta <- MM.gets statePackageMeta
+  let moduleTxt = case mModName of
+        Just (MV m) -> m
+        Nothing -> "?"
+      versionTxt = case pkgMeta of
+        (m : _) | not (T.null (packageVersion m)) -> packageVersion m
+        _ -> "?"
+  return $
+    [ ("module", moduleTxt)
+    , ("version", versionTxt)
+    , ("morloc_version", T.pack MV.versionStr)
+    ]
+      <> colorPlaceholders

@@ -59,6 +59,24 @@ parse f (Code code) = do
   -- subfield neither this nor the per-label config supplies.
   MM.modify (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
 
+  -- The main module's run-scope @prologue@ / @epilogue@ templates are
+  -- rendered by the nexus at run boundaries. Sub-modules cannot
+  -- contribute to these (a workflow has exactly one entry-point, so
+  -- run-scope events have exactly one source of truth).
+  MM.modify
+    ( \st -> st
+        { stateRunLog =
+            case (moduleConfigPrologue moduleConfig, moduleConfigEpilogue moduleConfig) of
+              (Nothing, Nothing) -> Nothing
+              (mp, me) ->
+                Just
+                  RunLogTemplate
+                    { runLogPrologue = mp
+                    , runLogEpilogue = me
+                    }
+        }
+    )
+
   -- Compute project root from entry-point file path
   let projectRoot = fmap MS.takeDirectory f
 

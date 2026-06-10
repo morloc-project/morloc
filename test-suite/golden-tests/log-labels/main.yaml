@@ -7,6 +7,32 @@ log-template:
   pass:  "[morloc] {group}: done in {runtime}s id={id}"
   fail:  "[morloc] {group}: FAILED after {runtime}s id={id}"
 
+# Run-scope prologue. Compile-time placeholders ({module}, {version},
+# {morloc_version}, color codes) are substituted at codegen; the nexus
+# fills the runtime placeholders at run start.
+# Runtime variables: {name}, {run_id}, {started_at}, {pid}, {hostname}.
+prologue: "{name} {version} is starting at {started_at} with pid={pid} on hostname={hostname}"
+
+epilogue:
+  # Variables:
+  # - {name}
+  # - {module}
+  # - {version}
+  # - {morloc_version}
+  # - {run_id}
+  # - {pid}
+  # - {hostname}
+  # - {started_at}
+  # - {finished_at}
+  # - {runtime}
+  ok: "Finish successfully in {runtime} seconds"
+
+  # Variables
+  # - all of the above
+  # - {exit_code} — nonzero
+  # - {error} — error packet contents (may be multi-line)
+  fail: "{name} failed after {runtime} seconds. Error message: {error}"
+
 labeled-groups:
   # Trilang baseline
   a:         { log: true }

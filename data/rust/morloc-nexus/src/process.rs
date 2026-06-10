@@ -507,10 +507,18 @@ pub fn clean_exit(exit_code: i32) -> ! {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    // Write summary.json (if the run dir was materialized) and drop
-    // any per-label tee handles still held by the nexus. Pool-side
-    // handles were closed when those processes died above; this only
-    // touches state owned by the nexus itself.
+    // Render and emit the run-scope epilogue BEFORE finalize writes
+    // summary.json. The epilogue line lands on stderr (and the rundir
+    // tee, when active) so a user grep'ing for "FAILED" sees the
+    // result independent of the structured summary. emit_epilogue is
+    // idempotent: if some earlier path already emitted, this call is
+    // a no-op.
+    crate::runlog::emit_epilogue(exit_code);
+
+    // Write summary.json (when --log-dir / --summary opts in) and drop
+    // any tee handles still held by the nexus. Pool-side handles were
+    // closed when those processes died above; this only touches state
+    // owned by the nexus itself.
     extern "C" {
         fn morloc_run_finalize(exit_code: i32);
     }

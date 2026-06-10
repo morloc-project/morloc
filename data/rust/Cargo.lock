@@ -813,6 +813,7 @@ dependencies = [
 name = "morloc-nexus"
 version = "0.88.0"
 dependencies = [
+ "chrono",
  "clap",
  "libc",
  "morloc-manifest",

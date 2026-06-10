@@ -9,5 +9,5 @@
 
 pub use morloc_manifest::{
     parse_manifest, read_manifest_payload, Arg, Command,
-    GroupEntry, Manifest, Pool,
+    GroupEntry, Manifest, Pool, RunLog,
 };

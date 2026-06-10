@@ -119,6 +119,10 @@ data MorlocState = MorlocState
   -- ^ Program-wide log message template from the main module's YAML
   -- @log-template@ field. Per-label overrides live in 'ManifoldConfig';
   -- the resolution order is per-label > this field > built-in default.
+  , stateRunLog :: Maybe RunLogTemplate
+  -- ^ Run-scope log templates from the main module's YAML @prologue@
+  -- and @epilogue@ fields. The nexus renders @prologue@ at run start
+  -- and the matching @epilogue.ok@ / @epilogue.fail@ at run end.
   , stateHashIncludePaths :: [Path]
   -- ^ Resolved (glob-expanded, scope-validated) list of files whose
   -- contents are folded into every pool's cache hash. Sourced from the
@@ -425,6 +429,7 @@ instance Defaultable MorlocState where
       , stateTermDocs = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
+      , stateRunLog = Nothing
       , stateHashIncludePaths = []
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty

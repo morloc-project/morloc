@@ -1,0 +1,13 @@
+module main (greet, boomP)
+
+import root-py
+
+greet :: Real -> Real
+greet x = x + 1.5
+
+-- Reaches the foreign pool and divides; calling with 0 makes Python
+-- throw ZeroDivisionError which the pool returns as a fail packet --
+-- this is the path that exercises the failure epilogue and the
+-- "error" field in summary.json.
+boomP :: Real -> Real
+boomP x = idpy (100.0 / x)

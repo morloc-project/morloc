@@ -66,6 +66,7 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "run-summary" "run-summary"
       , golden "cache-basics" "cache-basics"
       , golden "cache-concurrent" "cache-concurrent"
       , golden "cache-body-exception" "cache-body-exception"

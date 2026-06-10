@@ -50,6 +50,20 @@ fn color_enabled() -> bool {
     })
 }
 
+/// Global kill-switch for all morloc-emitted log lines. When
+/// `MORLOC_QUIET` is set to any non-empty value the per-label start /
+/// done lines, the prologue, and the epilogue are all suppressed at
+/// the source -- neither stderr nor the rundir tee receives them.
+/// Cached on first read so the env-var lookup is a one-time cost.
+fn quiet() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var_os("MORLOC_QUIET")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// Remove all CSI sequences (`ESC '[' ... [a-zA-Z]`). Bytes involved in
 /// a CSI sequence are all ASCII; multi-byte UTF-8 continuation bytes
 /// (`>= 0x80`) can't match the pattern, so the byte-level walk is
@@ -91,7 +105,7 @@ pub unsafe extern "C" fn morloc_log_emit(
     runtime_seconds: f64,
     call_id: u64,
 ) {
-    if tmpl.is_null() {
+    if tmpl.is_null() || quiet() {
         return;
     }
     let tmpl_str = match CStr::from_ptr(tmpl).to_str() {
@@ -128,6 +142,36 @@ pub unsafe extern "C" fn morloc_log_emit(
     if let Some(g) = group_str {
         crate::run::tee_log_line(g, &plain);
     }
+}
+
+/// Emit a fully-rendered run-scope line (prologue or epilogue) to
+/// stderr and tee to `$MORLOC_RUN_DIR/log` when the rundir is active.
+/// Distinct from [`morloc_log_emit`] because run-scope events are not
+/// per-label, have no `{date}`/`{runtime}`/`{id}` placeholders to
+/// fill, and write to the top-level log file rather than a label
+/// subdir.
+///
+/// Suppressed entirely under `MORLOC_QUIET`. NO_COLOR / TTY rules
+/// mirror the per-label emitter for visual consistency.
+///
+/// Safety: `text` must be a NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_run_emit_line(text: *const c_char) {
+    if text.is_null() || quiet() {
+        return;
+    }
+    let s = match CStr::from_ptr(text).to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let plain = strip_csi(s);
+    {
+        let stderr = io::stderr();
+        let mut handle = stderr.lock();
+        let out: &str = if color_enabled() { s } else { &plain };
+        let _ = writeln!(handle, "{}", out);
+    }
+    crate::run::tee_run_log_line(&plain);
 }
 
 #[cfg(test)]

@@ -26,3 +26,4 @@ serde_json = { workspace = true }
 nix = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
+chrono = "0.4"

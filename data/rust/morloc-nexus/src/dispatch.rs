@@ -50,6 +50,19 @@ pub struct NexusConfig {
     pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
+    /// Base directory under which a per-run subdir (named by run_id)
+    /// is materialized. Activates rundir creation, log tee, and
+    /// `summary.json`. Falls back to the `MORLOC_LOG_DIR` env var.
+    /// `None` => no rundir, no tee, no default summary.
+    pub log_dir: Option<String>,
+    /// Explicit `summary.json` output path. When set the summary file
+    /// goes here regardless of whether `log_dir` is set. Falls back
+    /// to the `MORLOC_SUMMARY` env var.
+    pub summary_path: Option<String>,
+    /// When true, suppress every nexus-and-pool-emitted log line
+    /// (prologue, epilogue, per-label start/done). Drives the
+    /// `MORLOC_QUIET` env var that the runtime's log emitter checks.
+    pub quiet: bool,
 }
 
 impl Default for NexusConfig {
@@ -70,6 +83,9 @@ impl Default for NexusConfig {
             port_file_path: None,
             fdb_path: None,
             eval_timeout: 30,
+            log_dir: None,
+            summary_path: None,
+            quiet: false,
         }
     }
 }
@@ -184,11 +200,11 @@ fn die_with_pool_error(
         _ => format!("{}", comm_err),
     };
 
-    eprintln!("Error: {}: {}", context, comm_msg);
+    let mut full = format!("{}: {}", context, comm_msg);
     if let Some(info) = process::pool_death_info(pool_index) {
-        eprintln!("Pool '{}' {}", socket.lang, info);
+        full.push_str(&format!("\nPool '{}' {}", socket.lang, info));
     }
-    process::clean_exit(1);
+    crate::runlog::die_with_error(&full);
 }
 
 /// Parse nexus-level options from argv. Returns the index of the first
@@ -290,6 +306,24 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
                     i += 1;
                 }
             }
+            "--log-dir" => {
+                i += 1;
+                if i < args.len() {
+                    config.log_dir = Some(args[i].clone());
+                    i += 1;
+                }
+            }
+            "--summary" => {
+                i += 1;
+                if i < args.len() {
+                    config.summary_path = Some(args[i].clone());
+                    i += 1;
+                }
+            }
+            "-q" | "--quiet" => {
+                config.quiet = true;
+                i += 1;
+            }
             _ => {
                 // Handle --key=value forms
                 if let Some(val) = arg.strip_prefix("--socket=") {
@@ -311,6 +345,12 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--eval-timeout=") {
                     config.eval_timeout = parse_timeout_arg("--eval-timeout", val);
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--log-dir=") {
+                    config.log_dir = Some(val.to_string());
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--summary=") {
+                    config.summary_path = Some(val.to_string());
                     i += 1;
                 } else {
                     // Not a nexus option - stop parsing
@@ -398,6 +438,20 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 consumed = 2;
                 matched = true;
             }
+            "--log-dir" if i + 1 < args.len() => {
+                config.log_dir = Some(args[i + 1].clone());
+                consumed = 2;
+                matched = true;
+            }
+            "--summary" if i + 1 < args.len() => {
+                config.summary_path = Some(args[i + 1].clone());
+                consumed = 2;
+                matched = true;
+            }
+            "--quiet" => {
+                config.quiet = true;
+                matched = true;
+            }
             _ => {
                 // Check --key=value forms
                 if let Some(val) = args[i].strip_prefix("--output-form=") {
@@ -425,6 +479,12 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--eval-timeout=") {
                     config.eval_timeout = parse_timeout_arg("--eval-timeout", val);
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--log-dir=") {
+                    config.log_dir = Some(val.to_string());
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--summary=") {
+                    config.summary_path = Some(val.to_string());
                     matched = true;
                 }
             }
@@ -525,6 +585,12 @@ pub fn dispatch_command(
     prog_name: &str,
 ) {
     let single_cmd = manifest.commands.len() == 1 && manifest.groups.is_empty();
+
+    // Run-scope log entry point. `{name}` is now bound; subsequent
+    // emit_prologue / emit_epilogue calls see it. clean_exit fires the
+    // matching epilogue at process exit.
+    crate::runlog::record_command(&cmd.name);
+    crate::runlog::emit_prologue();
 
     // Parse command-specific arguments
     let (parsed_args, _remaining_start) =
@@ -915,8 +981,7 @@ fn run_remote_command(
             } else {
                 "unknown error".into()
             };
-            eprintln!("Error: failed to parse argument #{}: {}", i, msg);
-            process::clean_exit(1);
+            crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
         // Get packet size and copy to Vec
@@ -1010,7 +1075,12 @@ fn run_remote_command(
     // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
-            eprintln!("Error: run failed\n{}", collapse_duplicate_lines(&err_msg));
+            // The "run failed\n" prefix is stripped from the recorded
+            // form -- consumers want the foreign traceback in summary
+            // .json's `error` field, not the morloc-level wrapper.
+            let collapsed = collapse_duplicate_lines(&err_msg);
+            crate::runlog::record_error(&collapsed);
+            eprintln!("Error: run failed\n{}", collapsed);
             process::clean_exit(1);
         }
         Ok(None) => {}
@@ -1397,8 +1467,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
         if c_pkt.is_null() {
             let msg = unsafe_errmsg_to_string(errmsg);
-            eprintln!("Error: failed to parse argument #{}: {}", i, msg);
-            process::clean_exit(1);
+            crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
         let voidstar = unsafe { get_morloc_data_packet_value(c_pkt, c_schema, &mut errmsg) };
@@ -1427,8 +1496,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
     if result.is_null() {
         let msg = unsafe_errmsg_to_string(errmsg);
-        eprintln!("Error: evaluation failed: {}", msg);
-        process::clean_exit(1);
+        crate::runlog::die_with_error(&format!("evaluation failed: {}", msg));
     }
 
     // Convert result to relptr and make a data packet for printing

@@ -121,6 +121,15 @@ pub struct Manifest {
     /// produced them ends.
     #[serde(default)]
     pub tmpdir: Option<String>,
+    /// Run-scope log templates rendered at compile time (the
+    /// `{module}` / `{version}` / `{morloc_version}` / color-code
+    /// placeholders are already substituted). Runtime placeholders
+    /// (`{name}`, `{run_id}`, `{started_at}`, `{finished_at}`,
+    /// `{runtime}`, `{pid}`, `{hostname}`, `{exit_code}`, `{error}`)
+    /// are filled by the nexus when emitting the line. `None` when
+    /// the program YAML declared no run-scope templates.
+    #[serde(default)]
+    pub run_log: Option<RunLog>,
     /// **Reserved.** User-sourced free-form annotations on the module.
     /// Always emitted as `{}` today. Distinct from `build` (which is
     /// compiler-sourced).
@@ -150,6 +159,26 @@ pub struct Build {
     /// produces an actionable "rebuild with the current compiler"
     /// error.
     pub morloc_version: String,
+}
+
+/// Run-scope log templates resolved at compile time. Each subfield is
+/// the user's template with compile-time placeholders already
+/// substituted (`{module}`, `{version}`, `{morloc_version}`, color
+/// codes). The nexus does the final pass to substitute runtime
+/// placeholders before emission.
+///
+/// `prologue` fires at the nexus entrypoint immediately after argument
+/// parsing; the appropriate `epilogue_ok` / `epilogue_fail` subfield
+/// fires at end-of-run. `None` means "emit nothing for this event".
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct RunLog {
+    #[serde(default)]
+    pub prologue: Option<String>,
+    #[serde(default)]
+    pub epilogue_ok: Option<String>,
+    #[serde(default)]
+    pub epilogue_fail: Option<String>,
 }
 
 /// A single language pool daemon. Each pool is one OS process that

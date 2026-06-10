@@ -30,6 +30,7 @@ import qualified Data.Time.Clock.POSIX as Time
 import qualified Data.Time.Format
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Infer as Infer
+import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
@@ -959,8 +960,9 @@ buildManifest ::
   Maybe Int64 ->
   Bool ->
   Maybe Path ->
+  Maybe RenderedRunLog ->
   Text
-buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck inlineSize noShm tmpdir =
+buildManifest config registry programName buildDir buildTime daemonSets fdata gasts langToPool indexToGroup groupDescs moduleDoc moduleEpilogues unsafeSkipNullCheck inlineSize noShm tmpdir runLog =
   jsonObj
     [ ("name", jsonStr (MT.pack programName))
     , ("build", buildJson)
@@ -973,6 +975,7 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
     , ("inline_size", maybe jsonNull jsonInt64 inlineSize)
     , ("no_shm", jsonBool noShm)
     , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) tmpdir)
+    , ("run_log", runLogJson runLog)
     , ("metadata", metadataEmpty)
     ]
   where
@@ -1026,6 +1029,19 @@ buildManifest config registry programName buildDir buildTime daemonSets fdata ga
         [ ("name", jsonStr gname)
         , ("desc", jsonStrArr desc)
         , ("metadata", metadataEmpty)
+        ]
+
+    -- Pre-rendered run-scope templates. The nexus does the final
+    -- runtime placeholder substitution at start/end of the run; the
+    -- string here already has {module}/{version}/{morloc_version}/color
+    -- placeholders resolved.
+    runLogJson :: Maybe RenderedRunLog -> Text
+    runLogJson Nothing = jsonNull
+    runLogJson (Just rl) =
+      jsonObj
+        [ ("prologue",     maybe jsonNull jsonStr (renderedPrologue rl))
+        , ("epilogue_ok",   maybe jsonNull jsonStr (renderedEpilogueOk rl))
+        , ("epilogue_fail", maybe jsonNull jsonStr (renderedEpilogueFail rl))
         ]
 
     -- Emit a real JSON null when the command has no group, not the
@@ -1190,6 +1206,7 @@ generate cs rASTs = do
   inlineSize <- MM.gets stateInlineSize
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
+  runLog <- renderRunLogTemplate
 
   let manifestJson =
         buildManifest
@@ -1210,6 +1227,7 @@ generate cs rASTs = do
           inlineSize
           noShm
           tmpdir
+          runLog
       wrapperScript = makeWrapperScript manifestJson
 
   return $
