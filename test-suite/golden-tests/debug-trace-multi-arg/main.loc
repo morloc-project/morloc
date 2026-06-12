@@ -1,0 +1,13 @@
+module main (boomP3)
+
+import root-py
+
+source Py from "throw.py" ("pyDivIfNonzero")
+
+pyDivIfNonzero :: Real -> Real -> Str -> Real
+
+-- Three args of distinct types: two Reals, one Str. When called with
+-- b == 0 the Python function raises; the debug-trace catch dumps all
+-- three args, producing three distinct content-addressed files.
+boomP3 :: Real -> Real -> Str -> Real
+boomP3 a b label = idpy (pyDivIfNonzero a b label)

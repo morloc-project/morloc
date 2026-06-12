@@ -16,6 +16,7 @@ parameters are fully instantiated.
 module Morloc.CodeGenerator.Express
   ( express
   , addCacheWraps
+  , addDebugWraps
   ) where
 
 import qualified Data.Set as Set
@@ -198,6 +199,82 @@ cacheWrapExpr (PolyIntrinsic ti intr xs) =
 cacheWrapExpr (PolyRemoteInterface l ti is rf inner) =
   PolyRemoteInterface l ti is rf <$> cacheWrapExpr inner
 cacheWrapExpr leaf = return leaf
+
+-- | Walk a 'PolyHead' and wrap every 'PolyManifold' body in a
+-- 'PolyDebugWrap'. Gated entirely on 'stateDebugTrace' so a build
+-- without @morloc make --debug@ pays nothing. The wrap lowers to a
+-- per-language try/catch + dump-args-on-throw at codegen.
+--
+-- Pure-runtime manifolds (whose body never reaches a foreign call;
+-- 'ManifoldKind' = 'ManifoldGenericPure') are left unwrapped because
+-- their failures go through the runtime's own error path, not the
+-- foreign-exception scaffold.
+addDebugWraps :: PolyHead -> MorlocMonad PolyHead
+addDebugWraps (PolyHead lang midx args body) = do
+  enabled <- MM.gets stateDebugTrace
+  if not enabled
+    then return $ PolyHead lang midx args body
+    else do
+      body' <- debugWrapExpr body
+      -- Skip the head-level wrap only when the body already wraps the
+      -- SAME midx (point-free fusion of the head's own manifold). Wraps
+      -- at a different midx inside the body migrate to a different
+      -- pool during segmentation -- if we suppressed the head wrap on
+      -- that basis, the calling pool would have no wrap to catch the
+      -- foreign-call exception. Args the typemap can't resolve are
+      -- silently dropped in 'lowerDebugWrap' (best-effort by design).
+      let body'' = if hasDebugWrapAt midx body'
+                    then body'
+                    else PolyDebugWrap midx args body'
+      return $ PolyHead lang midx args body''
+
+-- | Detect a 'PolyDebugWrap' at 'midx' already present in the body so
+-- the head-level wrap doesn't double up when 'debugWrapExpr' wrapped
+-- an enclosing 'PolyManifold' of the same midx.
+hasDebugWrapAt :: Int -> PolyExpr -> Bool
+hasDebugWrapAt m (PolyDebugWrap m' _ _) | m == m' = True
+hasDebugWrapAt m (PolyDebugWrap _ _ inner) = hasDebugWrapAt m inner
+hasDebugWrapAt m (PolyManifold _ _ _ _ inner) = hasDebugWrapAt m inner
+hasDebugWrapAt m (PolyCacheBody _ _ _ inner) = hasDebugWrapAt m inner
+hasDebugWrapAt m (PolyReturn e) = hasDebugWrapAt m e
+hasDebugWrapAt m (PolyLet _ e1 e2) = hasDebugWrapAt m e1 || hasDebugWrapAt m e2
+hasDebugWrapAt m (PolyApp h xs) = hasDebugWrapAt m h || any (hasDebugWrapAt m) xs
+hasDebugWrapAt m (PolyDoBlock _ e) = hasDebugWrapAt m e
+hasDebugWrapAt m (PolyEval _ e) = hasDebugWrapAt m e
+hasDebugWrapAt m (PolyCoerce _ _ e) = hasDebugWrapAt m e
+hasDebugWrapAt m (PolyIf a b c) = hasDebugWrapAt m a || hasDebugWrapAt m b || hasDebugWrapAt m c
+hasDebugWrapAt _ _ = False
+
+debugWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
+debugWrapExpr (PolyManifold l m form k inner) = do
+  inner' <- debugWrapExpr inner
+  let argsList = collectArgs form
+  return $ PolyManifold l m form k (PolyDebugWrap m argsList inner')
+debugWrapExpr (PolyApp head' args') =
+  PolyApp <$> debugWrapExpr head' <*> mapM debugWrapExpr args'
+debugWrapExpr (PolyCacheBody lbl m args' body) =
+  PolyCacheBody lbl m args' <$> debugWrapExpr body
+debugWrapExpr (PolyDebugWrap m args' body) =
+  PolyDebugWrap m args' <$> debugWrapExpr body
+debugWrapExpr (PolyLet i e1 e2) =
+  PolyLet i <$> debugWrapExpr e1 <*> debugWrapExpr e2
+debugWrapExpr (PolyReturn x) = PolyReturn <$> debugWrapExpr x
+debugWrapExpr (PolyIf c t' e) =
+  PolyIf <$> debugWrapExpr c <*> debugWrapExpr t' <*> debugWrapExpr e
+debugWrapExpr (PolyDoBlock ti x) = PolyDoBlock ti <$> debugWrapExpr x
+debugWrapExpr (PolyEval ti x) = PolyEval ti <$> debugWrapExpr x
+debugWrapExpr (PolyCoerce c ti x) = PolyCoerce c ti <$> debugWrapExpr x
+debugWrapExpr (PolyList v ts xs) = PolyList v ts <$> mapM debugWrapExpr xs
+debugWrapExpr (PolyTuple v xs) =
+  PolyTuple v <$> mapM (\(t, x) -> (,) t <$> debugWrapExpr x) xs
+debugWrapExpr (PolyRecord o v ps rs) =
+  PolyRecord o v ps <$>
+    mapM (\(k, (t, x)) -> (,) k . (,) t <$> debugWrapExpr x) rs
+debugWrapExpr (PolyIntrinsic ti intr xs) =
+  PolyIntrinsic ti intr <$> mapM debugWrapExpr xs
+debugWrapExpr (PolyRemoteInterface l ti is rf inner) =
+  PolyRemoteInterface l ti is rf <$> debugWrapExpr inner
+debugWrapExpr leaf = return leaf
 
 -- | Look up @midx@ in 'stateManifoldConfig'; return its label group
 -- when the manifold has @cache: true@ AND a label, otherwise

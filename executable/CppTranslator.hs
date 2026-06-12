@@ -594,6 +594,7 @@ cppLowerConfig =
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
          in [idoc|foreign_call#{tupled argList}|]
     , lcCacheBody = cppCacheBody
+    , lcDebugWrap = cppDebugWrap
     , lcRemoteCall = \socketFile mid res args -> do
         let resMem = pretty $ fromMaybe (-1) (remoteResourcesMemory res)
             resTime = pretty $ maybe (-1) unTimeInSeconds (remoteResourcesTime res)
@@ -901,6 +902,77 @@ cppCacheBody resSa lbl midx args bodyPool = do
   return $ PoolDocs
     { poolExpr = resultVar
     , poolPriorLines = prior
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | C++ debug-trace wrap. Wraps the manifold body in @try {...}
+-- catch (...) { ... throw; }@. The catch block serializes each arg
+-- via the same @_put_value@ path the cache wrap uses, then calls
+-- @morloc_debug_record_frame@ with the (mid, schema, packet bytes)
+-- tuples before re-throwing. Zero cost on the happy path.
+--
+-- Schema strings are inlined as C string literals (one-shot at
+-- codegen, no need to pass through the schema table).
+cppDebugWrap ::
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  CppTranslator PoolDocs
+cppDebugWrap midx args bodyPool = do
+  wrapIdx <- getCounter
+  let suffix = pretty wrapIdx
+      hp = "__morloc_"
+      resultVar = hp <> "dr_" <> suffix
+      packetsVar = hp <> "dpk_" <> suffix
+      schemasVar = hp <> "dsc_" <> suffix
+      sizesVar = hp <> "dsz_" <> suffix
+      n = length args
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      argSchemas = [s | (_, s, _) <- preparedArgs]
+      argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
+      packetsDecl = "const uint8_t*" <+> packetsVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", " argRefs <> ";"
+      schemasDecl = "const char*" <+> schemasVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", "
+          [dquotes (pretty (cppEscapeString s)) | s <- argSchemas]
+        <> ";"
+      sizesDecl = "size_t" <+> sizesVar <> brackets (pretty n) <+> "= { 0 };"
+      tryBody = poolPriorLines bodyPool
+        ++ [ resultVar <+> "=" <+> poolExpr bodyPool <> ";" ]
+      -- Inner try/catch in the catch block: a serialization failure
+      -- during the dump must NOT replace the original exception.
+      catchBody = vsep
+        [ "try {"
+        , indent 4 $ vsep
+            [ vsep argSetupLines
+            , packetsDecl
+            , schemasDecl
+            , sizesDecl
+            , "(void)" <> sizesVar <> ";"
+            , "morloc_debug_record_frame(" <> pretty midx
+                <> ", " <> packetsVar
+                <> ", " <> schemasVar
+                <> ", " <> pretty n <> ");"
+            ]
+        , "} catch (...) {}"
+        , "throw;"
+        ]
+      tryStmt = vsep
+        [ "uint8_t*" <+> resultVar <+> "= nullptr;"
+        , "try {"
+        , indent 4 (vsep tryBody)
+        , "} catch (...) {"
+        , indent 4 catchBody
+        , "}"
+        ]
+  return $ PoolDocs
+    { poolExpr = resultVar
+    , poolPriorLines = [tryStmt]
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool

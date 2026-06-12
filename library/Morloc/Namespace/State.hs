@@ -174,6 +174,12 @@ data MorlocState = MorlocState
   -- routing path, from @morloc make --tmpdir@. @Nothing@ = use the
   -- libmorloc default (@$TMPDIR@ or @/tmp@); emitted as the manifest
   -- @tmpdir@ field, forwarded by the nexus via @MORLOC_TMPDIR@.
+  , stateDebugTrace :: Bool
+  -- ^ True when @morloc make --debug@ was given. Causes Express to
+  -- wrap every foreign-call manifold body with a 'PolyDebugWrap'
+  -- node, which codegen lowers to per-language try/catch that dumps
+  -- the manifold's args via @morloc_debug_record_frame@ on
+  -- exception. Zero cost on the happy path.
   , stateModuleDoc :: [Text]
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
@@ -451,6 +457,7 @@ instance Defaultable MorlocState where
       , stateInlineSize = Nothing
       , stateNoShm = False
       , stateTmpdir = Nothing
+      , stateDebugTrace = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
       , stateSerialAncestors = Set.empty

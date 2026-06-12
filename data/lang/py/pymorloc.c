@@ -1823,6 +1823,92 @@ static PyObject* pybinding__flush_shm_tracker(PyObject* self, PyObject* args) {
 }
 
 
+// Debug-trace bindings -- forwarded straight to the Rust runtime in
+// libmorloc.so. The pool's run_job and per-manifold catch blocks call
+// these via the morloc Python module.
+extern void morloc_debug_record_frame(
+    uint32_t midx,
+    const uint8_t** packets,
+    const char** schemas,
+    size_t n);
+extern char* morloc_debug_drain_frames(void);
+extern void morloc_debug_flush_dispatch(void);
+
+// debug_record_frame(midx, packets_list, schemas_list) -- packets is a
+// Python list of bytes objects (each a serialized morloc packet);
+// schemas is a Python list of str. The codegen-emitted catch block
+// builds both lists from the per-arg serialization results.
+static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
+    (void)self;
+    unsigned long midx_arg;
+    PyObject* packets_list;
+    PyObject* schemas_list;
+    if (!PyArg_ParseTuple(args, "kOO", &midx_arg, &packets_list, &schemas_list)) {
+        return NULL;
+    }
+    if (!PyList_Check(packets_list) || !PyList_Check(schemas_list)) {
+        PyErr_SetString(PyExc_TypeError, "packets and schemas must be lists");
+        return NULL;
+    }
+    Py_ssize_t n_pkts = PyList_Size(packets_list);
+    Py_ssize_t n_sch = PyList_Size(schemas_list);
+    if (n_pkts != n_sch) {
+        PyErr_SetString(PyExc_ValueError,
+            "packets and schemas must have the same length");
+        return NULL;
+    }
+    if (n_pkts == 0) {
+        morloc_debug_record_frame((uint32_t)midx_arg, NULL, NULL, 0);
+        Py_RETURN_NONE;
+    }
+    const uint8_t** pkt_arr = (const uint8_t**)calloc((size_t)n_pkts, sizeof(uint8_t*));
+    const char** sch_arr = (const char**)calloc((size_t)n_pkts, sizeof(char*));
+    if (!pkt_arr || !sch_arr) {
+        free(pkt_arr); free(sch_arr);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n_pkts; i++) {
+        PyObject* p = PyList_GetItem(packets_list, i);
+        PyObject* s = PyList_GetItem(schemas_list, i);
+        if (!PyBytes_Check(p) || !PyUnicode_Check(s)) {
+            free(pkt_arr); free(sch_arr);
+            PyErr_SetString(PyExc_TypeError,
+                "packets must be bytes and schemas must be str");
+            return NULL;
+        }
+        pkt_arr[i] = (const uint8_t*)PyBytes_AsString(p);
+        sch_arr[i] = PyUnicode_AsUTF8(s);
+    }
+    morloc_debug_record_frame((uint32_t)midx_arg, pkt_arr, sch_arr, (size_t)n_pkts);
+    free(pkt_arr);
+    free(sch_arr);
+    Py_RETURN_NONE;
+}
+
+// debug_drain_frames() -> Optional[str] -- returns None when no frames
+// were recorded (clean run or --debug not compiled in).
+static PyObject* pybinding__debug_drain_frames(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    char* trace = morloc_debug_drain_frames();
+    if (trace == NULL) {
+        Py_RETURN_NONE;
+    }
+    PyObject* result = PyUnicode_FromString(trace);
+    free(trace);
+    return result;
+}
+
+// Reset per-dispatch debug state (recursion counters, write counter,
+// frame stack). Called by the pool's run_job at the start of each
+// new top-level call.
+static PyObject* pybinding__debug_flush_dispatch(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    morloc_debug_flush_dispatch();
+    Py_RETURN_NONE;
+}
+
+
 // Release the SHM ref owned by a put_value-produced packet. The codegen
 // inserts this call at the end of a serialize let's scope so the tracker
 // entry is dropped as soon as the packet is no longer needed, instead of
@@ -2491,6 +2577,9 @@ static PyMethodDef Methods[] = {
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"flush_shm_tracker", pybinding__flush_shm_tracker, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
     {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
+    {"debug_record_frame", pybinding__debug_record_frame, METH_VARARGS, "Append a manifold's args to the debug-trace stack"},
+    {"debug_drain_frames", pybinding__debug_drain_frames, METH_NOARGS, "Drain the debug-trace stack and return as a string, or None"},
+    {"debug_flush_dispatch", pybinding__debug_flush_dispatch, METH_NOARGS, "Reset per-dispatch debug state (recursion counters etc.)"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},

@@ -125,6 +125,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       return $ AppPoolS t' poolCall' es'
     serialExpr m (MonoCacheBody lbl midx args body) =
       lowerCacheBody Serialized m lbl midx args body
+    serialExpr m (MonoDebugWrap midx args body) =
+      lowerDebugWrap Serialized m midx args body
     serialExpr _ (MonoBndVar (A _) i) = return $ BndVarS Nothing i
     serialExpr _ (MonoBndVar (B _) i) =
       case Map.lookup i typemap of
@@ -259,6 +261,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
             SerialS tf -> tf
             _ -> error "CacheBody body must lower to a serial form"
       naturalizeN "MonoCacheBody" m lang t' se
+    nativeExpr m (MonoDebugWrap midx args body) = do
+      -- Same reasoning as MonoCacheBody: inside Preserved the bound
+      -- vars are native and must reference n0/n1/...
+      se <- lowerDebugWrap Unserialized m midx args body
+      let t' = case typeSof se of
+            SerialS tf -> tf
+            _ -> error "DebugWrap body must lower to a serial form"
+      naturalizeN "MonoDebugWrap" m lang t' se
     nativeExpr _ (MonoApp _ _) = error "Illegal application"
     nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
     nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
@@ -479,6 +489,57 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       resSa <- Serial.makeSerialAST m lang t'
       return $ CacheBodyS t' resSa lbl midx args' body'
 
+    -- | Parallel of 'lowerCacheBody' for the debug-trace wrap. Pairs
+    -- each arg with its 'SerialAST' so the catch block can serialize
+    -- the arg into a packet before dumping. Passthrough / function
+    -- args are silently skipped here (with @SerialNone@) rather than
+    -- throwing -- their omission from the trace is acceptable, and
+    -- failing the build would defeat --debug's purpose as a
+    -- diagnostic tool.
+    lowerDebugWrap ::
+      SerializationState ->
+      Int ->
+      Int ->
+      [Arg None] ->
+      MonoExpr ->
+      MorlocMonad SerialExpr
+    lowerDebugWrap state m midx args body = do
+      body' <- serialExpr m body
+      -- Debug-trace is best-effort: an arg whose type the typemap
+      -- can't infer (e.g. untyped passthrough into a remote-dispatch
+      -- sub-manifold) is silently dropped rather than crashing the
+      -- build. Same for passthrough/function args, which have no
+      -- wire form to dump.
+      args' <- fmap catMaybes $ mapM (\(Arg i _) ->
+                  case Map.lookup i typemap of
+                    Nothing -> return Nothing
+                    Just _ -> do
+                      arg@(Arg _ tm) <- typeArg state i
+                      case tm of
+                        Native tf -> do
+                          sa <- Serial.makeSerialAST m lang tf
+                          return $ Just (arg, sa)
+                        Serial tf -> do
+                          sa <- Serial.makeSerialAST m lang tf
+                          return $ Just (arg, sa)
+                        Passthrough -> return Nothing
+                        Function _ _ -> return Nothing
+                ) args
+      -- The TypeF stored on DebugWrapS is unused at codegen; pick
+      -- whichever serial type we can recover from the body. AppPoolS
+      -- (a remote-dispatch body) has typeSof = FunctionS _ (SerialS
+      -- t), not SerialS t directly, so peel a function result if
+      -- present.
+      let t' = case extractSerial (typeSof body') of
+            Just tf -> tf
+            Nothing -> error "DebugWrap body must lower to a serial form"
+      return $ DebugWrapS t' midx args' body'
+
+    extractSerial :: TypeS -> Maybe TypeF
+    extractSerial (SerialS tf) = Just tf
+    extractSerial (FunctionS _ inner) = extractSerial inner
+    extractSerial _ = Nothing
+
     typeArg ::
       SerializationState ->
       Int ->
@@ -518,6 +579,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap parentIdx (MonoCacheBody _ _ _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoDebugWrap _ _ e) = makeTypemap parentIdx e
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
@@ -579,9 +641,17 @@ instance IsSerializable SerialExpr where
   -- point of caching.
   serialLet i se (CacheBodyS t resSa lbl m args inner) =
     CacheBodyS t resSa lbl m args (SerialLetS i se inner)
+  -- Same push-in for 'DebugWrapS': lets MUST live inside the try
+  -- frame so the catch block fires on deserialization failures, not
+  -- just on body failures. If lets were hoisted outside, the wrap
+  -- would silently never see exceptions raised by 'morloc.get_value'.
+  serialLet i se (DebugWrapS t m args inner) =
+    DebugWrapS t m args (SerialLetS i se inner)
   serialLet i se body = SerialLetS i se body
   nativeLet i ne (CacheBodyS t resSa lbl m args inner) =
     CacheBodyS t resSa lbl m args (NativeLetS i ne inner)
+  nativeLet i ne (DebugWrapS t m args inner) =
+    DebugWrapS t m args (NativeLetS i ne inner)
   nativeLet i ne body = NativeLetS i ne body
 
 instance IsSerializable NativeExpr where

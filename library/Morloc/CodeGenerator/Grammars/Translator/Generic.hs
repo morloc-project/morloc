@@ -419,6 +419,7 @@ genericLowerConfig desc srcNamer = cfg
                   <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
         , lcRemoteCall = genericRemoteCall desc
         , lcCacheBody = genericCacheBody desc cfg
+        , lcDebugWrap = genericDebugWrap desc cfg
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
@@ -581,6 +582,97 @@ genericCacheBody desc cfg resSa lbl midx args bodyPool = do
   return $ defaultValue
     { poolExpr = resultVar
     , poolPriorLines = priorLines
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | Debug-trace wrap. Wraps the manifold body in a per-language
+-- try/catch. On exception the catch block serializes each arg via
+-- its 'SerialAST', invokes @morloc_debug_record_frame@, and
+-- re-raises. Zero cost on the happy path: only the try-frame
+-- overhead.
+--
+-- Branches on 'ldBlockStyle' to render either Python (try:/except:)
+-- or R (tryCatch). C++ is handled by 'cppDebugWrap' in the C++
+-- translator; control never reaches here for it.
+genericDebugWrap ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  IndexM PoolDocs
+genericDebugWrap desc cfg midx args bodyPool = do
+  let intr = pretty (ldIntrinsicPrefix desc)
+      assign = pretty (ldAssignOp desc)
+      hp = pretty (ldHelperVarPrefix desc)
+      resultVar = hp <> "debug_result"
+      excVar = hp <> "debug_e"
+      dumpExcVar = hp <> "dump_e"
+      midxLit = pretty midx <> pretty (ldIntLiteralSuffix desc)
+  preparedArgs <- mapM (prepareCacheArg desc cfg) args
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      schemaRefs = [s | (_, s, _) <- preparedArgs]
+      catchSerializeStmts = concatMap (\(_, _, ss) -> ss) preparedArgs
+      genericList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldGenericListFn desc) <> tupled xs
+      atomicList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldAtomicListFn desc) <> tupled xs
+      packetList = genericList argRefs
+      schemaList = atomicList schemaRefs
+      recordCall = intr <> "debug_record_frame"
+        <> tupled [midxLit, packetList, schemaList]
+      catchStmts = catchSerializeStmts ++ [recordCall]
+      -- Defensive inner wrap around the dump: a serialization failure
+      -- during the catch must NOT replace the original exception. If
+      -- the inner block throws we silently drop the dump and re-raise
+      -- the original.
+      block = case ldBlockStyle desc of
+        IndentBlock -> vsep
+          -- Python
+          [ "try:"
+          , indent 4 (vsep (poolPriorLines bodyPool
+              ++ [resultVar <+> assign <+> poolExpr bodyPool]))
+          , "except Exception as" <+> excVar <> ":"
+          , indent 4 "try:"
+          , indent 8 (vsep catchStmts)
+          , indent 4 "except Exception:"
+          , indent 8 "pass"
+          , indent 4 "raise"
+          ]
+        BraceBlock -> vsep
+          -- R: tryCatch returns the body's value; we assign the whole
+          -- thing. The dump is itself wrapped in tryCatch so any
+          -- serialization failure is swallowed before re-raising.
+          [ resultVar <+> assign <+> "tryCatch({"
+          , indent 4 (vsep (poolPriorLines bodyPool ++ [poolExpr bodyPool]))
+          , "}, error = function(" <> excVar <> ") {"
+          , indent 4 "tryCatch({"
+          , indent 8 (vsep catchStmts)
+          , indent 4 "}, error = function(" <> dumpExcVar <> ") NULL)"
+          , indent 4 "stop(" <> excVar <> ")"
+          , "})"
+          ]
+        EndKeywordBlock -> vsep
+          -- No supported lang uses EndKeyword for try/catch today;
+          -- placeholder mirroring Ruby/Lua idioms.
+          [ "begin"
+          , indent 4 (vsep (poolPriorLines bodyPool
+              ++ [resultVar <+> assign <+> poolExpr bodyPool]))
+          , "rescue" <+> excVar
+          , indent 4 "begin"
+          , indent 8 (vsep catchStmts)
+          , indent 4 "rescue"
+          , indent 4 "end"
+          , indent 4 "raise"
+          , "end"
+          ]
+  return $ defaultValue
+    { poolExpr = resultVar
+    , poolPriorLines = [block]
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool

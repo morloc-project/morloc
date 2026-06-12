@@ -157,6 +157,15 @@ fn main() {
     if config.quiet {
         std::env::set_var("MORLOC_QUIET", "1");
     }
+    if let Some(n) = config.debug_cache_depth {
+        std::env::set_var("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
+    }
+    if let Some(n) = config.debug_cache_max {
+        std::env::set_var("MORLOC_DEBUG_CACHE_MAX", n.to_string());
+    }
+    if let Some(n) = config.debug_recursion_cap {
+        std::env::set_var("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
+    }
 
     // Resolve the per-run identity now so pools inherit a fully-published
     // env (MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID).

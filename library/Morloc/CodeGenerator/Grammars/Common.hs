@@ -54,7 +54,6 @@ import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (serialAstToType)
@@ -62,7 +61,6 @@ import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
 import qualified Morloc.Monad as MM
-import Data.Maybe (catMaybes, isJust)
 
 -- Stores pieces of code made while building a pool
 data PoolDocs = PoolDocs
@@ -320,6 +318,7 @@ renameSE old new = go where
   go (AppRecS t m es) = AppRecS t m (map go es)
   go (AppForeignRecS t m s es) = AppForeignRecS t m s (map go es)
   go (CacheBodyS t resSa lbl m args body) = CacheBodyS t resSa lbl m args (go body)
+  go (DebugWrapS t m args body) = DebugWrapS t m args (go body)
   go (ReturnS se) = ReturnS (go se)
   go (SerialLetS i se1 se2) = SerialLetS (ri i) (go se1) (go se2)
   go (NativeLetS i ne se) = NativeLetS (ri i) (renameNE old new ne) (go se)
@@ -423,6 +422,11 @@ invertSerialManifold sm0 =
       -- correct let nesting (head of list = innermost = earliest in
       -- Python statement order).
       return $ D (CacheBodyS t resSa lbl mid args (weave (D body lets))) []
+    invertSerialExprM (DebugWrapS_ t mid args (D body lets)) =
+      -- KEEP let-bindings INSIDE the debug wrap so they're inside the
+      -- try-frame. If the body's deserialization itself throws, we
+      -- still want the catch block to fire and record the frame.
+      return $ D (DebugWrapS t mid args (weave (D body lets))) []
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
     invertNativeExprM ::

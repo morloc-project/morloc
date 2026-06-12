@@ -30,7 +30,7 @@ import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
-import Morloc.CodeGenerator.Express (express, addCacheWraps)
+import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
@@ -138,6 +138,9 @@ writeProgram translateFn path code = do
           mapM express paramRASTs
             -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
             >>= mapM addCacheWraps
+            -- When 'stateDebugTrace' (--debug), wrap every foreign-call
+            -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
+            >>= mapM addDebugWraps
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce

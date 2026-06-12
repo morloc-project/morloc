@@ -49,6 +49,10 @@ reduceSerialExpr ver ts lang (NativeLetS i ne se) =
   NativeLetS i <$> reduceNativeExpr ver ts lang ne <*> reduceSerialExpr ver ts lang se
 reduceSerialExpr ver ts lang (SerializeS ast ne) =
   SerializeS ast <$> reduceNativeExpr ver ts lang ne
+reduceSerialExpr ver ts lang (CacheBodyS t resSa lbl mid args body) =
+  CacheBodyS t resSa lbl mid args <$> reduceSerialExpr ver ts lang body
+reduceSerialExpr ver ts lang (DebugWrapS t mid args body) =
+  DebugWrapS t mid args <$> reduceSerialExpr ver ts lang body
 reduceSerialExpr _ _ _ e = return e
 
 reduceSerialArg :: Text -> Text -> Lang -> SerialArg -> MorlocMonad SerialArg

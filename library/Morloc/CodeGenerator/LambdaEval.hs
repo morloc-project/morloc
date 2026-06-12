@@ -18,7 +18,6 @@ module Morloc.CodeGenerator.LambdaEval
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
-import Control.Monad (void)
 
 -- {- | Remove lambdas introduced through substitution
 --

@@ -1,0 +1,10 @@
+module main (boomP)
+
+import root-py
+
+source Py from "throw.py" ("pyThrowAtZero")
+
+pyThrowAtZero :: Real -> Real
+
+boomP :: Real -> Real
+boomP n = idpy (pyThrowAtZero n)

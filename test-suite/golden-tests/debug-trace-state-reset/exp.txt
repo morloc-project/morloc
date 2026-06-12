@@ -1,0 +1,4 @@
+run1_fail_rc: PASS
+run2_fail_rc: PASS
+equal_frame_counts: PASS
+equal_pkt_counts: PASS

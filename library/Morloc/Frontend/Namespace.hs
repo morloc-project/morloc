@@ -117,6 +117,7 @@ copyState oldIndex newIndex = do
       , stateInlineSize = stateInlineSize s
       , stateNoShm = stateNoShm s
       , stateTmpdir = stateTmpdir s
+      , stateDebugTrace = stateDebugTrace s
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
       , stateSerialAncestors = stateSerialAncestors s

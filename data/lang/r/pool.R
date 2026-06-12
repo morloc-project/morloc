@@ -40,6 +40,8 @@ morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop
 morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
 morloc_exit                          <- function(...){ .Call("morloc_exit",                          ...) }
 morloc_cache_key_compute             <- function(...){ .Call("r_morloc_cache_key_compute",           ...) }
+morloc_debug_record_frame            <- function(...){ .Call("r_morloc_debug_record_frame",          ...) }
+morloc_debug_flush_dispatch          <- function(  ){ .Call("r_morloc_debug_flush_dispatch"        ) }
 morloc_cache_lookup                  <- function(...){ .Call("r_morloc_cache_lookup",                ...) }
 morloc_cache_store                   <- function(...){ .Call("r_morloc_cache_store",                 ...) }
 morloc_cache_record_hit              <- function( ){ .Call("r_morloc_cache_record_hit"             ) }

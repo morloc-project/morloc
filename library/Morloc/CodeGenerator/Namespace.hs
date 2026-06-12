@@ -569,6 +569,16 @@ data PolyExpr
     -- body. Every call to the labeled manifold -- cross-pool socket
     -- entry or intra-pool native call alike -- runs this body and
     -- therefore hits the cache hook uniformly.
+  | PolyDebugWrap Int [Arg None] PolyExpr
+    -- ^ Debug-trace wrap inserted around every foreign-call manifold
+    -- body by 'Express.addDebugWraps' when 'stateDebugTrace' is True.
+    -- Fields: midx (used as the frame identifier in the emitted
+    -- trace) and the manifold's bound args (each becomes a slot the
+    -- catch block dumps on exception). Has no per-label semantics --
+    -- the wrap is universal when the flag is on. Lowered through
+    -- 'MonoDebugWrap' to 'DebugWrapS', which the per-language
+    -- translator realizes as a try/catch + 'morloc_debug_record_frame'
+    -- call.
   | -- variables in the original tree will all be typed
     -- but I also may need to generate passthrough terms
     PolyBndVar
@@ -631,6 +641,10 @@ data MonoExpr
     -- label + midx + args forward to 'Serialize' which lowers it to
     -- 'CacheBodyS' / 'CacheBodyN' wrapping the body in serial /
     -- native form respectively.
+  | MonoDebugWrap Int [Arg None] MonoExpr
+    -- ^ Monomorphized counterpart of 'PolyDebugWrap'. Carries the
+    -- midx + args forward to 'Serialize' which lowers it to
+    -- 'DebugWrapS'.
   | -- terms that map 1:1 versus SAnno; have defined types in one language
     MonoExe (Indexed Type) ExecutableExpressionPool
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
@@ -705,6 +719,16 @@ data SerialExpr
     -- the wrap lowers to: serialize-native-args, content-hash,
     -- cache-lookup; on hit return cached bytes; on miss evaluate
     -- body, materialize+store its result bytes, return them.
+  | DebugWrapS TypeF Int [(Arg TypeM, SerialAST)] SerialExpr
+    -- ^ Debug-trace wrap. Fields: result type, manifold midx, the
+    -- manifold's bound args paired with their SerialAST (used to
+    -- serialize each arg into a packet on the catch path), and the
+    -- inner body. Codegen emits a per-language try/catch around the
+    -- body; on exception each arg is serialized + xxh64-hashed +
+    -- atomically written to @$DEBUG_DIR/inputs/<hash>.pkt@ (when
+    -- the debug dir is set), a frame entry is appended to the
+    -- thread-local trace, and the exception is rethrown. Zero cost
+    -- on the happy path.
   | ReturnS SerialExpr
   | SerialLetS Int SerialExpr SerialExpr
   | NativeLetS Int NativeExpr SerialExpr
@@ -776,6 +800,7 @@ foldlSE f b (AppPoolS_ _ _ xs) = foldl f b xs
 foldlSE f b (AppRecS_ _ _ xs) = foldl f b xs
 foldlSE f b (AppForeignRecS_ _ _ _ xs) = foldl f b xs
 foldlSE f b (CacheBodyS_ _ _ _ _ _ x) = f b x
+foldlSE f b (DebugWrapS_ _ _ _ x) = f b x
 foldlSE f b (ReturnS_ x) = f b x
 foldlSE f b (SerialLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE f b (NativeLetS_ _ x1 x2) = foldl f b [x1, x2]
@@ -849,6 +874,7 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidSerialExpr' (AppRecS_ t m (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppRecS t m es)
     monoidSerialExpr' (AppForeignRecS_ t m s (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppForeignRecS t m s es)
     monoidSerialExpr' (CacheBodyS_ t resSa lbl m args (req, body)) = return (req, CacheBodyS t resSa lbl m args body)
+    monoidSerialExpr' (DebugWrapS_ t m args (req, body)) = return (req, DebugWrapS t m args body)
     monoidSerialExpr' (ReturnS_ (req, se)) = return (req, ReturnS se)
     monoidSerialExpr' (SerialLetS_ i (req1, se1) (req2, se2)) = return (mappend' req1 req2, SerialLetS i se1 se2)
     monoidSerialExpr' (NativeLetS_ i (req1, ne) (req2, se)) = return (mappend' req1 req2, NativeLetS i ne se)
@@ -997,6 +1023,7 @@ data SerialExpr_ sm se ne sr nr
   | AppRecS_ TypeF Int [se]
   | AppForeignRecS_ TypeF Int Socket [se]
   | CacheBodyS_ TypeF SerialAST Text Int [(Arg TypeM, SerialAST)] se
+  | DebugWrapS_ TypeF Int [(Arg TypeM, SerialAST)] se
   | ReturnS_ se
   | SerialLetS_ Int se se
   | NativeLetS_ Int ne se
@@ -1157,6 +1184,9 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     f full@(CacheBodyS t resSa lbl m args body) = do
       body' <- surroundFoldSerialExprM sfm fm body
       opFoldWithSerialExprM fm full $ CacheBodyS_ t resSa lbl m args body'
+    f full@(DebugWrapS t m args body) = do
+      body' <- surroundFoldSerialExprM sfm fm body
+      opFoldWithSerialExprM fm full $ DebugWrapS_ t m args body'
     f full@(ReturnS e) = do
       e' <- surroundFoldSerialExprM sfm fm e
       opFoldWithSerialExprM fm full $ ReturnS_ e'
@@ -1307,6 +1337,7 @@ instance HasTypeS SerialExpr where
   typeSof (AppRecS t _ _) = SerialS t
   typeSof (AppForeignRecS t _ _ _) = SerialS t
   typeSof (CacheBodyS t _ _ _ _ _) = SerialS t
+  typeSof (DebugWrapS t _ _ _) = SerialS t
   typeSof (ReturnS e) = typeSof e
   typeSof (SerialLetS _ _ e) = typeSof e
   typeSof (NativeLetS _ _ e) = typeSof e
@@ -1438,6 +1469,7 @@ instance MFunctor SerialExpr where
         (AppRecS t m es) -> mapSerialExpr f $ AppRecS t m (map (mgatedMap g f) es)
         (AppForeignRecS t m s es) -> mapSerialExpr f $ AppForeignRecS t m s (map (mgatedMap g f) es)
         (CacheBodyS t resSa lbl m args body) -> mapSerialExpr f $ CacheBodyS t resSa lbl m args (mgatedMap g f body)
+        (DebugWrapS t m args body) -> mapSerialExpr f $ DebugWrapS t m args (mgatedMap g f body)
         (ReturnS se) -> mapSerialExpr f $ ReturnS (mgatedMap g f se)
         (SerialLetS i se1 se2) -> mapSerialExpr f $ SerialLetS i (mgatedMap g f se1) (mgatedMap g f se2)
         (NativeLetS i ne1 se2) -> mapSerialExpr f $ NativeLetS i (mgatedMap g f ne1) (mgatedMap g f se2)
@@ -1505,6 +1537,8 @@ instance Pretty PolyExpr where
   pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e : es))
   pretty (PolyCacheBody lbl m _ e) =
     "PolyCacheBody<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
+  pretty (PolyDebugWrap m _ e) =
+    "PolyDebugWrap<" <> pretty m <> ">" <+> parens (pretty e)
   pretty (PolyBndVar _ _) = "PolyBndVar"
   pretty (PolyLetVar _ _) = "PolyLetVar"
   pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
@@ -1538,6 +1572,8 @@ instance Pretty MonoExpr where
   pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
   pretty (MonoCacheBody lbl m _ e) =
     "cache<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
+  pretty (MonoDebugWrap m _ e) =
+    "debug<" <> pretty m <> ">" <+> parens (pretty e)
   pretty (MonoExe _ exe) = pretty exe
   pretty (MonoBndVar (A _) i) = parens $ "x" <> pretty i <+> ":" <+> "<unknown>"
   pretty (MonoBndVar (B t) i) = parens $ "x" <> pretty i <+> ":" <+> pretty t

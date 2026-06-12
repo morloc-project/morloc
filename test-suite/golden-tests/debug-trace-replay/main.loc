@@ -1,0 +1,53 @@
+module main
+  ( boomInt
+  , boomReal
+  , boomList
+  , boomTup
+  , loadInt
+  , loadReal
+  , loadList
+  , loadTup
+  )
+
+import root-py
+
+source Py from "throw.py" ("pyThrow1", "pyThrow2", "pyThrowList", "pyThrowTup")
+
+pyThrow1 :: Int -> Int
+pyThrow2 :: Real -> Real
+pyThrowList :: [Int] -> Int
+pyThrowTup :: (Int, Str) -> Str
+
+-- Four shapes covering the major msgpack categories. Each boom*
+-- export triggers a throw so the debug-trace catch dumps the arg
+-- to disk. The matching load* export reads the dumped .pkt back
+-- via @load -- a pure-morloc round-trip that proves the dumped
+-- bytes are a valid wire representation of the original value.
+--
+-- This style is robust to future changes in the dump format
+-- (binary voidstar, arrow, etc.): so long as @load can decode
+-- whatever the catch wrote, the round-trip succeeds without
+-- the test having to know the on-disk byte layout.
+boomInt :: Int -> Int
+boomInt x = idpy (pyThrow1 x)
+
+boomReal :: Real -> Real
+boomReal x = idpy (pyThrow2 x)
+
+boomList :: [Int] -> Int
+boomList xs = idpy (pyThrowList xs)
+
+boomTup :: (Int, Str) -> Str
+boomTup t = idpy (pyThrowTup t)
+
+loadInt :: Str -> <IO> ?Int
+loadInt path = @load path
+
+loadReal :: Str -> <IO> ?Real
+loadReal path = @load path
+
+loadList :: Str -> <IO> ?[Int]
+loadList path = @load path
+
+loadTup :: Str -> <IO> ?(Int, Str)
+loadTup path = @load path

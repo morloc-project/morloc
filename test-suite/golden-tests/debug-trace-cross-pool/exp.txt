@@ -1,0 +1,4 @@
+fail_rc_nonzero: PASS
+trace_in_summary: PASS
+trace_has_multiple_frames: PASS
+inputs_dumped: PASS

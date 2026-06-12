@@ -1,0 +1,4 @@
+fail_rc_nonzero: PASS
+three_distinct_inputs: PASS
+trace_has_arg012: PASS
+trace_in_summary: PASS

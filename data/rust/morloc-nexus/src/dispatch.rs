@@ -63,6 +63,15 @@ pub struct NexusConfig {
     /// (prologue, epilogue, per-label start/done). Drives the
     /// `MORLOC_QUIET` env var that the runtime's log emitter checks.
     pub quiet: bool,
+    /// Cap on disk writes per dispatch when `--debug` is compiled in.
+    /// `None` = use the runtime default (1). 0 = no cap.
+    pub debug_cache_depth: Option<u64>,
+    /// Per-arg msgpack-byte cap. Args exceeding the cap record their
+    /// hash but skip the disk write. `None` = unlimited.
+    pub debug_cache_max: Option<u64>,
+    /// Per-midx cap on catch fires before further entries are dropped
+    /// for that midx. `None` = use the runtime default (3). 0 = no cap.
+    pub debug_recursion_cap: Option<u32>,
 }
 
 impl Default for NexusConfig {
@@ -86,8 +95,46 @@ impl Default for NexusConfig {
             log_dir: None,
             summary_path: None,
             quiet: false,
+            debug_cache_depth: None,
+            debug_cache_max: None,
+            debug_recursion_cap: None,
         }
     }
+}
+
+/// Parse a human-readable byte size accepting k/m/g suffixes (1024-based).
+/// Used by `--debug-cache-max`; mirrors the existing `--inline-size` parser.
+fn parse_byte_size(flag: &str, raw: &str) -> u64 {
+    let (num_str, mult): (&str, u64) = match raw.chars().last() {
+        Some('k') | Some('K') => (&raw[..raw.len() - 1], 1024),
+        Some('m') | Some('M') => (&raw[..raw.len() - 1], 1024 * 1024),
+        Some('g') | Some('G') => (&raw[..raw.len() - 1], 1024 * 1024 * 1024),
+        _ => (raw, 1),
+    };
+    match num_str.parse::<u64>() {
+        Ok(n) => n.saturating_mul(mult),
+        Err(_) => {
+            eprintln!(
+                "error: {} expects a byte count (k/m/g suffix allowed), got '{}'",
+                flag, raw
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+fn parse_u64_flag(flag: &str, raw: &str) -> u64 {
+    raw.parse().unwrap_or_else(|_| {
+        eprintln!("error: {} expects a non-negative integer, got '{}'", flag, raw);
+        std::process::exit(2);
+    })
+}
+
+fn parse_u32_flag(flag: &str, raw: &str) -> u32 {
+    raw.parse().unwrap_or_else(|_| {
+        eprintln!("error: {} expects a non-negative integer, got '{}'", flag, raw);
+        std::process::exit(2);
+    })
 }
 
 /// Parse a CLI port argument. Accepts 0..=65535 (0 = bind-ephemeral; the
@@ -324,6 +371,30 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
                 config.quiet = true;
                 i += 1;
             }
+            "--debug-cache-depth" => {
+                i += 1;
+                if i < args.len() {
+                    config.debug_cache_depth =
+                        Some(parse_u64_flag("--debug-cache-depth", &args[i]));
+                    i += 1;
+                }
+            }
+            "--debug-cache-max" => {
+                i += 1;
+                if i < args.len() {
+                    config.debug_cache_max =
+                        Some(parse_byte_size("--debug-cache-max", &args[i]));
+                    i += 1;
+                }
+            }
+            "--debug-recursion-cap" => {
+                i += 1;
+                if i < args.len() {
+                    config.debug_recursion_cap =
+                        Some(parse_u32_flag("--debug-recursion-cap", &args[i]));
+                    i += 1;
+                }
+            }
             _ => {
                 // Handle --key=value forms
                 if let Some(val) = arg.strip_prefix("--socket=") {
@@ -351,6 +422,18 @@ pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
                     i += 1;
                 } else if let Some(val) = arg.strip_prefix("--summary=") {
                     config.summary_path = Some(val.to_string());
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--debug-cache-depth=") {
+                    config.debug_cache_depth =
+                        Some(parse_u64_flag("--debug-cache-depth", val));
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--debug-cache-max=") {
+                    config.debug_cache_max =
+                        Some(parse_byte_size("--debug-cache-max", val));
+                    i += 1;
+                } else if let Some(val) = arg.strip_prefix("--debug-recursion-cap=") {
+                    config.debug_recursion_cap =
+                        Some(parse_u32_flag("--debug-recursion-cap", val));
                     i += 1;
                 } else {
                     // Not a nexus option - stop parsing
@@ -452,6 +535,24 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                 config.quiet = true;
                 matched = true;
             }
+            "--debug-cache-depth" if i + 1 < args.len() => {
+                config.debug_cache_depth =
+                    Some(parse_u64_flag("--debug-cache-depth", &args[i + 1]));
+                consumed = 2;
+                matched = true;
+            }
+            "--debug-cache-max" if i + 1 < args.len() => {
+                config.debug_cache_max =
+                    Some(parse_byte_size("--debug-cache-max", &args[i + 1]));
+                consumed = 2;
+                matched = true;
+            }
+            "--debug-recursion-cap" if i + 1 < args.len() => {
+                config.debug_recursion_cap =
+                    Some(parse_u32_flag("--debug-recursion-cap", &args[i + 1]));
+                consumed = 2;
+                matched = true;
+            }
             _ => {
                 // Check --key=value forms
                 if let Some(val) = args[i].strip_prefix("--output-form=") {
@@ -485,6 +586,18 @@ pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) 
                     matched = true;
                 } else if let Some(val) = args[i].strip_prefix("--summary=") {
                     config.summary_path = Some(val.to_string());
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--debug-cache-depth=") {
+                    config.debug_cache_depth =
+                        Some(parse_u64_flag("--debug-cache-depth", val));
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--debug-cache-max=") {
+                    config.debug_cache_max =
+                        Some(parse_byte_size("--debug-cache-max", val));
+                    matched = true;
+                } else if let Some(val) = args[i].strip_prefix("--debug-recursion-cap=") {
+                    config.debug_recursion_cap =
+                        Some(parse_u32_flag("--debug-recursion-cap", val));
                     matched = true;
                 }
             }

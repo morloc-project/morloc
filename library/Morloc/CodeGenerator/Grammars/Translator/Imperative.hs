@@ -315,6 +315,12 @@ data LowerConfig m = LowerConfig
   -- schema to the content-aware hash; the leading 'SerialAST' is the
   -- result schema (used by cache_store to materialize SHM-backed
   -- payloads before writing).
+  , lcDebugWrap :: Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
+  -- ^ Wrap a manifold body in a per-language try/catch that, on any
+  -- thrown exception, serializes each arg via its 'SerialAST', calls
+  -- @morloc_debug_record_frame@ with the (mid, schema, packet bytes)
+  -- tuples, and re-raises. Zero cost on the happy path: only the
+  -- try-frame overhead, no serialization or hashing.
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
   , lcReleaseStmt :: Text -> MDoc
@@ -491,6 +497,8 @@ lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
 lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
   lcCacheBody cfg resSa lbl mid args body
+lowerSerialExpr cfg _ (DebugWrapS_ _ mid args body) =
+  lcDebugWrap cfg mid args body
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value

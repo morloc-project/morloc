@@ -89,6 +89,9 @@ segmentExpr m args (PolyApp e es) = do
 segmentExpr m args (PolyCacheBody lbl midx cargs e) = do
   (ms, (lang, e')) <- segmentExpr m args e
   return (ms, (lang, MonoCacheBody lbl midx cargs e'))
+segmentExpr m args (PolyDebugWrap midx cargs e) = do
+  (ms, (lang, e')) <- segmentExpr m args e
+  return (ms, (lang, MonoDebugWrap midx cargs e'))
 segmentExpr m args (PolyLet i e1 e2) = do
   MM.sayVVV "segmentExpr PolyLet"
   (ms1, (_, e1')) <- segmentExpr m args e1

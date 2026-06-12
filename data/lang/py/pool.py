@@ -80,10 +80,19 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
 # AUTO include dispatch end
 
 
+def _with_debug_trace(msg: str) -> str:
+    # Concatenate the morloc debug trace (if --debug was compiled in
+    # and any frames were recorded) with the raised exception's
+    # message. Returns msg unchanged when no trace is present.
+    trace = morloc.debug_drain_frames()
+    return f"{msg}\n{trace}" if trace else msg
+
+
 def run_job(client_fd: int) -> None:
     try:
         # Free SHM from previous dispatch result (consumed by caller)
         morloc.flush_shm_tracker()
+        morloc.debug_flush_dispatch()
         client_data = morloc.stream_from_client(client_fd)
 
         if(morloc.is_local_call(client_data)):
@@ -92,7 +101,7 @@ def run_job(client_fd: int) -> None:
             try:
                 result = dispatch[mid](*args)
             except Exception as e:
-                result = morloc.make_fail_packet(str(e))
+                result = morloc.make_fail_packet(_with_debug_trace(str(e)))
 
         elif(morloc.is_remote_call(client_data)):
             (mid, args) = morloc.read_morloc_call_packet(client_data)
@@ -100,7 +109,7 @@ def run_job(client_fd: int) -> None:
             try:
                 result = remote_dispatch[mid](*args)
             except Exception as e:
-                result = morloc.make_fail_packet(str(e))
+                result = morloc.make_fail_packet(_with_debug_trace(str(e)))
 
         elif(morloc.is_ping(client_data)):
             result = morloc.pong(client_data)

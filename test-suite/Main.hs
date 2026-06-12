@@ -66,6 +66,15 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "debug-trace" "debug-trace"
+      , golden "debug-trace-dedup" "debug-trace-dedup"
+      , golden "debug-trace-recursive" "debug-trace-recursive"
+      , golden "debug-trace-size-cap" "debug-trace-size-cap"
+      , golden "debug-trace-cross-pool" "debug-trace-cross-pool"
+      , golden "debug-trace-multi-arg" "debug-trace-multi-arg"
+      , golden "debug-trace-replay" "debug-trace-replay"
+      , golden "debug-trace-state-reset" "debug-trace-state-reset"
+
       , golden "run-summary" "run-summary"
       , golden "cache-basics" "cache-basics"
       , golden "cache-concurrent" "cache-concurrent"
