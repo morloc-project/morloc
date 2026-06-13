@@ -1,0 +1,4 @@
+labeled-groups:
+  a: { cache: true }
+hash-include:
+  - extra.txt

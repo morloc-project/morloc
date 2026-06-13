@@ -638,8 +638,14 @@ collectTags fullDag = do
     --   (threads required and such)
     f :: ExprI -> MorlocMonad ()
     f (ExprI i (VarE config _)) = do
-      s <- MM.get
-      MM.put (s {stateManifoldConfig = Map.insert i config (stateManifoldConfig s)})
+      -- Stamp the index into the config so that downstream label propagation
+      -- (which copies the whole config to other midxes) preserves a pointer
+      -- back to the original source position. Codegen reads this to render
+      -- @{module}@/@{line}@/@{column}@ for the log template.
+      let config' = case manifoldConfigLabel config of
+            Just _ -> config {manifoldConfigLabelIdx = Just i}
+            Nothing -> config
+      MM.modify (\s -> s {stateManifoldConfig = Map.insert i config' (stateManifoldConfig s)})
     f (ExprI _ (ModE _ es)) = mapM_ f es
     f (ExprI _ (IstE _ _ es)) = mapM_ f es
     f (ExprI _ (AssE _ e es)) = mapM_ f (e : es)
@@ -650,6 +656,10 @@ collectTags fullDag = do
     f (ExprI _ (LamE _ e)) = f e
     f (ExprI _ (AnnE e _)) = f e
     f (ExprI _ (LetE bindings body)) = mapM_ (f . snd) bindings >> f body
+    f (ExprI _ (IfE c t e)) = f c >> f t >> f e
+    f (ExprI _ (DoBlockE e)) = f e
+    f (ExprI _ (EvalE e)) = f e
+    f (ExprI _ (IntrinsicE _ es)) = mapM_ f es
     f _ = return ()
 
 type GCMap = (Scope, Map Lang Scope)

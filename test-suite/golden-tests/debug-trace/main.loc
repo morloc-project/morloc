@@ -1,0 +1,35 @@
+module main (boomP, okP, boomC, okC, boomR, okR)
+
+import root-py
+import root-cpp
+import root-r
+
+source Cpp from "throw.hpp" ("cppThrowAtZero")
+source R from "throw.R" ("rThrowAtZero")
+
+cppThrowAtZero :: Real -> Real
+rThrowAtZero :: Real -> Real
+
+-- Python failure: 10.0 / 0 raises ZeroDivisionError natively. With
+-- --debug the catch in m_boomP dumps n0 to debug/inputs/<hash>.pkt.
+boomP :: Real -> Real
+boomP n = idpy (10.0 / n)
+
+okP :: Real -> Real
+okP n = idpy (n + 1.0)
+
+-- C++ failure: cppThrowAtZero throws std::invalid_argument on 0. The
+-- catch in cppDebugWrap's emitted try block dumps n0 via _put_value.
+boomC :: Real -> Real
+boomC n = idcpp (cppThrowAtZero n)
+
+okC :: Real -> Real
+okC n = idcpp (n + 1.0)
+
+-- R failure: rThrowAtZero calls stop(). The catch in genericDebugWrap's
+-- tryCatch error= branch dumps n0 via morloc_put_value.
+boomR :: Real -> Real
+boomR n = idr (rThrowAtZero n)
+
+okR :: Real -> Real
+okR n = idr (n + 1.0)

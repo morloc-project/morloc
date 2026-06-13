@@ -1,3 +1,39 @@
+0.89.0 [2026-07-13]
+
+Observability
+  * add logging for labeled terms with start/pass/fail log entries with ANSI
+    coloring syntax support and placeholders
+  * add prologue/epilogue logging with ANSI coloring syntax and placeholders
+  * add start.json / summary.json sentinels distinguish in-progress, completed, and crashed runs
+  * add morloc-nexus options
+    * --log-dir / `MORLOC_LOG_DIR` for specifying logging directory
+    * --summary FILE for path of summary file
+    * --quiet / `MORLOC_QUIET=1` to silence logging
+  
+Content-addressed caching
+  * Opt-in via `cache:true` on a labeled group; calls are memoized to disk.
+  * Freshness based on hashes of args, manifold id, and source code
+  * Equal return values dedup across labels and across Python/R/C++ pools.
+  * Honors `MORLOC_CACHE_BASE`, then `XDG_CACHE_HOME`, then HOME.
+
+Debug traceback dumps
+
+  * `morloc make --debug` to cache arguments on exception in traceback frames 
+  * New nexus options
+    * `--debug-cache-depth` - how many frames to cache args for
+    * `--debug-cache-max` - max size of any cached argument
+    * `--debug-recursion-cap` - number of recursive frames to represent
+
+Nexus CLI overhaul
+  * switched help text and argv parsing to clap-derive across run/daemon/router
+  * daemon and router are now subcommands of morloc-nexus
+  * `@` zone separator disambiguates nexus options from user arguments.
+  * Single-export programs accept the full set of nexus options (short and long forms).
+
+Argument source handling
+  * clean handling of STDIN in arguments through `-`
+  * better error messages
+
 0.88.0 [2026-07-07]
 -------------------
 

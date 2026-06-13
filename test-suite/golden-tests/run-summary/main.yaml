@@ -1,0 +1,7 @@
+# Run-scope prologue / epilogue templates. Compile-time placeholders
+# ({module}, {version}, {morloc_version}, color codes) are substituted
+# at codegen; the nexus fills runtime placeholders at run boundaries.
+prologue: "[run] prologue name={name} run_id={run_id} pid={pid}"
+epilogue:
+  ok:   "[run] epilogue.ok name={name} runtime={runtime}s"
+  fail: "[run] epilogue.fail name={name} exit_code={exit_code} error={error}"

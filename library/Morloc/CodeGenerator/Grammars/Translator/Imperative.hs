@@ -59,6 +59,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Control.Monad.Identity (Identity)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -66,15 +68,18 @@ import Morloc.CodeGenerator.Grammars.Common
   ( DispatchEntry (..)
   , PoolDocs (..)
   , argNamer
+  , collectManifoldIds
   , extractLocalDispatch
   , extractRemoteDispatch
   , helperNamer
+  , isForeignCalleeForm
   , manNamer
   , mergePoolDocs
   , nvarNamer
   , provideClosure
   , svarNamer
   )
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
@@ -207,28 +212,58 @@ data IProgram = IProgram
   , ipLocalDispatch :: [DispatchEntry]
   , ipRemoteDispatch :: [DispatchEntry]
   , ipSchemaTable :: [Text]  -- ordered list of schema strings; index = schema ID
+  , ipLogTemplates :: Map.Map Int RenderedTemplate
+    -- ^ Per-labeled-midx pre-rendered log templates. See 'LogTemplate'.
   }
   deriving (Generic)
 
 instance Binary IProgram
 
 -- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
-buildProgram :: [MDoc] -> [MDoc] -> [SerialManifold] -> [Text] -> IProgram
-buildProgram sources manifolds es schemas =
+--
+-- Foreign-callee midxes are stripped from the templates map: a cross-pool
+-- labeled call exists once in each pool, and the caller's wrap already
+-- measures the full call (socket round-trip included). Wrapping the callee
+-- would double-count.
+buildProgram ::
+  Map.Map Int Text ->
+  Map.Map Int RenderedTemplate ->
+  [MDoc] ->
+  [MDoc] ->
+  [SerialManifold] ->
+  [Text] ->
   IProgram
-    { ipSources = map render sources
-    , ipManifolds = map render manifolds
-    , ipLocalDispatch = extractLocalDispatch es
-    , ipRemoteDispatch = extractRemoteDispatch es
-    , ipSchemaTable = schemas
-    }
+buildProgram labels templates sources manifolds es schemas =
+  let definedIds = collectManifoldIds es
+      foreignCalleeIds =
+        Set.fromList [i | SerialManifold i _ _ f _ <- es, isForeignCalleeForm (Just f)]
+      labels' = Map.restrictKeys labels definedIds
+                  `Map.withoutKeys` foreignCalleeIds
+      templates' = Map.restrictKeys templates definedIds
+                     `Map.withoutKeys` foreignCalleeIds
+   in IProgram
+        { ipSources = map render sources
+        , ipManifolds = map render manifolds
+        , ipLocalDispatch = extractLocalDispatch labels' es
+        , ipRemoteDispatch = extractRemoteDispatch labels' es
+        , ipSchemaTable = schemas
+        , ipLogTemplates = templates'
+        }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
-buildProgramM :: (Monad m) => [MDoc] -> [SerialManifold] -> (SerialManifold -> m MDoc) -> m [Text] -> m IProgram
-buildProgramM sources es translateSeg getSchemas = do
+buildProgramM ::
+  (Monad m) =>
+  Map.Map Int Text ->
+  Map.Map Int RenderedTemplate ->
+  [MDoc] ->
+  [SerialManifold] ->
+  (SerialManifold -> m MDoc) ->
+  m [Text] ->
+  m IProgram
+buildProgramM labels templates sources es translateSeg getSchemas = do
   manifolds <- mapM translateSeg es
   schemas <- getSchemas
-  return $ buildProgram sources manifolds es schemas
+  return $ buildProgram labels templates sources manifolds es schemas
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
@@ -272,6 +307,20 @@ data LowerConfig m = LowerConfig
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
+  , lcCacheBody :: SerialAST -> Text -> Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
+  -- ^ Wrap a labeled manifold's body in a cache lookup. The returned
+  -- 'PoolDocs' must set 'poolExpr' to the temp holding the cached or
+  -- freshly-computed result. Args are paired with their 'SerialAST'
+  -- so the hook can serialize native bindings and pass each arg's
+  -- schema to the content-aware hash; the leading 'SerialAST' is the
+  -- result schema (used by cache_store to materialize SHM-backed
+  -- payloads before writing).
+  , lcDebugWrap :: Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
+  -- ^ Wrap a manifold body in a per-language try/catch that, on any
+  -- thrown exception, serializes each arg via its 'SerialAST', calls
+  -- @morloc_debug_record_frame@ with the (mid, schema, packet bytes)
+  -- tuples, and re-raises. Zero cost on the happy path: only the
+  -- try-frame overhead, no serialization or hashing.
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
   , lcReleaseStmt :: Text -> MDoc
@@ -446,6 +495,10 @@ lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
+lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
+  lcCacheBody cfg resSa lbl mid args body
+lowerSerialExpr cfg _ (DebugWrapS_ _ mid args body) =
+  lcDebugWrap cfg mid args body
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value

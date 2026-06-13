@@ -120,6 +120,11 @@ data LangDescriptor = LangDescriptor
   , ldReleasePacketFn :: !Text -- "morloc.release_packet_shm" or equivalent
   , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
     ldIntrinsicPrefix :: !Text -- "morloc." or "morloc_" or "MorlocRuntime."
+  , -- Prefix for codegen-emitted helper variable names. Used to keep
+    -- internal vars (cache wraps, log shims, etc.) out of any source
+    -- namespace a user might claim. Languages that forbid leading
+    -- underscore in identifiers (R) use a leading dot instead.
+    ldHelperVarPrefix :: !Text -- "__morloc_" for Python/C++, ".morloc_" for R
   , -- Foreign call template
     ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
@@ -193,8 +198,14 @@ data LangDescriptor = LangDescriptor
   , ldDispatchLocalEntry :: !Text -- e.g. "    {{mid}}: {{name}},"
   , ldDispatchLocalFooter :: !Text -- e.g. "}"
   , ldDispatchRemoteHeader :: !Text -- e.g. "remote_dispatch = {"
-  , ldDispatchRemoteEntry :: !Text -- e.g. "    {{mid}}: {{name}}_remote,"
+  , ldDispatchRemoteEntry :: !Text -- e.g. "    {{mid}}: {{name}},"
   , ldDispatchRemoteFooter :: !Text -- e.g. "}"
+  , ldLogWrap :: !Text
+    -- ^ Wrap a dispatch entry's callable expression for per-label logging.
+    -- Substitutions: {{label}} (the label string literal value) and {{inner}}
+    -- (the unwrapped callable expression, including any "_remote" suffix).
+    -- Empty disables wrapping. Example for Python:
+    -- @"__mlc_log(\"{{label}}\", {{inner}})"@.
   }
   deriving (Eq, Show, Generic)
 
@@ -270,6 +281,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldRealNaN" (Y.String "")
             . ins "ldIntLiteralSuffix" (Y.String "")
             . ins "ldIntrinsicPrefix" (Y.String "")
+            . ins "ldHelperVarPrefix" (Y.String "__morloc_")
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldReleasePacketFn" (Y.String "morloc.release_packet_shm")
             . ins "ldDictStyleRecords" (Y.Bool False)
@@ -309,6 +321,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteHeader" (Y.String "")
             . ins "ldDispatchRemoteEntry" (Y.String "")
             . ins "ldDispatchRemoteFooter" (Y.String "")
+            . ins "ldLogWrap" (Y.String "")
             $ obj
     Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
 
@@ -353,6 +366,7 @@ defaultLangDescriptor name ext =
     , ldDeserializeFn = "morloc.get_value"
     , ldReleasePacketFn = "morloc.release_packet_shm"
     , ldIntrinsicPrefix = ""
+    , ldHelperVarPrefix = "__morloc_"
     , ldForeignCallFn = "morloc.foreign_call"
     , ldForeignCallIntSuffix = ""
     , ldIntLiteralSuffix = ""
@@ -398,6 +412,7 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteHeader = ""
     , ldDispatchRemoteEntry = ""
     , ldDispatchRemoteFooter = ""
+    , ldLogWrap = ""
     }
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the

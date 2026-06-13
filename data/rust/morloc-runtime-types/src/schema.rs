@@ -996,13 +996,17 @@ mod compat_tests {
 
     #[test]
     fn test_schema_compat_with_c() {
-        // These must match the C output exactly
+        // Root-level metadata for representative schemas. Optional's
+        // slot is a single relative pointer (width = sizeof(RelPtr)
+        // = 8) regardless of inner type -- see
+        // [`make_optional_schema`] for the reasoning around
+        // recursive Optionals.
         let cases = vec![
             ("s", "type=13 size=1 width=16"),
             ("ai4", "type=14 size=1 width=16"),
             ("t2i4s", "type=15 size=2 width=24"),
             ("?i4", "type=17 size=1 width=8"),
-            ("?s", "type=17 size=1 width=24"),
+            ("?s", "type=17 size=1 width=8"),
         ];
         for (input, expected_root) in &cases {
             let s = parse_schema(input).unwrap();
@@ -1014,11 +1018,14 @@ mod compat_tests {
         let t = parse_schema("t2i4s").unwrap();
         assert_eq!(t.offsets, vec![0, 8], "t2i4s offsets");
 
-        // Verify optional offsets
+        // Optional schemas use a single relative-pointer slot at the
+        // root with no internal offset table (the inner value lives
+        // elsewhere in the buffer and the relptr addresses it).
+        // See [`make_optional_schema`] for details.
         let o = parse_schema("?i4").unwrap();
-        assert_eq!(o.offsets, vec![4], "?i4 offsets");
+        assert!(o.offsets.is_empty(), "?i4 offsets");
         let os = parse_schema("?s").unwrap();
-        assert_eq!(os.offsets, vec![8], "?s offsets");
+        assert!(os.offsets.is_empty(), "?s offsets");
 
         // Verify string has uint8 parameter
         let s = parse_schema("s").unwrap();

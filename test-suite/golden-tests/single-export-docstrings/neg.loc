@@ -1,0 +1,14 @@
+module main (calc)
+
+import root-py
+
+--' name: calc
+calc ::
+  --' arg: -m
+  --' default: 0
+  Int ->
+  --' metavar: DATA
+  [Int] ->
+  Int
+
+source Py from "helpers.py" ("calc")

@@ -75,6 +75,10 @@ escapeStringLit = DT.concatMap escapeChar
     -- The receiving constructor (e.g. std::string(p, n)) must use the
     -- length-aware form so the decoded NUL survives.
     escapeChar '\0' = "\\000"
+    -- ESC (0x1B) shows up in pre-rendered log templates whose color
+    -- placeholders ({c:red} etc.) were resolved to ANSI CSI sequences.
+    -- Octal \033 is interpreted identically by C, C++, Python, and R.
+    escapeChar '\ESC' = "\\033"
     escapeChar c = DT.singleton c
 
 -- | Replace occurrences of a quote terminator with its escaped form.

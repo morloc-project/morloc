@@ -398,32 +398,33 @@ pub unsafe extern "C" fn remote_call(
 
     let seed = midx as u64;
     let mut err: *mut c_char = ptr::null_mut();
+    let _ = cache_path; // legacy arg ignored; cache now lives under the unified base.
 
-    // Resolve cache_path to an absolute path once. The compiler-generated
-    // pool code passes `.morloc-cache` (relative to the pool's cwd, which
-    // is the user's project dir under morloc-manager run). The compute-node
-    // nexus, brought up by sbatch on a different host, will have a
-    // different cwd (typically $HOME) -- the wrap command needs absolute
-    // paths to find the call packet on the shared FS. Canonicalize here
-    // and reuse the absolute form for every cache-path-keyed FFI call.
+    // Resolve the remote-dispatch cache directory once. Replaces the
+    // legacy per-cwd `.morloc-cache` (which broke on compute nodes
+    // brought up by sbatch with a different cwd) with the unified
+    // `~/.cache/morloc/cache/_remote/` (overridable via
+    // `MORLOC_CACHE_BASE`). The compute-node nexus, brought up by
+    // sbatch on a different host, sees the same path because the env
+    // var is set in the nexus environment and shared FS hosts the cache.
     let _cache_owned: CString = {
-        let cp_str = CStr::from_ptr(cache_path).to_string_lossy().into_owned();
-        let p = std::path::PathBuf::from(&cp_str);
-        let abs = if p.is_absolute() {
-            p
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")).join(p)
-        };
-        match CString::new(abs.to_string_lossy().as_bytes()) {
-            Ok(c) => c,
-            Err(_) => {
-                set_errmsg(errmsg, &MorlocError::Other(
-                    "cache_path contains an interior NUL".into()));
-                return ptr::null_mut();
-            }
+        let label = CString::new("_remote").unwrap();
+        let path = crate::cache::morloc_cache_path(label.as_ptr(), &mut err);
+        if path.is_null() {
+            if !err.is_null() { *errmsg = err; }
+            return ptr::null_mut();
         }
+        let cs = CStr::from_ptr(path).to_owned();
+        libc::free(path as *mut c_void);
+        cs
     };
     let cache_path: *const c_char = _cache_owned.as_ptr();
+
+    // Pool source fingerprint, parsed once from MORLOC_POOL_HASH and
+    // cached. Mixed into the cache key so that editing the morloc
+    // source (or any declared @hash-include@ file) invalidates every
+    // entry from this pool.
+    let pool_hash = crate::cache::morloc_pool_hash();
 
     // Cleanup tracking
     let mut return_packet: *mut u8 = ptr::null_mut();
@@ -433,7 +434,7 @@ pub unsafe extern "C" fn remote_call(
     let mut cached_arg_filenames: Vec<*mut c_char> = vec![ptr::null_mut(); nargs];
     let mut cached_arg_packets: Vec<*mut u8> = vec![ptr::null_mut(); nargs];
 
-    let mut function_hash = mix(seed, DEFAULT_XXHASH_SEED);
+    let mut function_hash = mix(mix(pool_hash, seed), DEFAULT_XXHASH_SEED);
 
     // Hash each argument
     for i in 0..nargs {

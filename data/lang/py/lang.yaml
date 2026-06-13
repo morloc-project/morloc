@@ -41,6 +41,7 @@ ldSerializeFn: "morloc.put_value"
 ldDeserializeFn: "morloc.get_value"
 ldReleasePacketFn: "morloc.release_packet_shm"
 ldIntrinsicPrefix: "morloc."
+ldHelperVarPrefix: "__morloc_"
 
 # Foreign call
 ldForeignCallFn: "morloc.foreign_call"
@@ -90,6 +91,7 @@ ldDispatchLocalFooter: "}"
 ldDispatchRemoteHeader: "remote_dispatch = {"
 ldDispatchRemoteEntry: "    {{mid}}: {{name}}_remote,"
 ldDispatchRemoteFooter: "}"
+ldLogWrap: "__mlc_wrap_log"
 
 # Pool template (loaded from pool.py, left empty here)
 ldPoolTemplate: ""

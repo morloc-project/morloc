@@ -113,6 +113,87 @@ pub fn read_json_with_schema_dest(
     json_to_voidstar(&rv, schema, dest, &mut env)
 }
 
+/// Partial-record loader for the CLI dispatcher.
+///
+/// Given a JSON record source (object or array form), produce a vector
+/// aligned to `schema.parameters` where each slot is either a freshly
+/// allocated SHM voidstar holding that field's value, or `None` if the
+/// source omitted the field. The schema must be a `Map`.
+///
+/// Object form may be partial: any key in the source must match a
+/// field; missing keys yield `None`. Unknown keys raise an error so
+/// typos surface clearly.
+///
+/// Array form must be complete: positional encoding has no notion of
+/// "missing" and a shorter array is ambiguous between "drop the last
+/// field" and "drop a middle one". Length mismatch is an error.
+///
+/// Callers own the returned `AbsPtr`s and must arrange for them to be
+/// either consumed into a larger record or released. The CLI
+/// dispatcher (`parse_cli_data_argument_unrolled`) handles both.
+pub fn load_record_fields_from_json(
+    json_str: &str,
+    schema: &Schema,
+) -> Result<Vec<Option<AbsPtr>>, MorlocError> {
+    if !matches!(schema.serial_type, SerialType::Map) {
+        return Err(err("load_record_fields_from_json requires a record (Map) schema"));
+    }
+    let rv: Box<RawValue> = serde_json::from_str(json_str)
+        .map_err(|e| MorlocError::Serialization(format!("JSON parse error: {}", e)))?;
+    let text = rv.get();
+    let t = text.trim_start();
+    let n = schema.parameters.len();
+    let mut out: Vec<Option<AbsPtr>> = Vec::with_capacity(n);
+
+    if t.starts_with('{') {
+        let obj = parse_object_children(text)?;
+        // Detect unknown keys: cheaper as a set lookup than nested loops.
+        let known: std::collections::HashSet<&str> =
+            schema.keys.iter().map(|s| s.as_str()).collect();
+        for k in obj.keys() {
+            if !known.contains(k.as_str()) {
+                return Err(err(&format!("unknown field '{}' in record bundle", k)));
+            }
+        }
+        let mut env: RecurEnv = Vec::new();
+        for (key, fs) in schema.keys.iter().zip(schema.parameters.iter()) {
+            match obj.get(key) {
+                Some(child) => {
+                    let abs = shm::shmalloc(fs.width)?;
+                    // SAFETY: abs is freshly allocated with fs.width bytes.
+                    unsafe { std::ptr::write_bytes(abs, 0, fs.width) };
+                    json_to_voidstar(child, fs, Some(abs), &mut env)?;
+                    out.push(Some(abs));
+                }
+                None => out.push(None),
+            }
+        }
+    } else if t.starts_with('[') {
+        let children = parse_array_children(text)?;
+        if children.len() != n {
+            return Err(err(&format!(
+                "record array form must have exactly {} fields (one per schema field, in declaration order), got {}",
+                n,
+                children.len()
+            )));
+        }
+        let mut env: RecurEnv = Vec::new();
+        for (child, fs) in children.iter().zip(schema.parameters.iter()) {
+            let abs = shm::shmalloc(fs.width)?;
+            // SAFETY: abs is freshly allocated with fs.width bytes.
+            unsafe { std::ptr::write_bytes(abs, 0, fs.width) };
+            json_to_voidstar(child, fs, Some(abs), &mut env)?;
+            out.push(Some(abs));
+        }
+    } else {
+        return Err(err(&format!(
+            "record source must be a JSON object {{...}} or array [...], got {}",
+            truncate_for_msg(t)
+        )));
+    }
+    Ok(out)
+}
+
 fn alloc(dest: Option<AbsPtr>, size: usize) -> Result<ShmWriter, MorlocError> {
     let ptr = match dest { Some(p) => p, None => shm::shmalloc(size)? };
     // SAFETY: ptr from shmalloc or caller-provided valid SHM of sufficient size
@@ -249,9 +330,23 @@ fn json_to_voidstar_inner(
         }
 
         SerialType::Map => {
-            // Preserve the existing tolerance: a Map can be encoded either as
-            // a JSON object {"k": v, ...} or as a positional JSON array
-            // [v0, v1, ...]. The trimmed first byte tells us which.
+            // Records on the JSON wire accept two shapes:
+            //
+            //  - Object form `{"key": val, ...}`. The canonical
+            //    user-facing shape. Every required field must be
+            //    present; missing keys for a non-Optional field
+            //    raise an error here. The partial-load entry point
+            //    [`load_record_fields_from_json`] is the path for
+            //    callers (the unrolled CLI dispatcher) that want to
+            //    accept partial bundles and fill missing fields
+            //    from elsewhere.
+            //
+            //  - Array form `[v0, v1, ...]`. Schema-agnostic;
+            //    preserves the property that any tuple-shaped wire
+            //    payload becomes a record when given the matching
+            //    schema. Length must equal `schema.parameters.len()`
+            //    exactly -- shorter or longer is an error because
+            //    positional encoding has no notion of "missing key".
             let t = text.trim_start();
             let w = alloc(dest, schema.width)?;
             w.zero(0, schema.width);
@@ -261,27 +356,32 @@ fn json_to_voidstar_inner(
                     let sub = w.sub(schema.offsets[i], fs.width);
                     match obj.get(key) {
                         Some(child) => { json_to_voidstar(child, fs, Some(sub.as_ptr()), env)?; }
-                        // Missing key: synthesize a 'null' RawValue so the
-                        // child handler decides whether null is acceptable
-                        // (e.g. allowed for Optional, error for non-optional).
-                        // Matches the old extract_fields behavior that
-                        // substituted Value::Null for missing keys.
                         None => {
-                            let null_rv: Box<RawValue> = serde_json::from_str("null")
-                                .expect("'null' is always valid JSON");
-                            json_to_voidstar(&null_rv, fs, Some(sub.as_ptr()), env)?;
+                            return Err(err(&format!(
+                                "missing required field '{}' in record",
+                                key
+                            )));
                         }
                     }
                 }
-            } else {
+            } else if t.starts_with('[') {
                 let children = parse_array_children(text)?;
                 if children.len() != schema.parameters.len() {
-                    return Err(err(&format!("expected {} fields, got {}", schema.parameters.len(), children.len())));
+                    return Err(err(&format!(
+                        "record array form must have exactly {} fields (one per schema field, in declaration order), got {}",
+                        schema.parameters.len(),
+                        children.len()
+                    )));
                 }
                 for (i, (child, fs)) in children.iter().zip(schema.parameters.iter()).enumerate() {
                     let sub = w.sub(schema.offsets[i], fs.width);
                     json_to_voidstar(child, fs, Some(sub.as_ptr()), env)?;
                 }
+            } else {
+                return Err(err(&format!(
+                    "record source must be a JSON object {{...}} or array [...], got {}",
+                    truncate_for_msg(t)
+                )));
             }
             Ok(w.as_ptr())
         }
@@ -796,4 +896,74 @@ mod tests {
     #[test] fn test_array()   { setup(); let s = parse_schema("ai4").unwrap(); let p = read_json_with_schema("[1,2,3]", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "[1,2,3]"); }
     #[test] fn test_opt_some(){ setup(); let s = parse_schema("?i4").unwrap(); let p = read_json_with_schema("5", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "5"); }
     #[test] fn test_opt_null(){ setup(); let s = parse_schema("?i4").unwrap(); let p = read_json_with_schema("null", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "null"); }
+
+    // Record `{m :: i4, n :: i4}` -- schema encoding `m21mi41ni4`.
+    fn rec2_schema() -> Schema { parse_schema("m21mi41ni4").unwrap() }
+
+    #[test]
+    fn test_record_missing_field_errors() {
+        setup();
+        let s = rec2_schema();
+        let r = read_json_with_schema("{\"m\":1}", &s);
+        let msg = r.err().expect("missing field must error").to_string();
+        assert!(msg.contains("missing required field 'n'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_record_array_wrong_length_errors() {
+        setup();
+        let s = rec2_schema();
+        let r = read_json_with_schema("[1]", &s);
+        let msg = r.err().expect("short array must error").to_string();
+        assert!(msg.contains("exactly 2 fields"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_partial_load_full_object() {
+        setup();
+        let s = rec2_schema();
+        let v = load_record_fields_from_json("{\"m\":7,\"n\":11}", &s).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(v[0].is_some());
+        assert!(v[1].is_some());
+    }
+
+    #[test]
+    fn test_partial_load_partial_object() {
+        setup();
+        let s = rec2_schema();
+        let v = load_record_fields_from_json("{\"m\":7}", &s).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(v[0].is_some(), "present field should be Some");
+        assert!(v[1].is_none(), "absent field should be None");
+    }
+
+    #[test]
+    fn test_partial_load_unknown_field_errors() {
+        setup();
+        let s = rec2_schema();
+        let r = load_record_fields_from_json("{\"m\":7,\"oops\":1}", &s);
+        let msg = r.err().expect("unknown key must error").to_string();
+        assert!(msg.contains("unknown field 'oops'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_partial_load_array_must_be_complete() {
+        setup();
+        let s = rec2_schema();
+        let r = load_record_fields_from_json("[1]", &s);
+        let msg = r.err().expect("short array must error").to_string();
+        assert!(msg.contains("exactly 2 fields"), "got: {}", msg);
+
+        let v = load_record_fields_from_json("[1,2]", &s).unwrap();
+        assert!(v.iter().all(|x| x.is_some()));
+    }
+
+    #[test]
+    fn test_partial_load_non_map_schema_errors() {
+        setup();
+        let s = parse_schema("i4").unwrap();
+        let r = load_record_fields_from_json("42", &s);
+        assert!(r.is_err());
+    }
 }

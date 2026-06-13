@@ -42,6 +42,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.LanguageDescriptor
+import qualified Morloc.CodeGenerator.Serial as Serial
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Map.Strict as Map
 import qualified Morloc.Config as MC
@@ -107,7 +109,9 @@ translateBuiltin lang desc srcs es = do
         docs <- mapM (translateSegment desc srcNamer) es
         tbl <- getSchemaTable
         return (docs, tbl)
-      program = buildProgram allSources mDocs es schemas
+  labels <- collectLogLabels <$> gets stateManifoldConfig
+  templates <- collectRenderedTemplates lang
+  let program = buildProgram labels templates allSources mDocs es schemas
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -154,7 +158,9 @@ translateExternal cmd lang desc srcs es = do
         docs <- mapM (translateSegment desc srcNamer) es
         tbl <- getSchemaTable
         return (docs, tbl)
-      program = buildProgram includeDocs mDocs es schemas
+  labels <- collectLogLabels <$> gets stateManifoldConfig
+  templates <- collectRenderedTemplates lang
+  let program = buildProgram labels templates includeDocs mDocs es schemas
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -412,6 +418,8 @@ genericLowerConfig desc srcNamer = cfg
              in pretty (ldForeignCallFn desc)
                   <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
         , lcRemoteCall = genericRemoteCall desc
+        , lcCacheBody = genericCacheBody desc cfg
+        , lcDebugWrap = genericDebugWrap desc cfg
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
@@ -481,6 +489,212 @@ genericRecordAccessor desc namType _constructor record field
   | otherwise = case ldFieldAccess desc of
       DotAccess -> record <> "." <> field
       DollarAccess -> record <> "$" <> field
+
+-- | Reference an entry of the per-pool 'mlc_schema_table' literal by
+-- the schema ID returned from 'lcRegisterSchema'. Adjusts the index
+-- for languages whose container literals are 1-based.
+genericSchemaRef :: LangDescriptor -> Int -> MDoc
+genericSchemaRef desc sid = case ldIndexStyle desc of
+  ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
+  OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
+  OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+
+-- | Wrap a labeled manifold's body in a cache check. The body's
+-- serialized result is what lands on disk, so cross-pool and
+-- intra-pool callers share the same format. Syntax (if/else shape,
+-- null literal, assignment operator) is taken from the language
+-- descriptor.
+genericCacheBody ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  SerialAST ->
+  Text ->
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  IndexM PoolDocs
+genericCacheBody desc cfg resSa lbl midx args bodyPool = do
+  let intr = pretty (ldIntrinsicPrefix desc)
+      assign = pretty (ldAssignOp desc)
+      hp = pretty (ldHelperVarPrefix desc)
+      keyVar = hp <> "cache_key"
+      cachedVar = hp <> "cached"
+      resultVar = hp <> "cache_result"
+      labelLit = dquotes (pretty lbl)
+  preparedArgs <- mapM (prepareCacheArg desc cfg) args
+  resSchemaId <- lcRegisterSchema cfg (render $ Serial.serialAstToMsgpackSchema resSa)
+  let resSchemaRef = genericSchemaRef desc resSchemaId
+      argRefs = [r | (r, _, _) <- preparedArgs]
+      schemaRefs = [s | (_, s, _) <- preparedArgs]
+      serializeStmts = concatMap (\(_, _, ss) -> ss) preparedArgs
+      -- Packets are heterogeneous (R: raw vectors must go through
+      -- list()); schemas are a homogeneous character vector (R: c()).
+      genericList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldGenericListFn desc) <> tupled xs
+      atomicList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldAtomicListFn desc) <> tupled xs
+      packetList = genericList argRefs
+      schemaList = atomicList schemaRefs
+      assignLine v rhs = v <+> assign <+> rhs
+      midxLit = pretty midx <> pretty (ldIntLiteralSuffix desc)
+      keyCompute = assignLine keyVar
+        (intr <> "cache_key_compute" <> tupled [midxLit, packetList, schemaList])
+      cacheLookup = assignLine cachedVar
+        (intr <> "cache_lookup" <> tupled [keyVar, labelLit])
+      hitLines =
+        [ intr <> "cache_record_hit()"
+        , assignLine resultVar cachedVar
+        ]
+      missLines =
+        [ intr <> "cache_record_miss()" ]
+        ++ poolPriorLines bodyPool
+        ++ [ assignLine resultVar (poolExpr bodyPool)
+           , intr <> "cache_store"
+               <> tupled [keyVar, labelLit, resultVar, resSchemaRef]
+           , intr <> "cache_record_store()"
+           ]
+      condE = pretty $ substituteT (ldNullCheckTemplate desc)
+        [("expr", render cachedVar)]
+      ifBlock = case ldBlockStyle desc of
+        IndentBlock -> vsep
+          [ "if" <+> condE <> ":"
+          , indent 4 (vsep hitLines)
+          , "else:"
+          , indent 4 (vsep missLines)
+          ]
+        BraceBlock -> vsep
+          [ "if" <+> parens condE <+> "{"
+          , indent 4 (vsep hitLines)
+          , "} else {"
+          , indent 4 (vsep missLines)
+          , "}"
+          ]
+        EndKeywordBlock -> vsep
+          [ "if" <+> condE
+          , indent 4 (vsep hitLines)
+          , "else"
+          , indent 4 (vsep missLines)
+          , "end"
+          ]
+      priorLines = serializeStmts ++ [keyCompute, cacheLookup, ifBlock]
+  return $ defaultValue
+    { poolExpr = resultVar
+    , poolPriorLines = priorLines
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | Debug-trace wrap. Wraps the manifold body in a per-language
+-- try/catch. On exception the catch block serializes each arg via
+-- its 'SerialAST', invokes @morloc_debug_record_frame@, and
+-- re-raises. Zero cost on the happy path: only the try-frame
+-- overhead.
+--
+-- Branches on 'ldBlockStyle' to render either Python (try:/except:)
+-- or R (tryCatch). C++ is handled by 'cppDebugWrap' in the C++
+-- translator; control never reaches here for it.
+genericDebugWrap ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  IndexM PoolDocs
+genericDebugWrap desc cfg midx args bodyPool = do
+  let intr = pretty (ldIntrinsicPrefix desc)
+      assign = pretty (ldAssignOp desc)
+      hp = pretty (ldHelperVarPrefix desc)
+      resultVar = hp <> "debug_result"
+      excVar = hp <> "debug_e"
+      dumpExcVar = hp <> "dump_e"
+      midxLit = pretty midx <> pretty (ldIntLiteralSuffix desc)
+  preparedArgs <- mapM (prepareCacheArg desc cfg) args
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      schemaRefs = [s | (_, s, _) <- preparedArgs]
+      catchSerializeStmts = concatMap (\(_, _, ss) -> ss) preparedArgs
+      genericList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldGenericListFn desc) <> tupled xs
+      atomicList xs = case ldListStyle desc of
+        BracketList -> list xs
+        _ -> pretty (ldAtomicListFn desc) <> tupled xs
+      packetList = genericList argRefs
+      schemaList = atomicList schemaRefs
+      recordCall = intr <> "debug_record_frame"
+        <> tupled [midxLit, packetList, schemaList]
+      catchStmts = catchSerializeStmts ++ [recordCall]
+      -- Defensive inner wrap around the dump: a serialization failure
+      -- during the catch must NOT replace the original exception. If
+      -- the inner block throws we silently drop the dump and re-raise
+      -- the original.
+      block = case ldBlockStyle desc of
+        IndentBlock -> vsep
+          -- Python
+          [ "try:"
+          , indent 4 (vsep (poolPriorLines bodyPool
+              ++ [resultVar <+> assign <+> poolExpr bodyPool]))
+          , "except Exception as" <+> excVar <> ":"
+          , indent 4 "try:"
+          , indent 8 (vsep catchStmts)
+          , indent 4 "except Exception:"
+          , indent 8 "pass"
+          , indent 4 "raise"
+          ]
+        BraceBlock -> vsep
+          -- R: tryCatch returns the body's value; we assign the whole
+          -- thing. The dump is itself wrapped in tryCatch so any
+          -- serialization failure is swallowed before re-raising.
+          [ resultVar <+> assign <+> "tryCatch({"
+          , indent 4 (vsep (poolPriorLines bodyPool ++ [poolExpr bodyPool]))
+          , "}, error = function(" <> excVar <> ") {"
+          , indent 4 "tryCatch({"
+          , indent 8 (vsep catchStmts)
+          , indent 4 "}, error = function(" <> dumpExcVar <> ") NULL)"
+          , indent 4 "stop(" <> excVar <> ")"
+          , "})"
+          ]
+        EndKeywordBlock -> vsep
+          -- No supported lang uses EndKeyword for try/catch today;
+          -- placeholder mirroring Ruby/Lua idioms.
+          [ "begin"
+          , indent 4 (vsep (poolPriorLines bodyPool
+              ++ [resultVar <+> assign <+> poolExpr bodyPool]))
+          , "rescue" <+> excVar
+          , indent 4 "begin"
+          , indent 8 (vsep catchStmts)
+          , indent 4 "rescue"
+          , indent 4 "end"
+          , indent 4 "raise"
+          , "end"
+          ]
+  return $ defaultValue
+    { poolExpr = resultVar
+    , poolPriorLines = [block]
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | For a single cache arg produce: (the packet expression, the
+-- schema-string expression, any supporting statements). Native args
+-- are serialized through 'lcSerialize' into a packet; serial args
+-- pass through by name.
+prepareCacheArg ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  (Arg TypeM, SerialAST) ->
+  IndexM (MDoc, MDoc, [MDoc])
+prepareCacheArg desc cfg (a@(Arg _ tm), sa) = do
+  schemaId <- lcRegisterSchema cfg (render $ Serial.serialAstToMsgpackSchema sa)
+  let schemaRef = genericSchemaRef desc schemaId
+  case tm of
+    Native _ -> do
+      pd <- lcSerialize cfg (argNamer a) sa
+      return (poolExpr pd, schemaRef, poolPriorLines pd)
+    _ -> return (argNamer a, schemaRef, [])
 
 -- | Remote call with template-driven resource packing
 genericRemoteCall :: LangDescriptor -> MDoc -> Int -> RemoteResources -> [MDoc] -> IndexM PoolDocs
@@ -692,10 +906,7 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_read(" <> schemaRef sid <> ", " <> go e <> ")"
 
-    schemaRef sid = case ldIndexStyle desc of
-      ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
-      OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
-      OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+    schemaRef = genericSchemaRef desc
 
     -- Languages that opt out of NUL-in-Str (allow_string_null = false)
     -- cannot represent a `\0` inside a source-level string literal: R
@@ -839,9 +1050,48 @@ printProgram desc prog =
   where
     sections =
       [ vsep (map pretty (ipSources prog) ++ [schemaTableInit])
-      , vsep (map pretty (ipManifolds prog))
+      , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
       ]
+
+    -- Rebind each labeled manifold function name to a logging shim. Placed
+    -- immediately after the manifold definitions so any later reference
+    -- (other manifolds calling this one, the dispatch table, partials
+    -- passed into higher-order stdlib functions) resolves to the wrapped
+    -- version. The shim is the per-language @__mlc_wrap_log@ helper; the
+    -- three template strings are passed as arguments and the helper
+    -- formats them on emission with the runtime values for @{date}@,
+    -- @{runtime}@, and @{id}@.
+    logRebindings :: [MDoc]
+    logRebindings
+      | T.null (ldLogWrap desc) = []
+      | otherwise =
+          [ manNamer i <+> pretty (ldAssignOp desc) <+> wrapFn desc
+              <> tupled
+                [ quoteString (renderedGroup tmpl)
+                , quoteOrNone (renderedStart tmpl)
+                , quoteOrNone (renderedPass tmpl)
+                , quoteOrNone (renderedFail tmpl)
+                , manNamer i
+                ]
+          | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)
+          ]
+
+    -- The wrap helper name varies per language (Python: @__mlc_wrap_log@;
+    -- R: @.mlc_wrap_log@). The 'ldLogWrap' field carries the bare helper
+    -- name; an empty string opts the language out of logging.
+    wrapFn :: LangDescriptor -> MDoc
+    wrapFn d = pretty (ldLogWrap d)
+
+    quoteOrNone :: Maybe Text -> MDoc
+    quoteOrNone Nothing = pretty (ldNullLiteral desc)
+    quoteOrNone (Just t) = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
+
+    -- Always-present string (e.g. the label group name). Empty strings
+    -- render as a normal "" literal; downstream pool helpers treat
+    -- empty as "skip the per-label tee".
+    quoteString :: Text -> MDoc
+    quoteString t = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
 
     schemaTableInit
       | null (ipSchemaTable prog) = mempty
@@ -854,21 +1104,16 @@ printProgram desc prog =
 
     templateDispatch = vsep [localD, remoteD]
       where
+        renderEntry :: Text -> DispatchEntry -> MDoc
+        renderEntry entryTmpl (DispatchEntry i _ _) =
+          pretty $
+            substituteT entryTmpl [("mid", T.pack (show i)), ("name", render (manNamer i))]
+
         localD =
           let hdr = ldDispatchLocalHeader desc
               entryTmpl = ldDispatchLocalEntry desc
               ftr = ldDispatchLocalFooter desc
-              entries =
-                map
-                  ( \(DispatchEntry i _) ->
-                      pretty $
-                        substituteT
-                          entryTmpl
-                          [ ("mid", T.pack (show i))
-                          , ("name", render (manNamer i))
-                          ]
-                  )
-                  (ipLocalDispatch prog)
+              entries = map (renderEntry entryTmpl) (ipLocalDispatch prog)
            in if T.null hdr && T.null entryTmpl
                 then mempty
                 else
@@ -884,17 +1129,7 @@ printProgram desc prog =
           let hdr = ldDispatchRemoteHeader desc
               entryTmpl = ldDispatchRemoteEntry desc
               ftr = ldDispatchRemoteFooter desc
-              entries =
-                map
-                  ( \(DispatchEntry i _) ->
-                      pretty $
-                        substituteT
-                          entryTmpl
-                          [ ("mid", T.pack (show i))
-                          , ("name", render (manNamer i))
-                          ]
-                  )
-                  (ipRemoteDispatch prog)
+              entries = map (renderEntry entryTmpl) (ipRemoteDispatch prog)
            in if T.null hdr && T.null entryTmpl
                 then mempty
                 else

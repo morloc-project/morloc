@@ -4,10 +4,13 @@
 //! Reads a .manifest JSON, spawns language pool daemons, and routes
 //! function calls to them over Unix sockets.
 
+mod cli;
 mod dispatch;
-mod help;
 mod manifest;
+mod phase2;
 mod process;
+mod runlog;
+mod schemas;
 
 use dispatch::NexusConfig;
 
@@ -22,45 +25,94 @@ fn morloc_home() -> String {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    // Install a panic hook so a Rust panic still runs the run-scope
+    // epilogue + summary.json + tee cleanup before the process dies.
+    // Without this, panic-unwound exits skip clean_exit entirely and
+    // leave operators with a half-written rundir. Restore the
+    // default hook for the panic message itself so stack traces keep
+    // working under RUST_BACKTRACE=1.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("nexus panicked: {}", info);
+        runlog::record_error(&msg);
+        default_hook(info);
+        process::clean_exit(101);
+    }));
 
-    let mut config = NexusConfig::default();
+    // Top-level argv parse. [`cli::parse_invocation`] handles the
+    // pre-scan for `@` separator (run mode), loads the manifest from
+    // the wrapper target, and runs the augmented clap parse with
+    // capability flags filtered by the manifest's advertised
+    // capabilities. Routes through the static `Nexus` derive for
+    // router mode and top-level help.
+    let config: NexusConfig;
+    let manifest_path: String;
+    let user_zone: Vec<String>;
 
-    // First pass: parse nexus-level options
-    let opt_end = dispatch::parse_nexus_options(&args, &mut config);
-
-    // Handle --router mode (no manifest needed)
-    if config.router_flag {
-        run_router(&config);
-        std::process::exit(0);
-    }
-
-    // If -h with no manifest argument, show nexus help
-    let prog_name = args.first().map(|s| s.as_str()).unwrap_or("morloc-nexus");
-    if config.help_flag && opt_end >= args.len() {
-        help::print_nexus_usage(prog_name);
-    }
-
-    // Manifest path: either an explicit argument or derived from argv[0].
-    // In daemon mode (`./test --daemon`), the manifest is at `<argv[0]>.manifest`.
-    // In normal mode (`./test add 1 2`), argv[0] is also the manifest source.
-    // An explicit path argument is only needed for multi-command mode.
-    let manifest_path = if opt_end < args.len() {
-        args[opt_end].clone()
-    } else if config.daemon_flag || config.router_flag {
-        // Daemon/router: derive from argv[0]
-        args[0].clone()
-    } else {
-        help::print_nexus_usage(prog_name)
+    let invocation = cli::parse_invocation();
+    let mut manifest = match invocation.manifest {
+        Some(m) => m,
+        None => {
+            // Router mode or top-level help: still need to dispatch
+            // via the static `Nexus`. The legacy router branch below
+            // handles the only non-help case; help paths exited
+            // inside parse_invocation.
+            match invocation.nexus.cmd {
+                cli::Mode::Router(rargs) => {
+                    let cfg = cli::router_args_to_config(&rargs);
+                    run_router(&cfg);
+                    std::process::exit(0);
+                }
+                _ => {
+                    // clap rendered help and the process exited
+                    // inside parse_invocation; if we got here, the
+                    // user invoked a mode that needs a manifest
+                    // without supplying one and we should hand
+                    // control back to clap for a proper error.
+                    eprintln!("Error: missing required target argument");
+                    std::process::exit(2);
+                }
+            }
+        }
     };
+
+    match invocation.nexus.cmd {
+        cli::Mode::Router(rargs) => {
+            let cfg = cli::router_args_to_config(&rargs);
+            run_router(&cfg);
+            std::process::exit(0);
+        }
+        cli::Mode::Run(rargs) => {
+            let (mut cfg, _target) = cli::run_args_to_config(&rargs);
+            cfg.debug_cache_depth = invocation.capability_values.debug_cache_depth;
+            cfg.debug_cache_max = invocation.capability_values.debug_cache_max;
+            cfg.debug_recursion_cap = invocation.capability_values.debug_recursion_cap;
+            config = cfg;
+            manifest_path = invocation.manifest_path.clone();
+            user_zone = invocation.user_zone;
+        }
+        cli::Mode::Daemon(dargs) => {
+            let (mut cfg, _target) = cli::daemon_args_to_config(&dargs);
+            cfg.debug_cache_depth = invocation.capability_values.debug_cache_depth;
+            cfg.debug_cache_max = invocation.capability_values.debug_cache_max;
+            cfg.debug_recursion_cap = invocation.capability_values.debug_recursion_cap;
+            config = cfg;
+            manifest_path = invocation.manifest_path.clone();
+            user_zone = Vec::new();
+        }
+    }
+
     let prog_name = std::path::Path::new(&manifest_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(&manifest_path)
         .to_string();
-    let mut arg_cursor = if opt_end < args.len() { opt_end + 1 } else { args.len() };
 
-    // Read and parse manifest
+    // Re-read the raw manifest payload string from disk. The
+    // structured manifest was already loaded and validated inside
+    // parse_invocation; the payload is used downstream by
+    // `daemon_run` (which parses the JSON via libmorloc.so for its
+    // C-layout Manifest type).
     let payload = match manifest::read_manifest_payload(&manifest_path) {
         Ok(p) => p,
         Err(e) => {
@@ -68,14 +120,9 @@ fn main() {
             std::process::exit(1);
         }
     };
-
-    let manifest = match manifest::parse_manifest(&payload) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Failed to parse manifest '{}': {}", manifest_path, e);
-            std::process::exit(1);
-        }
-    };
+    // Touch `manifest` to keep the binding live for the rest of
+    // main.
+    let _ = &mut manifest;
 
     // Forward the per-program inline-vs-shm routing knobs to libmorloc.
     // Env vars are inherited by every pool process the nexus later
@@ -108,16 +155,55 @@ fn main() {
         std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path);
     }
 
-    let single_command = manifest.commands.len() == 1 && manifest.groups.is_empty();
-
-    // Second pass: parse options after manifest path (skip in single-command mode)
-    let mut remaining_args = args.clone();
-    if !single_command {
-        arg_cursor = dispatch::parse_nexus_options(&args[opt_end..], &mut config) + opt_end;
-    } else {
-        // In single-command mode, extract daemon/server long options manually
-        dispatch::extract_global_options(&mut remaining_args, &mut config);
+    // Publish the run-scope activation env vars NOW (after both option
+    // passes) so the runtime sees the final config when morloc_run_init
+    // performs its env::var reads. Each flag/var is only set when
+    // explicitly requested:
+    //
+    //   * --log-dir / MORLOC_LOG_DIR -- activates rundir, log tee,
+    //     summary.json (under rundir unless --summary overrides).
+    //   * --summary / MORLOC_SUMMARY -- writes summary.json to a
+    //     specific path; works even without a rundir.
+    //   * --quiet  / MORLOC_QUIET   -- suppresses ALL morloc-emitted
+    //     log lines (prologue, epilogue, per-label).
+    //
+    // CLI flags win over env vars. Env vars that pre-existed without
+    // a matching flag are left untouched so pools inherit them.
+    if let Some(ref d) = config.log_dir {
+        std::env::set_var("MORLOC_LOG_DIR", d);
     }
+    if let Some(ref p) = config.summary_path {
+        std::env::set_var("MORLOC_SUMMARY", p);
+    }
+    if config.quiet {
+        std::env::set_var("MORLOC_QUIET", "1");
+    }
+    if let Some(n) = config.debug_cache_depth {
+        std::env::set_var("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
+    }
+    if let Some(n) = config.debug_cache_max {
+        std::env::set_var("MORLOC_DEBUG_CACHE_MAX", n.to_string());
+    }
+    if let Some(n) = config.debug_recursion_cap {
+        std::env::set_var("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
+    }
+
+    // Resolve the per-run identity now so pools inherit a fully-published
+    // env (MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID).
+    // No filesystem directory is materialized here -- creation is lazy
+    // on the first writer (log tee, future cache or SLURM artifacts).
+    // A nested invocation (this nexus's parent is itself a morloc
+    // process) detects that via MORLOC_RUN_PARENT_PID matching getppid()
+    // and inherits the parent's run dir; otherwise a fresh id is minted.
+    extern "C" {
+        fn morloc_run_init();
+    }
+    unsafe { morloc_run_init() };
+
+    // Capture run-scope log templates from the manifest. emit_prologue
+    // / emit_epilogue read this; clean_exit triggers emit_epilogue
+    // before morloc_run_finalize writes summary.json.
+    runlog::install(manifest.run_log.clone());
 
     // Pool paths in the manifest are absolute, so no chdir is needed.
     // This lets user programs resolve file paths relative to the caller's CWD.
@@ -128,15 +214,6 @@ fn main() {
     if let Err(e) = process::validate_pools(&manifest.pools) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
-    }
-
-    // Handle help flag with manifest loaded
-    if config.help_flag {
-        if single_command {
-            help::print_command_help_single(&prog_name, &manifest.commands[0]);
-        } else {
-            help::print_usage(&prog_name, &manifest);
-        }
     }
 
     // Setup tmpdir and SHM
@@ -261,38 +338,22 @@ fn main() {
             }
         }
 
-        if single_command {
-            // Single-command: dispatch directly to the command, no subcommand lookup
-            // Allow optional command name prefix for backward compatibility
-            let mut cmd_arg_start = arg_cursor;
-            if cmd_arg_start < remaining_args.len()
-                && remaining_args[cmd_arg_start] == manifest.commands[0].name
-            {
-                cmd_arg_start += 1;
-            }
-            dispatch::dispatch_command(
-                &remaining_args,
-                cmd_arg_start,
-                &config,
-                &manifest,
-                &manifest.commands[0],
-                &mut sockets,
-                &prog_name,
-            );
-        } else {
-            if arg_cursor >= remaining_args.len() {
-                help::print_usage(&prog_name, &manifest);
-            }
-            dispatch::dispatch(
-                &remaining_args,
-                arg_cursor,
-                &shm_basename,
-                &config,
-                &manifest,
-                &mut sockets,
-                &prog_name,
-            );
-        }
+        // Route through the manifest-driven parser. `user_zone`
+        // holds the post-`@` (or post-target) slice that the
+        // top-level parse handed off; clap's auto-help and unknown-
+        // flag rejection apply to that slice against the
+        // manifest's command surface. parse_run also extracts
+        // capability-gated flags (`--debug-*`) into `config`.
+        let parsed =
+            phase2::parse_run(&manifest, &user_zone, &prog_name);
+        let cmd = &manifest.commands[parsed.cmd_index];
+        dispatch::dispatch_command_parsed(
+            parsed.values,
+            &config,
+            &manifest,
+            cmd,
+            &mut sockets,
+        );
     } else {
         // Call-packet mode: read a pre-built call packet from file,
         // send to the appropriate pool, write the result packet.

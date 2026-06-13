@@ -30,7 +30,7 @@ import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
-import Morloc.CodeGenerator.Express (express)
+import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
@@ -44,6 +44,7 @@ import qualified Morloc.Frontend.API as F
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
+import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram)
 
@@ -135,14 +136,27 @@ writeProgram translateFn path code = do
         MM.modify (\s -> s { stateManifoldLang = langMap })
         pools <-
           mapM express paramRASTs
+            -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
+            >>= mapM addCacheWraps
+            -- When 'stateDebugTrace' (--debug), wrap every foreign-call
+            -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
+            >>= mapM addDebugWraps
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce
               |>> pool
             >>= mapM (uncurry (emit translateFn))
-        return (nexus, pools)
-        -- write the code and compile as needed
-        >>= buildProgram
+        -- Fingerprint each pool's emitted source and substitute the
+        -- hex hashes into the @<MORLOC_POOL_HASH:lang>@ placeholders
+        -- the nexus manifest carries. The hashes are computed AFTER
+        -- pool emission so they cover the final source bytes, and
+        -- BEFORE 'buildProgram' so the resolved manifest is what hits
+        -- disk. @hash-include@ files from the program YAML fold into
+        -- every pool's hash so they invalidate the cache too.
+        hashIncludes <- MM.gets stateHashIncludePaths
+        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes hashIncludes pools
+        let nexusPatched = PoolHash.patchManifestPoolHashes poolHashes nexus
+        buildProgram (nexusPatched, pools)
 
 -- | An eval input is a single expression, not a module: it may import
 -- installed modules and use let/where/do, but may not define types,

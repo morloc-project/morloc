@@ -23,6 +23,7 @@
 
 #include <limits>
 #include <utility>
+#include <chrono>
 
 char* g_tmpdir;
 
@@ -457,6 +458,21 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 
 
 
+// Debug-trace runtime hooks (defined in libmorloc). Declared here,
+// above the AUTO splice points, so codegen-emitted manifold bodies
+// see the prototype for morloc_debug_record_frame. drain/flush are
+// only called from the in-template handlers below, but the whole
+// trio is grouped here for cohesion.
+extern "C" char* morloc_debug_drain_frames();
+extern "C" void morloc_debug_flush_dispatch();
+extern "C" void morloc_debug_record_frame(
+    uint32_t midx,
+    const uint8_t** packets,
+    const char** schemas,
+    size_t n);
+
+
+
 // AUTO signatures statements start
 // <<<BREAK>>>
 // AUTO signatures statements end
@@ -474,6 +490,26 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // AUTO dispatch end
 
 
+// Drain the debug-trace if --debug was compiled in. Concatenates the
+// rendered morloc trace with the caught exception's message so the
+// fail packet carries both. When --debug is off (or no frames were
+// recorded), the drain returns NULL and we forward the message
+// unchanged.
+
+static uint8_t* make_fail_packet_with_trace(const char* msg) {
+    char* trace = morloc_debug_drain_frames();
+    if (trace == NULL) {
+        return make_fail_packet(msg);
+    }
+    std::string combined;
+    combined.reserve(strlen(msg) + strlen(trace) + 2);
+    combined.append(msg);
+    combined.append("\n");
+    combined.append(trace);
+    free(trace);
+    return make_fail_packet(combined.c_str());
+}
+
 // Wrappers to adapt compiler-generated dispatch functions to pool_dispatch_fn_t.
 // These catch C++ exceptions so the C pool_main never sees them.
 static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
@@ -481,24 +517,26 @@ static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     (void)nargs; (void)ctx;
     // Free SHM from previous dispatch (result packet consumed by caller)
     _flush_shm_tracker();
+    morloc_debug_flush_dispatch();
     try {
         return local_dispatch(mid, args);
     } catch (const std::exception& e) {
-        return make_fail_packet(e.what());
+        return make_fail_packet_with_trace(e.what());
     } catch (...) {
-        return make_fail_packet("An unknown error occurred");
+        return make_fail_packet_with_trace("An unknown error occurred");
     }
 }
 
 static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
                                      size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
+    morloc_debug_flush_dispatch();
     try {
         return remote_dispatch(mid, args);
     } catch (const std::exception& e) {
-        return make_fail_packet(e.what());
+        return make_fail_packet_with_trace(e.what());
     } catch (...) {
-        return make_fail_packet("An unknown error occurred");
+        return make_fail_packet_with_trace("An unknown error occurred");
     }
 }
 

@@ -179,7 +179,7 @@ lookupDocsAt pos = do
 captureDeclDocs :: Pos -> EVar -> D ()
 captureDeclDocs pos name = do
   docs <- lookupDocsAt pos
-  vars <- processArgDocLinesD docs
+  vars <- processArgDocLinesD pos docs
   let descLines = docLines vars
   case descLines of
     [] -> return ()
@@ -220,12 +220,31 @@ parseDocKV txt =
                 DocDirective key (T.strip (T.drop 1 colonRest))
           _ -> DocDesc descLine
 
-parseCliOpt :: Text -> Maybe CliOpt
+-- | Outcome of attempting to parse a CLI-option directive value
+-- (the right-hand side of `arg:`, `true:`, `false:`).
+data CliOptParse
+  = CliOptOk CliOpt
+  | -- | The shape matched a short-option form but the option
+    -- character is not a POSIX-valid short-flag char (must be an
+    -- ASCII letter). Carries the offending character so the caller
+    -- can construct a precise diagnostic.
+    CliOptShortCharInvalid !Char
+  | -- | The text didn't match any recognized CLI-option shape.
+    CliOptShapeUnknown
+
+isShortFlagChar :: Char -> Bool
+isShortFlagChar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+
+parseCliOpt :: Text -> CliOptParse
 parseCliOpt txt = case T.unpack (T.strip txt) of
-  '-' : '-' : rest@(_ : _) -> Just (CliOptLong (T.pack rest))
-  '-' : c : '/' : '-' : '-' : rest@(_ : _) -> Just (CliOptBoth c (T.pack rest))
-  '-' : c : [] -> Just (CliOptShort c)
-  _ -> Nothing
+  '-' : '-' : rest@(_ : _) -> CliOptOk (CliOptLong (T.pack rest))
+  '-' : c : '/' : '-' : '-' : rest@(_ : _)
+    | isShortFlagChar c -> CliOptOk (CliOptBoth c (T.pack rest))
+    | otherwise -> CliOptShortCharInvalid c
+  '-' : c : []
+    | isShortFlagChar c -> CliOptOk (CliOptShort c)
+    | otherwise -> CliOptShortCharInvalid c
+  _ -> CliOptShapeUnknown
 
 -- Known directive keys recognized inside argument / signature docstrings.
 argDocDirectiveKeys :: [Text]
@@ -243,27 +262,56 @@ unknownDirectiveWarning knownKeys k =
   <> "if this was intended as prose, prefix the line with '\\' to suppress this warning (e.g. '\\"
   <> k <> ":')"
 
-processArgDocLines :: [Text] -> ([Text], ArgDocVars)
-processArgDocLines = foldl step ([], defaultValue)
+-- | Parse a single CLI-option directive value into the
+-- [`ArgDocVars`] slot, recording an error when the value matched a
+-- recognized short-flag shape but used a forbidden character.
+-- A completely unrecognized shape (e.g. `arg: foobar`) is silently
+-- preserved as `Nothing` -- the user's intent is ambiguous and the
+-- existing pipeline treats absence as the default.
+applyCliOptDirective ::
+  Text -> -- directive key, used in error messages
+  Text -> -- raw value text
+  ([Text], Maybe CliOpt)
+applyCliOptDirective k v = case parseCliOpt v of
+  CliOptOk o -> ([], Just o)
+  CliOptShapeUnknown -> ([], Nothing)
+  CliOptShortCharInvalid c ->
+    let msg =
+          "invalid short option character in '" <> k <> ": " <> v <> "': "
+          <> "got '" <> T.singleton c <> "'. "
+          <> "Short options must use a single ASCII letter "
+          <> "(a-z, A-Z); digits are forbidden because they collide "
+          <> "with negative number arguments (e.g. '-5'). Use a "
+          <> "letter, or the long form '--" <> k <> "'."
+     in ([msg], Nothing)
+
+processArgDocLines :: [Text] -> ([Text], [Text], ArgDocVars)
+processArgDocLines = foldl step ([], [], defaultValue)
   where
-    step (ws, d) line = case parseDocKV line of
+    step (errs, ws, d) line = case parseDocKV line of
       DocDesc v
-        | T.null v -> (ws, d)
-        | otherwise -> (ws, d {docLines = docLines d <> [v]})
+        | T.null v -> (errs, ws, d)
+        | otherwise -> (errs, ws, d {docLines = docLines d <> [v]})
       DocDirective k v -> case k of
-        "name" -> (ws, d {docName = Just v})
-        "literal" -> (ws, d {docLiteral = Just (parseDocBool v)})
-        "unroll" -> (ws, d {docUnroll = Just (parseDocBool v)})
-        "default" -> (ws, d {docDefault = Just v})
-        "metavar" -> (ws, d {docMetavar = Just v})
-        "arg" -> (ws, d {docArg = parseCliOpt v})
-        "true" -> (ws, d {docTrue = parseCliOpt v})
-        "false" -> (ws, d {docFalse = parseCliOpt v})
-        "return" -> (ws, d {docReturn = Just v})
+        "name" -> (errs, ws, d {docName = Just v})
+        "literal" -> (errs, ws, d {docLiteral = Just (parseDocBool v)})
+        "unroll" -> (errs, ws, d {docUnroll = Just (parseDocBool v)})
+        "default" -> (errs, ws, d {docDefault = Just v})
+        "metavar" -> (errs, ws, d {docMetavar = Just v})
+        "arg" ->
+          let (es, o) = applyCliOptDirective k v
+           in (errs <> es, ws, d {docArg = o})
+        "true" ->
+          let (es, o) = applyCliOptDirective k v
+           in (errs <> es, ws, d {docTrue = o})
+        "false" ->
+          let (es, o) = applyCliOptDirective k v
+           in (errs <> es, ws, d {docFalse = o})
+        "return" -> (errs, ws, d {docReturn = Just v})
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k
               desc = k <> ": " <> v
-           in (ws <> [w], d {docLines = docLines d <> [desc]})
+           in (errs, ws <> [w], d {docLines = docLines d <> [desc]})
 
 parseDocBool :: Text -> Bool
 parseDocBool v = v == "true" || v == "True"
@@ -311,13 +359,17 @@ applySourceDocs lns src = foldl step ([], src) lns
       [(n, "")] -> Just n
       _ -> Nothing
 
--- | D-monad wrapper: parse argument docstring lines and accumulate any
--- warnings into 'dsWarnings' for the caller to drain.
-processArgDocLinesD :: [Text] -> D ArgDocVars
-processArgDocLinesD ls = do
-  let (ws, v) = processArgDocLines ls
+-- | D-monad wrapper: parse argument docstring lines, accumulate
+-- warnings into 'dsWarnings' for the caller to drain, and fail
+-- the compile with a 'dfail' at `pos` when any directive value is
+-- malformed (e.g. a short-option char that isn't a letter).
+processArgDocLinesD :: Pos -> [Text] -> D ArgDocVars
+processArgDocLinesD pos ls = do
+  let (errs, ws, v) = processArgDocLines ls
   dwarn ws
-  return v
+  case errs of
+    [] -> return v
+    (e : _) -> dfail pos (T.unpack e)
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
 applySourceDocsD :: [Text] -> Source -> D Source
@@ -587,12 +639,12 @@ argsToType ts = FunU (map snd (init ts)) (snd (last ts))
 desugarSigType :: Pos -> CstSigType -> D ([Constraint], [ArgDocVars], TypeU)
 desugarSigType _pos (CstSigType (Just constraintArgs) args) = do
   cs <- extractConstraints (argsToType constraintArgs)
-  argDocs <- mapM (\(p, _) -> lookupDocsAt p) args
-  argDocVars <- mapM processArgDocLinesD argDocs
+  argDocsWithPos <- mapM (\(p, _) -> (,) p <$> lookupDocsAt p) args
+  argDocVars <- mapM (\(p, ls) -> processArgDocLinesD p ls) argDocsWithPos
   return (cs, argDocVars, argsToType args)
 desugarSigType _pos (CstSigType Nothing args) = do
-  argDocs <- mapM (\(p, _) -> lookupDocsAt p) args
-  argDocVars <- mapM processArgDocLinesD argDocs
+  argDocsWithPos <- mapM (\(p, _) -> (,) p <$> lookupDocsAt p) args
+  argDocVars <- mapM (\(p, ls) -> processArgDocLinesD p ls) argDocsWithPos
   return ([], argDocVars, argsToType args)
 
 
@@ -926,7 +978,7 @@ desugarExpr :: Loc CstExpr -> D ExprI
 desugarExpr (Loc sp (CLabeledVarE label v)) = do
   moduleConfig <- State.gets dsModuleConfig
   case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
-    Just config -> freshExprSpan sp (VarE config v)
+    Just config -> freshExprSpan sp (VarE (config { manifoldConfigLabel = Just label }) v)
     Nothing -> dfail (startPos sp)
       ("Undefined label '" ++ T.unpack label
        ++ "': no matching entry in module config labeled-groups")
@@ -1100,7 +1152,7 @@ desugarTopLevel (Loc sp (CImpE imp)) = do
   return [e]
 desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
-  cmdDoc <- processArgDocLinesD docs
+  cmdDoc <- processArgDocLinesD (startPos sp) docs
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
@@ -1278,7 +1330,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       l <- parseLang tok
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
   return [e]
 desugarTypeDef sp (CstNewtype (v, vs) t) = do
@@ -1287,7 +1339,7 @@ desugarTypeDef sp (CstNewtype (v, vs) t) = do
       "Newtype '" ++ T.unpack (unTVar v) ++
       "' has a vacuous body: it reduces to a self-reference with no payload"
   docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
@@ -1298,7 +1350,7 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   -- table still has a uniform shape.
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
   docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD docs
+  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
@@ -1311,10 +1363,13 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   -- = Person@ wrapped around a record is still TypedefAlias and would
   -- still trip Invariant 1 if also given a per-language form.
   recDocs <- lookupDocsAt (startPos sp)
-  recDocVars <- processArgDocLinesD recDocs
+  recDocVars <- processArgDocLinesD (startPos sp) recDocs
   fieldDocs <-
     mapM
-      (\(loc, _, _) -> do dl <- lookupDocsAt (locPos loc); processArgDocLinesD dl)
+      (\(loc, _, _) -> do
+          let p = locPos loc
+          dl <- lookupDocsAt p
+          processArgDocLinesD p dl)
       locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       doc = ArgDocRec recDocVars (zip (map fst entries) fieldDocs)

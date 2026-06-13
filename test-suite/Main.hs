@@ -66,6 +66,25 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "debug-trace" "debug-trace"
+      , golden "debug-trace-dedup" "debug-trace-dedup"
+      , golden "debug-trace-recursive" "debug-trace-recursive"
+      , golden "debug-trace-size-cap" "debug-trace-size-cap"
+      , golden "debug-trace-cross-pool" "debug-trace-cross-pool"
+      , golden "debug-trace-multi-arg" "debug-trace-multi-arg"
+      , golden "debug-trace-replay" "debug-trace-replay"
+      , golden "debug-trace-state-reset" "debug-trace-state-reset"
+
+      , golden "run-summary" "run-summary"
+      , golden "cache-basics" "cache-basics"
+      , golden "cache-concurrent" "cache-concurrent"
+      , golden "cache-body-exception" "cache-body-exception"
+      , golden "cache-nested" "cache-nested"
+      , golden "cache-pool-hash" "cache-pool-hash"
+      , golden "cache-shm-backed" "cache-shm-backed"
+      , golden "cache-hash-include" "cache-hash-include"
+      , golden "cache-distinct-inputs" "cache-distinct-inputs"
+
       , golden "bracket-accessors" "bracket-accessors"
       , golden "bracket-accessors-pure" "bracket-accessors-pure"
 
@@ -329,6 +348,8 @@ main = do
         golden "manifold-form-7_c" "manifold-form-7_c"
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
+      , -- per-label logging (log: true) across all three pool languages
+        golden "log-labels" "log-labels"
       , -- test records
         golden "records-primitive" "records-primitive"
       , golden "records-complex-1" "records-complex-1"

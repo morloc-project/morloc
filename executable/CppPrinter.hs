@@ -207,8 +207,13 @@ uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
     localCases = map (makeCase "") locals
     remoteCases = map (makeCase "_remote") remotes
 
+    -- The dispatch case is just a direct return; per-label logging is
+    -- injected at the manifold definition (see lcMakeFunction in
+    -- executable/CppTranslator.hs) so callers via std::bind / direct symbol
+    -- reference all see the wrapped behavior. The label field on the
+    -- DispatchEntry is unused here.
     makeCase :: MDoc -> DispatchEntry -> MDoc
-    makeCase suffix (DispatchEntry i n) =
+    makeCase suffix (DispatchEntry i n _) =
       "case" <+> pretty i
         <> ":"
           <+> "return"

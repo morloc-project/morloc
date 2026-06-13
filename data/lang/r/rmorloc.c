@@ -1858,6 +1858,39 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
 }
 
 
+// ── log emission bridge to libmorloc.so ──────────────────────────────────
+
+SEXP morloc_log_next_id_r(void) {
+    uint64_t id = morloc_log_next_id();
+    // R's numeric is double; for our pid:counter values this is safe up
+    // to 2^53. The pool round-trips the id back into morloc_log_emit_r
+    // without inspecting it.
+    return ScalarReal((double)id);
+}
+
+SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP group_r, SEXP runtime_r, SEXP call_id_r) {
+    if (TYPEOF(tmpl_r) != STRSXP || LENGTH(tmpl_r) != 1) {
+        MORLOC_ERROR("log_emit: template must be a single string");
+    }
+    const char* tmpl = CHAR(STRING_ELT(tmpl_r, 0));
+    // group may be NA or an empty string -- both translate to a NULL
+    // C pointer so the tee is skipped.
+    const char* group = NULL;
+    if (TYPEOF(group_r) == STRSXP && LENGTH(group_r) == 1) {
+        SEXP s = STRING_ELT(group_r, 0);
+        if (s != NA_STRING) {
+            const char* g = CHAR(s);
+            if (g && g[0] != '\0') {
+                group = g;
+            }
+        }
+    }
+    double runtime = asReal(runtime_r);
+    uint64_t call_id = (uint64_t)asReal(call_id_r);
+    morloc_log_emit(tmpl, group, runtime, call_id);
+    return R_NilValue;
+}
+
 SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
@@ -2259,12 +2292,52 @@ static int recv_fd_c(int pipe_fd) {
     return fd;
 }
 
+// Drain the morloc debug-trace (if --debug was compiled in and any
+// frames were recorded). Returns a heap C string the caller must
+// free, or NULL when no trace is present.
+extern char* morloc_debug_drain_frames(void);
+
+// Reset per-dispatch debug-trace state (called at the start of every
+// run_job iteration so frames/dump counters don't leak between calls).
+extern void morloc_debug_flush_dispatch(void);
+
+// Record one frame to the per-thread debug-trace stack. Used by the
+// codegen-emitted try/catch wraps in pool.R.
+extern void morloc_debug_record_frame(
+    uint32_t midx,
+    const uint8_t** packets,
+    const char** schemas,
+    size_t n);
+
 // Send a fail packet to the client (best-effort, ignores send errors).
+// Concatenates any recorded debug trace with the message so the nexus's
+// summary.json carries both the foreign error and the morloc frames.
 static void send_fail_to_client(int client_fd, const char* msg) {
     char* errmsg = NULL;
-    uint8_t* fail = make_fail_packet(msg);
+    char* trace = morloc_debug_drain_frames();
+    char* full;
+    if (trace == NULL) {
+        full = (char*)msg;
+    } else {
+        size_t mlen = strlen(msg);
+        size_t tlen = strlen(trace);
+        full = (char*)malloc(mlen + tlen + 2);
+        if (full) {
+            memcpy(full, msg, mlen);
+            full[mlen] = '\n';
+            memcpy(full + mlen + 1, trace, tlen);
+            full[mlen + 1 + tlen] = '\0';
+        } else {
+            full = (char*)msg;
+        }
+    }
+    uint8_t* fail = make_fail_packet(full);
     send_packet_to_foreign_server(client_fd, fail, &errmsg);
     free(fail);
+    if (trace != NULL) {
+        free(trace);
+        if (full != msg) free(full);
+    }
 }
 
 // Dispatch a call to a manifold function. All packet handling is in C;
@@ -2342,6 +2415,7 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     // request, it is safe to reclaim. Without this every RPTR result would
     // leak per call and grow /dev/shm/morloc-* monotonically.
     flush_shm_tracker();
+    morloc_debug_flush_dispatch();
 
     uint8_t* packet = stream_from_client(client_fd, &errmsg);
     if (errmsg) {
@@ -2400,10 +2474,195 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_
 
 // }}} C-level worker loop
 
+// ── Cache bridge to libmorloc.so ───────────────────────────────────────────
+
+// Compute a cache key. Inputs:
+//   midx_r:     integer manifold id
+//   packets_r:  list of raw vectors (one packet per arg)
+//   schemas_r:  character vector of schema strings (one per arg, same length)
+// Returns a length-1 numeric (the 64-bit key cast to double; bit-exact up to
+// 2^53, fine for our xxh64 keys round-tripping back into other cache calls).
+SEXP morloc_cache_key_compute_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
+    if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
+        MORLOC_ERROR("cache_key_compute: midx must be a single integer");
+    }
+    if (TYPEOF(packets_r) != VECSXP) {
+        MORLOC_ERROR("cache_key_compute: packets must be a list of raw vectors");
+    }
+    if (TYPEOF(schemas_r) != STRSXP) {
+        MORLOC_ERROR("cache_key_compute: schemas must be a character vector");
+    }
+    R_xlen_t n_args = XLENGTH(packets_r);
+    if (XLENGTH(schemas_r) != n_args) {
+        MORLOC_ERROR("cache_key_compute: packets and schemas must have equal length");
+    }
+
+    const uint8_t** packet_ptrs = (const uint8_t**)R_alloc(n_args, sizeof(uint8_t*));
+    const char** schema_ptrs = (const char**)R_alloc(n_args, sizeof(char*));
+    for (R_xlen_t i = 0; i < n_args; i++) {
+        SEXP p = VECTOR_ELT(packets_r, i);
+        if (TYPEOF(p) != RAWSXP) {
+            MORLOC_ERROR("cache_key_compute: packet %lld must be a raw vector",
+                (long long)i);
+        }
+        packet_ptrs[i] = (const uint8_t*)RAW(p);
+        SEXP s = STRING_ELT(schemas_r, i);
+        if (s == NA_STRING) {
+            MORLOC_ERROR("cache_key_compute: schema %lld is NA", (long long)i);
+        }
+        schema_ptrs[i] = CHAR(s);
+    }
+
+    char* errmsg = NULL;
+    uint64_t key = morloc_cache_key_compute(
+        (uint32_t)INTEGER(midx_r)[0],
+        packet_ptrs,
+        schema_ptrs,
+        (size_t)n_args,
+        &errmsg
+    );
+    if (errmsg) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "%s", errmsg);
+        free(errmsg);
+        MORLOC_ERROR("cache_key_compute failed: %s", buf);
+    }
+    return ScalarReal((double)key);
+}
+
+// debug_record_frame(midx, packets_list, schemas_list)
+// packets_list: list of raw vectors (serialized packets, one per arg).
+// schemas_list: character vector (schema strings).
+// Appends one frame to the per-thread debug-trace stack.
+SEXP morloc_debug_flush_dispatch_r(void) {
+    morloc_debug_flush_dispatch();
+    return R_NilValue;
+}
+
+SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
+    if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
+        MORLOC_ERROR("debug_record_frame: midx must be a single integer");
+    }
+    if (TYPEOF(packets_r) != VECSXP) {
+        MORLOC_ERROR("debug_record_frame: packets must be a list of raw vectors");
+    }
+    if (TYPEOF(schemas_r) != STRSXP) {
+        MORLOC_ERROR("debug_record_frame: schemas must be a character vector");
+    }
+    R_xlen_t n_args = XLENGTH(packets_r);
+    if (XLENGTH(schemas_r) != n_args) {
+        MORLOC_ERROR("debug_record_frame: packets and schemas length mismatch");
+    }
+    if (n_args == 0) {
+        morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], NULL, NULL, 0);
+        return R_NilValue;
+    }
+    const uint8_t** packet_ptrs = (const uint8_t**)R_alloc(n_args, sizeof(uint8_t*));
+    const char** schema_ptrs = (const char**)R_alloc(n_args, sizeof(char*));
+    for (R_xlen_t i = 0; i < n_args; i++) {
+        SEXP p = VECTOR_ELT(packets_r, i);
+        if (TYPEOF(p) != RAWSXP) {
+            MORLOC_ERROR("debug_record_frame: packet %lld must be raw", (long long)i);
+        }
+        packet_ptrs[i] = (const uint8_t*)RAW(p);
+        SEXP s = STRING_ELT(schemas_r, i);
+        if (s == NA_STRING) {
+            MORLOC_ERROR("debug_record_frame: schema %lld is NA", (long long)i);
+        }
+        schema_ptrs[i] = CHAR(s);
+    }
+    morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], packet_ptrs,
+        schema_ptrs, (size_t)n_args);
+    return R_NilValue;
+}
+
+SEXP morloc_cache_lookup_r(SEXP key_r, SEXP label_r) {
+    uint64_t key = (uint64_t)asReal(key_r);
+    if (TYPEOF(label_r) != STRSXP || LENGTH(label_r) != 1) {
+        MORLOC_ERROR("cache_lookup: label must be a single string");
+    }
+    const char* label = CHAR(STRING_ELT(label_r, 0));
+    size_t size = 0;
+    char* errmsg = NULL;
+    uint8_t* data = morloc_cache_lookup(key, label, &size, &errmsg);
+    if (errmsg) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "%s", errmsg);
+        free(errmsg);
+        MORLOC_ERROR("cache_lookup failed: %s", buf);
+    }
+    if (!data) {
+        return R_NilValue;
+    }
+    SEXP result = PROTECT(allocVector(RAWSXP, size));
+    memcpy(RAW(result), data, size);
+    free(data);
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_cache_store_r(SEXP key_r, SEXP label_r, SEXP packet_r, SEXP schema_r) {
+    uint64_t key = (uint64_t)asReal(key_r);
+    if (TYPEOF(label_r) != STRSXP || LENGTH(label_r) != 1) {
+        MORLOC_ERROR("cache_store: label must be a single string");
+    }
+    if (TYPEOF(packet_r) != RAWSXP) {
+        MORLOC_ERROR("cache_store: packet must be a raw vector");
+    }
+    if (TYPEOF(schema_r) != STRSXP || LENGTH(schema_r) != 1) {
+        MORLOC_ERROR("cache_store: schema must be a single string");
+    }
+    const char* label = CHAR(STRING_ELT(label_r, 0));
+    const char* schema = CHAR(STRING_ELT(schema_r, 0));
+    char* errmsg = NULL;
+    bool ok = morloc_cache_store(
+        key, label,
+        (const uint8_t*)RAW(packet_r),
+        (size_t)XLENGTH(packet_r),
+        schema,
+        &errmsg
+    );
+    if (!ok) {
+        if (errmsg) {
+            char buf[1024];
+            snprintf(buf, sizeof(buf), "%s", errmsg);
+            free(errmsg);
+            MORLOC_ERROR("cache_store failed: %s", buf);
+        }
+        MORLOC_ERROR("cache_store failed");
+    }
+    return R_NilValue;
+}
+
+SEXP morloc_cache_record_hit_r(void) {
+    morloc_cache_record_hit();
+    return R_NilValue;
+}
+
+SEXP morloc_cache_record_miss_r(void) {
+    morloc_cache_record_miss();
+    return R_NilValue;
+}
+
+SEXP morloc_cache_record_store_r(void) {
+    morloc_cache_record_store();
+    return R_NilValue;
+}
+
 // }}} exported functions
 
 
-void R_init_rmorloc(DllInfo *info) {
+// R extracts the package name from the .so filename by stripping the "lib"
+// prefix and ".so" suffix and looks for R_init_<that name>. Our shared
+// library is installed as "librmorloc.so", so the expected initializer is
+// "R_init_librmorloc" -- not "R_init_rmorloc". We expose both names as
+// aliases for the same body so the registration runs regardless of which
+// stripping convention a given R build follows.
+static void __attribute__((unused)) _r_init_impl(DllInfo *info);
+void R_init_librmorloc(DllInfo *info) { _r_init_impl(info); }
+void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
+
+static void _r_init_impl(DllInfo *info) {
     R_CallMethodDef callMethods[] = {
         {"morloc_start_daemon", (DL_FUNC) &morloc_start_daemon, 4},
         {"morloc_wait_for_client", (DL_FUNC) &morloc_wait_for_client, 1},
@@ -2415,6 +2674,8 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 2},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
+        {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
+        {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
@@ -2443,6 +2704,14 @@ void R_init_rmorloc(DllInfo *info) {
         {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
         {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
+        {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
+        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 3},
+        {"r_morloc_debug_flush_dispatch", (DL_FUNC) &morloc_debug_flush_dispatch_r, 0},
+        {"r_morloc_cache_lookup", (DL_FUNC) &morloc_cache_lookup_r, 2},
+        {"r_morloc_cache_store", (DL_FUNC) &morloc_cache_store_r, 4},
+        {"r_morloc_cache_record_hit", (DL_FUNC) &morloc_cache_record_hit_r, 0},
+        {"r_morloc_cache_record_miss", (DL_FUNC) &morloc_cache_record_miss_r, 0},
+        {"r_morloc_cache_record_store", (DL_FUNC) &morloc_cache_record_store_r, 0},
         {NULL, NULL, 0}
     };
 

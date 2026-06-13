@@ -294,6 +294,52 @@ bool morloc_get_shm_enabled(void);
 // surrounding eval scope ends via eval_arena.
 void morloc_set_tmpdir(const char* path);
 
+// ========================================================================
+// Log emission for `log: true` labeled manifolds
+// ========================================================================
+
+// Allocate a fresh call id for pairing start / pass / fail log lines.
+// The returned u64 is opaque to the pool; internally morloc_log_emit
+// renders it as "{pid}:{counter}" for the {id} placeholder.
+uint64_t morloc_log_next_id(void);
+
+// Emit one formatted log line to stderr. `tmpl` is a null-terminated
+// pre-rendered template (the morloc compiler has already substituted
+// static placeholders like {name}, {module}, and the ANSI color codes
+// from {c:red}). This function fills in the runtime placeholders
+// ({date}, {runtime}, {id}), strips ANSI CSI sequences when stderr is
+// not a TTY (or when NO_COLOR is set), and writes the line + newline
+// atomically. `runtime_seconds` is the duration to substitute into
+// {runtime}; pass 0.0 for start events. `call_id` should come from
+// morloc_log_next_id and be reused across the start/pass/fail trio
+// for one invocation. `group` is the label group (e.g. "a" for an
+// a:foo reference); when MORLOC_RUN_DIR is set, the color-stripped
+// line is also appended to $MORLOC_RUN_DIR/<group>/log. NULL or empty
+// `group` skips the tee. NULL `tmpl` is a no-op.
+void morloc_log_emit(
+    const char* tmpl,
+    const char* group,
+    double runtime_seconds,
+    uint64_t call_id
+);
+
+// ========================================================================
+// Per-run workdir lifecycle
+// ========================================================================
+
+// Force resolution of the run id and republish the
+// MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID env vars
+// for child processes (pools, nested morloc programs) to inherit.
+// Called from the nexus at startup. The actual filesystem directory
+// is NOT created here -- materialization is lazy on first writer.
+void morloc_run_init(void);
+
+// Write summary.json (if the run directory has been materialized) and
+// flush any per-label log tee handles. Called from the nexus's
+// clean_exit after pool teardown so any final pool-side log writes
+// land in the per-label files before the handles close.
+void morloc_run_finalize(int exit_code);
+
 // Metadata sub-header in packet metadata sections.
 #define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01
 #define MORLOC_METADATA_TYPE_XXHASH        0x02
@@ -1004,6 +1050,69 @@ char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t k
 uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 bool del_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
+
+// Per-pool source fingerprint, parsed once from MORLOC_POOL_HASH at
+// first call and cached. Returns 0 when the env var is absent. The
+// pool's cache wrap mixes this into every cache key so editing the
+// morloc source (or any declared hash-include file) invalidates every
+// stale entry from this pool.
+uint64_t morloc_pool_hash(void);
+
+// Resolve and create the per-label cache directory beneath the unified
+// base ($MORLOC_CACHE_BASE, $XDG_CACHE_HOME/morloc/cache, or
+// ~/.cache/morloc/cache by default). A NULL or empty `label` resolves
+// to a synthetic `_unlabeled` subdirectory. Returns a heap-allocated
+// path string the caller frees via libc::free, NULL on failure.
+char* morloc_cache_path(const char* label, ERRMSG);
+
+// Counters consumed by the run summary (Stage 4). Each event is
+// independent: a `record_miss` followed by a successful compute and
+// store fires `record_store` as well. NULL out-pointers in
+// `morloc_cache_stats` are ignored.
+void morloc_cache_record_hit(void);
+void morloc_cache_record_miss(void);
+void morloc_cache_record_store(void);
+void morloc_cache_stats(uint64_t* hits_out, uint64_t* misses_out, uint64_t* stores_out);
+
+// Compute the cache key from a manifold id and N byte slices, one per
+// argument's content (resolved through the schema so SHM-backed packets
+// hash their actual values, NEVER raw relptr bits). The seed chain
+// mixes in pool_hash (read once from MORLOC_POOL_HASH) so source edits
+// invalidate cache entries. Each `arg_schemas[i]` must be a non-null,
+// well-formed schema string for `arg_packets[i]`; on any null or
+// unparseable schema the function returns 0 and sets *errmsg.
+uint64_t morloc_cache_key_compute(
+    uint32_t midx,
+    const uint8_t* const* arg_packets,
+    const char* const* arg_schemas,
+    size_t n_args,
+    ERRMSG
+);
+
+// Look up a cached result packet under <label>/<key>.packet. Returns
+// heap bytes (caller frees with free()) and writes the byte length to
+// *size_out on hit. NULL on miss (not an error) or on I/O failure
+// (errmsg set). Does NOT call morloc_cache_record_hit() -- the wrap
+// records hits/misses explicitly so the dispatch-loop and call_cached
+// paths attribute their own results.
+uint8_t* morloc_cache_lookup(uint64_t key, const char* label, size_t* size_out, ERRMSG);
+
+// Store the value carried by a packet under <label>/<key>.packet,
+// materializing the packet to a self-contained inline-msgpack form
+// before writing so SHM-backed (PACKET_SOURCE_RPTR) and file-backed
+// (PACKET_SOURCE_FILE) payloads survive across processes. `schema_str`
+// must describe the packet payload; on schema-parse or
+// materialization failure the store fails and *errmsg is set. Atomic
+// write. Returns true on success. Does NOT call
+// morloc_cache_record_store().
+bool morloc_cache_store(
+    uint64_t key,
+    const char* label,
+    const uint8_t* data,
+    size_t size,
+    const char* schema_str,
+    ERRMSG
+);
 
 // ========================================================================
 // Section 22: Function declarations -- CLI / argument parsing

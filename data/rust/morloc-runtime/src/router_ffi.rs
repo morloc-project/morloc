@@ -287,17 +287,22 @@ pub unsafe extern "C" fn router_start_program(
 
     let pid = libc::fork();
     if pid == 0 {
-        // Child: exec morloc-nexus with --daemon
+        // Child: exec `morloc-nexus daemon <manifest> --socket <path>`.
+        // The post-CLI-overhaul nexus uses explicit subcommands;
+        // `daemon` is the only argv shape that brings up a long-
+        // lived server. The router relies on this child to bind the
+        // Unix socket at `daemon_socket` so subsequent router
+        // requests can connect.
         libc::setpgid(0, 0);
         let arg_nexus = CString::new("morloc-nexus").unwrap();
-        let arg_daemon = CString::new("--daemon").unwrap();
+        let arg_daemon = CString::new("daemon").unwrap();
         let arg_socket = CString::new("--socket").unwrap();
         let socket_path = CStr::from_ptr((*prog).daemon_socket.as_ptr());
         libc::execl(
             c_nexus.as_ptr(),
             arg_nexus.as_ptr(),
-            (*prog).manifest_path,
             arg_daemon.as_ptr(),
+            (*prog).manifest_path,
             arg_socket.as_ptr(),
             socket_path.as_ptr(),
             ptr::null::<c_char>(),

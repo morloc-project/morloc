@@ -1,0 +1,26 @@
+module main (countdownP)
+
+import root-py
+
+source Py from "throw.py" ("pyThrowAtZero")
+
+pyThrowAtZero :: Int -> Real
+
+-- Recursive descent: countdown n calls countdown (n-1) until n hits
+-- 0, at which point pyThrowAtZero raises. Each level of recursion is
+-- a fresh invocation of the same midx; the per-midx counter caps
+-- how many frames make it into the trace.
+--
+-- Tree shape with input N:
+--   countdownP N
+--     -> countdownP (N-1)
+--       -> ...
+--         -> countdownP 0   (throws)
+--
+-- That's N+1 catches firing for the SAME midx. With
+-- --debug-recursion-cap=3, frames 4..N are dropped entirely. With
+-- --debug-cache-depth=2, only the innermost 2 frames have their
+-- args dumped to disk; outer frames record hashes only.
+countdownP :: Int -> Real
+countdownP n ? n <= 0 = idpy (pyThrowAtZero n)
+            : idpy (countdownP (n - 1))

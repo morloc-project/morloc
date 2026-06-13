@@ -47,6 +47,9 @@ pub mod router_ffi;
 pub mod null_check;
 pub mod cli;
 pub mod config_ffi;
+pub mod log;
+pub mod run;
+pub mod debug;
 
 /// Shared test SHM initialization. Call from all test modules.
 #[cfg(test)]

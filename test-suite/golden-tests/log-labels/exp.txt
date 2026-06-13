@@ -1,0 +1,24 @@
+[6.5,7]
+[6.5,7]
+[6.5,7]
+[13.5,13.5]
+13.5
+-13.5
+[13,14]
+120
+120
+120
+13.5
+a: start=3 end=3
+b: start=6 end=6
+tup_left: start=1 end=1
+tup_right: start=1 end=1
+then_lbl: start=1 end=1
+else_lbl: start=0 end=0
+then2: start=0 end=0
+else2: start=1 end=1
+outer: start=1 end=1
+inner: start=1 end=1
+recur: start=12 end=12
+let_in: start=1 end=1
+let_out: start=1 end=1

@@ -24,6 +24,9 @@ module Morloc.Namespace.Expr
     Source (..)
   , RemoteResources (..)
   , ManifoldConfig (..)
+  , LogTemplate (..)
+  , RunLogTemplate (..)
+  , EpilogueTemplate (..)
   , ModuleConfig (..)
   , BuildConfig (..)
 
@@ -79,7 +82,7 @@ module Morloc.Namespace.Expr
   ) where
 
 import Control.Monad.Identity (runIdentity)
-import Data.Aeson (FromJSON (..))
+import Data.Aeson (FromJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Foldable (toList)
@@ -116,16 +119,79 @@ data RemoteResources = RemoteResources
   }
   deriving (Show, Ord, Eq, Generic)
 
+-- | Per-event log-message templates. Each subfield is the format string
+-- for the start, pass, and fail log lines respectively. 'Nothing' for a
+-- subfield means \"emit nothing for this event\". The compiler resolves
+-- the effective template per labeled manifold by merging in this order:
+--   per-label 'manifoldConfigLogTemplate'
+--      > module-level 'moduleConfigLogTemplate'
+--      > built-in default ('defaultLogTemplate')
+-- per-subfield. Each subfield supports @{name}@-style placeholder
+-- substitution; see 'Morloc.CodeGenerator.LogTemplate' for the
+-- available variables and the rendering pipeline.
+data LogTemplate = LogTemplate
+  { logTemplateStart :: Maybe Text
+  , logTemplatePass :: Maybe Text
+  , logTemplateFail :: Maybe Text
+  }
+  deriving (Show, Ord, Eq, Generic)
+
+-- | Run-scope log templates. 'runLogPrologue' fires at the nexus
+-- entrypoint immediately after argument parsing; the appropriate
+-- 'runLogEpilogue' subfield fires at clean exit (Ok) or via the
+-- failure-path guard (Fail). 'Nothing' silences the corresponding
+-- event. Lives at the top level of the program YAML alongside
+-- 'log-template'; not per-label.
+data RunLogTemplate = RunLogTemplate
+  { runLogPrologue :: Maybe Text
+  , runLogEpilogue :: Maybe EpilogueTemplate
+  }
+  deriving (Show, Ord, Eq, Generic)
+
+-- | Success / failure branch of the run epilogue. Two templates so the
+-- success line never has to render an empty @{error}@ field and the
+-- failure line can include 'error' / 'exit_code' fields the success
+-- line lacks.
+data EpilogueTemplate = EpilogueTemplate
+  { epilogueOk :: Maybe Text
+  , epilogueFail :: Maybe Text
+  }
+  deriving (Show, Ord, Eq, Generic)
+
 data ManifoldConfig = ManifoldConfig
   { manifoldConfigCache :: Maybe Bool
   , manifoldConfigBenchmark :: Maybe Bool
   , manifoldConfigRemote :: Maybe RemoteResources
+  , manifoldConfigLog :: Maybe Bool
+  , manifoldConfigLabel :: Maybe Text
+  , manifoldConfigLogTemplate :: Maybe LogTemplate
+  , manifoldConfigLabelIdx :: Maybe Int
+  -- ^ The ExprI index where the label was attached. Set by 'collectTags'
+  -- when a labeled VarE is registered and preserved by
+  -- 'propagateManifoldLabel'. Used at codegen to look up the source
+  -- position (for @{module}@/@{line}@/@{column}@) and the term name
+  -- (for @{name}@). Not user-facing; absent from YAML.
   }
   deriving (Show, Ord, Eq, Generic)
 
 data ModuleConfig = ModuleConfig
   { moduleConfigDefaultGroup :: Maybe ManifoldConfig
   , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
+  , moduleConfigLogTemplate :: Maybe LogTemplate
+  , moduleConfigPrologue :: Maybe Text
+  -- ^ Top-level YAML field @prologue@: a template string fired by the
+  -- nexus at run start. See 'Morloc.CodeGenerator.LogTemplate' for the
+  -- available placeholders.
+  , moduleConfigEpilogue :: Maybe EpilogueTemplate
+  -- ^ Top-level YAML field @epilogue@ with @ok@/@fail@ sub-fields. The
+  -- nexus picks the branch matching the run's final disposition.
+  , moduleConfigHashInclude :: Maybe [Text]
+  -- ^ Top-level YAML field @hash-include@: a list of paths (glob-aware,
+  -- relative to the program's YAML) whose file contents are folded into
+  -- the per-pool cache key. Use this to invalidate cached results when
+  -- a foreign source file or runtime data file changes. Paths follow
+  -- the same scope rules as @packageInclude@ -- absolute paths and
+  -- @..@ traversals are rejected.
   }
   deriving (Show, Generic)
 
@@ -475,6 +541,25 @@ instance Defaultable ModuleConfig where
     ModuleConfig
       { moduleConfigDefaultGroup = Nothing
       , moduleConfigLabeledGroups = Map.empty
+      , moduleConfigLogTemplate = Nothing
+      , moduleConfigPrologue = Nothing
+      , moduleConfigEpilogue = Nothing
+      , moduleConfigHashInclude = Nothing
+      }
+
+instance Defaultable LogTemplate where
+  defaultValue =
+    LogTemplate
+      { logTemplateStart = Nothing
+      , logTemplatePass = Nothing
+      , logTemplateFail = Nothing
+      }
+
+instance Defaultable EpilogueTemplate where
+  defaultValue =
+    EpilogueTemplate
+      { epilogueOk = Nothing
+      , epilogueFail = Nothing
       }
 
 instance Defaultable BuildConfig where
@@ -499,17 +584,39 @@ instance Defaultable ManifoldConfig where
       { manifoldConfigCache = Just False
       , manifoldConfigBenchmark = Just False
       , manifoldConfigRemote = Nothing
+      , manifoldConfigLog = Just False
+      , manifoldConfigLabel = Nothing
+      , manifoldConfigLogTemplate = Nothing
+      , manifoldConfigLabelIdx = Nothing
       }
 
+-- Custom parser so each field is independently optional. Generic
+-- derivation would require @labeled-groups@ even when the user only
+-- declares, say, @prologue@ and @epilogue@.
 instance FromJSON ModuleConfig where
-  parseJSON =
-    Aeson.genericParseJSON $
-      defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "moduleConfig"}
+  parseJSON = Aeson.withObject "ModuleConfig" $ \o ->
+    ModuleConfig
+      <$> o .:? "default-group"
+      <*> o .:? "labeled-groups" .!= Map.empty
+      <*> o .:? "log-template"
+      <*> o .:? "prologue"
+      <*> o .:? "epilogue"
+      <*> o .:? "hash-include"
 
 instance FromJSON ManifoldConfig where
   parseJSON =
     Aeson.genericParseJSON $
       defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "manifoldConfig"}
+
+instance FromJSON LogTemplate where
+  parseJSON =
+    Aeson.genericParseJSON $
+      defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "logTemplate"}
+
+instance FromJSON EpilogueTemplate where
+  parseJSON =
+    Aeson.genericParseJSON $
+      defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "epilogue"}
 
 instance FromJSON RemoteResources where
   parseJSON =

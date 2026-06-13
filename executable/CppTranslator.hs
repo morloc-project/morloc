@@ -42,10 +42,12 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , expandSerialize
   , toIType
   )
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
+  , serialAstToMsgpackSchema
   , shallowType
   )
 import Morloc.Data.Doc
@@ -288,6 +290,10 @@ data CppTranslatorState = CppTranslatorState
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorCurrentManifold :: Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
+  , translatorLogTemplates :: Map.Map Int RenderedTemplate
+  -- ^ Per-labeled-midx pre-rendered log templates (see 'LogTemplate').
+  -- The IIFE wrap is injected at the definition site so manifolds
+  -- referenced by symbol (e.g. @std::bind(m1043, _1)@) also log.
   , translatorSchemas :: Map.Map Text Int
   -- The merged C++ concrete scope (the same scope @pairEval@ consults).
   -- 'cppTypeOf' uses it as ground truth to distinguish two cases that
@@ -312,6 +318,7 @@ instance Defaultable CppTranslatorState where
       , translatorRemoteManifoldSet = Set.empty
       , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
       , translatorEffectLabels = Map.empty
+      , translatorLogTemplates = Map.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
       }
@@ -374,13 +381,17 @@ translate srcs es = do
   -- `-I/abs/src` because the `src/` prefix was duplicated.
   (srcs', _, _) <- handleFlagsAndPaths srcs
 
+  labels <- collectLogLabels <$> MM.gets stateManifoldConfig
+  templates <- collectRenderedTemplates cppLang
+
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
         { translatorRecmap = recmap
         , translatorEffectLabels = effectMap
+        , translatorLogTemplates = templates
         , translatorCScope = mergedCppScope
         }
-      code = CMS.evalState (makeCppCode srcs' es universalScopeMap scopeMap) translatorState
+      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap) translatorState
 
   maker <- makeTheMaker srcs'
 
@@ -395,13 +406,14 @@ translate srcs es = do
       }
 
 makeCppCode ::
+  Map.Map Int Text ->
   [Source] ->
   [SerialManifold] ->
   Map.Map Lang Scope ->
   GMap Int MVar (Map.Map Lang Scope) ->
   CppTranslator MDoc
-makeCppCode srcs es univeralScopeMap scopeMap = do
-  -- ([MDoc], [MDoc])
+makeCppCode labels srcs es univeralScopeMap scopeMap = do
+  templates <- CMS.gets translatorLogTemplates
   (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
   -- write include statements for sources
@@ -413,7 +425,7 @@ makeCppCode srcs es univeralScopeMap scopeMap = do
   let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
   -- build the program (translates each manifold tree)
-  program <- buildProgramM includeDocs es translateSegment getCppSchemaTable
+  program <- buildProgramM labels templates includeDocs es translateSegment getCppSchemaTable
 
   -- create and return complete pool script
   return $ CP.printProgram serializationCode signatures program
@@ -581,6 +593,8 @@ cppLowerConfig =
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
          in [idoc|foreign_call#{tupled argList}|]
+    , lcCacheBody = cppCacheBody
+    , lcDebugWrap = cppDebugWrap
     , lcRemoteCall = \socketFile mid res args -> do
         let resMem = pretty $ fromMaybe (-1) (remoteResourcesMemory res)
             resTime = pretty $ maybe (-1) unTimeInSeconds (remoteResourcesTime res)
@@ -683,7 +697,49 @@ PROPAGATE_ERROR(errmsg)|]
                           ]
                      in block 4 "catch (const std::exception& e)" throwStatement
                   | otherwise = block 4 "catch (...)" "throw;"
-            return . Just . block 4 decl . vsep $ [tryBody <+> catchBody]
+                innerBlock = tryBody <+> catchBody
+            -- Wrap labeled manifolds with a chrono start/pass/fail shim,
+            -- using user-supplied templates (from YAML 'log-template').
+            -- Each event has its own pre-rendered template; a 'Nothing'
+            -- subfield elides that emission. Wrapping at the definition
+            -- site (rather than the dispatch table) is required because
+            -- inner manifolds are referenced by symbol (std::bind) and
+            -- can't be rebound after definition. The IIFE captures the
+            -- body's `return X;` so the wrap can log after the result is
+            -- computed. The foreign-callee side is skipped: the caller
+            -- pool already wraps the cross-pool call and includes the
+            -- socket round-trip.
+            let bodyDoc = case Map.lookup callIndex (translatorLogTemplates state) of
+                  Just tmpl | not (isForeignCalleeForm headForm) ->
+                    let groupLit = dquotes (pretty (escapeCxxStringLit (renderedGroup tmpl)))
+                        emit Nothing _ = mempty
+                        emit (Just t) runtimeExpr =
+                          let q = dquotes (pretty (escapeCxxStringLit t))
+                           in [idoc|morloc_log_emit(#{q}, #{groupLit}, #{runtimeExpr}, __mlc_id);|]
+                        startLine = emit (renderedStart tmpl) ("0.0" :: MDoc)
+                        passLine = emit (renderedPass tmpl) "__mlc_dt.count()"
+                        failLine = emit (renderedFail tmpl) "__mlc_dt.count()"
+                        dtDecl = "std::chrono::duration<double> __mlc_dt = std::chrono::steady_clock::now() - __mlc_t0;"
+                        innerLambda = "[&]()" <> line <> "{" <> nest 4 (line <> innerBlock) <> line <> "}()"
+                        outerTry = block 4 "try" $ vsep
+                          [ "auto __mlc_result =" <+> innerLambda <> ";"
+                          , dtDecl
+                          , passLine
+                          , "return __mlc_result;"
+                          ]
+                        outerCatch = block 4 "catch (...)" $ vsep
+                          [ dtDecl
+                          , failLine
+                          , "throw;"
+                          ]
+                     in vsep
+                          [ "auto __mlc_t0 = std::chrono::steady_clock::now();"
+                          , "auto __mlc_id = morloc_log_next_id();"
+                          , startLine
+                          , outerTry <+> outerCatch
+                          ]
+                  _ -> innerBlock
+            return . Just . block 4 decl $ bodyDoc
     , lcMakeLambda = \mname contextArgs boundArgs ->
         let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
          in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
@@ -698,6 +754,12 @@ PROPAGATE_ERROR(errmsg)|]
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
     rawTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
+
+    -- | Escape a log-template string for embedding in a C++ double-quoted
+    -- literal. Reuses the canonical 'Morloc.Data.Doc.escapeStringLit'
+    -- + 'escapeQuotes' (also used for Morloc Str literals elsewhere).
+    escapeCxxStringLit :: Text -> Text
+    escapeCxxStringLit = escapeQuotes "\"" "\\\"" . escapeStringLit
 
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr p1 p2 =
@@ -737,6 +799,214 @@ serialize v s = do
       , poolPriorExprs = []
       , poolReturnFlag = False
       }
+
+-- | C++ cache wrap. Mirrors the Python/R generic version but emits
+-- C++ syntax and routes through the runtime's C ABI directly (the
+-- pool already links libmorloc.so). Native args are serialized via
+-- '_put_value' to packets first; serial args pass through. Schema
+-- strings are inlined as C string literals since each lcCacheBody
+-- call happens once at codegen time -- no need to thread them
+-- through a global table.
+cppCacheBody ::
+  SerialAST ->
+  Text ->
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  CppTranslator PoolDocs
+cppCacheBody resSa lbl midx args bodyPool = do
+  wrapIdx <- getCounter
+  let suffix = pretty wrapIdx
+      hp = "__morloc_"
+      keyVar = hp <> "ck_" <> suffix
+      cachedVar = hp <> "cd_" <> suffix
+      resultVar = hp <> "cr_" <> suffix
+      errVar = hp <> "ce_" <> suffix
+      sizeVar = hp <> "cs_" <> suffix
+      storeSizeVar = hp <> "css_" <> suffix
+      storeOkVar = hp <> "cok_" <> suffix
+      packetsVar = hp <> "cpk_" <> suffix
+      schemasVar = hp <> "csc_" <> suffix
+      labelLit = dquotes (pretty lbl)
+      n = length args
+      resSchema = render (serialAstToMsgpackSchema resSa)
+  -- Per-arg setup: serialize native bindings to packets, route serial
+  -- bindings through by name; both feed the packets array.
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      argSchemas = [s | (_, s, _) <- preparedArgs]
+      argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
+      packetsDecl = "const uint8_t*" <+> packetsVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", " argRefs <> ";"
+      schemasDecl = "const char*" <+> schemasVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", "
+          [dquotes (pretty (cppEscapeString s)) | s <- argSchemas]
+        <> ";"
+      errDecl = "char*" <+> errVar <+> "= nullptr;"
+      keyStmt = vsep
+        [ "uint64_t" <+> keyVar <+> "= morloc_cache_key_compute("
+            <> pretty midx <> ", " <> packetsVar <> ", " <> schemasVar
+            <> ", " <> pretty n <> ", &" <> errVar <> ");"
+        , "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+        ]
+      sizeDecl = "size_t" <+> sizeVar <+> "= 0;"
+      lookupStmt = vsep
+        [ "uint8_t*" <+> cachedVar <+> "= morloc_cache_lookup("
+            <> keyVar <> ", " <> labelLit <> ", &" <> sizeVar
+            <> ", &" <> errVar <> ");"
+        , "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+        ]
+      resultDecl = "uint8_t*" <+> resultVar <> ";"
+      hitLines = vsep
+        [ "morloc_cache_record_hit();"
+        , resultVar <+> "=" <+> cachedVar <> ";"
+        ]
+      missBodyLines = poolPriorLines bodyPool
+        ++ [ resultVar <+> "=" <+> poolExpr bodyPool <> ";"
+           , "size_t" <+> storeSizeVar <+> "= morloc_packet_size("
+               <> resultVar <> ", &" <> errVar <> ");"
+           , "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+           , "bool" <+> storeOkVar <+> "= morloc_cache_store("
+               <> keyVar <> ", " <> labelLit <> ", " <> resultVar
+               <> ", " <> storeSizeVar <> ", "
+               <> dquotes (pretty (cppEscapeString resSchema))
+               <> ", &" <> errVar <> ");"
+           , "if (!" <> storeOkVar <> ") {"
+           , indent 4 $ vsep
+               [ "if (" <> errVar <> ") { PROPAGATE_ERROR(" <> errVar <> ") }"
+               , "throw std::runtime_error(\"cache_store failed\");"
+               ]
+           , "}"
+           , "morloc_cache_record_store();"
+           ]
+      missLines = vsep ("morloc_cache_record_miss();" : missBodyLines)
+      ifStmt = vsep
+        [ "if (" <> cachedVar <+> "!= nullptr) {"
+        , indent 4 hitLines
+        , "} else {"
+        , indent 4 missLines
+        , "}"
+        ]
+      prior = argSetupLines
+        ++ [ errDecl
+           , packetsDecl
+           , schemasDecl
+           , keyStmt
+           , sizeDecl
+           , lookupStmt
+           , resultDecl
+           , ifStmt
+           ]
+  return $ PoolDocs
+    { poolExpr = resultVar
+    , poolPriorLines = prior
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | C++ debug-trace wrap. Wraps the manifold body in @try {...}
+-- catch (...) { ... throw; }@. The catch block serializes each arg
+-- via the same @_put_value@ path the cache wrap uses, then calls
+-- @morloc_debug_record_frame@ with the (mid, schema, packet bytes)
+-- tuples before re-throwing. Zero cost on the happy path.
+--
+-- Schema strings are inlined as C string literals (one-shot at
+-- codegen, no need to pass through the schema table).
+cppDebugWrap ::
+  Int ->
+  [(Arg TypeM, SerialAST)] ->
+  PoolDocs ->
+  CppTranslator PoolDocs
+cppDebugWrap midx args bodyPool = do
+  wrapIdx <- getCounter
+  let suffix = pretty wrapIdx
+      hp = "__morloc_"
+      resultVar = hp <> "dr_" <> suffix
+      packetsVar = hp <> "dpk_" <> suffix
+      schemasVar = hp <> "dsc_" <> suffix
+      sizesVar = hp <> "dsz_" <> suffix
+      n = length args
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      argSchemas = [s | (_, s, _) <- preparedArgs]
+      argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
+      packetsDecl = "const uint8_t*" <+> packetsVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", " argRefs <> ";"
+      schemasDecl = "const char*" <+> schemasVar
+        <> brackets (pretty n) <+> "=" <+>
+        encloseSep "{ " " }" ", "
+          [dquotes (pretty (cppEscapeString s)) | s <- argSchemas]
+        <> ";"
+      sizesDecl = "size_t" <+> sizesVar <> brackets (pretty n) <+> "= { 0 };"
+      tryBody = poolPriorLines bodyPool
+        ++ [ resultVar <+> "=" <+> poolExpr bodyPool <> ";" ]
+      -- Inner try/catch in the catch block: a serialization failure
+      -- during the dump must NOT replace the original exception.
+      catchBody = vsep
+        [ "try {"
+        , indent 4 $ vsep
+            [ vsep argSetupLines
+            , packetsDecl
+            , schemasDecl
+            , sizesDecl
+            , "(void)" <> sizesVar <> ";"
+            , "morloc_debug_record_frame(" <> pretty midx
+                <> ", " <> packetsVar
+                <> ", " <> schemasVar
+                <> ", " <> pretty n <> ");"
+            ]
+        , "} catch (...) {}"
+        , "throw;"
+        ]
+      tryStmt = vsep
+        [ "uint8_t*" <+> resultVar <+> "= nullptr;"
+        , "try {"
+        , indent 4 (vsep tryBody)
+        , "} catch (...) {"
+        , indent 4 catchBody
+        , "}"
+        ]
+  return $ PoolDocs
+    { poolExpr = resultVar
+    , poolPriorLines = [tryStmt]
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | Serialize a single C++ cache arg. Native bindings are routed
+-- through '_put_value' into a temporary packet; serial bindings
+-- pass through by name. The returned schema text is the same schema
+-- that the surrounding wrap will register and inline.
+prepareCppCacheArg ::
+  Int ->
+  (Int, (Arg TypeM, SerialAST)) ->
+  CppTranslator (MDoc, Text, [MDoc])
+prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
+  let schemaStr = render (serialAstToMsgpackSchema sa)
+  case tm of
+    Native _ -> do
+      sid <- cppRegisterSchema schemaStr
+      let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
+          decl = "uint8_t*" <+> argVar <+> "= _put_value("
+            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]);"
+      return (argVar, schemaStr, [decl])
+    _ -> return (argNamer a, schemaStr, [])
+
+-- | Escape a string for a C++ string literal. Conservative: only
+-- handles characters the morloc msgpack-schema serializer emits
+-- (backslash, double-quote). Other ASCII passes through; non-ASCII
+-- is not produced by the schema serializer.
+cppEscapeString :: Text -> Text
+cppEscapeString = T.concatMap esc
+  where
+    esc '\\' = "\\\\"
+    esc '"' = "\\\""
+    esc c = T.singleton c
 
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])

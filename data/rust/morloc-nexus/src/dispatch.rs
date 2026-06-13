@@ -1,17 +1,18 @@
-//! Command dispatch: CLI argument parsing and routing to pools.
+//! Command dispatch: routing parsed CLI args to language pools.
 //!
-//! Replaces the dispatch_command, dispatch, run_command, and run_pure_command
-//! functions from nexus.c. Uses the C libmorloc for packet construction and
-//! serialization until Phase 2/3 replaces those.
+//! Argument parsing lives in [`crate::cli`] (top-level mode + always-
+//! on flags) and [`crate::phase2`] (manifest-driven per-program flags
+//! + capability gates). This module owns the execution backend: take
+//! a fully-parsed [`Vec<ArgValue>`], optionally spawn pool daemons,
+//! and either dispatch the call packet over a Unix socket (remote
+//! command) or evaluate the embedded NexusExpr tree in-process (pure
+//! command).
 //!
-//! For Phase 1, the nexus links against the C libmorloc.so for:
-//! - make_call_packet_from_cli, parse_cli_data_argument
-//! - send_and_receive_over_socket
-//! - pack_with_schema, print_voidstar, etc.
-//! - morloc_eval for pure commands
+//! Links against `libmorloc.so` for packet construction (call-packet
+//! builder, schema parser, pool send/receive) and for evaluating
+//! pure commands via `morloc_eval`.
 
-use crate::help;
-use crate::manifest::{Arg, Command, Manifest};
+use crate::manifest::{Command, Manifest};
 use crate::process::{self, PoolSocket};
 
 /// Output format enum.
@@ -35,7 +36,6 @@ pub enum OutputFormat {
 /// Nexus configuration parsed from CLI options.
 #[derive(Debug, Clone)]
 pub struct NexusConfig {
-    pub help_flag: bool,
     pub print_flag: bool,
     pub keep_null: bool,
     pub packet_path: Option<String>,
@@ -50,12 +50,33 @@ pub struct NexusConfig {
     pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
+    /// Base directory under which a per-run subdir (named by run_id)
+    /// is materialized. Activates rundir creation, log tee, and
+    /// `summary.json`. Falls back to the `MORLOC_LOG_DIR` env var.
+    /// `None` => no rundir, no tee, no default summary.
+    pub log_dir: Option<String>,
+    /// Explicit `summary.json` output path. When set the summary file
+    /// goes here regardless of whether `log_dir` is set. Falls back
+    /// to the `MORLOC_SUMMARY` env var.
+    pub summary_path: Option<String>,
+    /// When true, suppress every nexus-and-pool-emitted log line
+    /// (prologue, epilogue, per-label start/done). Drives the
+    /// `MORLOC_QUIET` env var that the runtime's log emitter checks.
+    pub quiet: bool,
+    /// Cap on disk writes per dispatch when `--debug` is compiled in.
+    /// `None` = use the runtime default (1). 0 = no cap.
+    pub debug_cache_depth: Option<u64>,
+    /// Per-arg msgpack-byte cap. Args exceeding the cap record their
+    /// hash but skip the disk write. `None` = unlimited.
+    pub debug_cache_max: Option<u64>,
+    /// Per-midx cap on catch fires before further entries are dropped
+    /// for that midx. `None` = use the runtime default (3). 0 = no cap.
+    pub debug_recursion_cap: Option<u32>,
 }
 
 impl Default for NexusConfig {
     fn default() -> Self {
         NexusConfig {
-            help_flag: false,
             print_flag: false,
             keep_null: false,
             packet_path: None,
@@ -70,54 +91,12 @@ impl Default for NexusConfig {
             port_file_path: None,
             fdb_path: None,
             eval_timeout: 30,
-        }
-    }
-}
-
-/// Parse a CLI port argument. Accepts 0..=65535 (0 = bind-ephemeral; the
-/// OS picks an unused port and the daemon reports it back via the stderr
-/// ready line and the optional --port-file). Anything else (negative,
-/// >65535, non-numeric) exits the process with a clear error message.
-fn parse_port_arg(flag: &str, raw: &str) -> i32 {
-    match raw.parse::<i64>() {
-        Ok(n) if (0..=65535).contains(&n) => n as i32,
-        _ => {
-            eprintln!(
-                "error: {} expects an integer in 0..=65535 (0 = ephemeral), got '{}'",
-                flag, raw
-            );
-            std::process::exit(2);
-        }
-    }
-}
-
-/// Reject a duplicate port assignment. A daemon has at most one HTTP /
-/// one TCP listener; specifying the same flag twice is almost always a
-/// script bug (e.g., a wrapper appending an extra --http-port from a
-/// stale env var). Fail loudly rather than silently picking one.
-fn reject_duplicate_port(flag: &str, existing: &Option<i32>) {
-    if existing.is_some() {
-        eprintln!(
-            "error: {} given more than once; specify it only once",
-            flag
-        );
-        std::process::exit(2);
-    }
-}
-
-/// Parse a CLI eval-timeout argument. Accepts a positive integer
-/// (seconds of CPU budget for the /eval and /typecheck child process).
-/// Anything else exits the process with a clear error message; the
-/// previous .parse().unwrap_or(30) silently substituted the default.
-fn parse_timeout_arg(flag: &str, raw: &str) -> i32 {
-    match raw.parse::<i32>() {
-        Ok(n) if n > 0 => n,
-        _ => {
-            eprintln!(
-                "error: {} expects a positive integer (seconds), got '{}'",
-                flag, raw
-            );
-            std::process::exit(2);
+            log_dir: None,
+            summary_path: None,
+            quiet: false,
+            debug_cache_depth: None,
+            debug_cache_max: None,
+            debug_recursion_cap: None,
         }
     }
 }
@@ -184,277 +163,13 @@ fn die_with_pool_error(
         _ => format!("{}", comm_err),
     };
 
-    eprintln!("Error: {}: {}", context, comm_msg);
+    let mut full = format!("{}: {}", context, comm_msg);
     if let Some(info) = process::pool_death_info(pool_index) {
-        eprintln!("Pool '{}' {}", socket.lang, info);
+        full.push_str(&format!("\nPool '{}' {}", socket.lang, info));
     }
-    process::clean_exit(1);
+    crate::runlog::die_with_error(&full);
 }
 
-/// Parse nexus-level options from argv. Returns the index of the first
-/// non-option argument (the manifest path or subcommand).
-pub fn parse_nexus_options(args: &[String], config: &mut NexusConfig) -> usize {
-    let mut i = 1; // skip argv[0]
-    while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "-h" | "--help" => {
-                config.help_flag = true;
-                i += 1;
-            }
-            "-p" | "--print" => {
-                config.print_flag = true;
-                i += 1;
-            }
-            "--keep-null" => {
-                config.keep_null = true;
-                i += 1;
-            }
-            "-c" | "--call-packet" => {
-                i += 1;
-                if i < args.len() {
-                    config.packet_path = Some(args[i].clone());
-                    i += 1;
-                }
-            }
-            "-s" | "--socket-base" => {
-                i += 1;
-                if i < args.len() {
-                    config.socket_base = Some(args[i].clone());
-                    i += 1;
-                }
-            }
-            "-o" | "--output-file" => {
-                i += 1;
-                if i < args.len() {
-                    config.output_path = Some(args[i].clone());
-                    i += 1;
-                }
-            }
-            "-f" | "--output-form" => {
-                i += 1;
-                if i < args.len() {
-                    config.output_format = parse_output_format(&args[i]);
-                    i += 1;
-                }
-            }
-            "--daemon" => {
-                config.daemon_flag = true;
-                i += 1;
-            }
-            "--router" => {
-                config.router_flag = true;
-                i += 1;
-            }
-            "--socket" => {
-                i += 1;
-                if i < args.len() {
-                    config.unix_socket_path = Some(args[i].clone());
-                    i += 1;
-                }
-            }
-            "--port" => {
-                i += 1;
-                if i < args.len() {
-                    reject_duplicate_port("--port", &config.tcp_port);
-                    config.tcp_port = Some(parse_port_arg("--port", &args[i]));
-                    i += 1;
-                }
-            }
-            "--http-port" => {
-                i += 1;
-                if i < args.len() {
-                    reject_duplicate_port("--http-port", &config.http_port);
-                    config.http_port = Some(parse_port_arg("--http-port", &args[i]));
-                    i += 1;
-                }
-            }
-            "--port-file" => {
-                i += 1;
-                if i < args.len() {
-                    config.port_file_path = Some(args[i].clone());
-                    i += 1;
-                }
-            }
-            "--fdb" => {
-                i += 1;
-                if i < args.len() {
-                    config.fdb_path = Some(args[i].clone());
-                    i += 1;
-                }
-            }
-            "--eval-timeout" => {
-                i += 1;
-                if i < args.len() {
-                    config.eval_timeout = parse_timeout_arg("--eval-timeout", &args[i]);
-                    i += 1;
-                }
-            }
-            _ => {
-                // Handle --key=value forms
-                if let Some(val) = arg.strip_prefix("--socket=") {
-                    config.unix_socket_path = Some(val.to_string());
-                    i += 1;
-                } else if let Some(val) = arg.strip_prefix("--port=") {
-                    reject_duplicate_port("--port", &config.tcp_port);
-                    config.tcp_port = Some(parse_port_arg("--port", val));
-                    i += 1;
-                } else if let Some(val) = arg.strip_prefix("--http-port=") {
-                    reject_duplicate_port("--http-port", &config.http_port);
-                    config.http_port = Some(parse_port_arg("--http-port", val));
-                    i += 1;
-                } else if let Some(val) = arg.strip_prefix("--port-file=") {
-                    config.port_file_path = Some(val.to_string());
-                    i += 1;
-                } else if let Some(val) = arg.strip_prefix("--fdb=") {
-                    config.fdb_path = Some(val.to_string());
-                    i += 1;
-                } else if let Some(val) = arg.strip_prefix("--eval-timeout=") {
-                    config.eval_timeout = parse_timeout_arg("--eval-timeout", val);
-                    i += 1;
-                } else {
-                    // Not a nexus option - stop parsing
-                    break;
-                }
-            }
-        }
-    }
-    i
-}
-
-/// Extract nexus-level long options from argv in single-command mode.
-/// Removes matched options from the args vector. In single-command mode
-/// the subcommand is optional, so nexus options and program arguments
-/// share an argv. To avoid stealing common short flags from the program
-/// (e.g. -o, -p, -f), only long forms (--print, --output-file, etc.)
-/// are recognized as nexus options here. Short flags pass through to
-/// the pool's argument parser.
-pub fn extract_global_options(args: &mut Vec<String>, config: &mut NexusConfig) {
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--" {
-            break;
-        }
-
-        let mut matched = false;
-        let mut consumed = 1;
-
-        match args[i].as_str() {
-            "--help" => {
-                config.help_flag = true;
-                matched = true;
-            }
-            "--daemon" => {
-                config.daemon_flag = true;
-                matched = true;
-            }
-            "--print" => {
-                config.print_flag = true;
-                matched = true;
-            }
-            "--keep-null" => {
-                config.keep_null = true;
-                matched = true;
-            }
-            "--output-form" if i + 1 < args.len() => {
-                config.output_format = parse_output_format(&args[i + 1]);
-                consumed = 2;
-                matched = true;
-            }
-            "--output-file" if i + 1 < args.len() => {
-                config.output_path = Some(args[i + 1].clone());
-                consumed = 2;
-                matched = true;
-            }
-            "--socket" if i + 1 < args.len() => {
-                config.unix_socket_path = Some(args[i + 1].clone());
-                consumed = 2;
-                matched = true;
-            }
-            "--port" if i + 1 < args.len() => {
-                reject_duplicate_port("--port", &config.tcp_port);
-                config.tcp_port = Some(parse_port_arg("--port", &args[i + 1]));
-                consumed = 2;
-                matched = true;
-            }
-            "--http-port" if i + 1 < args.len() => {
-                reject_duplicate_port("--http-port", &config.http_port);
-                config.http_port = Some(parse_port_arg("--http-port", &args[i + 1]));
-                consumed = 2;
-                matched = true;
-            }
-            "--port-file" if i + 1 < args.len() => {
-                config.port_file_path = Some(args[i + 1].clone());
-                consumed = 2;
-                matched = true;
-            }
-            "--fdb" if i + 1 < args.len() => {
-                config.fdb_path = Some(args[i + 1].clone());
-                consumed = 2;
-                matched = true;
-            }
-            "--eval-timeout" if i + 1 < args.len() => {
-                config.eval_timeout = parse_timeout_arg("--eval-timeout", &args[i + 1]);
-                consumed = 2;
-                matched = true;
-            }
-            _ => {
-                // Check --key=value forms
-                if let Some(val) = args[i].strip_prefix("--output-form=") {
-                    config.output_format = parse_output_format(val);
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--output-file=") {
-                    config.output_path = Some(val.to_string());
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--socket=") {
-                    config.unix_socket_path = Some(val.to_string());
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--port=") {
-                    reject_duplicate_port("--port", &config.tcp_port);
-                    config.tcp_port = Some(parse_port_arg("--port", val));
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--http-port=") {
-                    reject_duplicate_port("--http-port", &config.http_port);
-                    config.http_port = Some(parse_port_arg("--http-port", val));
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--port-file=") {
-                    config.port_file_path = Some(val.to_string());
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--fdb=") {
-                    config.fdb_path = Some(val.to_string());
-                    matched = true;
-                } else if let Some(val) = args[i].strip_prefix("--eval-timeout=") {
-                    config.eval_timeout = parse_timeout_arg("--eval-timeout", val);
-                    matched = true;
-                }
-            }
-        }
-
-        if matched {
-            for _ in 0..consumed {
-                args.remove(i);
-            }
-        } else {
-            i += 1;
-        }
-    }
-}
-
-fn parse_output_format(s: &str) -> OutputFormat {
-    match s {
-        "json" => OutputFormat::Json,
-        "mpk" => OutputFormat::MessagePack,
-        "voidstar" => OutputFormat::VoidStar,
-        "packet" => OutputFormat::Packet,
-        "arrow" | "ipc" => OutputFormat::Arrow,
-        "parquet" => OutputFormat::Parquet,
-        "csv" => OutputFormat::Csv,
-        _ => {
-            eprintln!("Invalid output format: {}", s);
-            std::process::exit(1);
-        }
-    }
-}
 
 /// Wrap a string in JSON quotes (for literal string arguments).
 pub fn quoted(s: &str) -> String {
@@ -463,72 +178,21 @@ pub fn quoted(s: &str) -> String {
     escaped
 }
 
-/// Main dispatch entry point. Routes to the correct command based on argv.
-pub fn dispatch(
-    args: &[String],
-    arg_start: usize,
-    _shm_basename: &str,
-    config: &NexusConfig,
-    manifest: &Manifest,
-    sockets: &mut [PoolSocket],
-    prog_name: &str,
-) {
-    if arg_start >= args.len() {
-        help::print_usage(prog_name, manifest);
-    }
-
-    let cmd_name = &args[arg_start];
-    let next = arg_start + 1;
-
-    // Check if it matches a group name
-    for grp in &manifest.groups {
-        if grp.name == *cmd_name {
-            if next >= args.len() {
-                help::print_group_usage(prog_name, manifest, cmd_name);
-            }
-            let subcmd = &args[next];
-            if subcmd == "-h" || subcmd == "--help" {
-                help::print_group_usage(prog_name, manifest, cmd_name);
-            }
-            // Find command within this group
-            for cmd in &manifest.commands {
-                if cmd.group.as_deref() == Some(cmd_name.as_str()) && cmd.name == *subcmd {
-                    dispatch_command(args, next + 1, config, manifest, cmd, sockets, prog_name);
-                    return;
-                }
-            }
-            eprintln!("Unrecognized command '{}' in group '{}'", subcmd, cmd_name);
-            process::clean_exit(1);
-        }
-    }
-
-    // Try ungrouped commands
-    for cmd in &manifest.commands {
-        if cmd.name == *cmd_name && cmd.group.is_none() {
-            dispatch_command(args, next, config, manifest, cmd, sockets, prog_name);
-            return;
-        }
-    }
-
-    eprintln!("Unrecognized command '{}'", cmd_name);
-    process::clean_exit(1);
-}
-
-/// Dispatch a single command: parse its args, start needed daemons, execute.
-pub fn dispatch_command(
-    args: &[String],
-    arg_start: usize,
+/// Run pre-parsed args through dispatch. Separated from any
+/// particular parser frontend so the daemon-spawn + NUL-check +
+/// run_remote/run_pure backend stays parser-agnostic.
+pub fn dispatch_command_parsed(
+    parsed_args: Vec<ArgValue>,
     config: &NexusConfig,
     manifest: &Manifest,
     cmd: &Command,
     sockets: &mut [PoolSocket],
-    prog_name: &str,
 ) {
-    let single_cmd = manifest.commands.len() == 1 && manifest.groups.is_empty();
-
-    // Parse command-specific arguments
-    let (parsed_args, _remaining_start) =
-        parse_command_args(args, arg_start, cmd, config, single_cmd, prog_name);
+    // Run-scope log entry point. `{name}` is now bound; subsequent
+    // emit_prologue / emit_epilogue calls see it. clean_exit fires the
+    // matching epilogue at process exit.
+    crate::runlog::record_command(&cmd.name);
+    crate::runlog::emit_prologue();
 
     // Start daemons for remote commands
     if !cmd.is_pure() {
@@ -596,204 +260,6 @@ pub enum ArgValue {
     },
 }
 
-/// Parse command-specific arguments from argv.
-fn parse_command_args(
-    args: &[String],
-    pos: usize,
-    cmd: &Command,
-    _config: &NexusConfig,
-    single_cmd: bool,
-    prog_name: &str,
-) -> (Vec<ArgValue>, usize) {
-    let mut parsed = Vec::with_capacity(cmd.args.len());
-    // Simple option tracking: collect all --opt=val and -o val
-    let mut opt_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut flag_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut positional_idx = 0;
-    let mut positionals: Vec<String> = Vec::new();
-
-    // First pass: separate options from positionals
-    let mut i = pos;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--" {
-            i += 1;
-            // Everything after -- is positional
-            while i < args.len() {
-                positionals.push(args[i].clone());
-                i += 1;
-            }
-            break;
-        }
-        if arg == "-h" || arg == "--help" {
-            if single_cmd {
-                help::print_command_help_single(prog_name, cmd);
-            } else {
-                help::print_command_help(prog_name, cmd);
-            }
-        }
-        if arg.starts_with("--") && arg.len() > 2 {
-            // Long option
-            if let Some(eq_pos) = arg.find('=') {
-                let key = &arg[2..eq_pos];
-                let val = &arg[eq_pos + 1..];
-                if !is_known_long_opt(cmd, key) {
-                    eprintln!("Error: unknown option --{}", key);
-                    process::clean_exit(1);
-                }
-                opt_values.insert(key.to_string(), val.to_string());
-                i += 1;
-            } else {
-                let key = &arg[2..];
-                // Check if it's a flag
-                if is_flag_opt(cmd, key) {
-                    flag_values.insert(key.to_string(), flag_forward_value(cmd, key));
-                    i += 1;
-                } else if is_rev_flag(cmd, key) {
-                    if let Some(orig) = find_flag_by_rev(cmd, key) {
-                        flag_values.insert(orig, flag_reverse_value_by_rev(cmd, key));
-                    }
-                    i += 1;
-                } else if !is_known_long_opt(cmd, key) {
-                    eprintln!("Error: unknown option --{}", key);
-                    process::clean_exit(1);
-                } else if i + 1 < args.len() {
-                    opt_values.insert(key.to_string(), args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: option --{} requires a value", key);
-                    process::clean_exit(1);
-                }
-            }
-        } else if arg.starts_with('-') && arg.len() == 2 && arg.as_bytes()[1].is_ascii_alphabetic() {
-            let ch = arg.chars().nth(1).unwrap();
-            if is_short_flag(cmd, ch) {
-                flag_values.insert(
-                    short_to_long(cmd, ch).unwrap_or_else(|| ch.to_string()),
-                    flag_forward_value_by_short(cmd, ch),
-                );
-                i += 1;
-            } else if !is_known_short_opt(cmd, ch) {
-                eprintln!("Error: unknown option -{}", ch);
-                process::clean_exit(1);
-            } else if i + 1 < args.len() {
-                opt_values.insert(
-                    short_to_long(cmd, ch).unwrap_or_else(|| ch.to_string()),
-                    args[i + 1].clone(),
-                );
-                i += 2;
-            } else {
-                eprintln!("Error: option -{} requires a value", ch);
-                process::clean_exit(1);
-            }
-        } else {
-            positionals.push(arg.clone());
-            i += 1;
-        }
-    }
-
-    // Second pass: build ArgValue for each manifest arg
-    for arg_def in &cmd.args {
-        match arg_def {
-            Arg::Positional { quoted, .. } => {
-                if positional_idx < positionals.len() {
-                    let val = if *quoted {
-                        self::quoted(&positionals[positional_idx])
-                    } else {
-                        positionals[positional_idx].clone()
-                    };
-                    parsed.push(ArgValue::Value(val));
-                    positional_idx += 1;
-                } else {
-                    eprintln!("Error: too few positional arguments");
-                    process::clean_exit(1);
-                }
-            }
-            Arg::Optional {
-                long_opt,
-                short_opt,
-                default_val,
-                quoted,
-                ..
-            } => {
-                let key = long_opt
-                    .as_deref()
-                    .or_else(|| short_opt.as_deref())
-                    .unwrap_or("");
-                let user_val = opt_values.get(key);
-                if let Some(val) = user_val {
-                    let v = if *quoted { self::quoted(val) } else { val.clone() };
-                    parsed.push(ArgValue::Value(v));
-                } else if let Some(def) = default_val {
-                    parsed.push(ArgValue::Value(def.clone()));
-                } else {
-                    parsed.push(ArgValue::Null);
-                }
-            }
-            Arg::Flag {
-                long_opt,
-                default_val,
-                ..
-            } => {
-                let key = long_opt.as_deref().unwrap_or("");
-                if let Some(val) = flag_values.get(key) {
-                    parsed.push(ArgValue::Value(val.clone()));
-                } else {
-                    parsed.push(ArgValue::Value(
-                        default_val.as_deref().unwrap_or("false").to_string(),
-                    ));
-                }
-            }
-            Arg::Group {
-                entries,
-                group_opt,
-                ..
-            } => {
-                let grp_val = group_opt.as_ref().and_then(|go| {
-                    go.long_opt
-                        .as_deref()
-                        .and_then(|k| opt_values.get(k))
-                        .cloned()
-                });
-                let mut fields = Vec::new();
-                let mut defaults = Vec::new();
-                for entry in entries {
-                    // Look up by long option name or short option character
-                    let long_key = entry.arg.long_opt_str().unwrap_or("");
-                    let short_key = entry.arg.short_opt_char()
-                        .map(|c| c.to_string())
-                        .unwrap_or_default();
-                    let user = opt_values
-                        .get(long_key)
-                        .or_else(|| opt_values.get(&short_key))
-                        .or_else(|| flag_values.get(long_key))
-                        .or_else(|| flag_values.get(&short_key))
-                        .map(|v| {
-                            if entry.arg.is_quoted() {
-                                self::quoted(v)
-                            } else {
-                                v.clone()
-                            }
-                        });
-                    fields.push(user);
-                    defaults.push(entry.arg.default_val().map(|s| s.to_string()));
-                }
-                parsed.push(ArgValue::Group {
-                    grp_val,
-                    fields,
-                    defaults,
-                });
-            }
-        }
-    }
-
-    if positional_idx < positionals.len() {
-        eprintln!("Error: too many positional arguments given");
-        process::clean_exit(1);
-    }
-
-    (parsed, i)
-}
 
 // -- Command execution ------------------------------------------------------
 
@@ -915,8 +381,7 @@ fn run_remote_command(
             } else {
                 "unknown error".into()
             };
-            eprintln!("Error: failed to parse argument #{}: {}", i, msg);
-            process::clean_exit(1);
+            crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
         // Get packet size and copy to Vec
@@ -1010,7 +475,12 @@ fn run_remote_command(
     // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
-            eprintln!("Error: run failed\n{}", collapse_duplicate_lines(&err_msg));
+            // The "run failed\n" prefix is stripped from the recorded
+            // form -- consumers want the foreign traceback in summary
+            // .json's `error` field, not the morloc-level wrapper.
+            let collapsed = collapse_duplicate_lines(&err_msg);
+            crate::runlog::record_error(&collapsed);
+            eprintln!("Error: run failed\n{}", collapsed);
             process::clean_exit(1);
         }
         Ok(None) => {}
@@ -1397,8 +867,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
         if c_pkt.is_null() {
             let msg = unsafe_errmsg_to_string(errmsg);
-            eprintln!("Error: failed to parse argument #{}: {}", i, msg);
-            process::clean_exit(1);
+            crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
         let voidstar = unsafe { get_morloc_data_packet_value(c_pkt, c_schema, &mut errmsg) };
@@ -1427,8 +896,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
     if result.is_null() {
         let msg = unsafe_errmsg_to_string(errmsg);
-        eprintln!("Error: evaluation failed: {}", msg);
-        process::clean_exit(1);
+        crate::runlog::die_with_error(&format!("evaluation failed: {}", msg));
     }
 
     // Convert result to relptr and make a data packet for printing
@@ -1472,201 +940,6 @@ fn unsafe_errmsg_to_string(errmsg: *mut std::ffi::c_char) -> String {
     }
 }
 
-// -- Helpers for command argument parsing ------------------------------------
-
-fn is_flag_opt(cmd: &Command, long_name: &str) -> bool {
-    cmd.args.iter().any(|a| match a {
-        Arg::Flag { long_opt, .. } => long_opt.as_deref() == Some(long_name),
-        Arg::Group { entries, .. } => entries.iter().any(|e| match &e.arg {
-            Arg::Flag { long_opt, .. } => long_opt.as_deref() == Some(long_name),
-            _ => false,
-        }),
-        _ => false,
-    })
-}
-
-fn is_rev_flag(cmd: &Command, name: &str) -> bool {
-    cmd.args.iter().any(|a| match a {
-        Arg::Flag { long_rev, .. } => long_rev.as_deref() == Some(name),
-        Arg::Group { entries, .. } => entries.iter().any(|e| match &e.arg {
-            Arg::Flag { long_rev, .. } => long_rev.as_deref() == Some(name),
-            _ => false,
-        }),
-        _ => false,
-    })
-}
-
-fn find_flag_by_rev(cmd: &Command, rev_name: &str) -> Option<String> {
-    for a in &cmd.args {
-        match a {
-            Arg::Flag { long_opt, long_rev, .. } => {
-                if long_rev.as_deref() == Some(rev_name) {
-                    return long_opt.clone();
-                }
-            }
-            Arg::Group { entries, .. } => {
-                for e in entries {
-                    if let Arg::Flag { long_opt, long_rev, .. } = &e.arg {
-                        if long_rev.as_deref() == Some(rev_name) {
-                            return long_opt.clone();
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn flag_forward_value(cmd: &Command, long_name: &str) -> String {
-    for a in &cmd.args {
-        if let Arg::Flag {
-            long_opt,
-            default_val,
-            ..
-        } = a
-        {
-            if long_opt.as_deref() == Some(long_name) {
-                let def = default_val.as_deref().unwrap_or("false");
-                return if def == "true" {
-                    "false".into()
-                } else {
-                    "true".into()
-                };
-            }
-        }
-    }
-    "true".into()
-}
-
-fn flag_forward_value_by_short(cmd: &Command, ch: char) -> String {
-    for a in &cmd.args {
-        if let Arg::Flag {
-            short_opt,
-            default_val,
-            ..
-        } = a
-        {
-            if short_opt.as_deref().and_then(|s| s.chars().next()) == Some(ch) {
-                let def = default_val.as_deref().unwrap_or("false");
-                return if def == "true" {
-                    "false".into()
-                } else {
-                    "true".into()
-                };
-            }
-        }
-    }
-    "true".into()
-}
-
-fn flag_reverse_value_by_rev(cmd: &Command, rev_name: &str) -> String {
-    // Search top-level and group entries
-    let check = |long_rev: &Option<String>, default_val: &Option<String>| -> Option<String> {
-        if long_rev.as_deref() == Some(rev_name) {
-            let def = default_val.as_deref().unwrap_or("false");
-            Some(if def == "true" { "true".into() } else { "false".into() })
-        } else {
-            None
-        }
-    };
-    for a in &cmd.args {
-        match a {
-            Arg::Flag { long_rev, default_val, .. } => {
-                if let Some(v) = check(long_rev, default_val) { return v; }
-            }
-            Arg::Group { entries, .. } => {
-                for e in entries {
-                    if let Arg::Flag { long_rev, default_val, .. } = &e.arg {
-                        if let Some(v) = check(long_rev, default_val) { return v; }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    "false".into()
-}
-
-fn is_short_flag(cmd: &Command, ch: char) -> bool {
-    cmd.args.iter().any(|a| match a {
-        Arg::Flag { short_opt, .. } => {
-            short_opt.as_deref().and_then(|s| s.chars().next()) == Some(ch)
-        }
-        _ => false,
-    })
-}
-
-/// True when `name` is a long option declared by the command (as an
-/// `Optional`, `Flag` long_opt, `Flag` long_rev, or a `Group`'s
-/// group_opt). Used to reject unknown `--foo` rather than silently
-/// absorbing them as opt-with-value.
-fn is_known_long_opt(cmd: &Command, name: &str) -> bool {
-    let matches_arg = |arg: &Arg| -> bool {
-        match arg {
-            Arg::Optional { long_opt, .. } => long_opt.as_deref() == Some(name),
-            Arg::Flag { long_opt, long_rev, .. } => {
-                long_opt.as_deref() == Some(name) || long_rev.as_deref() == Some(name)
-            }
-            _ => false,
-        }
-    };
-    cmd.args.iter().any(|a| match a {
-        Arg::Group { entries, group_opt, .. } => {
-            let go_match = group_opt
-                .as_ref()
-                .and_then(|g| g.long_opt.as_deref())
-                == Some(name);
-            go_match || entries.iter().any(|e| matches_arg(&e.arg))
-        }
-        _ => matches_arg(a),
-    })
-}
-
-/// True when `ch` is a short option declared by the command. Short
-/// flags and short Optionals share this lookup; the body reuses
-/// `short_to_long` which already walks Group entries and both Arg
-/// variants that carry a short_opt.
-fn is_known_short_opt(cmd: &Command, ch: char) -> bool {
-    short_to_long(cmd, ch).is_some()
-}
-
-fn short_to_long(cmd: &Command, ch: char) -> Option<String> {
-    for a in &cmd.args {
-        let (s, l) = match a {
-            Arg::Optional {
-                short_opt,
-                long_opt,
-                ..
-            } => (short_opt.as_deref(), long_opt.clone()),
-            Arg::Flag {
-                short_opt,
-                long_opt,
-                ..
-            } => (short_opt.as_deref(), long_opt.clone()),
-            Arg::Group { entries, .. } => {
-                // Search inside group entries
-                for entry in entries {
-                    let (es, el) = match &entry.arg {
-                        Arg::Optional { short_opt, long_opt, .. } => (short_opt.as_deref(), long_opt.clone()),
-                        Arg::Flag { short_opt, long_opt, .. } => (short_opt.as_deref(), long_opt.clone()),
-                        _ => (None, None),
-                    };
-                    if es.and_then(|s| s.chars().next()) == Some(ch) {
-                        return el.or_else(|| Some(ch.to_string()));
-                    }
-                }
-                (None, None)
-            }
-            _ => (None, None),
-        };
-        if s.and_then(|s| s.chars().next()) == Some(ch) {
-            return l;
-        }
-    }
-    None
-}
 
 #[cfg(test)]
 mod tests {

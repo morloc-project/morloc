@@ -94,6 +94,46 @@ pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> 
     xs.ends_with(ss.as_ref())
 }
 
+/// Rust-friendly entry point shared by every in-crate caller.
+/// Writes to `.<basename>.tmp.<pid>.<seq>` first, fsyncs, renames,
+/// then fsyncs the parent dir. The tmp basename's PID + monotonic
+/// counter avoids collisions between concurrent writers to the same
+/// directory.
+pub fn write_atomic_path(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let basename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("out"));
+    let tmp_path = dir.join(format!(
+        ".{}.tmp.{}.{}",
+        basename,
+        std::process::id(),
+        seq
+    ));
+
+    let result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        if !bytes.is_empty() {
+            f.write_all(bytes)?;
+        }
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_path, path)?;
+        if let Ok(dir_f) = std::fs::File::open(dir) {
+            let _ = dir_f.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn write_atomic(
     filename: *const c_char,
@@ -108,37 +148,14 @@ pub unsafe extern "C" fn write_atomic(
     }
     let path_str = CStr::from_ptr(filename).to_string_lossy();
     let path = std::path::Path::new(path_str.as_ref());
-
-    // Get parent directory
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-
-    // Create temp file in same directory
-    let tmp_path = dir.join(format!("morloc-tmp_{}", std::process::id()));
-
-    let result = (|| -> Result<(), std::io::Error> {
-        // Write to temp file
-        let mut f = std::fs::File::create(&tmp_path)?;
-        if size > 0 {
-            let bytes = std::slice::from_raw_parts(data, size);
-            f.write_all(bytes)?;
-        }
-        f.sync_all()?;
-        drop(f);
-
-        // Atomic rename
-        std::fs::rename(&tmp_path, path)?;
-
-        // Sync parent directory
-        if let Ok(dir_f) = std::fs::File::open(dir) {
-            let _ = dir_f.sync_all();
-        }
-        Ok(())
-    })();
-
-    match result {
-        Ok(_) => 0,
+    let bytes: &[u8] = if size == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data, size)
+    };
+    match write_atomic_path(path, bytes) {
+        Ok(()) => 0,
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
             set_errmsg(errmsg, &MorlocError::Io(e));
             -1
         }

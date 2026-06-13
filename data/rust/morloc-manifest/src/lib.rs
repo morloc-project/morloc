@@ -121,11 +121,36 @@ pub struct Manifest {
     /// produced them ends.
     #[serde(default)]
     pub tmpdir: Option<String>,
+    /// Run-scope log templates rendered at compile time (the
+    /// `{module}` / `{version}` / `{morloc_version}` / color-code
+    /// placeholders are already substituted). Runtime placeholders
+    /// (`{name}`, `{run_id}`, `{started_at}`, `{finished_at}`,
+    /// `{runtime}`, `{pid}`, `{hostname}`, `{exit_code}`, `{error}`)
+    /// are filled by the nexus when emitting the line. `None` when
+    /// the program YAML declared no run-scope templates.
+    #[serde(default)]
+    pub run_log: Option<RunLog>,
+    /// Optional codegen features the underlying binary supports. The
+    /// nexus's per-mode clap builder reveals option groups keyed off
+    /// these strings: `"log"` is always present and unlocks the
+    /// `--log-dir` / `--summary` / `--quiet` group; `"debug_trace"`
+    /// unlocks the `--debug-cache-depth` / `--debug-cache-max` /
+    /// `--debug-recursion-cap` group; future capabilities (`"slurm"`,
+    /// `"sanitizer"`, `"profile"`) each get their own string. A
+    /// binary without a capability literally cannot accept (or
+    /// display) the corresponding flags -- clap rejects them as
+    /// unknown.
+    #[serde(default = "default_capabilities")]
+    pub capabilities: Vec<String>,
     /// **Reserved.** User-sourced free-form annotations on the module.
     /// Always emitted as `{}` today. Distinct from `build` (which is
     /// compiler-sourced).
     #[serde(default)]
     pub metadata: Metadata,
+}
+
+fn default_capabilities() -> Vec<String> {
+    vec!["log".to_string()]
 }
 
 /// Compiler-sourced metadata about how this manifest was produced.
@@ -152,6 +177,26 @@ pub struct Build {
     pub morloc_version: String,
 }
 
+/// Run-scope log templates resolved at compile time. Each subfield is
+/// the user's template with compile-time placeholders already
+/// substituted (`{module}`, `{version}`, `{morloc_version}`, color
+/// codes). The nexus does the final pass to substitute runtime
+/// placeholders before emission.
+///
+/// `prologue` fires at the nexus entrypoint immediately after argument
+/// parsing; the appropriate `epilogue_ok` / `epilogue_fail` subfield
+/// fires at end-of-run. `None` means "emit nothing for this event".
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct RunLog {
+    #[serde(default)]
+    pub prologue: Option<String>,
+    #[serde(default)]
+    pub epilogue_ok: Option<String>,
+    #[serde(default)]
+    pub epilogue_fail: Option<String>,
+}
+
 /// A single language pool daemon. Each pool is one OS process that
 /// hosts the language-specific implementations of source functions.
 #[derive(Debug, Clone, Deserialize)]
@@ -171,6 +216,14 @@ pub struct Pool {
     /// without the field stay permissive.
     #[serde(default = "default_allow_string_null")]
     pub allow_string_null: bool,
+    /// XXH64 fingerprint of the pool's emitted source plus any files
+    /// listed under the program YAML's `hash-include`. Stored as a
+    /// 16-character lowercase hex string. The nexus exports this to
+    /// the pool process via `MORLOC_POOL_HASH` so the runtime cache
+    /// key changes whenever the source (or a declared external
+    /// dependency) changes. Empty string when absent (older manifests).
+    #[serde(default)]
+    pub pool_hash: String,
     /// **Reserved.** Per-pool metadata. Future slots: `resource`
     /// (cpu/memory limits), `env` (environment variables),
     /// `startup_timeout`, `health_check`.
@@ -891,6 +944,41 @@ mod tests {
         );
         let m = parse_manifest(&json).unwrap();
         assert_eq!(m.commands[0].args[0].kind_constraint(), Some("table"));
+    }
+
+    #[test]
+    fn test_capabilities_default_when_absent() {
+        // Manifests written by an older compiler that didn't know about
+        // capabilities must still parse, defaulting to ["log"].
+        let json = wrap("[]");
+        let m = parse_manifest(&json).unwrap();
+        assert_eq!(m.capabilities, vec!["log".to_string()]);
+    }
+
+    #[test]
+    fn test_capabilities_round_trip() {
+        let v = env!("CARGO_PKG_VERSION");
+        let json = format!(
+            r#"{{
+                "name": "main",
+                "build": {{
+                    "path": "/tmp/test",
+                    "time": 0,
+                    "morloc_version": "{}"
+                }},
+                "pools": [],
+                "commands": [],
+                "groups": [],
+                "capabilities": ["log", "debug_trace"],
+                "metadata": {{}}
+            }}"#,
+            v
+        );
+        let m = parse_manifest(&json).unwrap();
+        assert_eq!(
+            m.capabilities,
+            vec!["log".to_string(), "debug_trace".to_string()]
+        );
     }
 
     #[test]

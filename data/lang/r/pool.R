@@ -39,6 +39,14 @@ morloc_close_fd                      <- function(...){ .Call("morloc_close_fd", 
 morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
 morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
 morloc_exit                          <- function(...){ .Call("morloc_exit",                          ...) }
+morloc_cache_key_compute             <- function(...){ .Call("r_morloc_cache_key_compute",           ...) }
+morloc_debug_record_frame            <- function(...){ .Call("r_morloc_debug_record_frame",          ...) }
+morloc_debug_flush_dispatch          <- function(  ){ .Call("r_morloc_debug_flush_dispatch"        ) }
+morloc_cache_lookup                  <- function(...){ .Call("r_morloc_cache_lookup",                ...) }
+morloc_cache_store                   <- function(...){ .Call("r_morloc_cache_store",                 ...) }
+morloc_cache_record_hit              <- function( ){ .Call("r_morloc_cache_record_hit"             ) }
+morloc_cache_record_miss             <- function( ){ .Call("r_morloc_cache_record_miss"            ) }
+morloc_cache_record_store            <- function( ){ .Call("r_morloc_cache_record_store"           ) }
 
 global_state <- list()
 
@@ -58,6 +66,36 @@ morloc_foreign_call <- function(...) {
   }
   on.exit(morloc_shared_counter_dec(.busy_counter))
   .orig_foreign_call(...)
+}
+
+.mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, fn) {
+  # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
+  # rebinding pattern `mN <- .mlc_wrap_log(..., mN)` reassigns the global
+  # mN to this wrapper; without force(), R's lazy promise for `fn` only
+  # resolves when first used inside the wrapper, by which point mN points
+  # at the wrapper itself -- the wrapper calls itself, infinite recursion.
+  force(group); force(start_tmpl); force(pass_tmpl); force(fail_tmpl); force(fn)
+  function(...) {
+    call_id <- .Call("r_morloc_log_next_id")
+    t0 <- Sys.time()
+    if (!is.null(start_tmpl)) {
+      .Call("r_morloc_log_emit", start_tmpl, group, 0, call_id)
+    }
+    tryCatch({
+      r <- fn(...)
+      if (!is.null(pass_tmpl)) {
+        dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        .Call("r_morloc_log_emit", pass_tmpl, group, dt, call_id)
+      }
+      r
+    }, error = function(e) {
+      if (!is.null(fail_tmpl)) {
+        dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+        .Call("r_morloc_log_emit", fail_tmpl, group, dt, call_id)
+      }
+      stop(e)
+    })
+  }
 }
 
 # AUTO include manifolds start

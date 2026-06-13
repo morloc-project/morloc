@@ -300,7 +300,8 @@ cmdMake args verbosity config buildConfig = do
                               , stateUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
                               , stateInlineSize = makeInlineSize args
                               , stateNoShm = makeNoShm args
-                              , stateTmpdir = makeTmpdir args})
+                              , stateTmpdir = makeTmpdir args
+                              , stateDebugTrace = makeDebugTrace args})
             M.writeProgram translator path code
       result <- MM.runMorlocMonad outfile verbosity config buildConfig action
       passed <- MM.writeMorlocReturn result

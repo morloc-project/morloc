@@ -1,0 +1,24 @@
+module main (outerP)
+
+import root-py
+import root-cpp
+
+source Cpp from "throw.hpp" ("cppInnerThrow")
+
+cppInnerThrow :: Real -> Real
+
+-- outerP runs in Python and calls cppInner which runs in C++. When
+-- the C++ function throws, its catch records its frame, sends a fail
+-- packet back to Python. Python's foreign_call wrapper raises an
+-- exception with the error; Python's catch records ITS frame, and
+-- the pool's dispatcher prepends the combined trace to the fail
+-- packet returned to the nexus.
+--
+-- Expected trace shape (innermost first):
+--   frame 0  mid=<cppInner>   args[0] -> .../inputs/<hash>.pkt   (C++ side)
+--   frame 1  mid=<outerP>     args[0] -> .../inputs/<hash>.pkt   (Py side)
+cppInner :: Real -> Real
+cppInner n = idcpp (cppInnerThrow n)
+
+outerP :: Real -> Real
+outerP n = idpy (cppInner n)

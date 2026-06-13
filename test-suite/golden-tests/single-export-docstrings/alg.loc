@@ -1,0 +1,27 @@
+module main (foo)
+
+import root-py
+
+--' Algorithm configuration
+--' metavar: ALG_CONFIG
+--' unroll: true
+--' arg: --alg-config
+record AlgConfig where
+  --' arg: -m
+  --' default: 0
+  m :: Int
+
+  --' arg: -n/--nosy
+  --' default: 0
+  n :: Int
+
+record Py => AlgConfig = "dict"
+
+--' name: foo
+foo ::
+  AlgConfig ->
+  --' metavar: DATA
+  [Int] ->
+  Int
+
+source Py from "helpers.py" ("foo")

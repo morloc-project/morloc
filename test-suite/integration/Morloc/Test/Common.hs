@@ -178,7 +178,7 @@ data DaemonHandle = DaemonHandle
 
 -- | Start a daemon, run action, stop daemon
 withDaemon ::
-  -- | working directory with compiled nexus
+  -- | working directory with compiled nexus wrapper
   FilePath ->
   -- | extra daemon args (e.g. ["--http-port", "12345"])
   [String] ->
@@ -186,10 +186,14 @@ withDaemon ::
   IO a
 withDaemon workDir extraArgs action = bracket startD stopD action
   where
+    -- Daemon-mode argv shape: `morloc-nexus daemon <target> [opts...]`.
+    -- The wrapper script `morloc make` produced sits at
+    -- `<workDir>/nexus`; daemon mode treats it the same as a
+    -- freestanding `.manifest` file via `cli::resolve_daemon_target`.
     startD = do
       devNull <- openFile "/dev/null" WriteMode
       let cp =
-            (proc (workDir </> "nexus") ("--daemon" : extraArgs))
+            (proc "morloc-nexus" ("daemon" : (workDir </> "nexus") : extraArgs))
               { cwd = Just workDir
               , std_out = UseHandle devNull
               , std_err = UseHandle devNull

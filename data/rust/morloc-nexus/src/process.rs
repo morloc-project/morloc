@@ -336,6 +336,12 @@ pub struct PoolSocket {
     pub socket_path: String,
     pub syscmd: Vec<CString>,
     pub pid: i32,
+    /// XXH64 fingerprint (16-char hex) of this pool's emitted source +
+    /// any declared @hash-include@ files. Exported to the spawned pool
+    /// process as @MORLOC_POOL_HASH@ so the runtime cache key changes
+    /// whenever source or external dependencies change. Empty for
+    /// manifests that predate the field.
+    pub pool_hash: CString,
 }
 
 // ── Signal handlers (async-signal-safe) ────────────────────────────────────
@@ -501,6 +507,23 @@ pub fn clean_exit(exit_code: i32) -> ! {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // Render and emit the run-scope epilogue BEFORE finalize writes
+    // summary.json. The epilogue line lands on stderr (and the rundir
+    // tee, when active) so a user grep'ing for "FAILED" sees the
+    // result independent of the structured summary. emit_epilogue is
+    // idempotent: if some earlier path already emitted, this call is
+    // a no-op.
+    crate::runlog::emit_epilogue(exit_code);
+
+    // Write summary.json (when --log-dir / --summary opts in) and drop
+    // any tee handles still held by the nexus. Pool-side handles were
+    // closed when those processes died above; this only touches state
+    // owned by the nexus itself.
+    extern "C" {
+        fn morloc_run_finalize(exit_code: i32);
+    }
+    unsafe { morloc_run_finalize(exit_code) };
+
     std::process::exit(exit_code);
 }
 
@@ -528,6 +551,8 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
                 socket_path,
                 syscmd,
                 pid: 0,
+                pool_hash: CString::new(pool.pool_hash.as_str())
+                    .unwrap_or_else(|_| CString::new("").unwrap()),
             }
         })
         .collect()
@@ -545,6 +570,16 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
     if pid == 0 {
         // Child process
         unsafe { libc::setpgid(0, 0) };
+
+        // Export this pool's source-fingerprint hash so the runtime
+        // cache wrap can mix it into every cache key. The env var is
+        // per-pool because each language emits its own pool source and
+        // therefore has its own hash; setting it in the child between
+        // fork and exec keeps the values isolated.
+        unsafe {
+            let key = b"MORLOC_POOL_HASH\0".as_ptr() as *const libc::c_char;
+            libc::setenv(key, socket.pool_hash.as_ptr(), 1);
+        }
 
         let argv: Vec<*const libc::c_char> = socket
             .syscmd

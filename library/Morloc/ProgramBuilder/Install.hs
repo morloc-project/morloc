@@ -13,11 +13,12 @@ module Morloc.ProgramBuilder.Install
   , validateIncludeCoverage
   , copyAllFiltered
   , cleanIgnoredFiles
+  , resolveIncludePatterns
   ) where
 
 import Control.Exception (throwIO)
 import Control.Monad (forM_, when, unless)
-import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -341,6 +342,56 @@ validateIncludeScope patterns =
             (".." : _) -> False
             segs -> not (any (== "..") segs)
 
+{- | Expand a list of include patterns against a root directory, returning
+the resulting file paths (absolute, sorted lexicographically,
+deduplicated).
+
+Patterns follow the same syntax as @packageInclude@: literal paths,
+@*@ within a path segment, @**@ across segments, trailing @/@ for a
+directory. Patterns are interpreted relative to @root@. Directory
+matches expand to every file beneath them.
+
+The caller is expected to have already passed the patterns through
+'validateIncludeScope'; this function does not re-validate.
+
+Missing patterns (no matches) are silently ignored -- the caller may
+warn if desired. We don't error here because a glob naturally returns
+zero hits in some workflows, and treating that as a hard failure
+would surprise users.
+-}
+resolveIncludePatterns ::
+  -- | project root (directory containing the main YAML / .loc script)
+  FilePath ->
+  -- | patterns as written in YAML
+  [Text] ->
+  IO [FilePath]
+resolveIncludePatterns root patterns = do
+  rootExists <- doesDirectoryExist root
+  if not rootExists
+    then return []
+    else do
+      allFiles <- listDirectoryRecursive root
+      let matchesPattern :: String -> [FilePath]
+          matchesPattern pat
+            | "/" `isSuffixOf` pat =
+                let dir = init pat
+                    pfx = dir ++ "/"
+                in [ f | f <- allFiles, let rel = makeRelative root f
+                        , pfx `isPrefixOf` rel || rel == dir ]
+            | '*' `elem` pat =
+                [ f | f <- allFiles, matchGlob pat (makeRelative root f) ]
+            | otherwise =
+                let p = root </> pat
+                in filter (== p) allFiles
+      let matched = concatMap (matchesPattern . T.unpack) patterns
+      return . dedupSorted $ matched
+  where
+    dedupSorted :: [FilePath] -> [FilePath]
+    dedupSorted = uniq . sort
+    uniq (x : y : rest) | x == y = uniq (y : rest)
+    uniq (x : rest) = x : uniq rest
+    uniq [] = []
+
 {- | Verify that every directly-sourced file in the compiled program is
 covered by at least one include pattern.
 
@@ -403,7 +454,8 @@ isCovered patterns relPath = any (coversOne relPath) patterns
 {- | Extract the manifest JSON from a wrapper script and write it to a file.
 The wrapper script has the format:
   #!/bin/sh
-  exec morloc-nexus "$0" "$@"
+  # morloc-program v<version>
+  exec morloc-nexus run "$0" "$@"
   ### MANIFEST ###
   <json>
 -}

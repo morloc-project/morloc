@@ -3,11 +3,146 @@
 
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::packet;
 use crate::shm;
+
+/// Extensions that mark an argument as path-shaped for the
+/// "looks-like-a-path" early-failure check (in addition to the
+/// `/` separator). A superset of the extensions
+/// [`load_morloc_data_file`] dispatches on by name (`.json`,
+/// `.mpk`, `.msgpack`, `.csv`, `.tsv`); `.arrow` and `.parquet`
+/// are recognized as paths here even though that loader detects
+/// them by magic bytes instead of extension.
+pub const DATA_FILE_EXTENSIONS: &[&str] = &[
+    ".json", ".mpk", ".msgpack", ".csv", ".tsv", ".arrow", ".parquet",
+];
+
+/// True if `arg` has a recognized data-file extension or contains a
+/// path separator AND is not unambiguously inline JSON content. Used
+/// to decide whether a non-existent argument was a path typo (hard
+/// error) or a literal value (treat as inline).
+///
+/// JSON-content prefixes (`"` `{` `[` digit `-digit`) always win: a
+/// JSON-quoted string like `"path/to/file"` is a string literal for
+/// the JSON parser to handle, not a path the CLI should resolve.
+fn arg_looks_like_file_path(arg: &str) -> bool {
+    let trimmed = arg.trim_start();
+    let mut it = trimmed.chars();
+    match it.next() {
+        Some('"') | Some('{') | Some('[') => return false,
+        Some(c) if c.is_ascii_digit() => return false,
+        Some('-') => {
+            // `-<digit>` is a negative-number literal; other `-...`
+            // (e.g. `--flag`) is not a path and shouldn't trigger
+            // the not-found error either.
+            return false;
+        }
+        _ => {}
+    }
+    if arg.contains('/') || arg.contains('\\') { return true; }
+    DATA_FILE_EXTENSIONS.iter().any(|ext| {
+        arg.len() >= ext.len()
+            && arg.as_bytes()[arg.len() - ext.len()..].eq_ignore_ascii_case(ext.as_bytes())
+    })
+}
+
+/// Process-wide first-wins guard for stdin. Each invocation of a
+/// nexus command may consume stdin at most once -- a second attempt
+/// errors clearly instead of silently reading zero bytes after the
+/// first reader drained it.
+///
+/// The flag is reset by the dispatch entry point so a long-running
+/// nexus that handles multiple commands in sequence (currently not a
+/// thing, but cheap insurance) doesn't carry state across commands.
+static STDIN_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Reset the stdin-claim flag. Called at the start of each top-level
+/// dispatch so per-command isolation holds even if the runtime is
+/// reused across commands in one process.
+pub fn reset_stdin_claim() {
+    STDIN_CLAIMED.store(false, Ordering::Relaxed);
+}
+
+/// Try to claim stdin for the current argument. Returns `Ok(())` on
+/// first claim, `Err(...)` if another argument has already consumed
+/// stdin in this dispatch.
+fn claim_stdin() -> Result<(), MorlocError> {
+    if STDIN_CLAIMED.swap(true, Ordering::Relaxed) {
+        Err(MorlocError::Other(
+            "stdin can only be read by a single argument per command".into()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Consume a C errmsg pointer and rebuild a `MorlocError` whose
+/// message is `ctx: <inner>`. Frees the original C string. If the
+/// inner pointer is null, the wrapped error reads `ctx`.
+unsafe fn wrap_errmsg_with(err: *mut c_char, ctx: &str) -> MorlocError {
+    if err.is_null() {
+        return MorlocError::Other(ctx.into());
+    }
+    let inner = CStr::from_ptr(err).to_string_lossy().into_owned();
+    libc::free(err as *mut c_void);
+    MorlocError::Other(format!("{}: {}", ctx, inner))
+}
+
+/// Wrap a C errmsg with `ctx` and write the result to `errmsg`.
+/// One-liner over `set_errmsg` + `wrap_errmsg_with` for the common
+/// "tag this error with where it came from" pattern.
+unsafe fn wrap_and_set_errmsg(err: *mut c_char, ctx: &str, errmsg: *mut *mut c_char) {
+    set_errmsg(errmsg, &wrap_errmsg_with(err, ctx));
+}
+
+/// How a CLI argument should be sourced. The classification is the
+/// single source of truth for "is this stdin, a file, or inline" --
+/// every entry point that reads a CLI argument routes through
+/// [`classify_arg_source`] so the rules stay in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgSource {
+    /// `-` or `/dev/stdin`. The caller still needs to call
+    /// [`claim_stdin`] before actually reading -- the classifier
+    /// only labels the source.
+    Stdin,
+    /// `file_exists(arg)` returned true. Content type is decided
+    /// by [`load_morloc_data_file`] (extension + magic-byte sniff).
+    File,
+    /// Neither stdin nor an existing file, and the bytes are not
+    /// path-shaped. Hand the literal bytes to the JSON/inline
+    /// parser for the target schema.
+    Inline,
+}
+
+/// Single classifier for "what does this CLI argument represent."
+/// The four-way decision -- stdin / existing file / path-shaped
+/// typo / inline content -- is split out here so every entry point
+/// (positional args, bundles, per-field overrides) reaches the
+/// same conclusion for the same bytes.
+///
+/// Returns `Err("file '...' not found")` when the bytes look like a
+/// path (per [`arg_looks_like_file_path`]) but `file_exists` says
+/// otherwise -- almost always a user typo. JSON-content prefixes
+/// (`"` `{` `[` digit `-`) bypass the path check.
+pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<ArgSource, MorlocError> {
+    extern "C" { fn file_exists(filename: *const c_char) -> bool; }
+
+    let stdin_path = b"/dev/stdin\0";
+    let dash_path = b"-\0";
+    let is_stdin = libc::strcmp(arg, stdin_path.as_ptr() as *const c_char) == 0
+        || libc::strcmp(arg, dash_path.as_ptr() as *const c_char) == 0;
+    if is_stdin { return Ok(ArgSource::Stdin); }
+    if file_exists(arg) { return Ok(ArgSource::File); }
+    let arg_str = CStr::from_ptr(arg).to_string_lossy();
+    if arg_looks_like_file_path(arg_str.as_ref()) {
+        return Err(MorlocError::Other(format!("file '{}' not found", arg_str)));
+    }
+    Ok(ArgSource::Inline)
+}
 
 // ── argument_t lifecycle ───────────────────────────────────────────────────
 
@@ -501,7 +636,6 @@ unsafe fn parse_cli_data_argument_singular(
             dest: *mut u8, json: *mut c_char, schema: *const CSchema,
             errmsg: *mut *mut c_char,
         ) -> *mut u8;
-        fn file_exists(filename: *const c_char) -> bool;
         fn read_binary_fd(file: *mut libc::FILE, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8;
     }
 
@@ -509,22 +643,29 @@ unsafe fn parse_cli_data_argument_singular(
     let mut err: *mut c_char = ptr::null_mut();
     let mut fd: *mut libc::FILE = ptr::null_mut();
 
-    // handle STDIN
-    let stdin_path = b"/dev/stdin\0";
-    let dash_path = b"-\0";
-    if libc::strcmp(arg, stdin_path.as_ptr() as *const c_char) == 0
-        || libc::strcmp(arg, dash_path.as_ptr() as *const c_char) == 0
-    {
-        fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
-    } else if file_exists(arg) {
-        fd = libc::fopen(arg, b"rb\0".as_ptr() as *const c_char);
-        if fd.is_null() {
-            set_errmsg(errmsg, &MorlocError::Other(
-                format!("The argument '{}' is a filename, but it can't be read",
-                    CStr::from_ptr(arg).to_string_lossy())
-            ));
-            return ptr::null_mut();
+    let source = match classify_arg_source(arg) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+    match source {
+        ArgSource::Stdin => {
+            if let Err(e) = claim_stdin() {
+                set_errmsg(errmsg, &e);
+                return ptr::null_mut();
+            }
+            fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
         }
+        ArgSource::File => {
+            fd = libc::fopen(arg, b"rb\0".as_ptr() as *const c_char);
+            if fd.is_null() {
+                set_errmsg(errmsg, &MorlocError::Other(
+                    format!("The argument '{}' is a filename, but it can't be read",
+                        CStr::from_ptr(arg).to_string_lossy())
+                ));
+                return ptr::null_mut();
+            }
+        }
+        ArgSource::Inline => {}
     }
 
     if fd.is_null() {
@@ -555,6 +696,11 @@ unsafe fn parse_cli_data_argument_singular(
     }
 
     // File or stdin
+    let source_label: String = match source {
+        ArgSource::Stdin => "stdin".to_string(),
+        ArgSource::File => format!("file '{}'", CStr::from_ptr(arg).to_string_lossy()),
+        ArgSource::Inline => unreachable!("fd is non-null"),
+    };
     let mut data_size: usize = 0;
     let data = read_binary_fd(fd, &mut data_size, &mut err);
     // Don't close stdin
@@ -563,7 +709,7 @@ unsafe fn parse_cli_data_argument_singular(
     }
     if !err.is_null() {
         if !data.is_null() { libc::free(data as *mut c_void); }
-        *errmsg = err;
+        wrap_and_set_errmsg(err, &source_label, errmsg);
         return ptr::null_mut();
     }
 
@@ -588,7 +734,7 @@ unsafe fn parse_cli_data_argument_singular(
                 let voidstar_ptr = data.add(32 + header.offset as usize);
                 if upload_packet(dest, voidstar_ptr, voidstar_ptr as usize + data_size - 1, schema, &mut err) != 0 {
                     libc::free(data as *mut c_void);
-                    *errmsg = err;
+                    wrap_and_set_errmsg(err, &source_label, errmsg);
                     return ptr::null_mut();
                 }
                 libc::free(data as *mut c_void);
@@ -600,13 +746,133 @@ unsafe fn parse_cli_data_argument_singular(
     // All other formats: canonical file loader (takes ownership of data)
     dest = load_morloc_data_file(arg, data, data_size, schema, &mut err) as *mut u8;
     if !err.is_null() {
-        *errmsg = err;
+        wrap_and_set_errmsg(err, &source_label, errmsg);
         return ptr::null_mut();
     }
     dest
 }
 
 // ── parse_cli_data_argument_unrolled ─────────────────────────────────────────
+
+/// Load a record bundle (`--group=...` value) and report which fields it
+/// supplied.
+///
+/// The returned vector aligns with `schema.parameters`. `Some(p)` means
+/// the bundle provided that field; `None` means it was absent and the
+/// caller should fall back to the next source (user override, manifest
+/// default, Optional-RELNULL, or error).
+///
+/// Format detection:
+///   - Inline / file content whose first non-whitespace byte is `{`
+///     uses the partial JSON path. Missing keys yield `None`.
+///   - Anything else (JSON arrays, mpack, voidstar binary packets,
+///     morloc binary, arrow, etc.) is treated as a complete record:
+///     it is loaded in full and every slot is reported `Some`.
+///
+/// Field pointers for complete-format bundles alias into the loaded
+/// record's SHM allocation -- both blocks stay alive in the eval arena
+/// until the dispatch scope drops, so the alias is safe.
+unsafe fn load_bundle_partial(
+    arg: *mut c_char,
+    schema: *const CSchema,
+    rs: &crate::schema::Schema,
+) -> Result<Vec<Option<shm::AbsPtr>>, MorlocError> {
+    let source = classify_arg_source(arg)?;
+
+    let inline_bytes = if source == ArgSource::Inline {
+        Some(CStr::from_ptr(arg).to_bytes())
+    } else {
+        None
+    };
+
+    // Read file/stdin content up front: the partial-JSON dispatcher
+    // needs to peek at the leading non-whitespace byte, and stdin
+    // can only be read once anyway. For inline values the bytes are
+    // already addressable via the C string.
+    let file_bytes: Option<Vec<u8>> = match source {
+        ArgSource::File => {
+            let p = CStr::from_ptr(arg).to_string_lossy().into_owned();
+            Some(std::fs::read(&p).map_err(|e| MorlocError::Other(
+                format!("read bundle file '{}': {}", p, e)
+            ))?)
+        }
+        ArgSource::Stdin => {
+            claim_stdin()?;
+            let mut buf = Vec::new();
+            use std::io::Read;
+            std::io::stdin().read_to_end(&mut buf).map_err(|e| MorlocError::Other(
+                format!("read bundle stdin: {}", e)
+            ))?;
+            Some(buf)
+        }
+        ArgSource::Inline => None,
+    };
+
+    // Take a peek at the leading non-whitespace byte WITHOUT keeping
+    // a live borrow of file_bytes (we want to move it below).
+    let first: Option<u8> = {
+        let slice: &[u8] = match (inline_bytes, file_bytes.as_deref()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b,
+            (None, None) => &[],
+        };
+        slice.iter().find(|&&b| !b.is_ascii_whitespace()).copied()
+    };
+
+    if first == Some(b'{') {
+        // JSON object form: partial-load. Re-derive the slice in a
+        // new scope; this borrow is independent of the one above.
+        let slice: &[u8] = match (inline_bytes, file_bytes.as_deref()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b,
+            (None, None) => &[],
+        };
+        let s = std::str::from_utf8(slice).map_err(|e| MorlocError::Other(
+            format!("bundle JSON is not valid UTF-8: {}", e)
+        ))?;
+        return crate::json::load_record_fields_from_json(s, rs);
+    }
+
+    // Complete-form bundle. For inline arguments we hand off to
+    // singular unchanged (its inline-JSON branch handles JSON arrays
+    // and primitives without needing the bytes we already peeked at).
+    // For files and stdin the bytes are already in `file_bytes` and
+    // re-reading is either wasteful (file) or impossible (stdin
+    // already consumed); we feed them to `load_morloc_data_file`
+    // directly, which dispatches on path extension or content magic.
+    let mut err: *mut c_char = ptr::null_mut();
+    let full: *mut u8 = if let Some(bytes) = file_bytes {
+        let n = bytes.len();
+        let buf = libc::malloc(n.max(1)) as *mut u8;
+        if buf.is_null() {
+            return Err(MorlocError::Other("malloc failed for bundle bytes".into()));
+        }
+        ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
+        // `load_morloc_data_file` takes ownership of `buf` -- it
+        // frees on every path. The path string only affects
+        // extension-based format hints; for stdin we pass the
+        // original "-" / "/dev/stdin", which has no extension and
+        // falls through to magic-byte detection.
+        let result = load_morloc_data_file(arg, buf, n, schema, &mut err);
+        result as *mut u8
+    } else {
+        parse_cli_data_argument_singular(ptr::null_mut(), arg, schema, &mut err)
+    };
+    if !err.is_null() {
+        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+        libc::free(err as *mut c_void);
+        return Err(MorlocError::Other(msg));
+    }
+    if full.is_null() {
+        return Err(MorlocError::Other("bundle load returned null".into()));
+    }
+
+    let mut out = Vec::with_capacity(rs.parameters.len());
+    for i in 0..rs.parameters.len() {
+        out.push(Some(full.add(rs.offsets[i])));
+    }
+    Ok(out)
+}
 
 unsafe fn parse_cli_data_argument_unrolled(
     mut dest: *mut u8,
@@ -619,7 +885,16 @@ unsafe fn parse_cli_data_argument_unrolled(
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
     let mut err: *mut c_char = ptr::null_mut();
-    let mut using_record_default = false;
+
+    use crate::schema::SerialType;
+    match rs.serial_type {
+        SerialType::Tuple | SerialType::Map => {}
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "Only record and tuple types may be unrolled".into()));
+            return ptr::null_mut();
+        }
+    }
 
     if dest.is_null() {
         match shm::shcalloc(1, rs.width) {
@@ -628,60 +903,113 @@ unsafe fn parse_cli_data_argument_unrolled(
         }
     }
 
-    if !default_value.is_null() {
-        dest = parse_cli_data_argument_singular(dest, default_value, schema, &mut err);
-        if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
-        using_record_default = true;
-    }
+    let n = rs.parameters.len();
 
-    use crate::schema::SerialType;
-    match rs.serial_type {
-        SerialType::Tuple | SerialType::Map => {
-            for i in 0..rs.parameters.len() {
-                let element_dest = dest.add(rs.offsets[i]);
-                let field_val = *fields.add(i);
-                let elem_cs = *(*schema).parameters.add(i);
-
-                if !field_val.is_null() {
-                    // Release any sub-blocks the default value owns before
-                    // overwriting this slot in place.
-                    let elem_rs = CSchema::to_rust(elem_cs);
-                    if let Err(e) = crate::voidstar::shfree_inplace(
-                        element_dest, &elem_rs,
-                    ) {
-                        set_errmsg(errmsg, &e);
-                        return ptr::null_mut();
-                    }
-
-                    let result = parse_cli_data_argument_singular(
-                        element_dest, field_val, elem_cs, &mut err,
-                    );
-                    if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
-                    let _ = result; // result writes into element_dest
-                } else if using_record_default {
-                    continue;
-                } else {
-                    let default_field = *default_fields.add(i);
-                    if !default_field.is_null() {
-                        let result = parse_cli_data_argument_singular(
-                            element_dest, default_field, elem_cs, &mut err,
-                        );
-                        if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
-                        let _ = result;
-                    } else {
-                        set_errmsg(errmsg, &MorlocError::Other(
-                            format!("Field {} missing with no default or default record", i)
-                        ));
-                        return ptr::null_mut();
-                    }
-                }
-            }
+    // Source 1: bundle (per-field voidstar, may be absent or partial).
+    let bundle_fields: Vec<Option<shm::AbsPtr>> = if default_value.is_null() {
+        vec![None; n]
+    } else {
+        match load_bundle_partial(default_value, schema, &rs) {
+            Ok(v) => v,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
         }
-        _ => {
-            set_errmsg(errmsg, &MorlocError::Other("Only record and tuple types may be unrolled".into()));
+    };
+
+    // Tuple bundles must be complete -- positional encoding has no
+    // notion of missing slots. JSON object form is record-only;
+    // load_bundle_partial enforces that at parse time.
+    if matches!(rs.serial_type, SerialType::Tuple) {
+        if let Some((i, _)) = bundle_fields.iter().enumerate().find(|(_, f)| f.is_none()) {
+            set_errmsg(errmsg, &MorlocError::Other(
+                format!("Tuple bundle is missing slot {}", i)
+            ));
             return ptr::null_mut();
         }
     }
+
+    let field_label = |i: usize| -> String {
+        match rs.keys.get(i) {
+            Some(k) => format!("field '{}'", k),
+            None => format!("slot {}", i),
+        }
+    };
+
+    // Source 2: per-field user CLI values, each loaded independently
+    // through the standard pipeline (so any format the user provides
+    // works: inline JSON, file path, stdin, mpack file, etc.).
+    let mut user_fields: Vec<Option<shm::AbsPtr>> = vec![None; n];
+    for i in 0..n {
+        let field_val = *fields.add(i);
+        if !field_val.is_null() {
+            let elem_cs = *(*schema).parameters.add(i);
+            let fs = &rs.parameters[i];
+            let p = match shm::shcalloc(1, fs.width) {
+                Ok(p) => p,
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            };
+            let loaded = parse_cli_data_argument_singular(p, field_val, elem_cs, &mut err);
+            if !err.is_null() {
+                wrap_and_set_errmsg(err, &field_label(i), errmsg);
+                return ptr::null_mut();
+            }
+            user_fields[i] = Some(loaded);
+        }
+    }
+
+    // Source 3: manifest per-field defaults (always JSON literals in
+    // the manifest). Eager: parse them upfront so the merge step is a
+    // pure picker. Cheap -- defaults are tiny. A bad default raises a
+    // hard error pointing at the field, so manifest-data shape bugs
+    // surface here rather than as silent zeros.
+    let mut default_field_ptrs: Vec<Option<shm::AbsPtr>> = vec![None; n];
+    for i in 0..n {
+        let default_field = *default_fields.add(i);
+        if !default_field.is_null() {
+            let elem_cs = *(*schema).parameters.add(i);
+            let fs = &rs.parameters[i];
+            let p = match shm::shcalloc(1, fs.width) {
+                Ok(p) => p,
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            };
+            let loaded = parse_cli_data_argument_singular(p, default_field, elem_cs, &mut err);
+            if !err.is_null() {
+                wrap_and_set_errmsg(
+                    err,
+                    &format!("default for {}", field_label(i)),
+                    errmsg,
+                );
+                return ptr::null_mut();
+            }
+            default_field_ptrs[i] = Some(loaded);
+        }
+    }
+
+    // Merge into dest with precedence user > bundle > default >
+    // Optional-RELNULL > error. memcpy of fs.width bytes copies the
+    // field header (and any inline value); relptrs inside the header
+    // continue to reference the source's SHM block, which stays
+    // tracked by the eval arena for the rest of the dispatch.
+    for i in 0..n {
+        let elem_dest = dest.add(rs.offsets[i]);
+        let fs = &rs.parameters[i];
+        let src = user_fields[i]
+            .or(bundle_fields[i])
+            .or(default_field_ptrs[i]);
+        match src {
+            Some(p) => ptr::copy_nonoverlapping(p, elem_dest, fs.width),
+            None if matches!(fs.serial_type, SerialType::Optional) => {
+                *(elem_dest as *mut shm::RelPtr) = shm::RELNULL;
+            }
+            None => {
+                let key = rs.keys.get(i).map(|s| s.as_str()).unwrap_or("?");
+                set_errmsg(errmsg, &MorlocError::Other(
+                    format!("Required field '{}' is missing and has no default", key)
+                ));
+                return ptr::null_mut();
+            }
+        }
+    }
+
     dest
 }
 
@@ -805,4 +1133,57 @@ pub unsafe extern "C" fn make_call_packet_from_cli(
         return ptr::null_mut();
     }
     call_packet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_predicate_extensions() {
+        assert!(arg_looks_like_file_path("a.json"));
+        assert!(arg_looks_like_file_path("a.JSON"));
+        assert!(arg_looks_like_file_path("data.mpk"));
+        assert!(arg_looks_like_file_path("table.parquet"));
+        assert!(arg_looks_like_file_path("table.arrow"));
+    }
+
+    #[test]
+    fn path_predicate_separators() {
+        assert!(arg_looks_like_file_path("./algconf"));
+        assert!(arg_looks_like_file_path("dir/sub/file"));
+        assert!(arg_looks_like_file_path("/abs/path"));
+    }
+
+    #[test]
+    fn path_predicate_inline_values() {
+        // Bare inline JSON-ish values should NOT be treated as paths.
+        assert!(!arg_looks_like_file_path("42"));
+        assert!(!arg_looks_like_file_path("\"hello\""));
+        assert!(!arg_looks_like_file_path("[1,2,3]"));
+        assert!(!arg_looks_like_file_path("{\"m\":1}"));
+        assert!(!arg_looks_like_file_path("true"));
+        assert!(!arg_looks_like_file_path("-"));
+        assert!(!arg_looks_like_file_path(""));
+    }
+
+    #[test]
+    fn path_predicate_quoted_path_is_json_string() {
+        // A JSON-quoted string is a Str literal for the JSON parser,
+        // even if its contents look like a path.
+        assert!(!arg_looks_like_file_path("\"logs/run/inputs/0001.pkt\""));
+        assert!(!arg_looks_like_file_path("\"a/b/c.json\""));
+    }
+
+    #[test]
+    fn stdin_claim_first_wins() {
+        reset_stdin_claim();
+        assert!(claim_stdin().is_ok());
+        let second = claim_stdin();
+        assert!(second.is_err(), "second claim should fail");
+        assert!(second.unwrap_err().to_string().contains("stdin"));
+        reset_stdin_claim();
+        assert!(claim_stdin().is_ok(), "reset releases the claim");
+        reset_stdin_claim();
+    }
 }

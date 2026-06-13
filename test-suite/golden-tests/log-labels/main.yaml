@@ -1,0 +1,55 @@
+# Program-wide log template. The compiler resolves the per-label
+# 'log-template' (if any), then this default, then the built-in.
+# Variables: {name} (term name), {group} (label-group name), {lang},
+# {module}, {line}, {column}, {index}, {date}, {runtime}, {id}.
+log-template:
+  start: "[morloc] {group}: start"
+  pass:  "[morloc] {group}: done in {runtime}s id={id}"
+  fail:  "[morloc] {group}: FAILED after {runtime}s id={id}"
+
+# Run-scope prologue. Compile-time placeholders ({module}, {version},
+# {morloc_version}, color codes) are substituted at codegen; the nexus
+# fills the runtime placeholders at run start.
+# Runtime variables: {name}, {run_id}, {started_at}, {pid}, {hostname}.
+prologue: "{name} {version} is starting at {started_at} with pid={pid} on hostname={hostname}"
+
+epilogue:
+  # Variables:
+  # - {name}
+  # - {module}
+  # - {version}
+  # - {morloc_version}
+  # - {run_id}
+  # - {pid}
+  # - {hostname}
+  # - {started_at}
+  # - {finished_at}
+  # - {runtime}
+  ok: "Finish successfully in {runtime} seconds"
+
+  # Variables
+  # - all of the above
+  # - {exit_code} — nonzero
+  # - {error} — error packet contents (may be multi-line)
+  fail: "{name} failed after {runtime} seconds. Error message: {error}"
+
+labeled-groups:
+  # Trilang baseline
+  a:         { log: true }
+  b:         { log: true }
+  # Per-call-site labels (tupTest)
+  tup_left:  { log: true }
+  tup_right: { log: true }
+  # If-then-else branches
+  then_lbl:  { log: true }
+  else_lbl:  { log: true }
+  then2:     { log: true }
+  else2:     { log: true }
+  # Nested
+  outer:     { log: true }
+  inner:     { log: true }
+  # Recursive
+  recur:     { log: true }
+  # Let bindings
+  let_in:    { log: true }
+  let_out:   { log: true }

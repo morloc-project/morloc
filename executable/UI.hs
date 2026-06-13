@@ -78,6 +78,7 @@ data MakeCommand = MakeCommand
   , makeInlineSize :: Maybe Int64
   , makeNoShm :: Bool
   , makeTmpdir :: Maybe String
+  , makeDebugTrace :: Bool
   , makeScript :: String
   }
 
@@ -96,6 +97,7 @@ makeCommandParser =
     <*> optInlineSize
     <*> optNoShm
     <*> optTmpdir
+    <*> optDebugTrace
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -411,6 +413,20 @@ optMakeInclude =
             <> metavar "PATTERN"
             <> help "File pattern to include in install"
         )
+    )
+
+optDebugTrace :: Parser Bool
+optDebugTrace =
+  switch
+    ( long "debug"
+        <> help
+            ( "Wrap every foreign-call manifold with an exception-path "
+                ++ "trace recorder. On any thrown exception, each active "
+                ++ "frame's args are content-addressed and dumped to "
+                ++ "$MORLOC_DEBUG_DIR (or $MORLOC_RUN_DIR/debug if --log-dir "
+                ++ "is set). Zero cost on the happy path; opt-in only for "
+                ++ "diagnostic builds."
+            )
     )
 
 optUnsafeSkipNullCheck :: Parser Bool

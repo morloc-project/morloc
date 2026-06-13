@@ -1,0 +1,13 @@
+module main (boomP)
+
+import root-py
+
+source Py from "throw.py" ("pyThrowOnList")
+
+pyThrowOnList :: [Str] -> Int
+
+-- Throws after receiving a list of strings. Used to verify that
+-- --debug-cache-max actually skips the disk write for an oversized
+-- arg and surfaces the size-exceeded marker in the rendered trace.
+boomP :: [Str] -> Int
+boomP xs = idpy (pyThrowOnList xs)

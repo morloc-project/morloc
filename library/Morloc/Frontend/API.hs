@@ -36,6 +36,7 @@ import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.ProgramBuilder.Install as Install
 import qualified Morloc.System as MS
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 
@@ -52,8 +53,48 @@ parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
   langMap <- buildLangMap'
 
+  -- The main module's @log-template@ becomes the program-wide default
+  -- log message template. Per-label overrides win over this; the
+  -- built-in defaults in 'Morloc.CodeGenerator.LogTemplate' fill any
+  -- subfield neither this nor the per-label config supplies.
+  MM.modify (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
+
+  -- The main module's run-scope @prologue@ / @epilogue@ templates are
+  -- rendered by the nexus at run boundaries. Sub-modules cannot
+  -- contribute to these (a workflow has exactly one entry-point, so
+  -- run-scope events have exactly one source of truth).
+  MM.modify
+    ( \st -> st
+        { stateRunLog =
+            case (moduleConfigPrologue moduleConfig, moduleConfigEpilogue moduleConfig) of
+              (Nothing, Nothing) -> Nothing
+              (mp, me) ->
+                Just
+                  RunLogTemplate
+                    { runLogPrologue = mp
+                    , runLogEpilogue = me
+                    }
+        }
+    )
+
   -- Compute project root from entry-point file path
   let projectRoot = fmap MS.takeDirectory f
+
+  -- Resolve the main module's @hash-include@ patterns into a concrete
+  -- list of files. Their contents will be folded into every pool's
+  -- cache hash so that editing a foreign source file (or a runtime
+  -- data file the user explicitly lists) invalidates the cache. Scope
+  -- validation rejects absolute paths and @..@ traversals; the same
+  -- contract as @packageInclude@.
+  case moduleConfigHashInclude moduleConfig of
+    Just patterns | not (null patterns) -> do
+      MM.liftIO $ Install.validateIncludeScope patterns
+      case projectRoot of
+        Just root -> do
+          paths <- MM.liftIO $ Install.resolveIncludePatterns root patterns
+          MM.modify (\st -> st {stateHashIncludePaths = paths})
+        Nothing -> return ()
+    _ -> return ()
 
   let parserState =
         emptyPState

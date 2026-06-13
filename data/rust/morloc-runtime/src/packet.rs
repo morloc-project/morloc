@@ -26,6 +26,20 @@ pub static INLINE_THRESHOLD: std::sync::atomic::AtomicUsize =
 pub static SHM_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
+/// Process-wide serialization gate for any test that mutates or
+/// observes [`INLINE_THRESHOLD`] / [`SHM_ENABLED`] / the file-packet
+/// tmpdir. Without it, `cargo test`'s default multi-threaded
+/// runner interleaves writes from `config_ffi::tests` with reads
+/// from `packet_ffi::auto_routing_tests`, producing nondeterministic
+/// failures.
+///
+/// Each test acquires the lock at entry; the guard is dropped at
+/// the end of the test. Lock contention is irrelevant -- the
+/// shared atomics need exclusive access for the duration of any
+/// observation that depends on a specific value.
+#[cfg(test)]
+pub static TEST_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Read the live inline threshold. Cheap and lock-free.
 #[inline]
 pub fn inline_threshold() -> usize {
