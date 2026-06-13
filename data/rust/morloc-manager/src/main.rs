@@ -713,13 +713,6 @@ fn print_flag_section(label: &str, section: &EngineFlags) {
     emit("apptainer", &section.apptainer);
 }
 
-fn bold_green(msg: &str) -> String {
-    if io::stderr().is_terminal() {
-        format!("\x1b[1;32m{msg}\x1b[0m")
-    } else {
-        msg.to_string()
-    }
-}
 
 fn check_docker_socket(engine: ContainerEngine) {
     use std::path::Path;
@@ -1186,7 +1179,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Warning: --no-init was used. Run 'morloc-manager run -- morloc init -f' before building morloc programs.");
             }
 
-            eprintln!("{}", bold_green(&format!("Environment '{env_name}' is ready.")));
+            anstream::eprintln!(
+                "\x1b[1;32mEnvironment '{env_name}' is ready.\x1b[0m"
+            );
             eprintln!("Activate it with: morloc-manager select {env_name}");
 
             if system && !check_podman_additional_stores(resolved_engine) {
@@ -1954,7 +1949,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose, &init_args)?;
             }
 
-            eprintln!("{}", bold_green(&format!("Environment '{env_name}' updated.")));
+            anstream::eprintln!(
+                "\x1b[1;32mEnvironment '{env_name}' updated.\x1b[0m"
+            );
 
             if env_scope == Scope::System && !check_podman_additional_stores(
                 cfg::read_env_config(env_scope, &env_name)

@@ -64,35 +64,13 @@ fn quiet() -> bool {
     })
 }
 
-/// Remove all CSI sequences (`ESC '[' ... [a-zA-Z]`). Bytes involved in
-/// a CSI sequence are all ASCII; multi-byte UTF-8 continuation bytes
-/// (`>= 0x80`) can't match the pattern, so the byte-level walk is
-/// UTF-8 safe.
+/// Remove all ANSI escape sequences (CSI color codes, OSC, etc.)
+/// from a string. Delegates to [`anstream::adapter::strip_str`],
+/// which uses an ECMA-48-conformant parser; the function exists
+/// only as a named call-site for clarity at the use sites in
+/// [`morloc_log_emit`] and [`morloc_run_emit_line`].
 fn strip_csi(s: &str) -> String {
-    // Fast path: most log lines contain no ANSI.
-    if !s.as_bytes().contains(&0x1b) {
-        return s.to_string();
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            let mut j = i + 2;
-            while j < bytes.len() && !bytes[j].is_ascii_alphabetic() {
-                j += 1;
-            }
-            if j < bytes.len() {
-                j += 1;
-            }
-            i = j;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    // SAFETY: stripped only ASCII byte runs from valid UTF-8 input.
-    String::from_utf8(out).unwrap_or_default()
+    anstream::adapter::strip_str(s).to_string()
 }
 
 /// Safety: `tmpl` must be a null-terminated UTF-8 byte sequence. A null

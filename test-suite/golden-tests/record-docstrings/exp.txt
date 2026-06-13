@@ -7,6 +7,11 @@ foo
 211
 11
 6
+100106
+106
+-299
+-6
+-694
 bar
 110
 107
@@ -14,6 +19,7 @@ bar
 6507
 travelTime
 24
+39
 baz
 ["foo","foo"]
 ["foo bar","foo bar"]
@@ -23,3 +29,10 @@ bif
 "True"
 "True"
 "False"
+error_paths
+6
+1
+1
+1
+1
+1

@@ -65,27 +65,32 @@ mod tests {
     //! multi-threaded by default).
 
     use super::*;
-    use crate::packet::{DEFAULT_INLINE_THRESHOLD, inline_threshold, shm_enabled};
+    use crate::packet::{
+        inline_threshold, shm_enabled, MORLOC_INLINE_THRESHOLD, TEST_CONFIG_LOCK,
+    };
 
     #[test]
     fn setter_roundtrip_threshold() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         unsafe { morloc_set_inline_threshold(1024) };
         assert_eq!(inline_threshold(), 1024);
         unsafe { morloc_set_inline_threshold(0) };
         assert_eq!(inline_threshold(), 0);
-        unsafe { morloc_set_inline_threshold(DEFAULT_INLINE_THRESHOLD as i64) };
-        assert_eq!(inline_threshold(), DEFAULT_INLINE_THRESHOLD);
+        unsafe { morloc_set_inline_threshold(MORLOC_INLINE_THRESHOLD as i64) };
+        assert_eq!(inline_threshold(), MORLOC_INLINE_THRESHOLD);
     }
 
     #[test]
     fn negative_clamps_to_zero() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         unsafe { morloc_set_inline_threshold(-42) };
         assert_eq!(inline_threshold(), 0);
-        unsafe { morloc_set_inline_threshold(DEFAULT_INLINE_THRESHOLD as i64) };
+        unsafe { morloc_set_inline_threshold(MORLOC_INLINE_THRESHOLD as i64) };
     }
 
     #[test]
     fn shm_toggle() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         unsafe { morloc_set_shm_enabled(false) };
         assert!(!shm_enabled());
         unsafe { morloc_set_shm_enabled(true) };
@@ -96,6 +101,7 @@ mod tests {
     fn tmpdir_roundtrip() {
         use crate::packet::file_packet_tmpdir;
         use std::ffi::CString;
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
 
         let c = CString::new("/tmp/morloc-tmpdir-test").unwrap();
         unsafe { morloc_set_tmpdir(c.as_ptr()) };

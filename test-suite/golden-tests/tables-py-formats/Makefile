@@ -8,7 +8,7 @@ all:
 	  echo '--- json_input ---';    ./nexus echo '[{"x":0,"y":"a"},{"x":1,"y":"b"},{"x":2,"y":"c"}]'; \
 	  echo '--- parquet_input ---'; ./nexus echo input.parquet; \
 	  echo '--- arrow_input ---';   ./nexus echo input.arrow; \
-	  echo '--- csv_output ---';    ./nexus echo '[{"x":42,"y":"alpha"},{"x":17,"y":"beta"}]' --output-form csv; \
+	  echo '--- csv_output ---';    ./nexus --output-form csv echo '[{"x":42,"y":"alpha"},{"x":17,"y":"beta"}]'; \
 	} > obs.txt 2> obs.err
 
 clean:

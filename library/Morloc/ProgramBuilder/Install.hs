@@ -454,7 +454,8 @@ isCovered patterns relPath = any (coversOne relPath) patterns
 {- | Extract the manifest JSON from a wrapper script and write it to a file.
 The wrapper script has the format:
   #!/bin/sh
-  exec morloc-nexus "$0" "$@"
+  # morloc-program v<version>
+  exec morloc-nexus run "$0" "$@"
   ### MANIFEST ###
   <json>
 -}

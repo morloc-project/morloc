@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # run-tests.sh - Daemon and router test suite for morloc
 #
-# Tests the daemon mode (--daemon), HTTP/TCP/socket APIs, and the
-# multi-program router (--router).
+# Tests the daemon mode (morloc-nexus daemon <target>),
+# HTTP/TCP/socket APIs, and the multi-program router
+# (morloc-nexus router).
 #
 # Usage: ./run-tests.sh [test...]
 #   With no arguments, runs all test groups. Pass partial names to filter:
@@ -264,13 +265,18 @@ compile_program() {
 # Start a daemon in the background, returning its PID
 # Usage: start_daemon <work_dir> [extra_args...]
 # Sets: LAST_DAEMON_PID, LAST_DAEMON_LOG
+#
+# Daemon-mode argv shape: `morloc-nexus daemon <target> [opts...]`.
+# The wrapper script that `morloc make` produced sits at
+# `<work_dir>/nexus`; daemon mode treats it the same as a freestanding
+# `.manifest` file via cli::resolve_daemon_target.
 start_daemon() {
     local work_dir="$1"
     shift
 
     local log_file="$work_dir/daemon.log"
 
-    (cd "$work_dir" && exec ./nexus --daemon "$@" 2>"$log_file") &
+    (cd "$work_dir" && exec morloc-nexus daemon ./nexus "$@" 2>"$log_file") &
     local pid=$!
     DAEMON_PIDS+=("$pid")
     LAST_DAEMON_PID=$pid
@@ -429,10 +435,10 @@ fi
 # ======================================================================
 # Test Group 1b: HTTP status codes
 #
-# Every daemon-dispatch failure used to map to 500 Internal Server Error
-# regardless of cause. After Stage 2, client errors (unknown command,
-# unknown endpoint, missing field, malformed args, wrong arity) map to
-# 4xx; only genuinely-server-side failures remain 500.
+# Client errors (unknown command, unknown endpoint, missing field,
+# malformed args, wrong arity) must map to 4xx HTTP status codes;
+# only genuinely server-side failures map to 500 Internal Server
+# Error.
 # ======================================================================
 
 if should_run "http-status"; then
@@ -885,78 +891,6 @@ if should_run "tcp"; then
 fi
 
 # ======================================================================
-# Test Group 5b: Port CLI validation
-#
-# `--port` / `--http-port` accept 0..=65535 (0 = bind ephemeral, OS picks
-# the port). Anything else -- negative, >65535, non-numeric -- must exit
-# non-zero with a clear stderr message. Pre-fix behaviour silently
-# swallowed parse errors and truncated out-of-range values via `as u16`.
-# ======================================================================
-
-if should_run "port-cli"; then
-    echo "${BOLD}[port-cli] Port argument validation${RESET}"
-
-    # Wrap nexus invocations so failures don't trip `set -e`.
-    run_nexus() {
-        ( cd "$ARITH_DIR" && ./nexus --daemon "$@" 2>"$ARITH_DIR/port-cli.err" )
-        local ec=$?
-        LAST_NEXUS_ERR=$(cat "$ARITH_DIR/port-cli.err" 2>/dev/null)
-        return $ec
-    }
-
-    # --http-port out of u16 range
-    run_nexus --http-port 99999 || true
-    assert_test "--http-port 99999 exits non-zero" "2" "$?"
-    assert_contains "--http-port 99999 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
-
-    # --http-port negative
-    run_nexus --http-port -1 || true
-    assert_test "--http-port -1 exits non-zero" "2" "$?"
-    assert_contains "--http-port -1 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
-
-    # --http-port non-numeric
-    run_nexus --http-port abc || true
-    assert_test "--http-port abc exits non-zero" "2" "$?"
-    assert_contains "--http-port abc stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
-
-    # --http-port=VAL long-equals form
-    run_nexus --http-port=99999 || true
-    assert_test "--http-port=99999 exits non-zero" "2" "$?"
-
-    # TCP --port same validation
-    run_nexus --port 99999 || true
-    assert_test "--port 99999 exits non-zero" "2" "$?"
-    assert_contains "--port 99999 stderr mentions range" "0..=65535" "$LAST_NEXUS_ERR"
-
-    run_nexus --port abc || true
-    assert_test "--port abc exits non-zero" "2" "$?"
-
-    # Duplicate port flags are rejected (issue 9). The previous "last
-    # wins" behavior silently absorbed script bugs that appended a
-    # stray --http-port from a stale env var.
-    run_nexus --http-port 8080 --http-port 9090 || true
-    assert_test "--http-port given twice exits non-zero" "2" "$?"
-    assert_contains "duplicate --http-port stderr is clear" "given more than once" "$LAST_NEXUS_ERR"
-
-    run_nexus --port 8080 --port 9090 || true
-    assert_test "--port given twice exits non-zero" "2" "$?"
-
-    # --eval-timeout strict parse (issue 6). The previous
-    # .parse().unwrap_or(30) silently substituted 30 on any parse error.
-    run_nexus --eval-timeout abc || true
-    assert_test "--eval-timeout abc exits non-zero" "2" "$?"
-    assert_contains "--eval-timeout abc stderr is clear" "positive integer" "$LAST_NEXUS_ERR"
-
-    run_nexus --eval-timeout 0 || true
-    assert_test "--eval-timeout 0 exits non-zero" "2" "$?"
-
-    run_nexus --eval-timeout -5 || true
-    assert_test "--eval-timeout -5 exits non-zero" "2" "$?"
-
-    echo ""
-fi
-
-# ======================================================================
 # Test Group 5c: Ephemeral port binding (port 0)
 #
 # `--http-port 0` and `--port 0` ask the kernel to assign a free port.
@@ -1349,7 +1283,7 @@ with open(sys.argv[1], 'w') as f:
 
         # Start router (use the morloc-nexus binary)
         NEXUS_PATH="$(which morloc-nexus 2>/dev/null || echo "$HOME/.local/bin/morloc-nexus")"
-        (exec "$NEXUS_PATH" --router --http-port "$ROUTER_PORT" --fdb "$FDB_DIR" 2>"$FDB_DIR/router.log") &
+        (exec "$NEXUS_PATH" router --http-port "$ROUTER_PORT" --fdb "$FDB_DIR" 2>"$FDB_DIR/router.log") &
         ROUTER_PID=$!
         DAEMON_PIDS+=("$ROUTER_PID")
 

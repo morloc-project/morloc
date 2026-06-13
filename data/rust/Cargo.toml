@@ -7,9 +7,11 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 indexmap = { version = "2", features = ["serde"] }
-rmp-serde = "1"
-twox-hash = "2"
-nix = { version = "0.29", features = ["signal", "socket", "mman", "process", "fs"] }
+# `xxhash64` is the only algorithm we use, always with an explicit seed,
+# so the `random` default feature (which pulls rand + getrandom) is
+# disabled. Keep `std` for the std::hash::Hasher impl.
+twox-hash = { version = "2", default-features = false, features = ["xxhash64", "std"] }
+nix = { version = "0.29", features = ["signal", "socket", "mman", "process", "fs", "user"] }
 clap = { version = "4", features = ["derive", "wrap_help"] }
 thiserror = "2"
 

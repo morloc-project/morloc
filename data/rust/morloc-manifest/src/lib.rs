@@ -130,11 +130,27 @@ pub struct Manifest {
     /// the program YAML declared no run-scope templates.
     #[serde(default)]
     pub run_log: Option<RunLog>,
+    /// Optional codegen features the underlying binary supports. The
+    /// nexus's per-mode clap builder reveals option groups keyed off
+    /// these strings: `"log"` is always present and unlocks the
+    /// `--log-dir` / `--summary` / `--quiet` group; `"debug_trace"`
+    /// unlocks the `--debug-cache-depth` / `--debug-cache-max` /
+    /// `--debug-recursion-cap` group; future capabilities (`"slurm"`,
+    /// `"sanitizer"`, `"profile"`) each get their own string. A
+    /// binary without a capability literally cannot accept (or
+    /// display) the corresponding flags -- clap rejects them as
+    /// unknown.
+    #[serde(default = "default_capabilities")]
+    pub capabilities: Vec<String>,
     /// **Reserved.** User-sourced free-form annotations on the module.
     /// Always emitted as `{}` today. Distinct from `build` (which is
     /// compiler-sourced).
     #[serde(default)]
     pub metadata: Metadata,
+}
+
+fn default_capabilities() -> Vec<String> {
+    vec!["log".to_string()]
 }
 
 /// Compiler-sourced metadata about how this manifest was produced.
@@ -928,6 +944,41 @@ mod tests {
         );
         let m = parse_manifest(&json).unwrap();
         assert_eq!(m.commands[0].args[0].kind_constraint(), Some("table"));
+    }
+
+    #[test]
+    fn test_capabilities_default_when_absent() {
+        // Manifests written by an older compiler that didn't know about
+        // capabilities must still parse, defaulting to ["log"].
+        let json = wrap("[]");
+        let m = parse_manifest(&json).unwrap();
+        assert_eq!(m.capabilities, vec!["log".to_string()]);
+    }
+
+    #[test]
+    fn test_capabilities_round_trip() {
+        let v = env!("CARGO_PKG_VERSION");
+        let json = format!(
+            r#"{{
+                "name": "main",
+                "build": {{
+                    "path": "/tmp/test",
+                    "time": 0,
+                    "morloc_version": "{}"
+                }},
+                "pools": [],
+                "commands": [],
+                "groups": [],
+                "capabilities": ["log", "debug_trace"],
+                "metadata": {{}}
+            }}"#,
+            v
+        );
+        let m = parse_manifest(&json).unwrap();
+        assert_eq!(
+            m.capabilities,
+            vec!["log".to_string(), "debug_trace".to_string()]
+        );
     }
 
     #[test]

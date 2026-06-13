@@ -966,6 +966,7 @@ data ManifestInputs = ManifestInputs
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
   , miRunLog              :: !(Maybe RenderedRunLog)
+  , miCapabilities        :: ![Text]
   }
 
 buildManifest :: ManifestInputs -> Text
@@ -983,6 +984,7 @@ buildManifest ManifestInputs{..} =
     , ("no_shm", jsonBool miNoShm)
     , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) miTmpdir)
     , ("run_log", runLogJson miRunLog)
+    , ("capabilities", jsonStrArr miCapabilities)
     , ("metadata", metadataEmpty)
     ]
   where
@@ -1214,6 +1216,15 @@ generate cs rASTs = do
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
   runLog <- renderRunLogTemplate
+  debugTrace <- MM.gets stateDebugTrace
+  -- Capability strings advertise optional codegen features baked into
+  -- the binary. The nexus's mode-specific clap parser reveals flag
+  -- groups keyed off these strings; a binary without a capability
+  -- literally cannot accept (or display) the corresponding flags.
+  -- @log@ is always present; @debug_trace@ is set when @morloc make
+  -- --debug@ was used. Future strings (@slurm@, @sanitizer@,
+  -- @profile@) accumulate the same way.
+  let capabilities = "log" : ["debug_trace" | debugTrace]
 
   let manifestJson =
         buildManifest
@@ -1236,6 +1247,7 @@ generate cs rASTs = do
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
             , miRunLog              = runLog
+            , miCapabilities        = capabilities
             }
       wrapperScript = makeWrapperScript manifestJson
 
@@ -1247,10 +1259,20 @@ generate cs rASTs = do
       , scriptMake = [SysExe outfileName]
       }
 
--- Build a self-contained wrapper script with embedded manifest
+-- Build a self-contained wrapper script with embedded manifest.
+--
+-- The `# morloc-program v<version>` sentinel comment is the marker
+-- `morloc-nexus daemon` uses to confirm a target path is a morloc
+-- wrapper before resolving the sibling `<target>.manifest`. The
+-- exec line hardcodes the `run` subcommand so the wrapper artifact
+-- can never be (mis)used to start a daemon directly -- daemons are
+-- launched through an explicit `morloc-nexus daemon <target>`.
 makeWrapperScript :: Text -> Text
 makeWrapperScript manifestJson =
-  "#!/bin/sh\nexec morloc-nexus \"$0\" \"$@\"\n### MANIFEST ###\n" <> manifestJson
+  "#!/bin/sh\n# morloc-program v"
+    <> MT.pack Morloc.Version.versionStr
+    <> "\nexec morloc-nexus run \"$0\" \"$@\"\n### MANIFEST ###\n"
+    <> manifestJson
 
 -- ======================================================================
 -- Utilities

@@ -29,7 +29,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true }
 rmp = "0.8"
-rmp-serde = { workspace = true }
 twox-hash = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }
@@ -44,6 +43,7 @@ arrow-csv = "58"
 arrow-cast = "58"
 bytes = "1"
 chrono = "0.4"
+anstream = "1"
 
 [build-dependencies]
 cbindgen = "0.28"

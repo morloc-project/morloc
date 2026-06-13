@@ -99,6 +99,9 @@ impl Drop for ArenaGuard {
 
 /// Begin a new arena scope on the current thread. Returns `Err` if a
 /// scope is already active (re-entry is treated as a bug).
+///
+/// Side-effect: resets the per-command stdin-claim flag so each
+/// command starts with a fresh stdin budget of one reader.
 pub fn enter() -> Result<ArenaGuard, MorlocError> {
     ARENA.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -111,6 +114,7 @@ pub fn enter() -> Result<ArenaGuard, MorlocError> {
             blocks: Vec::with_capacity(INITIAL_CAPACITY),
             files: Vec::new(),
         });
+        crate::cli::reset_stdin_claim();
         Ok(ArenaGuard { _priv: () })
     })
 }

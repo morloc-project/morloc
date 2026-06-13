@@ -1157,7 +1157,10 @@ mod auto_routing_tests {
     //! becoming alignment-sensitive; the boundary itself is checked
     //! once each side.
     use super::*;
-    use crate::packet::{MORLOC_INLINE_THRESHOLD, PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR};
+    use crate::packet::{
+        MORLOC_INLINE_THRESHOLD, PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR,
+        TEST_CONFIG_LOCK,
+    };
     use crate::shm::{self, Array, RelPtr};
 
     /// Byte offset of the `source` field inside the 32-byte packet
@@ -1207,7 +1210,13 @@ mod auto_routing_tests {
     /// Run `make_data_packet_auto` on a synthetic byte-array voidstar
     /// of size `n` and return the `source` byte from the resulting
     /// packet header.
+    ///
+    /// Acquires [`TEST_CONFIG_LOCK`] for the duration of the call so
+    /// the read of [`crate::packet::inline_threshold`] inside
+    /// `make_data_packet_auto` can't race with a write from a
+    /// concurrent `config_ffi::tests` test.
     fn auto_route_source_for(n: usize) -> u8 {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         ensure_shm();
         let schema = byte_array_schema();
         let cs = crate::cschema::CSchema::from_rust(&schema);
@@ -1264,21 +1273,32 @@ mod auto_routing_tests {
         assert_eq!(auto_route_source_for(65000), PACKET_SOURCE_MESG);
     }
 
+    /// Per-element overhead the size calculator adds beyond the raw
+    /// `sizeof::<Array>() + N` payload for the byte-array schema:
+    /// the wrapper plus the `array_data_alignment - 1` bytes the
+    /// allocator may need for SIMD/BLAS-aligned element storage
+    /// (see [`crate::ffi::calc_voidstar_size_inner`]).
+    fn byte_array_flat_overhead() -> usize {
+        let schema = byte_array_schema();
+        let elem_align = schema.parameters[0].array_data_alignment();
+        std::mem::size_of::<Array>() + elem_align.saturating_sub(1)
+    }
+
     #[test]
     fn at_threshold_inlines() {
         // The contract is `flat_size <= MORLOC_INLINE_THRESHOLD` so the
-        // exactly-equal case must inline. Wrapper is 16 bytes so an
-        // N-byte data section gives flat = 16+N; pick N so 16+N equals
-        // the threshold exactly (this is also the largest allowed
-        // inline payload).
-        let n = MORLOC_INLINE_THRESHOLD - std::mem::size_of::<Array>();
+        // exactly-equal case must inline. flat_size for an N-byte
+        // byte-array payload is `overhead + N`; pick N so the sum
+        // equals the threshold exactly (this is also the largest
+        // allowed inline payload).
+        let n = MORLOC_INLINE_THRESHOLD - byte_array_flat_overhead();
         assert_eq!(auto_route_source_for(n), PACKET_SOURCE_MESG);
     }
 
     #[test]
     fn one_byte_over_threshold_uses_rptr() {
         // Same wrapper, one extra data byte: must flip to RPTR.
-        let n = MORLOC_INLINE_THRESHOLD - std::mem::size_of::<Array>() + 1;
+        let n = MORLOC_INLINE_THRESHOLD - byte_array_flat_overhead() + 1;
         assert_eq!(auto_route_source_for(n), PACKET_SOURCE_RPTR);
     }
 
