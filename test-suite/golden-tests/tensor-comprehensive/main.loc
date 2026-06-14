@@ -365,7 +365,7 @@ cornersPyToR = rCornersT3 pyMakeT3
 -- =========================================================================
 matFileBin :: Str -> <IO> ?(Matrix 3 4 Real)
 matFileBin path = do
-  @save cppMakeMat34 path
+  @save 0 cppMakeMat34 path
   @load path
 
 matFileJson :: Str -> <IO> ?(Matrix 3 4 Real)
@@ -380,7 +380,7 @@ matFileMsg path = do
 
 matFileSumBin :: Str -> <IO> ?Real
 matFileSumBin path = do
-  @save cppMakeMat34 path
+  @save 0 cppMakeMat34 path
   m <- @load path
   mapMaybe pySumMat34 m
 

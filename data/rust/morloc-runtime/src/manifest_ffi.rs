@@ -171,6 +171,10 @@ pub struct MorlocLamExpression {
 #[repr(C)]
 pub struct MorlocSaveExpression {
     pub format: *mut c_char,
+    // zstd compression-level expression (0-9). Only consulted when
+    // `format` is "voidstar"; codegen emits a literal 0 for the other
+    // formats so the layout stays uniform.
+    pub level: *mut MorlocExpression,
     pub value: *mut MorlocExpression,
     pub path: *mut MorlocExpression,
 }
@@ -766,10 +770,12 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             }
             let fmt_str = je.get("format").and_then(|v| v.as_str()).unwrap_or("voidstar");
             let c_fmt = CString::new(fmt_str).unwrap_or_default();
+            let level = build_expr(je.get("level").unwrap_or(&serde_json::Value::Null))?;
             let value = build_expr(je.get("value").unwrap_or(&serde_json::Value::Null))?;
             let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
             let save = libc::calloc(1, std::mem::size_of::<MorlocSaveExpression>()) as *mut MorlocSaveExpression;
             (*save).format = c_fmt.into_raw();
+            (*save).level = level;
             (*save).value = value;
             (*save).path = path;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;

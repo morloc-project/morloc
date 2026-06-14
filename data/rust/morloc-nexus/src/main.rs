@@ -704,8 +704,57 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
                 process::clean_exit(1);
             }
 
+            // If --compression-level > 0, run the result packet through
+            // morloc-runtime-types' compression helper before writing. The
+            // helper is a no-op for non-MESG sources (FILE-source = a
+            // path, RPTR = a relptr -- neither benefits from compression
+            // and the downstream consumer wouldn't know how to interpret
+            // the result), but it warns so the user knows their -z was
+            // silently dropped for that result type.
+            let packet_slice = unsafe {
+                std::slice::from_raw_parts(result_packet, packet_size)
+            };
+            let bytes_to_write: Vec<u8> = if config.compression_level > 0 {
+                match morloc_runtime_types::compression::CompressionLevel::from_u8(
+                    config.compression_level,
+                ) {
+                    Ok(lvl) => match morloc_runtime_types::compression::compress_packet(
+                        packet_slice,
+                        lvl,
+                    ) {
+                        Ok(morloc_runtime_types::compression::CompressOutcome::Compressed(v)) => v,
+                        Ok(morloc_runtime_types::compression::CompressOutcome::NoOp) => {
+                            eprintln!(
+                                "Warning: --compression-level {} ignored for non-MESG result packet",
+                                config.compression_level
+                            );
+                            packet_slice.to_vec()
+                        }
+                        Err(e) => {
+                            eprintln!("Error: compression failed: {}", e);
+                            unsafe { libc::free(result_packet as *mut c_void) };
+                            process::clean_exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error: invalid compression level: {}", e);
+                        unsafe { libc::free(result_packet as *mut c_void) };
+                        process::clean_exit(1);
+                    }
+                }
+            } else {
+                packet_slice.to_vec()
+            };
+
             let output_c = CString::new(output_path.as_str()).unwrap();
-            let rc = unsafe { write_atomic(output_c.as_ptr(), result_packet, packet_size, &mut errmsg) };
+            let rc = unsafe {
+                write_atomic(
+                    output_c.as_ptr(),
+                    bytes_to_write.as_ptr(),
+                    bytes_to_write.len(),
+                    &mut errmsg,
+                )
+            };
             if rc != 0 || !errmsg.is_null() {
                 let msg = if !errmsg.is_null() {
                     let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();

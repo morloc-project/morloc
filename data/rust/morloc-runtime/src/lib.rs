@@ -17,6 +17,7 @@ pub mod hash;
 // the `MorlocSocket` struct without re-defining it.
 pub use morloc_runtime_types::shm_types;
 pub use morloc_runtime_types::daemon_socket;
+pub use morloc_runtime_types::compression;
 pub mod ipc;
 pub mod json;
 pub mod mpack;

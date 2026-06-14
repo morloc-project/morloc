@@ -888,14 +888,19 @@ genericPrintExpr desc = go
     go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_hash(" <> go e <> ", " <> schemaRef sid <> ")"
-    go (IIntrinsicSave fmt sid e path) =
+    go (IIntrinsicSave fmt sid level e path) =
       let prefix = ldIntrinsicPrefix desc
           saveFn :: Text
           saveFn = case fmt of
             "json"     -> "mlc_save_json"
             "voidstar" -> "mlc_save_voidstar"
             _          -> "mlc_save"
-       in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> schemaRef sid <> ", " <> go path <> ")"
+       in pretty prefix <> pretty saveFn
+            <> "(" <> go e
+            <> ", " <> schemaRef sid
+            <> ", " <> go level
+            <> ", " <> go path
+            <> ")"
     go (IIntrinsicLoad sid _ path) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_load(" <> schemaRef sid <> ", " <> go path <> ")"

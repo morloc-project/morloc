@@ -72,6 +72,9 @@ pub struct NexusConfig {
     /// Per-midx cap on catch fires before further entries are dropped
     /// for that midx. `None` = use the runtime default (3). 0 = no cap.
     pub debug_recursion_cap: Option<u32>,
+    /// zstd compression preset for packets written to --output-file
+    /// (output-form packet). 0 = no compression.
+    pub compression_level: u8,
 }
 
 impl Default for NexusConfig {
@@ -97,6 +100,7 @@ impl Default for NexusConfig {
             debug_cache_depth: None,
             debug_cache_max: None,
             debug_recursion_cap: None,
+            compression_level: 0,
         }
     }
 }

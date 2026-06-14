@@ -9,10 +9,15 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
 // ── mlc_save: serialize to msgpack file ────────────────────────────────────
 
+// `level` is accepted for ABI uniformity with mlc_save_voidstar but is
+// ignored here: the msgpack file is not a morloc packet and has no header
+// in which to record a compression algorithm. Compressing the file as a
+// whole is the deferred "compressed JSON/MPK input" workstream.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save(
     data: *const c_void,
     schema: *const CSchema,
+    _level: u8,
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -51,10 +56,12 @@ pub unsafe extern "C" fn mlc_save(
 
 // ── mlc_save_json: serialize to JSON file ──────────────────────────────────
 
+// `level` accepted but ignored; see mlc_save for the rationale.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_json(
     data: *const c_void,
     schema: *const CSchema,
+    _level: u8,
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -88,12 +95,17 @@ pub unsafe extern "C" fn mlc_save_json(
     0
 }
 
-// ── mlc_save_voidstar: serialize to binary voidstar file ───────────────────
+// ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
 
+// On disk: 32-byte morloc packet header + flattened voidstar payload. When
+// `level > 0` the payload region is zstd-compressed and the header's
+// compression byte is set to PACKET_COMPRESSION_ZSTD; level == 0 writes
+// the legacy uncompressed shape.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_voidstar(
     data: *const c_void,
     schema: *const CSchema,
+    level: u8,
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -112,6 +124,13 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     }
 
     let mut err: *mut c_char = ptr::null_mut();
+
+    // Resolve the compression level upfront so a bad level aborts before
+    // we touch the filesystem.
+    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
+        Ok(lvl) => lvl,
+        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+    };
 
     // Get directory for temp file
     let path_str = CStr::from_ptr(path).to_string_lossy();
@@ -149,23 +168,55 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
-    // Write flattened data
-    if write_binary_fd(fd, blob as *const c_char, blob_size, &mut err) != 0 {
+    // If a compression level is selected, swap the flattened buffer for
+    // its zstd-compressed form before writing the payload region. The
+    // raw blob is freed either way; the compressed bytes live in `comp`
+    // for the rest of the function when level > 0.
+    let (payload_ptr, payload_len, compression_byte, comp_buf): (*const u8, usize, u8, Option<Vec<u8>>) =
+        if clvl.is_none() {
+            (blob as *const u8, blob_size, crate::packet::PACKET_COMPRESSION_NONE, None)
+        } else {
+            let raw_slice = std::slice::from_raw_parts(blob as *const u8, blob_size);
+            match crate::compression::compress_payload_zstd(raw_slice, clvl) {
+                Ok(comp) => (
+                    comp.as_ptr(),
+                    comp.len(),
+                    crate::packet::PACKET_COMPRESSION_ZSTD,
+                    Some(comp),
+                ),
+                Err(e) => {
+                    libc::free(blob as *mut c_void);
+                    libc::close(fd);
+                    libc::unlink(tmp_buf.as_ptr() as *const c_char);
+                    set_errmsg(errmsg, &e);
+                    return 1;
+                }
+            }
+        };
+
+    if write_binary_fd(fd, payload_ptr as *const c_char, payload_len, &mut err) != 0 {
         libc::free(blob as *mut c_void);
+        drop(comp_buf);
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
         *errmsg = err;
         return 1;
     }
     libc::free(blob as *mut c_void);
+    drop(comp_buf);
 
-    // Seek back and write real header
+    // Seek back and write the real header. data_mesg fills in everything
+    // except the compression byte; patch byte 15 in the serialized header
+    // when level > 0 to record PACKET_COMPRESSION_ZSTD. (Byte 15 is the
+    // data-command compression slot: 4 magic + 2 plain + 2 version + 2
+    // flavor + 2 mode + 1 cmd_type + 1 source + 1 format = 15.)
     libc::lseek(fd, 0, libc::SEEK_SET);
     let header = crate::packet::PacketHeader::data_mesg(
         crate::packet::PACKET_FORMAT_VOIDSTAR,
-        blob_size as u64,
+        payload_len as u64,
     );
-    let hdr_bytes = header.to_bytes();
+    let mut hdr_bytes = header.to_bytes();
+    hdr_bytes[15] = compression_byte;
     write_binary_fd(fd, hdr_bytes.as_ptr() as *const c_char, hdr_bytes.len(), &mut err);
 
     libc::fsync(fd);
@@ -219,6 +270,42 @@ pub unsafe extern "C" fn mlc_load(
         }
         return ptr::null_mut();
     }
+
+    // If the file is a morloc data packet with a non-NONE compression byte,
+    // decompress to a fresh malloc'd buffer and hand THAT to the format
+    // detector. Non-packet inputs (raw JSON / raw msgpack) and uncompressed
+    // packets pass through unchanged so the legacy path is unaffected.
+    let raw_slice = std::slice::from_raw_parts(data, file_size);
+    let (data, file_size) = match crate::compression::decompress_packet_if_needed(raw_slice) {
+        Ok(bytes) => {
+            if bytes.as_ptr() == data as *const u8 && bytes.len() == file_size {
+                // Borrowed case from a non-decompress path: keep the
+                // existing buffer. (Our helper currently always allocates,
+                // but stay defensive against future changes.)
+                (data, file_size)
+            } else {
+                // Allocate a new libc::malloc buffer so the existing
+                // free-on-fail contract works uniformly.
+                let new_size = bytes.len();
+                let new_buf = libc::malloc(new_size) as *mut u8;
+                if new_buf.is_null() {
+                    libc::free(data as *mut libc::c_void);
+                    let path_str = CStr::from_ptr(path).to_string_lossy();
+                    eprintln!("@load warning ({}): malloc failed during decompression", path_str);
+                    return ptr::null_mut();
+                }
+                ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
+                libc::free(data as *mut libc::c_void);
+                (new_buf, new_size)
+            }
+        }
+        Err(e) => {
+            libc::free(data as *mut libc::c_void);
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            eprintln!("@load warning ({}): {}", path_str, e);
+            return ptr::null_mut();
+        }
+    };
 
     let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
     if result.is_null() && !err.is_null() {

@@ -14,6 +14,10 @@ twox-hash = { version = "2", default-features = false, features = ["xxhash64", "
 nix = { version = "0.29", features = ["signal", "socket", "mman", "process", "fs", "user"] }
 clap = { version = "4", features = ["derive", "wrap_help"] }
 thiserror = "2"
+# `zstdmt` unlocks the multithreaded encoder used by
+# compression::choose_workers for >=1 MiB payloads. Without this feature
+# `Encoder::multithread` does not exist.
+zstd = { version = "0.13", features = ["zstdmt"] }
 
 [profile.release]
 opt-level = 2

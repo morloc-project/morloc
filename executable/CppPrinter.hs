@@ -96,10 +96,10 @@ printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
 printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash sid e) =
   [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicSave fmt sid e path)
-  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
-  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
-  | otherwise = [idoc|_mlc_save(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicSave fmt sid level e path)
+  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
+  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
+  | otherwise = [idoc|_mlc_save(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
 printExpr (IIntrinsicLoad sid (Just t) path) =
   [idoc|_mlc_load<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicLoad sid Nothing path) =

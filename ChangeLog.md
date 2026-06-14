@@ -1,4 +1,13 @@
+0.90.0 [2026-07-xx]
+-------------------
+
+Packet compression with zstd
+ * `-z <level>` morloc-nexus argument with 0 being no compression and 9 max
+ * add compression level to `@save` intrinsic as first argument
+ * add dynamically decided multi-threading to zstd compression
+
 0.89.0 [2026-07-13]
+-------------------
 
 Observability
   * add logging for labeled terms with start/pass/fail log entries with ANSI

@@ -1,0 +1,59 @@
+-- @save / @load round-trip with zstd compression.
+--
+-- Exercises the full pipeline added by the compression feature:
+--   * Haskell typechecks @save with its new arity-3 signature
+--     (Int -> a -> Str -> <IO> ()).
+--   * Nexus and Imperative codegen threads the level expression
+--     through to the runtime call.
+--   * mlc_save_voidstar zstd-compresses the flattened voidstar
+--     payload and stamps PACKET_COMPRESSION_ZSTD into the header.
+--   * mlc_load detects the compression byte at the start of the
+--     buffer it just read and decompresses before format detection.
+--
+-- The Makefile additionally inspects the on-disk header byte at
+-- offset 15 (the data-command compression slot) to confirm that
+-- level 0 writes 0x00 and levels 1, 5, 9 all write 0x01. Without
+-- that check, the test would still pass if compression were
+-- silently dropped (mlc_load's no-op branch decompresses nothing
+-- successfully).
+
+module main
+  ( binIntLvl0
+  , binIntLvl1
+  , binIntLvl5
+  , binIntLvl9
+  , binListLvl0
+  , binListLvl5
+  )
+
+effect IO
+
+binIntLvl0 :: Int -> Str -> <IO> ?Int
+binIntLvl0 x path = do
+  @save 0 x path
+  @load path
+
+binIntLvl1 :: Int -> Str -> <IO> ?Int
+binIntLvl1 x path = do
+  @save 1 x path
+  @load path
+
+binIntLvl5 :: Int -> Str -> <IO> ?Int
+binIntLvl5 x path = do
+  @save 5 x path
+  @load path
+
+binIntLvl9 :: Int -> Str -> <IO> ?Int
+binIntLvl9 x path = do
+  @save 9 x path
+  @load path
+
+binListLvl0 :: [Int] -> Str -> <IO> ?[Int]
+binListLvl0 xs path = do
+  @save 0 xs path
+  @load path
+
+binListLvl5 :: [Int] -> Str -> <IO> ?[Int]
+binListLvl5 xs path = do
+  @save 5 xs path
+  @load path

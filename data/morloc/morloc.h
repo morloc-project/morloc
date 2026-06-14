@@ -212,6 +212,7 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 #define PACKET_FORMAT_ARROW    0x05
 
 #define PACKET_COMPRESSION_NONE 0x00
+#define PACKET_COMPRESSION_ZSTD 0x01
 #define PACKET_ENCRYPTION_NONE  0x00
 
 #define PACKET_STATUS_PASS 0x00
@@ -1153,9 +1154,12 @@ char* manifest_to_discovery_json(const manifest_t* manifest);
 // Section 25: Function declarations -- Intrinsics
 // ========================================================================
 
-int mlc_save(const absptr_t data, const Schema* schema, const char* path, ERRMSG);
-int mlc_save_json(const absptr_t data, const Schema* schema, const char* path, ERRMSG);
-int mlc_save_voidstar(const absptr_t data, const Schema* schema, const char* path, ERRMSG);
+int mlc_save(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
+int mlc_save_json(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
+// @save voidstar: produces a morloc data packet. When level > 0 the
+// packet's payload is zstd-compressed and the header carries
+// PACKET_COMPRESSION_ZSTD; level == 0 writes uncompressed (legacy shape).
+int mlc_save_voidstar(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
 void* mlc_load(const char* path, const Schema* schema, ERRMSG);
 char* mlc_hash(const absptr_t data, const Schema* schema, ERRMSG);
 char* mlc_show(const absptr_t data, const Schema* schema, ERRMSG);

@@ -269,10 +269,10 @@ data Pattern
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
-  = IntrSave      -- ^ @save   :: a -> Str -> {()}   -- voidstar format
-  | IntrSaveM     -- ^ @savem  :: a -> Str -> {()}   -- msgpack format
-  | IntrSaveJ     -- ^ @savej  :: a -> Str -> {()}   -- JSON format
-  | IntrLoad      -- ^ @load   :: Str -> {?a}        -- auto-detect format
+  = IntrSave      -- ^ @save  :: Int -> a -> Str -> <IO>() -- voidstar packet, with zstd level 0-9
+  | IntrSaveM     -- ^ @savem :: a -> Str -> <IO>()         -- raw msgpack file
+  | IntrSaveJ     -- ^ @savej :: a -> Str -> <IO>()         -- raw JSON file
+  | IntrLoad      -- ^ @load  :: Str -> <IO> ?a             -- auto-detect format, auto-decompress packets
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
@@ -327,7 +327,7 @@ parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
 intrinsicArity :: Intrinsic -> Int
-intrinsicArity IntrSave = 2
+intrinsicArity IntrSave = 3
 intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1

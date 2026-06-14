@@ -15,7 +15,7 @@ identity :: a -> a
 
 roundTripBin :: Int -> Str -> <IO> ?Int
 roundTripBin x path = do
-  @save (identity x) path
+  @save 0 (identity x) path
   @load path
 
 roundTripMsg :: Int -> Str -> <IO> ?Int

@@ -66,6 +66,8 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
+
       , golden "debug-trace" "debug-trace"
       , golden "debug-trace-dedup" "debug-trace-dedup"
       , golden "debug-trace-recursive" "debug-trace-recursive"

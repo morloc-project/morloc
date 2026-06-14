@@ -1184,8 +1184,12 @@ checkIntrinsicArgs i g intr argTypes = do
     else do
       -- Check specific argument types
       case (intr, argTypes) of
-        -- @save/@savem/@savej: a -> Str -> {()}
-        (IntrSave, [_, pathT]) -> subtype' i pathT BT.strU g
+        -- @save: Int -> a -> Str -> <IO>(). Level constrained to integer
+        -- domain; the value is unconstrained; path must be Str.
+        (IntrSave, [levelT, _, pathT]) -> do
+          g' <- subtype' i levelT BT.intU g
+          subtype' i pathT BT.strU g'
+        -- @savem/@savej: a -> Str -> <IO>()
         (IntrSaveM, [_, pathT]) -> subtype' i pathT BT.strU g
         (IntrSaveJ, [_, pathT]) -> subtype' i pathT BT.strU g
         -- @load: Str -> {?a}

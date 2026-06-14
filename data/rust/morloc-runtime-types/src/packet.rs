@@ -43,6 +43,7 @@ pub const PACKET_FORMAT_ARROW: u8 = 0x05;
 // ── Compression / encryption ───────────────────────────────────────────────
 
 pub const PACKET_COMPRESSION_NONE: u8 = 0x00;
+pub const PACKET_COMPRESSION_ZSTD: u8 = 0x01;
 pub const PACKET_ENCRYPTION_NONE: u8 = 0x00;
 
 // ── Status ─────────────────────────────────────────────────────────────────

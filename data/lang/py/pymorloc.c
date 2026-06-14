@@ -2308,20 +2308,25 @@ error:
 static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
+    long long level_ll;
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+    // Args: (value, schema, level, path). The level is accepted here
+    // for ABI uniformity with mlc_save_voidstar; the runtime ignores it
+    // for the msgpack format (not a packet file).
+    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
         PyRAISE("Failed to parse arguments");
     }
+    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save, voidstar, schema, path);
+    PyTRY(mlc_save, voidstar, schema, level, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -2344,20 +2349,24 @@ error:
 static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
+    long long level_ll;
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+    // Args: (value, schema, level, path). level is the zstd preset
+    // (0 = uncompressed, 1-9 = increasing ratio).
+    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
         PyRAISE("Failed to parse arguments");
     }
+    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_voidstar, voidstar, schema, path);
+    PyTRY(mlc_save_voidstar, voidstar, schema, level, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -2380,20 +2389,23 @@ error:
 static PyObject* pybinding__mlc_save_json(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
+    long long level_ll;
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+    // Args: (value, schema, level, path). level accepted for ABI uniformity.
+    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
         PyRAISE("Failed to parse arguments");
     }
+    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_json, voidstar, schema, path);
+    PyTRY(mlc_save_json, voidstar, schema, level, path);
 
     {
         char* shfree_errmsg = NULL;

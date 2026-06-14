@@ -131,7 +131,7 @@ data IExpr
   | IRawExpr Text
   | IDoBlock IExpr -- effect: lambda wrapping expression
   | IEval IExpr -- eval: call effect with no args
-  | IIntrinsicSave Text Int IExpr IExpr -- format, schemaId, data, path
+  | IIntrinsicSave Text Int IExpr IExpr IExpr -- format, schemaId, level, data, path
   | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
   | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
@@ -648,18 +648,32 @@ lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [dataDocs, pathDocs]) = do
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "voidstar"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+      saveExpr = IIntrinsicSave fmt sid
+                   (IRawExpr (render (poolExpr levelDocs)))
+                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr pathDocs)))
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs, pathDocs]
+-- @savem/@savej are not packet formats; codegen always passes a zero
+-- level expression so the printed call shape is uniform with @save.
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "msgpack"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+      saveExpr = IIntrinsicSave fmt sid
+                   (IRawExpr "0")
+                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr pathDocs)))
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "json"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+      saveExpr = IIntrinsicSave fmt sid
+                   (IRawExpr "0")
+                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr pathDocs)))
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   innerType <- case typeFof origExpr of

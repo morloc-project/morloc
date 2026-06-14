@@ -368,16 +368,29 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- user-side struct it cannot serialize.
     unpackDataArgIfNeeded ::
       Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
+    -- @save's first argument is the compression level, not the data;
+    -- the data is the second positional arg. Apply the unpacker there.
+    unpackDataArgIfNeeded m IntrSave (levelArg : dataArg : rest) = do
+      rest' <- packDataArg m dataArg
+      return (levelArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr (dataArg : rest)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
-          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-          case ast of
-            SerialPack _ (packer, _) -> do
-              let unpackerSrc = typePackerReverse packer
-                  unpackedType = typePackerUnpacked packer
-              return (AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg] : rest)
-            _ -> return (dataArg : rest)
+      | intr `elem` [IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
+          rest' <- packDataArg m dataArg
+          return (rest' ++ rest)
     unpackDataArgIfNeeded _ _ args = return args
+
+    -- Pack a single data arg through its language's unpacker if it has
+    -- a Packable instance. Returns either a single-element list with the
+    -- wrapped expression or the original arg unchanged.
+    packDataArg :: Int -> NativeExpr -> MorlocMonad [NativeExpr]
+    packDataArg m dataArg = do
+      ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+      case ast of
+        SerialPack _ (packer, _) -> do
+          let unpackerSrc = typePackerReverse packer
+              unpackedType = typePackerUnpacked packer
+          return [AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg]]
+        _ -> return [dataArg]
 
     -- Symmetric to unpackDataArgIfNeeded: @load and @read return optional
     -- values, and the runtime emits the wire form. When the user-facing
@@ -410,8 +423,12 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
+    -- @save's data is the second positional arg (after the level).
+    intrinsicSchema m IntrSave _ (_levelArg : dataArg : _) = do
+      ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrSchema] = do
+      | intr `elem` [IntrHash, IntrSaveM, IntrSaveJ, IntrShow, IntrSchema] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =

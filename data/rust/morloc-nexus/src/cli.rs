@@ -95,6 +95,13 @@ pub struct DispatchOptions {
     /// Override the summary.json location.
     #[arg(long, value_name = "PATH")]
     pub summary: Option<String>,
+
+    /// zstd compression preset for packet payloads written via -o
+    /// (output-form packet). 0 = no compression (default), 1 = fastest,
+    /// 9 = maximum.
+    #[arg(short = 'z', long = "compression-level",
+          default_value_t = 0, value_name = "N")]
+    pub compression_level: u8,
 }
 
 /// One-shot CLI invocation of a compiled morloc program.
@@ -234,6 +241,7 @@ fn apply_dispatch_options(cfg: &mut NexusConfig, opts: &DispatchOptions) {
     cfg.quiet = opts.quiet;
     cfg.log_dir = opts.log_dir.clone();
     cfg.summary_path = opts.summary.clone();
+    cfg.compression_level = opts.compression_level;
 }
 
 // ============================================================

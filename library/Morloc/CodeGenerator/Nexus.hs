@@ -84,7 +84,11 @@ data NexusExpr
   | ShowX Text NexusExpr  -- schema (return type = Str), child expression
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
-  | SaveX Text Text NexusExpr NexusExpr  -- format + schema + value + path -> ()
+  | SaveX Text Text NexusExpr NexusExpr NexusExpr
+  -- ^ format + schema + level + value + path -> (). For "voidstar" the
+  -- level is a 0-9 zstd-preset expression evaluated at runtime; for
+  -- "msgpack"/"json" the level is currently always a zero literal
+  -- because those formats are not packets and don't carry compression.
   | LoadX Text NexusExpr  -- schema + path -> ?a
   | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
                           -- (Just-coerce: at runtime sets tag=1 and writes
@@ -478,12 +482,27 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ReadX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [valExpr, path])) =
-      SaveX "voidstar" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, valExpr, path])) =
+      SaveX "voidstar"
+        <$> type2schema t
+        <*> toNexusExpr levelExpr
+        <*> toNexusExpr valExpr
+        <*> toNexusExpr path
+    -- @savem/@savej carry no compression level; emit a zero literal so the
+    -- nexus dispatch (which always reads a level field from save_expr) has
+    -- a uniform shape. The runtime ignores the field for non-voidstar formats.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [valExpr, path])) =
-      SaveX "msgpack" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+      SaveX "msgpack"
+        <$> type2schema t
+        <*> pure (LitX IntX "0")
+        <*> toNexusExpr valExpr
+        <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [valExpr, path])) =
-      SaveX "json" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+      SaveX "json"
+        <$> type2schema t
+        <*> pure (LitX IntX "0")
+        <*> toNexusExpr valExpr
+        <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
       LoadX <$> type2schema t <*> toNexusExpr path
     -- @lang in a language-independent context is always "morloc"; the
@@ -843,11 +862,12 @@ exprToJson (HashX schema child) =
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
     ]
-exprToJson (SaveX fmt schema value path) =
+exprToJson (SaveX fmt schema level value path) =
   jsonObj
     [ ("tag", jsonStr "save")
     , ("format", jsonStr fmt)
     , ("schema", jsonStr schema)
+    , ("level", exprToJson level)
     , ("value", exprToJson value)
     , ("path", exprToJson path)
     ]

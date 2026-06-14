@@ -287,36 +287,40 @@ std::string _mlc_hash(const T& value, Schema* schema) {
     return result;
 }
 
-// Save a value to file in msgpack format
+// Save a value to file in msgpack format. The `level` arg is accepted
+// for ABI uniformity with mlc_save_voidstar and forwarded; the runtime
+// ignores it for non-packet formats.
 template <typename T>
-void _mlc_save(const T& value, Schema* schema, const std::string& path) {
+void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
-    mlc_save(voidstar, schema, path.c_str(), &errmsg);
+    mlc_save(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
     }
 }
 
-// Save a value to file in flat voidstar binary format
+// Save a value to file in flat voidstar binary format. `level` is the
+// zstd preset (0 = uncompressed, 1-9 = increasing ratio); the runtime
+// stamps PACKET_COMPRESSION_ZSTD into the packet header when level > 0.
 template <typename T>
-void _mlc_save_voidstar(const T& value, Schema* schema, const std::string& path) {
+void _mlc_save_voidstar(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
-    mlc_save_voidstar(voidstar, schema, path.c_str(), &errmsg);
+    mlc_save_voidstar(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
     }
 }
 
-// Save a value to file in JSON format
+// Save a value to file in JSON format. `level` accepted for ABI uniformity.
 template <typename T>
-void _mlc_save_json(const T& value, Schema* schema, const std::string& path) {
+void _mlc_save_json(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = toAnything(schema, value);
     char* errmsg = NULL;
-    mlc_save_json(voidstar, schema, path.c_str(), &errmsg);
+    mlc_save_json(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)

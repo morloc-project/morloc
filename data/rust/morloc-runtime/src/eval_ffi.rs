@@ -1063,11 +1063,24 @@ unsafe fn morloc_eval_r(
         MorlocExpressionType::Save => {
             // Save value to file at path
             let save = (*expr).expr.save_expr;
+            let level_expr = (*save).level;
             let value_expr = (*save).value;
             let path_expr = (*save).path;
             let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("voidstar");
 
             let value_schema = (*value_expr).schema;
+            // Evaluate the compression level. The level expression is
+            // typechecked as Int; clamp into u8 with a 0-9 range check.
+            let level_schema = (*level_expr).schema;
+            let level_result = morloc_eval_r(level_expr, ptr::null_mut(), 0, bndvars)?;
+            let level_i64 = read_int_as_i64(level_result, level_schema)?;
+            if !(0..=9).contains(&level_i64) {
+                return Err(MorlocError::Other(format!(
+                    "@save compression level must be in 0..=9, got {level_i64}"
+                )));
+            }
+            let level: u8 = level_i64 as u8;
+
             let value_result = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
 
@@ -1082,15 +1095,15 @@ unsafe fn morloc_eval_r(
             *path_cstr.add(path_arr.size) = 0;
 
             extern "C" {
-                fn mlc_save(data: *const c_void, schema: *const CSchema, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-                fn mlc_save_json(data: *const c_void, schema: *const CSchema, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-                fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+                fn mlc_save(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+                fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+                fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
             }
             let mut err: *mut c_char = ptr::null_mut();
             let rc = match fmt {
-                "json" => mlc_save_json(value_result as *const c_void, value_schema, path_cstr, &mut err),
-                "msgpack" => mlc_save(value_result as *const c_void, value_schema, path_cstr, &mut err),
-                _ => mlc_save_voidstar(value_result as *const c_void, value_schema, path_cstr, &mut err),
+                "json" => mlc_save_json(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
+                "msgpack" => mlc_save(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
+                _ => mlc_save_voidstar(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
             };
             libc::free(path_cstr as *mut c_void);
             if rc != 0 && !err.is_null() {
