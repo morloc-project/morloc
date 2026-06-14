@@ -1,0 +1,11 @@
+module main (result)
+
+import morloc-test-expose-py
+import root-py
+
+source Py from "src.py" ("compute")
+
+compute :: Int -> Int
+
+result :: Int -> Int
+result x = compute x

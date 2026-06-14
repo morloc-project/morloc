@@ -873,7 +873,7 @@ cmdUninstall args config = do
       return True
     else do
       let skipDepCheck = uninstallAll args
-      allPassed <- mapM (\name -> uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name) names
+      allPassed <- mapM (\name -> uninstallOne config fdbDir libDir binDir exeDir dryRun skipDepCheck kind name) names
       let anyRemoved = or allPassed
 
       -- Regenerate completions if anything was actually removed
@@ -884,8 +884,8 @@ cmdUninstall args config = do
       return True
 
 uninstallOne ::
-  FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Bool -> Maybe ListKind -> String -> IO Bool
-uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
+  Config.Config -> FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Bool -> Maybe ListKind -> String -> IO Bool
+uninstallOne config fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
   let moduleManifest = fdbDir </> name ++ ".module"
       programManifest = fdbDir </> name ++ ".manifest"
       moduleDir = libDir </> name
@@ -918,6 +918,9 @@ uninstallOne fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
             else do
               if hasModuleDir then removeDirectoryRecursive moduleDir else return ()
               if hasModule then removeFile moduleManifest else return ()
+              -- Symmetric with install: wipe per-language exposed copies so
+              -- headers / Python pkgs / R scripts don't outlive the module.
+              Mod.wipeExposed config (T.pack name)
               hPutStrLn stderr $ "Uninstalled module '" <> name <> "'"
         else return ()
 

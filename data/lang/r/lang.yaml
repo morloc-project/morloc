@@ -15,7 +15,8 @@ allow_string_null: false
 preamble:
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
   - '.morloc.srcdir <- normalizePath(file.path(dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1])), "..", ".."), mustWork=FALSE)'
-  - '.morloc.source <- function(p) source(ifelse(startsWith(p, "/"), p, file.path(.morloc.srcdir, p)), chdir=TRUE)'
+  - '.morloc.libdir <- "{{home}}/lib/R"'
+  - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { local <- file.path(.morloc.srcdir, p); if (file.exists(local)) local else file.path(.morloc.libdir, p) }, chdir=TRUE)'
 
 # Literals
 ldBoolTrue: "TRUE"

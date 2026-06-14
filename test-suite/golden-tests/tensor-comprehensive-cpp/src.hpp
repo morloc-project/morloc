@@ -1,6 +1,6 @@
 #ifndef __SRC_HPP__
 #define __SRC_HPP__
-#include "mlc_tensor.hpp"
+#include "tensor.hpp"
 #include <vector>
 #include <cstdint>
 #include <cmath>

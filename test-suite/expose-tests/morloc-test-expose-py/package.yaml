@@ -1,0 +1,8 @@
+name: morloc-test-expose-py
+version: 0.1.0
+synopsis: Fixture for expose-tests; verifies Python subpackage exposure with relative imports.
+
+expose:
+  py:
+    - __init__.py
+    - pkg/

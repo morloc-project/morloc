@@ -1,0 +1,8 @@
+name: morloc-test-expose-r
+version: 0.1.0
+synopsis: Fixture for expose-tests; verifies R script exposure with relative source() calls.
+
+expose:
+  r:
+    - util.R
+    - helpers.R

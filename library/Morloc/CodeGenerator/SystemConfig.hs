@@ -68,6 +68,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   ensureDirectory verbose "morloc home directory" homeDir
   ensureDirectory verbose "morloc lib directory" libDir
   ensureDirectory verbose "morloc include directory" includeDir
+  ensureDirectory verbose "morloc python lib directory" (libDir </> "python")
+  ensureDirectory verbose "morloc R lib directory" (libDir </> "R")
   ensureDirectory verbose "morloc tmp directory" tmpDir
   ensureDirectory verbose "morloc opt directory" optDir
   ensureDirectory verbose "morloc module directory" srcLibrary

@@ -20,7 +20,6 @@
 #include <type_traits>
 
 #include "morloc.h"
-#include "mlc_tensor.hpp"
 
 // ============================================================
 // Type traits for container dispatch

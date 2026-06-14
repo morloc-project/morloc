@@ -1,6 +1,6 @@
 #ifndef __SRC_HPP__
 #define __SRC_HPP__
-#include "mlc_tensor.hpp"
+#include "tensor.hpp"
 
 double sumAll(const mlc::Tensor2<double>& m) {
     double s = 0;

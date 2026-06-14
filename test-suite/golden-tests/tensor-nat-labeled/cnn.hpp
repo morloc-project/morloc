@@ -1,7 +1,7 @@
 #ifndef __CNN_HPP__
 #define __CNN_HPP__
 
-#include "mlc_tensor.hpp"
+#include "tensor.hpp"
 #include <vector>
 #include <cstdint>
 #include <cmath>

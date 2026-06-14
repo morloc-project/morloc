@@ -1,0 +1,11 @@
+module main (result)
+
+import morloc-test-expose-r
+import root-r
+
+source R from "src.R" ("compute")
+
+compute :: Int -> Int
+
+result :: Int -> Int
+result x = compute x
