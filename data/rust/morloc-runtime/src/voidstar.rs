@@ -474,6 +474,419 @@ fn flatten_fixup_inner(
     Ok(())
 }
 
+// ── write_flat_to_writer (forward-only flatten) ───────────────────────────
+//
+// Forward-only counterpart to `flatten_to_buffer`. Emits the same byte
+// sequence in strict cursor order so the output can be a `zstd::Encoder`
+// or any other `Write` sink that can't be back-patched.
+pub fn write_flat_to_writer<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    data: AbsPtr,
+    schema: &Schema,
+) -> Result<usize, MorlocError> {
+    let mut state = EmitState { writer, cursor: 0 };
+    let mut env: RecurEnv = Vec::new();
+    let tail_start = schema.width;
+    recur::with_scope(&mut env, schema, |env| -> Result<(), MorlocError> {
+        emit_slot_inner(&mut state, data, schema, tail_start, env)?;
+        emit_tail_inner(&mut state, data, schema, env)?;
+        Ok(())
+    })?;
+    Ok(state.cursor)
+}
+
+struct EmitState<'a, W: std::io::Write + ?Sized> {
+    writer: &'a mut W,
+    cursor: usize,
+}
+
+impl<W: std::io::Write + ?Sized> EmitState<'_, W> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), MorlocError> {
+        self.writer.write_all(bytes).map_err(MorlocError::Io)?;
+        self.cursor += bytes.len();
+        Ok(())
+    }
+
+    fn pad_to(&mut self, target: usize) -> Result<(), MorlocError> {
+        const PAD: [u8; 64] = [0u8; 64];
+        while self.cursor < target {
+            let n = (target - self.cursor).min(PAD.len());
+            self.writer.write_all(&PAD[..n]).map_err(MorlocError::Io)?;
+            self.cursor += n;
+        }
+        Ok(())
+    }
+}
+
+fn emit_slot<W: std::io::Write + ?Sized>(
+    e: &mut EmitState<'_, W>,
+    data: AbsPtr,
+    schema: &Schema,
+    tail_start: usize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| emit_slot_inner(e, data, schema, tail_start, env))
+}
+
+fn emit_slot_inner<W: std::io::Write + ?Sized>(
+    e: &mut EmitState<'_, W>,
+    data: AbsPtr,
+    schema: &Schema,
+    tail_start: usize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    // Materialize the whole slot into a stack buffer (heap-fallback for
+    // very wide structs), then push it to the writer in one call. Without
+    // this, every relptr field inside a struct produces its own tiny
+    // Write::write_all dispatch -- which adds up to hundreds of millions
+    // of calls for arrays of variable-bearing tuples.
+    // Covers every primitive (<= 16) and every realistic tuple/map width
+    // in the stdlib. Wider structs fall back to a heap Vec.
+    const STACK_SLOT_MAX: usize = 256;
+    let width = schema.width;
+    if width <= STACK_SLOT_MAX {
+        let mut buf = [0u8; STACK_SLOT_MAX];
+        materialize_slot(&mut buf[..width], data, schema, tail_start, env)?;
+        e.write_bytes(&buf[..width])?;
+    } else {
+        let mut buf = vec![0u8; width];
+        materialize_slot(&mut buf, data, schema, tail_start, env)?;
+        e.write_bytes(&buf)?;
+    }
+    Ok(())
+}
+
+// Fill `dest` (exactly `schema.width` bytes) with the slot's flattened
+// bytes. Variable-bearing relptr fields are computed from `tail_start`
+// rather than copied from the source. Primitive fields and structural
+// scaffolding are bulk-copied from `data` first, then relptrs are
+// overwritten in place. The caller has already pushed `schema`'s
+// `with_scope` if applicable.
+fn materialize_slot(
+    dest: &mut [u8],
+    data: AbsPtr,
+    schema: &Schema,
+    tail_start: usize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    debug_assert_eq!(dest.len(), schema.width);
+    // SAFETY: dest has schema.width bytes; data points to schema.width
+    // valid bytes in SHM.
+    unsafe {
+        std::ptr::copy_nonoverlapping(data, dest.as_mut_ptr(), schema.width);
+    }
+    patch_slot_inner(dest, data, schema, tail_start, env)
+}
+
+fn patch_slot(
+    dest: &mut [u8],
+    data: AbsPtr,
+    schema: &Schema,
+    tail_start: usize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| {
+        patch_slot_inner(dest, data, schema, tail_start, env)
+    })
+}
+
+fn patch_slot_inner(
+    dest: &mut [u8],
+    data: AbsPtr,
+    schema: &Schema,
+    tail_start: usize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    unsafe {
+        match schema.serial_type {
+            SerialType::Int => {
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let limb_pos = shm::align_up(tail_start, std::mem::align_of::<u64>());
+                    dest[std::mem::size_of::<usize>()..std::mem::size_of::<usize>() + 8]
+                        .copy_from_slice(&(limb_pos as u64).to_le_bytes());
+                }
+            }
+            SerialType::String | SerialType::Array => {
+                let arr = &*(data as *const Array);
+                let new_relptr: u64 = if arr.size == 0 {
+                    0
+                } else {
+                    let elem_schema = &schema.parameters[0];
+                    let align = if schema.serial_type == SerialType::String {
+                        elem_schema.alignment()
+                    } else {
+                        elem_schema.array_data_alignment()
+                    };
+                    shm::align_up(tail_start, align) as u64
+                };
+                dest[8..16].copy_from_slice(&new_relptr.to_le_bytes());
+            }
+            SerialType::Tuple | SerialType::Map => {
+                let mut field_tail_start = tail_start;
+                for i in 0..schema.parameters.len() {
+                    let field_offset = schema.offsets[i];
+                    let field_schema = &schema.parameters[i];
+                    let field_data = data.add(field_offset);
+                    let field_dest = &mut dest
+                        [field_offset..field_offset + field_schema.width];
+                    patch_slot(field_dest, field_data, field_schema, field_tail_start, env)?;
+                    field_tail_start =
+                        tail_end_pos(field_data, field_schema, field_tail_start, env)?;
+                }
+            }
+            SerialType::Optional => {
+                let relptr_in = *(data as *const RelPtr);
+                let new_value: i64 = if relptr_in == shm::RELNULL {
+                    shm::RELNULL as i64
+                } else {
+                    let inner_schema = &schema.parameters[0];
+                    let inner_align = inner_schema.alignment().max(1);
+                    shm::align_up(tail_start, inner_align) as i64
+                };
+                dest[0..8].copy_from_slice(&new_value.to_le_bytes());
+            }
+            SerialType::Recur => {
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = recur::lookup(env, name)?;
+                let target = &*target_ptr;
+                patch_slot_inner(dest, data, target, tail_start, env)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn emit_tail<W: std::io::Write + ?Sized>(
+    e: &mut EmitState<'_, W>,
+    data: AbsPtr,
+    schema: &Schema,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| emit_tail_inner(e, data, schema, env))
+}
+
+fn emit_tail_inner<W: std::io::Write + ?Sized>(
+    e: &mut EmitState<'_, W>,
+    data: AbsPtr,
+    schema: &Schema,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    unsafe {
+        match schema.serial_type {
+            SerialType::Int => {
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let limb_pos = shm::align_up(e.cursor, std::mem::align_of::<u64>());
+                    e.pad_to(limb_pos)?;
+                    let limb_relptr =
+                        *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
+                    let limb_data = shm::rel2abs(limb_relptr)?;
+                    let total_bytes = size * std::mem::size_of::<u64>();
+                    e.write_bytes(std::slice::from_raw_parts(limb_data, total_bytes))?;
+                }
+            }
+            SerialType::String | SerialType::Array => {
+                let arr = &*(data as *const Array);
+                if arr.size > 0 {
+                    let elem_schema = &schema.parameters[0];
+                    let align = if schema.serial_type == SerialType::String {
+                        elem_schema.alignment()
+                    } else {
+                        elem_schema.array_data_alignment()
+                    };
+                    let elem_pos = shm::align_up(e.cursor, align);
+                    e.pad_to(elem_pos)?;
+                    let elem_data = shm::rel2abs(arr.data)?;
+                    let elem_w = elem_schema.width;
+
+                    if elem_schema.is_fixed_width() {
+                        e.write_bytes(std::slice::from_raw_parts(
+                            elem_data,
+                            arr.size * elem_w,
+                        ))?;
+                    } else {
+                        // TODO: for very large arrays of variable-width elements
+                        // this allocates 8 * arr.size bytes. At 20 M elements
+                        // that's 160 MB. A two-pass-without-Vec variant would
+                        // walk the source twice instead but keep peak memory
+                        // bounded by SHM + encoder buffer.
+                        let elements_end = elem_pos + arr.size * elem_w;
+                        let mut tail_positions: Vec<usize> = Vec::with_capacity(arr.size);
+                        let mut cur = elements_end;
+                        for i in 0..arr.size {
+                            tail_positions.push(cur);
+                            cur = tail_end_pos(
+                                elem_data.add(i * elem_w),
+                                elem_schema,
+                                cur,
+                                env,
+                            )?;
+                        }
+                        for i in 0..arr.size {
+                            let slot_pos = elem_pos + i * elem_w;
+                            e.pad_to(slot_pos)?;
+                            emit_slot(
+                                e,
+                                elem_data.add(i * elem_w),
+                                elem_schema,
+                                tail_positions[i],
+                                env,
+                            )?;
+                        }
+                        for i in 0..arr.size {
+                            e.pad_to(tail_positions[i])?;
+                            emit_tail(
+                                e,
+                                elem_data.add(i * elem_w),
+                                elem_schema,
+                                env,
+                            )?;
+                        }
+                    }
+                }
+            }
+            SerialType::Tuple | SerialType::Map => {
+                for i in 0..schema.parameters.len() {
+                    emit_tail(
+                        e,
+                        data.add(schema.offsets[i]),
+                        &schema.parameters[i],
+                        env,
+                    )?;
+                }
+            }
+            SerialType::Optional => {
+                let relptr_in = *(data as *const RelPtr);
+                if relptr_in != shm::RELNULL {
+                    let inner_schema = &schema.parameters[0];
+                    let inner_align = inner_schema.alignment().max(1);
+                    let inner_pos = shm::align_up(e.cursor, inner_align);
+                    e.pad_to(inner_pos)?;
+                    let inner_data = shm::rel2abs(relptr_in)?;
+                    let after_inner_slot = inner_pos + inner_schema.width;
+                    emit_slot(e, inner_data, inner_schema, after_inner_slot, env)?;
+                    emit_tail(e, inner_data, inner_schema, env)?;
+                }
+            }
+            SerialType::Recur => {
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = recur::lookup(env, name)?;
+                let target = &*target_ptr;
+                emit_tail_inner(e, data, target, env)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// Pure walk: returns the cursor position AFTER emitting the tail
+// of `data`/`schema` starting at cursor `start`. Used by `emit_slot`
+// to fill in relptr values for variable-bearing fields before the
+// tail bytes have been written.
+//
+// This is essentially `calc_voidstar_size_inner` but tracks actual
+// cursor positions (which depend on the real starting offset for
+// alignment) instead of returning conservative sizes.
+fn tail_end_pos(
+    data: AbsPtr,
+    schema: &Schema,
+    start: usize,
+    env: &mut RecurEnv,
+) -> Result<usize, MorlocError> {
+    recur::with_scope(env, schema, |env| tail_end_pos_inner(data, schema, start, env))
+}
+
+fn tail_end_pos_inner(
+    data: AbsPtr,
+    schema: &Schema,
+    start: usize,
+    env: &mut RecurEnv,
+) -> Result<usize, MorlocError> {
+    unsafe {
+        match schema.serial_type {
+            SerialType::Int => {
+                let size = *(data as *const usize);
+                if size <= 1 {
+                    Ok(start)
+                } else {
+                    let aligned = shm::align_up(start, std::mem::align_of::<u64>());
+                    Ok(aligned + size * std::mem::size_of::<u64>())
+                }
+            }
+            SerialType::String => {
+                let arr = &*(data as *const Array);
+                if arr.size == 0 {
+                    Ok(start)
+                } else {
+                    let elem_schema = &schema.parameters[0];
+                    let elem_pos = shm::align_up(start, elem_schema.alignment());
+                    Ok(elem_pos + arr.size * elem_schema.width)
+                }
+            }
+            SerialType::Array => {
+                let arr = &*(data as *const Array);
+                if arr.size == 0 {
+                    return Ok(start);
+                }
+                let elem_schema = &schema.parameters[0];
+                let elem_pos = shm::align_up(start, elem_schema.array_data_alignment());
+                let elem_w = elem_schema.width;
+                let elements_end = elem_pos + arr.size * elem_w;
+                if elem_schema.is_fixed_width() {
+                    Ok(elements_end)
+                } else {
+                    let elem_data = shm::rel2abs(arr.data)?;
+                    let mut cur = elements_end;
+                    for i in 0..arr.size {
+                        cur = tail_end_pos(
+                            elem_data.add(i * elem_w),
+                            elem_schema,
+                            cur,
+                            env,
+                        )?;
+                    }
+                    Ok(cur)
+                }
+            }
+            SerialType::Tuple | SerialType::Map => {
+                let mut cur = start;
+                for i in 0..schema.parameters.len() {
+                    cur = tail_end_pos(
+                        data.add(schema.offsets[i]),
+                        &schema.parameters[i],
+                        cur,
+                        env,
+                    )?;
+                }
+                Ok(cur)
+            }
+            SerialType::Optional => {
+                let relptr_in = *(data as *const RelPtr);
+                if relptr_in == shm::RELNULL {
+                    Ok(start)
+                } else {
+                    let inner_schema = &schema.parameters[0];
+                    let inner_align = inner_schema.alignment().max(1);
+                    let inner_pos = shm::align_up(start, inner_align);
+                    let inner_data = shm::rel2abs(relptr_in)?;
+                    let after_inner_slot = inner_pos + inner_schema.width;
+                    tail_end_pos(inner_data, inner_schema, after_inner_slot, env)
+                }
+            }
+            SerialType::Recur => {
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = recur::lookup(env, name)?;
+                let target = &*target_ptr;
+                tail_end_pos_inner(data, target, start, env)
+            }
+            _ => Ok(start),
+        }
+    }
+}
+
 // ── write_voidstar_binary (to fd) ──────────────────────────────────────────
 
 /// Flatten voidstar and write to a file descriptor. Returns bytes written.
@@ -487,4 +900,215 @@ pub fn write_binary_to_fd(fd: i32, data: AbsPtr, schema: &Schema) -> Result<usiz
         return Err(MorlocError::Io(std::io::Error::last_os_error()));
     }
     Ok(written as usize)
+}
+
+// ── Tests: write_flat_to_writer byte-equivalence with flatten_to_buffer ───
+
+#[cfg(test)]
+mod flat_writer_tests {
+    use super::*;
+    use crate::schema::parse_schema;
+    use crate::json::read_json_with_schema;
+
+    fn setup() { crate::init_test_shm(); }
+
+    // Build a voidstar from JSON, then verify both flatteners produce
+    // equivalent output:
+    //   * `flatten_to_buffer` pre-allocates a buffer sized by the
+    //     worst-case `calc_voidstar_size_inner` (which pessimizes
+    //     alignment), so its tail may contain stale zero bytes that
+    //     no relptr addresses.
+    //   * `write_flat_to_writer` emits the exact number of bytes the
+    //     algorithm actually visits.
+    // The new emitter's bytes must be a byte-identical prefix of the
+    // old emitter's, and any old trailing bytes must be zero. Both
+    // representations round-trip identically through `read_binary`.
+    fn assert_byte_equal(json: &str, schema_str: &str) -> Vec<u8> {
+        let schema = parse_schema(schema_str).unwrap();
+        let abs = read_json_with_schema(json, &schema).unwrap();
+
+        let buf_old = flatten_to_buffer(abs, &schema).unwrap();
+        let mut buf_new: Vec<u8> = Vec::new();
+        let n = write_flat_to_writer(&mut buf_new, abs, &schema).unwrap();
+
+        assert_eq!(
+            buf_new.len(), n,
+            "schema={schema_str} json={json}: returned size ({n}) != bytes written ({})",
+            buf_new.len()
+        );
+        assert!(
+            buf_new.len() <= buf_old.len(),
+            "schema={schema_str} json={json}: new ({}) is larger than old ({})",
+            buf_new.len(), buf_old.len()
+        );
+        if buf_old[..buf_new.len()] != buf_new[..] {
+            let diff = buf_old.iter().zip(buf_new.iter()).position(|(a, b)| a != b);
+            panic!(
+                "schema={schema_str} json={json}: prefix differs at byte {:?}\n  old[..{}]\n  new[..{}]",
+                diff, buf_new.len(), buf_new.len(),
+            );
+        }
+        for (i, &b) in buf_old[buf_new.len()..].iter().enumerate() {
+            assert_eq!(
+                b, 0,
+                "schema={schema_str} json={json}: old trailing byte at offset {} is non-zero (0x{:02x})",
+                buf_new.len() + i, b
+            );
+        }
+        buf_new
+    }
+
+    #[test]
+    fn primitives() {
+        setup();
+        assert_byte_equal("42", "i4");
+        assert_byte_equal("-1", "i8");
+        assert_byte_equal("3.14", "f8");
+        assert_byte_equal("0.5", "f4");
+        assert_byte_equal("true", "b");
+        assert_byte_equal("false", "b");
+    }
+
+    #[test]
+    fn strings() {
+        setup();
+        assert_byte_equal("\"\"", "s");
+        assert_byte_equal("\"hello\"", "s");
+        assert_byte_equal("\"a slightly longer string here\"", "s");
+    }
+
+    #[test]
+    fn array_of_primitive_fixed() {
+        setup();
+        // Empty array
+        assert_byte_equal("[]", "ai4");
+        // Small array
+        assert_byte_equal("[1,2,3]", "ai4");
+        // Larger array: forces SIMD-aligned (64) data region
+        assert_byte_equal("[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]", "af8");
+        // Bytes (u8 = 1-byte alignment, no padding)
+        assert_byte_equal("[1, 2, 3, 4, 5]", "au1");
+    }
+
+    #[test]
+    fn array_of_string() {
+        setup();
+        assert_byte_equal("[\"a\",\"bb\",\"ccc\"]", "as");
+        assert_byte_equal("[]", "as");
+        assert_byte_equal("[\"\"]", "as");
+        // Many strings of varying length: stresses per-element tail accounting
+        assert_byte_equal(
+            "[\"hello\",\"world\",\"\",\"morloc\",\"x\"]",
+            "as",
+        );
+    }
+
+    #[test]
+    fn nested_array() {
+        setup();
+        assert_byte_equal("[[1,2,3],[4,5],[]]", "aai4");
+        assert_byte_equal("[[\"a\",\"b\"],[\"cd\"],[]]", "aas");
+    }
+
+    #[test]
+    fn tuple_fixed_width() {
+        setup();
+        assert_byte_equal("[1, 2.5]", "t2i4f8");
+        assert_byte_equal("[1, 2, 3]", "t3i4i4i4");
+    }
+
+    #[test]
+    fn tuple_with_variable_fields() {
+        setup();
+        assert_byte_equal("[1, \"hello\"]", "t2i4s");
+        assert_byte_equal("[\"a\", \"bb\", \"ccc\"]", "t3sss");
+        assert_byte_equal("[\"a\", 42, \"bb\"]", "t3si4s");
+        // Tuple of arrays: each field has its own variable region
+        assert_byte_equal("[[1,2,3], [4,5,6]]", "t2ai4ai4");
+        assert_byte_equal("[[1.0,2.0], [\"a\",\"b\"]]", "t2af8as");
+    }
+
+    #[test]
+    fn array_of_tuple_of_strings() {
+        setup();
+        // Array of small fixed-arity string tuples.
+        assert_byte_equal(
+            "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"], [\"\",\"\",\"\"]]",
+            "at3sss",
+        );
+    }
+
+    #[test]
+    fn optional_some_and_none() {
+        setup();
+        assert_byte_equal("42", "?i4");
+        assert_byte_equal("null", "?i4");
+        assert_byte_equal("\"hello\"", "?s");
+        assert_byte_equal("null", "?s");
+        // Optional of array
+        assert_byte_equal("[1,2,3]", "?ai4");
+        assert_byte_equal("null", "?ai4");
+    }
+
+    #[test]
+    fn tuple_with_optional_field() {
+        setup();
+        assert_byte_equal("[42, \"hi\"]", "t2?i4s");
+        assert_byte_equal("[null, \"hi\"]", "t2?i4s");
+        assert_byte_equal("[42, null]", "t2?i4?s");
+    }
+
+    #[test]
+    fn empty_collections() {
+        setup();
+        assert_byte_equal("[]", "as");
+        assert_byte_equal("[]", "aas");
+        assert_byte_equal("[[],[],[]]", "aas");
+    }
+
+    // Round-trip through read_binary: the bytes emitted by
+    // write_flat_to_writer (tighter than flatten_to_buffer's
+    // worst-case-padded output) must still be a valid input for
+    // the consumer side -- since the consumer just memcpy's into
+    // SHM and walks relptrs, the shorter buffer is structurally
+    // equivalent.
+    fn assert_roundtrip(json: &str, schema_str: &str) {
+        use crate::json::voidstar_to_json_string;
+        let schema = parse_schema(schema_str).unwrap();
+        let original_abs = read_json_with_schema(json, &schema).unwrap();
+        let original_json = voidstar_to_json_string(original_abs, &schema).unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_flat_to_writer(&mut buf, original_abs, &schema).unwrap();
+
+        let recovered_abs = read_binary(&buf, &schema).unwrap();
+        let recovered_json = voidstar_to_json_string(recovered_abs, &schema).unwrap();
+
+        assert_eq!(
+            original_json, recovered_json,
+            "roundtrip mismatch for schema={schema_str} json={json}"
+        );
+    }
+
+    #[test]
+    fn roundtrip_through_read_binary() {
+        setup();
+        assert_roundtrip("42", "i4");
+        assert_roundtrip("3.14", "f8");
+        assert_roundtrip("\"hello\"", "s");
+        assert_roundtrip("[1,2,3]", "ai4");
+        assert_roundtrip("[1.0, 2.0, 3.0]", "af8");
+        assert_roundtrip("[\"a\",\"bb\",\"ccc\"]", "as");
+        assert_roundtrip("[[1,2,3],[4,5],[]]", "aai4");
+        assert_roundtrip("[1, \"hello\"]", "t2i4s");
+        assert_roundtrip("[[1,2,3],[4,5,6]]", "t2ai4ai4");
+        assert_roundtrip(
+            "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"]]",
+            "at3sss",
+        );
+        assert_roundtrip("42", "?i4");
+        assert_roundtrip("null", "?i4");
+        assert_roundtrip("[42, \"hi\"]", "t2?i4s");
+        assert_roundtrip("[null, \"hi\"]", "t2?i4s");
+    }
 }

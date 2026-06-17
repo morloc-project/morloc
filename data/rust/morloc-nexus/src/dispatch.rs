@@ -727,33 +727,36 @@ fn print_result_c(
         }
         OutputFormat::Packet => {
             // Normalize RPTR/FILE-source packets to inline MESG, then
-            // optionally zstd-compress. Without this, a large result
-            // packet on disk is just an 8-byte shared-memory pointer
-            // that goes stale the moment the nexus exits.
+            // optionally zstd-compress. The fd variant streams the
+            // payload directly to stdout when the destination is a
+            // regular file (i.e. `-o file` or a shell redirect) and
+            // the payload is large enough to amortize streaming
+            // overhead; otherwise it falls back to the buffered path.
+            use std::os::unix::io::AsRawFd;
             extern "C" {
-                fn normalize_data_packet_for_output(
+                fn normalize_data_packet_to_fd(
                     packet: *const u8,
                     packet_size: usize,
                     compression_level: u8,
-                    out_buf: *mut *mut u8,
-                    out_size: *mut usize,
+                    fd: libc::c_int,
                     errmsg: *mut *mut std::ffi::c_char,
-                ) -> i32;
+                ) -> i64;
             }
-            let mut out_buf: *mut u8 = std::ptr::null_mut();
-            let mut out_size: usize = 0;
+            let stdout = std::io::stdout();
+            let lock = stdout.lock();
+            let fd = lock.as_raw_fd();
             let mut nerr: *mut std::ffi::c_char = std::ptr::null_mut();
-            let rc = unsafe {
-                normalize_data_packet_for_output(
+            let n = unsafe {
+                normalize_data_packet_to_fd(
                     full_packet.as_ptr(),
                     full_packet.len(),
                     config.compression_level,
-                    &mut out_buf,
-                    &mut out_size,
+                    fd,
                     &mut nerr,
                 )
             };
-            if rc != 0 || out_buf.is_null() {
+            drop(lock);
+            if n < 0 {
                 let msg = if !nerr.is_null() {
                     let s = unsafe { std::ffi::CStr::from_ptr(nerr) }
                         .to_string_lossy().into_owned();
@@ -765,10 +768,6 @@ fn print_result_c(
                 eprintln!("Error: packet normalization failed: {}", msg);
                 process::clean_exit(1);
             }
-            use std::io::Write;
-            let bytes = unsafe { std::slice::from_raw_parts(out_buf, out_size) };
-            let _ = std::io::stdout().lock().write_all(bytes);
-            unsafe { libc::free(out_buf as *mut std::ffi::c_void) };
         }
         OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
             // Table-only output formats. The pool returns an Arrow SHM

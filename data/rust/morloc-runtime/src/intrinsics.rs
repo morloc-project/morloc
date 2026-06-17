@@ -274,30 +274,23 @@ pub unsafe extern "C" fn mlc_load(
     // If the file is a morloc data packet with a non-NONE compression byte,
     // decompress to a fresh malloc'd buffer and hand THAT to the format
     // detector. Non-packet inputs (raw JSON / raw msgpack) and uncompressed
-    // packets pass through unchanged so the legacy path is unaffected.
+    // packets short-circuit through Cow::Borrowed (no copy) and keep the
+    // original libc-malloc'd buffer from read_binary_file.
     let raw_slice = std::slice::from_raw_parts(data, file_size);
     let (data, file_size) = match crate::compression::decompress_packet_if_needed(raw_slice) {
-        Ok(bytes) => {
-            if bytes.as_ptr() == data as *const u8 && bytes.len() == file_size {
-                // Borrowed case from a non-decompress path: keep the
-                // existing buffer. (Our helper currently always allocates,
-                // but stay defensive against future changes.)
-                (data, file_size)
-            } else {
-                // Allocate a new libc::malloc buffer so the existing
-                // free-on-fail contract works uniformly.
-                let new_size = bytes.len();
-                let new_buf = libc::malloc(new_size) as *mut u8;
-                if new_buf.is_null() {
-                    libc::free(data as *mut libc::c_void);
-                    let path_str = CStr::from_ptr(path).to_string_lossy();
-                    eprintln!("@load warning ({}): malloc failed during decompression", path_str);
-                    return ptr::null_mut();
-                }
-                ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
+        Ok(std::borrow::Cow::Borrowed(_)) => (data, file_size),
+        Ok(std::borrow::Cow::Owned(bytes)) => {
+            let new_size = bytes.len();
+            let new_buf = libc::malloc(new_size) as *mut u8;
+            if new_buf.is_null() {
                 libc::free(data as *mut libc::c_void);
-                (new_buf, new_size)
+                let path_str = CStr::from_ptr(path).to_string_lossy();
+                eprintln!("@load warning ({}): malloc failed during decompression", path_str);
+                return ptr::null_mut();
             }
+            ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
+            libc::free(data as *mut libc::c_void);
+            (new_buf, new_size)
         }
         Err(e) => {
             libc::free(data as *mut libc::c_void);

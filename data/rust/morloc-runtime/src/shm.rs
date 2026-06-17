@@ -522,6 +522,7 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
     if ptr < 0 {
         return Err(MorlocError::Shm(format!("Illegal relptr value {}", ptr)));
     }
+
     let mut remaining = ptr as usize;
 
     // First try with volumes already mapped. Sum their sizes so the

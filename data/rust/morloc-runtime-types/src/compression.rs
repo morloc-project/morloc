@@ -13,8 +13,11 @@
 //!
 //! User-facing level 0-9 maps to zstd presets (see `CompressionLevel`).
 //! Multithreaded compression is enabled automatically for payloads above
-//! 1 MiB via `choose_workers`; decompression is single-threaded by the
-//! zstd frame format.
+//! 1 MiB via `choose_workers`; decompression is single-threaded because
+//! the underlying libzstd stream decoder does not expose a worker knob
+//! and a single zstd frame cannot be decoded by parallel workers.
+//! Multithreaded decompression would require a multi-frame compressed
+//! format on the encoder side.
 //!
 //! Public surface:
 //! * `CompressionLevel::from_u8` / `zstd_level` / `use_long` / `is_none`
@@ -23,6 +26,7 @@
 //! * `decompress_packet_if_needed`                            (no-op for
 //!   non-packets and uncompressed packets; used by `mlc_load`)
 
+use std::borrow::Cow;
 use std::io::{Read, Write};
 
 use crate::error::MorlocError;
@@ -106,11 +110,17 @@ pub fn choose_workers(payload_bytes: usize) -> u32 {
 
 /// Encoder window log used when long-mode is active. 27 == 128 MiB,
 /// matching the zstd CLI's --long default.
-const LONG_WINDOW_LOG: u32 = 27;
+pub const LONG_WINDOW_LOG: u32 = 27;
 
 /// Decoder windowLogMax: must cover any window an encoder might have used.
 /// 31 == 2 GiB, the maximum zstd permits.
 const DECODER_WINDOW_LOG_MAX: u32 = 31;
+
+/// Buffer between the byte-producing walker (e.g. voidstar flatten) and
+/// the encoder. Sized to fit comfortably in L2 cache while still being
+/// big enough to amortize per-call dispatch over thousands of small
+/// struct-slot writes. 256 KiB is a good compromise on modern CPUs.
+const STREAM_INPUT_BUFFER: usize = 256 * 1024;
 
 // ── Raw-payload compress / decompress ─────────────────────────────────────
 
@@ -148,6 +158,17 @@ pub fn compress_payload_zstd(
 
 /// Decompress a zstd frame back to raw bytes. The decoder's windowLogMax
 /// is raised so long-mode frames decode without error.
+///
+/// Single-threaded by design: libzstd's stream decoder does not expose
+/// a worker-thread knob (`DParameter` only carries `WindowLogMax` and
+/// `Format`). Multithreaded decompression in zstd requires the input
+/// to be a sequence of independent frames so workers can decode them
+/// in parallel; our compressor emits a single frame per payload, so
+/// there is nothing for workers to split across. If multithreaded
+/// decompression becomes worth chasing, the path is on the encoder
+/// side: split the payload into N chunked frames at compress time and
+/// emit a small frame index in the metadata block, then dispatch the
+/// frames to workers at decompress time.
 pub fn decompress_payload_zstd(compressed: &[u8]) -> Result<Vec<u8>, MorlocError> {
     let mut decoder = zstd::stream::Decoder::new(compressed).map_err(MorlocError::Io)?;
     decoder
@@ -156,6 +177,90 @@ pub fn decompress_payload_zstd(compressed: &[u8]) -> Result<Vec<u8>, MorlocError
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).map_err(MorlocError::Io)?;
     Ok(out)
+}
+
+// ── Streaming encoders (no intermediate Vec for the compressed bytes) ────
+
+/// Stream-compress everything pulled from `reader` into `writer`.
+/// Used when neither side needs to be fully buffered in memory --
+/// e.g. compressing a multi-GB file straight to disk. Worker count
+/// is computed from `estimated_input_bytes` via `choose_workers`, so
+/// the caller is responsible for passing a sensible estimate (e.g.
+/// `fstat` size for a source file).
+pub fn stream_encode_reader<W: Write, R: Read>(
+    writer: W,
+    reader: &mut R,
+    lvl: CompressionLevel,
+    estimated_input_bytes: usize,
+) -> Result<(), MorlocError> {
+    if lvl.is_none() {
+        // std::io::copy uses its own 8 KiB ping-pong buffer, so a
+        // BufWriter here would just double-buffer; route directly.
+        let mut w = writer;
+        std::io::copy(reader, &mut w).map_err(MorlocError::Io)?;
+        return Ok(());
+    }
+    let workers = choose_workers(estimated_input_bytes);
+    let mut encoder = zstd::stream::write::Encoder::new(writer, lvl.zstd_level())
+        .map_err(MorlocError::Io)?;
+    if workers > 0 {
+        encoder.multithread(workers).map_err(MorlocError::Io)?;
+    }
+    if lvl.use_long() {
+        encoder.window_log(LONG_WINDOW_LOG).map_err(MorlocError::Io)?;
+    }
+    std::io::copy(reader, &mut encoder).map_err(MorlocError::Io)?;
+    encoder.finish().map_err(MorlocError::Io)?;
+    Ok(())
+}
+
+/// Run a writer-producing closure with optional zstd compression
+/// applied to its output. Used by streaming paths that need to
+/// hand a `&mut dyn Write` sink to a flatten-and-emit routine but
+/// also want compression wrapped transparently around the sink.
+/// At level 0 the closure writes directly to `writer`; at level
+/// 1-9 it writes to a multithreaded encoder whose output goes to
+/// `writer`. Worker count is computed from `estimated_input_bytes`
+/// via `choose_workers`, so the caller is responsible for passing a
+/// sensible estimate (e.g. `calc_voidstar_size_inner` for a SHM
+/// voidstar that the closure is about to flatten).
+pub fn stream_encode_with<W, F>(
+    writer: W,
+    lvl: Option<CompressionLevel>,
+    estimated_input_bytes: usize,
+    body: F,
+) -> Result<(), MorlocError>
+where
+    W: Write,
+    F: FnOnce(&mut dyn Write) -> Result<(), MorlocError>,
+{
+    // Buffer between the byte producer and the encoder / fd: a flatten
+    // walk that emits per-relptr u64s would otherwise generate one
+    // Write::write_all dispatch per field.
+    let is_compress = matches!(lvl, Some(l) if !l.is_none());
+    if !is_compress {
+        let mut buf = std::io::BufWriter::with_capacity(STREAM_INPUT_BUFFER, writer);
+        body(&mut buf)?;
+        return buf.flush().map_err(MorlocError::Io);
+    }
+    let lvl = lvl.unwrap();
+    let workers = choose_workers(estimated_input_bytes);
+    let mut encoder = zstd::stream::write::Encoder::new(writer, lvl.zstd_level())
+        .map_err(MorlocError::Io)?;
+    if workers > 0 {
+        encoder.multithread(workers).map_err(MorlocError::Io)?;
+    }
+    if lvl.use_long() {
+        encoder.window_log(LONG_WINDOW_LOG).map_err(MorlocError::Io)?;
+    }
+    let mut buf = std::io::BufWriter::with_capacity(STREAM_INPUT_BUFFER, encoder);
+    body(&mut buf)?;
+    buf.flush().map_err(MorlocError::Io)?;
+    let encoder = buf
+        .into_inner()
+        .map_err(|e| MorlocError::Io(e.into_error()))?;
+    encoder.finish().map_err(MorlocError::Io)?;
+    Ok(())
 }
 
 // ── Packet-level compress / decompress ────────────────────────────────────
@@ -294,34 +399,37 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
     }
 }
 
-/// Best-effort decompress used by `mlc_load`. Detects whether the bytes
-/// are a morloc packet at all (by magic check) and, if so, applies
-/// `decompress_packet`. Non-packet inputs (raw JSON, raw msgpack) are
-/// passed through verbatim; the downstream format detector handles them.
-pub fn decompress_packet_if_needed(bytes: &[u8]) -> Result<Vec<u8>, MorlocError> {
+/// Best-effort decompress used by `mlc_load` and `--call-packet` ingest.
+/// Detects whether the bytes are a morloc packet at all (by magic check)
+/// and, if so, applies `decompress_packet`. Non-packet inputs (raw JSON,
+/// raw msgpack) are passed through verbatim; the downstream format
+/// detector handles them. Returns `Cow::Borrowed` on every pass-through
+/// path so callers do not pay a full copy on the common case where the
+/// input was not compressed.
+pub fn decompress_packet_if_needed(bytes: &[u8]) -> Result<Cow<'_, [u8]>, MorlocError> {
     if bytes.len() < 4 {
-        return Ok(bytes.to_vec());
+        return Ok(Cow::Borrowed(bytes));
     }
     let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     if magic != PACKET_MAGIC {
-        return Ok(bytes.to_vec());
+        return Ok(Cow::Borrowed(bytes));
     }
     if bytes.len() < 32 {
         // Looks like a packet by magic but is truncated -- let the
         // downstream packet validator surface the error rather than us.
-        return Ok(bytes.to_vec());
+        return Ok(Cow::Borrowed(bytes));
     }
     let mut hdr_buf = [0u8; 32];
     hdr_buf.copy_from_slice(&bytes[..32]);
     let header = PacketHeader::from_bytes(&hdr_buf)?;
     if header.command_type() != PACKET_TYPE_DATA {
-        return Ok(bytes.to_vec());
+        return Ok(Cow::Borrowed(bytes));
     }
     let comp = unsafe { header.command.data.compression };
     if comp == PACKET_COMPRESSION_NONE {
-        return Ok(bytes.to_vec());
+        return Ok(Cow::Borrowed(bytes));
     }
-    decompress_packet(bytes)
+    decompress_packet(bytes).map(Cow::Owned)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -414,13 +522,91 @@ mod tests {
         // Raw JSON-looking bytes (no morloc magic) must come back unchanged.
         let bytes = b"{\"x\":1}".to_vec();
         let out = decompress_packet_if_needed(&bytes).unwrap();
-        assert_eq!(out, bytes);
+        assert!(matches!(out, Cow::Borrowed(_)), "expected zero-copy passthrough");
+        assert_eq!(out.as_ref(), bytes.as_slice());
     }
 
     #[test]
     fn decompress_packet_if_needed_passes_through_uncompressed_packet() {
         let packet = synthetic_packet(4096);
         let out = decompress_packet_if_needed(&packet).unwrap();
-        assert_eq!(out, packet);
+        assert!(matches!(out, Cow::Borrowed(_)), "expected zero-copy passthrough");
+        assert_eq!(out.as_ref(), packet.as_slice());
+    }
+
+    #[test]
+    fn decompress_packet_if_needed_unwraps_compressed_packet() {
+        let original = synthetic_packet(1 << 20);
+        let lvl = CompressionLevel::from_u8(3).unwrap();
+        let compressed = match compress_packet(&original, lvl).unwrap() {
+            CompressOutcome::Compressed(v) => v,
+            CompressOutcome::NoOp => panic!("expected compression"),
+        };
+        let out = decompress_packet_if_needed(&compressed).unwrap();
+        assert!(matches!(out, Cow::Owned(_)), "expected owned output for compressed input");
+        assert_eq!(out.as_ref(), original.as_slice());
+    }
+
+    #[test]
+    fn level_zero_payload_is_clean_copy() {
+        // compress_payload_zstd at level 0 must return the input bytes
+        // verbatim -- no zstd frame -- so callers can rely on it as a
+        // uniform pass-through.
+        let raw = vec![0xAB; 1024];
+        let lvl = CompressionLevel::from_u8(0).unwrap();
+        let out = compress_payload_zstd(&raw, lvl).unwrap();
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn empty_payload_roundtrip() {
+        // Empty payload must compress (to a small empty frame) and
+        // decompress back to empty without error.
+        let original = synthetic_packet(0);
+        let lvl = CompressionLevel::from_u8(3).unwrap();
+        let compressed = match compress_packet(&original, lvl).unwrap() {
+            CompressOutcome::Compressed(v) => v,
+            CompressOutcome::NoOp => panic!("expected compression at level 3"),
+        };
+        let recovered = decompress_packet(&compressed).unwrap();
+        assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn stream_encode_reader_roundtrip() {
+        // Reader-driven streaming encode must roundtrip through the
+        // decoder. Use 4 MiB so multithreading actually fires.
+        let original: Vec<u8> = (0..(4 << 20)).map(|i| (i & 0x0F) as u8).collect();
+        let lvl = CompressionLevel::from_u8(3).unwrap();
+        let mut src: &[u8] = &original;
+        let mut compressed: Vec<u8> = Vec::new();
+        stream_encode_reader(&mut compressed, &mut src, lvl, original.len()).unwrap();
+        let decoded = decompress_payload_zstd(&compressed).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn roundtrip_spans_threading_threshold() {
+        // 64 KiB sits below choose_workers' 1 MiB threshold (single-
+        // threaded encode). 1 MiB exactly hits it. 16 MiB is well into
+        // multithreaded territory (~4 workers on a typical box). All
+        // three must roundtrip identically across levels 1, 3, 9.
+        for &size in &[64 * 1024usize, 1 << 20, 16 << 20] {
+            let original = synthetic_packet(size);
+            for n in [1u8, 3, 9] {
+                let lvl = CompressionLevel::from_u8(n).unwrap();
+                let compressed = match compress_packet(&original, lvl).unwrap() {
+                    CompressOutcome::Compressed(v) => v,
+                    CompressOutcome::NoOp => {
+                        panic!("size={size} level={n}: expected Compressed, got NoOp");
+                    }
+                };
+                let recovered = decompress_packet(&compressed).unwrap();
+                assert_eq!(
+                    recovered, original,
+                    "size={size} level={n}: roundtrip mismatch"
+                );
+            }
+        }
     }
 }

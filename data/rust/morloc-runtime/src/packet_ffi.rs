@@ -940,11 +940,12 @@ pub unsafe extern "C" fn make_data_packet_auto(
 // Normalization rules (source x format x compression):
 //
 //   MESG + any format, compression = NONE
-//      level > 0: compress_packet (sets compression = ZSTD)
+//      level > 0: compress payload region with zstd, stamp ZSTD
 //      level = 0: copy through unchanged
 //
 //   MESG + any format, compression = ZSTD
-//      copy through unchanged (do not recompress)
+//      copy through unchanged (do not recompress -- the existing
+//      level is not recoverable from the frame header)
 //
 //   RPTR + VOIDSTAR
 //      dereference SHM, flatten voidstar to a flat buffer (the same
@@ -962,6 +963,14 @@ pub unsafe extern "C" fn make_data_packet_auto(
 //      meaningful after the producing process exits.
 //
 // FAIL packets and non-DATA packets (CALL/PING) pass through.
+//
+// Performance: the implementation does at most one materialize-sized
+// allocation (flatten / file read), at most one compressed-sized
+// allocation (zstd output), and exactly one libc::malloc of the final
+// output bytes. No intermediate "build a full packet then re-extract
+// its payload to compress it" copy; the payload region is fed straight
+// to the encoder and the header/metadata/payload are stitched into the
+// output buffer in a single pass.
 //
 // The output buffer is libc::malloc'd; the caller must libc::free.
 #[no_mangle]
@@ -982,11 +991,8 @@ pub unsafe extern "C" fn normalize_data_packet_for_output(
         return 1;
     }
 
-    let is_data = (*header).is_data();
-    let is_fail = (*header).is_fail();
-
     // CALL/PING and FAIL packets ride out unchanged.
-    if !is_data || is_fail {
+    if !(*header).is_data() || (*header).is_fail() {
         return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
     }
 
@@ -1004,42 +1010,21 @@ pub unsafe extern "C" fn normalize_data_packet_for_output(
         return 1;
     }
 
-    // MESG: either pass through or just compress the existing payload.
-    if source == PACKET_SOURCE_MESG {
-        if compression_level == 0 || compression != PACKET_COMPRESSION_NONE {
-            return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
-        }
-        return compress_inline(packet, packet_size, compression_level, out_buf, out_size, errmsg);
-    }
-
-    // RPTR or FILE: materialize the payload into inline bytes, then
-    // build a fresh MESG packet, then (optionally) compress.
-    let new_payload: Vec<u8> = match source {
+    // Phase 1: get the inline-payload bytes. For MESG, that is the
+    // existing payload region (borrowed -- zero extra copy). For RPTR
+    // and FILE, we materialize into an owned Vec.
+    let materialized: Option<Vec<u8>> = match source {
+        PACKET_SOURCE_MESG => None,
         PACKET_SOURCE_RPTR => {
             match read_rptr_payload(packet, payload_start, format, errmsg) {
-                Some(v) => v,
+                Some(v) => Some(v),
                 None => return 1,
             }
         }
         PACKET_SOURCE_FILE => {
-            if format != PACKET_FORMAT_MSGPACK {
-                set_errmsg(errmsg, &MorlocError::Packet(format!(
-                    "FILE source with unsupported format 0x{:02x}", format
-                )));
-                return 1;
-            }
-            let filename_bytes = std::slice::from_raw_parts(
-                packet.add(payload_start),
-                payload_len.min(4096),
-            );
-            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-            let filename = filename.trim_end_matches('\0');
-            match std::fs::read(filename) {
-                Ok(data) => data,
-                Err(e) => {
-                    set_errmsg(errmsg, &MorlocError::Io(e));
-                    return 1;
-                }
+            match read_file_payload(packet, payload_start, payload_len, format, errmsg) {
+                Some(v) => Some(v),
+                None => return 1,
             }
         }
         _ => {
@@ -1049,42 +1034,102 @@ pub unsafe extern "C" fn normalize_data_packet_for_output(
             return 1;
         }
     };
+    let raw_payload: &[u8] = match materialized.as_deref() {
+        Some(slice) => slice,
+        None => std::slice::from_raw_parts(packet.add(payload_start), payload_len),
+    };
 
-    // Build MESG packet: same metadata, new payload, source = MESG,
-    // compression = NONE, format and schema unchanged.
-    let mut new_header = *header;
-    new_header.command.data.source = PACKET_SOURCE_MESG;
-    new_header.command.data.compression = PACKET_COMPRESSION_NONE;
-    let mut hdr_bytes = new_header.to_bytes();
-    let new_len = new_payload.len() as u64;
-    hdr_bytes[24..32].copy_from_slice(&new_len.to_le_bytes());
-
-    let mut mesg_packet = Vec::with_capacity(32 + metadata_size + new_payload.len());
-    mesg_packet.extend_from_slice(&hdr_bytes);
-    if metadata_size > 0 {
-        let meta = std::slice::from_raw_parts(packet.add(32), metadata_size);
-        mesg_packet.extend_from_slice(meta);
-    }
-    mesg_packet.extend_from_slice(&new_payload);
-
-    // Optional compression.
-    let final_bytes = if compression_level > 0 {
-        match crate::compression::CompressionLevel::from_u8(compression_level) {
-            Ok(lvl) if !lvl.is_none() => {
-                match crate::compression::compress_packet(&mesg_packet, lvl) {
-                    Ok(crate::compression::CompressOutcome::Compressed(v)) => v,
-                    Ok(crate::compression::CompressOutcome::NoOp) => mesg_packet,
+    // Phase 2: optionally compress. We only compress when the user
+    // asked for it AND the input is currently uncompressed. The
+    // already-ZSTD case passes through with its existing compression
+    // byte intact (see header comment).
+    let compressed: Option<Vec<u8>> =
+        if compression_level > 0 && compression == PACKET_COMPRESSION_NONE {
+            let lvl = match crate::compression::CompressionLevel::from_u8(compression_level) {
+                Ok(l) => l,
+                Err(e) => { set_errmsg(errmsg, &e); return 1; }
+            };
+            if lvl.is_none() {
+                None
+            } else {
+                match crate::compression::compress_payload_zstd(raw_payload, lvl) {
+                    Ok(v) => Some(v),
                     Err(e) => { set_errmsg(errmsg, &e); return 1; }
                 }
             }
-            Ok(_) => mesg_packet,
-            Err(e) => { set_errmsg(errmsg, &e); return 1; }
-        }
+        } else {
+            None
+        };
+    let final_payload: &[u8] = compressed.as_deref().unwrap_or(raw_payload);
+    let final_compression: u8 = if compressed.is_some() {
+        PACKET_COMPRESSION_ZSTD
     } else {
-        mesg_packet
+        compression
     };
 
-    alloc_out(final_bytes.as_ptr(), final_bytes.len(), out_buf, out_size, errmsg)
+    // Phase 3: emit a libc::malloc'd buffer of exactly
+    // 32 + metadata_size + final_payload.len() and stitch the three
+    // regions into it in one pass.
+    let total = 32 + metadata_size + final_payload.len();
+    let mem = libc::malloc(total) as *mut u8;
+    if mem.is_null() {
+        set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+        return 1;
+    }
+
+    let mut new_header = *header;
+    new_header.command.data.source = PACKET_SOURCE_MESG;
+    new_header.command.data.compression = final_compression;
+    let mut hdr_bytes = new_header.to_bytes();
+    let new_len = final_payload.len() as u64;
+    hdr_bytes[24..32].copy_from_slice(&new_len.to_le_bytes());
+
+    ptr::copy_nonoverlapping(hdr_bytes.as_ptr(), mem, 32);
+    if metadata_size > 0 {
+        ptr::copy_nonoverlapping(packet.add(32), mem.add(32), metadata_size);
+    }
+    if !final_payload.is_empty() {
+        ptr::copy_nonoverlapping(
+            final_payload.as_ptr(),
+            mem.add(32 + metadata_size),
+            final_payload.len(),
+        );
+    }
+
+    *out_buf = mem;
+    *out_size = total;
+    0
+}
+
+// Read a FILE+MSGPACK packet's referenced file into a fresh Vec.
+// Symmetric with read_rptr_payload so the materialize match arm in
+// normalize_data_packet_for_output has uniform shape.
+unsafe fn read_file_payload(
+    packet: *const u8,
+    payload_start: usize,
+    payload_len: usize,
+    format: u8,
+    errmsg: *mut *mut c_char,
+) -> Option<Vec<u8>> {
+    if format != PACKET_FORMAT_MSGPACK {
+        set_errmsg(errmsg, &MorlocError::Packet(format!(
+            "FILE source with unsupported format 0x{:02x}", format
+        )));
+        return None;
+    }
+    let filename_bytes = std::slice::from_raw_parts(
+        packet.add(payload_start),
+        payload_len.min(4096),
+    );
+    let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+    let filename = filename.trim_end_matches('\0');
+    match std::fs::read(filename) {
+        Ok(data) => Some(data),
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Io(e));
+            None
+        }
+    }
 }
 
 // Materialize the SHM-backed payload of an RPTR packet into a flat
@@ -1155,37 +1200,422 @@ unsafe fn read_rptr_payload(
     }
 }
 
-// Compress a MESG packet that is already inline and uncompressed. The
-// caller has already verified source == MESG and compression == NONE.
-unsafe fn compress_inline(
+// ── normalize_data_packet_to_fd ──────────────────────────────────────────────
+//
+// fd variant of normalize_data_packet_for_output. Routes through the
+// streaming path when the destination supports pwrite (regular file),
+// the source is RPTR+VOIDSTAR or FILE+MSGPACK, and the payload is large
+// enough to amortize the streaming setup; otherwise falls back to the
+// buffered helper. Streaming writes the header with a length-field
+// placeholder, streams the payload, then pwrites the corrected length.
+// Returns total bytes written, or -1 on error. RPTR+ARROW is currently
+// always buffered -- see TODO at stream_packet_to_fd.
+#[no_mangle]
+pub unsafe extern "C" fn normalize_data_packet_to_fd(
     packet: *const u8,
     packet_size: usize,
-    level: u8,
-    out_buf: *mut *mut u8,
-    out_size: *mut usize,
+    compression_level: u8,
+    fd: libc::c_int,
     errmsg: *mut *mut c_char,
-) -> i32 {
-    let lvl = match crate::compression::CompressionLevel::from_u8(level) {
-        Ok(l) => l,
-        Err(e) => { set_errmsg(errmsg, &e); return 1; }
-    };
-    if lvl.is_none() {
-        return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
+) -> i64 {
+    clear_errmsg(errmsg);
+
+    let header = read_morloc_packet_header(packet, errmsg);
+    if header.is_null() {
+        return -1;
     }
-    let slice = std::slice::from_raw_parts(packet, packet_size);
-    match crate::compression::compress_packet(slice, lvl) {
-        Ok(crate::compression::CompressOutcome::Compressed(v)) => {
-            alloc_out(v.as_ptr(), v.len(), out_buf, out_size, errmsg)
+
+    let is_data = (*header).is_data();
+    let is_fail = (*header).is_fail();
+    let source = if is_data { (*header).command.data.source } else { 0 };
+    let format = if is_data { (*header).command.data.format } else { 0 };
+
+    // Streaming preconditions. Any failure routes us through the
+    // buffered path (which produces identical bytes; the only cost is
+    // memory).
+    let stream_eligible = is_data
+        && !is_fail
+        && source != PACKET_SOURCE_MESG
+        && !(source == PACKET_SOURCE_RPTR && format == PACKET_FORMAT_ARROW)
+        && is_regular_fd(fd);
+
+    if stream_eligible {
+        match estimate_payload_size(packet, source, format, errmsg) {
+            Some(est) if est >= STREAMING_THRESHOLD => {
+                return stream_packet_to_fd(
+                    packet, packet_size, compression_level, fd, est, errmsg,
+                );
+            }
+            Some(_) => {} // below threshold: fall through to buffered
+            None => return -1, // estimation hit an error (already set)
         }
-        Ok(crate::compression::CompressOutcome::NoOp) => {
-            alloc_out(packet, packet_size, out_buf, out_size, errmsg)
+    }
+
+    buffered_packet_to_fd(packet, packet_size, compression_level, fd, errmsg)
+}
+
+// Matches the `choose_workers` 1 MiB threshold: below it the buffered
+// alloc + memcpy beats the streaming setup cost, and the encoder would
+// be single-threaded anyway.
+const STREAMING_THRESHOLD: u64 = 1 << 20;
+
+// Run the existing in-memory normalizer, then write the resulting
+// buffer to the fd in one syscall. Used for every non-streamed path.
+unsafe fn buffered_packet_to_fd(
+    packet: *const u8,
+    packet_size: usize,
+    compression_level: u8,
+    fd: libc::c_int,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    let mut out_buf: *mut u8 = ptr::null_mut();
+    let mut out_size: usize = 0;
+    let rc = normalize_data_packet_for_output(
+        packet, packet_size, compression_level,
+        &mut out_buf, &mut out_size, errmsg,
+    );
+    if rc != 0 || out_buf.is_null() {
+        return -1;
+    }
+    let n = write_all_fd(fd, out_buf, out_size, errmsg);
+    libc::free(out_buf as *mut c_void);
+    n
+}
+
+// Write `len` bytes from `buf` to `fd`, retrying on partial writes
+// and EINTR. Returns bytes written or -1 with errmsg set.
+unsafe fn write_all_fd(
+    fd: libc::c_int,
+    buf: *const u8,
+    len: usize,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    let mut written: usize = 0;
+    while written < len {
+        let n = libc::write(
+            fd,
+            buf.add(written) as *const c_void,
+            len - written,
+        );
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            set_errmsg(errmsg, &MorlocError::Io(err));
+            return -1;
         }
-        Err(e) => { set_errmsg(errmsg, &e); 1 }
+        if n == 0 {
+            set_errmsg(errmsg, &MorlocError::Other("write returned 0".into()));
+            return -1;
+        }
+        written += n as usize;
+    }
+    written as i64
+}
+
+// fstat fd; return true iff S_ISREG. pwrite at the trailing length
+// patch step requires a regular file -- pipes and sockets do not
+// support random access.
+unsafe fn is_regular_fd(fd: libc::c_int) -> bool {
+    let mut st: libc::stat = std::mem::zeroed();
+    if libc::fstat(fd, &mut st) != 0 {
+        return false;
+    }
+    (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+}
+
+// Estimate the eventual on-disk payload size for the streaming threshold
+// check. Returns None on error (errmsg already set).
+//
+// Estimation errors (e.g., a corrupted relptr) return Some(0); this
+// will fall through to the buffered path, which will surface the same
+// error consistently.
+unsafe fn estimate_payload_size(
+    packet: *const u8,
+    source: u8,
+    format: u8,
+    errmsg: *mut *mut c_char,
+) -> Option<u64> {
+    let header = packet as *const PacketHeader;
+    let metadata_size = (*header).offset as usize;
+    let payload_start = 32 + metadata_size;
+    let payload_len = (*header).length as usize;
+
+    match source {
+        PACKET_SOURCE_RPTR => {
+            if format != PACKET_FORMAT_VOIDSTAR {
+                return Some(0);
+            }
+            let relptr = *(packet.add(payload_start) as *const RelPtr);
+            let abs_ptr = match shm::rel2abs(relptr) {
+                Ok(p) => p,
+                Err(e) => { set_errmsg(errmsg, &e); return None; }
+            };
+            let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
+            if schema_ptr.is_null() {
+                return Some(0);
+            }
+            let schema_str = match CStr::from_ptr(schema_ptr).to_str() {
+                Ok(s) => s,
+                Err(_) => return Some(0),
+            };
+            let rs = match crate::schema::parse_schema(schema_str) {
+                Ok(s) => s,
+                Err(_) => return Some(0),
+            };
+            match crate::ffi::calc_voidstar_size_inner(abs_ptr, &rs) {
+                Ok(sz) => Some(sz as u64),
+                Err(_) => Some(0),
+            }
+        }
+        PACKET_SOURCE_FILE => {
+            let filename_bytes = std::slice::from_raw_parts(
+                packet.add(payload_start),
+                payload_len.min(4096),
+            );
+            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+            let filename = filename.trim_end_matches('\0');
+            match std::fs::metadata(filename) {
+                Ok(md) => Some(md.len()),
+                Err(_) => Some(0),
+            }
+        }
+        _ => Some(payload_len as u64),
     }
 }
 
+// Streaming path: write header + metadata + payload directly to the fd.
+// Returns total bytes written, or -1 with errmsg set.
+unsafe fn stream_packet_to_fd(
+    packet: *const u8,
+    packet_size: usize,
+    compression_level: u8,
+    fd: libc::c_int,
+    estimated_payload_bytes: u64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    let header_in = packet as *const PacketHeader;
+    let metadata_size = (*header_in).offset as usize;
+    let payload_start = 32 + metadata_size;
+    let payload_len = (*header_in).length as usize;
+    let source = (*header_in).command.data.source;
+    let format = (*header_in).command.data.format;
+
+    if payload_start + payload_len > packet_size {
+        set_errmsg(errmsg, &MorlocError::Packet(
+            "packet payload extends past packet bounds".into()
+        ));
+        return -1;
+    }
+
+    let lvl_opt = if compression_level > 0 {
+        match crate::compression::CompressionLevel::from_u8(compression_level) {
+            Ok(l) if !l.is_none() => Some(l),
+            Ok(_) => None,
+            Err(e) => { set_errmsg(errmsg, &e); return -1; }
+        }
+    } else {
+        None
+    };
+
+    // Remember the fd's starting offset so we can pwrite the length
+    // field at the right absolute position when streaming is done.
+    let start_pos = libc::lseek(fd, 0, libc::SEEK_CUR);
+    if start_pos < 0 {
+        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+        return -1;
+    }
+
+    let mut new_header = *header_in;
+    new_header.command.data.source = PACKET_SOURCE_MESG;
+    new_header.command.data.compression = if lvl_opt.is_some() {
+        PACKET_COMPRESSION_ZSTD
+    } else {
+        PACKET_COMPRESSION_NONE
+    };
+    let mut hdr_bytes = new_header.to_bytes();
+    hdr_bytes[24..32].copy_from_slice(&0u64.to_le_bytes());
+
+    if write_all_fd(fd, hdr_bytes.as_ptr(), 32, errmsg) < 0 {
+        return -1;
+    }
+    if metadata_size > 0 {
+        if write_all_fd(fd, packet.add(32), metadata_size, errmsg) < 0 {
+            return -1;
+        }
+    }
+
+    let payload_origin = start_pos + 32 + metadata_size as i64;
+    let est = estimated_payload_bytes as usize;
+    let stream_result = match source {
+        PACKET_SOURCE_RPTR => stream_rptr_payload(packet, payload_start, format, fd, lvl_opt, est, errmsg),
+        PACKET_SOURCE_FILE => stream_file_payload(packet, payload_start, payload_len, format, fd, lvl_opt, est, errmsg),
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Packet(format!(
+                "stream_packet_to_fd called with unstreamable source 0x{:02x}", source
+            )));
+            return -1;
+        }
+    };
+    if stream_result.is_err() {
+        return -1;
+    }
+
+    let end_pos = libc::lseek(fd, 0, libc::SEEK_CUR);
+    if end_pos < 0 {
+        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+        return -1;
+    }
+    let payload_size = (end_pos - payload_origin) as u64;
+    let length_le = payload_size.to_le_bytes();
+    let rc = libc::pwrite(
+        fd,
+        length_le.as_ptr() as *const c_void,
+        8,
+        start_pos + 24,
+    );
+    if rc != 8 {
+        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+        return -1;
+    }
+
+    (end_pos - start_pos) as i64
+}
+
+// Write to a raw fd via the std::io::Write trait. Borrowed: never
+// closes the underlying fd on drop. Retries partial writes and EINTR.
+struct FdWriter(libc::c_int);
+
+impl std::io::Write for FdWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        loop {
+            let n = unsafe {
+                libc::write(self.0, buf.as_ptr() as *const c_void, buf.len())
+            };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(n as usize);
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+// Stream an RPTR+VOIDSTAR payload to fd, optionally through a zstd
+// encoder. Uses `voidstar::write_flat_to_writer` for forward-only
+// flatten so the full payload never materializes in a Vec on the
+// way out.
+unsafe fn stream_rptr_payload(
+    packet: *const u8,
+    payload_start: usize,
+    format: u8,
+    fd: libc::c_int,
+    lvl: Option<crate::compression::CompressionLevel>,
+    estimated_input_bytes: usize,
+    errmsg: *mut *mut c_char,
+) -> Result<(), ()> {
+    if format != PACKET_FORMAT_VOIDSTAR {
+        set_errmsg(errmsg, &MorlocError::Packet(format!(
+            "stream_rptr_payload: expected VOIDSTAR, got 0x{:02x}", format
+        )));
+        return Err(());
+    }
+    let relptr = *(packet.add(payload_start) as *const RelPtr);
+    let abs_ptr = match shm::rel2abs(relptr) {
+        Ok(p) => p,
+        Err(e) => { set_errmsg(errmsg, &e); return Err(()); }
+    };
+    let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
+    if schema_ptr.is_null() {
+        if (*errmsg).is_null() {
+            set_errmsg(errmsg, &MorlocError::Packet(
+                "RPTR+VOIDSTAR packet missing schema metadata".into()
+            ));
+        }
+        return Err(());
+    }
+    let schema_str = match CStr::from_ptr(schema_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Packet(
+                "schema metadata is not valid UTF-8".into()
+            ));
+            return Err(());
+        }
+    };
+    let rs = match crate::schema::parse_schema(schema_str) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return Err(()); }
+    };
+
+    let mut writer = FdWriter(fd);
+    let result = crate::compression::stream_encode_with(
+        &mut writer,
+        lvl,
+        estimated_input_bytes,
+        |sink| crate::voidstar::write_flat_to_writer(sink, abs_ptr, &rs).map(|_| ()),
+    );
+    if let Err(e) = result {
+        set_errmsg(errmsg, &e);
+        return Err(());
+    }
+    Ok(())
+}
+
+// Stream a FILE+MSGPACK payload: open the source file, io::copy
+// through the optional encoder into the fd. Peak in-process memory
+// is bounded by the io::copy chunk size (8 KiB) + the encoder's
+// internal worker buffers.
+unsafe fn stream_file_payload(
+    packet: *const u8,
+    payload_start: usize,
+    payload_len: usize,
+    format: u8,
+    fd: libc::c_int,
+    lvl: Option<crate::compression::CompressionLevel>,
+    estimated_input_bytes: usize,
+    errmsg: *mut *mut c_char,
+) -> Result<(), ()> {
+    if format != PACKET_FORMAT_MSGPACK {
+        set_errmsg(errmsg, &MorlocError::Packet(format!(
+            "stream_file_payload: expected MSGPACK, got 0x{:02x}", format
+        )));
+        return Err(());
+    }
+    let filename_bytes = std::slice::from_raw_parts(
+        packet.add(payload_start),
+        payload_len.min(4096),
+    );
+    let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+    let filename = filename.trim_end_matches('\0');
+    let mut src = match std::fs::File::open(filename) {
+        Ok(f) => f,
+        Err(e) => { set_errmsg(errmsg, &MorlocError::Io(e)); return Err(()); }
+    };
+
+    let mut writer = FdWriter(fd);
+    let result = match lvl {
+        Some(lvl) => crate::compression::stream_encode_reader(
+            &mut writer, &mut src, lvl, estimated_input_bytes,
+        ),
+        None => std::io::copy(&mut src, &mut writer)
+            .map(|_| ())
+            .map_err(MorlocError::Io),
+    };
+    if let Err(e) = result {
+        set_errmsg(errmsg, &e);
+        return Err(());
+    }
+    Ok(())
+}
+
 // libc::malloc a copy of `src[..len]` and hand it back through the
-// (out_buf, out_size) outparams. Used by every success path of
+// (out_buf, out_size) outparams. Used by the pass-through cases of
 // normalize_data_packet_for_output so the C ABI is uniform.
 unsafe fn alloc_out(
     src: *const u8,

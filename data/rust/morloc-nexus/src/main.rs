@@ -612,13 +612,10 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         fn get_morloc_data_packet_error_message(
             data: *const u8, errmsg: *mut *mut c_char,
         ) -> *mut c_char;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn normalize_data_packet_for_output(
+        fn normalize_data_packet_to_fd(
             packet: *const u8, packet_size: usize, compression_level: u8,
-            out_buf: *mut *mut u8, out_size: *mut usize, errmsg: *mut *mut c_char,
-        ) -> i32;
+            fd: libc::c_int, errmsg: *mut *mut c_char,
+        ) -> i64;
     }
 
     let packet_path = config.packet_path.as_ref().unwrap();
@@ -652,12 +649,25 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
 
     // If the on-disk packet was written with -z, transparently
     // decompress before validating + forwarding. decompress_packet_if_needed
-    // is a no-op for plain packets and for non-DATA packets, so this is
-    // safe to apply unconditionally.
-    let decompressed: Vec<u8> = {
+    // returns Cow::Borrowed for plain packets, so the common case keeps
+    // the original read_binary_file buffer with zero extra copies.
+    let (call_packet, packet_size): (*mut u8, usize) = {
         let raw_slice = unsafe { std::slice::from_raw_parts(raw_packet, packet_size) };
         match morloc_runtime_types::compression::decompress_packet_if_needed(raw_slice) {
-            Ok(v) => v,
+            Ok(std::borrow::Cow::Borrowed(_)) => (raw_packet, packet_size),
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                let buf = unsafe { libc::malloc(bytes.len()) as *mut u8 };
+                if buf.is_null() {
+                    unsafe { libc::free(raw_packet as *mut c_void) };
+                    eprintln!("Error: malloc failed for call packet");
+                    process::clean_exit(1);
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+                    libc::free(raw_packet as *mut c_void);
+                }
+                (buf, bytes.len())
+            }
             Err(e) => {
                 eprintln!(
                     "Error: failed to decompress call packet '{}': {}",
@@ -668,21 +678,6 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
             }
         }
     };
-    unsafe { libc::free(raw_packet as *mut c_void) };
-
-    // Move into a libc::malloc'd buffer so we can hand the raw pointer
-    // to send_and_receive_over_socket (which is a C ABI function).
-    let call_packet: *mut u8 = unsafe {
-        let buf = libc::malloc(decompressed.len()) as *mut u8;
-        if buf.is_null() {
-            eprintln!("Error: malloc failed for call packet");
-            process::clean_exit(1);
-        }
-        std::ptr::copy_nonoverlapping(decompressed.as_ptr(), buf, decompressed.len());
-        buf
-    };
-    let packet_size = decompressed.len();
-    drop(decompressed);
 
     // Structural check on the bytes we just read from the shared FS. A
     // torn or corrupted call packet would otherwise propagate into the
@@ -728,10 +723,9 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     // Write the morloc result packet to --output-file. The driver-side
     // `slurm_ffi::remote_call` (libmorloc.so) reads exactly this file
     // via `read_binary_file` and feeds the bytes back up the call
-    // chain. normalize_data_packet_for_output materializes RPTR/FILE
-    // payloads into inline MESG (so the on-disk packet is meaningful
-    // after this process exits) and applies zstd compression when
-    // -z N > 0.
+    // chain. The fd-based normalizer streams the payload straight to
+    // disk when the result is large enough; for atomicity we stream
+    // into a sibling temp file and rename on success.
     if config.output_format == dispatch::OutputFormat::Packet {
         if let Some(ref output_path) = config.output_path {
             let packet_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
@@ -743,24 +737,62 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
                 process::clean_exit(1);
             }
 
-            let mut out_buf: *mut u8 = std::ptr::null_mut();
-            let mut out_size: usize = 0;
+            let output_path_buf = std::path::PathBuf::from(output_path);
+            let parent = output_path_buf
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let basename = output_path_buf
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "out".to_string());
+            let tmp_path = parent.join(format!(
+                ".{}.tmp.{}",
+                basename,
+                std::process::id()
+            ));
+
+            let tmp_file = match std::fs::File::create(&tmp_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "Error: failed to open temp file '{}': {}",
+                        tmp_path.display(), e
+                    );
+                    unsafe { libc::free(result_packet as *mut c_void) };
+                    process::clean_exit(1);
+                }
+            };
+            let fd = {
+                use std::os::unix::io::AsRawFd;
+                tmp_file.as_raw_fd()
+            };
+
             let mut nerr: *mut c_char = std::ptr::null_mut();
-            let rc = unsafe {
-                normalize_data_packet_for_output(
+            let n = unsafe {
+                normalize_data_packet_to_fd(
                     result_packet,
                     packet_size,
                     config.compression_level,
-                    &mut out_buf,
-                    &mut out_size,
+                    fd,
                     &mut nerr,
                 )
             };
-            if rc != 0 || out_buf.is_null() {
+            // sync_all before rename so a crash between rename and
+            // fsync doesn't yield a zero-length result file the
+            // driver would treat as success.
+            let sync_result = tmp_file.sync_all();
+            drop(tmp_file);
+
+            if n < 0 || sync_result.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
                 let msg = if !nerr.is_null() {
                     let s = unsafe { std::ffi::CStr::from_ptr(nerr) }.to_string_lossy().into_owned();
                     unsafe { libc::free(nerr as *mut c_void) };
                     s
+                } else if let Err(e) = sync_result {
+                    format!("sync_all failed: {}", e)
                 } else {
                     "unknown error".into()
                 };
@@ -769,20 +801,12 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
                 process::clean_exit(1);
             }
 
-            let output_c = CString::new(output_path.as_str()).unwrap();
-            let rc = unsafe {
-                write_atomic(output_c.as_ptr(), out_buf, out_size, &mut errmsg)
-            };
-            unsafe { libc::free(out_buf as *mut c_void) };
-            if rc != 0 || !errmsg.is_null() {
-                let msg = if !errmsg.is_null() {
-                    let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
-                    unsafe { libc::free(errmsg as *mut c_void) };
-                    s
-                } else {
-                    format!("write_atomic returned {}", rc)
-                };
-                eprintln!("Error: failed to write result packet to '{}': {}", output_path, msg);
+            if let Err(e) = std::fs::rename(&tmp_path, &output_path_buf) {
+                let _ = std::fs::remove_file(&tmp_path);
+                eprintln!(
+                    "Error: failed to rename '{}' to '{}': {}",
+                    tmp_path.display(), output_path, e
+                );
                 unsafe { libc::free(result_packet as *mut c_void) };
                 process::clean_exit(1);
             }
