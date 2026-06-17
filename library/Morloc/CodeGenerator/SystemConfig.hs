@@ -26,7 +26,7 @@ import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, catch, displayException, fromException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
+import System.Directory (createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
@@ -58,11 +58,16 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       optDir = homeDir </> "opt"
       libDir = homeDir </> "lib"
 
-  -- When force is set, clean build output directories
+  -- When force is set, clean stale init-owned artifacts. Package-installed
+  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
+  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
+  -- here or every `morloc init -f` would force a reinstall of every module
+  -- that uses the `expose:` field. opt/ has no expose target, so it can
+  -- still be fully wiped.
   when (force == ForceOverwrite) $ do
-    sayInfo verbose "Force rebuild: cleaning stale artifacts"
-    cleanDirectory libDir
-    cleanDirectoryExcept includeDir ["mlccpptypes"]
+    sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
+    forM_ initOwnedLibPaths $ \p -> removePathIfExists (libDir </> p)
+    forM_ initOwnedIncludePaths $ \p -> removePathIfExists (includeDir </> p)
     cleanDirectory optDir
 
   ensureDirectory verbose "morloc home directory" homeDir
@@ -350,19 +355,43 @@ cleanDirectory dir = do
     removeDirectoryRecursive dir
     createDirectoryIfMissing True dir
 
--- | Remove all contents of a directory except entries in the keep list
-cleanDirectoryExcept :: FilePath -> [String] -> IO ()
-cleanDirectoryExcept dir keep = do
-  exists <- doesDirectoryExist dir
-  when exists $ do
-    entries <- listDirectory dir
-    forM_ entries $ \entry -> do
-      unless (entry `elem` keep) $ do
-        let path = dir </> entry
-        isDir <- doesDirectoryExist path
-        if isDir
-          then removeDirectoryRecursive path
-          else removeFile path
+-- | Remove a path that may be a file, directory, or symlink. No-op if absent.
+removePathIfExists :: FilePath -> IO ()
+removePathIfExists path = do
+  isFile <- doesFileExist path
+  if isFile
+    then removeFile path
+    else do
+      isDir <- doesDirectoryExist path
+      when isDir $ removeDirectoryRecursive path
+
+-- | Names (relative to $MORLOC_HOME/lib/) written by morloc init itself.
+-- Must stay in sync with the per-language init.sh scripts under
+-- data/lang/*/init.sh and with the libmorloc.so install above. Anything
+-- not in this list (notably lib/python/<modName>/ and lib/R/<modName>/
+-- populated by `morloc install` via Module.runExpose) is preserved across
+-- `morloc init -f`.
+initOwnedLibPaths :: [FilePath]
+initOwnedLibPaths =
+  [ "libmorloc.so"
+  , "libcppmorloc.a"
+  , "librmorloc.so"
+  ]
+
+-- | Names (relative to $MORLOC_HOME/include/) written by morloc init itself.
+-- Must stay in sync with data/lang/cpp/init.sh. `mlccpptypes/` is omitted
+-- because cpp/init.sh git-clones it on demand and reuses it if present.
+-- Anything not in this list (notably include/<modName>/ populated by
+-- `morloc install`) is preserved across `morloc init -f`.
+initOwnedIncludePaths :: [FilePath]
+initOwnedIncludePaths =
+  [ "morloc.h"
+  , "cppmorloc.hpp"
+  , "mlc_arrow.hpp"
+  , "morloc_pch.hpp"
+  , "morloc_pch.hpp.gch"
+  , "nanoarrow"
+  ]
 
 -- | Check that a tool exists on PATH, error if not
 requireTool :: String -> String -> IO ()
