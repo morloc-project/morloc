@@ -547,6 +547,7 @@ data ArgDocVars = ArgDocVars
   { docLines :: [Text]
   , docName :: Maybe Text
   , docLiteral :: Maybe Bool
+  , docMany :: Maybe Bool
   , docUnroll :: Maybe Bool
   , docDefault :: Maybe Text
   , docMetavar :: Maybe Text
@@ -600,6 +601,7 @@ instance Defaultable ArgDocVars where
       { docLines = []
       , docName = Nothing
       , docLiteral = Nothing
+      , docMany = Nothing
       , docUnroll = Nothing
       , docDefault = Nothing
       , docMetavar = Nothing

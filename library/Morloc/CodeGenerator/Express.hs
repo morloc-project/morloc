@@ -176,8 +176,8 @@ cacheWrapExpr (PolyManifold l m form k inner) = do
     Just lbl ->
       PolyManifold l m form k (PolyCacheBody lbl m argsList inner')
     Nothing -> PolyManifold l m form k inner'
-cacheWrapExpr (PolyApp head args) =
-  PolyApp <$> cacheWrapExpr head <*> mapM cacheWrapExpr args
+cacheWrapExpr (PolyApp f args) =
+  PolyApp <$> cacheWrapExpr f <*> mapM cacheWrapExpr args
 cacheWrapExpr (PolyCacheBody lbl m args body) =
   PolyCacheBody lbl m args <$> cacheWrapExpr body
 cacheWrapExpr (PolyLet i e1 e2) =
@@ -320,8 +320,8 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
     goExpr ids (PolyLet i e1 e2) = PolyLet i (goExpr ids e1) (goExpr ids e2)
     goExpr ids (PolyReturn e) = PolyReturn (goExpr ids e)
     goExpr ids (PolyApp e es) = PolyApp (goExpr ids e) (map (goExpr ids) es)
-    goExpr ids (PolyCacheBody lbl midx args e) =
-      PolyCacheBody lbl midx args (goExpr ids e)
+    goExpr ids (PolyCacheBody lbl cm cargs e) =
+      PolyCacheBody lbl cm cargs (goExpr ids e)
     goExpr ids (PolyEval ti e) = PolyEval ti (goExpr ids e)
     goExpr ids (PolyDoBlock ti e) = PolyDoBlock ti (goExpr ids e)
     goExpr ids (PolyCoerce c ti e) = PolyCoerce c ti (goExpr ids e)

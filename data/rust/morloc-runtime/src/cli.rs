@@ -109,39 +109,111 @@ pub enum ArgSource {
     /// [`claim_stdin`] before actually reading -- the classifier
     /// only labels the source.
     Stdin,
-    /// `file_exists(arg)` returned true. Content type is decided
+    /// The token names a file to be opened. Content type is decided
     /// by [`load_morloc_data_file`] (extension + magic-byte sniff).
+    /// File mode is reached two ways: an explicit `file:` prefix
+    /// (which always wins, and strips off the prefix), or a token
+    /// that doesn't parse as inline JSON but does name an existing
+    /// path on disk.
     File,
-    /// Neither stdin nor an existing file, and the bytes are not
-    /// path-shaped. Hand the literal bytes to the JSON/inline
-    /// parser for the target schema.
+    /// The bytes are inline content (literal JSON for the target
+    /// schema). Reached when the token has a JSON-literal shape
+    /// (`"`/`{`/`[`/digit/`-digit` prefix, or the bare keywords
+    /// `null`/`true`/`false`).
     Inline,
 }
 
+/// Classified CLI argument: the source kind plus a C-string pointer
+/// into (a possibly offset position within) the original token. The
+/// pointer is safe to pass to `fopen` / `read_json_with_schema` and is
+/// guaranteed to be NUL-terminated because we only advance into the
+/// original NUL-terminated string -- never past it.
+pub struct Classified {
+    pub kind: ArgSource,
+    pub effective: *const c_char,
+}
+
+/// True iff the (trimmed) token has the prefix of a JSON literal, or
+/// is one of the three bare keywords. Used by the new classifier to
+/// preempt the filesystem check so a file literally named `null`,
+/// `42`, etc. doesn't shadow the JSON keyword. Strings (which start
+/// with `"`), objects (`{`), arrays (`[`), numbers (digit, or
+/// `-digit`), and the keywords are all recognized here.
+fn is_json_literal_shape(s: &str) -> bool {
+    let t = s.trim_start();
+    let mut it = t.chars();
+    match it.next() {
+        Some('"') | Some('{') | Some('[') => return true,
+        Some(c) if c.is_ascii_digit() => return true,
+        Some('-') => return it.next().map_or(false, |c| c.is_ascii_digit()),
+        _ => {}
+    }
+    matches!(t.trim_end(), "null" | "true" | "false")
+}
+
 /// Single classifier for "what does this CLI argument represent."
-/// The four-way decision -- stdin / existing file / path-shaped
-/// typo / inline content -- is split out here so every entry point
-/// (positional args, bundles, per-field overrides) reaches the
-/// same conclusion for the same bytes.
+/// The decision order, in priority:
 ///
-/// Returns `Err("file '...' not found")` when the bytes look like a
-/// path (per [`arg_looks_like_file_path`]) but `file_exists` says
-/// otherwise -- almost always a user typo. JSON-content prefixes
-/// (`"` `{` `[` digit `-`) bypass the path check.
-pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<ArgSource, MorlocError> {
+///   1. `file:` prefix at position 0 (forces File mode, strips prefix).
+///   2. `-` / `/dev/stdin` (Stdin).
+///   3. Token has a JSON-literal shape (Inline) -- this preempts the
+///      filesystem check, so a file literally named `null` or `42`
+///      doesn't shadow the JSON keyword.
+///   4. `file_exists(token)` (File).
+///   5. Path-shaped but missing -> `Err("file '...' not found")`.
+///   6. Anything else -> `Err("expected inline JSON, file path, or
+///      `file:` prefix...")` (Bug 4 follow-up: clearer typo error).
+///
+/// For Bug 10 the user accepted the breaking change in (3): we no
+/// longer let an on-disk file shadow a JSON literal. The escape
+/// hatch is `file:<path>`.
+pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, MorlocError> {
     extern "C" { fn file_exists(filename: *const c_char) -> bool; }
 
+    // 1. `file:` prefix (only at position 0). We strip exactly one
+    // occurrence; `file:file:foo` opens the file literally named
+    // `file:foo`.
+    let prefix = b"file:";
+    if libc::strncmp(arg, prefix.as_ptr() as *const c_char, prefix.len()) == 0 {
+        let effective = arg.add(prefix.len());
+        return Ok(Classified { kind: ArgSource::File, effective });
+    }
+
+    // 2. Stdin markers.
     let stdin_path = b"/dev/stdin\0";
     let dash_path = b"-\0";
     let is_stdin = libc::strcmp(arg, stdin_path.as_ptr() as *const c_char) == 0
         || libc::strcmp(arg, dash_path.as_ptr() as *const c_char) == 0;
-    if is_stdin { return Ok(ArgSource::Stdin); }
-    if file_exists(arg) { return Ok(ArgSource::File); }
+    if is_stdin {
+        return Ok(Classified { kind: ArgSource::Stdin, effective: arg });
+    }
+
     let arg_str = CStr::from_ptr(arg).to_string_lossy();
+
+    // 3. JSON-literal shape preempts the filesystem.
+    if is_json_literal_shape(&arg_str) {
+        return Ok(Classified { kind: ArgSource::Inline, effective: arg });
+    }
+
+    // 4. Existing file.
+    if file_exists(arg) {
+        return Ok(Classified { kind: ArgSource::File, effective: arg });
+    }
+
+    // 5. Path-shaped + missing -> clear typo error.
     if arg_looks_like_file_path(arg_str.as_ref()) {
         return Err(MorlocError::Other(format!("file '{}' not found", arg_str)));
     }
-    Ok(ArgSource::Inline)
+
+    // 6. Anything else.
+    Err(MorlocError::Other(format!(
+        "argument '{}' is not inline JSON (would have to start with \", {{, [, a digit, \
+         -digit, or be the bare keyword null/true/false), is not an existing file path, \
+         and is not prefixed with `file:`. If you meant the literal string `{0}`, set \
+         `literal: true` on the argument's docstring (or pass `\"{0}\"`); if you meant \
+         a file named `{0}`, use `file:{0}`",
+        arg_str
+    )))
 }
 
 // ── argument_t lifecycle ───────────────────────────────────────────────────
@@ -643,11 +715,12 @@ unsafe fn parse_cli_data_argument_singular(
     let mut err: *mut c_char = ptr::null_mut();
     let mut fd: *mut libc::FILE = ptr::null_mut();
 
-    let source = match classify_arg_source(arg) {
-        Ok(s) => s,
+    let classified = match classify_arg_source(arg) {
+        Ok(c) => c,
         Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
     };
-    match source {
+    let effective = classified.effective;
+    match classified.kind {
         ArgSource::Stdin => {
             if let Err(e) = claim_stdin() {
                 set_errmsg(errmsg, &e);
@@ -656,11 +729,11 @@ unsafe fn parse_cli_data_argument_singular(
             fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
         }
         ArgSource::File => {
-            fd = libc::fopen(arg, b"rb\0".as_ptr() as *const c_char);
+            fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
             if fd.is_null() {
                 set_errmsg(errmsg, &MorlocError::Other(
                     format!("The argument '{}' is a filename, but it can't be read",
-                        CStr::from_ptr(arg).to_string_lossy())
+                        CStr::from_ptr(effective).to_string_lossy())
                 ));
                 return ptr::null_mut();
             }
@@ -671,7 +744,7 @@ unsafe fn parse_cli_data_argument_singular(
     if fd.is_null() {
         // Literal JSON data
         if crate::arrow_ffi::is_arrow_table_schema(&rs) {
-            let relptr = crate::arrow_ffi::read_json_to_arrow_shm(arg as *const c_char, schema, &mut err);
+            let relptr = crate::arrow_ffi::read_json_to_arrow_shm(effective as *const c_char, schema, &mut err);
             if !err.is_null() {
                 *errmsg = err;
                 return ptr::null_mut();
@@ -687,7 +760,7 @@ unsafe fn parse_cli_data_argument_singular(
                 Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
             }
         }
-        dest = read_json_with_schema(dest, arg, schema, &mut err);
+        dest = read_json_with_schema(dest, effective as *mut c_char, schema, &mut err);
         if !err.is_null() {
             *errmsg = err;
             return ptr::null_mut();
@@ -696,9 +769,9 @@ unsafe fn parse_cli_data_argument_singular(
     }
 
     // File or stdin
-    let source_label: String = match source {
+    let source_label: String = match classified.kind {
         ArgSource::Stdin => "stdin".to_string(),
-        ArgSource::File => format!("file '{}'", CStr::from_ptr(arg).to_string_lossy()),
+        ArgSource::File => format!("file '{}'", CStr::from_ptr(effective).to_string_lossy()),
         ArgSource::Inline => unreachable!("fd is non-null"),
     };
     let mut data_size: usize = 0;
@@ -744,7 +817,7 @@ unsafe fn parse_cli_data_argument_singular(
     }
 
     // All other formats: canonical file loader (takes ownership of data)
-    dest = load_morloc_data_file(arg, data, data_size, schema, &mut err) as *mut u8;
+    dest = load_morloc_data_file(effective, data, data_size, schema, &mut err) as *mut u8;
     if !err.is_null() {
         wrap_and_set_errmsg(err, &source_label, errmsg);
         return ptr::null_mut();
@@ -777,10 +850,11 @@ unsafe fn load_bundle_partial(
     schema: *const CSchema,
     rs: &crate::schema::Schema,
 ) -> Result<Vec<Option<shm::AbsPtr>>, MorlocError> {
-    let source = classify_arg_source(arg)?;
+    let classified = classify_arg_source(arg)?;
+    let effective = classified.effective;
 
-    let inline_bytes = if source == ArgSource::Inline {
-        Some(CStr::from_ptr(arg).to_bytes())
+    let inline_bytes = if classified.kind == ArgSource::Inline {
+        Some(CStr::from_ptr(effective).to_bytes())
     } else {
         None
     };
@@ -789,9 +863,9 @@ unsafe fn load_bundle_partial(
     // needs to peek at the leading non-whitespace byte, and stdin
     // can only be read once anyway. For inline values the bytes are
     // already addressable via the C string.
-    let file_bytes: Option<Vec<u8>> = match source {
+    let file_bytes: Option<Vec<u8>> = match classified.kind {
         ArgSource::File => {
-            let p = CStr::from_ptr(arg).to_string_lossy().into_owned();
+            let p = CStr::from_ptr(effective).to_string_lossy().into_owned();
             Some(std::fs::read(&p).map_err(|e| MorlocError::Other(
                 format!("read bundle file '{}': {}", p, e)
             ))?)
@@ -1011,6 +1085,152 @@ unsafe fn parse_cli_data_argument_unrolled(
     }
 
     dest
+}
+
+// ── parse_cli_data_argument_list ─────────────────────────────────────────────
+
+/// Assemble a single list-typed packet from N CLI arguments. Used by
+/// the nexus when a manifest arg is marked `many: true`. Each input
+/// `argument_t` carries one CLI token (or whitespace-quoted literal,
+/// already JSON-wrapped for `literal: true` cases). Per-element source
+/// resolution goes through the same `parse_cli_data_argument_singular`
+/// path as scalars, so every supported wire format (inline JSON, file
+/// JSON, mpack file, morloc voidstar binary file, RPTR packet file,
+/// stdin) is accepted for every element with no JSON-conversion cost.
+///
+/// The resulting packet wraps a morloc list whose element schema is
+/// `list_schema->parameters[0]`.
+#[no_mangle]
+pub unsafe extern "C" fn parse_cli_data_argument_list(
+    mut dest: *mut u8,
+    args: *const *const ArgumentT,
+    n: usize,
+    list_schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+
+    if list_schema.is_null() {
+        set_errmsg(errmsg, &MorlocError::NullPointer);
+        return ptr::null_mut();
+    }
+
+    let rs = CSchema::to_rust(list_schema);
+
+    use crate::schema::SerialType;
+    if !matches!(rs.serial_type, SerialType::Array) {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "parse_cli_data_argument_list requires a list (Array) schema".into()));
+        return ptr::null_mut();
+    }
+    if rs.parameters.is_empty() || (*list_schema).parameters.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "list schema has no element schema".into()));
+        return ptr::null_mut();
+    }
+
+    let elem_rs = &rs.parameters[0];
+    let elem_cs: *const CSchema = *(*list_schema).parameters.add(0);
+    let ew = elem_rs.width;
+    let hdr = std::mem::size_of::<shm::Array>();
+
+    // Allocate header at `dest` (or fresh shmalloc) and a separate
+    // shmalloc'd block for the element data area. Matches the
+    // dest-Some branch of `json.rs::json_to_voidstar_inner` for the
+    // SerialType::Array case so the dispatch / arena bookkeeping is
+    // identical for many-args and JSON-array-parsed args.
+    if dest.is_null() {
+        match shm::shmalloc(hdr) {
+            Ok(p) => dest = p,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        }
+    }
+    // Zero the header slot before writing -- a partial write leaves
+    // garbage in the second field if we error out mid-loop.
+    ptr::write_bytes(dest, 0, hdr);
+
+    let data_ptr: *mut u8 = if n > 0 {
+        match shm::shmalloc(n * ew) {
+            Ok(p) => {
+                ptr::write_bytes(p, 0, n * ew);
+                p
+            }
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        }
+    } else {
+        ptr::null_mut()
+    };
+    let data_rel = if data_ptr.is_null() {
+        shm::RELNULL
+    } else {
+        match shm::abs2rel(data_ptr) {
+            Ok(r) => r,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        }
+    };
+
+    // Parse each element into its slot in the data area. Mirrors
+    // `parse_cli_data_argument_unrolled`'s per-field loop: shcalloc a
+    // scratch buffer of the element width, parse into it, then
+    // memcpy the parsed bytes into the destination slot. Relptrs in
+    // the element header continue to reference SHM blocks owned by
+    // the eval arena and stay alive for the rest of dispatch.
+    for i in 0..n {
+        let arg_t = *args.add(i);
+        if arg_t.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(
+                format!("element {} in many-arg list is NULL", i)));
+            return ptr::null_mut();
+        }
+        let val = (*arg_t).value;
+        if val.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(
+                format!("element {} in many-arg list has no value", i)));
+            return ptr::null_mut();
+        }
+
+        let scratch = match shm::shcalloc(1, ew) {
+            Ok(p) => p,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        };
+        let mut err: *mut c_char = ptr::null_mut();
+        let loaded = parse_cli_data_argument_singular(scratch, val, elem_cs, &mut err);
+        if !err.is_null() {
+            wrap_and_set_errmsg(err, &format!("element {}", i), errmsg);
+            return ptr::null_mut();
+        }
+        if loaded.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(
+                format!("failed to parse element {}", i)));
+            return ptr::null_mut();
+        }
+
+        let slot = data_ptr.add(i * ew);
+        ptr::copy_nonoverlapping(loaded, slot, ew);
+    }
+
+    // Write the Array header (size, data relptr) at `dest`.
+    let arr = shm::Array { size: n, data: data_rel };
+    ptr::copy_nonoverlapping(
+        &arr as *const shm::Array as *const u8,
+        dest,
+        hdr,
+    );
+
+    // Wrap into a packet just like `parse_cli_data_argument` does.
+    // Arrow-table targets cannot be the element type of a many-arg
+    // (the manifest's `many` flag is gated on `[a]`, not Table), so
+    // the auto path is always correct here.
+    let relptr = match shm::abs2rel(dest) {
+        Ok(r) => r,
+        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+    crate::packet_ffi::make_data_packet_auto(
+        dest as *mut c_void,
+        relptr,
+        list_schema,
+        errmsg,
+    )
 }
 
 // ── parse_cli_data_argument ──────────────────────────────────────────────────

@@ -12,7 +12,7 @@ Processes docstring annotations from type signatures into the final
 'MDoc' records used by the nexus for @--help@ output, including argument
 names, default values, metavars, and CLI option flags.
 -}
-module Morloc.CodeGenerator.Docstrings (processDocstrings) where
+module Morloc.CodeGenerator.Docstrings (processDocstrings, argLocPrefix) where
 
 import qualified Data.Map as Map
 import Data.Text (Text)
@@ -94,11 +94,14 @@ processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
 processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   (ts', argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
   loc <- argLocPrefix i
+  validateCommandLevelDirectives loc cmddoc
   cmdargs <-
     sequence
-      [ makeCmdArg (loc <> "positional argument #" <> pretty n) t' a'
+      [ makeCmdArg (loc <> "argument #" <> pretty n) t' a'
       | (n, t', a') <- zip3 [(1 :: Int) ..] ts' argdocs'
       ]
+  validateManyOrdering loc cmdargs
+  validateFlagRevCollisions loc cmdargs
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
     CmdDocSet
@@ -108,6 +111,8 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
       }
 processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
+  loc <- argLocPrefix i
+  validateCommandLevelDirectives loc cmddoc
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
     CmdDocSet
@@ -116,7 +121,9 @@ processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
       , cmdDocArgs = []
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
       }
-processArgDoc _ t (ArgDocAlias r) =
+processArgDoc i t (ArgDocAlias r) = do
+  loc <- argLocPrefix i
+  validateCommandLevelDirectives loc r
   return $
     CmdDocSet
       { cmdDocDesc = docLines r
@@ -129,6 +136,7 @@ processArgDoc i t r = do
   case (t', r') of
     (NamT _ _ _ ts, ArgDocRec args entries) -> do
       loc <- argLocPrefix i
+      validateCommandLevelDirectives loc args
       cmdargs <-
         sequence
           [ makeCmdArg (loc <> "field " <> pretty k) ty (ArgDocAlias dv)
@@ -142,6 +150,33 @@ processArgDoc i t r = do
           , cmdDocRet = (t, [])
           }
     _ -> MM.throwSystemError "Expected a record type with docstrings but found a non-record type"
+
+-- | Reject argument-only directives that appear at the command /
+-- function level (i.e. on the docstring lines above `name ::`
+-- instead of inside the signature next to a specific type). Without
+-- this check the directive is silently dropped: `literal: true`
+-- above a function only affects the command's metadata record,
+-- never any argument, so the user's intent never reaches the
+-- manifest.
+validateCommandLevelDirectives :: MDoc -> ArgDocVars -> MorlocMonad ()
+validateCommandLevelDirectives loc r =
+  mapM_ check
+    [ ("literal", isJust (docLiteral r))
+    , ("many",    isJust (docMany r))
+    , ("unroll",  isJust (docUnroll r))
+    , ("default", isJust (docDefault r))
+    , ("metavar", isJust (docMetavar r))
+    , ("arg",     isJust (docArg r))
+    , ("true",    isJust (docTrue r))
+    , ("false",   isJust (docFalse r))
+    ]
+  where
+    check :: (Text, Bool) -> MorlocMonad ()
+    check (name, True) = MM.throwSystemError $
+      loc <> "docstring directive '" <> pretty name <> "' cannot be used"
+        <> " to describe a function; it applies to a specific argument and"
+        <> " must appear inside the signature."
+    check (_, False) = return ()
 
 getReturnDesc :: ArgDoc -> Maybe Text -> [Text]
 getReturnDesc _ (Just ret) = [ret]
@@ -181,6 +216,7 @@ reduceArgDoc i t@(VarT v) arg = do
         { docLines = if (length (docLines r1) > 0) then docLines r1 else docLines r2
         , docName = docName r1 <|> docName r2
         , docLiteral = docLiteral r1 <|> docLiteral r2
+        , docMany = docMany r1 <|> docMany r2
         , docUnroll = docUnroll r1 <|> docUnroll r2
         , docDefault = docDefault r1 <|> docDefault r2
         , docMetavar = docMetavar r1 <|> docMetavar r2
@@ -208,10 +244,10 @@ makeCmdArg _ _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI p
 
 resolveArgDocVars :: MDoc -> [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
 resolveArgDocVars loc rs t r
-  -- A default value is only meaningful for a flag (true:/false:) or a
-  -- flagged optional argument (arg:). On a positional argument it was
-  -- silently discarded, leaving the argument required with no diagnostic.
-  -- An unrolled record group is exempt: each field carries its own tags.
+  -- `default:` only makes sense on a flag (true:/false:) or an
+  -- option (arg:). On a bare positional it is rejected. An
+  -- unrolled record group is exempt: each field carries its own
+  -- directives.
   | isJust (docDefault r)
       && isNothing (docArg r)
       && isNothing (docTrue r)
@@ -223,14 +259,21 @@ resolveArgDocVars loc rs t r
           <> " required and cannot take defaults. Either remove the"
           <> " 'default:' line, or make the field optional by adding an"
           <> " 'arg:' docstring entry (e.g. \"arg: -f/--flag\")."
+  -- list-of-elements (many) and per-field unroll describe
+  -- incompatible CLI shapes for the same slot.
+  | docMany r == Just True && docUnroll r == Just True =
+      MM.throwSystemError $
+        loc <> " cannot combine `many: true` with `unroll: true`."
   | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
-  | length rs > 0 && docUnroll r == Just True = resolveGrp t r rs
-  | t == VarT MBT.bool = resolveFlagCmdArg r
-  | isJust (docArg r) && isJust (docDefault r) = resolveOpt t r |>> CmdArgOpt
+  | length rs > 0 && docUnroll r == Just True = resolveGrp loc t r rs
+  | t == VarT MBT.bool = resolveFlagCmdArg loc r
+  -- Any non-Bool typed argument with `arg:` becomes an option;
+  -- `resolveOpt` errors if no `default:` accompanies it.
+  | isJust (docArg r) = resolveOpt loc t r |>> CmdArgOpt
   | otherwise = resolvePos t r |>> CmdArgPos
 
-resolveGrp :: Type -> ArgDocVars -> [(Key, (Type, ArgDocVars))] -> MorlocMonad CmdArg
-resolveGrp recType@(NamT _ v _ _) arg argEntries = do
+resolveGrp :: MDoc -> Type -> ArgDocVars -> [(Key, (Type, ArgDocVars))] -> MorlocMonad CmdArg
+resolveGrp loc recType@(NamT _ v _ _) arg argEntries = do
   entries <- mapM resolveRecDocVars argEntries
   return . CmdArgGrp $
     RecDocSet
@@ -245,18 +288,36 @@ resolveGrp recType@(NamT _ v _ _) arg argEntries = do
       (Key, (Type, ArgDocVars)) -> MorlocMonad (Key, Either ArgFlagDocSet ArgOptDocSet)
     resolveRecDocVars (k, (t, r))
       | t == VarT MBT.bool = do
-          eitherFlag <- resolveFlag r
+          eitherFlag <- resolveFlag (loc <> ", field " <> pretty (unKey k)) r
           case eitherFlag of
             (Right flag) -> return $ (k, Left flag)
-            (Left _) -> MM.throwSystemError $ "Non-optional field found in unrolled record"
+            (Left _) -> MM.throwSystemError $
+              loc <> ", field " <> pretty (unKey k) <> ": non-optional field found in unrolled record"
       | otherwise = do
-          opt <- resolveOpt t r
+          opt <- resolveOpt (loc <> ", field " <> pretty (unKey k)) t r
           return (k, Right opt)
-resolveGrp _ _ _ = MM.throwSystemError "Cannot unroll a non-record type into CLI argument groups"
+resolveGrp loc _ _ _ = MM.throwSystemError $
+  loc <> ": cannot unroll a non-record type into CLI argument groups"
 
 -- resolve a boolean into either a flag option or a positional
-resolveFlag :: ArgDocVars -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)
-resolveFlag r =
+resolveFlag :: MDoc -> ArgDocVars -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)
+resolveFlag loc r = do
+  -- `metavar:` only makes sense on something with a value. A Bool
+  -- positional carries an implicit BOOL metavar; an actual flag
+  -- carries none. Reject the latter before constructing the flag.
+  when (isJust (docMetavar r) && hasAnyFlagDirective) $
+    MM.throwSystemError $
+      loc <> ": `metavar:` is not allowed on a Bool flag because flags have no value."
+        <> " Remove the `metavar:` directive."
+  -- A Bool flag's CLI shape is encoded by `true:` / `false:`, not
+  -- `arg:`. Reject before the (Nothing, Nothing, Nothing) case
+  -- below silently produces a Bool positional and drops the
+  -- directive.
+  when (isJust (docArg r) && isNothing (docTrue r) && isNothing (docFalse r)) $
+    MM.throwSystemError $
+      loc <> ": a Bool argument cannot use `arg:`. Use `true: <opt>`"
+        <> " (default false, the flag turns it on) or `false: <opt>`"
+        <> " (default true, the flag turns it off) instead."
   case (docTrue r, docFalse r, (==) "true" <$> docDefault r) of
     -- if no default value is given, make default based on given args
     -- e.g., true: -v/--verbose
@@ -272,9 +333,18 @@ resolveFlag r =
     -- set default to FALSE
     (Just rt, Nothing, Just False) -> flag rt Nothing False
     (Just rt, Just rf, Just False) -> flag rt (Just rf) False
-    -- handle noop cases
-    (Just _, Nothing, Just True) -> MM.throwSystemError "Noop flag"
-    (Nothing, Just _, Just False) -> MM.throwSystemError "Noop flag"
+    -- Noop: the only declared direction agrees with the default,
+    -- so flipping the flag would never change the value.
+    (Just rt, Nothing, Just True) -> MM.throwSystemError $
+      loc <> ": `true: " <> pretty (makeArg rt) <> "` combined with `default: true`"
+        <> " is a no-op -- supplying the flag never changes the value."
+        <> " Remove `default: true` (let the flag turn true on from a false default),"
+        <> " or replace `true:` with `false:` (the flag will turn the true default off)."
+    (Nothing, Just rf, Just False) -> MM.throwSystemError $
+      loc <> ": `false: " <> pretty (makeArg rf) <> "` combined with `default: false`"
+        <> " is a no-op -- supplying the flag never changes the value."
+        <> " Remove `default: false` (let the flag turn false on from a true default),"
+        <> " or replace `false:` with `true:` (the flag will turn the false default off)."
     -- handle positional with a given default
     (Nothing, Nothing, Just _) -> MM.throwSystemError "Positional argument with default"
     -- handle positional
@@ -285,8 +355,15 @@ resolveFlag r =
           , argPosDocDesc = docLines r
           , argPosDocMetavar = docMetavar r <|> Just "BOOL"
           , argPosDocLiteral = docLiteral r
+          , argPosDocMany = False
           }
   where
+    -- "any flag-like directive" -- true/false/default. If none is set
+    -- and only metavar: is given, we'd fall through to the Bool
+    -- positional branch, where the BOOL metavar IS meaningful. So the
+    -- error only fires when the arg actually wants to be a flag.
+    hasAnyFlagDirective =
+      isJust (docTrue r) || isJust (docFalse r) || isJust (docDefault r) || isJust (docArg r)
     flag :: CliOpt -> Maybe CliOpt -> Bool -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)
     flag opt rev def =
       return . Right $
@@ -297,41 +374,48 @@ resolveFlag r =
           , argFlagDocDefault = if def then "true" else "false"
           }
 
-resolveFlagCmdArg :: ArgDocVars -> MorlocMonad CmdArg
-resolveFlagCmdArg r = do
-  eitherFlag <- resolveFlag r
+resolveFlagCmdArg :: MDoc -> ArgDocVars -> MorlocMonad CmdArg
+resolveFlagCmdArg loc r = do
+  eitherFlag <- resolveFlag loc r
   case eitherFlag of
     (Right flag) -> return . CmdArgFlag $ flag
     (Left pos) -> return . CmdArgPos $ pos
 
-resolveOpt :: Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
-resolveOpt t r = case (docArg r, docDefault r) of
-  (Nothing, _) -> MM.throwSystemError "Optional argument missing tags"
-  (Just opt, Nothing)
-    -- literal ?Str: auto-default to null (the only way to get null is to omit the flag)
-    | isLiteralOptStr -> makeOpt opt "null"
-    | otherwise ->
-        MM.throwSystemError $ "Optional argument " <> pretty (makeArg opt) <> " must have default values"
-  (Just opt, Just def)
-    -- literal ?Str with non-null default is an error
-    | isLiteralOptStr && def /= "null" ->
-        MM.throwSystemError $
-          "Optional argument " <> pretty (makeArg opt)
-          <> " has type ?Str with literal: true, so default must be null (got \""
-          <> pretty def <> "\")"
-    | otherwise -> makeOpt opt def
+resolveOpt :: MDoc -> Type -> ArgDocVars -> MorlocMonad ArgOptDocSet
+resolveOpt loc t r = do
+  let many = docMany r == Just True
+  case (docArg r, docDefault r) of
+    (Nothing, _) -> MM.throwSystemError $ loc <> ": optional argument missing tags"
+    (Just opt, Nothing)
+      -- `many` options without an explicit default fall back to "[]".
+      | many -> makeOpt many opt "[]"
+      -- literal ?Str: auto-default to null (the only way to get null is to omit the flag)
+      | isLiteralOptStr -> makeOpt many opt "null"
+      | otherwise ->
+          MM.throwSystemError $
+            loc <> ": optional argument " <> pretty (makeArg opt)
+              <> " must be given a default value"
+    (Just opt, Just def)
+      -- literal ?Str with non-null default is an error
+      | isLiteralOptStr && def /= "null" ->
+          MM.throwSystemError $
+            loc <> ": optional argument " <> pretty (makeArg opt)
+            <> " has type ?Str with literal: true, so default must be null (got \""
+            <> pretty def <> "\")"
+      | otherwise -> makeOpt many opt def
   where
     isLiteralOptStr = docLiteral r == Just True && isOptionalStrType t
 
     isOptionalStrType (OptionalT (VarT v)) = v == MBT.str
     isOptionalStrType _ = False
 
-    makeOpt opt def = return $
+    makeOpt many opt def = return $
       ArgOptDocSet
         { argOptDocType = t
         , argOptDocDesc = docLines r
         , argOptDocMetavar = fromMaybe (makeOptMeta t) (docMetavar r)
         , argOptDocLiteral = docLiteral r
+        , argOptDocMany = many
         , argOptDocArg = opt
         , argOptDocDefault = def
         }
@@ -339,9 +423,9 @@ resolveOpt t r = case (docArg r, docDefault r) of
 makeArg ::
   CliOpt ->
   Text -- argument string, such as "-h/--help"
-makeArg (CliOptShort s) = "-" <> MT.show' s
+makeArg (CliOptShort s) = "-" <> MT.singleton s
 makeArg (CliOptLong l) = "--" <> l
-makeArg (CliOptBoth s l) = "-" <> MT.show' s <> "/--" <> l
+makeArg (CliOptBoth s l) = "-" <> MT.singleton s <> "/--" <> l
 
 makeOptMeta :: Type -> Text
 makeOptMeta (UnkT v) = unTVar v
@@ -364,10 +448,73 @@ makeOptMeta StrVoidT = "STR"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do
+  let many = docMany r == Just True
   return $
     ArgPosDocSet
       { argPosDocType = t
       , argPosDocDesc = docLines r
       , argPosDocMetavar = docMetavar r
       , argPosDocLiteral = docLiteral r
+      , argPosDocMany = many
       }
+
+-- Validate that within a function's argument list, at most one
+-- positional carries `many: true`, and it is the LAST positional
+-- (options and flags may follow without issue, but no second
+-- positional may appear after it -- clap requires variadic
+-- positionals to occupy the final positional slot).
+validateManyOrdering :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateManyOrdering loc = go False
+  where
+    go :: Bool -> [CmdArg] -> MorlocMonad ()
+    go _ [] = return ()
+    go seenMany (CmdArgPos r : rest)
+      | seenMany && argPosDocMany r =
+          MM.throwSystemError $
+            loc <> " has more than one positional with `many: true`; at most one is allowed."
+      | seenMany =
+          MM.throwSystemError $
+            loc <> " has a positional with `many: true` that is not the last positional;"
+              <> " variadic positionals must occupy the final positional slot."
+      | otherwise = go (argPosDocMany r) rest
+    go seenMany (_ : rest) = go seenMany rest
+
+-- Reject collisions between option / flag long-form names within a
+-- single subcommand. Without this check, two flags that happen to
+-- share a long name (e.g. one's `false: --no-foo` matches another's
+-- `arg: --no-foo`) fail downstream in clap with an opaque
+-- duplicate-argument message instead of pointing at the source.
+validateFlagRevCollisions :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateFlagRevCollisions loc cmdargs = do
+  let longs = concatMap collect cmdargs
+      grouped = Map.fromListWith (++) [(n, [src]) | (n, src) <- longs]
+      dups = [(n, srcs) | (n, srcs) <- Map.toList grouped, length srcs > 1]
+  case dups of
+    [] -> return ()
+    ((name, srcs) : _) ->
+      MM.throwSystemError $
+        loc <> ": option long name '--" <> pretty name
+          <> "' is declared by " <> hsep (punctuate "," (map pretty srcs))
+          <> ". Long-form names must be unique within a subcommand."
+  where
+    collect :: CmdArg -> [(Text, Text)]
+    collect (CmdArgOpt r)  = [(n, "arg:") | n <- longOf (argOptDocArg r)]
+    collect (CmdArgFlag r) =
+         [(n, mainSrc r) | n <- longOf (argFlagDocOpt r)]
+      ++ [(n, revSrc r)  | rev <- maybe [] (:[]) (argFlagDocOptRev r), n <- longOf rev]
+    collect (CmdArgGrp r) =
+         concatMap (collect . CmdArgOpt)  [opt | (_, Right opt) <- recDocEntries r]
+      ++ concatMap (collect . CmdArgFlag) [fl  | (_, Left  fl)  <- recDocEntries r]
+    collect (CmdArgPos _)  = []
+
+    -- The main and reverse halves of a flag come from `true:` or
+    -- `false:` depending on which side of the default the user
+    -- declared first. Naming the directive in the error keeps
+    -- diagnostics actionable.
+    mainSrc r = if argFlagDocDefault r == "true" then "false:" else "true:"
+    revSrc  r = if argFlagDocDefault r == "true" then "true:"  else "false:"
+
+    longOf :: CliOpt -> [Text]
+    longOf (CliOptShort _)   = []
+    longOf (CliOptLong l)    = [l]
+    longOf (CliOptBoth _ l)  = [l]

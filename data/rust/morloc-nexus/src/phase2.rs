@@ -223,13 +223,19 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { metavar, type_desc, desc, .. } => {
+            ManifestArg::Positional { metavar, type_desc, desc, many, .. } => {
                 let mut a = ClapArg::new(id)
                     .required(true)
                     .index(pos_idx as usize)
                     .help_heading("Positional arguments");
                 if let Some(m) = metavar {
                     a = a.value_name(leak(m));
+                }
+                // Variadic positional: accept one or more tokens.
+                // The compiler guarantees a `many` positional is the
+                // last positional, which is clap's requirement too.
+                if *many {
+                    a = a.num_args(1..).action(ArgAction::Append);
                 }
                 a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
                 cmd = cmd.arg(a);
@@ -242,6 +248,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                 default_val,
                 type_desc,
                 desc,
+                many,
                 ..
             } => {
                 let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -258,6 +265,12 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                 }
                 if let Some(d) = default_val {
                     a = a.default_value(leak(d));
+                }
+                if *many {
+                    // Variadic option: collect every value supplied
+                    // across the option's occurrences AND every value
+                    // passed after a single occurrence (`--xs 1 2 3`).
+                    a = a.num_args(1..).action(ArgAction::Append);
                 }
                 a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
                 cmd = cmd.arg(a);
@@ -431,18 +444,33 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, .. } => {
-                // Required positional: clap guaranteed a value.
-                let val = matches
-                    .get_one::<String>(&id)
-                    .cloned()
-                    .expect("clap-required positional must have a value");
-                let v = if *q { quoted(&val) } else { val };
-                out.push(ArgValue::Value(v));
+            ManifestArg::Positional { quoted: q, many, .. } => {
+                if *many {
+                    // Variadic positional: clap collects 1..N tokens
+                    // via Append action; pull them all and forward as
+                    // ArgValue::Many for list-packet assembly in
+                    // dispatch. clap's `required(true)` guarantees at
+                    // least one token, so an empty vec here is a clap
+                    // bug.
+                    let toks: Vec<String> = matches
+                        .get_many::<String>(&id)
+                        .map(|it| it.cloned().collect())
+                        .unwrap_or_default();
+                    out.push(ArgValue::Many { tokens: toks, literal: *q });
+                } else {
+                    // Required positional: clap guaranteed a value.
+                    let val = matches
+                        .get_one::<String>(&id)
+                        .cloned()
+                        .expect("clap-required positional must have a value");
+                    let v = if *q { quoted(&val) } else { val };
+                    out.push(ArgValue::Value(v));
+                }
             }
             ManifestArg::Optional {
                 quoted: q,
                 default_val,
+                many,
                 ..
             } => {
                 // Distinguish "user typed the flag" from "clap
@@ -457,7 +485,23 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 use clap::parser::ValueSource;
                 let from_cli = matches.value_source(&id)
                     == Some(ValueSource::CommandLine);
-                if from_cli {
+                if *many {
+                    // Variadic option: collect all CLI tokens (if any)
+                    // and forward as ArgValue::Many. If the user did
+                    // not pass the option at all, fall back to the
+                    // compiler-supplied default (typically `"[]"`).
+                    if from_cli {
+                        let toks: Vec<String> = matches
+                            .get_many::<String>(&id)
+                            .map(|it| it.cloned().collect())
+                            .unwrap_or_default();
+                        out.push(ArgValue::Many { tokens: toks, literal: *q });
+                    } else if let Some(def) = default_val {
+                        out.push(ArgValue::Value(def.clone()));
+                    } else {
+                        out.push(ArgValue::Null);
+                    }
+                } else if from_cli {
                     let v = matches
                         .get_one::<String>(&id)
                         .cloned()

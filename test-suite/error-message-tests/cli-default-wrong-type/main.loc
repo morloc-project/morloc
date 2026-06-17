@@ -1,0 +1,12 @@
+-- shape: a string literal default on an Int argument is a
+-- type mismatch the runtime would only report when the option's
+-- default actually fires. Now caught at compile time with the
+-- expected/got wire types.
+module main (f)
+
+f ::
+  --' arg: -i
+  --' default: "abc"
+  Int ->
+  Int
+f x = x

@@ -249,7 +249,7 @@ parseCliOpt txt = case T.unpack (T.strip txt) of
 -- Known directive keys recognized inside argument / signature docstrings.
 argDocDirectiveKeys :: [Text]
 argDocDirectiveKeys =
-  ["name", "literal", "unroll", "default", "metavar", "arg", "true", "false", "return"]
+  ["name", "literal", "many", "unroll", "default", "metavar", "arg", "true", "false", "return"]
 
 -- Known directive keys recognized on `source` declarations.
 sourceDocDirectiveKeys :: [Text]
@@ -295,6 +295,7 @@ processArgDocLines = foldl step ([], [], defaultValue)
       DocDirective k v -> case k of
         "name" -> (errs, ws, d {docName = Just v})
         "literal" -> (errs, ws, d {docLiteral = Just (parseDocBool v)})
+        "many" -> (errs, ws, d {docMany = Just (parseDocBool v)})
         "unroll" -> (errs, ws, d {docUnroll = Just (parseDocBool v)})
         "default" -> (errs, ws, d {docDefault = Just v})
         "metavar" -> (errs, ws, d {docMetavar = Just v})

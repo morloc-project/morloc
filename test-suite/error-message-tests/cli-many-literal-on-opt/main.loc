@@ -1,0 +1,12 @@
+-- `many: true + literal: true` on `[?Str]` cannot express null
+-- elements because literal mode treats every token as a verbatim
+-- string -- including the word "null". The validator rejects this
+-- combination at compile time and explains the limitation.
+module main (f)
+
+f ::
+  --' many: true
+  --' literal: true
+  [?Str] ->
+  Int
+f xs = 0

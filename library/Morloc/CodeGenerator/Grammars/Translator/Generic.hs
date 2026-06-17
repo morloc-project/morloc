@@ -630,7 +630,7 @@ genericDebugWrap desc cfg midx args bodyPool = do
       -- during the catch must NOT replace the original exception. If
       -- the inner block throws we silently drop the dump and re-raise
       -- the original.
-      block = case ldBlockStyle desc of
+      catchBlock = case ldBlockStyle desc of
         IndentBlock -> vsep
           -- Python
           [ "try:"
@@ -672,7 +672,7 @@ genericDebugWrap desc cfg midx args bodyPool = do
           ]
   return $ defaultValue
     { poolExpr = resultVar
-    , poolPriorLines = [block]
+    , poolPriorLines = [catchBlock]
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool

@@ -182,6 +182,48 @@ pub fn quoted(s: &str) -> String {
     escaped
 }
 
+/// Build the per-element argument_t's for a `many: true` slot and
+/// invoke the C-side list assembler. `literal == true` JSON-quotes
+/// each token so the per-element classifier treats it as inline
+/// content rather than a file path. Holds the CStrings in a local
+/// `keepalive` vec for the duration of the call (the C side only
+/// strdup's its inputs).
+unsafe fn assemble_many_packet(
+    tokens: &[String],
+    literal: bool,
+    c_schema: *const morloc_runtime_types::cschema::CSchema,
+    errmsg: *mut *mut std::ffi::c_char,
+    initialize_positional: unsafe extern "C" fn(*mut std::ffi::c_char) -> *mut std::ffi::c_void,
+    free_argument_t: unsafe extern "C" fn(*mut std::ffi::c_void),
+    parse_cli_data_argument_list: unsafe extern "C" fn(
+        *mut u8,
+        *const *const std::ffi::c_void,
+        usize,
+        *const morloc_runtime_types::cschema::CSchema,
+        *mut *mut std::ffi::c_char,
+    ) -> *mut u8,
+) -> *mut u8 {
+    let keepalive: Vec<std::ffi::CString> = tokens.iter()
+        .map(|tok| {
+            let s = if literal { quoted(tok) } else { tok.clone() };
+            std::ffi::CString::new(s).unwrap()
+        })
+        .collect();
+    let c_args: Vec<*mut std::ffi::c_void> = keepalive.iter()
+        .map(|c_str| initialize_positional(c_str.as_ptr() as *mut std::ffi::c_char))
+        .collect();
+    let pkt = parse_cli_data_argument_list(
+        std::ptr::null_mut(),
+        c_args.as_ptr() as *const *const std::ffi::c_void,
+        c_args.len(),
+        c_schema,
+        errmsg,
+    );
+    for a in &c_args { free_argument_t(*a); }
+    drop(keepalive);
+    pkt
+}
+
 /// Run pre-parsed args through dispatch. Separated from any
 /// particular parser frontend so the daemon-spawn + NUL-check +
 /// run_remote/run_pure backend stays parser-agnostic.
@@ -262,6 +304,13 @@ pub enum ArgValue {
         fields: Vec<Option<String>>,
         defaults: Vec<Option<String>>,
     },
+    /// Variadic argument: the user supplied N tokens that the C-side
+    /// `parse_cli_data_argument_list` will assemble into a single
+    /// list packet. `literal` is the `literal: true` flag -- when
+    /// set, each token is JSON-quoted in Rust before reaching C so
+    /// the per-element classifier treats it as inline content rather
+    /// than a file path.
+    Many { tokens: Vec<String>, literal: bool },
 }
 
 
@@ -284,6 +333,13 @@ fn run_remote_command(
         fn parse_cli_data_argument(
             dest: *mut u8, arg: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut u8;
+        fn parse_cli_data_argument_list(
+            dest: *mut u8,
+            args: *const *const std::ffi::c_void,
+            n: usize,
+            list_schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
         fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
@@ -333,8 +389,13 @@ fn run_remote_command(
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
-        let c_arg;
-        match arg_val {
+        let c_pkt = match arg_val {
+            ArgValue::Many { tokens, literal } => unsafe {
+                assemble_many_packet(
+                    tokens, *literal, c_schema, &mut errmsg,
+                    initialize_positional, free_argument_t, parse_cli_data_argument_list,
+                )
+            },
             ArgValue::Group { grp_val, fields, defaults } => {
                 // Group arg: use initialize_unrolled (matches C nexus behavior)
                 extern "C" {
@@ -344,37 +405,58 @@ fn run_remote_command(
                         default_fields: *mut *mut std::ffi::c_char,
                     ) -> *mut std::ffi::c_void;
                 }
-                let n = fields.len();
-                let grp_val_c = grp_val.as_ref()
-                    .map(|s| std::ffi::CString::new(s.as_str()).unwrap().into_raw())
+                // Hold every CString until after the C call so its
+                // strdup'd copy inside argument_t is the only owner
+                // that lives past this scope.
+                let grp_val_keep: Option<std::ffi::CString> =
+                    grp_val.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap());
+                let fields_keep: Vec<Option<std::ffi::CString>> = fields.iter()
+                    .map(|f| f.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap()))
+                    .collect();
+                let defaults_keep: Vec<Option<std::ffi::CString>> = defaults.iter()
+                    .map(|d| d.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap()))
+                    .collect();
+
+                let grp_val_c: *mut std::ffi::c_char = grp_val_keep
+                    .as_ref()
+                    .map(|c| c.as_ptr() as *mut std::ffi::c_char)
                     .unwrap_or(std::ptr::null_mut());
-                let mut c_fields: Vec<*mut std::ffi::c_char> = fields.iter()
-                    .map(|f| f.as_ref()
-                        .map(|s| std::ffi::CString::new(s.as_str()).unwrap().into_raw())
-                        .unwrap_or(std::ptr::null_mut()))
+                let mut c_fields: Vec<*mut std::ffi::c_char> = fields_keep.iter()
+                    .map(|c| c.as_ref().map(|s| s.as_ptr() as *mut std::ffi::c_char)
+                              .unwrap_or(std::ptr::null_mut()))
                     .collect();
-                let mut c_defaults: Vec<*mut std::ffi::c_char> = defaults.iter()
-                    .map(|d| d.as_ref()
-                        .map(|s| std::ffi::CString::new(s.as_str()).unwrap().into_raw())
-                        .unwrap_or(std::ptr::null_mut()))
+                let mut c_defaults: Vec<*mut std::ffi::c_char> = defaults_keep.iter()
+                    .map(|c| c.as_ref().map(|s| s.as_ptr() as *mut std::ffi::c_char)
+                              .unwrap_or(std::ptr::null_mut()))
                     .collect();
-                c_arg = unsafe {
+
+                let n = fields.len();
+                let c_arg = unsafe {
                     initialize_unrolled(n, grp_val_c, c_fields.as_mut_ptr(), c_defaults.as_mut_ptr())
                 };
+                let pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
+                unsafe { free_argument_t(c_arg) };
+                drop(grp_val_keep);
+                drop(fields_keep);
+                drop(defaults_keep);
+                pkt
             }
-            _ => {
+            ArgValue::Value(_) | ArgValue::Null => {
                 let json_str = match arg_val {
                     ArgValue::Value(s) => s.clone(),
                     ArgValue::Null => "null".to_string(),
                     _ => unreachable!(),
                 };
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
-                c_arg = unsafe { initialize_positional(json_c.into_raw()) };
+                let c_arg = unsafe {
+                    initialize_positional(json_c.as_ptr() as *mut std::ffi::c_char)
+                };
+                let pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
+                unsafe { free_argument_t(c_arg) };
+                drop(json_c);
+                pkt
             }
-        }
-
-        let c_pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
-        unsafe { free_argument_t(c_arg) };
+        };
         unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 
         if c_pkt.is_null() {
@@ -797,6 +879,13 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
             schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
+        fn parse_cli_data_argument_list(
+            dest: *mut u8,
+            args: *const *const std::ffi::c_void,
+            n: usize,
+            list_schema: *const morloc_runtime_types::cschema::CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut u8;
         fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
         fn free_argument_t(arg: *mut std::ffi::c_void);
         fn get_morloc_data_packet_value(
@@ -857,17 +946,36 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         };
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
 
-        let json_str = match arg_val {
-            ArgValue::Value(s) => s.clone(),
-            ArgValue::Null => "null".to_string(),
-            ArgValue::Group { .. } => "null".to_string(),
+        // Many-args go through the dedicated list-assembly C entry
+        // point; everything else (Value / Null / Group) goes through
+        // the scalar parse_cli_data_argument path. Group is treated
+        // as Null at the pure path -- pure morloc expressions cannot
+        // currently consume record-unrolled args (the schema covers
+        // the whole record; group plumbing lives in the remote path).
+        let c_pkt = match arg_val {
+            ArgValue::Many { tokens, literal } => unsafe {
+                assemble_many_packet(
+                    tokens, *literal, c_schema, &mut errmsg,
+                    initialize_positional, free_argument_t, parse_cli_data_argument_list,
+                )
+            },
+            _ => {
+                let json_str = match arg_val {
+                    ArgValue::Value(s) => s.clone(),
+                    ArgValue::Null => "null".to_string(),
+                    ArgValue::Group { .. } => "null".to_string(),
+                    ArgValue::Many { .. } => unreachable!(),
+                };
+                let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
+                let c_arg = unsafe {
+                    initialize_positional(json_c.as_ptr() as *mut std::ffi::c_char)
+                };
+                let pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
+                unsafe { free_argument_t(c_arg) };
+                drop(json_c);
+                pkt
+            }
         };
-
-        // Parse CLI arg to data packet, then extract voidstar
-        let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
-        let c_arg = unsafe { initialize_positional(json_c.into_raw()) };
-        let c_pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
-        unsafe { free_argument_t(c_arg) };
 
         if c_pkt.is_null() {
             let msg = unsafe_errmsg_to_string(errmsg);

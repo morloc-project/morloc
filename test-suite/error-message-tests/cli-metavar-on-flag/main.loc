@@ -1,0 +1,11 @@
+-- `metavar:` is meaningless on a Bool flag because flags carry
+-- no value. Used to be silently dropped; now rejected with a clear
+-- "remove the metavar:" message.
+module main (f)
+
+f ::
+  --' true: -v/--verbose
+  --' metavar: LEVEL
+  Bool ->
+  Int
+f b = 0

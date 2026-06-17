@@ -1,0 +1,14 @@
+-- fixed-dim list: the default `[1,2]` is a JSON array of
+-- length 2, but the argument's type `Vector 3 Int` constrains the
+-- length to exactly 3. The validator's SerialList dim arm reports the
+-- expected vs. actual length.
+module main (f)
+
+import vector
+
+f ::
+  --' arg: -v
+  --' default: "[1,2]"
+  Vector 3 Int ->
+  Int
+f v = 0

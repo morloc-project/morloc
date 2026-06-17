@@ -1,0 +1,11 @@
+-- (Bool sub-case): `arg:` is the wrong directive for a Bool
+-- flag; the shape comes from `true:` / `false:`. Used to silently
+-- demote to a Bool positional and drop the `arg:` -- now an explicit
+-- error with a fix-up suggestion.
+module main (f)
+
+f ::
+  --' arg: -v/--verbose
+  Bool ->
+  Int
+f b = 0

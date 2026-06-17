@@ -974,10 +974,10 @@ findEntryPointLocFile dir = do
           case locFiles of
             [single] -> return (Right single)
             []       -> return (Left $ "no .loc file found in " <> MT.pack dir)
-            many     -> return . Left $
+            multiple -> return . Left $
               "multiple .loc files in " <> MT.pack dir <>
               " and no main.loc to disambiguate: " <>
-              MT.intercalate ", " (map (MT.pack . MS.takeFileName) many)
+              MT.intercalate ", " (map (MT.pack . MS.takeFileName) multiple)
 
 -- | Verify the installed module's directory basename matches the
 -- declared module name in its entry-point .loc file. Throws IOError on

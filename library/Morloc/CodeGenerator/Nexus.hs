@@ -19,6 +19,10 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AesonKey
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as BSL
 import Data.Int (Int64)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
@@ -26,16 +30,19 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
+import qualified Data.Text.Encoding as TE
 import qualified Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as Time
 import qualified Data.Time.Format
+import qualified Data.Vector as V
 import qualified Morloc.BaseTypes as MBT
+import qualified Morloc.CodeGenerator.Docstrings as Docstrings
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
-import Morloc.Data.Doc (pretty, render, (<+>))
+import Morloc.Data.Doc (concatWith, hardline, pretty, render, (<+>))
 import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
@@ -141,7 +148,13 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
   mayName <- MM.metaName i
-  (argSchemas, returnSchema) <- makeSchemas i lang t
+  (argAsts, returnAst) <- makeSerialASTs i lang t
+  let argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
+      returnSchema  = render (Serial.serialAstToMsgpackSchema returnAst)
+  -- Validate wire-shape constraints and default values now that the
+  -- SerialASTs are in hand. The rendered schema texts are reused
+  -- here so the validator never re-renders.
+  validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
 
   case mayName of
     (Just name') -> do
@@ -155,8 +168,8 @@ getFData (t, i, lang, doc, sockets) = do
           , fdataMid = i
           , fdataType = t
           , fdataSubSockets = sockets
-          , fdataArgSchemas = map render argSchemas
-          , fdataReturnSchema = render returnSchema
+          , fdataArgSchemas = argSchemas
+          , fdataReturnSchema = returnSchema
           , fdataCmdDocSet = doc
           }
     Nothing -> MM.throwSourcedError i $ "No name in FData"
@@ -165,24 +178,28 @@ getFData (t, i, lang, doc, sockets) = do
 -- Schema building
 -- ======================================================================
 
-makeSchemas :: Int -> Lang -> Type -> MorlocMonad ([MDoc], MDoc)
-makeSchemas mid lang (FunT ts t) = do
-  ss <- mapM (makeSchema mid lang) ts
-  s <- makeSchema mid lang t
+-- | Build SerialASTs for a function's argument list (or a single
+-- non-function type). The rendered msgpack schema text is derived from
+-- the same AST at the call sites, so 'validateArgSpecs' (operating on
+-- the AST) and the manifest emitter (operating on the rendered text)
+-- never go out of sync.
+makeSerialASTs :: Int -> Lang -> Type -> MorlocMonad ([SerialAST], SerialAST)
+makeSerialASTs mid lang (FunT ts t) = do
+  ss <- mapM (makeSerialAST mid lang) ts
+  s <- makeSerialAST mid lang t
   return (ss, s)
-makeSchemas mid lang t = do
-  s <- makeSchema mid lang t
+makeSerialASTs mid lang t = do
+  s <- makeSerialAST mid lang t
   return ([], s)
 
-makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
-makeSchema mid lang t = do
+makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
+makeSerialAST mid lang t = do
   ft <- Infer.inferConcreteTypeUniversal lang t
   ast <- Serial.makeSerialAST mid lang ft
   -- Apply nat dimension constraints from the original type to the SerialAST.
   -- The TypeF may have lost nat params during alias expansion, but the
   -- original Type still has them.
-  let ast' = applyNatDimsFromType t ast
-  return $ Serial.serialAstToMsgpackSchema ast'
+  return $ applyNatDimsFromType t ast
 
 -- | Extract nat dimension constraints from a Type and apply them to a SerialAST.
 -- For example, Matrix 2 3 Int has NatLitT args [2, 3]. After alias expansion,
@@ -197,14 +214,16 @@ applyNatDimsFromType (AppT _ args) ast =
     applyDims _ s = s
 applyNatDimsFromType _ ast = ast
 
-makeGastSchemas :: Type -> MorlocMonad (MDoc, [MDoc])
-makeGastSchemas (FunT ts t) = do
+-- | SerialASTs for a pure (gast) function's return + argument types.
+-- The 'FunT' input puts the return type first, then arguments.
+makeGastSerialASTs :: Type -> MorlocMonad (SerialAST, [SerialAST])
+makeGastSerialASTs (FunT ts t) = do
   serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM generalTypeToSerialAST (t : ts)
-  case map Serial.serialAstToMsgpackSchema serialAsts of
+  case serialAsts of
     (s : ss) -> return (s, ss)
-    [] -> error "makeGastSchemas: FunT produced empty serial AST list"
-makeGastSchemas t = do
-  s <- Serial.serialAstToMsgpackSchema . applyNatDimsFromType t <$> generalTypeToSerialAST t
+    [] -> error "makeGastSerialASTs: FunT produced empty serial AST list"
+makeGastSerialASTs t = do
+  s <- applyNatDimsFromType t <$> generalTypeToSerialAST t
   return (s, [])
 
 -- | Build a SerialAST for a general (nexus-side) type. The Set
@@ -366,7 +385,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   CM.when (exportHasHigherOrder gtype) $
     MM.throwSourcedError i "cannot export higher-order functions through the CLI"
 
-  (retSchemaDoc, argSchemaDocs) <- makeGastSchemas gtype
+  (retAst, argAsts) <- makeGastSerialASTs gtype
+  let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
+      argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
+  validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
   expr <- toNexusExpr x0
 
   return $
@@ -376,8 +398,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandType = gtype
       , commandDocs = docs
       , commandExpr = expr
-      , commandReturnSchema = render retSchemaDoc
-      , commandArgSchemas = map render argSchemaDocs
+      , commandReturnSchema = returnSchema
+      , commandArgSchemas = argSchemas
       }
   where
     type2schema :: Type -> MorlocMonad Text
@@ -617,7 +639,8 @@ argToJson mschema (CmdArgPos r) =
     ++ schemaField mschema
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-       , ("quoted", jsonBool (argPosDocLiteral r == Just True && isStrType (argPosDocType r)))
+       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocMany r) mschema))
+       , ("many", jsonBool (argPosDocMany r))
        , ("desc", jsonStrArr (argPosDocDesc r))
        , ("constraints", constraintsJsonFor (argPosDocType r))
        , ("metadata", metadataEmpty)
@@ -628,7 +651,8 @@ argToJson mschema (CmdArgOpt r) =
     ++ schemaField mschema
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
-       , ("quoted", jsonBool (argOptDocLiteral r == Just True && isStrType (argOptDocType r)))
+       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocMany r) mschema))
+       , ("many", jsonBool (argOptDocMany r))
        , ("short", cliOptShortJson (argOptDocArg r))
        , ("long", cliOptLongJson (argOptDocArg r))
        , ("default", jsonStr (argOptDocDefault r))
@@ -681,11 +705,544 @@ schemaField :: Maybe Text -> [(Text, Text)]
 schemaField Nothing  = []
 schemaField (Just s) = [("schema", jsonStr s)]
 
--- Check if a type is Str or ?Str (for literal string handling)
+-- | Compute the `quoted` flag emitted for a typed CLI arg. When
+-- 'literal: true' is set, the nexus JSON-quotes the value before
+-- dispatch so the C-side classifier treats it as inline content
+-- rather than a file path. The flag fires only when the wire schema
+-- reduces to the Str primitive 's' -- for many-args we look at the
+-- list's ELEMENT schema, for scalars we look at the schema itself.
+-- This widens the historical 'isStrType' check to cover newtypes /
+-- aliases over Str. Without a schema (flag args), returns False.
+isQuotedArg :: Maybe Bool -> Bool -> Maybe Text -> Bool
+isQuotedArg literal many mschema =
+  literal == Just True && case mschema of
+    Nothing -> False
+    Just s
+      | many -> isListOfStrWireSchema s
+      | otherwise -> isStrOrOptStrWireSchema s
+
+-- Check if a type is Str or ?Str (for literal string handling).
+-- NOTE: this is the surface-type check used for help-text rendering;
+-- the manifest's `quoted` field uses the schema-text check below
+-- ('isStrWireSchema') so that newtypes-over-Str (whose surface type
+-- is not 'Str' but whose wire format is the Str primitive 's') also
+-- get the JSON-quoting treatment.
 isStrType :: Type -> Bool
 isStrType (VarT v) = v == MBT.str
 isStrType (OptionalT t) = isStrType t
 isStrType _ = False
+
+-- | Strip a leading addHint decoration `<...>` if present. Hints
+-- carry the concrete-type tag for newtypes / aliases over a built-in
+-- primitive. The implementation drops the literal characters between
+-- the angle brackets; brackets without a closing `>` are left in place
+-- (defensive against malformed schemas).
+peelHint :: Text -> Text
+peelHint t = case MT.uncons t of
+  Just ('<', tt) -> case MT.span (/= '>') tt of
+    (_, post) -> case MT.uncons post of
+      Just ('>', after) -> peelHint after
+      _ -> t
+  _ -> t
+
+-- | Strip a leading `&<klen><name>` rec-decl prefix if present. The
+-- klen is a base64-encoded character count; for names of length < 64
+-- (the practical case), klen is a single character we can decode by
+-- table. Multi-character klens (encoding lengths >= 64, marked with
+-- a leading `=`) are left in place -- recursive records with
+-- 64+-character names never appear at the position the wire-shape
+-- helpers below probe (primitive scalar / top-level array), so the
+-- fallback is harmless.
+peelRecDecl :: Text -> Text
+peelRecDecl t = case MT.uncons t of
+  Just ('&', rest) -> case MT.uncons rest of
+    Just (c, body) | Just n <- decode1 c -> MT.drop n body
+    _ -> t
+  _ -> t
+  where
+    decode1 c
+      | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
+      | c >= 'a' && c <= 'z' = Just (fromEnum c - fromEnum 'a' + 10)
+      | c >= 'A' && c <= 'Z' = Just (fromEnum c - fromEnum 'A' + 36)
+      | c == '+'             = Just 62
+      | c == '/'             = Just 63
+      | otherwise            = Nothing
+
+-- | True iff the rendered wire schema reduces to the plain Str
+-- primitive 's'. Peels rec-decl and addHint decorations but NOT the
+-- optional `?` wrapper; 'isOptStrWireSchema' handles `?s` separately
+-- so the `many + literal` validator can reject optional-element
+-- lists (no token can express null in literal mode).
+isStrWireSchema :: Text -> Bool
+isStrWireSchema s0 = peelHint (peelRecDecl s0) == "s"
+
+-- | True iff the schema reduces to `?s` (Optional Str primitive),
+-- peeling the same outer decorations as 'isStrWireSchema' and a single
+-- `?` wrapper before the primitive token.
+isOptStrWireSchema :: Text -> Bool
+isOptStrWireSchema s0 = case MT.uncons (peelHint (peelRecDecl s0)) of
+  Just ('?', rest) -> peelHint rest == "s"
+  _ -> False
+
+-- | True iff the schema reduces to either Str or Optional Str. Used by
+-- 'isQuotedArg' (the scalar literal:true gate) and by validateArgSpecs
+-- when checking scalar literal:true.
+isStrOrOptStrWireSchema :: Text -> Bool
+isStrOrOptStrWireSchema s = isStrWireSchema s || isOptStrWireSchema s
+
+-- | True iff the schema is array-shaped at the top level. Peels
+-- rec-decl + addHint, expects `a`. Used by the `many: true` validator
+-- in lieu of the surface-type 'isListType' check, so newtypes / aliases
+-- whose wire form is `a<elem>` (but whose surface type isn't the
+-- built-in `List` constructor) are also accepted.
+isArrayWireSchema :: Text -> Bool
+isArrayWireSchema s0 = case MT.uncons (peelHint (peelRecDecl s0)) of
+  Just ('a', _) -> True
+  _ -> False
+
+-- | For a list-shape schema ('a' + optional dim + element schema),
+-- return the element schema text. Returns Nothing if the schema is
+-- not list-shaped at the top level.
+listElementSchema :: Text -> Maybe Text
+listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('a', rest) -> Just (skipDim rest)
+  _ -> Nothing
+  where
+    skipDim t = case MT.uncons t of
+      Just (':', tt) -> MT.dropWhile (\c -> c >= '0' && c <= '9') tt
+      _ -> t
+
+-- | True iff the schema is a list whose element wire schema is the
+-- plain Str primitive 's' (NOT `?s`). Optional-element lists are
+-- rejected so the `many + literal` validator can produce a focused
+-- diagnostic.
+isListOfStrWireSchema :: Text -> Bool
+isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
+
+-- ======================================================================
+-- Argument spec validation (compile-time)
+-- ======================================================================
+--
+-- 'validateArgSpecs' is invoked once per command (remote or pure)
+-- after the SerialASTs and rendered schema text are computed. It
+-- enforces the wire-shape constraints that depend on the schema
+-- (and therefore cannot be checked at the docstring-resolution
+-- stage), and type-checks each option's 'default:' value against
+-- its SerialAST.
+
+-- | Top-level validator. Walks each CmdArg in lockstep with its
+-- SerialAST and the already-rendered schema text. The caller renders
+-- the schemas once for the manifest; the validator reuses them rather
+-- than re-rendering.
+validateArgSpecs :: Int -> [CmdArg] -> [SerialAST] -> [Text] -> MorlocMonad ()
+validateArgSpecs i cmdargs asts schemas = do
+  loc <- Docstrings.argLocPrefix i
+  CM.zipWithM_ (validateOne loc) (zip3 [(1::Int) ..] cmdargs schemas) asts
+  where
+    validateOne :: MDoc -> (Int, CmdArg, Text) -> SerialAST -> MorlocMonad ()
+    validateOne loc (n, arg, schemaText) ast = do
+      let argLoc = loc <> "argument #" <> pretty n
+      case arg of
+        CmdArgPos r -> do
+          checkLiteralWire argLoc (argPosDocLiteral r) (argPosDocMany r) schemaText
+          checkManyWire    argLoc (argPosDocMany r)                     schemaText
+        CmdArgOpt r -> do
+          checkLiteralWire argLoc (argOptDocLiteral r) (argOptDocMany r) schemaText
+          checkManyWire    argLoc (argOptDocMany r)                     schemaText
+          checkDefault     argLoc ast (argOptDocDefault r)
+        CmdArgFlag _ -> return ()
+        CmdArgGrp r  -> validateGroup argLoc r ast
+
+-- | `literal: true` requires the argument's wire type to be Str
+-- (`s`) or Optional Str (`?s`). For `many: true` lists, the element
+-- must be plain Str (not Optional) because literal mode can never
+-- produce a null element -- the word "null" would be a literal
+-- string, not a JSON null.
+checkLiteralWire :: MDoc -> Maybe Bool -> Bool -> Text -> MorlocMonad ()
+checkLiteralWire _   Nothing      _    _      = return ()
+checkLiteralWire _   (Just False) _    _      = return ()
+checkLiteralWire loc (Just True)  many schema
+  | many =
+      if isListOfStrWireSchema schema
+        then return ()
+        else if maybe False isOptStrWireSchema (listElementSchema schema)
+          then MM.throwSystemError $
+                 loc <> ": `literal: true` combined with `many: true` cannot be"
+                   <> " used with an Optional element type (`?Str`); literal mode"
+                   <> " treats every token as a literal string, including the word"
+                   <> " \"null\", so null elements can never be expressed. Either"
+                   <> " drop `literal: true`, or change the element type to `Str`."
+          else MM.throwSystemError $
+                 loc <> ": `literal: true` was ignored because the wire type"
+                   <> " of this argument is not a list of strings (schema `"
+                   <> pretty schema <> "`). Remove `literal: true`."
+  | otherwise =
+      if isStrOrOptStrWireSchema schema
+        then return ()
+        else MM.throwSystemError $
+               loc <> ": `literal: true` was ignored because the wire type"
+                 <> " of this argument is not a string type (schema `"
+                 <> pretty schema <> "`). Remove `literal: true`."
+
+-- | `many: true` requires an array wire type.
+checkManyWire :: MDoc -> Bool -> Text -> MorlocMonad ()
+checkManyWire _   False _      = return ()
+checkManyWire loc True  schema
+  | isArrayWireSchema schema = return ()
+  | otherwise = MM.throwSystemError $
+      loc <> ": `many: true` requires a list-typed argument (wire schema"
+        <> " starting with `a`); got `" <> pretty schema <> "`. Remove"
+        <> " `many: true` or change the type to a list."
+
+-- | Parse the default text as JSON and structurally validate it
+-- against the SerialAST. Parser failures are surfaced verbatim --
+-- being explicit about the message's origin is preferable to
+-- rewriting the parser's framing, which varies between aeson
+-- versions.
+checkDefault :: MDoc -> SerialAST -> Text -> MorlocMonad ()
+checkDefault loc ast defaultText =
+  case Aeson.eitherDecodeStrict (TE.encodeUtf8 defaultText) of
+    Left e -> MM.throwSystemError $ formatBlock
+      [ loc <> ": default value is not valid JSON, parser message:"
+      , pretty (MT.pack e)
+      , "Default text:"
+      , pretty (truncateForMsg defaultText)
+      ]
+    Right value -> validateValueAgainstAST loc Map.empty rootPath ast value
+
+-- Recurse into the entries of an unrolled record group, matching them
+-- against the SerialObject's per-field parameters.
+validateGroup :: MDoc -> RecDocSet -> SerialAST -> MorlocMonad ()
+validateGroup loc r ast = case peelGroupAst ast of
+  Just (SerialObject _ _ _ pairs) -> do
+    let asts = [(k, sub) | (k, sub) <- pairs]
+        entries = recDocEntries r
+    CM.forM_ entries $ \(k, entry) -> do
+      let entryLoc = loc <> "/field " <> pretty (unKey k)
+      case lookup k asts of
+        Nothing -> MM.throwSystemError $
+          entryLoc <> ": no schema field for unrolled record entry"
+        Just subAst -> case entry of
+          Right opt -> do
+            let subSchema = render (Serial.serialAstToMsgpackSchema subAst)
+            checkLiteralWire entryLoc (argOptDocLiteral opt) (argOptDocMany opt) subSchema
+            checkManyWire entryLoc (argOptDocMany opt) subSchema
+            checkDefault entryLoc subAst (argOptDocDefault opt)
+          Left _flag -> return ()
+  _ -> return ()
+  where
+    -- A group's AST may be wrapped in a SerialPack (newtype-over-record).
+    peelGroupAst (SerialPack _ (_, inner)) = peelGroupAst inner
+    peelGroupAst a = Just a
+
+-- ----------------------------------------------------------------------
+-- Default-value validation
+-- ----------------------------------------------------------------------
+
+-- | Recursive-type env: each entry binds a TVar (the record's name) to
+-- the SerialAST that declared it, so SerialRec back-references can
+-- resolve. Bound at SerialObject; consulted at SerialRec.
+type RecEnv = Map.Map TVar SerialAST
+
+-- | The "JSON path" within the default value at which validation is
+-- currently happening, used to anchor mismatch diagnostics. Local to
+-- this module; do NOT confuse with 'Morloc.Namespace.Prim.Path' (the
+-- filesystem-path alias used elsewhere).
+type JsonPath = MDoc
+
+-- | Walk a JSON value against a SerialAST. Errors point at the path,
+-- the expected wire shape, and a (truncated) snippet of the offending
+-- value.
+validateValueAgainstAST :: MDoc -> RecEnv -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+validateValueAgainstAST loc env path ast value = case (ast, value) of
+  -- SerialPack: newtype/alias is transparent for default validation;
+  -- the user writes the JSON shape of the underlying packed type.
+  (SerialPack _ (_, inner), _) ->
+    validateValueAgainstAST loc env path inner value
+
+  -- Primitives.
+  (SerialNull _,    Aeson.Null)     -> return ()
+  (SerialBool _,    Aeson.Bool _)   -> return ()
+  (SerialString _,  Aeson.String _) -> return ()
+  (SerialReal _,    v)              -> checkRealLike   loc path ast v
+  (SerialFloat32 _, v)              -> checkRealLike   loc path ast v
+  (SerialFloat64 _, v)              -> checkRealLike   loc path ast v
+  (SerialInt _,     v)              -> checkInteger    loc path ast (Nothing, Nothing) v
+  (SerialInt8 _,    v)              -> checkBoundedInt loc path ast (-128, 127) v
+  (SerialInt16 _,   v)              -> checkBoundedInt loc path ast (-32768, 32767) v
+  (SerialInt32 _,   v)              -> checkBoundedInt loc path ast (-2147483648, 2147483647) v
+  (SerialInt64 _,   v)              -> checkBoundedInt loc path ast (-9223372036854775808, 9223372036854775807) v
+  -- UInt is bigint-capable, so the only constraint is "non-negative";
+  -- use checkInteger with min-only (Just 0, Nothing) instead of a
+  -- fictitious u64 upper bound.
+  (SerialUInt _,    v)              -> checkInteger    loc path ast (Just 0, Nothing) v
+  (SerialUInt8 _,   v)              -> checkBoundedInt loc path ast (0, 255) v
+  (SerialUInt16 _,  v)              -> checkBoundedInt loc path ast (0, 65535) v
+  (SerialUInt32 _,  v)              -> checkBoundedInt loc path ast (0, 4294967295) v
+  (SerialUInt64 _,  v)              -> checkBoundedInt loc path ast (0, 18446744073709551615) v
+
+  -- Optional: null OR the inner type's value.
+  (SerialOptional _ _,     Aeson.Null) -> return ()
+  (SerialOptional _ inner, v)          -> validateValueAgainstAST loc env path inner v
+
+  -- Lists: array, with an optional fixed-length constraint.
+  (SerialList _ dim elemAst, Aeson.Array arr) -> do
+    case dim of
+      Just (NatLitF n) | fromIntegral (V.length arr) /= n ->
+        MM.throwSystemError $ formatBlock
+          [ loc <> ": default" <> pathAt path <> " is an array of length "
+              <> pretty (V.length arr) <> ", expected length "
+              <> pretty n <> "."
+          , "Expected: " <> pretty (expectedJsonShape ast)
+          , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
+          ]
+      _ -> return ()
+    CM.zipWithM_
+      (\j v -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") elemAst v)
+      [(0::Int) ..]
+      (V.toList arr)
+
+  -- Tuples: array of exactly the right length.
+  (SerialTuple _ subs, Aeson.Array arr)
+    | length subs /= V.length arr ->
+        MM.throwSystemError $ formatBlock
+          [ loc <> ": default" <> pathAt path <> " is an array of length "
+              <> pretty (V.length arr) <> ", expected tuple of length "
+              <> pretty (length subs) <> "."
+          , "Expected: " <> pretty (expectedJsonShape ast)
+          , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
+          ]
+    | otherwise ->
+        CM.zipWithM_
+          (\j (subAst, v) -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") subAst v)
+          [(0::Int) ..]
+          (zip subs (V.toList arr))
+
+  -- Records: object form. Collect every missing required field up
+  -- front so the diagnostic lists all of them at once (for a large
+  -- record, a one-by-one report would force the user through many
+  -- recompiles to discover the full set).
+  (SerialObject _ (FV v _) _ fields, Aeson.Object obj) -> do
+    let env' = Map.insert v ast env
+        missing = [k | (k, _) <- fields
+                     , not (KM.member (AesonKey.fromText (unKey k)) obj)]
+    case missing of
+      []  -> CM.forM_ fields $ \(k, fieldAst) ->
+        case KM.lookup (AesonKey.fromText (unKey k)) obj of
+          Just fv -> validateValueAgainstAST loc env'
+                       (path <> "." <> pretty (unKey k)) fieldAst fv
+          Nothing -> return ()
+      ks  -> MM.throwSystemError $ formatBlock
+        [ loc <> ": default" <> pathAt path
+            <> (if length ks == 1
+                then " is missing required key "
+                else " is missing required keys ")
+            <> pretty (renderKeyList ks) <> "."
+        , "Expected: " <> pretty (expectedJsonShape ast)
+        , "Got " <> pretty (jsonKind value) <> ": "
+            <> pretty (truncateForMsg (jsonGotDisplay value))
+        ]
+
+  -- Recursive back-reference: look up the binding, recurse.
+  (SerialRec (FV v _), _) -> case Map.lookup v env of
+    Just bound -> validateValueAgainstAST loc env path bound value
+    Nothing -> MM.throwSystemError $
+      loc <> ": compiler bug: unbound SerialRec `" <> pretty (unTVar v)
+        <> "` reached default-value validator" <> pathAt path
+
+  -- SerialUnknown: opaque type, cannot validate; allow anything.
+  (SerialUnknown _, _) -> return ()
+
+  -- Anything else is a type mismatch.
+  _ -> typeMismatch loc path ast value
+
+-- | Mismatch reporter. Describes the offending JSON value's kind
+-- (Object / Array / String / Number / Bool / Null) AND the full
+-- expected JSON shape derived from the SerialAST so the diagnostic
+-- carries the same information whether the user wrote a primitive,
+-- a string, a list, or a nested record. Laid out in three blocks
+-- separated by blank lines so the terminal-wrap doesn't smear them.
+typeMismatch :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+typeMismatch loc path expectedAst value =
+  MM.throwSystemError $ formatBlock
+    [ loc <> ": default" <> pathAt path <> " has the wrong shape."
+    , "Expected: " <> pretty (expectedJsonShape expectedAst)
+    , "Got " <> pretty (jsonKind value) <> ": "
+        <> pretty (truncateForMsg (jsonGotDisplay value))
+    ]
+
+-- | Render the "at <path>" suffix for diagnostics. The root path is
+-- the empty MDoc ('rootPath'); descents prepend their own delimiter
+-- (`.` for record fields, `[i]` for list / tuple elements), so the
+-- suffix only appears once we've actually walked into a field or
+-- element.
+pathAt :: JsonPath -> MDoc
+pathAt p
+  | render p == "" = ""
+  | otherwise      = " at " <> p
+
+-- | The empty root JSON path. Centralised so the "no descent yet"
+-- sentinel is constructed in one place rather than as a stringly
+-- literal scattered across call sites.
+rootPath :: JsonPath
+rootPath = mempty
+
+-- | Lay out a validator diagnostic as one summary line followed by
+-- blank-separated detail blocks. Keeps Expected / Got on their own
+-- lines so terminal wrap doesn't muddle them.
+formatBlock :: [MDoc] -> MDoc
+formatBlock = concatWith (\a b -> a <> hardline <> hardline <> b)
+
+-- | Render a list of record keys in JSON-array shape, e.g.
+-- @["alpha", "beta"]@. Used in the missing-keys diagnostic to mirror
+-- the JSON formality.
+renderKeyList :: [Key] -> Text
+renderKeyList ks = "[" <> MT.intercalate ", " ["\"" <> unKey k <> "\"" | k <- ks] <> "]"
+
+-- | "Got" display for an Aeson value. For 'Aeson.String' we want the
+-- raw string content -- showing the JSON-encoded form would add an
+-- extra layer of quotes and backslash escapes that the user did NOT
+-- write and that obscures the actual value. For non-strings the
+-- canonical JSON encoding is the right thing.
+jsonGotDisplay :: Aeson.Value -> Text
+jsonGotDisplay (Aeson.String s) = s
+jsonGotDisplay v                = jsonSnippet v
+
+-- | Compact human-readable name for a JSON value's kind. Goes into
+-- the mismatch diagnostic so the user can immediately tell what they
+-- wrote at the top level (e.g. a JSON String containing JSON object
+-- text vs. a real JSON object).
+jsonKind :: Aeson.Value -> Text
+jsonKind (Aeson.Null)     = "null"
+jsonKind (Aeson.Bool _)   = "JSON Bool"
+jsonKind (Aeson.Number _) = "JSON Number"
+jsonKind (Aeson.String _) = "JSON String"
+jsonKind (Aeson.Array _)  = "JSON Array"
+jsonKind (Aeson.Object _) = "JSON Object"
+
+-- | Render a SerialAST as the expected JSON shape, in a JSON-Schema-ish
+-- syntax that names every field and element type. Primitives use their
+-- bare morloc type names (no range annotations) -- the range info is
+-- only relevant when the JSON value IS a number and its value falls
+-- out of bounds, which is reported separately by 'rangeMismatch' using
+-- 'expectedRange'.
+expectedJsonShape :: SerialAST -> Text
+expectedJsonShape = go
+  where
+    go (SerialPack _ (_, s))         = go s
+    go (SerialNull _)                = "null"
+    go (SerialBool _)                = "Bool"
+    go (SerialString _)              = "Str"
+    go (SerialReal _)                = "Real"
+    go (SerialFloat32 _)             = "Float32"
+    go (SerialFloat64 _)             = "Float64"
+    go (SerialInt _)                 = "Int"
+    go (SerialInt8 _)                = "Int8"
+    go (SerialInt16 _)               = "Int16"
+    go (SerialInt32 _)               = "Int32"
+    go (SerialInt64 _)               = "Int64"
+    go (SerialUInt _)                = "UInt"
+    go (SerialUInt8 _)               = "UInt8"
+    go (SerialUInt16 _)              = "UInt16"
+    go (SerialUInt32 _)              = "UInt32"
+    go (SerialUInt64 _)              = "UInt64"
+    go (SerialOptional _ s)          = go s <> " | null"
+    go (SerialList _ Nothing s)      = "[" <> go s <> "]"
+    go (SerialList _ (Just (NatLitF n)) s) =
+      "[" <> go s <> "] of length " <> MT.pack (show n)
+    go (SerialList _ _ s)            = "[" <> go s <> "]"
+    go (SerialTuple _ ss)            =
+      "(" <> MT.intercalate ", " (map go ss) <> ")"
+    go (SerialObject _ _ _ fields)   =
+      "{ " <> MT.intercalate ", " [unKey k <> ": " <> go v | (k, v) <- fields] <> " }"
+    go (SerialRec (FV (TV name) _))  = name <> " (recursive)"
+    go (SerialUnknown _)             = "Unknown"
+
+-- | Numeric range description, used ONLY by 'rangeMismatch' to spell
+-- the legal bounds when the user's number falls outside the type's
+-- range. Only invoked from the integer arms of 'checkInteger', so
+-- non-numeric nodes here are a compiler bug, not a runtime case.
+expectedRange :: SerialAST -> Text
+expectedRange (SerialPack _ (_, s)) = expectedRange s
+expectedRange (SerialInt _)         = "any integer (BigInt)"
+expectedRange (SerialInt8 _)        = "Int8 in -128 .. 127"
+expectedRange (SerialInt16 _)       = "Int16 in -32768 .. 32767"
+expectedRange (SerialInt32 _)       = "Int32 in -2147483648 .. 2147483647"
+expectedRange (SerialInt64 _)       = "Int64 in -9223372036854775808 .. 9223372036854775807"
+expectedRange (SerialUInt _)        = "UInt >= 0 (BigInt)"
+expectedRange (SerialUInt8 _)       = "UInt8 in 0 .. 255"
+expectedRange (SerialUInt16 _)      = "UInt16 in 0 .. 65535"
+expectedRange (SerialUInt32 _)      = "UInt32 in 0 .. 4294967295"
+expectedRange (SerialUInt64 _)      = "UInt64 in 0 .. 18446744073709551615"
+expectedRange ast = error
+  $ "expectedRange: non-numeric SerialAST node reached the range reporter; "
+  <> "this indicates 'rangeMismatch' was called outside an integer arm. "
+  <> "Node shape: " <> MT.unpack (expectedJsonShape ast)
+
+-- | Accept a JSON Number OR one of the three special-string forms
+-- morloc uses on the wire for non-finite IEEE-754 values
+-- (`"inf"` / `"-inf"` / `"nan"`).
+checkRealLike :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+checkRealLike _   _    _   (Aeson.Number _) = return ()
+checkRealLike _   _    _   (Aeson.String s)
+  | s `elem` ["inf", "-inf", "nan"]         = return ()
+checkRealLike loc path ast v                = typeMismatch loc path ast v
+
+-- | Integer check with optional bounds. Bounds are 'Maybe' on each
+-- side independently so unbounded-low (e.g. SerialInt, no lower bound
+-- because bigint) or unbounded-high (SerialUInt, no upper bound: only
+-- non-negative) can be expressed without inventing a sentinel max.
+-- Out-of-range values report against the SerialAST's
+-- 'expectedJsonShape', which already spells the legal range.
+checkInteger
+  :: MDoc -> JsonPath -> SerialAST
+  -> (Maybe Integer, Maybe Integer)  -- (lo, hi)
+  -> Aeson.Value
+  -> MorlocMonad ()
+checkInteger loc path ast (mlo, mhi) (Aeson.Number n)
+  | DS.isInteger n = case toIntegerSafe n of
+      Just k
+        | maybe True (k >=) mlo && maybe True (k <=) mhi -> return ()
+        | otherwise -> rangeMismatch loc path ast (Aeson.Number n)
+      Nothing -> rangeMismatch loc path ast (Aeson.Number n)
+  | otherwise = typeMismatch loc path ast (Aeson.Number n)
+checkInteger loc path ast _ v = typeMismatch loc path ast v
+
+-- | Bounded-integer convenience for sized types. Both bounds required.
+checkBoundedInt
+  :: MDoc -> JsonPath -> SerialAST -> (Integer, Integer) -> Aeson.Value -> MorlocMonad ()
+checkBoundedInt loc path ast (lo, hi) v =
+  checkInteger loc path ast (Just lo, Just hi) v
+
+-- | Range mismatch: the JSON IS a number, but its value falls outside
+-- the type's allowed range. Distinguished from 'typeMismatch' so the
+-- diagnostic says "out of range" rather than "wrong shape" and uses
+-- 'expectedRange' (which spells the legal numeric bounds) instead of
+-- 'expectedJsonShape'.
+rangeMismatch :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+rangeMismatch loc path ast value =
+  MM.throwSystemError $ formatBlock
+    [ loc <> ": default" <> pathAt path <> " is out of range."
+    , "Expected: " <> pretty (expectedRange ast)
+    , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
+    ]
+
+toIntegerSafe :: DS.Scientific -> Maybe Integer
+toIntegerSafe n
+  | DS.isInteger n = Just (DS.coefficient n * 10 ^ DS.base10Exponent n)
+  | otherwise = Nothing
+
+-- | Truncating display of a Text value (default text or JSON snippet)
+-- for inclusion in error messages. Keeps diagnostics readable when the
+-- user pastes a multi-KB JSON literal.
+truncateForMsg :: Text -> Text
+truncateForMsg t
+  | MT.length t <= 80 = t
+  | otherwise = MT.take 77 t <> "..."
+
+-- | Render a JSON Value as a single-line snippet for error messages.
+jsonSnippet :: Aeson.Value -> Text
+jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 
 typeDescStr :: Type -> Maybe Bool -> Text
 typeDescStr t isLiteral
@@ -1115,9 +1672,10 @@ buildManifest ManifestInputs{..} =
         , cmdGroupField (commandMid g)
         ]
 
-    -- Render the @args@ JSON array. 'makeSchemas' produces one schema
-    -- per arg position in the original function signature, INCLUDING
-    -- flags. So 'fdataArgSchemas' is index-aligned 1:1 with 'docArgs'.
+    -- Render the @args@ JSON array. 'makeSerialASTs' produces one
+    -- SerialAST per arg position in the original function signature,
+    -- INCLUDING flags; the rendered schemas in 'fdataArgSchemas' are
+    -- index-aligned 1:1 with 'docArgs'.
     -- For each arg we attach the corresponding schema; flags drop
     -- their schema in the JSON output (it's never used at dispatch
     -- time for boolean flags) but we still consume the schema slot to

@@ -1,0 +1,11 @@
+-- `true: -v` plus `default: true` is a no-op flag -- the user
+-- can never change the value by supplying the flag. Now diagnosed with
+-- a specific message naming the offending directive.
+module main (f)
+
+f ::
+  --' true: -v/--verbose
+  --' default: true
+  Bool ->
+  Int
+f b = 0

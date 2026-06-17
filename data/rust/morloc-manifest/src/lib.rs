@@ -439,6 +439,13 @@ pub enum Arg {
         /// declared with `--' literal: true`.
         #[serde(default)]
         quoted: bool,
+        /// If true, the positional is variadic (`--' many: true`):
+        /// it consumes ALL remaining CLI tokens and the nexus assembles
+        /// them into a single list value. Only legal as the last
+        /// positional in a subcommand. Implies a `[a]`-typed argument
+        /// in the morloc signature.
+        #[serde(default)]
+        many: bool,
         /// Description lines from `--' desc:` docstrings.
         #[serde(default)]
         desc: Vec<String>,
@@ -467,6 +474,11 @@ pub enum Arg {
         /// JSON-wrap flag for `Str`-typed literal options.
         #[serde(default)]
         quoted: bool,
+        /// If true, the option is variadic (`--' many: true`): it
+        /// accepts multiple values that the nexus assembles into a
+        /// single list value. Implies a `[a]`-typed argument.
+        #[serde(default)]
+        many: bool,
         /// Single-character short option (e.g. `"f"` for `-f`).
         #[serde(default, rename = "short")]
         short_opt: Option<String>,
@@ -699,6 +711,16 @@ impl Arg {
     pub fn is_quoted(&self) -> bool {
         match self {
             Arg::Positional { quoted, .. } | Arg::Optional { quoted, .. } => *quoted,
+            _ => false,
+        }
+    }
+
+    /// True if this arg is variadic (`--' many: true`): it accepts
+    /// multiple CLI tokens that the nexus assembles into a single
+    /// list value at dispatch time. Always false for flags and groups.
+    pub fn is_many(&self) -> bool {
+        match self {
+            Arg::Positional { many, .. } | Arg::Optional { many, .. } => *many,
             _ => false,
         }
     }
