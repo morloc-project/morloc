@@ -67,6 +67,7 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
+      , golden "nexus-packet-output-zstd" "nexus-packet-output-zstd"
 
       , golden "debug-trace" "debug-trace"
       , golden "debug-trace-dedup" "debug-trace-dedup"

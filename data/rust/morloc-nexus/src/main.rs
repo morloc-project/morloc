@@ -615,6 +615,10 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         fn write_atomic(
             filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char,
         ) -> i32;
+        fn normalize_data_packet_for_output(
+            packet: *const u8, packet_size: usize, compression_level: u8,
+            out_buf: *mut *mut u8, out_size: *mut usize, errmsg: *mut *mut c_char,
+        ) -> i32;
     }
 
     let packet_path = config.packet_path.as_ref().unwrap();
@@ -633,8 +637,8 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
 
     // Read call packet from file
     let mut packet_size: usize = 0;
-    let call_packet = unsafe { read_binary_file(packet_c.as_ptr(), &mut packet_size, &mut errmsg) };
-    if call_packet.is_null() || !errmsg.is_null() {
+    let raw_packet = unsafe { read_binary_file(packet_c.as_ptr(), &mut packet_size, &mut errmsg) };
+    if raw_packet.is_null() || !errmsg.is_null() {
         let msg = if !errmsg.is_null() {
             let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
             unsafe { libc::free(errmsg as *mut c_void) };
@@ -645,6 +649,40 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         eprintln!("Error: failed to read call packet '{}': {}", packet_path, msg);
         process::clean_exit(1);
     }
+
+    // If the on-disk packet was written with -z, transparently
+    // decompress before validating + forwarding. decompress_packet_if_needed
+    // is a no-op for plain packets and for non-DATA packets, so this is
+    // safe to apply unconditionally.
+    let decompressed: Vec<u8> = {
+        let raw_slice = unsafe { std::slice::from_raw_parts(raw_packet, packet_size) };
+        match morloc_runtime_types::compression::decompress_packet_if_needed(raw_slice) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "Error: failed to decompress call packet '{}': {}",
+                    packet_path, e
+                );
+                unsafe { libc::free(raw_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
+        }
+    };
+    unsafe { libc::free(raw_packet as *mut c_void) };
+
+    // Move into a libc::malloc'd buffer so we can hand the raw pointer
+    // to send_and_receive_over_socket (which is a C ABI function).
+    let call_packet: *mut u8 = unsafe {
+        let buf = libc::malloc(decompressed.len()) as *mut u8;
+        if buf.is_null() {
+            eprintln!("Error: malloc failed for call packet");
+            process::clean_exit(1);
+        }
+        std::ptr::copy_nonoverlapping(decompressed.as_ptr(), buf, decompressed.len());
+        buf
+    };
+    let packet_size = decompressed.len();
+    drop(decompressed);
 
     // Structural check on the bytes we just read from the shared FS. A
     // torn or corrupted call packet would otherwise propagate into the
@@ -687,12 +725,13 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         process::clean_exit(1);
     }
 
-    // Write the raw morloc packet to --output-file. The driver-side
+    // Write the morloc result packet to --output-file. The driver-side
     // `slurm_ffi::remote_call` (libmorloc.so) reads exactly this file
     // via `read_binary_file` and feeds the bytes back up the call
-    // chain. The previous implementation called `print_morloc_data_packet`
-    // (which prints to stdout) and wrote a sibling `.mpk` -- neither
-    // matched what the driver actually reads.
+    // chain. normalize_data_packet_for_output materializes RPTR/FILE
+    // payloads into inline MESG (so the on-disk packet is meaningful
+    // after this process exits) and applies zstd compression when
+    // -z N > 0.
     if config.output_format == dispatch::OutputFormat::Packet {
         if let Some(ref output_path) = config.output_path {
             let packet_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
@@ -704,57 +743,37 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
                 process::clean_exit(1);
             }
 
-            // If --compression-level > 0, run the result packet through
-            // morloc-runtime-types' compression helper before writing. The
-            // helper is a no-op for non-MESG sources (FILE-source = a
-            // path, RPTR = a relptr -- neither benefits from compression
-            // and the downstream consumer wouldn't know how to interpret
-            // the result), but it warns so the user knows their -z was
-            // silently dropped for that result type.
-            let packet_slice = unsafe {
-                std::slice::from_raw_parts(result_packet, packet_size)
-            };
-            let bytes_to_write: Vec<u8> = if config.compression_level > 0 {
-                match morloc_runtime_types::compression::CompressionLevel::from_u8(
+            let mut out_buf: *mut u8 = std::ptr::null_mut();
+            let mut out_size: usize = 0;
+            let mut nerr: *mut c_char = std::ptr::null_mut();
+            let rc = unsafe {
+                normalize_data_packet_for_output(
+                    result_packet,
+                    packet_size,
                     config.compression_level,
-                ) {
-                    Ok(lvl) => match morloc_runtime_types::compression::compress_packet(
-                        packet_slice,
-                        lvl,
-                    ) {
-                        Ok(morloc_runtime_types::compression::CompressOutcome::Compressed(v)) => v,
-                        Ok(morloc_runtime_types::compression::CompressOutcome::NoOp) => {
-                            eprintln!(
-                                "Warning: --compression-level {} ignored for non-MESG result packet",
-                                config.compression_level
-                            );
-                            packet_slice.to_vec()
-                        }
-                        Err(e) => {
-                            eprintln!("Error: compression failed: {}", e);
-                            unsafe { libc::free(result_packet as *mut c_void) };
-                            process::clean_exit(1);
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Error: invalid compression level: {}", e);
-                        unsafe { libc::free(result_packet as *mut c_void) };
-                        process::clean_exit(1);
-                    }
-                }
-            } else {
-                packet_slice.to_vec()
+                    &mut out_buf,
+                    &mut out_size,
+                    &mut nerr,
+                )
             };
+            if rc != 0 || out_buf.is_null() {
+                let msg = if !nerr.is_null() {
+                    let s = unsafe { std::ffi::CStr::from_ptr(nerr) }.to_string_lossy().into_owned();
+                    unsafe { libc::free(nerr as *mut c_void) };
+                    s
+                } else {
+                    "unknown error".into()
+                };
+                eprintln!("Error: packet normalization failed: {}", msg);
+                unsafe { libc::free(result_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
 
             let output_c = CString::new(output_path.as_str()).unwrap();
             let rc = unsafe {
-                write_atomic(
-                    output_c.as_ptr(),
-                    bytes_to_write.as_ptr(),
-                    bytes_to_write.len(),
-                    &mut errmsg,
-                )
+                write_atomic(output_c.as_ptr(), out_buf, out_size, &mut errmsg)
             };
+            unsafe { libc::free(out_buf as *mut c_void) };
             if rc != 0 || !errmsg.is_null() {
                 let msg = if !errmsg.is_null() {
                     let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();

@@ -96,9 +96,13 @@ pub struct DispatchOptions {
     #[arg(long, value_name = "PATH")]
     pub summary: Option<String>,
 
-    /// zstd compression preset for packet payloads written via -o
-    /// (output-form packet). 0 = no compression (default), 1 = fastest,
-    /// 9 = maximum.
+    /// zstd compression preset for `-f packet` output. RPTR (shared
+    /// memory) and FILE (temp file) result packets are always
+    /// materialized to inline MESG form on disk regardless of this
+    /// flag, so the on-disk packet is self-contained. When N > 0 the
+    /// MESG payload is additionally zstd-compressed; the schema
+    /// metadata block stays in the clear. 0 = no compression
+    /// (default), 1 = fastest, 9 = maximum.
     #[arg(short = 'z', long = "compression-level",
           default_value_t = 0, value_name = "N")]
     pub compression_level: u8,

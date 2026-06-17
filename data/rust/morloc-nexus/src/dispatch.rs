@@ -726,9 +726,49 @@ fn print_result_c(
             }
         }
         OutputFormat::Packet => {
-            // Packet format: write raw binary packet to stdout (used by SLURM)
+            // Normalize RPTR/FILE-source packets to inline MESG, then
+            // optionally zstd-compress. Without this, a large result
+            // packet on disk is just an 8-byte shared-memory pointer
+            // that goes stale the moment the nexus exits.
+            extern "C" {
+                fn normalize_data_packet_for_output(
+                    packet: *const u8,
+                    packet_size: usize,
+                    compression_level: u8,
+                    out_buf: *mut *mut u8,
+                    out_size: *mut usize,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
+            }
+            let mut out_buf: *mut u8 = std::ptr::null_mut();
+            let mut out_size: usize = 0;
+            let mut nerr: *mut std::ffi::c_char = std::ptr::null_mut();
+            let rc = unsafe {
+                normalize_data_packet_for_output(
+                    full_packet.as_ptr(),
+                    full_packet.len(),
+                    config.compression_level,
+                    &mut out_buf,
+                    &mut out_size,
+                    &mut nerr,
+                )
+            };
+            if rc != 0 || out_buf.is_null() {
+                let msg = if !nerr.is_null() {
+                    let s = unsafe { std::ffi::CStr::from_ptr(nerr) }
+                        .to_string_lossy().into_owned();
+                    unsafe { libc::free(nerr as *mut std::ffi::c_void) };
+                    s
+                } else {
+                    "unknown error".into()
+                };
+                eprintln!("Error: packet normalization failed: {}", msg);
+                process::clean_exit(1);
+            }
             use std::io::Write;
-            let _ = std::io::stdout().lock().write_all(&full_packet);
+            let bytes = unsafe { std::slice::from_raw_parts(out_buf, out_size) };
+            let _ = std::io::stdout().lock().write_all(bytes);
+            unsafe { libc::free(out_buf as *mut std::ffi::c_void) };
         }
         OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
             // Table-only output formats. The pool returns an Arrow SHM

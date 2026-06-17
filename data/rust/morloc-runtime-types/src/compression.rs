@@ -114,16 +114,17 @@ const DECODER_WINDOW_LOG_MAX: u32 = 31;
 
 // ── Raw-payload compress / decompress ─────────────────────────────────────
 
-/// Compress raw bytes with zstd. Multithreaded when the payload is large
-/// enough to amortize worker overhead; long-mode enabled for preset 7+.
+/// Compress raw bytes with zstd. Single entry point for every
+/// compression site in the runtime: takes a user-facing level (0..=9)
+/// and decides threading internally via `choose_workers`. Long-mode
+/// kicks in for preset 7+. Level 0 returns a clean copy of `raw`
+/// (no zstd frame), so callers don't have to special-case it.
 pub fn compress_payload_zstd(
     raw: &[u8],
     lvl: CompressionLevel,
 ) -> Result<Vec<u8>, MorlocError> {
     if lvl.is_none() {
-        return Err(MorlocError::Other(
-            "compress_payload_zstd called with level 0".into(),
-        ));
+        return Ok(raw.to_vec());
     }
 
     let mut encoder = zstd::stream::Encoder::new(Vec::new(), lvl.zstd_level())

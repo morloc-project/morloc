@@ -928,6 +928,285 @@ pub unsafe extern "C" fn make_data_packet_auto(
     }
 }
 
+// ── normalize_data_packet_for_output ─────────────────────────────────────────
+//
+// Produce a self-contained packet suitable for writing to disk. The
+// pool may return a result packet whose source is RPTR (an 8-byte
+// relptr into SHM) or FILE (a filename whose contents are msgpack);
+// neither survives the lifetime of the producing process. This helper
+// rewrites such packets so the payload is inline (source = MESG),
+// then optionally applies zstd compression.
+//
+// Normalization rules (source x format x compression):
+//
+//   MESG + any format, compression = NONE
+//      level > 0: compress_packet (sets compression = ZSTD)
+//      level = 0: copy through unchanged
+//
+//   MESG + any format, compression = ZSTD
+//      copy through unchanged (do not recompress)
+//
+//   RPTR + VOIDSTAR
+//      dereference SHM, flatten voidstar to a flat buffer (the same
+//      writer the SLURM serialization path uses), wrap as
+//      MESG + VOIDSTAR, then compress if level > 0.
+//
+//   RPTR + ARROW
+//      dereference SHM, serialize the Arrow SHM table to IPC bytes
+//      (existing write_arrow_ipc_to_buffer), wrap as MESG + ARROW,
+//      then compress if level > 0.
+//
+//   FILE + MSGPACK
+//      read the file, wrap the msgpack bytes as MESG + MSGPACK, then
+//      compress if level > 0. Inlining keeps the on-disk packet
+//      meaningful after the producing process exits.
+//
+// FAIL packets and non-DATA packets (CALL/PING) pass through.
+//
+// The output buffer is libc::malloc'd; the caller must libc::free.
+#[no_mangle]
+pub unsafe extern "C" fn normalize_data_packet_for_output(
+    packet: *const u8,
+    packet_size: usize,
+    compression_level: u8,
+    out_buf: *mut *mut u8,
+    out_size: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    *out_buf = ptr::null_mut();
+    *out_size = 0;
+
+    let header = read_morloc_packet_header(packet, errmsg);
+    if header.is_null() {
+        return 1;
+    }
+
+    let is_data = (*header).is_data();
+    let is_fail = (*header).is_fail();
+
+    // CALL/PING and FAIL packets ride out unchanged.
+    if !is_data || is_fail {
+        return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
+    }
+
+    let source = (*header).command.data.source;
+    let format = (*header).command.data.format;
+    let compression = (*header).command.data.compression;
+    let metadata_size = (*header).offset as usize;
+    let payload_start = 32 + metadata_size;
+    let payload_len = (*header).length as usize;
+
+    if payload_start + payload_len > packet_size {
+        set_errmsg(errmsg, &MorlocError::Packet(
+            "packet payload extends past packet bounds".into()
+        ));
+        return 1;
+    }
+
+    // MESG: either pass through or just compress the existing payload.
+    if source == PACKET_SOURCE_MESG {
+        if compression_level == 0 || compression != PACKET_COMPRESSION_NONE {
+            return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
+        }
+        return compress_inline(packet, packet_size, compression_level, out_buf, out_size, errmsg);
+    }
+
+    // RPTR or FILE: materialize the payload into inline bytes, then
+    // build a fresh MESG packet, then (optionally) compress.
+    let new_payload: Vec<u8> = match source {
+        PACKET_SOURCE_RPTR => {
+            match read_rptr_payload(packet, payload_start, format, errmsg) {
+                Some(v) => v,
+                None => return 1,
+            }
+        }
+        PACKET_SOURCE_FILE => {
+            if format != PACKET_FORMAT_MSGPACK {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "FILE source with unsupported format 0x{:02x}", format
+                )));
+                return 1;
+            }
+            let filename_bytes = std::slice::from_raw_parts(
+                packet.add(payload_start),
+                payload_len.min(4096),
+            );
+            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+            let filename = filename.trim_end_matches('\0');
+            match std::fs::read(filename) {
+                Ok(data) => data,
+                Err(e) => {
+                    set_errmsg(errmsg, &MorlocError::Io(e));
+                    return 1;
+                }
+            }
+        }
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Packet(format!(
+                "unsupported packet source 0x{:02x}", source
+            )));
+            return 1;
+        }
+    };
+
+    // Build MESG packet: same metadata, new payload, source = MESG,
+    // compression = NONE, format and schema unchanged.
+    let mut new_header = *header;
+    new_header.command.data.source = PACKET_SOURCE_MESG;
+    new_header.command.data.compression = PACKET_COMPRESSION_NONE;
+    let mut hdr_bytes = new_header.to_bytes();
+    let new_len = new_payload.len() as u64;
+    hdr_bytes[24..32].copy_from_slice(&new_len.to_le_bytes());
+
+    let mut mesg_packet = Vec::with_capacity(32 + metadata_size + new_payload.len());
+    mesg_packet.extend_from_slice(&hdr_bytes);
+    if metadata_size > 0 {
+        let meta = std::slice::from_raw_parts(packet.add(32), metadata_size);
+        mesg_packet.extend_from_slice(meta);
+    }
+    mesg_packet.extend_from_slice(&new_payload);
+
+    // Optional compression.
+    let final_bytes = if compression_level > 0 {
+        match crate::compression::CompressionLevel::from_u8(compression_level) {
+            Ok(lvl) if !lvl.is_none() => {
+                match crate::compression::compress_packet(&mesg_packet, lvl) {
+                    Ok(crate::compression::CompressOutcome::Compressed(v)) => v,
+                    Ok(crate::compression::CompressOutcome::NoOp) => mesg_packet,
+                    Err(e) => { set_errmsg(errmsg, &e); return 1; }
+                }
+            }
+            Ok(_) => mesg_packet,
+            Err(e) => { set_errmsg(errmsg, &e); return 1; }
+        }
+    } else {
+        mesg_packet
+    };
+
+    alloc_out(final_bytes.as_ptr(), final_bytes.len(), out_buf, out_size, errmsg)
+}
+
+// Materialize the SHM-backed payload of an RPTR packet into a flat
+// byte buffer suitable for inlining.
+unsafe fn read_rptr_payload(
+    packet: *const u8,
+    payload_start: usize,
+    format: u8,
+    errmsg: *mut *mut c_char,
+) -> Option<Vec<u8>> {
+    let relptr = *(packet.add(payload_start) as *const RelPtr);
+    let abs_ptr = match shm::rel2abs(relptr) {
+        Ok(p) => p,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+
+    match format {
+        PACKET_FORMAT_VOIDSTAR => {
+            let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
+            if schema_ptr.is_null() {
+                if (*errmsg).is_null() {
+                    set_errmsg(errmsg, &MorlocError::Packet(
+                        "RPTR+VOIDSTAR packet missing schema metadata".into()
+                    ));
+                }
+                return None;
+            }
+            let schema_str = match CStr::from_ptr(schema_ptr).to_str() {
+                Ok(s) => s,
+                Err(_) => {
+                    set_errmsg(errmsg, &MorlocError::Packet(
+                        "schema metadata is not valid UTF-8".into()
+                    ));
+                    return None;
+                }
+            };
+            let rs = match crate::schema::parse_schema(schema_str) {
+                Ok(s) => s,
+                Err(e) => { set_errmsg(errmsg, &e); return None; }
+            };
+            match crate::voidstar::flatten_to_buffer(abs_ptr, &rs) {
+                Ok(buf) => Some(buf),
+                Err(e) => { set_errmsg(errmsg, &e); None }
+            }
+        }
+        PACKET_FORMAT_ARROW => {
+            let mut arrow_buf: *mut u8 = ptr::null_mut();
+            let mut arrow_len: usize = 0;
+            let rc = crate::arrow_ipc_reader::write_arrow_ipc_to_buffer(
+                abs_ptr as *const _,
+                &mut arrow_buf,
+                &mut arrow_len,
+                errmsg,
+            );
+            if rc != 0 || arrow_buf.is_null() {
+                return None;
+            }
+            let v = std::slice::from_raw_parts(arrow_buf, arrow_len).to_vec();
+            libc::free(arrow_buf as *mut c_void);
+            Some(v)
+        }
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Packet(format!(
+                "RPTR source with unsupported format 0x{:02x}", format
+            )));
+            None
+        }
+    }
+}
+
+// Compress a MESG packet that is already inline and uncompressed. The
+// caller has already verified source == MESG and compression == NONE.
+unsafe fn compress_inline(
+    packet: *const u8,
+    packet_size: usize,
+    level: u8,
+    out_buf: *mut *mut u8,
+    out_size: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    let lvl = match crate::compression::CompressionLevel::from_u8(level) {
+        Ok(l) => l,
+        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+    };
+    if lvl.is_none() {
+        return alloc_out(packet, packet_size, out_buf, out_size, errmsg);
+    }
+    let slice = std::slice::from_raw_parts(packet, packet_size);
+    match crate::compression::compress_packet(slice, lvl) {
+        Ok(crate::compression::CompressOutcome::Compressed(v)) => {
+            alloc_out(v.as_ptr(), v.len(), out_buf, out_size, errmsg)
+        }
+        Ok(crate::compression::CompressOutcome::NoOp) => {
+            alloc_out(packet, packet_size, out_buf, out_size, errmsg)
+        }
+        Err(e) => { set_errmsg(errmsg, &e); 1 }
+    }
+}
+
+// libc::malloc a copy of `src[..len]` and hand it back through the
+// (out_buf, out_size) outparams. Used by every success path of
+// normalize_data_packet_for_output so the C ABI is uniform.
+unsafe fn alloc_out(
+    src: *const u8,
+    len: usize,
+    out_buf: *mut *mut u8,
+    out_size: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    let mem = libc::malloc(len) as *mut u8;
+    if mem.is_null() {
+        set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+        return 1;
+    }
+    if len > 0 {
+        ptr::copy_nonoverlapping(src, mem, len);
+    }
+    *out_buf = mem;
+    *out_size = len;
+    0
+}
+
 // ── make_file_data_packet_voidstar ───────────────────────────────────────────
 //
 // FILE-routed data path for `morloc make --no-shm` (or when SHM is
