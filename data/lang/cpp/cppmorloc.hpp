@@ -265,13 +265,20 @@ auto to_vector(const Container& c) {
 absptr_t cpp_rel2abs(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
 
-// Resolve a relative pointer using either base-pointer arithmetic (inline data)
-// or SHM. When base_ptr is non-null, data lives in a contiguous malloc'd blob.
+// Resolve a relative pointer.
+//
+// When `base_ptr` is non-null the relptr is a buffer-relative offset
+// into a malloc'd inline packet payload (the inline MESG+VOIDSTAR
+// path); resolution is a single add. Otherwise we route through the
+// inline `resolve_relptr` in morloc.h which consults the per-process
+// exposed volume table for a lock-free fast path, falling through to
+// the SHM FFI only when the slot has not yet been populated in this
+// process.
 static inline void* resolve_relptr_cpp(relptr_t relptr, const void* base_ptr) {
     if (base_ptr) {
-        return (char*)base_ptr + relptr;
+        return (char*)base_ptr + relptr_offset_bits(relptr);
     }
-    return cpp_rel2abs(relptr);
+    return resolve_relptr(relptr, NULL, NULL);
 }
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);

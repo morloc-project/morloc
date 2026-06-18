@@ -13,7 +13,7 @@ use std::sync::Mutex;
 // `crate::shm::Array`, etc.) keep working unchanged.
 pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
-    AbsPtr, Array, BlockHeader, RelPtr, ShmHeader, VolPtr,
+    AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
     BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
@@ -41,27 +41,102 @@ const LOCK_TIMEOUT_SECS: u64 = 5;
 
 // ── Slot record (one per volume index) ─────────────────────────────────────
 
-/// One VOLUMES entry. Holds a pointer to the slot's ShmHeader (the
-/// start of an `shinit`-created `/dev/shm` segment) or null for empty
-/// slots. The data region lives at `header + sizeof::<ShmHeader>()`;
-/// the volume's bounds (`volume_size`) are read from the header on
-/// demand by `rel2abs` and friends.
+/// One VOLUMES entry. Holds a pointer to the slot's ShmHeader plus a
+/// cached copy of `(*header).volume_size`. The cache exists so
+/// `rel2abs` can do its bounds check without dereferencing the header
+/// on every call -- `volume_size` lives at byte offset 136 of
+/// ShmHeader (past the 128-byte name buffer), a separate cache line
+/// from the slot pointer that the table walk has already loaded.
+///
+/// `data_base` is intentionally NOT cached: it is the compile-time
+/// constant offset `header + sizeof::<ShmHeader>()`, so reading it
+/// from the slot would only save a pointer add, no memory traffic.
+///
+/// Empty slots have `header.is_null()` and `data_size == 0`.
 #[derive(Clone, Copy)]
-struct SendPtr(*mut ShmHeader);
+struct SendPtr {
+    header: *mut ShmHeader,
+    data_size: usize,
+}
 
 // SAFETY: ShmHeader lives in mmap'd shared memory that outlives all threads.
 // Access is serialized via VOLUMES Mutex and per-volume AtomicU32 futex locks.
 unsafe impl Send for SendPtr {}
 
 impl SendPtr {
-    const fn null() -> Self { SendPtr(std::ptr::null_mut()) }
-    fn is_null(&self) -> bool { self.0.is_null() }
-    fn ptr(&self) -> *mut ShmHeader { self.0 }
-    fn set(&mut self, p: *mut ShmHeader) { self.0 = p; }
+    const fn null() -> Self {
+        SendPtr { header: std::ptr::null_mut(), data_size: 0 }
+    }
+    fn is_null(&self) -> bool { self.header.is_null() }
+    fn ptr(&self) -> *mut ShmHeader { self.header }
+    fn data_size(&self) -> usize { self.data_size }
+    fn set(&mut self, header: *mut ShmHeader, data_size: usize) {
+        self.header = header;
+        self.data_size = data_size;
+    }
 }
 
 fn get_cstr_buf(buf: &[u8; MAX_FILENAME_SIZE]) -> &str {
     get_cstr(buf.as_slice())
+}
+
+// ── Exposed per-process volume table (lock-free, public symbol) ────────────
+
+/// Per-process volume base+size table, exposed as a public symbol so
+/// C/C++/Python/R bridges can do `rel2abs` inline without an FFI call.
+///
+/// Each slot is two atomics with naturally-aligned, naturally-lock-free
+/// types. The publication protocol:
+///
+/// * **Populate** (`shinit`/`shopen_diag`): store `data_size` first
+///   (Relaxed -- readers ignore it until the gate flips), then store
+///   `data_base` with Release. The Release pairs with the reader's
+///   Acquire of `data_base` and makes `data_size` visible.
+/// * **Invalidate** (`shclose`/`reset_all`): store `data_base = null`
+///   with Release. Subsequent readers see null and fall through to the
+///   FFI slow path, which will either find the segment unmapped or
+///   trigger a fresh shopen.
+/// * **Read** (C inline `resolve_relptr` in morloc.h): Acquire-load
+///   `data_base`; if non-null, Relaxed-load `data_size`, bounds-check,
+///   return `data_base + offset`. Else fall through to `rel2abs`.
+///
+/// Sized at MAX_VOLUME_NUMBER (32 768). With 16 bytes per entry that's
+/// 512 KiB of process-local static data.
+#[no_mangle]
+pub static MORLOC_VOL_TABLE: [MorlocVolEntry; MAX_VOLUME_NUMBER] =
+    [const { MorlocVolEntry::empty() }; MAX_VOLUME_NUMBER];
+
+/// Publish a volume's mapping to the lock-free table so the C-side
+/// `resolve_relptr` inline can resolve relptrs into it without FFI.
+#[inline]
+fn publish_vol(idx: usize, header: *mut ShmHeader, data_size: usize) {
+    if idx >= MAX_VOLUME_NUMBER {
+        return;
+    }
+    let entry = &MORLOC_VOL_TABLE[idx];
+    // SAFETY: header is a valid mmap'd ShmHeader pointer; data region
+    // starts at header + sizeof::<ShmHeader>().
+    let data_base = unsafe {
+        (header as *mut u8).add(std::mem::size_of::<ShmHeader>())
+    };
+    // Store data_size before publishing data_base; readers gate on the
+    // Release-store of data_base, so size is visible by the time they
+    // observe a non-null base.
+    entry.data_size.store(data_size, Ordering::Relaxed);
+    entry.data_base.store(data_base, Ordering::Release);
+}
+
+/// Withdraw a volume's mapping from the lock-free table. Subsequent
+/// `resolve_relptr` inline calls for this slot will fall through to
+/// the FFI.
+#[inline]
+fn unpublish_vol(idx: usize) {
+    if idx >= MAX_VOLUME_NUMBER {
+        return;
+    }
+    MORLOC_VOL_TABLE[idx]
+        .data_base
+        .store(std::ptr::null_mut(), Ordering::Release);
 }
 
 // ── Global state ───────────────────────────────────────────────────────────
@@ -186,6 +261,7 @@ extern "C" fn shclose_atexit() {
         if shm.is_null() {
             continue;
         }
+        unpublish_vol(slot_idx as usize);
         // SAFETY: shm is a valid mmap'd pointer recorded in VOLUMES under
         // the lock we hold. Name is read from a valid ShmHeader region.
         unsafe {
@@ -279,9 +355,10 @@ pub fn shinit(
     // Store in volumes table and add to USED_VOLUMES walk list.
     {
         let mut vols = VOLUMES.lock().unwrap();
-        vols.slots[volume_index].set(shm);
+        vols.slots[volume_index].set(shm, actual_data_size);
         vols.mark_used(volume_index);
     }
+    publish_vol(volume_index, shm, actual_data_size);
 
     if created {
         // SAFETY: shm points to the start of our mmap'd region of actual_full_size bytes.
@@ -440,11 +517,16 @@ pub fn shopen_diag(
     }
 
     let shm = ptr as *mut ShmHeader;
+    // SAFETY: shm is a freshly mmap'd ShmHeader; we read volume_size
+    // once at registration so the per-call cache in SendPtr is
+    // populated for the lifetime of the slot.
+    let data_size = unsafe { (*shm).volume_size };
     {
         let mut vols = VOLUMES.lock().unwrap();
-        vols.slots[volume_index].set(shm);
+        vols.slots[volume_index].set(shm, data_size);
         vols.mark_used(volume_index);
     }
+    publish_vol(volume_index, shm, data_size);
 
     Ok(Ok(shm))
 }
@@ -491,14 +573,14 @@ fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
     let p = ptr as usize;
     let vols = VOLUMES.lock().unwrap();
     for &slot_idx in &vols.used {
-        let shm = vols.slots[slot_idx as usize].ptr();
-        if shm.is_null() {
+        let slot = vols.slots[slot_idx as usize];
+        if slot.is_null() {
             continue;
         }
-        // SAFETY: shm is a valid mmap'd ShmHeader from VOLUMES.
-        let vol_size = unsafe { (*shm).volume_size };
-        let base = unsafe { (shm as *const u8).add(std::mem::size_of::<ShmHeader>()) } as usize;
-        if p >= base && p < base + vol_size {
+        let base = unsafe {
+            (slot.ptr() as *const u8).add(std::mem::size_of::<ShmHeader>())
+        } as usize;
+        if p >= base && p < base + slot.data_size() {
             return true;
         }
     }
@@ -516,6 +598,11 @@ fn shclose_locked(vols: &mut VolumeTable) {
         if shm.is_null() {
             continue;
         }
+        // Withdraw from the lock-free table BEFORE we unmap, so any
+        // racing rel2abs inline can't read a stale data_base and
+        // dereference an unmapped page. The Release-store ensures the
+        // null is visible before munmap is observed.
+        unpublish_vol(i);
         // SAFETY: shm is a valid mmap'd pointer stored in VOLUMES.
         // munmap/unlink on regions we own. Name read from valid ShmHeader.
         unsafe {
@@ -636,46 +723,58 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
     let vol_idx = relptr_volume_index(ptr);
     let offset = relptr_offset(ptr);
 
-    // Fast path: volume already mapped in this process. Read the
-    // header pointer under the lock, then drop the lock before
-    // dereferencing -- the SHM segment is stable for the life of the
-    // slot, so we don't need to hold the table lock while reading it.
-    let shm = {
+    // Fast path: volume already mapped in this process. Read the slot
+    // record (header pointer + cached data_size, both in the same
+    // SendPtr cache line) under the lock, then drop the lock before
+    // computing the address.
+    let slot = {
         let vols = VOLUMES.lock().unwrap();
-        vols.slots[vol_idx].ptr()
+        vols.slots[vol_idx]
     };
-    if !shm.is_null() {
-        // SAFETY: shm is a valid mmap'd ShmHeader; volume_size and
-        // the data region offset are read from it.
+    if !slot.is_null() {
+        if offset >= slot.data_size() {
+            return Err(MorlocError::Shm(format!(
+                "rel2abs offset {} exceeds volume {}'s size {}",
+                offset, vol_idx, slot.data_size()
+            )));
+        }
+        // SAFETY: slot.header is a valid mmap'd ShmHeader and the
+        // bounds check above keeps the add inside the data region.
         unsafe {
-            let vol_size = (*shm).volume_size;
-            if offset >= vol_size {
-                return Err(MorlocError::Shm(format!(
-                    "rel2abs offset {} exceeds volume {}'s size {}",
-                    offset, vol_idx, vol_size
-                )));
-            }
-            let base = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
+            let base = (slot.ptr() as *const u8)
+                .add(std::mem::size_of::<ShmHeader>());
             return Ok(base.add(offset) as AbsPtr);
         }
     }
 
     // Slow path: try to lazily open the producer's volume from disk
-    // (POSIX SHM or file-backed fallback).
-    let shm = match shopen_diag(vol_idx)? {
+    // (POSIX SHM or file-backed fallback). shopen_diag populates the
+    // slot's data_size cache as part of its work, so we re-read the
+    // slot afterwards rather than dereferencing the header here.
+    let _ = match shopen_diag(vol_idx)? {
         Ok(s) => s,
         Err(miss) => return Err(rel2abs_miss_error(ptr, vol_idx, 0, miss)),
     };
-    // SAFETY: shm is a valid mmap'd ShmHeader returned by shopen_diag.
+    let slot = {
+        let vols = VOLUMES.lock().unwrap();
+        vols.slots[vol_idx]
+    };
+    if slot.is_null() {
+        return Err(MorlocError::Shm(format!(
+            "rel2abs: shopen_diag claimed success for volume {} but slot is null",
+            vol_idx
+        )));
+    }
+    if offset >= slot.data_size() {
+        return Err(MorlocError::Shm(format!(
+            "rel2abs offset {} exceeds volume {}'s size {}",
+            offset, vol_idx, slot.data_size()
+        )));
+    }
+    // SAFETY: same as the fast path.
     unsafe {
-        let vol_size = (*shm).volume_size;
-        if offset >= vol_size {
-            return Err(MorlocError::Shm(format!(
-                "rel2abs offset {} exceeds volume {}'s size {}",
-                offset, vol_idx, vol_size
-            )));
-        }
-        let base = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
+        let base = (slot.ptr() as *const u8)
+            .add(std::mem::size_of::<ShmHeader>());
         Ok(base.add(offset) as AbsPtr)
     }
 }
@@ -754,15 +853,18 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
     let vols = VOLUMES.lock().unwrap();
     for &slot_idx in &vols.used {
         let i = slot_idx as usize;
-        let shm = vols.slots[i].ptr();
-        if shm.is_null() {
+        let slot = vols.slots[i];
+        if slot.is_null() {
             continue;
         }
-        // SAFETY: shm is a valid mmap'd ShmHeader from VOLUMES. We compute
-        // data region bounds and check ptr falls within before computing offset.
+        // SAFETY: data_base = header + sizeof::<ShmHeader>(); the slot's
+        // cached data_size bounds the search range. ptr is matched
+        // against the half-open interval [data_start, data_start +
+        // data_size) before any pointer arithmetic returns.
         unsafe {
-            let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
-            let data_end = data_start.add((*shm).volume_size);
+            let data_start = (slot.ptr() as *const u8)
+                .add(std::mem::size_of::<ShmHeader>());
+            let data_end = data_start.add(slot.data_size());
             let p = ptr as *const u8;
             if p >= data_start && p < data_end {
                 let offset = p.offset_from(data_start) as usize;
@@ -780,17 +882,18 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
 pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
     let vols = VOLUMES.lock().unwrap();
     for &slot_idx in &vols.used {
-        let shm = vols.slots[slot_idx as usize].ptr();
-        if shm.is_null() {
+        let slot = vols.slots[slot_idx as usize];
+        if slot.is_null() {
             continue;
         }
-        // SAFETY: shm is a valid mmap'd ShmHeader from VOLUMES.
+        // SAFETY: see abs2rel.
         unsafe {
-            let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
-            let data_end = data_start.add((*shm).volume_size);
+            let data_start = (slot.ptr() as *const u8)
+                .add(std::mem::size_of::<ShmHeader>());
+            let data_end = data_start.add(slot.data_size());
             let p = ptr as *const u8;
             if p >= data_start && p < data_end {
-                return Ok(shm);
+                return Ok(slot.ptr());
             }
         }
     }
@@ -813,16 +916,32 @@ pub fn total_shm_size() -> usize {
     let vols = VOLUMES.lock().unwrap();
     let mut total = 0;
     for &slot_idx in &vols.used {
-        let shm = vols.slots[slot_idx as usize].ptr();
-        if !shm.is_null() {
-            // SAFETY: non-null VOLUMES entries are valid mmap'd ShmHeader pointers.
-            total += unsafe { (*shm).volume_size };
+        let slot = vols.slots[slot_idx as usize];
+        if !slot.is_null() {
+            total += slot.data_size();
         }
     }
     total
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
+
+/// Format a byte count as "N.N GiB" / "N.N MiB" / "N KiB" / "N B" for
+/// user-facing diagnostics. Cutoffs match the obvious thresholds.
+fn human_bytes(n: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    const GIB: usize = 1024 * MIB;
+    if n >= GIB {
+        format!("{:.1} GiB", n as f64 / GIB as f64)
+    } else if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else if n >= KIB {
+        format!("{} KiB", n / KIB)
+    } else {
+        format!("{} B", n)
+    }
+}
 
 fn try_open_shm(
     shm_name: &str,
@@ -900,6 +1019,18 @@ fn try_open_shm(
                 file_path, full_size
             )));
         }
+        // We successfully created a file-backed segment because POSIX
+        // SHM couldn't host it. Notify the user once per fallback site
+        // -- this is a working but slower path (data lives on whatever
+        // backs the fallback dir, often a regular filesystem), and the
+        // typical cause in containers is a small /dev/shm. The fallback
+        // itself is intentional graceful degradation, not an error.
+        eprintln!(
+            "morloc warning: /dev/shm is too small for a {} allocation; \
+             falling back to file-backed '{}'.",
+            human_bytes(full_size),
+            file_path,
+        );
         full_size
     } else {
         sb.st_size as usize
@@ -986,11 +1117,9 @@ fn find_free_block(
     // practice.
     const VOLUME_GROWTH_FACTOR: usize = 2;
     let prev_volume_size = {
-        let last = vols.slots[cv].ptr();
+        let last = vols.slots[cv];
         if !last.is_null() {
-            // SAFETY: last is a valid mmap'd ShmHeader held under the
-            // VOLUMES lock we currently hold.
-            unsafe { (*last).volume_size }
+            last.data_size()
         } else {
             0xffff
         }
@@ -1302,6 +1431,46 @@ mod tests {
     fn test_pointer_constants() {
         assert_eq!(RELNULL, -1);
         assert_eq!(VOLNULL, -1);
+    }
+
+    #[test]
+    fn vol_table_publication_roundtrip() {
+        // shinit / shopen_diag publish a (data_base, data_size) pair to
+        // MORLOC_VOL_TABLE so the C-side resolve_relptr inline can do
+        // its lookup without crossing FFI. Verify the publish helpers
+        // expose the right values to an Acquire reader, and that the
+        // unpublish step clears the slot.
+        let tmpdir = std::env::temp_dir();
+        let test_dir = tmpdir.join(format!("morloc_test_vt_{}", std::process::id()));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        shm_set_fallback_dir(test_dir.to_str().unwrap());
+
+        let basename = format!("test_shm_vt_{}", std::process::id());
+        let shm = shinit(&basename, 0, 4096).unwrap();
+
+        // shinit should have populated slot 0.
+        let entry = &MORLOC_VOL_TABLE[0];
+        let base = entry.data_base.load(Ordering::Acquire);
+        let size = entry.data_size.load(Ordering::Relaxed);
+        assert!(!base.is_null(),
+            "expected publish_vol to populate slot 0's data_base");
+        assert!(size > 0,
+            "expected publish_vol to populate slot 0's data_size");
+        // data_base must point to the data region right after the header.
+        let expected_base = unsafe {
+            (shm as *mut u8).add(std::mem::size_of::<ShmHeader>())
+        };
+        assert_eq!(base, expected_base,
+            "data_base must be header + sizeof::<ShmHeader>()");
+
+        shclose().unwrap();
+
+        // shclose drops the slot back to null.
+        let base_after = MORLOC_VOL_TABLE[0].data_base.load(Ordering::Acquire);
+        assert!(base_after.is_null(),
+            "expected shclose to publish a null data_base");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]

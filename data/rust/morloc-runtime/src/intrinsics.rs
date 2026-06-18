@@ -284,35 +284,8 @@ pub unsafe extern "C" fn mlc_load(
         return ptr::null_mut();
     }
 
-    // If the file is a morloc data packet with a non-NONE compression byte,
-    // decompress to a fresh malloc'd buffer and hand THAT to the format
-    // detector. Non-packet inputs (raw JSON / raw msgpack) and uncompressed
-    // packets short-circuit through Cow::Borrowed (no copy) and keep the
-    // original libc-malloc'd buffer from read_binary_file.
-    let raw_slice = std::slice::from_raw_parts(data, file_size);
-    let (data, file_size) = match crate::compression::decompress_packet_if_needed(raw_slice) {
-        Ok(std::borrow::Cow::Borrowed(_)) => (data, file_size),
-        Ok(std::borrow::Cow::Owned(bytes)) => {
-            let new_size = bytes.len();
-            let new_buf = libc::malloc(new_size) as *mut u8;
-            if new_buf.is_null() {
-                libc::free(data as *mut libc::c_void);
-                let path_str = CStr::from_ptr(path).to_string_lossy();
-                eprintln!("@load warning ({}): malloc failed during decompression", path_str);
-                return ptr::null_mut();
-            }
-            ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
-            libc::free(data as *mut libc::c_void);
-            (new_buf, new_size)
-        }
-        Err(e) => {
-            libc::free(data as *mut libc::c_void);
-            let path_str = CStr::from_ptr(path).to_string_lossy();
-            eprintln!("@load warning ({}): {}", path_str, e);
-            return ptr::null_mut();
-        }
-    };
-
+    // Decompression is now handled inside `load_morloc_data_file`,
+    // which is the single choke point all packet-load paths share.
     let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
     if result.is_null() && !err.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();

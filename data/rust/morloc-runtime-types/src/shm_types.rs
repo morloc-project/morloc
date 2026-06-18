@@ -9,7 +9,7 @@
 //! handler, mmap'd region) lives in `morloc-runtime::shm` and is
 //! reached only through libmorloc.so's C ABI.
 
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -85,6 +85,44 @@ pub const BLOCK_ALIGN: usize = std::mem::align_of::<BlockHeader>();
 #[inline]
 pub const fn align_up(x: usize, align: usize) -> usize {
     (x + align - 1) & !(align - 1)
+}
+
+// ── Exposed volume table (per-process, lock-free) ──────────────────────────
+
+/// One entry in `MORLOC_VOL_TABLE`. Holds the data-region base address
+/// and size of one SHM volume **in this process's address space**. Each
+/// loaded volume publishes its entry from `shinit` / `shopen_diag`; the
+/// `data_base != null` check serves as the publication gate.
+///
+/// The struct is exposed via `#[no_mangle]` static and consumed
+/// directly from C/C++/Python/R bridges, so the layout is part of the
+/// libmorloc.so ABI:
+///
+/// ```c
+/// struct morloc_vol_entry {
+///     _Atomic(void*)  data_base;   // 0 if slot empty in this process
+///     _Atomic(size_t) data_size;   // valid when data_base != 0
+/// };
+/// ```
+///
+/// On x86-64 and ARM64 (the supported targets), `_Atomic(void*)` and
+/// `_Atomic(size_t)` are layout-compatible with the plain types and
+/// match Rust's `AtomicPtr<u8>` (which is `repr(transparent)` over
+/// `*mut u8`) and `AtomicUsize`. The C side asserts the layout via
+/// `_Static_assert`.
+#[repr(C)]
+pub struct MorlocVolEntry {
+    pub data_base: AtomicPtr<u8>,
+    pub data_size: AtomicUsize,
+}
+
+impl MorlocVolEntry {
+    pub const fn empty() -> Self {
+        MorlocVolEntry {
+            data_base: AtomicPtr::new(std::ptr::null_mut()),
+            data_size: AtomicUsize::new(0),
+        }
+    }
 }
 
 // ── Shared memory header (lives in mmap'd region) ──────────────────────────

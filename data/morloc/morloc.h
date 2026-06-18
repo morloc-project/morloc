@@ -6,6 +6,24 @@
 #ifndef __MORLOC_H__
 #define __MORLOC_H__
 
+// Atomic includes must sit outside any `extern "C"` block because the
+// C++ <atomic> header pulls in <type_traits> et al., which use C++
+// templates. We define the platform-neutral macros here, then open
+// the extern "C" block once we are past the headers.
+#if defined(__cplusplus)
+#  include <atomic>
+#  define MORLOC_ATOMIC_PTR(T)   std::atomic<T*>
+#  define MORLOC_ATOMIC_SIZE     std::atomic<size_t>
+#  define MORLOC_ATOMIC_LOAD_ACQ(x)  ((x).load(std::memory_order_acquire))
+#  define MORLOC_ATOMIC_LOAD_RLX(x)  ((x).load(std::memory_order_relaxed))
+#else
+#  include <stdatomic.h>
+#  define MORLOC_ATOMIC_PTR(T)   _Atomic(T*)
+#  define MORLOC_ATOMIC_SIZE     _Atomic(size_t)
+#  define MORLOC_ATOMIC_LOAD_ACQ(x)  atomic_load_explicit(&(x), memory_order_acquire)
+#  define MORLOC_ATOMIC_LOAD_RLX(x)  atomic_load_explicit(&(x), memory_order_relaxed)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -69,6 +87,23 @@ typedef void*   absptr_t;
 #define BLK_MAGIC 0x0CB10DF0
 
 #define MAX_VOLUME_NUMBER 32768
+
+// Indexed relptr encoding: bit 63 = sentinel, bits 62..48 = 15-bit
+// volume index, bits 47..0 = 48-bit offset within the volume's data
+// region. Mirrors morloc-runtime-types::shm_types; kept here so the
+// C/C++ bridges can do per-relptr arithmetic without crossing FFI.
+#define RELPTR_VOL_IDX_SHIFT 48
+#define RELPTR_VOL_IDX_MASK  ((uint64_t)0x7FFF)
+#define RELPTR_OFFSET_MASK   ((uint64_t)0x0000FFFFFFFFFFFF)
+#define RELPTR_SENTINEL_MASK ((uint64_t)0x8000000000000000)
+
+static inline size_t relptr_vol_idx(relptr_t p) {
+    return (size_t)(((uint64_t)p >> RELPTR_VOL_IDX_SHIFT) & RELPTR_VOL_IDX_MASK);
+}
+
+static inline size_t relptr_offset_bits(relptr_t p) {
+    return (size_t)((uint64_t)p & RELPTR_OFFSET_MASK);
+}
 
 // Shared memory volume header (lives at the start of each mmap'd region).
 typedef struct shm_s {
@@ -834,10 +869,59 @@ size_t total_shm_size(void);
 volptr_t rel2vol(relptr_t ptr, ERRMSG);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 
-// Convenience: resolve a relptr, using base_ptr if available (no SHM lookup needed).
+// ── Lock-free per-process volume base table ─────────────────────────────────
+//
+// libmorloc.so publishes a base+size entry for every SHM volume it has
+// mapped into this process. `resolve_relptr` below reads from the
+// table inline, replacing what used to be a mutex-guarded FFI call
+// (~100 ns) with an Acquire-load + branch + add (~5 ns). On a miss --
+// volume not yet mapped in this process -- it falls through to the
+// FFI `rel2abs` which lazily opens the segment and publishes the
+// entry. Publication and withdrawal happen inside libmorloc.so's
+// `shinit` / `shopen_diag` / `shclose`.
+//
+// Layout is part of the libmorloc.so ABI:
+struct morloc_vol_entry {
+    MORLOC_ATOMIC_PTR(void) data_base;   // 0 if slot empty in this process
+    MORLOC_ATOMIC_SIZE      data_size;   // valid when data_base != 0
+};
+extern struct morloc_vol_entry MORLOC_VOL_TABLE[MAX_VOLUME_NUMBER];
+
+#if !defined(__cplusplus)
+_Static_assert(sizeof(MORLOC_ATOMIC_PTR(void))   == sizeof(void*),
+               "atomic pointer layout mismatch");
+_Static_assert(sizeof(MORLOC_ATOMIC_SIZE)        == sizeof(size_t),
+               "atomic size_t layout mismatch");
+_Static_assert(sizeof(struct morloc_vol_entry)   == 2 * sizeof(void*),
+               "morloc_vol_entry layout mismatch");
+#endif
+
+// Resolve a relptr. Three paths, in priority order:
+//
+//   1. `base_ptr` is non-null  -- inline MESG+VOIDSTAR data: the relptr
+//      is a buffer-relative offset; strip the vol_idx bits (they are
+//      zero in practice for inline producers, but masking is harmless
+//      either way) and add to base_ptr.
+//
+//   2. Lock-free table hit     -- the volume the relptr targets is
+//      mapped in this process. Acquire-load the entry, bounds-check
+//      the offset, return data_base + offset. No FFI, no mutex.
+//
+//   3. Lock-free table miss    -- volume not yet mapped here. Fall
+//      through to the FFI `rel2abs`, which lazily opens the segment
+//      and publishes the entry. Subsequent calls hit path (2).
 static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG) {
     if (base_ptr) {
-        return (char*)base_ptr + relptr;
+        return (char*)base_ptr + relptr_offset_bits(relptr);
+    }
+    size_t vol = relptr_vol_idx(relptr);
+    void* data_base = MORLOC_ATOMIC_LOAD_ACQ(MORLOC_VOL_TABLE[vol].data_base);
+    if (data_base) {
+        size_t off = relptr_offset_bits(relptr);
+        size_t data_size = MORLOC_ATOMIC_LOAD_RLX(MORLOC_VOL_TABLE[vol].data_size);
+        if (off < data_size) {
+            return (char*)data_base + off;
+        }
     }
     return rel2abs(relptr, errmsg_);
 }

@@ -631,10 +631,30 @@ unsafe fn arrow_load_json(
 }
 
 #[no_mangle]
+/// The single entry point that loads a morloc data file's bytes into
+/// SHM. Every caller that wants to *use* on-disk bytes as a morloc
+/// value (CLI argument parsing, @load intrinsic, bundle reader,
+/// --call-packet input) funnels through here. The function:
+///
+///  1. Decompresses the bytes if they are a compressed morloc packet
+///     (the only function that does so; all other callers should be
+///     funneling through this one rather than duplicating the step).
+///  2. Dispatches on extension / content magic and produces either
+///     an SHM-resident voidstar or a parsed JSON/MSGPACK/Arrow result.
+///
+/// Sites that read packet bytes for *forwarding* (cache.rs returning
+/// cached blobs to a downstream packet builder, slurm_ffi shipping
+/// arg packets to a remote worker) do not go through this function
+/// because they do not unpack -- they pass the bytes through. Those
+/// paths are uncompressed by convention (their writers are
+/// uncompressed, e.g. `put_cache_packet`) so they currently need no
+/// decompression. If a writer ever starts emitting compressed cache
+/// or slurm artifacts, the read sites in those files would need their
+/// own decompress call -- not this function.
 pub unsafe extern "C" fn load_morloc_data_file(
     path: *const c_char,
-    data: *mut u8,
-    data_size: usize,
+    mut data: *mut u8,
+    mut data_size: usize,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
@@ -654,6 +674,41 @@ pub unsafe extern "C" fn load_morloc_data_file(
     if data_size == 0 {
         set_errmsg(errmsg, &MorlocError::Other("Cannot parse 0-length data".into()));
         return ptr::null_mut();
+    }
+
+    // Decompress in place if the buffer is a compressed morloc packet.
+    // This is the single choke point: every caller that hands a buffer
+    // to load_morloc_data_file gets decompression for free, so we do
+    // not duplicate the decompress logic at each call site.
+    //
+    // `data` may be swapped for a fresh libc allocation containing the
+    // decompressed bytes; the function's contract that the caller has
+    // transferred ownership of `data` is preserved -- we libc::free the
+    // original and adopt the new buffer for the rest of the call.
+    if !data.is_null() && data_size > 0 {
+        let raw_slice = std::slice::from_raw_parts(data, data_size);
+        match crate::compression::decompress_packet_if_needed(raw_slice) {
+            Ok(std::borrow::Cow::Borrowed(_)) => { /* no-op */ }
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                let new_size = bytes.len();
+                let new_buf = libc::malloc(new_size) as *mut u8;
+                if new_buf.is_null() {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &MorlocError::Other(
+                        "malloc failed during packet decompression".into()));
+                    return ptr::null_mut();
+                }
+                ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
+                libc::free(data as *mut c_void);
+                data = new_buf;
+                data_size = new_size;
+            }
+            Err(e) => {
+                libc::free(data as *mut c_void);
+                set_errmsg(errmsg, &e);
+                return ptr::null_mut();
+            }
+        }
     }
 
     // Detect arrow-table targets: the JSON / Arrow-IPC paths produce an
@@ -1023,7 +1078,7 @@ unsafe fn parse_cli_data_argument_singular(
         ArgSource::Inline => unreachable!("fd is non-null"),
     };
     let mut data_size: usize = 0;
-    let mut data = read_binary_fd(fd, &mut data_size, &mut err);
+    let data = read_binary_fd(fd, &mut data_size, &mut err);
     // Don't close stdin
     if fd != libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char) {
         libc::fclose(fd);
@@ -1034,45 +1089,29 @@ unsafe fn parse_cli_data_argument_singular(
         return ptr::null_mut();
     }
 
-    // Decompress packet bodies that arrived with a non-NONE
-    // compression byte (typically `-z N` output from a prior step
-    // written via `-f packet`). The fast-path mmap loader above
-    // already rejects compressed payloads; this is the slow-path
-    // equivalent of mlc_load's decompress step.
-    if !data.is_null() && data_size > 0 {
-        let raw_slice = std::slice::from_raw_parts(data, data_size);
-        match crate::compression::decompress_packet_if_needed(raw_slice) {
-            Ok(std::borrow::Cow::Borrowed(_)) => { /* no-op; data unchanged */ }
-            Ok(std::borrow::Cow::Owned(bytes)) => {
-                let new_size = bytes.len();
-                let new_buf = libc::malloc(new_size) as *mut u8;
-                if new_buf.is_null() {
-                    libc::free(data as *mut c_void);
-                    set_errmsg(errmsg, &MorlocError::Other(
-                        "malloc failed during packet decompression".into()));
-                    return ptr::null_mut();
-                }
-                ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
-                libc::free(data as *mut c_void);
-                data = new_buf;
-                data_size = new_size;
-            }
-            Err(e) => {
-                libc::free(data as *mut c_void);
-                set_errmsg(errmsg, &e);
-                return ptr::null_mut();
-            }
-        }
-    }
+    // NOTE: decompression now happens inside `load_morloc_data_file`,
+    // the single choke point all packet-load paths go through. The
+    // RPTR special case below intentionally runs before that, so for a
+    // *compressed* RPTR packet (rare -- the producer normalizes RPTR
+    // to MESG before writing) we fall through to `load_morloc_data_file`
+    // and decompress there. The branch below only fires for plain
+    // uncompressed RPTR bytes, which is correct.
 
-    // Special case: RPTR packets
+    // Special case: RPTR packets (uncompressed only; a compressed RPTR
+    // packet would have garbage bytes where the relptr is supposed to
+    // sit. In practice the on-disk normalize step rewrites RPTR to
+    // MESG before any compression, so this branch is the live path for
+    // RPTR-on-disk; the compression guard is defense in depth.)
     if data_size >= 32 {
         let magic = *(data as *const u32);
         if magic == packet::PACKET_MAGIC {
             let header = &*(data as *const packet::PacketHeader);
             let source = header.command.data.source;
             let format = header.command.data.format;
-            if source == packet::PACKET_SOURCE_RPTR && format == packet::PACKET_FORMAT_VOIDSTAR {
+            let compression = header.command.data.compression;
+            if source == packet::PACKET_SOURCE_RPTR
+                && format == packet::PACKET_FORMAT_VOIDSTAR
+                && compression == 0 {
                 if dest.is_null() {
                     match shm::shcalloc(1, rs.width) {
                         Ok(p) => dest = p,
