@@ -330,13 +330,239 @@ pub unsafe extern "C" fn adjust_voidstar_relptrs(
     }
 }
 
+// ── Layer 2/3: try_load_voidstar_packet_via_mmap ──────────────────────────
+
+/// Layer 2/3 fast path. For inputs that are regular files containing a
+/// large uncompressed MESG+VOIDSTAR morloc packet, allocate SHM for the
+/// payload, `pread` the payload directly into the SHM region (skipping
+/// the wasted libc::malloc + read + memcpy round-trip the legacy path
+/// does), and rewrite the embedded relptrs in place so they resolve in
+/// the consumer's VOLUMES table.
+///
+/// Cross-process correctness: the returned pointer lives in real
+/// `/dev/shm` (or the file-backed fallback). A peer process that
+/// receives a relptr into this payload can `shm_open` the segment via
+/// the relptr's encoded volume index -- the foundation Layer 1 added.
+///
+/// Layer 3 interaction: if the on-disk packet carries
+/// `METADATA_TYPE_VOL_INDEX` (a producer hint), the relptrs in the
+/// payload have that hint already baked into their high bits; the
+/// relptr walk uses a delta of `dest_rel - encode_relptr(hint, 0)` so
+/// the hint bits cancel and the consumer's slot/offset is added in
+/// the same single pass. Hint = 0 collapses to the legacy
+/// "buffer-relative -> SHM-relative" add walk.
+///
+/// Returns:
+/// * `Ok(Some(ptr))` -- fast path took, `ptr` is the payload in SHM
+/// * `Ok(None)`     -- file isn't eligible (too small, not a packet,
+///                     wrong format, open/fstat failed). Caller should
+///                     fall back to the read+process path.
+/// * `Err(e)`        -- the file IS eligible but allocation or the
+///                     in-place relptr walk failed.
+pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
+    path: *const c_char,
+    schema: *const CSchema,
+) -> Result<Option<*mut u8>, MorlocError> {
+    // Below this size the existing libc::malloc + read + shmalloc +
+    // memcpy path is fast enough that the SHM-direct path's syscalls
+    // don't amortize. 1 MiB is the crossover on commodity SSDs.
+    const FAST_PATH_THRESHOLD: usize = 1024 * 1024;
+
+    if path.is_null() {
+        return Ok(None);
+    }
+
+    let fd = libc::open(path, libc::O_RDONLY);
+    if fd < 0 {
+        return Ok(None);
+    }
+
+    let mut sb: libc::stat = std::mem::zeroed();
+    if libc::fstat(fd, &mut sb) != 0 {
+        libc::close(fd);
+        return Ok(None);
+    }
+    if (sb.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let file_size = sb.st_size as usize;
+    if file_size < 32 || file_size < FAST_PATH_THRESHOLD {
+        libc::close(fd);
+        return Ok(None);
+    }
+
+    let mut header_bytes = [0u8; 32];
+    let n = libc::pread(fd, header_bytes.as_mut_ptr() as *mut libc::c_void, 32, 0);
+    if n != 32 {
+        libc::close(fd);
+        return Ok(None);
+    }
+
+    let magic = u32::from_le_bytes(header_bytes[..4].try_into().unwrap());
+    if magic != packet::PACKET_MAGIC {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let header = match packet::PacketHeader::from_bytes(&header_bytes) {
+        Ok(h) => h,
+        Err(_) => {
+            libc::close(fd);
+            return Ok(None);
+        }
+    };
+    if !header.is_data() {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let source = header.command.data.source;
+    let format = header.command.data.format;
+    let compression = header.command.data.compression;
+    if source != packet::PACKET_SOURCE_MESG || format != packet::PACKET_FORMAT_VOIDSTAR {
+        libc::close(fd);
+        return Ok(None);
+    }
+    if compression != 0 {
+        // Compressed payloads need a separate decompressed buffer; the
+        // legacy path handles them.
+        libc::close(fd);
+        return Ok(None);
+    }
+    let metadata_size = header.offset as usize;
+    let payload_offset = 32 + metadata_size;
+    let payload_size = header.length as usize;
+    if payload_offset.saturating_add(payload_size) > file_size {
+        libc::close(fd);
+        return Ok(None);
+    }
+
+    // Pull the metadata block out so we can check for a vol_idx hint
+    // without a full mmap. Falls back to hint = 0 (legacy Layer 2) if
+    // metadata is absent, malformed, or doesn't include the block.
+    let vol_idx_hint: u16 = if metadata_size > 0 {
+        let mut meta = vec![0u8; metadata_size];
+        let nm = libc::pread(
+            fd,
+            meta.as_mut_ptr() as *mut libc::c_void,
+            metadata_size,
+            32,
+        );
+        if nm as usize != metadata_size {
+            libc::close(fd);
+            return Ok(None);
+        }
+        let mut full = Vec::with_capacity(32 + metadata_size);
+        full.extend_from_slice(&header_bytes);
+        full.extend_from_slice(&meta);
+        packet::read_vol_index_from_meta(&full).ok().flatten().unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Allocate the SHM destination for the payload and pread the file's
+    // payload region straight into it. The shmalloc-tracking arena
+    // hooks in automatically; the caller's normal "shfree on drop"
+    // semantics apply.
+    let dest = match shm::shmalloc(payload_size) {
+        Ok(p) => p,
+        Err(e) => {
+            libc::close(fd);
+            return Err(e);
+        }
+    };
+
+    // pread in a loop until payload_size bytes have been read, in case
+    // short reads occur on large files.
+    let mut total: usize = 0;
+    while total < payload_size {
+        let n = libc::pread(
+            fd,
+            dest.add(total) as *mut libc::c_void,
+            payload_size - total,
+            (payload_offset + total) as libc::off_t,
+        );
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            libc::close(fd);
+            let _ = shm::shfree(dest);
+            return Err(MorlocError::Io(e));
+        }
+        if n == 0 {
+            // Unexpected EOF mid-payload.
+            libc::close(fd);
+            let _ = shm::shfree(dest);
+            return Err(MorlocError::Other(format!(
+                "short read on packet payload: got {} of {} bytes",
+                total, payload_size
+            )));
+        }
+        total += n as usize;
+    }
+    libc::close(fd);
+
+    // Compute the delta that transforms each producer relptr P =
+    // (hint << 48) | p_o into the consumer-side relptr T = (dest_slot
+    // << 48) | (dest_offset + p_o). Single pass works for both Layer 3
+    // (hint > 0) and the legacy buffer-relative (hint = 0) cases.
+    let dest_rel = match shm::abs2rel(dest) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shm::shfree(dest);
+            return Err(e);
+        }
+    };
+    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+    let delta = (dest_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
+
+    let rs = CSchema::to_rust(schema);
+    if let Err(e) = crate::voidstar::adjust_relptrs(dest, &rs, delta) {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+
+    Ok(Some(dest))
+}
+
 // ── read_voidstar_binary ───────────────────────────────────────────────────
 
+/// Legacy C ABI: reads a VOIDSTAR payload assuming the producer encoded
+/// relptrs with vol_idx = 0 (no Layer-3 hint). Forwards to
+/// `read_voidstar_binary_with_hint` with hint = 0. Kept for ABI
+/// stability with C callers that don't know about the Layer-3 metadata.
+///
+/// **Callers reading a payload extracted from a morloc packet should
+/// prefer `read_voidstar_binary_with_hint` and pass the vol_idx hint
+/// recovered from `METADATA_TYPE_VOL_INDEX`** -- otherwise relptrs
+/// produced by the Layer-3 emitter (`stream_packet_to_fd` for
+/// uncompressed RPTR+VOIDSTAR) will carry stale vol_idx bits that this
+/// reader cannot cancel.
 #[no_mangle]
 pub unsafe extern "C" fn read_voidstar_binary(
     blob: *const u8,
     blob_size: usize,
     schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    read_voidstar_binary_with_hint(blob, blob_size, schema, 0, errmsg)
+}
+
+/// Read a VOIDSTAR payload into SHM, accounting for an optional Layer-3
+/// `vol_idx_hint` baked into the producer's relptr high bits.
+///
+/// Delta computation matches the fast-path mmap loader's:
+///     delta = abs2rel(dest) - encode_relptr(hint, 0)
+/// so for `hint = 0` this reduces to the legacy "buffer-relative ->
+/// SHM-relative" add walk, and for `hint > 0` the hint bits cancel
+/// against the consumer's slot in a single pass.
+#[no_mangle]
+pub unsafe extern "C" fn read_voidstar_binary_with_hint(
+    blob: *const u8,
+    blob_size: usize,
+    schema: *const CSchema,
+    vol_idx_hint: u16,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
     clear_errmsg(errmsg);
@@ -359,8 +585,10 @@ pub unsafe extern "C" fn read_voidstar_binary(
             return ptr::null_mut();
         }
     };
+    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
 
-    if let Err(e) = crate::voidstar::adjust_relptrs(base, &rs, base_rel) {
+    if let Err(e) = crate::voidstar::adjust_relptrs(base, &rs, delta) {
         let _ = shm::shfree(base);
         set_errmsg(errmsg, &e);
         return ptr::null_mut();
@@ -535,7 +763,15 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 let format = { header.command.data.format };
 
                 if format == packet::PACKET_FORMAT_VOIDSTAR {
-                    let result = read_voidstar_binary(payload, length, schema, &mut err);
+                    // Pull the Layer-3 vol_idx hint out of the metadata
+                    // block if present; the legacy reader otherwise
+                    // miscounts the producer's high bits.
+                    let packet_slice = std::slice::from_raw_parts(data, data_size);
+                    let hint = packet::read_vol_index_from_meta(packet_slice)
+                        .ok().flatten().unwrap_or(0);
+                    let result = read_voidstar_binary_with_hint(
+                        payload, length, schema, hint, &mut err,
+                    );
                     libc::free(data as *mut c_void);
                     if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
                     return result;
@@ -729,6 +965,18 @@ unsafe fn parse_cli_data_argument_singular(
             fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
         }
         ArgSource::File => {
+            // Layer 2 fast path: if the file is a regular file holding
+            // a large MESG+VOIDSTAR morloc packet, pread its payload
+            // straight into a fresh SHM allocation and skip the
+            // libc::malloc + read + shmalloc + memcpy chain.
+            match try_load_voidstar_packet_via_mmap(effective, schema) {
+                Ok(Some(payload_ptr)) => return payload_ptr,
+                Ok(None) => { /* fall through to read path */ }
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
+                }
+            }
             fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
             if fd.is_null() {
                 set_errmsg(errmsg, &MorlocError::Other(
@@ -775,7 +1023,7 @@ unsafe fn parse_cli_data_argument_singular(
         ArgSource::Inline => unreachable!("fd is non-null"),
     };
     let mut data_size: usize = 0;
-    let data = read_binary_fd(fd, &mut data_size, &mut err);
+    let mut data = read_binary_fd(fd, &mut data_size, &mut err);
     // Don't close stdin
     if fd != libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char) {
         libc::fclose(fd);
@@ -784,6 +1032,37 @@ unsafe fn parse_cli_data_argument_singular(
         if !data.is_null() { libc::free(data as *mut c_void); }
         wrap_and_set_errmsg(err, &source_label, errmsg);
         return ptr::null_mut();
+    }
+
+    // Decompress packet bodies that arrived with a non-NONE
+    // compression byte (typically `-z N` output from a prior step
+    // written via `-f packet`). The fast-path mmap loader above
+    // already rejects compressed payloads; this is the slow-path
+    // equivalent of mlc_load's decompress step.
+    if !data.is_null() && data_size > 0 {
+        let raw_slice = std::slice::from_raw_parts(data, data_size);
+        match crate::compression::decompress_packet_if_needed(raw_slice) {
+            Ok(std::borrow::Cow::Borrowed(_)) => { /* no-op; data unchanged */ }
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                let new_size = bytes.len();
+                let new_buf = libc::malloc(new_size) as *mut u8;
+                if new_buf.is_null() {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &MorlocError::Other(
+                        "malloc failed during packet decompression".into()));
+                    return ptr::null_mut();
+                }
+                ptr::copy_nonoverlapping(bytes.as_ptr(), new_buf, new_size);
+                libc::free(data as *mut c_void);
+                data = new_buf;
+                data_size = new_size;
+            }
+            Err(e) => {
+                libc::free(data as *mut c_void);
+                set_errmsg(errmsg, &e);
+                return ptr::null_mut();
+            }
+        }
     }
 
     // Special case: RPTR packets

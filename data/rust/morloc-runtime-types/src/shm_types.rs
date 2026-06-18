@@ -15,21 +15,68 @@ use std::sync::atomic::AtomicU32;
 
 pub const SHM_MAGIC: u32 = 0xFECA_0DF0;
 pub const BLK_MAGIC: u32 = 0x0CB1_0DF0;
-pub const MAX_VOLUME_NUMBER: usize = 32;
+pub const MAX_VOLUME_NUMBER: usize = 32768;
 pub const MAX_FILENAME_SIZE: usize = 128;
 pub const MAX_PATH_SIZE: usize = 512;
 
 // ── Pointer types ──────────────────────────────────────────────────────────
 
-/// Relative pointer: index into the multi-volume pool (cross-process safe).
+/// Relative pointer: encodes a (volume index, in-volume offset) pair.
+///
+/// Layout (64-bit):
+///   bit 63        sign / sentinel flag
+///   bits 62..48   15-bit volume index   (0..=32767)
+///   bits 47..0    48-bit in-volume offset (0..=256 TiB)
+///
+/// RELNULL = -1 (all bits set) is reserved as the absent-value sentinel.
+/// Other negative values are reserved for future sentinel use.
 pub type RelPtr = isize;
-/// Volume-local pointer: offset within a single volume.
+/// Volume-local pointer: offset within a single volume (no encoding).
 pub type VolPtr = isize;
 /// Absolute pointer: virtual address in this process.
 pub type AbsPtr = *mut u8;
 
 pub const RELNULL: RelPtr = -1;
 pub const VOLNULL: VolPtr = -1;
+
+// ── Indexed relptr encoding ────────────────────────────────────────────────
+
+pub const VOL_IDX_SHIFT: u32 = 48;
+pub const VOL_IDX_MASK: u64 = 0x7FFF;                          // bits 62..48
+pub const OFFSET_MASK: u64  = 0x0000_FFFF_FFFF_FFFF;            // bits 47..0
+pub const SENTINEL_MASK: u64 = 0x8000_0000_0000_0000;           // bit 63
+
+/// Pack a (volume_index, offset) pair into a RelPtr.
+///
+/// `volume_index` must be < `MAX_VOLUME_NUMBER` (15 bits) and `offset`
+/// must fit in 48 bits. Producers always satisfy both; debug builds
+/// assert it.
+#[inline]
+pub const fn encode_relptr(volume_index: usize, offset: usize) -> RelPtr {
+    debug_assert!(volume_index < MAX_VOLUME_NUMBER);
+    debug_assert!(offset <= OFFSET_MASK as usize);
+    (((volume_index as u64) << VOL_IDX_SHIFT) | (offset as u64 & OFFSET_MASK)) as RelPtr
+}
+
+/// Extract the volume index from a (non-sentinel, non-negative) relptr.
+#[inline]
+pub const fn relptr_volume_index(ptr: RelPtr) -> usize {
+    (((ptr as u64) >> VOL_IDX_SHIFT) & VOL_IDX_MASK) as usize
+}
+
+/// Extract the in-volume offset from a (non-sentinel, non-negative) relptr.
+#[inline]
+pub const fn relptr_offset(ptr: RelPtr) -> usize {
+    ((ptr as u64) & OFFSET_MASK) as usize
+}
+
+/// True if the relptr carries the sentinel bit (RELNULL or future
+/// reserved sentinels). Callers should special-case sentinels before
+/// decoding the (volume, offset) pair.
+#[inline]
+pub const fn relptr_is_sentinel(ptr: RelPtr) -> bool {
+    (ptr as u64) & SENTINEL_MASK != 0
+}
 
 // ── Block alignment ────────────────────────────────────────────────────────
 
@@ -75,4 +122,57 @@ const _: () = assert!(
 pub struct Array {
     pub size: usize,
     pub data: RelPtr,
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_vol_idx_and_offset() {
+        for &(v, o) in &[
+            (0usize, 0usize),
+            (0, 1),
+            (1, 0),
+            (1, 0x1234),
+            (42, 0xABCDEF),
+            (MAX_VOLUME_NUMBER - 1, 1usize << 47),
+            (1234, (1usize << 48) - 1),
+        ] {
+            let p = encode_relptr(v, o);
+            assert!(!relptr_is_sentinel(p), "vol={v} off={o}: leaked into sign bit");
+            assert_eq!(relptr_volume_index(p), v, "vol roundtrip failed for ({v}, {o})");
+            assert_eq!(relptr_offset(p), o, "offset roundtrip failed for ({v}, {o})");
+        }
+    }
+
+    #[test]
+    fn relnull_is_sentinel() {
+        assert!(relptr_is_sentinel(RELNULL));
+    }
+
+    #[test]
+    fn small_values_decode_as_vol0() {
+        // Compatibility check for staged migration: a "small positive
+        // integer" relptr (the kind the old flat-offset encoding produced
+        // for offsets into volume 0) decodes as (volume 0, offset = ptr)
+        // under the new encoding. Call sites that haven't yet been
+        // updated and happen to operate inside volume 0 keep working.
+        for &p in &[0i64, 1, 16, 1024, 0xFFFF] {
+            let rp = p as RelPtr;
+            assert!(!relptr_is_sentinel(rp));
+            assert_eq!(relptr_volume_index(rp), 0);
+            assert_eq!(relptr_offset(rp), p as usize);
+        }
+    }
+
+    #[test]
+    fn max_offset_in_bounds() {
+        // 48-bit offset field can address exactly 256 TiB - 1 within a
+        // single volume; anything larger should be rejected by callers
+        // (debug_assert in encode_relptr).
+        let off = (1usize << 48) - 1;
+        let p = encode_relptr(0, off);
+        assert_eq!(relptr_offset(p), off);
+    }
 }

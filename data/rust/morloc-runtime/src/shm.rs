@@ -12,9 +12,10 @@ use std::sync::Mutex;
 // Re-exported here so existing call sites (`crate::shm::RelPtr`,
 // `crate::shm::Array`, etc.) keep working unchanged.
 pub use morloc_runtime_types::shm_types::{
-    align_up, AbsPtr, Array, BlockHeader, RelPtr, ShmHeader, VolPtr,
+    align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
+    AbsPtr, Array, BlockHeader, RelPtr, ShmHeader, VolPtr,
     BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
-    RELNULL, SHM_MAGIC, VOLNULL,
+    OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
 /// Cross-platform file pre-allocation.
@@ -38,13 +39,20 @@ const SPIN_LIMIT: u32 = 40;
 #[cfg(target_os = "linux")]
 const LOCK_TIMEOUT_SECS: u64 = 5;
 
-// ── Send wrapper for raw pointers ──────────────────────────────────────────
+// ── Slot record (one per volume index) ─────────────────────────────────────
 
+/// One VOLUMES entry. Holds a pointer to the slot's ShmHeader (the
+/// start of an `shinit`-created `/dev/shm` segment) or null for empty
+/// slots. The data region lives at `header + sizeof::<ShmHeader>()`;
+/// the volume's bounds (`volume_size`) are read from the header on
+/// demand by `rel2abs` and friends.
 #[derive(Clone, Copy)]
 struct SendPtr(*mut ShmHeader);
+
 // SAFETY: ShmHeader lives in mmap'd shared memory that outlives all threads.
 // Access is serialized via VOLUMES Mutex and per-volume AtomicU32 futex locks.
 unsafe impl Send for SendPtr {}
+
 impl SendPtr {
     const fn null() -> Self { SendPtr(std::ptr::null_mut()) }
     fn is_null(&self) -> bool { self.0.is_null() }
@@ -58,12 +66,103 @@ fn get_cstr_buf(buf: &[u8; MAX_FILENAME_SIZE]) -> &str {
 
 // ── Global state ───────────────────────────────────────────────────────────
 
+/// Hint for `find_free_block`: the slot index where the last allocation
+/// landed. Not load-bearing; if stale or null the allocator falls back
+/// to the USED_VOLUMES walk.
 static CURRENT_VOLUME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-static VOLUMES: Mutex<[SendPtr; MAX_VOLUME_NUMBER]> =
-    Mutex::new([SendPtr::null(); MAX_VOLUME_NUMBER]);
+/// Sparse 32 768-entry volume table.
+///
+/// `slots`: indexed directly by the relptr's volume-index field. Most
+/// entries are null; `rel2abs` reads `slots[idx]` in O(1).
+///
+/// `used`: packed list of currently-occupied slot indices. Walks that
+/// historically iterated `0..MAX_VOLUME_NUMBER` (shclose, abs2rel,
+/// total_shm_size, etc) iterate `used` instead and visit only the
+/// active K, not 32 K nulls. Maintained as a no-order Vec; on free
+/// we swap_remove the slot's entry.
+struct VolumeTable {
+    slots: [SendPtr; MAX_VOLUME_NUMBER],
+    used: Vec<u16>,
+}
+
+impl VolumeTable {
+    fn mark_used(&mut self, idx: usize) {
+        // Caller has already verified slots[idx] is non-null. Avoid
+        // a duplicate entry if the same slot is re-registered.
+        if !self.used.iter().any(|&i| i as usize == idx) {
+            self.used.push(idx as u16);
+        }
+    }
+}
+
+static VOLUMES: Mutex<VolumeTable> = Mutex::new(VolumeTable {
+    slots: [SendPtr::null(); MAX_VOLUME_NUMBER],
+    used: Vec::new(),
+});
 
 static ALLOC_MUTEX: Mutex<()> = Mutex::new(());
+
+// ── Thread-local PRNG (for random slot allocation) ─────────────────────────
+
+thread_local! {
+    static RNG_STATE: std::cell::Cell<u64> = std::cell::Cell::new(rng_seed());
+}
+
+fn rng_seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    // SAFETY: pthread_self always succeeds; the value is opaque but unique
+    // per live thread, which is all we need to differentiate seeds.
+    let tid = unsafe { libc::pthread_self() as u64 };
+    let mut s = nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(tid.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    if s == 0 {
+        s = 0xA5A5_A5A5_A5A5_A5A5;
+    }
+    s
+}
+
+/// xorshift64 -- unbiased enough for random slot picking; not
+/// cryptographic. Local to this module; called only inside the
+/// allocator path.
+fn next_random_u64() -> u64 {
+    RNG_STATE.with(|cell| {
+        let mut x = cell.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        cell.set(x);
+        x
+    })
+}
+
+/// Pick a random unoccupied slot in `slots`. Tries random uniform
+/// picks first (the common case at low occupancy), falls back to a
+/// linear probe from a random start (covers the dense case where
+/// random picks keep colliding).
+fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
+    if table.used.len() >= MAX_VOLUME_NUMBER {
+        return None;
+    }
+    for _ in 0..8 {
+        let idx = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
+        if table.slots[idx].is_null() {
+            return Some(idx);
+        }
+    }
+    let start = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
+    for off in 0..MAX_VOLUME_NUMBER {
+        let idx = (start + off) & (MAX_VOLUME_NUMBER - 1);
+        if table.slots[idx].is_null() {
+            return Some(idx);
+        }
+    }
+    None
+}
 
 static COMMON_BASENAME: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
 
@@ -82,11 +181,13 @@ extern "C" fn shclose_atexit() {
         Ok(g) => g,
         Err(_) => return,
     };
-    for i in 0..MAX_VOLUME_NUMBER {
-        if vols_guard[i].is_null() {
+    for &slot_idx in &vols_guard.used {
+        let shm = vols_guard.slots[slot_idx as usize].ptr();
+        if shm.is_null() {
             continue;
         }
-        let shm = vols_guard[i].ptr();
+        // SAFETY: shm is a valid mmap'd pointer recorded in VOLUMES under
+        // the lock we hold. Name is read from a valid ShmHeader region.
         unsafe {
             let name = get_cstr(&(*shm).volume_name).to_string();
             let full_size = (*shm).volume_size + std::mem::size_of::<ShmHeader>();
@@ -173,13 +274,14 @@ pub fn shinit(
 
     let shm = ptr as *mut ShmHeader;
 
-    // Store in volumes array
+    let actual_data_size = actual_full_size - std::mem::size_of::<ShmHeader>();
+
+    // Store in volumes table and add to USED_VOLUMES walk list.
     {
         let mut vols = VOLUMES.lock().unwrap();
-        vols[volume_index].set(shm);
+        vols.slots[volume_index].set(shm);
+        vols.mark_used(volume_index);
     }
-
-    let actual_data_size = actual_full_size - std::mem::size_of::<ShmHeader>();
 
     if created {
         // SAFETY: shm points to the start of our mmap'd region of actual_full_size bytes.
@@ -190,16 +292,11 @@ pub fn shinit(
             set_cstr(&mut name_buf, &volume_label);
             (*shm).volume_name = name_buf;
             (*shm).volume_index = volume_index as i32;
-
-            // Calculate relative offset from prior volumes
-            let vols = VOLUMES.lock().unwrap();
-            let mut rel_offset = 0usize;
-            for i in 0..volume_index {
-                if !vols[i].is_null() {
-                    rel_offset += (*vols[i].ptr()).volume_size;
-                }
-            }
-            (*shm).relative_offset = rel_offset;
+            // `relative_offset` is unused under the indexed-relptr encoding;
+            // each relptr now carries its own volume index in the high bits.
+            // Kept zero for layout compatibility with consumers that still
+            // read the field.
+            (*shm).relative_offset = 0;
             (*shm).volume_size = actual_data_size;
             (*shm).lock = AtomicU32::new(LOCK_UNLOCKED);
             (*shm).cursor = 0;
@@ -260,8 +357,8 @@ pub fn shopen_diag(
 ) -> Result<Result<*mut ShmHeader, ShopenMiss>, MorlocError> {
     {
         let vols = VOLUMES.lock().unwrap();
-        if !vols[volume_index].is_null() {
-            return Ok(Ok(vols[volume_index].ptr()));
+        if !vols.slots[volume_index].is_null() {
+            return Ok(Ok(vols.slots[volume_index].ptr()));
         }
     }
 
@@ -345,7 +442,8 @@ pub fn shopen_diag(
     let shm = ptr as *mut ShmHeader;
     {
         let mut vols = VOLUMES.lock().unwrap();
-        vols[volume_index].set(shm);
+        vols.slots[volume_index].set(shm);
+        vols.mark_used(volume_index);
     }
 
     Ok(Ok(shm))
@@ -392,8 +490,8 @@ pub fn reset_all() -> Result<(), MorlocError> {
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
     let p = ptr as usize;
     let vols = VOLUMES.lock().unwrap();
-    for i in 0..MAX_VOLUME_NUMBER {
-        let shm = vols[i].ptr();
+    for &slot_idx in &vols.used {
+        let shm = vols.slots[slot_idx as usize].ptr();
         if shm.is_null() {
             continue;
         }
@@ -408,14 +506,16 @@ fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
 }
 
 /// Internal: do the unlink/munmap walk under already-held locks.
-fn shclose_locked(vols: &mut [SendPtr; MAX_VOLUME_NUMBER]) {
-    for i in 0..MAX_VOLUME_NUMBER {
-        let shm = if !vols[i].is_null() {
-            vols[i].ptr()
-        } else {
+fn shclose_locked(vols: &mut VolumeTable) {
+    // Drain `used` once into a local list; `mark_free` would O(N) on
+    // each removal otherwise.
+    let used: Vec<u16> = std::mem::take(&mut vols.used);
+    for slot_idx in used {
+        let i = slot_idx as usize;
+        let shm = vols.slots[i].ptr();
+        if shm.is_null() {
             continue;
-        };
-
+        }
         // SAFETY: shm is a valid mmap'd pointer stored in VOLUMES.
         // munmap/unlink on regions we own. Name read from valid ShmHeader.
         unsafe {
@@ -432,7 +532,7 @@ fn shclose_locked(vols: &mut [SendPtr; MAX_VOLUME_NUMBER]) {
                 libc::shm_unlink(cstr.as_ptr());
             }
         }
-        vols[i] = SendPtr::null();
+        vols.slots[i] = SendPtr::null();
     }
 }
 
@@ -517,92 +617,95 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     Ok(())
 }
 
-/// Convert relative pointer to absolute pointer.
+/// Convert relative pointer to absolute pointer. O(1) under the
+/// indexed-relptr encoding: a relptr packs `(volume_index, offset)`
+/// into a 64-bit word, so we read the index, look up VOLUMES[idx],
+/// and add the offset.
+///
+/// If the volume is not yet mapped in this process (cross-process
+/// reader), `shopen_diag(idx)` lazily mmaps `<basename>_<idx>` and
+/// records it.
 pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
-    if ptr < 0 {
-        return Err(MorlocError::Shm(format!("Illegal relptr value {}", ptr)));
+    if relptr_is_sentinel(ptr) {
+        // RELNULL and any future reserved sentinel are not addressable.
+        return Err(MorlocError::Shm(format!(
+            "rel2abs called on sentinel relptr {}",
+            ptr
+        )));
     }
+    let vol_idx = relptr_volume_index(ptr);
+    let offset = relptr_offset(ptr);
 
-    let mut remaining = ptr as usize;
-
-    // First try with volumes already mapped. Sum their sizes so the
-    // error path can report how far into the SHM pool the relptr
-    // actually pointed before we ran out of mapped volumes.
-    let already_mapped_total: usize = {
+    // Fast path: volume already mapped in this process. Read the
+    // header pointer under the lock, then drop the lock before
+    // dereferencing -- the SHM segment is stable for the life of the
+    // slot, so we don't need to hold the table lock while reading it.
+    let shm = {
         let vols = VOLUMES.lock().unwrap();
-        let mut total = 0usize;
-        for i in 0..MAX_VOLUME_NUMBER {
-            if vols[i].is_null() {
-                break; // No more volumes mapped
-            }
-            let shm = vols[i].ptr();
-            // SAFETY: shm is a valid mmap'd ShmHeader pointer from VOLUMES.
-            let vol_size = unsafe { (*shm).volume_size };
-            if remaining < vol_size {
-                // SAFETY: data region starts after ShmHeader; remaining < vol_size
-                // guarantees the offset is within the mmap'd region.
-                let base = unsafe {
-                    (shm as *const u8).add(std::mem::size_of::<ShmHeader>())
-                };
-                return Ok(unsafe { base.add(remaining) as AbsPtr });
-            }
-            remaining -= vol_size;
-            total += vol_size;
-        }
-        total
+        vols.slots[vol_idx].ptr()
     };
-
-    // If not found, try opening unmapped volumes
-    remaining = ptr as usize;
-    for i in 0..MAX_VOLUME_NUMBER {
-        let shm = match shopen_diag(i)? {
-            Ok(s) => s,
-            Err(miss) => return Err(rel2abs_miss_error(ptr, i, already_mapped_total, miss)),
-        };
-        // SAFETY: shm is a valid mmap'd ShmHeader pointer from shopen.
-        let vol_size = unsafe { (*shm).volume_size };
-        if remaining < vol_size {
-            // SAFETY: same as above - offset within mmap'd region.
-            let base = unsafe {
-                (shm as *const u8).add(std::mem::size_of::<ShmHeader>())
-            };
-            return Ok(unsafe { base.add(remaining) as AbsPtr });
+    if !shm.is_null() {
+        // SAFETY: shm is a valid mmap'd ShmHeader; volume_size and
+        // the data region offset are read from it.
+        unsafe {
+            let vol_size = (*shm).volume_size;
+            if offset >= vol_size {
+                return Err(MorlocError::Shm(format!(
+                    "rel2abs offset {} exceeds volume {}'s size {}",
+                    offset, vol_idx, vol_size
+                )));
+            }
+            let base = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
+            return Ok(base.add(offset) as AbsPtr);
         }
-        remaining -= vol_size;
     }
 
-    // Walked all MAX_VOLUME_NUMBER slots without finding it.
-    Err(MorlocError::Shm(format!(
-        "relptr {} exceeds total SHM capacity (scanned all {} volume slots; \
-         the pool must have grown beyond MAX_VOLUME_NUMBER, or the relptr is corrupt)",
-        ptr, MAX_VOLUME_NUMBER
-    )))
+    // Slow path: try to lazily open the producer's volume from disk
+    // (POSIX SHM or file-backed fallback).
+    let shm = match shopen_diag(vol_idx)? {
+        Ok(s) => s,
+        Err(miss) => return Err(rel2abs_miss_error(ptr, vol_idx, 0, miss)),
+    };
+    // SAFETY: shm is a valid mmap'd ShmHeader returned by shopen_diag.
+    unsafe {
+        let vol_size = (*shm).volume_size;
+        if offset >= vol_size {
+            return Err(MorlocError::Shm(format!(
+                "rel2abs offset {} exceeds volume {}'s size {}",
+                offset, vol_idx, vol_size
+            )));
+        }
+        let base = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
+        Ok(base.add(offset) as AbsPtr)
+    }
 }
 
 /// Build a user-facing error for an `shopen` miss inside `rel2abs`. Each
 /// `ShopenMiss` variant has a different root cause and a different fix,
 /// so they get different messages instead of the legacy generic
-/// "Failed to find volume". `already_mapped_bytes` is how much of the
-/// pool was successfully scanned before the miss, included so the user
-/// can correlate the relptr value with the working portion of SHM.
+/// "Failed to find volume". The indexed-relptr encoding makes the
+/// decoded `(vol_idx, offset)` pair the actionable piece of information,
+/// since `rel2abs` is now O(1) and doesn't iterate over a population
+/// of mapped volumes.
 fn rel2abs_miss_error(
     ptr: RelPtr,
     volume_index: usize,
-    already_mapped_bytes: usize,
+    _already_mapped_bytes: usize,
     miss: ShopenMiss,
 ) -> MorlocError {
     let basename_now = {
         let cb = COMMON_BASENAME.lock().unwrap();
         get_cstr_buf(&cb).to_string()
     };
+    let offset = relptr_offset(ptr);
     match miss {
         ShopenMiss::NotInitialized => MorlocError::Shm(format!(
-            "cannot resolve relptr {} -- SHM is not initialized in this process \
-             (COMMON_BASENAME is empty). Caller reached rel2abs before any \
-             shinit; if you see this after the rlib-removal refactor it most \
-             likely means a foreign caller bypassed the dispatch path. \
-             {} volume(s) were already mapped totaling {} bytes before the miss.",
-            ptr, volume_index, already_mapped_bytes
+            "cannot resolve relptr {} (decoded as vol_idx={}, offset={}) -- SHM is \
+             not initialized in this process (COMMON_BASENAME is empty). Caller \
+             reached rel2abs before any shinit; if you see this after the \
+             rlib-removal refactor it most likely means a foreign caller bypassed \
+             the dispatch path.",
+            ptr, volume_index, offset
         )),
         ShopenMiss::FileMissing {
             basename,
@@ -633,22 +736,25 @@ fn rel2abs_miss_error(
                 format!("file-backed fallback '{}/{}_{}' also missing", fallback_dir, basename, vi)
             };
             MorlocError::Shm(format!(
-                "cannot resolve relptr {} -- SHM volume '/dev/shm/{}_{}' does not exist \
-                 (shm_open: {}).{} {}. Likely causes: writer never created this volume, \
-                 writer crashed before sending, basename mismatch between writer and \
-                 reader, or another process (or /dev/shm cleanup) unlinked it. \
-                 {} volume(s) were already mapped before the miss.",
-                ptr, basename, vi, errno_msg, basename_note, fallback_note, volume_index
+                "cannot resolve relptr {} (decoded as vol_idx={}, offset={}) -- \
+                 SHM volume '/dev/shm/{}_{}' does not exist (shm_open: {}).{} {}. \
+                 Likely causes: writer never created this volume, writer crashed \
+                 before sending, basename mismatch between writer and reader, or \
+                 another process (or /dev/shm cleanup) unlinked it.",
+                ptr, vi, offset, basename, vi, errno_msg, basename_note, fallback_note
             ))
         }
     }
 }
 
-/// Convert absolute pointer to relative pointer.
+/// Convert absolute pointer to relative pointer. Walks `USED_VOLUMES`
+/// (the packed list of K active slot indices) rather than scanning the
+/// 32 768-slot sparse `slots` array. Cost is O(K_active).
 pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
     let vols = VOLUMES.lock().unwrap();
-    for i in 0..MAX_VOLUME_NUMBER {
-        let shm = vols[i].ptr();
+    for &slot_idx in &vols.used {
+        let i = slot_idx as usize;
+        let shm = vols.slots[i].ptr();
         if shm.is_null() {
             continue;
         }
@@ -660,7 +766,7 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
             let p = ptr as *const u8;
             if p >= data_start && p < data_end {
                 let offset = p.offset_from(data_start) as usize;
-                return Ok(((*shm).relative_offset + offset) as RelPtr);
+                return Ok(encode_relptr(i, offset));
             }
         }
     }
@@ -673,8 +779,8 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
 /// Find the ShmHeader for a given absolute pointer.
 pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
     let vols = VOLUMES.lock().unwrap();
-    for i in 0..MAX_VOLUME_NUMBER {
-        let shm = vols[i].ptr();
+    for &slot_idx in &vols.used {
+        let shm = vols.slots[slot_idx as usize].ptr();
         if shm.is_null() {
             continue;
         }
@@ -691,14 +797,26 @@ pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
     Err(MorlocError::Shm("Failed to find absptr in SHM".into()))
 }
 
+/// Register a pre-mapped ShmHeader-backed region as a volume.
+///
+/// `slot_hint = Some(i)` requests that index; if `i` is occupied, falls
+/// back to a randomly chosen free slot. `slot_hint = None` always picks
+/// random.
+///
+/// The caller owns the mmap'd region for as long as the volume is
+/// registered. Layer 2 (packet-as-volume) uses this to map an input
+/// file's data section directly into VOLUMES without a memcpy.
+///
+/// Returns the chosen slot index, or an error if every slot is taken.
 /// Total size of all SHM volumes.
 pub fn total_shm_size() -> usize {
     let vols = VOLUMES.lock().unwrap();
     let mut total = 0;
-    for i in 0..MAX_VOLUME_NUMBER {
-        if !vols[i].is_null() {
+    for &slot_idx in &vols.used {
+        let shm = vols.slots[slot_idx as usize].ptr();
+        if !shm.is_null() {
             // SAFETY: non-null VOLUMES entries are valid mmap'd ShmHeader pointers.
-            total += unsafe { (*vols[i].ptr()).volume_size };
+            total += unsafe { (*shm).volume_size };
         }
     }
     total
@@ -836,8 +954,8 @@ fn find_free_block(
     let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
     let vols = VOLUMES.lock().unwrap();
 
-    // Try current volume first
-    let shm = vols[cv].ptr();
+    // Try current volume first (allocation hint).
+    let shm = vols.slots[cv].ptr();
     if !shm.is_null() {
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
             *shm_out = shm;
@@ -845,41 +963,16 @@ fn find_free_block(
         }
     }
 
-    // Search all volumes
-    for i in 0..MAX_VOLUME_NUMBER {
-        let shm = vols[i].ptr();
-        if shm.is_null() {
-            // Grow each new volume to K x the previous volume's size, but at
-            // least large enough to fit the requesting allocation plus its
-            // BlockHeader. Geometric growth means total capacity expands
-            // exponentially with volume count, so MAX_VOLUME_NUMBER is not
-            // reached after only a handful of fresh volumes.
-            const VOLUME_GROWTH_FACTOR: usize = 2;
-            let prev_volume_size = if i > 0 && !vols[i - 1].is_null() {
-                // SAFETY: vols[i-1] is a valid mmap'd ShmHeader held under the
-                // VOLUMES lock for the duration of this read.
-                unsafe { (*vols[i - 1].ptr()).volume_size }
-            } else {
-                0xffff
-            };
-            let new_size = std::cmp::max(
-                size.saturating_add(std::mem::size_of::<BlockHeader>()),
-                prev_volume_size.saturating_mul(VOLUME_GROWTH_FACTOR),
-            );
-            drop(vols);
-            let basename = {
-                let cb = COMMON_BASENAME.lock().unwrap();
-                get_cstr_buf(&cb).to_string()
-            };
-            let new_shm = shinit(&basename, i, new_size)?;
-            CURRENT_VOLUME.store(i, Ordering::Relaxed);
-            *shm_out = new_shm;
-            let blk = unsafe {
-                (new_shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader
-            };
-            return Ok(blk);
+    // Fall back to scanning all currently-occupied volumes.
+    for &slot_idx in &vols.used {
+        let i = slot_idx as usize;
+        if i == cv {
+            continue;
         }
-
+        let shm = vols.slots[i].ptr();
+        if shm.is_null() {
+            continue;
+        }
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
             CURRENT_VOLUME.store(i, Ordering::Relaxed);
             *shm_out = shm;
@@ -887,10 +980,49 @@ fn find_free_block(
         }
     }
 
-    Err(MorlocError::Shm(format!(
-        "Could not find suitable block for {} bytes",
-        size
-    )))
+    // No existing volume has space; grow into a randomly-chosen free
+    // slot. Geometric growth (K x previous size) keeps total capacity
+    // expanding exponentially so MAX_VOLUME_NUMBER is unreachable in
+    // practice.
+    const VOLUME_GROWTH_FACTOR: usize = 2;
+    let prev_volume_size = {
+        let last = vols.slots[cv].ptr();
+        if !last.is_null() {
+            // SAFETY: last is a valid mmap'd ShmHeader held under the
+            // VOLUMES lock we currently hold.
+            unsafe { (*last).volume_size }
+        } else {
+            0xffff
+        }
+    };
+    let new_size = std::cmp::max(
+        size.saturating_add(std::mem::size_of::<BlockHeader>()),
+        prev_volume_size.saturating_mul(VOLUME_GROWTH_FACTOR),
+    );
+
+    let new_idx = match pick_free_slot(&vols) {
+        Some(i) => i,
+        None => {
+            return Err(MorlocError::Shm(format!(
+                "Could not find suitable block for {} bytes: all {} \
+                 volume slots are occupied",
+                size, MAX_VOLUME_NUMBER
+            )));
+        }
+    };
+    drop(vols);
+
+    let basename = {
+        let cb = COMMON_BASENAME.lock().unwrap();
+        get_cstr_buf(&cb).to_string()
+    };
+    let new_shm = shinit(&basename, new_idx, new_size)?;
+    CURRENT_VOLUME.store(new_idx, Ordering::Relaxed);
+    *shm_out = new_shm;
+    let blk = unsafe {
+        (new_shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader
+    };
+    Ok(blk)
 }
 
 fn find_free_block_in_volume(
@@ -1130,7 +1262,10 @@ pub unsafe fn shm_unlock(lock: &AtomicU32) {
 
 #[inline]
 pub fn vol2rel(ptr: VolPtr, shm: &ShmHeader) -> RelPtr {
-    shm.relative_offset as RelPtr + ptr
+    // Under the indexed-relptr encoding, the volume index lives in the
+    // high bits of the relptr and the volume-local offset (ptr) lives
+    // in the low 48 bits.
+    encode_relptr(shm.volume_index as usize, ptr as usize)
 }
 
 /// # Safety
@@ -1186,6 +1321,63 @@ mod tests {
             std::mem::size_of::<Array>(),
             std::mem::size_of::<usize>() + std::mem::size_of::<RelPtr>()
         );
+    }
+
+    #[test]
+    fn test_indexed_relptr_roundtrip_across_volumes() {
+        // Verify that rel2abs/abs2rel commute under the new indexed
+        // encoding: every (slot_idx, offset) pair we allocate into can
+        // be encoded to a relptr and decoded back to the same absolute
+        // address. Stresses the multi-volume case where the old
+        // flat-offset encoding required summing prior volume sizes.
+        let tmpdir = std::env::temp_dir();
+        let test_dir = tmpdir.join(format!("morloc_test_idx_{}", std::process::id()));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        shm_set_fallback_dir(test_dir.to_str().unwrap());
+
+        let basename = format!("test_shm_idx_{}", std::process::id());
+        shinit(&basename, 0, 4096).unwrap();
+
+        // Force grow into several randomly-allocated volumes by
+        // allocating much more than the initial 4 KiB volume can hold.
+        let mut allocs = Vec::new();
+        for i in 0..128 {
+            let p = shmalloc(2048).unwrap();
+            unsafe {
+                std::ptr::write_bytes(p, (i & 0xFF) as u8, 2048);
+            }
+            allocs.push(p);
+        }
+        // Confirm we actually exercised the multi-volume path.
+        let used_count = VOLUMES.lock().unwrap().used.len();
+        assert!(
+            used_count >= 2,
+            "expected at least 2 volumes after 128 allocs of 2 KiB, got {}",
+            used_count
+        );
+
+        // Round-trip each: abs -> rel -> abs must yield the original.
+        for (i, &abs) in allocs.iter().enumerate() {
+            let rel = abs2rel(abs).unwrap();
+            assert!(!relptr_is_sentinel(rel), "alloc {}: rel had sentinel bit", i);
+            assert!(relptr_volume_index(rel) < MAX_VOLUME_NUMBER);
+            let round = rel2abs(rel).unwrap();
+            assert_eq!(abs, round, "alloc {} round-trip mismatch", i);
+            // Data still readable through the round-tripped pointer.
+            unsafe {
+                assert_eq!(*round, (i & 0xFF) as u8);
+            }
+        }
+
+        // RELNULL must come back as an error from rel2abs.
+        assert!(rel2abs(RELNULL).is_err());
+
+        // Cleanup.
+        for p in allocs {
+            shfree(p).unwrap();
+        }
+        shclose().unwrap();
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]

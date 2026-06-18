@@ -68,6 +68,15 @@ pub const MORLOC_INLINE_THRESHOLD: usize = 64 * 1024;
 
 pub const METADATA_TYPE_SCHEMA_STRING: u8 = 0x01;
 pub const METADATA_TYPE_XXHASH: u8 = 0x02;
+/// Layer 3 vol_idx hint: the producer of an on-disk MESG+VOIDSTAR
+/// packet has encoded a 15-bit volume index into the high bits of
+/// every relptr in the payload. The reader that mmaps this file can
+/// (a) register the payload at that slot if it's free in the reader's
+/// VOLUMES table -- the relptrs decode correctly with no walk -- or
+/// (b) register at a different slot and run `remap_volume_indices`
+/// to XOR-rewrite the high bits. The 16-bit body is a little-endian
+/// u16 carrying the producer's chosen index; the high bit is reserved.
+pub const METADATA_TYPE_VOL_INDEX: u8 = 0x03;
 pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
 
 // ── Packed structs matching the C binary layout ────────────────────────────
@@ -540,6 +549,36 @@ pub fn get_error_message(packet: &[u8]) -> Result<Option<String>, MorlocError> {
     }
     let payload = get_data_payload(packet)?;
     Ok(Some(String::from_utf8_lossy(payload).into_owned()))
+}
+
+/// Read the Layer 3 vol_idx hint from packet metadata, if present.
+pub fn read_vol_index_from_meta(packet: &[u8]) -> Result<Option<u16>, MorlocError> {
+    if packet.len() < 32 {
+        return Err(MorlocError::Packet("packet too small".into()));
+    }
+    let header = PacketHeader::from_bytes(packet[..32].try_into().unwrap())?;
+    let offset = { header.offset } as usize;
+    if offset == 0 {
+        return Ok(None);
+    }
+    let meta_start = 32;
+    let meta_end = meta_start + offset;
+    let mut pos = meta_start;
+    while pos + 8 <= meta_end {
+        if packet[pos] != b'm' || packet[pos + 1] != b'm' || packet[pos + 2] != b'h' {
+            break;
+        }
+        let meta_type = packet[pos + 3];
+        let meta_size = u32::from_le_bytes([
+            packet[pos + 4], packet[pos + 5], packet[pos + 6], packet[pos + 7],
+        ]) as usize;
+        if meta_type == METADATA_TYPE_VOL_INDEX && meta_size >= 2 && pos + 8 + 2 <= meta_end {
+            let v = u16::from_le_bytes([packet[pos + 8], packet[pos + 9]]);
+            return Ok(Some(v));
+        }
+        pos += 8 + meta_size;
+    }
+    Ok(None)
 }
 
 /// Read the schema string from packet metadata section.

@@ -1434,11 +1434,65 @@ unsafe fn stream_packet_to_fd(
     } else {
         PACKET_COMPRESSION_NONE
     };
+
+    // Layer 3: bake a vol_idx hint into the relptrs we're about to emit,
+    // and record that hint in a fresh metadata block. Only meaningful
+    // for RPTR+VOIDSTAR -- other sources don't carry relptrs we can
+    // re-encode.
+    //
+    // The hint we pick is the producer's actual SHM slot, decoded from
+    // the input relptr. If the eventual reader has that slot free, it
+    // can mmap the file, register the payload at that slot, and skip
+    // the rebase walk entirely (the relptrs already address the right
+    // index). If the slot is taken, the reader picks a different slot
+    // and calls `remap_volume_indices` -- still O(N relptrs) but a
+    // single XOR per relptr, not a full re-add.
+    let (out_vol_idx, vol_meta_size): (u16, usize) =
+        if source == PACKET_SOURCE_RPTR
+            && format == PACKET_FORMAT_VOIDSTAR
+            // Compression would smear the vol_idx-baked relptrs through
+            // a zstd frame; the consumer that decompresses doesn't go
+            // through the mmap path and would mis-process the high bits.
+            // Keep Layer 3's wire-format change scoped to uncompressed
+            // packets.
+            && lvl_opt.is_none()
+        {
+            let relptr = *(packet.add(payload_start) as *const RelPtr);
+            // Reject sentinel relptrs early -- they have no vol_idx.
+            if shm::relptr_is_sentinel(relptr) {
+                (0, 0)
+            } else {
+                let v = shm::relptr_volume_index(relptr) as u16;
+                // Vol_idx 0 would clash with the "no hint" sentinel
+                // readers use to decide whether to bother with Layer 3
+                // semantics. Skip the block for slot-0 producers; the
+                // reader falls back to the Layer 2 path which still
+                // works.
+                if v == 0 { (0, 0) } else { (v, 10) }
+            }
+        } else {
+            (0, 0)
+        };
+
+    let extended_offset = metadata_size + vol_meta_size;
+    new_header.offset = extended_offset as u32;
     let mut hdr_bytes = new_header.to_bytes();
     hdr_bytes[24..32].copy_from_slice(&0u64.to_le_bytes());
 
     if write_all_fd(fd, hdr_bytes.as_ptr(), 32, errmsg) < 0 {
         return -1;
+    }
+    if vol_meta_size > 0 {
+        // 8-byte metadata header + 2-byte u16 body.
+        let mut buf = [0u8; 10];
+        buf[0] = b'm'; buf[1] = b'm'; buf[2] = b'h';
+        buf[3] = METADATA_TYPE_VOL_INDEX;
+        // size field is u32 LE = 2
+        buf[4..8].copy_from_slice(&2u32.to_le_bytes());
+        buf[8..10].copy_from_slice(&out_vol_idx.to_le_bytes());
+        if write_all_fd(fd, buf.as_ptr(), 10, errmsg) < 0 {
+            return -1;
+        }
     }
     if metadata_size > 0 {
         if write_all_fd(fd, packet.add(32), metadata_size, errmsg) < 0 {
@@ -1446,10 +1500,12 @@ unsafe fn stream_packet_to_fd(
         }
     }
 
-    let payload_origin = start_pos + 32 + metadata_size as i64;
+    let payload_origin = start_pos + 32 + extended_offset as i64;
     let est = estimated_payload_bytes as usize;
     let stream_result = match source {
-        PACKET_SOURCE_RPTR => stream_rptr_payload(packet, payload_start, format, fd, lvl_opt, est, errmsg),
+        PACKET_SOURCE_RPTR => stream_rptr_payload(
+            packet, payload_start, format, fd, lvl_opt, est, out_vol_idx, errmsg,
+        ),
         PACKET_SOURCE_FILE => stream_file_payload(packet, payload_start, payload_len, format, fd, lvl_opt, est, errmsg),
         _ => {
             set_errmsg(errmsg, &MorlocError::Packet(format!(
@@ -1517,6 +1573,7 @@ unsafe fn stream_rptr_payload(
     fd: libc::c_int,
     lvl: Option<crate::compression::CompressionLevel>,
     estimated_input_bytes: usize,
+    vol_idx_hint: u16,
     errmsg: *mut *mut c_char,
 ) -> Result<(), ()> {
     if format != PACKET_FORMAT_VOIDSTAR {
@@ -1558,7 +1615,11 @@ unsafe fn stream_rptr_payload(
         &mut writer,
         lvl,
         estimated_input_bytes,
-        |sink| crate::voidstar::write_flat_to_writer(sink, abs_ptr, &rs).map(|_| ()),
+        |sink| {
+            crate::voidstar::write_flat_to_writer_with_vol_idx(
+                sink, abs_ptr, &rs, vol_idx_hint,
+            ).map(|_| ())
+        },
     );
     if let Err(e) = result {
         set_errmsg(errmsg, &e);

@@ -68,7 +68,7 @@ typedef void*   absptr_t;
 #define SHM_MAGIC 0xFECA0DF0
 #define BLK_MAGIC 0x0CB10DF0
 
-#define MAX_VOLUME_NUMBER 32
+#define MAX_VOLUME_NUMBER 32768
 
 // Shared memory volume header (lives at the start of each mmap'd region).
 typedef struct shm_s {

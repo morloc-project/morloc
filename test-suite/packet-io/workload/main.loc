@@ -1,0 +1,42 @@
+-- Test workload for packet-io rugged tests.
+--
+-- The structure deliberately spans the cases that touched encoding bugs
+-- during the Layer-1/2/3 work: variable-width tuples, optionals at
+-- multiple depths, nested arrays, and long strings whose tail-emit
+-- crosses SHM volume boundaries.
+--
+-- Exported:
+--   genBig n s    -- build n outer entries, with str_len s
+--   identityPy x  -- Py-pool identity (forces pool round-trip)
+--   identityCpp x -- Cpp-pool identity
+--   sumBig x      -- structural traversal that touches every relptr
+--                    and returns a scalar fingerprint
+
+module main
+  ( genBig
+  , identityPy
+  , identityCpp
+  , sumBig
+  )
+
+import root-py
+import root-cpp
+
+-- An entry: header string, list of reals, maybe-a-quality-string, and a
+-- 64-bit position. Picks up Str + Array + Optional + Int64 in one
+-- record.
+type Entry = (Str, [Real], ?Str, Int64)
+
+genBig :: Int -> Int -> [[Entry]]
+sumBig :: [[Entry]] -> (Int, Real, Int, Int)
+identityPy :: [[Entry]] -> [[Entry]]
+identityCpp :: [[Entry]] -> [[Entry]]
+
+source Py from "gen.py"
+  ( "gen_big" as genBig
+  , "sum_big" as sumBig
+  )
+
+source Py from "id.py" ("ident" as identityPy)
+
+source Cpp from "id.hpp" ("ident_cpp" as identityCpp)

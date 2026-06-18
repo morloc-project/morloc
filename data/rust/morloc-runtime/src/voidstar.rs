@@ -114,15 +114,149 @@ fn adjust_relptrs_inner(
     }
 }
 
+// ── remap_volume_indices ───────────────────────────────────────────────────
+//
+// Not currently used by any live load path: the production loaders
+// (`try_load_voidstar_packet_via_mmap`, `read_voidstar_binary_with_hint`,
+// `voidstar::read_binary_with_hint`) all collapse the vol_idx XOR and
+// the offset addition into a single ADD walk via `adjust_relptrs`
+// with `delta = abs2rel(dest) - encode_relptr(hint, 0)`. This pure-XOR
+// variant is exercised by the Layer-3 round-trip unit tests and kept
+// in tree as a primitive for any future flow that needs to relocate
+// already-loaded voidstar data between volumes without touching offsets.
+
+/// Layer 3 slow path: rewrite the `vol_idx` bits in every relptr of a
+/// voidstar blob via XOR with `xor_mask`. Used when a producer encoded
+/// relptrs with one vol_idx but the consumer needs a different one
+/// (slot collision in the reader's VOLUMES table).
+///
+/// `xor_mask` should already be shifted into position; callers usually
+/// compute it as `((producer_vol_idx ^ consumer_vol_idx) as u64) << 48`.
+///
+/// When `xor_mask` is 0 this returns immediately without walking --
+/// the fast path of Layer 3 (no collision, no rewrite needed) is
+/// O(1).
+pub fn remap_volume_indices(
+    data: AbsPtr,
+    schema: &Schema,
+    xor_mask: u64,
+) -> Result<(), MorlocError> {
+    if xor_mask == 0 {
+        return Ok(());
+    }
+    let mut env: RecurEnv = Vec::new();
+    remap_volume_indices_with_env(data, schema, xor_mask, &mut env)
+}
+
+fn remap_volume_indices_with_env(
+    data: AbsPtr,
+    schema: &Schema,
+    xor_mask: u64,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| {
+        remap_volume_indices_inner(data, schema, xor_mask, env)
+    })
+}
+
+fn remap_volume_indices_inner(
+    data: AbsPtr,
+    schema: &Schema,
+    xor_mask: u64,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    // SAFETY: data points to a voidstar blob whose layout is described
+    // by schema. All pointer arithmetic stays inside the blob.
+    unsafe {
+        match schema.serial_type {
+            SerialType::Int => {
+                let size = *(data as *const usize);
+                if size > 1 {
+                    let p = data.add(std::mem::size_of::<usize>()) as *mut u64;
+                    *p ^= xor_mask;
+                }
+                Ok(())
+            }
+            SerialType::String | SerialType::Array => {
+                let arr = &mut *(data as *mut Array);
+                if arr.size == 0 {
+                    // Zero-sized arrays carry data = 0 (no vol_mask).
+                    return Ok(());
+                }
+                let saved_arr_data = arr.data;
+                let arr_p = &mut arr.data as *mut RelPtr as *mut u64;
+                *arr_p ^= xor_mask;
+                if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
+                    let arr_data = shm::rel2abs(arr.data)?;
+                    let _ = saved_arr_data;
+                    let elem_schema = &schema.parameters[0];
+                    let w = elem_schema.width;
+                    for i in 0..arr.size {
+                        remap_volume_indices_with_env(
+                            arr_data.add(i * w), elem_schema, xor_mask, env,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+            SerialType::Tuple | SerialType::Map => {
+                for i in 0..schema.parameters.len() {
+                    remap_volume_indices_with_env(
+                        data.add(schema.offsets[i]),
+                        &schema.parameters[i],
+                        xor_mask,
+                        env,
+                    )?;
+                }
+                Ok(())
+            }
+            SerialType::Optional => {
+                let relptr_slot = data as *mut RelPtr;
+                let v = *relptr_slot;
+                if v != shm::RELNULL && !schema.parameters.is_empty() {
+                    *(relptr_slot as *mut u64) ^= xor_mask;
+                    let inner_abs = shm::rel2abs(*relptr_slot)?;
+                    remap_volume_indices_with_env(
+                        inner_abs, &schema.parameters[0], xor_mask, env,
+                    )?;
+                }
+                Ok(())
+            }
+            SerialType::Recur => {
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = recur::lookup(env, name)?;
+                let target = &*target_ptr;
+                remap_volume_indices_with_env(data, target, xor_mask, env)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 // ── read_voidstar_binary ───────────────────────────────────────────────────
 
 /// Read a flat voidstar binary blob into SHM, adjusting relptrs.
+/// Assumes the producer wrote buffer-relative (vol_idx=0) relptrs.
+/// For Layer-3 emitter output (vol_idx baked into relptr high bits)
+/// use `read_binary_with_hint`.
 pub fn read_binary(blob: &[u8], schema: &Schema) -> Result<AbsPtr, MorlocError> {
+    read_binary_with_hint(blob, schema, 0)
+}
+
+/// Read a flat voidstar binary blob into SHM, accounting for a
+/// Layer-3 `vol_idx_hint`. `hint = 0` is equivalent to `read_binary`.
+pub fn read_binary_with_hint(
+    blob: &[u8],
+    schema: &Schema,
+    vol_idx_hint: u16,
+) -> Result<AbsPtr, MorlocError> {
     let base = shm::shmalloc(blob.len())?;
     // SAFETY: base is freshly allocated with blob.len() bytes.
     unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), base, blob.len()) };
     let base_rel = shm::abs2rel(base)?;
-    adjust_relptrs(base, schema, base_rel)?;
+    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
+    adjust_relptrs(base, schema, delta)?;
     Ok(base)
 }
 
@@ -484,7 +618,22 @@ pub fn write_flat_to_writer<W: std::io::Write + ?Sized>(
     data: AbsPtr,
     schema: &Schema,
 ) -> Result<usize, MorlocError> {
-    let mut state = EmitState { writer, cursor: 0 };
+    write_flat_to_writer_with_vol_idx(writer, data, schema, 0)
+}
+
+/// Like `write_flat_to_writer` but bakes a 15-bit `vol_idx` into the
+/// high bits of every emitted relptr. Layer 3 on-disk output uses this
+/// so a Layer-2 reader that mmaps the file and registers it at the same
+/// slot can skip the rebase walk entirely. `vol_idx = 0` is identical
+/// to the unparameterized `write_flat_to_writer`.
+pub fn write_flat_to_writer_with_vol_idx<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    data: AbsPtr,
+    schema: &Schema,
+    vol_idx: u16,
+) -> Result<usize, MorlocError> {
+    let vol_mask = (vol_idx as u64) << 48;
+    let mut state = EmitState { writer, cursor: 0, vol_mask };
     let mut env: RecurEnv = Vec::new();
     let tail_start = schema.width;
     recur::with_scope(&mut env, schema, |env| -> Result<(), MorlocError> {
@@ -498,6 +647,9 @@ pub fn write_flat_to_writer<W: std::io::Write + ?Sized>(
 struct EmitState<'a, W: std::io::Write + ?Sized> {
     writer: &'a mut W,
     cursor: usize,
+    /// `(vol_idx as u64) << 48`. ORed into every relptr the writer
+    /// emits. Zero for unparameterized output (current default).
+    vol_mask: u64,
 }
 
 impl<W: std::io::Write + ?Sized> EmitState<'_, W> {
@@ -544,13 +696,14 @@ fn emit_slot_inner<W: std::io::Write + ?Sized>(
     // in the stdlib. Wider structs fall back to a heap Vec.
     const STACK_SLOT_MAX: usize = 256;
     let width = schema.width;
+    let vol_mask = e.vol_mask;
     if width <= STACK_SLOT_MAX {
         let mut buf = [0u8; STACK_SLOT_MAX];
-        materialize_slot(&mut buf[..width], data, schema, tail_start, env)?;
+        materialize_slot(&mut buf[..width], data, schema, tail_start, vol_mask, env)?;
         e.write_bytes(&buf[..width])?;
     } else {
         let mut buf = vec![0u8; width];
-        materialize_slot(&mut buf, data, schema, tail_start, env)?;
+        materialize_slot(&mut buf, data, schema, tail_start, vol_mask, env)?;
         e.write_bytes(&buf)?;
     }
     Ok(())
@@ -561,12 +714,15 @@ fn emit_slot_inner<W: std::io::Write + ?Sized>(
 // rather than copied from the source. Primitive fields and structural
 // scaffolding are bulk-copied from `data` first, then relptrs are
 // overwritten in place. The caller has already pushed `schema`'s
-// `with_scope` if applicable.
+// `with_scope` if applicable. `vol_mask` is ORed into every emitted
+// relptr to bake a vol_idx hint into the on-disk form (Layer 3); 0
+// means "leave high bits clear" (unparameterized).
 fn materialize_slot(
     dest: &mut [u8],
     data: AbsPtr,
     schema: &Schema,
     tail_start: usize,
+    vol_mask: u64,
     env: &mut RecurEnv,
 ) -> Result<(), MorlocError> {
     debug_assert_eq!(dest.len(), schema.width);
@@ -575,7 +731,7 @@ fn materialize_slot(
     unsafe {
         std::ptr::copy_nonoverlapping(data, dest.as_mut_ptr(), schema.width);
     }
-    patch_slot_inner(dest, data, schema, tail_start, env)
+    patch_slot_inner(dest, data, schema, tail_start, vol_mask, env)
 }
 
 fn patch_slot(
@@ -583,10 +739,11 @@ fn patch_slot(
     data: AbsPtr,
     schema: &Schema,
     tail_start: usize,
+    vol_mask: u64,
     env: &mut RecurEnv,
 ) -> Result<(), MorlocError> {
     recur::with_scope(env, schema, |env| {
-        patch_slot_inner(dest, data, schema, tail_start, env)
+        patch_slot_inner(dest, data, schema, tail_start, vol_mask, env)
     })
 }
 
@@ -595,6 +752,7 @@ fn patch_slot_inner(
     data: AbsPtr,
     schema: &Schema,
     tail_start: usize,
+    vol_mask: u64,
     env: &mut RecurEnv,
 ) -> Result<(), MorlocError> {
     unsafe {
@@ -603,13 +761,17 @@ fn patch_slot_inner(
                 let size = *(data as *const usize);
                 if size > 1 {
                     let limb_pos = shm::align_up(tail_start, std::mem::align_of::<u64>());
+                    let baked = (limb_pos as u64) | vol_mask;
                     dest[std::mem::size_of::<usize>()..std::mem::size_of::<usize>() + 8]
-                        .copy_from_slice(&(limb_pos as u64).to_le_bytes());
+                        .copy_from_slice(&baked.to_le_bytes());
                 }
             }
             SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const Array);
                 let new_relptr: u64 = if arr.size == 0 {
+                    // Empty arrays use 0 as a sentinel for "no data"
+                    // (size==0 short-circuits the rel2abs read). Don't
+                    // OR vol_mask so readers can distinguish.
                     0
                 } else {
                     let elem_schema = &schema.parameters[0];
@@ -618,7 +780,7 @@ fn patch_slot_inner(
                     } else {
                         elem_schema.array_data_alignment()
                     };
-                    shm::align_up(tail_start, align) as u64
+                    shm::align_up(tail_start, align) as u64 | vol_mask
                 };
                 dest[8..16].copy_from_slice(&new_relptr.to_le_bytes());
             }
@@ -630,7 +792,7 @@ fn patch_slot_inner(
                     let field_data = data.add(field_offset);
                     let field_dest = &mut dest
                         [field_offset..field_offset + field_schema.width];
-                    patch_slot(field_dest, field_data, field_schema, field_tail_start, env)?;
+                    patch_slot(field_dest, field_data, field_schema, field_tail_start, vol_mask, env)?;
                     field_tail_start =
                         tail_end_pos(field_data, field_schema, field_tail_start, env)?;
                 }
@@ -642,7 +804,7 @@ fn patch_slot_inner(
                 } else {
                     let inner_schema = &schema.parameters[0];
                     let inner_align = inner_schema.alignment().max(1);
-                    shm::align_up(tail_start, inner_align) as i64
+                    (shm::align_up(tail_start, inner_align) as u64 | vol_mask) as i64
                 };
                 dest[0..8].copy_from_slice(&new_value.to_le_bytes());
             }
@@ -650,7 +812,7 @@ fn patch_slot_inner(
                 let name = schema.name.as_deref().unwrap_or("");
                 let target_ptr = recur::lookup(env, name)?;
                 let target = &*target_ptr;
-                patch_slot_inner(dest, data, target, tail_start, env)?;
+                patch_slot_inner(dest, data, target, tail_start, vol_mask, env)?;
             }
             _ => {}
         }
@@ -1110,5 +1272,103 @@ mod flat_writer_tests {
         assert_roundtrip("null", "?i4");
         assert_roundtrip("[42, \"hi\"]", "t2?i4s");
         assert_roundtrip("[null, \"hi\"]", "t2?i4s");
+    }
+
+    // `remap_volume_indices` recurses via `rel2abs` between XOR
+    // operations, which means the walked relptrs must resolve to
+    // mapped memory at every intermediate step. A "build-here, XOR
+    // away, XOR back" round-trip therefore cannot work without
+    // somewhere to point the corrupted intermediate values -- exactly
+    // the gap `register_external_volume` used to fill. The function
+    // stays in tree for future flows that need it (e.g. genuine
+    // volume defragmentation), but it can only be tested at the
+    // structural-walk level here.
+
+    #[test]
+    fn remap_volume_indices_zero_mask_is_noop() {
+        // The fast-path short-circuit: an empty xor_mask returns
+        // immediately without walking. Compose two writes (producer and
+        // consumer both 0) so the bytes are identical before and after.
+        setup();
+        let schema = parse_schema("at3sss").unwrap();
+        let original = read_json_with_schema(
+            "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"]]", &schema,
+        ).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        write_flat_to_writer_with_vol_idx(&mut buf, original, &schema, 7).unwrap();
+
+        let dest = shm::shmalloc(buf.len()).unwrap();
+        unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), dest, buf.len()) };
+        let before: Vec<u8> = unsafe {
+            std::slice::from_raw_parts(dest, buf.len()).to_vec()
+        };
+        // Mask of zero must not modify a single byte.
+        remap_volume_indices(dest, &schema, 0).unwrap();
+        let after: Vec<u8> = unsafe {
+            std::slice::from_raw_parts(dest, buf.len()).to_vec()
+        };
+        assert_eq!(before, after, "xor_mask=0 must be byte-level no-op");
+        shm::shfree(dest).unwrap();
+    }
+
+    /// Bug-1 regression: a buffer produced by the Layer-3 emitter
+    /// (`write_flat_to_writer_with_vol_idx` with hint > 0) MUST round-trip
+    /// cleanly through `read_binary_with_hint`. Before the fix, the
+    /// legacy reader called `adjust_relptrs(base, schema, abs2rel(base))`
+    /// without subtracting `encode_relptr(hint, 0)`, so the producer's
+    /// `hint << 48` bits added to the consumer's slot bits and the
+    /// resulting vol_idx was nonsense. The JSON read-back would either
+    /// segfault or silently produce garbage.
+    fn assert_hint_aware_read_binary(json: &str, schema_str: &str, hint: u16) {
+        use crate::json::voidstar_to_json_string;
+        let schema = parse_schema(schema_str).unwrap();
+        let original_abs = read_json_with_schema(json, &schema).unwrap();
+        let original_json = voidstar_to_json_string(original_abs, &schema).unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_flat_to_writer_with_vol_idx(&mut buf, original_abs, &schema, hint).unwrap();
+
+        let recovered_abs = read_binary_with_hint(&buf, &schema, hint).unwrap();
+        let recovered_json = voidstar_to_json_string(recovered_abs, &schema).unwrap();
+        assert_eq!(
+            original_json, recovered_json,
+            "read_binary_with_hint round-trip mismatch \
+             for schema={schema_str} json={json} hint={hint}"
+        );
+    }
+
+    #[test]
+    fn read_binary_with_hint_handles_layer3_emitter() {
+        setup();
+        for &hint in &[0u16, 1, 17, 4242, 32767] {
+            assert_hint_aware_read_binary("\"hello\"", "s", hint);
+            assert_hint_aware_read_binary("[1,2,3]", "ai4", hint);
+            assert_hint_aware_read_binary("[\"a\",\"bb\",\"ccc\"]", "as", hint);
+            assert_hint_aware_read_binary("[1, \"hello\"]", "t2i4s", hint);
+            assert_hint_aware_read_binary("[null, \"hi\"]", "t2?i4s", hint);
+            assert_hint_aware_read_binary("[[1,2,3],[4,5],[]]", "aai4", hint);
+        }
+    }
+
+    /// Tier-A: the read_binary path with hint=0 must reproduce the
+    /// pre-Layer-3 behavior exactly. Catches regression in the legacy
+    /// reader's wrapper.
+    #[test]
+    fn read_binary_no_hint_is_unchanged() {
+        setup();
+        let schema = parse_schema("at3sss").unwrap();
+        let original = read_json_with_schema(
+            "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"]]", &schema,
+        ).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        write_flat_to_writer(&mut buf, original, &schema).unwrap();
+        // Both APIs must give the same answer when hint is 0.
+        let a = read_binary(&buf, &schema).unwrap();
+        let b = read_binary_with_hint(&buf, &schema, 0).unwrap();
+        use crate::json::voidstar_to_json_string;
+        assert_eq!(
+            voidstar_to_json_string(a, &schema).unwrap(),
+            voidstar_to_json_string(b, &schema).unwrap(),
+        );
     }
 }

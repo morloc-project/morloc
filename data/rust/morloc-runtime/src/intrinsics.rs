@@ -258,6 +258,19 @@ pub unsafe extern "C" fn mlc_load(
         return ptr::null_mut();
     }
 
+    // Layer 2 fast path: large MESG+VOIDSTAR packets `pread` straight
+    // into a fresh SHM allocation, skipping the libc::malloc + read +
+    // shmalloc + memcpy chain.
+    match crate::cli::try_load_voidstar_packet_via_mmap(path, schema) {
+        Ok(Some(ptr)) => return ptr as *mut c_void,
+        Ok(None) => { /* fall through */ }
+        Err(e) => {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            eprintln!("@load warning ({}): {}", path_str, e);
+            return ptr::null_mut();
+        }
+    }
+
     let mut err: *mut c_char = ptr::null_mut();
     let mut file_size: usize = 0;
     let data = read_binary_file(path, &mut file_size, &mut err);
