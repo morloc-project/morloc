@@ -6,6 +6,7 @@
 
 mod cli;
 mod dispatch;
+mod help;
 mod manifest;
 mod phase2;
 mod process;

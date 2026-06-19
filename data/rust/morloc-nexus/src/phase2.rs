@@ -29,7 +29,7 @@ use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
 /// process lifetime are acceptable. Daemons reuse their built clap
 /// commands across requests instead of rebuilding, so the leak there
 /// is also bounded.
-fn leak(s: &str) -> &'static str {
+pub(crate) fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
@@ -127,17 +127,24 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 
     if single {
         let cmd = &manifest.commands[0];
-        return build_command_args(ClapCommand::new(leak(prog_name)), cmd)
+        // add_general_options runs first so the "General Options"
+        // section sorts before the command's positional/optional args
+        // (clap orders sections by first-arg-added).
+        let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
+        let root = build_command_args(root, cmd)
             .about(leak(first_desc(&cmd.desc)))
             .arg_required_else_help(false);
+        return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
 
     let mut root = ClapCommand::new(leak(prog_name))
         .subcommand_required(true)
         .arg_required_else_help(true);
+    root = crate::help::add_general_options(root);
     if let Some(first) = manifest.desc.first() {
         root = root.about(leak(first));
     }
+    root = crate::help::finalize(root, crate::help::usage_multi_root(prog_name));
 
     // Each CmdGroup becomes its own clap subcommand; its members
     // (commands carrying that group) become subcommands beneath it.
@@ -145,31 +152,46 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         let mut grp_cmd = ClapCommand::new(leak(&grp.name))
             .subcommand_required(true)
             .arg_required_else_help(true);
+        grp_cmd = crate::help::add_general_options(grp_cmd);
         if let Some(first) = grp.desc.first() {
             grp_cmd = grp_cmd.about(leak(first));
         }
+        grp_cmd = crate::help::finalize(
+            grp_cmd,
+            crate::help::usage_multi_group(prog_name, &grp.name),
+        );
         for cmd in &manifest.commands {
             if cmd.group.as_deref() == Some(grp.name.as_str()) {
-                grp_cmd = grp_cmd.subcommand(
-                    build_command_args(
-                        ClapCommand::new(leak(&cmd.name))
-                            .about(leak(first_desc(&cmd.desc))),
-                        cmd,
+                let sub = crate::help::add_general_options(
+                    ClapCommand::new(leak(&cmd.name))
+                        .about(leak(first_desc(&cmd.desc))),
+                );
+                let sub = build_command_args(sub, cmd);
+                let sub = crate::help::finalize(
+                    sub,
+                    crate::help::usage_multi_sub(
+                        prog_name,
+                        Some(&grp.name),
+                        &cmd.name,
                     ),
                 );
+                grp_cmd = grp_cmd.subcommand(sub);
             }
         }
         root = root.subcommand(grp_cmd);
     }
     for cmd in &manifest.commands {
         if cmd.group.is_none() {
-            root = root.subcommand(
-                build_command_args(
-                    ClapCommand::new(leak(&cmd.name))
-                        .about(leak(first_desc(&cmd.desc))),
-                    cmd,
-                ),
+            let sub = crate::help::add_general_options(
+                ClapCommand::new(leak(&cmd.name))
+                    .about(leak(first_desc(&cmd.desc))),
             );
+            let sub = build_command_args(sub, cmd);
+            let sub = crate::help::finalize(
+                sub,
+                crate::help::usage_multi_sub(prog_name, None, &cmd.name),
+            );
+            root = root.subcommand(sub);
         }
     }
     root
@@ -188,7 +210,13 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 /// short flag declarations in user docstrings, making this
 /// unambiguous.
 fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
-    cmd = cmd.allow_negative_numbers(true);
+    cmd = cmd
+        .allow_negative_numbers(true)
+        // User-declared flag-style args inherit this; positionals
+        // override with their own "Positional arguments" heading.
+        // `attach_to` resets to "General Options" afterward so the
+        // auto-added help row lands under that heading.
+        .next_help_heading("Optional arguments");
     // Long help: concatenate every desc line so clap renders the
     // full block under `<sub> --help`.
     if !mcmd.desc.is_empty() {

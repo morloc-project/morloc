@@ -594,7 +594,7 @@ pub fn resolve_daemon_target(target: &str) -> Result<String, String> {
 /// filtering happens later in [`augment_with_capability_flags`].
 fn value_taking_run_flags() -> ValueTakingFlags {
     use clap::CommandFactory;
-    let nexus_cmd = Nexus::command();
+    let nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
     let run_cmd = nexus_cmd
         .find_subcommand("run")
         .expect("Nexus declares a 'run' subcommand");
@@ -835,19 +835,25 @@ fn first_positional<'a>(
 /// 3. **Daemon mode.** Same as run minus the `@` split (daemon
 ///    mode has no user zone).
 pub fn parse_invocation() -> ParsedInvocation {
-    use clap::Parser;
     let argv: Vec<String> = std::env::args().collect();
     let mode_str = argv.get(1).map(|s| s.as_str());
     match mode_str {
         Some("run") => parse_run_or_daemon(&argv, true),
         Some("daemon") => parse_run_or_daemon(&argv, false),
-        _ => ParsedInvocation {
-            nexus: Nexus::parse(),
-            manifest: None,
-            manifest_path: String::new(),
-            user_zone: Vec::new(),
-            capability_values: CapabilityValues::default(),
-        },
+        _ => {
+            use clap::{CommandFactory, FromArgMatches};
+            let cmd = crate::help::strip_styles_recursively(Nexus::command());
+            let matches = cmd.get_matches();
+            let nexus = Nexus::from_arg_matches(&matches)
+                .unwrap_or_else(|e| e.exit());
+            ParsedInvocation {
+                nexus,
+                manifest: None,
+                manifest_path: String::new(),
+                user_zone: Vec::new(),
+                capability_values: CapabilityValues::default(),
+            }
+        }
     }
 }
 
@@ -917,7 +923,7 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
     // Build the augmented Nexus command tree: take the static
     // clap-derive command and inject capability flags into the
     // chosen subcommand based on `caps_for_augment`.
-    let mut nexus_cmd = Nexus::command();
+    let mut nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
     {
         let sub = nexus_cmd
             .find_subcommand_mut(mode_token)
