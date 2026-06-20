@@ -54,7 +54,7 @@
 #define SHM_TRACKER_INIT_CAP 16
 typedef struct {
     absptr_t ptr;
-    Schema* schema;  // owned by the tracker; freed in flush_shm_tracker
+    Schema* schema;  // owned by the tracker; freed in shm_tracker_flush
 } shm_entry_t;
 static shm_entry_t* shm_tracker = NULL;
 static size_t shm_tracker_count = 0;
@@ -73,7 +73,7 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     shm_tracker_count++;
 }
 
-static void flush_shm_tracker(void) {
+static void shm_tracker_flush(void) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
         // shfree decrements the refcount and zeros the block on final
@@ -417,19 +417,19 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         *(uint64_t*)dest = (uint64_t)value; \
     } while(0)
 
-static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Schema* schema);
+static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const Schema* schema);
 
 // Public entry point: push the schema's declaration name (if any) onto
 // the recur env, dispatch to the inner walker, then pop. Recur arms
 // inside _inner resolve targets via recur_env_lookup.
-static void* to_voidstar_r(void* dest, void** cursor, SEXP obj, const Schema* schema){
+static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
     int pushed = recur_env_push(schema);
-    void* r = to_voidstar_r_inner(dest, cursor, obj, schema);
+    void* r = to_voidstar_inner_impl(dest, cursor, obj, schema);
     recur_env_pop(pushed);
     return r;
 }
 
-static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
+static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const Schema* schema){
     MAYFAIL
 
     switch (schema->type) {
@@ -573,7 +573,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                             start = R_TRY(rel2abs, array->data);
                             for(size_t i = 0; i < array->size; i++){
                                 SEXP elem = STRING_ELT(obj, i);
-                                to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
+                                to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
                             }
                         } else {
                             MORLOC_ERROR("Expected character vector of length 1, but got length %ld", array->size);
@@ -593,7 +593,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = VECTOR_ELT(obj, i);
-                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
+                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
                     }
                     break;
                 case LGLSXP:
@@ -601,7 +601,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
-                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
+                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
@@ -610,7 +610,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarInteger(INTEGER(obj)[i]));
-                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
+                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
@@ -619,7 +619,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarReal(REAL(obj)[i]));
-                        to_voidstar_r(start + i * element_schema->width, cursor, elem, element_schema);
+                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
                         UNPROTECT(1);
                     }
                     break;
@@ -642,7 +642,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                 }
                 for (R_xlen_t i = 0; i < size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
-                    to_voidstar_r(dest + schema->offsets[i], cursor, item, schema->parameters[i]);
+                    to_voidstar_inner(dest + schema->offsets[i], cursor, item, schema->parameters[i]);
                 }
             }
             break;
@@ -666,7 +666,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                         }
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
-                            to_voidstar_r(dest + schema->offsets[i], cursor, value, schema->parameters[i]);
+                            to_voidstar_inner(dest + schema->offsets[i], cursor, value, schema->parameters[i]);
                         }
                         UNPROTECT(1);
                     }
@@ -695,7 +695,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
                 }
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
-                to_voidstar_r(inner_dest, cursor, obj, inner_schema);
+                to_voidstar_inner(inner_dest, cursor, obj, inner_schema);
             }
             break;
 
@@ -707,12 +707,12 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
             }
             // Dispatch directly to _inner so the Recur node itself
             // does not push its own (lookup-key) name onto the env.
-            to_voidstar_r_inner(dest, cursor, obj, target);
+            to_voidstar_inner_impl(dest, cursor, obj, target);
             break;
         }
 
         default:
-            MORLOC_ERROR("Unhandled schema type %d in to_voidstar_r", (int)schema->type);
+            MORLOC_ERROR("Unhandled schema type %d in to_voidstar_inner", (int)schema->type);
             break;
     }
 
@@ -721,7 +721,7 @@ static void* to_voidstar_r_inner(void* dest, void** cursor, SEXP obj, const Sche
 }
 
 
-// NOTE: If to_voidstar_r calls error() (via MORLOC_ERROR or R_TRY), the shared
+// NOTE: If to_voidstar_inner calls error() (via MORLOC_ERROR or R_TRY), the shared
 // memory at dest leaks. This only happens on type mismatches (a development-time
 // bug) and the memory is reclaimed when the pool process exits.
 static void* to_voidstar(SEXP obj, const Schema* schema) {
@@ -733,7 +733,7 @@ static void* to_voidstar(SEXP obj, const Schema* schema) {
 
     void* cursor = (void*)((char*)dest + schema->width);
 
-    return to_voidstar_r(dest, &cursor, obj, schema);
+    return to_voidstar_inner(dest, &cursor, obj, schema);
 }
 
 // }}} to_voidstar
@@ -1599,7 +1599,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
         // SHM is referenced by the result packet; the pool retains the only
         // reference until the next request. Hand voidstar AND schema to the
-        // tracker -- they are freed by flush_shm_tracker at the start of the
+        // tracker -- they are freed by shm_tracker_flush at the start of the
         // next dispatch in run_job_c. Without this, every RPTR-shipped
         // value would leak its SHM block for the lifetime of the pool.
         shm_tracker_push((absptr_t)voidstar, schema);
@@ -1744,7 +1744,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     if (is_rptr) {
         // Sender (daemon or peer pool) holds the original ref and will
         // release it at their next dispatch. We add our own ref and stash
-        // it in the tracker so flush_shm_tracker() releases it at the
+        // it in the tracker so shm_tracker_flush() releases it at the
         // start of our next request -- after R has finished consuming
         // the deserialized form.
         char* incref_err = NULL;
@@ -2414,7 +2414,7 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     // calling daemon can dereference its relptr; once we're starting a new
     // request, it is safe to reclaim. Without this every RPTR result would
     // leak per call and grow /dev/shm/morloc-* monotonically.
-    flush_shm_tracker();
+    shm_tracker_flush();
     morloc_debug_flush_dispatch();
 
     uint8_t* packet = stream_from_client(client_fd, &errmsg);

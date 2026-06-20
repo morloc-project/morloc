@@ -91,7 +91,7 @@ def _with_debug_trace(msg: str) -> str:
 def run_job(client_fd: int) -> None:
     try:
         # Free SHM from previous dispatch result (consumed by caller)
-        morloc.flush_shm_tracker()
+        morloc.shm_tracker_flush()
         morloc.debug_flush_dispatch()
         client_data = morloc.stream_from_client(client_fd)
 

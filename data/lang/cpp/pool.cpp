@@ -95,7 +95,7 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 struct ShmEntry { absptr_t ptr; Schema* schema; };
 thread_local std::vector<ShmEntry> _shm_tracker;
 
-static void _flush_shm_tracker() {
+static void _shm_tracker_flush() {
     for (auto& e : _shm_tracker) {
         char* err = NULL;
         // shfree decrements the refcount and zeros the block on final
@@ -176,7 +176,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
 
         void* voidstar = nullptr;
         try {
-            voidstar = toAnything(schema, value);
+            voidstar = to_voidstar(schema, value);
             relptr_t relptr = abs2rel_cpp(voidstar);
 
             char* errmsg = nullptr;
@@ -245,7 +245,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
             const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
             T* dummy = nullptr;
-            return fromAnything(schema, (const void*)payload, dummy, (const void*)payload);
+            return from_voidstar(schema, (const void*)payload, dummy, (const void*)payload);
         }
 
         // SHM paths (RPTR or MESG+MSGPACK): existing logic
@@ -267,7 +267,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         }
 
         T* dummy = nullptr;
-        return fromAnything(schema, (void*)voidstar, dummy);
+        return from_voidstar(schema, (void*)voidstar, dummy);
     }
 }
 
@@ -275,7 +275,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
 // Hash a value, returning a 16-char hex string
 template <typename T>
 std::string _mlc_hash(const T& value, Schema* schema) {
-    void* voidstar = toAnything(schema, value);
+    void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
     char* hex = mlc_hash(voidstar, schema, &errmsg);
     shfree_cpp(voidstar);
@@ -292,7 +292,7 @@ std::string _mlc_hash(const T& value, Schema* schema) {
 // ignores it for non-packet formats.
 template <typename T>
 void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string& path) {
-    void* voidstar = toAnything(schema, value);
+    void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
     mlc_save(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
@@ -306,7 +306,7 @@ void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string&
 // stamps PACKET_COMPRESSION_ZSTD into the packet header when level > 0.
 template <typename T>
 void _mlc_save_voidstar(const T& value, Schema* schema, int64_t level, const std::string& path) {
-    void* voidstar = toAnything(schema, value);
+    void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
     mlc_save_voidstar(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
@@ -318,7 +318,7 @@ void _mlc_save_voidstar(const T& value, Schema* schema, int64_t level, const std
 // Save a value to file in JSON format. `level` accepted for ABI uniformity.
 template <typename T>
 void _mlc_save_json(const T& value, Schema* schema, int64_t level, const std::string& path) {
-    void* voidstar = toAnything(schema, value);
+    void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
     mlc_save_json(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
@@ -330,7 +330,7 @@ void _mlc_save_json(const T& value, Schema* schema, int64_t level, const std::st
 // Serialize a value to a JSON string
 template <typename T>
 std::string _mlc_show(const T& value, Schema* schema) {
-    void* voidstar = toAnything(schema, value);
+    void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
     char* json = mlc_show(voidstar, schema, &errmsg);
     shfree_cpp(voidstar);
@@ -355,7 +355,7 @@ std::optional<T> _mlc_read(Schema* schema, const std::string& json_str) {
         return std::nullopt;
     }
     T* dummy = nullptr;
-    T result = fromAnything(schema, voidstar, dummy);
+    T result = from_voidstar(schema, voidstar, dummy);
     shfree_cpp(voidstar);
     return result;
 }
@@ -373,7 +373,7 @@ std::optional<T> _mlc_load(Schema* schema, const std::string& path) {
         return std::nullopt;
     }
     T* dummy = nullptr;
-    T result = fromAnything(schema, voidstar, dummy);
+    T result = from_voidstar(schema, voidstar, dummy);
     shfree_cpp(voidstar);
     return result;
 }
@@ -520,7 +520,7 @@ static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
     // Free SHM from previous dispatch (result packet consumed by caller)
-    _flush_shm_tracker();
+    _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
         return local_dispatch(mid, args);

@@ -42,7 +42,7 @@
 //! All thread-local state -- frames, dump counter, per-midx counters
 //! -- is per-dispatch. The pool's outer dispatcher calls
 //! [`morloc_debug_flush_dispatch`] at the start of each new top-level
-//! call (same site that calls `flush_shm_tracker`), so state never
+//! call (same site that calls `shm_tracker_flush`), so state never
 //! leaks between unrelated invocations of the same pool process.
 //!
 //! ## TODO (case 6 from the design review)
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
 
 /// Reset per-dispatch state. Called by the pool's outer dispatcher
 /// at the start of each top-level call (same site as
-/// `flush_shm_tracker`). Without this, recursion counters and the
+/// `shm_tracker_flush`). Without this, recursion counters and the
 /// disk-write counter would carry across unrelated invocations of
 /// the same pool process.
 #[no_mangle]

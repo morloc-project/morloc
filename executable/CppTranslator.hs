@@ -746,7 +746,7 @@ PROPAGATE_ERROR(errmsg)|]
     , lcRegisterSchema = cppRegisterSchema
     }
   where
-    -- For serialization, records become tuples (that's what _put_value/toAnything expects)
+    -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)
     serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     serializeTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
     serializeTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)

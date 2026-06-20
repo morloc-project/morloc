@@ -262,7 +262,7 @@ auto to_vector(const Container& c) {
 // C runtime wrappers (implementations in cppmorloc.cpp)
 // ============================================================
 
-absptr_t cpp_rel2abs(relptr_t ptr);
+absptr_t rel2abs_cpp(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
 
 // Resolve a relative pointer.
@@ -303,14 +303,14 @@ struct CppRecurEntry {
     const Schema* schema;
 };
 
-inline std::vector<CppRecurEntry>& cpp_recur_env() {
+inline std::vector<CppRecurEntry>& recur_env() {
     thread_local std::vector<CppRecurEntry> stack;
     return stack;
 }
 
-inline const Schema* recur_env_lookup_cpp(const char* name) {
+inline const Schema* recur_env_lookup(const char* name) {
     if (name == nullptr) return nullptr;
-    auto& stack = cpp_recur_env();
+    auto& stack = recur_env();
     for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
         if (it->name != nullptr && std::strcmp(it->name, name) == 0) {
             return it->schema;
@@ -325,13 +325,13 @@ struct RecurEnvScope {
         if (schema != nullptr
             && schema->name != nullptr
             && schema->type != MORLOC_RECUR) {
-            cpp_recur_env().push_back({schema->name, schema});
+            recur_env().push_back({schema->name, schema});
             pushed = true;
         }
     }
     ~RecurEnvScope() {
         if (pushed) {
-            auto& s = cpp_recur_env();
+            auto& s = recur_env();
             if (!s.empty()) s.pop_back();
         }
     }
@@ -344,11 +344,11 @@ struct RecurEnvScope {
 // can use it as an unconditional normaliser at the top of a walker).
 // Throws when a Recur is unresolvable, since downstream reads would
 // otherwise dereference an empty parameter list.
-inline const Schema* resolve_recur_cpp(const Schema* schema) {
+inline const Schema* resolve_recur(const Schema* schema) {
     if (schema == nullptr || schema->type != MORLOC_RECUR) {
         return schema;
     }
-    const Schema* target = recur_env_lookup_cpp(schema->name);
+    const Schema* target = recur_env_lookup(schema->name);
     if (target == nullptr) {
         std::ostringstream oss;
         oss << "Recur back-reference to undeclared schema name '"
@@ -447,7 +447,7 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
 template<typename T>
 size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
     size_t total_size = schema->width;
-    const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
+    const Schema* elem_schema = resolve_recur(schema->parameters[0]);
     // worst-case cursor alignment padding for element data
     total_size += array_data_alignment_cpp(elem_schema) - 1;
     switch(elem_schema->type){
@@ -496,7 +496,7 @@ size_t get_shm_size(const Schema* schema, const std::optional<T>& data) {
     if (!data.has_value()) {
         return schema->width;
     }
-    const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+    const Schema* inner_schema = resolve_recur(schema->parameters[0]);
     size_t inner_size = get_shm_size(inner_schema, *data);
     size_t inner_align = schema_alignment_cpp(inner_schema);
     if (inner_align == 0) inner_align = 1;
@@ -513,7 +513,7 @@ size_t get_shm_size(const Schema* schema, const std::shared_ptr<T>& data) {
     if (!data) {
         return schema->width;
     }
-    const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+    const Schema* inner_schema = resolve_recur(schema->parameters[0]);
     size_t inner_size = get_shm_size(inner_schema, *data);
     size_t inner_align = schema_alignment_cpp(inner_schema);
     if (inner_align == 0) inner_align = 1;
@@ -529,11 +529,11 @@ size_t get_shm_size(void* dest, const Schema* schema, const char* data) {
 }
 
 template<typename Tuple, size_t... Is>
-size_t createTupleShmSizeHelper(const Schema* schema, const Tuple& data, std::index_sequence<Is...>) {
+size_t tuple_shm_size(const Schema* schema, const Tuple& data, std::index_sequence<Is...>) {
     size_t total_size = schema->width;
     (void)std::initializer_list<int>{(
         [&](){
-            const Schema* field_schema = resolve_recur_cpp(schema->parameters[Is]);
+            const Schema* field_schema = resolve_recur(schema->parameters[Is]);
             size_t elem = get_shm_size(field_schema, std::get<Is>(data));
             if (elem > field_schema->width) {
                 total_size += elem - field_schema->width;
@@ -546,7 +546,7 @@ size_t createTupleShmSizeHelper(const Schema* schema, const Tuple& data, std::in
 
 template<typename... Args>
 size_t get_shm_size(const Schema* schema, const std::tuple<Args...>& data) {
-    return createTupleShmSizeHelper(schema, data, std::index_sequence_for<Args...>{});
+    return tuple_shm_size(schema, data, std::index_sequence_for<Args...>{});
 }
 
 // Non-vector containers: convert to vector and delegate
@@ -577,12 +577,12 @@ size_t get_shm_size(const Schema* schema, const std::queue<T>& data) {
 
 
 // ============================================================
-// toAnything - top-level (allocating)
+// to_voidstar - top-level (allocating)
 // ============================================================
 
 // Generic top-level: compute size, allocate, serialize
 template<typename T>
-void* toAnything(const Schema* schema, const T& data){
+void* to_voidstar(const Schema* schema, const T& data){
     // Push the top schema's name onto the recur env so any back-ref
     // encountered during the walk resolves to the matching declaration.
     // RAII pops on every return path.
@@ -591,7 +591,7 @@ void* toAnything(const Schema* schema, const T& data){
     void* dest = shmalloc_cpp(total_size);
     void* cursor = (void*)((char*)dest + schema->width);
     try {
-        return toAnything(dest, &cursor, schema, data);
+        return to_voidstar(dest, &cursor, schema, data);
     } catch (...) {
         shfree_cpp(dest);
         throw;
@@ -600,41 +600,41 @@ void* toAnything(const Schema* schema, const T& data){
 
 // Non-vector containers: convert to vector and delegate
 template<typename T>
-void* toAnything(const Schema* schema, const std::stack<T>& data) {
-    return toAnything(schema, to_vector(data));
+void* to_voidstar(const Schema* schema, const std::stack<T>& data) {
+    return to_voidstar(schema, to_vector(data));
 }
 
 template<typename T>
-void* toAnything(const Schema* schema, const std::forward_list<T>& data) {
-    return toAnything(schema, to_vector(data));
+void* to_voidstar(const Schema* schema, const std::forward_list<T>& data) {
+    return to_voidstar(schema, to_vector(data));
 }
 
 template<typename T>
-void* toAnything(const Schema* schema, const std::queue<T>& data) {
-    return toAnything(schema, to_vector(data));
+void* to_voidstar(const Schema* schema, const std::queue<T>& data) {
+    return to_voidstar(schema, to_vector(data));
 }
 
 template<typename T>
-void* toAnything(const Schema* schema, const std::deque<T>& data) {
-    return toAnything(schema, to_vector(data));
+void* to_voidstar(const Schema* schema, const std::deque<T>& data) {
+    return to_voidstar(schema, to_vector(data));
 }
 
 template<typename T>
-void* toAnything(const Schema* schema, const std::list<T>& data) {
-    return toAnything(schema, to_vector(data));
+void* to_voidstar(const Schema* schema, const std::list<T>& data) {
+    return to_voidstar(schema, to_vector(data));
 }
 
 
 // ============================================================
-// toAnything - cursor-based (recursive)
+// to_voidstar - cursor-based (recursive)
 // ============================================================
 
 // Forward declaration
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const T& data);
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data);
 
 // Write raw binary data as an array
-void* binarytoAnything(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
+void* bytes_to_voidstar(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
     Array* result = static_cast<Array*>(dest);
     result->size = size;
     if(size == 0){
@@ -648,7 +648,7 @@ void* binarytoAnything(void* dest, void** cursor, const Schema* schema, const ui
     return dest;
 }
 
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::nullptr_t&) {
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::nullptr_t&) {
     *((int8_t*)dest) = (int8_t)0;
     return dest;
 }
@@ -658,7 +658,7 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::nul
 // declared morloc type (e.g. `int` returning 200 declared as `Int8`),
 // which would otherwise truncate silently into the wire payload.
 template<typename Wire, typename Src>
-Wire checkRangeNarrow(const Src& data, const char* name) {
+Wire check_range_narrow(const Src& data, const char* name) {
     if constexpr (std::is_arithmetic_v<Src>) {
         using SLim = std::numeric_limits<Wire>;
         if constexpr (std::is_signed_v<Src>) {
@@ -689,16 +689,16 @@ Wire checkRangeNarrow(const Src& data, const char* name) {
 // the morloc type regardless of the C++ concrete type width.
 // Also instantiated for record types (which fall through to default).
 template<typename Primitive>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
     if constexpr (std::is_arithmetic_v<Primitive>) {
         switch(schema->type) {
-            case MORLOC_SINT8:   *(int8_t*)dest   = checkRangeNarrow<int8_t>(data, "Int8");    break;
-            case MORLOC_SINT16:  *(int16_t*)dest  = checkRangeNarrow<int16_t>(data, "Int16");  break;
-            case MORLOC_SINT32:  *(int32_t*)dest  = checkRangeNarrow<int32_t>(data, "Int32");  break;
+            case MORLOC_SINT8:   *(int8_t*)dest   = check_range_narrow<int8_t>(data, "Int8");    break;
+            case MORLOC_SINT16:  *(int16_t*)dest  = check_range_narrow<int16_t>(data, "Int16");  break;
+            case MORLOC_SINT32:  *(int32_t*)dest  = check_range_narrow<int32_t>(data, "Int32");  break;
             case MORLOC_SINT64:  *(int64_t*)dest  = static_cast<int64_t>(data);   break;
-            case MORLOC_UINT8:   *(uint8_t*)dest  = checkRangeNarrow<uint8_t>(data, "UInt8");   break;
-            case MORLOC_UINT16:  *(uint16_t*)dest = checkRangeNarrow<uint16_t>(data, "UInt16"); break;
-            case MORLOC_UINT32:  *(uint32_t*)dest = checkRangeNarrow<uint32_t>(data, "UInt32"); break;
+            case MORLOC_UINT8:   *(uint8_t*)dest  = check_range_narrow<uint8_t>(data, "UInt8");   break;
+            case MORLOC_UINT16:  *(uint16_t*)dest = check_range_narrow<uint16_t>(data, "UInt16"); break;
+            case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "UInt32"); break;
             case MORLOC_UINT64:  *(uint64_t*)dest = static_cast<uint64_t>(data);  break;
             case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
@@ -719,7 +719,7 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const Primitiv
 
 // Vector (primary array implementation)
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vector<T>& data) {
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::vector<T>& data) {
     Array* result = static_cast<Array*>(dest);
     result->size = data.size();
     if(data.size() == 0){
@@ -729,99 +729,99 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::vec
     // Resolve a Recur element schema before descending so any
     // user-generated struct overload sees the named declaration's
     // parameters / offsets, not the empty back-ref node.
-    const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
+    const Schema* elem_schema = resolve_recur(schema->parameters[0]);
     // align cursor for element data placement (bumps to 64 for primitive numerics)
     *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(elem_schema)));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
     *cursor = static_cast<char*>(*cursor) + data.size() * elem_schema->width;
-    char* start = (char*)cpp_rel2abs(result->data);
+    char* start = (char*)rel2abs_cpp(result->data);
     size_t width = elem_schema->width;
     for (size_t i = 0; i < data.size(); ++i) {
-         toAnything(start + width * i, cursor, elem_schema, data[i]);
+         to_voidstar(start + width * i, cursor, elem_schema, data[i]);
     }
     return dest;
 }
 
 // Shared helper for iterable containers (list, forward_list, deque)
 template<typename Container>
-void* toAnything_seq(void* dest, void** cursor, const Schema* schema, const Container& data, size_t size) {
+void* seq_to_voidstar(void* dest, void** cursor, const Schema* schema, const Container& data, size_t size) {
     Array* result = static_cast<Array*>(dest);
     result->size = size;
     if(size == 0){
         result->data = RELNULL;
         return dest;
     }
-    const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
+    const Schema* elem_schema = resolve_recur(schema->parameters[0]);
     // align cursor for element data placement (bumps to 64 for primitive numerics)
     *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), array_data_alignment_cpp(elem_schema)));
     result->data = abs2rel_cpp(static_cast<absptr_t>(*cursor));
     *cursor = static_cast<char*>(*cursor) + size * elem_schema->width;
-    char* start = (char*)cpp_rel2abs(result->data);
+    char* start = (char*)rel2abs_cpp(result->data);
     size_t width = elem_schema->width;
     size_t i = 0;
     for (const auto& item : data) {
-        toAnything(start + width * i, cursor, elem_schema, item);
+        to_voidstar(start + width * i, cursor, elem_schema, item);
         ++i;
     }
     return dest;
 }
 
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::list<T>& data) {
-    return toAnything_seq(dest, cursor, schema, data, data.size());
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::list<T>& data) {
+    return seq_to_voidstar(dest, cursor, schema, data, data.size());
 }
 
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::forward_list<T>& data) {
-    return toAnything_seq(dest, cursor, schema, data, std::distance(data.begin(), data.end()));
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::forward_list<T>& data) {
+    return seq_to_voidstar(dest, cursor, schema, data, std::distance(data.begin(), data.end()));
 }
 
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::deque<T>& data) {
-    return toAnything_seq(dest, cursor, schema, data, data.size());
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::deque<T>& data) {
+    return seq_to_voidstar(dest, cursor, schema, data, data.size());
 }
 
 // Stack and queue: convert to vector and delegate
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::queue<T>& data) {
-    return toAnything(dest, cursor, schema, to_vector(data));
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::queue<T>& data) {
+    return to_voidstar(dest, cursor, schema, to_vector(data));
 }
 
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::stack<T>& data) {
-    return toAnything(dest, cursor, schema, to_vector(data));
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::stack<T>& data) {
+    return to_voidstar(dest, cursor, schema, to_vector(data));
 }
 
 // String and C string
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::string& data) {
-    return binarytoAnything(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::string& data) {
+    return bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
 }
 
-void* toAnything(void* dest, void** cursor, const Schema* schema, const char* data) {
-    return binarytoAnything(dest, cursor, schema, (const uint8_t*)data, strlen(data));
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const char* data) {
+    return bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data, strlen(data));
 }
 
 // Tuple
 template<typename Tuple, size_t... Is>
-void* createTupleAnythingHelper(void* dest, const Schema* schema, void** cursor, const Tuple& data, std::index_sequence<Is...>) {
+void* tuple_to_voidstar(void* dest, const Schema* schema, void** cursor, const Tuple& data, std::index_sequence<Is...>) {
     // Each element's schema may be a Recur back-reference; resolve
     // before dispatch so user-generated overloads see the target.
     (void)std::initializer_list<int>{(
-        toAnything((char*)dest + schema->offsets[Is], cursor, resolve_recur_cpp(schema->parameters[Is]), std::get<Is>(data)),
+        to_voidstar((char*)dest + schema->offsets[Is], cursor, resolve_recur(schema->parameters[Is]), std::get<Is>(data)),
         0
     )...};
     return dest;
 }
 
 template<typename... Args>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::tuple<Args...>& data) {
-    return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence_for<Args...>{});
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::tuple<Args...>& data) {
+    return tuple_to_voidstar(dest, schema, cursor, data, std::index_sequence_for<Args...>{});
 }
 
 // Pair (reuses tuple helper since std::pair supports std::get)
 template<typename A, typename B>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::pair<A, B>& data) {
-    return createTupleAnythingHelper(dest, schema, cursor, data, std::index_sequence<0, 1>{});
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::pair<A, B>& data) {
+    return tuple_to_voidstar(dest, schema, cursor, data, std::index_sequence<0, 1>{});
 }
 
 // Optional
@@ -830,18 +830,18 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::pai
 // align the cursor for the inner T, write its relptr into the slot,
 // advance the cursor past T's width, then recurse to populate T.
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::optional<T>& data) {
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::optional<T>& data) {
     if (!data.has_value()) {
         *((relptr_t*)dest) = RELNULL;
     } else {
-        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const Schema* inner_schema = resolve_recur(schema->parameters[0]);
         size_t inner_align = schema_alignment_cpp(inner_schema);
         if (inner_align == 0) inner_align = 1;
         *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), inner_align));
         *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(*cursor));
         void* inner_dest = *cursor;
         *cursor = static_cast<char*>(*cursor) + inner_schema->width;
-        toAnything(inner_dest, cursor, inner_schema, *data);
+        to_voidstar(inner_dest, cursor, inner_schema, *data);
     }
     return dest;
 }
@@ -851,34 +851,34 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const std::opt
 // allocates the inner slot when present, and recurses into the
 // pointee. Mirrors the optional<T> overload above exactly.
 template<typename T>
-void* toAnything(void* dest, void** cursor, const Schema* schema, const std::shared_ptr<T>& data) {
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::shared_ptr<T>& data) {
     if (!data) {
         *((relptr_t*)dest) = RELNULL;
     } else {
-        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const Schema* inner_schema = resolve_recur(schema->parameters[0]);
         size_t inner_align = schema_alignment_cpp(inner_schema);
         if (inner_align == 0) inner_align = 1;
         *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), inner_align));
         *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(*cursor));
         void* inner_dest = *cursor;
         *cursor = static_cast<char*>(*cursor) + inner_schema->width;
-        toAnything(inner_dest, cursor, inner_schema, *data);
+        to_voidstar(inner_dest, cursor, inner_schema, *data);
     }
     return dest;
 }
 
 
 // ============================================================
-// fromAnything - single template with if constexpr dispatch
+// from_voidstar - single template with if constexpr dispatch
 // ============================================================
 
 // Forward declaration for recursive calls
 template<typename T>
-T fromAnything(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr);
+T from_voidstar(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr);
 
-// Tuple helper (needs forward declaration of fromAnything)
+// Tuple helper (needs forward declaration of from_voidstar)
 template<typename Tuple, size_t... Is>
-Tuple fromTupleAnythingHelper(
+Tuple tuple_from_voidstar(
   const Schema* schema,
   const void* anything,
   std::index_sequence<Is...>,
@@ -888,16 +888,16 @@ Tuple fromTupleAnythingHelper(
     // Resolve each element's schema (it may be a Recur back-reference)
     // so any user-defined struct overload sees the named target's
     // parameters/offsets rather than the empty back-ref node.
-    return Tuple(fromAnything(resolve_recur_cpp(schema->parameters[Is]),
+    return Tuple(from_voidstar(resolve_recur(schema->parameters[Is]),
                               (char*)anything + schema->offsets[Is],
                               static_cast<std::tuple_element_t<Is, Tuple>*>(nullptr),
                               base_ptr)...);
 }
 
 template<typename T>
-T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr) {
+T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr) {
     if(data == NULL){
-        throw std::runtime_error("Void error in fromAnything");
+        throw std::runtime_error("Void error in from_voidstar");
     }
 
     // Resolve a back-reference to the named declaration on the env
@@ -905,7 +905,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
     // every downstream read needs the resolved target. Push the
     // resolved schema's name (if any) onto the env so a sub-walk's
     // Recur back-ref finds it.
-    schema = resolve_recur_cpp(schema);
+    schema = resolve_recur(schema);
     RecurEnvScope _recur_scope(schema);
 
     if constexpr (std::is_same_v<T, bool>) {
@@ -929,7 +929,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         // schema Array<Recur(Tree)>) to the named declaration before
         // descending. User-generated struct overloads access
         // schema->offsets[] directly and would crash on a Recur.
-        const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
+        const Schema* elem_schema = resolve_recur(schema->parameters[0]);
 
         // Fast path for primitive arrays — only when C++ type width
         // matches schema width (e.g. both 8 bytes). When they differ
@@ -960,7 +960,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         result.reserve(array->size);
         char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
         for(size_t i = 0; i < array->size; i++){
-            result.push_back(fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr));
+            result.push_back(from_voidstar(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr));
         }
         return result;
     }
@@ -970,20 +970,20 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         T result;
         if(array->size == 0) return result;
 
-        const Schema* elem_schema = resolve_recur_cpp(schema->parameters[0]);
+        const Schema* elem_schema = resolve_recur(schema->parameters[0]);
         char* start = (char*)resolve_relptr_cpp(array->data, base_ptr);
 
         constexpr bool reverse = is_std_stack<T>::value || is_std_forward_list<T>::value;
 
         if constexpr (reverse) {
             for (size_t i = array->size; i > 0; --i) {
-                auto elem = fromAnything(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
+                auto elem = from_voidstar(elem_schema, (void*)(start + (i-1) * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
                 if constexpr (is_std_stack<T>::value) result.push(std::move(elem));
                 else result.push_front(std::move(elem));
             }
         } else {
             for (size_t i = 0; i < array->size; ++i) {
-                auto elem = fromAnything(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
+                auto elem = from_voidstar(elem_schema, (void*)(start + i * elem_schema->width), static_cast<ElemT*>(nullptr), base_ptr);
                 if constexpr (is_std_queue<T>::value) result.push(std::move(elem));
                 else result.push_back(std::move(elem));
             }
@@ -991,7 +991,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         return result;
     }
     else if constexpr (is_std_tuple<T>::value) {
-        return fromTupleAnythingHelper(
+        return tuple_from_voidstar(
             schema, data,
             std::make_index_sequence<std::tuple_size_v<T>>{},
             static_cast<T*>(nullptr),
@@ -999,7 +999,7 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         );
     }
     else if constexpr (is_std_pair<T>::value) {
-        return fromTupleAnythingHelper(
+        return tuple_from_voidstar(
             schema, data,
             std::index_sequence<0, 1>{},
             static_cast<T*>(nullptr),
@@ -1014,10 +1014,10 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         if (relptr == RELNULL) {
             return std::nullopt;
         }
-        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const Schema* inner_schema = resolve_recur(schema->parameters[0]);
         const void* inner_data = resolve_relptr_cpp(relptr, base_ptr);
         return std::optional<InnerT>(
-            fromAnything(inner_schema, inner_data, static_cast<InnerT*>(nullptr), base_ptr));
+            from_voidstar(inner_schema, inner_data, static_cast<InnerT*>(nullptr), base_ptr));
     }
     else if constexpr (is_std_shared_ptr<T>::value) {
         // shared_ptr<T> is the C++ surface form for `?T` at a recursive
@@ -1029,10 +1029,10 @@ T fromAnything(const Schema* schema, const void* data, T*, const void* base_ptr)
         if (relptr == RELNULL) {
             return std::shared_ptr<PointeeT>(nullptr);
         }
-        const Schema* inner_schema = resolve_recur_cpp(schema->parameters[0]);
+        const Schema* inner_schema = resolve_recur(schema->parameters[0]);
         const void* inner_data = resolve_relptr_cpp(relptr, base_ptr);
         return std::make_shared<PointeeT>(
-            fromAnything(inner_schema, inner_data, static_cast<PointeeT*>(nullptr), base_ptr));
+            from_voidstar(inner_schema, inner_data, static_cast<PointeeT*>(nullptr), base_ptr));
     }
     else if constexpr (std::is_arithmetic_v<T>) {
         // Primitives (int, double, float, etc.) — read at schema width and
@@ -1106,7 +1106,7 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str) {
     size_t msg_size = 0;
 
     try {
-        voidstar = toAnything(schema, data);
+        voidstar = to_voidstar(schema, data);
         pack_with_schema_cpp(voidstar, schema, &msgpack_data, &msg_size);
     } catch (...) {
         if (voidstar) shfree_cpp(voidstar);
@@ -1138,7 +1138,7 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
 
     T x;
     try {
-        x = fromAnything(schema, voidstar, static_cast<T*>(nullptr));
+        x = from_voidstar(schema, voidstar, static_cast<T*>(nullptr));
     } catch (...) {
         free_schema(schema);
         shfree_cpp(voidstar);

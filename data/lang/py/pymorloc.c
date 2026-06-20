@@ -34,7 +34,7 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     shm_tracker_count++;
 }
 
-static void flush_shm_tracker(void) {
+static void shm_tracker_flush(void) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
         // shm::shfree decrements the refcount and zeros the block on final
@@ -223,7 +223,7 @@ static int schema_to_npy_type(morloc_serial_type type) {
     }
 }
 
-PyObject* fromAnything(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
+PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
 
     PyObject* obj = NULL;
     // Push the schema's name (if it is a `&<name>X` declaration) onto
@@ -336,7 +336,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             // memcpy). For everything else (MORLOC_INT BigInt, MORLOC_STRING,
             // nested tuples/arrays/records, MORLOC_NIL, MORLOC_OPTIONAL) we
             // build an `np.empty(n, dtype=object)` and fill via recursive
-            // fromAnything per element. This preserves Functor's container
+            // from_voidstar per element. This preserves Functor's container
             // invariance: `map asString ([1,2,3] :: Vector 3 Int)` stays a
             // NumPy ndarray on both sides, the dtype just shifts from int64
             // to object.
@@ -361,7 +361,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             if (numpy_type_num == NPY_OBJECT) {
                 // Boxed path: build dtype=object array and fill via
-                // recursive fromAnything. Each slot stores a PyObject*
+                // recursive from_voidstar. Each slot stores a PyObject*
                 // pointer; SETITEM handles INCREF/DECREF correctly.
                 import_numpy();
                 npy_intp dims[] = {array->size};
@@ -375,7 +375,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
                         if (!item) {
                             PyRAISE("Failed to convert element for numpy object array");
                         }
@@ -436,7 +436,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             PyRAISE("Failed to access element in list")
                         }
@@ -470,7 +470,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             PyRAISE("Failed to access element in list");
                         }
@@ -488,7 +488,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* item = fromAnything(schema->parameters[i], item_ptr, base_ptr);
+                PyObject* item = from_voidstar(schema->parameters[i], item_ptr, base_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     PyRAISE("Failed to access tuple element");
                 }
@@ -502,7 +502,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* value = fromAnything(schema->parameters[i], item_ptr, base_ptr);
+                PyObject* value = from_voidstar(schema->parameters[i], item_ptr, base_ptr);
                 PyObject* key = PyUnicode_FromString(schema->keys[i]);
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
@@ -536,7 +536,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     goto error;
                 }
             }
-            obj = fromAnything(schema->parameters[0], inner_abs, base_ptr);
+            obj = from_voidstar(schema->parameters[0], inner_abs, base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize optional inner value");
             }
@@ -553,14 +553,14 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                 PyRAISE("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
-            obj = fromAnything(target, data, base_ptr);
+            obj = from_voidstar(target, data, base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize recursive value");
             }
             break;
         }
         default:
-            PyRAISE("Unsupported schema type %d in fromAnything", (int)schema->type);
+            PyRAISE("Unsupported schema type %d in from_voidstar", (int)schema->type);
     }
 
     recur_env_pop(_recur_pushed);
@@ -833,19 +833,19 @@ error:
 
 
 
-static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj);
+static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schema, PyObject* obj);
 
 // Public entry point: push the schema's declaration name (if any) and
 // delegate to the inner walker. The push/pop discipline lets Recur arms
 // inside the inner walker resolve via the env stack.
-int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+int to_voidstar_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
     int pushed = recur_env_push(schema);
-    int r = to_voidstar_r_inner(dest, cursor, schema, obj);
+    int r = to_voidstar_inner_impl(dest, cursor, schema, obj);
     recur_env_pop(pushed);
     return r;
 }
 
-static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
+static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
     switch (schema->type) {
         case MORLOC_NIL:
             if (obj != Py_None) {
@@ -1063,7 +1063,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                             // PyList_GetItem returns a BORROWED reference.
                             item = PyList_GetItem(obj, i);
                         }
-                        int rc = to_voidstar_r(start + width * i, cursor, element_schema, item);
+                        int rc = to_voidstar_inner(start + width * i, cursor, element_schema, item);
                         if (numpy_per_element) {
                             Py_DECREF(item);
                         }
@@ -1104,7 +1104,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
-                    if (to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item) != 0) {
+                    if (to_voidstar_inner((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item) != 0) {
                         goto error;
                     }
                 }
@@ -1122,7 +1122,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                     PyObject* value = PyDict_GetItem(obj, key);
                     Py_DECREF(key);
                     if (value) {
-                        if (to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value) != 0) {
+                        if (to_voidstar_inner((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value) != 0) {
                             goto error;
                         }
                     }
@@ -1150,7 +1150,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 }
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
-                if (to_voidstar_r(inner_dest, cursor, inner_schema, obj) != 0) {
+                if (to_voidstar_inner(inner_dest, cursor, inner_schema, obj) != 0) {
                     goto error;
                 }
             }
@@ -1166,14 +1166,14 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 PyRAISE("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
-            if (to_voidstar_r_inner(dest, cursor, target, obj) != 0) {
+            if (to_voidstar_inner_impl(dest, cursor, target, obj) != 0) {
                 goto error;
             }
             break;
         }
 
         default:
-            PyRAISE("Unsupported schema type %d in to_voidstar_r", (int)schema->type);
+            PyRAISE("Unsupported schema type %d in to_voidstar_inner", (int)schema->type);
     }
 
     return 0;
@@ -1198,7 +1198,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   void* cursor = (void*)((char*)dest + schema->width);
 
   // write the data to the block
-  int result = to_voidstar_r(dest, &cursor, schema, obj);
+  int result = to_voidstar_inner(dest, &cursor, schema, obj);
   if (result != 0) {
       goto error;
   }
@@ -1775,7 +1775,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // Fast path: inline voidstar -- read directly from packet, no SHM needed
     if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
-        obj = fromAnything(schema, (const void*)payload, (const void*)payload);
+        obj = from_voidstar(schema, (const void*)payload, (const void*)payload);
         PyTRACE(obj == NULL)
         free_schema(schema);
         return obj;
@@ -1797,7 +1797,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         tracked = true;
     }
 
-    obj = fromAnything(schema, voidstar, NULL);
+    obj = from_voidstar(schema, voidstar, NULL);
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -1816,9 +1816,9 @@ error:
 
 // Free tracked SHM allocations from put_value calls.
 // Called at dispatch start to free result SHM from previous dispatch.
-static PyObject* pybinding__flush_shm_tracker(PyObject* self, PyObject* args) {
+static PyObject* pybinding__shm_tracker_flush(PyObject* self, PyObject* args) {
     (void)self; (void)args;
-    flush_shm_tracker();
+    shm_tracker_flush();
     Py_RETURN_NONE;
 }
 
@@ -2240,7 +2240,7 @@ error:
 }
 
 
-static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { MAYFAIL
+static PyObject* pybinding__make_fail_packet(PyObject* self, PyObject* args) { MAYFAIL
     const char* packet_errmsg;
     uint8_t* packet = NULL;
 
@@ -2493,12 +2493,12 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        // The numpy fast-path in fromAnything (base_ptr == NULL) returns a
+        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
         // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
         // backing memory must outlive the view. Defer the shfree via
         // shm_tracker so the dispatch's flush releases the block (and the
         // schema) once the view is no longer in scope.
-        PyObject* obj = fromAnything(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -2540,12 +2540,12 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        // The numpy fast-path in fromAnything (base_ptr == NULL) returns a
+        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
         // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
         // backing memory must outlive the view. Defer the shfree via
         // shm_tracker so the dispatch's flush releases the block (and the
         // schema) once the view is no longer in scope.
-        PyObject* obj = fromAnything(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -2587,7 +2587,7 @@ static PyMethodDef Methods[] = {
     {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
-    {"flush_shm_tracker", pybinding__flush_shm_tracker, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
+    {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
     {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
     {"debug_record_frame", pybinding__debug_record_frame, METH_VARARGS, "Append a manifold's args to the debug-trace stack"},
     {"debug_drain_frames", pybinding__debug_drain_frames, METH_NOARGS, "Drain the debug-trace stack and return as a string, or None"},
@@ -2599,7 +2599,7 @@ static PyMethodDef Methods[] = {
     {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
-    {"make_fail_packet", pybinding__make_fail_packetg, METH_VARARGS, "Create a fail packet from an error message"},
+    {"make_fail_packet", pybinding__make_fail_packet, METH_VARARGS, "Create a fail packet from an error message"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
     {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},

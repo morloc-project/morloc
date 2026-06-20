@@ -276,9 +276,9 @@ printStructTypedef params rname fields = vsep [template, struct]
         (vsep [t <+> k <> ";" | (k, t) <- fields])
         <> ";"
 
--- | Render a C++ serializer (toAnything) for a struct.
+-- | Render a C++ serializer (to_voidstar) for a struct.
 --
--- Writes each field directly via per-field toAnything calls instead of
+-- Writes each field directly via per-field to_voidstar calls instead of
 -- wrapping the whole record in a `std::make_tuple` and re-dispatching to
 -- the tuple overload. The tuple form needed to copy/move every field
 -- into the temporary tuple, which fails to compile when a field is
@@ -293,7 +293,7 @@ printSerializer ::
 printSerializer params rtype fields =
   [idoc|
 #{printTemplateHeader params}
-void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
 #{block 4 "" (vsep (zipWith assignField [0 ..] (map fst fields)))}
     return dest;
@@ -302,9 +302,9 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}
   where
     assignField :: Int -> MDoc -> MDoc
     assignField idx key =
-      [idoc|toAnything((char*)dest + schema->offsets[#{pretty idx}], cursor, schema->parameters[#{pretty idx}], obj.#{key});|]
+      [idoc|to_voidstar((char*)dest + schema->offsets[#{pretty idx}], cursor, schema->parameters[#{pretty idx}], obj.#{key});|]
 
--- | Render a C++ deserializer (fromAnything + get_shm_size) for a struct.
+-- | Render a C++ deserializer (from_voidstar + get_shm_size) for a struct.
 printDeserializer ::
   Bool -> -- build object with constructor
   [MDoc] -> -- template parameters
@@ -321,7 +321,7 @@ printDeserializer _ params rtype fields =
 |]
   where
     header =
-      [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr, const void* base_ptr = nullptr)|]
+      [idoc|#{rtype} from_voidstar(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr, const void* base_ptr = nullptr)|]
     body =
       vsep $
         [[idoc|#{rtype} obj;|]]
@@ -332,7 +332,7 @@ printDeserializer _ params rtype fields =
     assignFields idx (keyName, keyType) =
       vsep
         [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
-        , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName}, base_ptr);|]
+        , [idoc|obj.#{keyName} = from_voidstar(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName}, base_ptr);|]
         ]
 
     headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
