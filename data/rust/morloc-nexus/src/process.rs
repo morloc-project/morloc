@@ -405,6 +405,99 @@ pub fn set_tmpdir(path: String) {
     let _ = TMPDIR.set(path);
 }
 
+/// Initialize the per-process SHM segment: make the tmpdir, sweep
+/// stale SHM volumes left by prior crashes, and call libmorloc's
+/// `shinit`. Returns `(tmpdir, shm_basename)`. Exits the process via
+/// [`clean_exit`] on any failure.
+pub fn init_shm() -> (String, String) {
+    let tmpdir = match make_tmpdir() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    set_tmpdir(tmpdir.clone());
+    cleanup_stale_shm();
+
+    let job_hash = make_job_hash(42);
+    // PID is embedded so cleanup_stale_shm() can identify orphans
+    // without reading SHM headers.
+    let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
+
+    extern "C" {
+        fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
+        fn shinit(
+            shm_basename: *const std::ffi::c_char,
+            volume_index: usize,
+            shm_size: usize,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    let tmpdir_c = std::ffi::CString::new(tmpdir.as_str()).unwrap();
+    let basename_c = std::ffi::CString::new(shm_basename.as_str()).unwrap();
+    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+    unsafe {
+        shm_set_fallback_dir(tmpdir_c.as_ptr());
+        let shm = shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
+        if shm.is_null() {
+            let msg = if !errmsg.is_null() {
+                let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
+                libc::free(errmsg as *mut std::ffi::c_void);
+                s
+            } else {
+                "unknown error".into()
+            };
+            eprintln!("Error: failed to initialize shared memory: {}", msg);
+            clean_exit(1);
+        }
+    }
+    (tmpdir, shm_basename)
+}
+
+/// Apply the `-o FILE` redirect by `dup2`ing a freshly-opened file
+/// onto STDOUT_FILENO. No-op when `path` is `None`. Exits via
+/// [`clean_exit`] on any open/dup2 failure. Used by both `run` and
+/// `view` so the redirect covers every output writer uniformly
+/// (Rust, libc printf, raw fd writes).
+pub fn redirect_stdout_to(path: Option<&str>) {
+    let Some(path) = path else { return };
+    use std::os::unix::io::AsRawFd;
+    match std::fs::File::create(path) {
+        Ok(f) => {
+            let rc = unsafe { libc::dup2(f.as_raw_fd(), libc::STDOUT_FILENO) };
+            if rc == -1 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Error: cannot redirect stdout to '{}': {}", path, err);
+                clean_exit(1);
+            }
+            // Drop the File handle so the original fd is closed; the
+            // dup2'd fd 1 keeps the file alive.
+            drop(f);
+        }
+        Err(e) => {
+            eprintln!("Error: cannot open output file '{}': {}", path, e);
+            clean_exit(1);
+        }
+    }
+}
+
+/// Convert a libmorloc-allocated C error string into an owned Rust
+/// `String` and `libc::free` the source pointer. Returns `None` if
+/// the pointer is null. Centralizes the FFI errmsg-consume pattern
+/// every callsite ends up needing.
+pub fn take_c_errmsg(p: *mut std::ffi::c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let owned = unsafe { std::ffi::CStr::from_ptr(p) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { libc::free(p as *mut std::ffi::c_void) };
+    Some(owned)
+}
+
 /// Get the tmpdir path.
 pub fn get_tmpdir() -> Option<&'static str> {
     TMPDIR.get().map(|s| s.as_str())

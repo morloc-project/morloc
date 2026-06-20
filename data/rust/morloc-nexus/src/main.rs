@@ -6,12 +6,15 @@
 
 mod cli;
 mod dispatch;
+mod file;
 mod help;
+mod loader;
 mod manifest;
 mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod view;
 
 use dispatch::NexusConfig;
 
@@ -51,6 +54,20 @@ fn main() {
     let user_zone: Vec<String>;
 
     let invocation = cli::parse_invocation();
+
+    // `file` and `view` need no manifest, no pool spawning, no signal
+    // handlers. Dispatch them before the manifest-mode plumbing below.
+    // `view` does need SHM because the loader may produce SHM-backed
+    // voidstar values.
+    match invocation.nexus.cmd {
+        cli::Mode::File(ref fargs) => file::run(fargs),
+        cli::Mode::View(ref vargs) => {
+            process::init_shm();
+            view::run(vargs);
+        }
+        _ => {}
+    }
+
     let mut manifest = match invocation.manifest {
         Some(m) => m,
         None => {
@@ -101,6 +118,9 @@ fn main() {
             manifest_path = invocation.manifest_path.clone();
             user_zone = Vec::new();
         }
+        cli::Mode::File(_) | cli::Mode::View(_) => unreachable!(
+            "File/View dispatched before manifest setup"
+        ),
     }
 
     let prog_name = std::path::Path::new(&manifest_path)
@@ -217,61 +237,13 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Setup tmpdir and SHM
-    let tmpdir = match process::make_tmpdir() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
-    process::set_tmpdir(tmpdir.clone());
-
-    // Reap orphaned SHM segments from previous runs (SIGKILLed nexus,
-    // crashed tests, etc.) before we create our own. Best-effort.
-    process::cleanup_stale_shm();
-
-    let job_hash = process::make_job_hash(42);
-    // PID is embedded in the basename so cleanup_stale_shm() can identify
-    // orphans without reading the SHM headers.
-    let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
-
     // Initialize shared memory. The nexus no longer statically links
-    // morloc-runtime as an rlib, so these `extern "C"` symbols resolve
-    // at load time via DT_NEEDED against the single process-shared
-    // copy in libmorloc.so. The dlsym workaround that used to live
-    // here is gone -- it existed only to bypass symbol shadowing by
-    // the rlib's static copy of shinit, which is now absent.
-    {
-        extern "C" {
-            fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
-            fn shinit(
-                shm_basename: *const std::ffi::c_char,
-                volume_index: usize,
-                shm_size: usize,
-                errmsg: *mut *mut std::ffi::c_char,
-            ) -> *mut std::ffi::c_void;
-        }
-
-        let tmpdir_c = std::ffi::CString::new(tmpdir.as_str()).unwrap();
-        let basename_c = std::ffi::CString::new(shm_basename.as_str()).unwrap();
-        let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
-        unsafe {
-            shm_set_fallback_dir(tmpdir_c.as_ptr());
-            let shm = shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
-            if shm.is_null() {
-                let msg = if !errmsg.is_null() {
-                    let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
-                    libc::free(errmsg as *mut std::ffi::c_void);
-                    s
-                } else {
-                    "unknown error".into()
-                };
-                eprintln!("Error: failed to initialize shared memory: {}", msg);
-                process::clean_exit(1);
-            }
-        }
-    }
+    // morloc-runtime as an rlib, so the `shinit` FFI symbol resolves at
+    // load time via DT_NEEDED against the single process-shared copy in
+    // libmorloc.so. The dlsym workaround that used to live here is gone
+    // -- it existed only to bypass symbol shadowing by the rlib's static
+    // copy of shinit, which is now absent.
+    let (tmpdir, shm_basename) = process::init_shm();
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -308,36 +280,10 @@ fn main() {
 
     // Normal CLI mode
     if config.packet_path.is_none() {
-        // Redirect stdout to the file given via -o/--output-file. Done
-        // at the fd level so the redirect applies uniformly to every
-        // output path (Rust println! through json.rs, raw byte writes
-        // for mpk, C-side printf in the Arrow JSON path, etc.) without
-        // changing each print site. clean_exit flushes both Rust and
-        // libc stdout before std::process::exit.
-        //
         // Scoped to normal CLI dispatch only: call-packet mode already
         // honors output_path internally (writes a sibling .mpk file
         // via write_atomic) and must not have its stdout hijacked.
-        if let Some(ref path) = config.output_path {
-            use std::os::unix::io::AsRawFd;
-            match std::fs::File::create(path) {
-                Ok(f) => {
-                    let rc = unsafe { libc::dup2(f.as_raw_fd(), libc::STDOUT_FILENO) };
-                    if rc == -1 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!("Error: cannot redirect stdout to '{}': {}", path, err);
-                        process::clean_exit(1);
-                    }
-                    // Drop the File handle so the original fd is closed;
-                    // the dup2'd fd 1 keeps the file alive.
-                    drop(f);
-                }
-                Err(e) => {
-                    eprintln!("Error: cannot open output file '{}': {}", path, e);
-                    process::clean_exit(1);
-                }
-            }
-        }
+        process::redirect_stdout_to(config.output_path.as_deref());
 
         // Route through the manifest-driven parser. `user_zone`
         // holds the post-`@` (or post-target) slice that the

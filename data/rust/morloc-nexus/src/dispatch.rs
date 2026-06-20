@@ -460,13 +460,8 @@ fn run_remote_command(
         unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 
         if c_pkt.is_null() {
-            let msg = if !errmsg.is_null() {
-                let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
-                unsafe { libc::free(errmsg as *mut std::ffi::c_void) };
-                s
-            } else {
-                "unknown error".into()
-            };
+            let msg = process::take_c_errmsg(errmsg)
+                .unwrap_or_else(|| "unknown error".into());
             crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
@@ -583,13 +578,8 @@ fn run_remote_command(
         get_morloc_data_packet_value(full_packet.as_ptr(), c_schema, &mut errmsg)
     };
     if result_ptr.is_null() {
-        let msg = if !errmsg.is_null() {
-            let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
-            unsafe { libc::free(errmsg as *mut std::ffi::c_void) };
-            s
-        } else {
-            "unknown error".into()
-        };
+        let msg = process::take_c_errmsg(errmsg)
+            .unwrap_or_else(|| "unknown error".into());
         eprintln!("Error: failed to extract result: {}", msg);
         unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
         process::clean_exit(1);
@@ -607,7 +597,7 @@ fn run_remote_command(
 }
 
 /// Print using the C library functions for correct voidstar handling.
-fn print_result_c(
+pub(crate) fn print_result_c(
     ptr: *mut u8,
     schema: *const morloc_runtime_types::cschema::CSchema,
     full_packet: &[u8],
@@ -660,13 +650,8 @@ fn print_result_c(
                 }
             };
             if !ok {
-                let msg = if !errmsg.is_null() {
-                    let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
-                    unsafe { libc::free(errmsg as *mut std::ffi::c_void) };
-                    s
-                } else {
-                    "unknown error".into()
-                };
+                let msg = process::take_c_errmsg(errmsg)
+                    .unwrap_or_else(|| "unknown error".into());
                 eprintln!("Error: {}", msg);
                 process::clean_exit(1);
             }
@@ -757,14 +742,8 @@ fn print_result_c(
             };
             drop(lock);
             if n < 0 {
-                let msg = if !nerr.is_null() {
-                    let s = unsafe { std::ffi::CStr::from_ptr(nerr) }
-                        .to_string_lossy().into_owned();
-                    unsafe { libc::free(nerr as *mut std::ffi::c_void) };
-                    s
-                } else {
-                    "unknown error".into()
-                };
+                let msg = process::take_c_errmsg(nerr)
+                    .unwrap_or_else(|| "unknown error".into());
                 eprintln!("Error: packet normalization failed: {}", msg);
                 process::clean_exit(1);
             }
@@ -817,14 +796,8 @@ fn print_result_c(
                 }
             };
             if rc != 0 || buf.is_null() {
-                let msg = if !err.is_null() {
-                    let s = unsafe { std::ffi::CStr::from_ptr(err) }
-                        .to_string_lossy().into_owned();
-                    unsafe { libc::free(err as *mut std::ffi::c_void) };
-                    s
-                } else {
-                    "unknown error".into()
-                };
+                let msg = process::take_c_errmsg(err)
+                    .unwrap_or_else(|| "unknown error".into());
                 eprintln!("Error: {}", msg);
                 process::clean_exit(1);
             }
@@ -886,14 +859,8 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
         let h = unsafe { morloc_eval_arena_enter(&mut err) };
         if h.is_null() {
-            let msg = if !err.is_null() {
-                let s =
-                    unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
-                unsafe { libc::free(err as *mut std::ffi::c_void) };
-                s
-            } else {
-                "unknown error".into()
-            };
+            let msg = process::take_c_errmsg(err)
+                .unwrap_or_else(|| "unknown error".into());
             eprintln!("Error: eval arena could not be opened: {}", msg);
             process::clean_exit(1);
         }
@@ -950,7 +917,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
     let expr = unsafe { build_manifest_expr(expr_c.as_ptr(), &mut errmsg) };
     if expr.is_null() {
-        let msg = unsafe_errmsg_to_string(errmsg);
+        let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "unknown error".into());
         eprintln!("Error: failed to build expression: {}", msg);
         process::clean_exit(1);
     }
@@ -1017,14 +984,14 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         };
 
         if c_pkt.is_null() {
-            let msg = unsafe_errmsg_to_string(errmsg);
+            let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "unknown error".into());
             crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
         let voidstar = unsafe { get_morloc_data_packet_value(c_pkt, c_schema, &mut errmsg) };
         unsafe { libc::free(c_pkt as *mut std::ffi::c_void) };
         if voidstar.is_null() {
-            let msg = unsafe_errmsg_to_string(errmsg);
+            let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "unknown error".into());
             eprintln!("Error: failed to extract argument #{}: {}", i, msg);
             process::clean_exit(1);
         }
@@ -1046,7 +1013,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     };
 
     if result.is_null() {
-        let msg = unsafe_errmsg_to_string(errmsg);
+        let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "unknown error".into());
         crate::runlog::die_with_error(&format!("evaluation failed: {}", msg));
     }
 
@@ -1080,17 +1047,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         libc::free(result_packet as *mut std::ffi::c_void);
     }
 }
-
-fn unsafe_errmsg_to_string(errmsg: *mut std::ffi::c_char) -> String {
-    if errmsg.is_null() {
-        "unknown error".into()
-    } else {
-        let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
-        unsafe { libc::free(errmsg as *mut std::ffi::c_void) };
-        s
-    }
-}
-
 
 #[cfg(test)]
 mod tests {

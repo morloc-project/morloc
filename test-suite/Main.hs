@@ -186,6 +186,7 @@ main = do
       , golden "nexus-let-pure" "nexus-let-pure"
       , golden "nexus-let-lambda" "nexus-let-lambda"
       , golden "nexus-toplevel-null" "nexus-toplevel-null"
+      , golden "nexus-file-and-view" "nexus-file-and-view"
       , golden "demo-trimming" "demo-trimming"
       , golden "formatting" "formatting"
       , golden "record-docstrings" "record-docstrings"

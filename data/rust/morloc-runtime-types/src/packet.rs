@@ -56,6 +56,59 @@ pub const PACKET_STATUS_FAIL: u8 = 0x01;
 pub const PACKET_ENTRYPOINT_LOCAL: u8 = 0x00;
 pub const PACKET_ENTRYPOINT_REMOTE_SFS: u8 = 0x01;
 
+// ── Lower-case display names for the packet-byte constants above. ──────────
+//
+// Single source of truth for the strings used by `morloc-nexus file`,
+// FFI error messages, and any future tooling. Returns `"unknown"`
+// for unrecognized bytes rather than panicking — these are derived
+// from on-disk packets that may carry future / corrupt values.
+
+pub const fn packet_type_name(t: u8) -> &'static str {
+    match t {
+        PACKET_TYPE_DATA => "data",
+        PACKET_TYPE_CALL => "call",
+        PACKET_TYPE_PING => "ping",
+        _ => "unknown",
+    }
+}
+
+pub const fn packet_source_name(s: u8) -> &'static str {
+    match s {
+        PACKET_SOURCE_MESG => "mesg",
+        PACKET_SOURCE_FILE => "file",
+        PACKET_SOURCE_RPTR => "rptr",
+        _ => "unknown",
+    }
+}
+
+pub const fn packet_format_name(f: u8) -> &'static str {
+    match f {
+        PACKET_FORMAT_JSON => "json",
+        PACKET_FORMAT_MSGPACK => "msgpack",
+        PACKET_FORMAT_TEXT => "text",
+        PACKET_FORMAT_DATA => "data",
+        PACKET_FORMAT_VOIDSTAR => "voidstar",
+        PACKET_FORMAT_ARROW => "arrow",
+        _ => "unknown",
+    }
+}
+
+pub const fn packet_compression_name(c: u8) -> &'static str {
+    match c {
+        PACKET_COMPRESSION_NONE => "none",
+        PACKET_COMPRESSION_ZSTD => "zstd",
+        _ => "unknown",
+    }
+}
+
+pub const fn packet_entrypoint_name(e: u8) -> &'static str {
+    match e {
+        PACKET_ENTRYPOINT_LOCAL => "local",
+        PACKET_ENTRYPOINT_REMOTE_SFS => "remote_sfs",
+        _ => "unknown",
+    }
+}
+
 // ── Inline-threshold default ───────────────────────────────────────────────
 
 // Compile-time default for the inline threshold. The effective runtime
@@ -551,70 +604,90 @@ pub fn get_error_message(packet: &[u8]) -> Result<Option<String>, MorlocError> {
     Ok(Some(String::from_utf8_lossy(payload).into_owned()))
 }
 
-/// Read the Layer 3 vol_idx hint from packet metadata, if present.
-pub fn read_vol_index_from_meta(packet: &[u8]) -> Result<Option<u16>, MorlocError> {
+/// Iterator over the entries of a metadata block. Each entry is
+/// `(metadata_type, data)` — the type byte from the entry header and
+/// a borrow of the entry's payload bytes. Iteration stops on the
+/// first non-`mmh` magic or on size overflow past `meta`'s end.
+///
+/// The input is the metadata block ALONE (not a full packet); for a
+/// full packet the caller slices `&packet[32..32 + header.offset]`.
+pub struct MetadataIter<'a> {
+    meta: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for MetadataIter<'a> {
+    type Item = (u8, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos + 8 > self.meta.len() {
+            return None;
+        }
+        if self.meta[self.pos..self.pos + 3] != METADATA_HEADER_MAGIC {
+            return None;
+        }
+        let meta_type = self.meta[self.pos + 3];
+        let meta_size = u32::from_le_bytes([
+            self.meta[self.pos + 4],
+            self.meta[self.pos + 5],
+            self.meta[self.pos + 6],
+            self.meta[self.pos + 7],
+        ]) as usize;
+        let data_start = self.pos + 8;
+        let data_end = data_start.checked_add(meta_size)?;
+        if data_end > self.meta.len() {
+            return None;
+        }
+        self.pos = data_end;
+        Some((meta_type, &self.meta[data_start..data_end]))
+    }
+}
+
+/// Iterate the entries of a standalone metadata block (NOT a full
+/// packet). See [`iter_packet_metadata`] for the full-packet form.
+pub fn iter_metadata(meta: &[u8]) -> MetadataIter<'_> {
+    MetadataIter { meta, pos: 0 }
+}
+
+/// Iterate the entries of a full packet's metadata section. Errors
+/// on a too-small or invalid-header packet; returns an empty iterator
+/// when the packet declares no metadata.
+pub fn iter_packet_metadata(packet: &[u8]) -> Result<MetadataIter<'_>, MorlocError> {
     if packet.len() < 32 {
         return Err(MorlocError::Packet("packet too small".into()));
     }
     let header = PacketHeader::from_bytes(packet[..32].try_into().unwrap())?;
     let offset = { header.offset } as usize;
-    if offset == 0 {
-        return Ok(None);
-    }
-    let meta_start = 32;
-    let meta_end = meta_start + offset;
-    let mut pos = meta_start;
-    while pos + 8 <= meta_end {
-        if packet[pos] != b'm' || packet[pos + 1] != b'm' || packet[pos + 2] != b'h' {
-            break;
+    let meta_end = 32usize
+        .checked_add(offset)
+        .filter(|&e| e <= packet.len())
+        .ok_or_else(|| MorlocError::Packet("metadata extends past packet end".into()))?;
+    Ok(iter_metadata(&packet[32..meta_end]))
+}
+
+/// Decode a null-terminated UTF-8 (lossy) string from the payload of
+/// a `METADATA_TYPE_SCHEMA_STRING` entry. Re-used by every metadata
+/// scanner that needs the schema text.
+pub fn decode_schema_entry(data: &[u8]) -> String {
+    let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    String::from_utf8_lossy(&data[..len]).into_owned()
+}
+
+/// Read the Layer 3 vol_idx hint from packet metadata, if present.
+pub fn read_vol_index_from_meta(packet: &[u8]) -> Result<Option<u16>, MorlocError> {
+    for (kind, data) in iter_packet_metadata(packet)? {
+        if kind == METADATA_TYPE_VOL_INDEX && data.len() >= 2 {
+            return Ok(Some(u16::from_le_bytes([data[0], data[1]])));
         }
-        let meta_type = packet[pos + 3];
-        let meta_size = u32::from_le_bytes([
-            packet[pos + 4], packet[pos + 5], packet[pos + 6], packet[pos + 7],
-        ]) as usize;
-        if meta_type == METADATA_TYPE_VOL_INDEX && meta_size >= 2 && pos + 8 + 2 <= meta_end {
-            let v = u16::from_le_bytes([packet[pos + 8], packet[pos + 9]]);
-            return Ok(Some(v));
-        }
-        pos += 8 + meta_size;
     }
     Ok(None)
 }
 
 /// Read the schema string from packet metadata section.
 pub fn read_schema_from_meta(packet: &[u8]) -> Result<Option<String>, MorlocError> {
-    if packet.len() < 32 {
-        return Err(MorlocError::Packet("packet too small".into()));
-    }
-    let header = PacketHeader::from_bytes(packet[..32].try_into().unwrap())?;
-    let offset = { header.offset } as usize;
-    if offset == 0 {
-        return Ok(None);
-    }
-
-    // Scan metadata headers
-    let meta_start = 32;
-    let meta_end = meta_start + offset;
-    let mut pos = meta_start;
-    while pos + 8 <= meta_end {
-        if packet[pos] == b'm' && packet[pos + 1] == b'm' && packet[pos + 2] == b'h' {
-            let meta_type = packet[pos + 3];
-            let meta_size = u32::from_le_bytes([
-                packet[pos + 4], packet[pos + 5], packet[pos + 6], packet[pos + 7],
-            ]) as usize;
-            if meta_type == METADATA_TYPE_SCHEMA_STRING {
-                let str_start = pos + 8;
-                let str_end = str_start + meta_size;
-                if str_end <= meta_end {
-                    let bytes = &packet[str_start..str_end];
-                    // Find null terminator
-                    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                    return Ok(Some(String::from_utf8_lossy(&bytes[..len]).into_owned()));
-                }
-            }
-            pos += 8 + meta_size;
-        } else {
-            break;
+    for (kind, data) in iter_packet_metadata(packet)? {
+        if kind == METADATA_TYPE_SCHEMA_STRING {
+            return Ok(Some(decode_schema_entry(data)));
         }
     }
     Ok(None)

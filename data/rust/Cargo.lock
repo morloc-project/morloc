@@ -832,6 +832,7 @@ dependencies = [
  "morloc-manifest",
  "morloc-runtime-types",
  "nix",
+ "rmp",
  "serde",
  "serde_json",
  "thiserror",

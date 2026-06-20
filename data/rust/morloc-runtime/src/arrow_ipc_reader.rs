@@ -1137,6 +1137,106 @@ fn csv_sniff_rows() -> Option<usize> {
     }
 }
 
+/// Map an arrow DataType to a short category morloc-nexus's `file`
+/// surface displays. Collapses every numeric width, every text width,
+/// and the date/time family to a single label so the displayed
+/// schema stays scannable.
+fn arrow_type_category(dt: &arrow_schema::DataType) -> &'static str {
+    use arrow_schema::DataType::*;
+    match dt {
+        Int8 | Int16 | Int32 | Int64
+        | UInt8 | UInt16 | UInt32 | UInt64 => "int",
+        Float16 | Float32 | Float64 => "float",
+        Utf8 | LargeUtf8 | Utf8View => "str",
+        Boolean => "bool",
+        Date32 | Date64 => "date",
+        Time32(_) | Time64(_) | Timestamp(_, _) | Duration(_) | Interval(_) => "time",
+        _ => "other",
+    }
+}
+
+/// Dry-run CSV / TSV inference: confirms the bytes parse as a valid
+/// CSV (header + at least one record) under the given delimiter, and
+/// reports the inferred column schema as a JSON string. Used by
+/// `morloc-nexus file` to classify CSV inputs with the same parser
+/// the runtime uses for actual ingest, so a file that `file` flags
+/// as CSV is one `view`/`run` can also read.
+///
+/// `out_info` (on success) receives a libc-allocated, null-terminated
+/// JSON string of the form
+/// `{"columns":[{"name":"a","type":"int"}, ...]}`.
+/// The caller is responsible for `libc::free`-ing it. The JSON
+/// always includes every column; the simplified type categories are
+/// `int` / `float` / `str` / `bool` / `date` / `time` / `other`.
+///
+/// On failure, `errmsg` carries the arrow-csv inference error
+/// verbatim (line / column info, type-conflict description, etc.)
+/// for surfacing to the user. No allocation in SHM, no schema
+/// required.
+///
+/// # Safety
+/// `data` must point to `data_len` valid bytes. `out_info` and
+/// `errmsg` must be valid `*mut *mut c_char`.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_csv_infer(
+    data: *const u8,
+    data_len: usize,
+    delimiter: u8,
+    out_info: *mut *mut std::ffi::c_char,
+    errmsg: *mut *mut std::ffi::c_char,
+) -> bool {
+    clear_errmsg(errmsg);
+    unsafe { *out_info = ptr::null_mut() };
+    if data.is_null() || data_len == 0 {
+        set_errmsg(errmsg, &MorlocError::Other("empty input".into()));
+        return false;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, data_len) };
+    let format = arrow_csv::reader::Format::default()
+        .with_header(true)
+        .with_delimiter(delimiter);
+    let mut cursor = Cursor::new(bytes);
+    let schema = match format.infer_schema(&mut cursor, csv_sniff_rows()) {
+        Ok((s, _records_read)) => s,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(format!("{}", e)));
+            return false;
+        }
+    };
+    let columns: Vec<serde_json::Value> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name(),
+                "type": arrow_type_category(f.data_type()),
+            })
+        })
+        .collect();
+    let json = serde_json::Value::Object(
+        [(
+            "columns".to_string(),
+            serde_json::Value::Array(columns),
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .to_string();
+    // Allocate via libc::malloc so the caller can free with libc::free.
+    let bytes = json.as_bytes();
+    let buf = unsafe { libc::malloc(bytes.len() + 1) as *mut u8 };
+    if buf.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("malloc failed for csv info".into()));
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+        *buf.add(bytes.len()) = 0;
+        *out_info = buf as *mut std::ffi::c_char;
+    }
+    true
+}
+
 /// Read a CSV / TSV file into the morloc Arrow SHM layout.
 ///
 /// Open Table semantics: the morloc target type is a constraint on
