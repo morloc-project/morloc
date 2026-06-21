@@ -51,26 +51,19 @@ all:
 	./nexus litNaN >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S8: JSON decode of non-finite string forms (CLI -> Real) ===" >> obs.txt
-	./nexus realId '"inf"' >> obs.txt
-	./nexus realId '"-inf"' >> obs.txt
-	./nexus realId '"nan"' >> obs.txt
-	./nexus realId '"Infinity"' >> obs.txt
-	./nexus realId '"-Infinity"' >> obs.txt
-	./nexus realId '"NaN"' >> obs.txt
-	./nexus realId '"+inf"' >> obs.txt
-	echo "" >> obs.txt
-	echo "=== S9: legacy null decode (best-effort recovery -> NaN) ===" >> obs.txt
-	./nexus realId 'null' >> obs.txt
+	./nexus realId "inf" >> obs.txt
+	./nexus realId "\-inf" >> obs.txt
+	./nexus realId "nan" >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S10: invalid Real strings reject ===" >> obs.txt
-	./nexus realId '"hello"' >> obs.txt 2>/dev/null || echo "PARSE_ERROR" >> obs.txt
-	./nexus realId '"infinit"' >> obs.txt 2>/dev/null || echo "PARSE_ERROR" >> obs.txt
+	./nexus realId "hello" >> obs.txt 2>/dev/null || echo "PARSE_ERROR" >> obs.txt
+	./nexus realId "infinit" >> obs.txt 2>/dev/null || echo "PARSE_ERROR" >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S11: Float32 round-trip incl. non-finites ===" >> obs.txt
 	./nexus f32Id 3.14 >> obs.txt
-	./nexus f32Id '"inf"' >> obs.txt
-	./nexus f32Id '"-inf"' >> obs.txt
-	./nexus f32Id '"nan"' >> obs.txt
+	./nexus f32Id "inf" >> obs.txt
+	./nexus f32Id "\-inf" >> obs.txt
+	./nexus f32Id "nan" >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S12: Python IEEE-754 arithmetic on Inf / -Inf / NaN ===" >> obs.txt
 	./nexus pyInfPlusInf >> obs.txt

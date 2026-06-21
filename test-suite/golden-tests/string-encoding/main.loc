@@ -1,6 +1,8 @@
 module main (foor, fooc, foop)
 
-import root ((.))
+import root-py
+import root-cpp
+import root-r
 
 source Py from "foo.py" ("mlc_foo" as pfoo)
 source Cpp from "foo.hpp" ("mlc_foo" as cfoo)
@@ -10,15 +12,11 @@ pfoo :: a -> a
 cfoo :: a -> a
 rfoo :: a -> a
 
-type Py => Str = "str"
-type Cpp => Str = "std::string"
-type R => Str = "character"
+foor :: (Int, Str) -> Str
+foor = rfoo . rfoo . .1
 
-foor :: Str -> Str
-foor = rfoo . rfoo
+fooc :: (Int, Str) -> Str
+fooc = cfoo . cfoo . .1
 
-fooc :: Str -> Str
-fooc = cfoo . cfoo
-
-foop :: Str -> Str
-foop = pfoo . pfoo
+foop :: (Int, Str) -> Str
+foop = pfoo . pfoo . .1

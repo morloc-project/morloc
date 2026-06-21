@@ -101,6 +101,7 @@ pub fn add_general_options(cmd: ClapCommand) -> ClapCommand {
         .long_help("Print help (see a summary with '-h')")
         .help_heading("General Options");
     cmd.disable_help_flag(true)
+        .disable_help_subcommand(true)
         .styles(PLAIN_STYLES)
         .arg(help_arg)
 }

@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- auto reaches a fallback for every input, so the second atom is unreachable.
+foo ::
+  --' source: auto
+  --' form: auto|packet
+  Int ->
+  Int
+foo x = 0

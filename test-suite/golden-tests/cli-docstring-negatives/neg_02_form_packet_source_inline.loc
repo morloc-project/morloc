@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- form: packet requires file/auto, not inline.
+foo ::
+  --' source: inline
+  --' form: packet
+  Int ->
+  Int
+foo x = 0

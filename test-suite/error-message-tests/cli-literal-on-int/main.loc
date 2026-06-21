@@ -5,7 +5,6 @@ module main (f)
 
 f ::
   --' arg: -i
-  --' literal: true
   --' default: 0
   Int ->
   Int

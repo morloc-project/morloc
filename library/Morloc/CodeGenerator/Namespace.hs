@@ -1677,6 +1677,12 @@ data ArgOptDocSet = ArgOptDocSet
   , -- the option
     argOptDocDefault :: Text
     -- the required default vale for an argument
+  , argOptDocSource :: Maybe SourceAtom
+  , argOptDocForm :: Maybe FormAtom
+  , argOptDocChecks :: [Check]
+  , argOptDocListSource :: Maybe SourceAtom
+  , argOptDocListForm :: Maybe FormAtom
+  , argOptDocListChecks :: [Check]
   }
   deriving (Show, Ord, Eq)
 
@@ -1706,5 +1712,11 @@ data ArgPosDocSet = ArgPosDocSet
     -- if True, the positional accepts many tokens that are assembled into a
     -- List; only legal when the argument type is List a and the positional
     -- is the last in its subcommand signature.
+  , argPosDocSource :: Maybe SourceAtom
+  , argPosDocForm :: Maybe FormAtom
+  , argPosDocChecks :: [Check]
+  , argPosDocListSource :: Maybe SourceAtom
+  , argPosDocListForm :: Maybe FormAtom
+  , argPosDocListChecks :: [Check]
   }
   deriving (Show, Ord, Eq)

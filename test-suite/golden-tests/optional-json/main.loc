@@ -20,6 +20,10 @@ source Py from "foo.py" ("identity", "fromNull", "isNull")
 echoOptInt :: ?Int -> ?Int
 echoOptInt x = identity x
 
+
+-- There is actually no way to represent a null string in the shell, "null"
+-- would be interpretted as a string. If you really want to distinguish between
+-- null and an empty string, make the argument optional and give null as a default.
 echoOptStr :: ?Str -> ?Str
 echoOptStr x = identity x
 

@@ -1,0 +1,12 @@
+module main (foo)
+
+import root
+
+-- form: list is mutually exclusive with many: true.
+foo ::
+  --' many: true
+  --' source: file
+  --' form: list
+  [Int] ->
+  Int
+foo x = 0

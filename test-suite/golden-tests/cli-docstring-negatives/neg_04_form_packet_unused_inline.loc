@@ -1,0 +1,12 @@
+module main (foo)
+
+import root
+
+-- inline is dead in the chain: only packet is in the form chain, and
+-- packet doesn't accept inline.
+foo ::
+  --' source: file|inline
+  --' form: packet
+  Int ->
+  Int
+foo x = 0

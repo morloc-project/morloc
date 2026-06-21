@@ -32,7 +32,6 @@ passList xs = xs
 -- of input tokens.
 countLits ::
   --' many: true
-  --' literal: true
   [Str] ->
   Int
 
@@ -49,7 +48,6 @@ concatLists xs = xs
 -- literal string regardless of whether a file by that name exists.
 greet ::
   --' arg: -y/--yolo
-  --' literal: true
   --' default: "yolo"
   Str ->
   Int

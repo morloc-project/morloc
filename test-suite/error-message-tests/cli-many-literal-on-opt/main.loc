@@ -6,7 +6,6 @@ module main (f)
 
 f ::
   --' many: true
-  --' literal: true
   [?Str] ->
   Int
 f xs = 0

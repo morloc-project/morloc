@@ -627,6 +627,210 @@ resolveDatafilePath _ = return "<datafile: could not resolve path>"
 -- CLI argument serialization
 -- ======================================================================
 
+-- | Encode a single source atom as a JSON string.
+sourceAtomJson :: SourceAtom -> Text
+sourceAtomJson SourceInline = jsonStr "inline"
+sourceAtomJson SourceFile   = jsonStr "file"
+
+-- | Encode a single form atom as a JSON string.
+formAtomJson :: FormAtom -> Text
+formAtomJson FormPacket    = jsonStr "packet"
+formAtomJson FormBytes     = jsonStr "bytes"
+formAtomJson FormBytesOnly = jsonStr "bytes-only"
+formAtomJson FormList      = jsonStr "list"
+
+-- | Encode a single check as `{"kind": ..., "value": ...}`. Each future
+-- check kind adds a constructor and a matching JSON shape; the runtime
+-- decoder dispatches on the `kind` field.
+checkJson :: Check -> Text
+checkJson (CheckPath (PathPerm p)) =
+  jsonObj [("kind", jsonStr "path"), ("value", jsonStr p)]
+
+-- | Resolve the outer source field to emit. `auto` is the internal
+-- sentinel meaning "use the runtime classifier"; it is never written
+-- by users (the parser rejects `source: auto`) but the manifest uses
+-- it as the default for list / compound types where the classifier
+-- handles inline-or-file dispatch. `literal: true` is the deprecated
+-- alias for `source: inline`.
+resolvedSourceJson :: Maybe Bool -> Maybe SourceAtom -> Maybe Text -> Text
+resolvedSourceJson _ (Just a) _ = sourceAtomJson a
+resolvedSourceJson mLit Nothing mschema
+  | mLit == Just True = sourceAtomJson SourceInline
+  | otherwise = case fmap classifySchema mschema of
+      Just CatScalarPrim    -> sourceAtomJson SourceInline
+      Just CatStr           -> sourceAtomJson SourceInline
+      _                     -> jsonStr "auto"
+
+-- | Emit the outer form atom, or `"auto"` when none is set. `auto` is
+-- the runtime sentinel for "use the classifier"; it is never written
+-- by users.
+resolvedFormJson :: Maybe FormAtom -> Text
+resolvedFormJson Nothing  = jsonStr "auto"
+resolvedFormJson (Just a) = formAtomJson a
+
+-- | Emit the per-element source atom or `"inline"` (the default).
+resolvedListSourceJson :: Maybe SourceAtom -> Text
+resolvedListSourceJson Nothing  = sourceAtomJson SourceInline
+resolvedListSourceJson (Just a) = sourceAtomJson a
+
+-- | Emit the per-element form atom or `"auto"` (the classifier).
+resolvedListFormJson :: Maybe FormAtom -> Text
+resolvedListFormJson Nothing  = jsonStr "auto"
+resolvedListFormJson (Just a) = formAtomJson a
+
+-- | Emit a list of checks as a JSON array.
+checksJson :: [Check] -> Text
+checksJson cs = jsonArr (map checkJson cs)
+
+-- | The CLI-shape fields shared by positional and option args. The
+-- wire schema (when known) drives the default source: scalar
+-- primitives and Str default to `"inline"`, everything else defaults
+-- to the classifier sentinel `"auto"`.
+ioShapeFields :: Maybe Text
+              -> Bool
+              -> Maybe Bool
+              -> Maybe SourceAtom
+              -> Maybe FormAtom
+              -> [Check]
+              -> Maybe SourceAtom
+              -> Maybe FormAtom
+              -> [Check]
+              -> [(Text, Text)]
+ioShapeFields mschema many mLit mSrc mForm cks mLSrc mLForm lcks =
+  [ ("source",      resolvedSourceJson mLit mSrc mschema)
+  , ("form",        resolvedFormJson mForm)
+  , ("checks",      checksJson cks)
+  , ("list_source", resolvedListSourceJson mLSrc)
+  , ("list_form",   resolvedListFormJson mLForm)
+  , ("list_checks", checksJson lcks)
+  , ("format",      jsonMaybeStr
+                      (renderFormatHint mschema many mSrc mForm cks
+                         mLSrc mLForm lcks))
+  ]
+
+-- | One-line user-facing "Format:" hint describing how to type input
+-- for an argument that uses a non-default `source:` / `form:` /
+-- `check.*:` / `list.*:` configuration. Returns 'Nothing' when the
+-- default contract applies (the type line is then enough).
+renderFormatHint :: Maybe Text -> Bool
+                 -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+                 -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+                 -> Maybe Text
+renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
+  | many = Just "one or more argv tokens, each parsed as the element type"
+  | otherwise = case mschema of
+      Nothing -> Nothing
+      Just s -> case classifySchema s of
+        CatScalarPrim    -> Nothing
+        CatStr           -> strFormatHint mSrc cks
+        CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
+        CatOtherCompound -> Nothing
+
+-- | Format hint for `Str` arguments.
+strFormatHint :: Maybe SourceAtom -> [Check] -> Maybe Text
+strFormatHint mSrc cks
+  | mSrc == Just SourceFile =
+      Just "read the value from the file at this path"
+  | otherwise = case cks of
+      (CheckPath (PathPerm p) : _) -> Just (pathCheckHint p)
+      _                            -> Nothing
+
+-- | Map a path-permission subset to a user-facing phrase.
+pathCheckHint :: Text -> Text
+pathCheckHint p = case MT.unpack (MT.toLower p) of
+  "r"   -> "path to readable file"
+  "w"   -> "path to existing writable file"
+  "c"   -> "path to non-existing writable file"
+  "rw"  -> "path to existing readable+writable file"
+  "wr"  -> "path to existing readable+writable file"
+  "rc"  -> "path to readable or creatable file"
+  "wc"  -> "path to writable or creatable file"
+  "rwc" -> "path to readable+writable or creatable file"
+  _     -> "must satisfy path permissions `" <> p <> "`"
+
+-- | Format hint for a list argument. Considers the outer
+-- `form:` / `source:` / `check.*:` first, then per-element overrides.
+listFormatHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+               -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+               -> Maybe Text
+listFormatHint elemSchema mSrc mForm _cks mLSrc mLForm lcks =
+  case mForm of
+    Just FormList ->
+      Just (formListHint elemSchema mLSrc mLForm lcks)
+    Just FormBytes ->
+      Just (bytesHint elemSchema mSrc Hybrid)
+    Just FormBytesOnly ->
+      Just (bytesHint elemSchema mSrc Raw)
+    Just FormPacket ->
+      Just (bytesHint elemSchema mSrc Packet)
+    _ -> Nothing
+
+-- | Internal enum for the three bytes-family display variants.
+data BytesVariant = Hybrid | Raw | Packet
+
+-- | Format hint for `form: bytes` / `bytes-only` / `packet`.
+-- The inline-bytes shortcut (`source: inline + form: bytes/bytes-only`
+-- on `[UInt8]`) is its own case.
+bytesHint :: Text -> Maybe SourceAtom -> BytesVariant -> Text
+bytesHint elemSchema mSrc variant
+  | mSrc == Just SourceInline && elemSchema == "u1" =
+      "literal byte sequence with escapes allowed"
+  | otherwise = case variant of
+      Hybrid -> "path to readable file (morloc packet or " <> packedDescr elemSchema <> ")"
+      Raw    -> "path to readable " <> packedDescr elemSchema
+      Packet -> "path to morloc packet"
+
+
+-- | A short phrase describing the binary layout for a fixed-width
+-- scalar element schema.
+packedDescr :: Text -> Text
+packedDescr "u1" = "raw binary"
+packedDescr "i1" = "packed int8"
+packedDescr "u2" = "packed uint16"
+packedDescr "i2" = "packed int16"
+packedDescr "u4" = "packed uint32"
+packedDescr "i4" = "packed int32"
+packedDescr "u8" = "packed uint64"
+packedDescr "i8" = "packed int64"
+packedDescr "f4" = "packed f32"
+packedDescr "f8" = "packed f64"
+packedDescr "b"  = "packet booleans (0/1)"
+packedDescr _    = "packed bytes"
+
+-- | Format hint for `form: list`: file with newline-delimited
+-- elements, optionally with per-element overrides.
+formListHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check] -> Text
+formListHint elemSchema mLSrc mLForm lcks =
+  let base = baseLine elemSchema mLSrc mLForm
+      checkSuffix = case lcks of
+        (CheckPath (PathPerm p) : _) -> "; " <> pathCheckHint p
+        _                            -> ""
+  in base <> checkSuffix
+  where
+    baseLine es ms mf = case mf of
+      Just FormPacket ->
+        "path to text file; each line a morloc packet filename"
+      Just FormBytes ->
+        "path to text file; each line a " <> "morloc packet or " <> packedDescr (innerOrSelf es)
+      Just FormBytesOnly ->
+        "path to a text file; each line a path to " <> packedDescr (innerOrSelf es)
+      _ -> case ms of
+        Just SourceFile ->
+          "path to a text file; each line is one value"
+        _ -> defaultPerLine es
+
+    defaultPerLine es = case classifySchema es of
+      CatStr           -> "path to text file with one string per line"
+      CatScalarPrim    -> "path to text file with one value per line"
+      CatList _        -> "path to text file with one JSON array per line"
+      CatOtherCompound -> "path to file with one row entry line (JSON or table)"
+
+    -- For `[[UInt8]]` etc., the bytes-family description uses the
+    -- innermost element width.
+    innerOrSelf es = case classifySchema es of
+      CatList inner -> inner
+      _             -> es
+
 -- | Serialize a 'CmdArg' to its JSON manifest form. The optional
 -- 'Maybe Text' is the pre-rendered serialization schema for typed
 -- args (pos/opt/grp); flags pass 'Nothing' since they have no schema.
@@ -639,19 +843,23 @@ argToJson mschema (CmdArgPos r) =
     ++ schemaField mschema
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocMany r) mschema))
+       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mschema))
        , ("many", jsonBool (argPosDocMany r))
        , ("desc", jsonStrArr (argPosDocDesc r))
        , ("constraints", constraintsJsonFor (argPosDocType r))
        , ("metadata", metadataEmpty)
        ]
+    ++ ioShapeFields mschema (argPosDocMany r)
+         (argPosDocLiteral r)
+         (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
+         (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
 argToJson mschema (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
     ++ schemaField mschema
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocMany r) mschema))
+       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mschema))
        , ("many", jsonBool (argOptDocMany r))
        , ("short", cliOptShortJson (argOptDocArg r))
        , ("long", cliOptLongJson (argOptDocArg r))
@@ -660,6 +868,10 @@ argToJson mschema (CmdArgOpt r) =
        , ("constraints", constraintsJsonFor (argOptDocType r))
        , ("metadata", metadataEmpty)
        ]
+    ++ ioShapeFields mschema (argOptDocMany r)
+         (argOptDocLiteral r)
+         (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
+         (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
 argToJson _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
@@ -705,19 +917,19 @@ schemaField :: Maybe Text -> [(Text, Text)]
 schemaField Nothing  = []
 schemaField (Just s) = [("schema", jsonStr s)]
 
--- | Compute the `quoted` flag emitted for a typed CLI arg. When
--- 'literal: true' is set, the nexus JSON-quotes the value before
--- dispatch so the C-side classifier treats it as inline content
--- rather than a file path. The flag fires only when the wire schema
--- reduces to the Str primitive 's' -- for many-args we look at the
--- list's ELEMENT schema, for scalars we look at the schema itself.
--- This widens the historical 'isStrType' check to cover newtypes /
--- aliases over Str. Without a schema (flag args), returns False.
-isQuotedArg :: Maybe Bool -> Bool -> Maybe Text -> Bool
-isQuotedArg literal many mschema =
-  literal == Just True && case mschema of
+-- | Compute the `quoted` flag emitted for a typed CLI arg. The flag
+-- tells the nexus to JSON-wrap the argv string before handing it to
+-- the runtime, so a bare Str like `Joe Dirt` becomes `"Joe Dirt"` for
+-- the JSON parser. The flag fires only when the wire schema reduces
+-- to the Str primitive `s` AND the argv is going to be interpreted as
+-- an inline literal: with `source: file` the argv is a path and the
+-- runtime's File branch must see it unquoted.
+isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe Text -> Bool
+isQuotedArg _literal mSource many mschema =
+  case mschema of
     Nothing -> False
     Just s
+      | mSource == Just SourceFile -> False
       | many -> isListOfStrWireSchema s
       | otherwise -> isStrOrOptStrWireSchema s
 
@@ -844,45 +1056,56 @@ validateArgSpecs i cmdargs asts schemas = do
       let argLoc = loc <> "argument #" <> pretty n
       case arg of
         CmdArgPos r -> do
-          checkLiteralWire argLoc (argPosDocLiteral r) (argPosDocMany r) schemaText
-          checkManyWire    argLoc (argPosDocMany r)                     schemaText
+          checkManyWire argLoc (argPosDocMany r) schemaText
+          checkArgShape argLoc schemaText arg
         CmdArgOpt r -> do
-          checkLiteralWire argLoc (argOptDocLiteral r) (argOptDocMany r) schemaText
-          checkManyWire    argLoc (argOptDocMany r)                     schemaText
-          checkDefault     argLoc ast (argOptDocDefault r)
+          checkManyWire argLoc (argOptDocMany r) schemaText
+          checkDefault  argLoc ast (argOptDocDefault r)
+          checkArgShape argLoc schemaText arg
         CmdArgFlag _ -> return ()
         CmdArgGrp r  -> validateGroup argLoc r ast
 
--- | `literal: true` requires the argument's wire type to be Str
--- (`s`) or Optional Str (`?s`). For `many: true` lists, the element
--- must be plain Str (not Optional) because literal mode can never
--- produce a null element -- the word "null" would be a literal
--- string, not a JSON null.
-checkLiteralWire :: MDoc -> Maybe Bool -> Bool -> Text -> MorlocMonad ()
-checkLiteralWire _   Nothing      _    _      = return ()
-checkLiteralWire _   (Just False) _    _      = return ()
-checkLiteralWire loc (Just True)  many schema
-  | many =
-      if isListOfStrWireSchema schema
-        then return ()
-        else if maybe False isOptStrWireSchema (listElementSchema schema)
-          then MM.throwSystemError $
-                 loc <> ": `literal: true` combined with `many: true` cannot be"
-                   <> " used with an Optional element type (`?Str`); literal mode"
-                   <> " treats every token as a literal string, including the word"
-                   <> " \"null\", so null elements can never be expressed. Either"
-                   <> " drop `literal: true`, or change the element type to `Str`."
-          else MM.throwSystemError $
-                 loc <> ": `literal: true` was ignored because the wire type"
-                   <> " of this argument is not a list of strings (schema `"
-                   <> pretty schema <> "`). Remove `literal: true`."
-  | otherwise =
-      if isStrOrOptStrWireSchema schema
-        then return ()
-        else MM.throwSystemError $
-               loc <> ": `literal: true` was ignored because the wire type"
-                 <> " of this argument is not a string type (schema `"
-                 <> pretty schema <> "`). Remove `literal: true`."
+    checkArgShape :: MDoc -> Text -> CmdArg -> MorlocMonad ()
+    checkArgShape argLoc schemaText arg =
+      case Docstrings.validateCmdArg schemaText arg of
+        Right _ -> return ()
+        Left e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
+
+-- | Wire-schema category. Drives the per-shape rules: each category
+-- has its own narrow vocabulary for `source:` / `form:` / `list.*:`.
+-- Lists carry their element schema so per-element validation can
+-- recurse into the element's category.
+data SchemaCat
+  = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
+  | CatStr              -- Str (`s`)
+  | CatList Text        -- `a<elem>` for any elem schema
+  | CatOtherCompound    -- tuples, records, maps, tables
+  deriving (Eq, Show)
+
+-- | Classify the wire schema. The hint/recursive-decl prefix and outer
+-- `?` are peeled before classification so optional and aliased forms
+-- inherit the underlying category.
+classifySchema :: Text -> SchemaCat
+classifySchema s0 =
+  let peeled = peelHint (peelRecDecl s0)
+      core = case MT.uncons peeled of
+        Just ('?', rest) -> peelHint rest
+        _ -> peeled
+  in if core == "s"
+       then CatStr
+       else if isScalarPrimCore core
+              then CatScalarPrim
+              else case MT.uncons core of
+                Just ('a', rest) -> CatList rest
+                _                -> CatOtherCompound
+
+isScalarPrimCore :: Text -> Bool
+isScalarPrimCore c = c `elem`
+  [ "b", "j", "z"
+  , "i1", "i2", "i4", "i8"
+  , "u1", "u2", "u4", "u8"
+  , "f4", "f8"
+  ]
 
 -- | `many: true` requires an array wire type.
 checkManyWire :: MDoc -> Bool -> Text -> MorlocMonad ()
@@ -925,9 +1148,11 @@ validateGroup loc r ast = case peelGroupAst ast of
         Just subAst -> case entry of
           Right opt -> do
             let subSchema = render (Serial.serialAstToMsgpackSchema subAst)
-            checkLiteralWire entryLoc (argOptDocLiteral opt) (argOptDocMany opt) subSchema
             checkManyWire entryLoc (argOptDocMany opt) subSchema
             checkDefault entryLoc subAst (argOptDocDefault opt)
+            case Docstrings.validateCmdArg subSchema (CmdArgOpt opt) of
+              Right _ -> return ()
+              Left e  -> MM.throwSystemError $ entryLoc <> ": " <> pretty e
           Left _flag -> return ()
   _ -> return ()
   where

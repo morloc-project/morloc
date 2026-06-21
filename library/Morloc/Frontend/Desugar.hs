@@ -247,9 +247,68 @@ parseCliOpt txt = case T.unpack (T.strip txt) of
   _ -> CliOptShapeUnknown
 
 -- Known directive keys recognized inside argument / signature docstrings.
+-- Includes the dotted families (`source`, `form`, `check.<kind>`,
+-- `list.source`, `list.form`, `list.check.<kind>`) used by the new
+-- CLI-argument shape design; the family heads are listed here for the
+-- unknown-key warning even though full keys are dotted.
 argDocDirectiveKeys :: [Text]
 argDocDirectiveKeys =
-  ["name", "literal", "many", "unroll", "default", "metavar", "arg", "true", "false", "return"]
+  [ "name", "literal", "many", "unroll", "default", "metavar"
+  , "arg", "true", "false", "return"
+  , "source", "form", "check.<kind>"
+  , "list.source", "list.form", "list.check.<kind>"
+  ]
+
+-- | Parse the value of a `source:` field. OR-chains (`a|b`) are
+-- rejected with a targeted error so the user can find the redundant
+-- syntax. `auto` was the implicit default in earlier designs and is
+-- never written explicitly.
+parseSourceAtom :: Text -> Either Text SourceAtom
+parseSourceAtom raw = case T.strip raw of
+  "inline" -> Right SourceInline
+  "file" -> Right SourceFile
+  s | T.isInfixOf "|" s ->
+        Left $ "OR-chains in `source:` (e.g. `file|inline`) are no longer"
+            <> " supported; pick a single value (inline or file)."
+    | s == "auto" ->
+        Left $ "`source: auto` is not a writable value; auto is the implicit"
+            <> " default. Either drop the field or pick `inline` / `file`."
+    | otherwise ->
+        Left $ "unknown source value '" <> s
+            <> "'; expected one of: inline, file."
+
+-- | Parse the value of a `form:` field. The four meaningful atoms are
+-- `list`, `bytes`, `bytes-only`, and `packet`. OR-chains are rejected.
+parseFormAtom :: Text -> Either Text FormAtom
+parseFormAtom raw = case T.strip raw of
+  "packet" -> Right FormPacket
+  "bytes" -> Right FormBytes
+  "bytes-only" -> Right FormBytesOnly
+  "list" -> Right FormList
+  s | T.isInfixOf "|" s ->
+        Left $ "OR-chains in `form:` (e.g. `packet|bytes`) are no longer"
+            <> " supported; pick a single value."
+    | s == "auto" ->
+        Left $ "`form: auto` is not a writable value; auto is the implicit"
+            <> " default. Either drop the field or pick `list`, `bytes`,"
+            <> " `bytes-only`, or `packet`."
+    | otherwise ->
+        Left $ "unknown form value '" <> s
+            <> "'; expected one of: list, bytes, bytes-only, packet."
+
+-- | Parse a check kind + value. Only `path` is recognized in v1.
+parseCheck :: Text -> Text -> Either Text Check
+parseCheck kind raw = case kind of
+  "path" -> let v = T.strip raw in
+            if T.null v
+              then Left "path check value is empty; expected a non-empty subset of {r, w, c}"
+              else if T.all isPermChar v
+                then Right (CheckPath (PathPerm v))
+                else Left $ "invalid path permissions '" <> v
+                            <> "': expected a subset of {r, w, c}"
+  k -> Left $ "unknown check kind '" <> k <> "'; v1 supports: path"
+  where
+    isPermChar c = c == 'r' || c == 'w' || c == 'c'
 
 -- Known directive keys recognized on `source` declarations.
 sourceDocDirectiveKeys :: [Text]
@@ -292,23 +351,51 @@ processArgDocLines = foldl step ([], [], defaultValue)
       DocDesc v
         | T.null v -> (errs, ws, d)
         | otherwise -> (errs, ws, d {docLines = docLines d <> [v]})
-      DocDirective k v -> case k of
-        "name" -> (errs, ws, d {docName = Just v})
-        "literal" -> (errs, ws, d {docLiteral = Just (parseDocBool v)})
-        "many" -> (errs, ws, d {docMany = Just (parseDocBool v)})
-        "unroll" -> (errs, ws, d {docUnroll = Just (parseDocBool v)})
-        "default" -> (errs, ws, d {docDefault = Just v})
-        "metavar" -> (errs, ws, d {docMetavar = Just v})
-        "arg" ->
+      DocDirective k v -> case T.splitOn "." k of
+        ["name"] -> (errs, ws, d {docName = Just v})
+        ["literal"] ->
+          let parsed = parseDocBool v
+              warn =
+                if parsed
+                  then
+                    [ "warning: docstring directive `literal: true` is deprecated; "
+                        <> "use `source: inline` instead. Both work today, but "
+                        <> "`literal: true` will be removed in a future release."
+                    ]
+                  else []
+           in (errs, ws <> warn, d {docLiteral = Just parsed})
+        ["many"] -> (errs, ws, d {docMany = Just (parseDocBool v)})
+        ["unroll"] -> (errs, ws, d {docUnroll = Just (parseDocBool v)})
+        ["default"] -> (errs, ws, d {docDefault = Just v})
+        ["metavar"] -> (errs, ws, d {docMetavar = Just v})
+        ["arg"] ->
           let (es, o) = applyCliOptDirective k v
            in (errs <> es, ws, d {docArg = o})
-        "true" ->
+        ["true"] ->
           let (es, o) = applyCliOptDirective k v
            in (errs <> es, ws, d {docTrue = o})
-        "false" ->
+        ["false"] ->
           let (es, o) = applyCliOptDirective k v
            in (errs <> es, ws, d {docFalse = o})
-        "return" -> (errs, ws, d {docReturn = Just v})
+        ["return"] -> (errs, ws, d {docReturn = Just v})
+        ["source"] -> case parseSourceAtom v of
+          Right a -> (errs, ws, d {docSource = Just a})
+          Left e  -> (errs <> ["in `source: " <> v <> "`: " <> e], ws, d)
+        ["form"] -> case parseFormAtom v of
+          Right a -> (errs, ws, d {docForm = Just a})
+          Left e  -> (errs <> ["in `form: " <> v <> "`: " <> e], ws, d)
+        ["check", kind] -> case parseCheck kind v of
+          Right c -> (errs, ws, d {docChecks = docChecks d <> [c]})
+          Left e  -> (errs <> ["in `check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
+        ["list", "source"] -> case parseSourceAtom v of
+          Right a -> (errs, ws, d {docListSource = Just a})
+          Left e  -> (errs <> ["in `list.source: " <> v <> "`: " <> e], ws, d)
+        ["list", "form"] -> case parseFormAtom v of
+          Right a -> (errs, ws, d {docListForm = Just a})
+          Left e  -> (errs <> ["in `list.form: " <> v <> "`: " <> e], ws, d)
+        ["list", "check", kind] -> case parseCheck kind v of
+          Right c -> (errs, ws, d {docListChecks = docListChecks d <> [c]})
+          Left e  -> (errs <> ["in `list.check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k
               desc = k <> ": " <> v

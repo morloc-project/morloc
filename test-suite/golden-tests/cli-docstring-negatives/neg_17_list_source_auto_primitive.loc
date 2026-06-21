@@ -1,0 +1,14 @@
+module main (foo)
+
+import root
+
+-- list.source: auto is not allowed when the element type is a primitive.
+-- For [Str] each line is either the literal value or a file path; the
+-- auto-classifier's filename-as-value fallback is incoherent.
+foo ::
+  --' source: file
+  --' form: list
+  --' list.source: auto
+  [Str] ->
+  Int
+foo x = 0

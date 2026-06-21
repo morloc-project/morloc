@@ -5,7 +5,6 @@ import root-py
 --' name: greet
 greet ::
   --' arg: -y/--yolo
-  --' literal: true
   --' default: "yolo"
   Str ->
   Int

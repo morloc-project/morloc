@@ -850,17 +850,15 @@ fn parse_float(text: &str, name: &str) -> Result<f64, MorlocError> {
     )))
 }
 
-// Recognise non-finite literal forms case-insensitively. Returns None if the
-// input is not a recognised non-finite spelling. Accepts: nan, +nan, -nan,
-// inf, +inf, -inf, infinity, +infinity, -infinity, and bareword null
-// (legacy recovery -> NaN).
+// Recognise the canonical non-finite wire tokens. Case-sensitive,
+// matching the writer (which emits exactly `"inf"` / `"-inf"` /
+// `"nan"`). Any other spelling is rejected so the caller surfaces a
+// clear parse error.
 fn parse_nonfinite(s: &str) -> Option<f64> {
-    let lower = s.to_ascii_lowercase();
-    match lower.as_str() {
-        "nan" | "+nan" | "-nan" => Some(f64::NAN),
-        "inf" | "+inf" | "infinity" | "+infinity" => Some(f64::INFINITY),
-        "-inf" | "-infinity" => Some(f64::NEG_INFINITY),
-        "null" => Some(f64::NAN),
+    match s {
+        "nan" => Some(f64::NAN),
+        "inf" => Some(f64::INFINITY),
+        "-inf" => Some(f64::NEG_INFINITY),
         _ => None,
     }
 }

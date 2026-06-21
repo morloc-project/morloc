@@ -1,0 +1,115 @@
+module main
+  ( mk_int
+  , mk_real
+  , mk_str
+  , mk_tup
+  , size_ints_packets
+  , sum_ints_packets
+  , sum_ints_auto
+  , sum_reals_packets
+  , size_strs_packets
+  , size_tups_packets
+  , size_byte_files
+  , total_byte_files
+  )
+
+import root-py
+
+source Py from "helper.py"
+  ( "py_id"
+  , "py_size"
+  , "py_sum_int"
+  , "py_sum_real"
+  , "py_total_bytes"
+  )
+
+py_id          :: a -> a
+py_size        :: [a] -> Int
+py_sum_int     :: [Int] -> Int
+py_sum_real    :: [Float64] -> Float64
+py_total_bytes :: [[UInt8]] -> Int
+
+-- ── Producers ──────────────────────────────────────────────────────
+-- Identity functions whose output a `nexus -f packet` call captures
+-- to disk as a typed packet of the value the user passed in.
+
+--' Identity Int producer; dump via `nexus -f packet mk_int N`.
+mk_int :: Int -> Int
+mk_int x = py_id x
+
+--' Identity Float64 producer; dump via `nexus -f packet mk_real F`.
+mk_real :: Float64 -> Float64
+mk_real x = py_id x
+
+--' Identity Str producer; dump via `nexus -f packet mk_str S`.
+mk_str :: Str -> Str
+mk_str x = py_id x
+
+--' Identity (Int, Str) producer; dump via `nexus -f packet mk_tup ...`.
+mk_tup :: (Int, Str) -> (Int, Str)
+mk_tup x = py_id x
+
+-- ── Consumers ──────────────────────────────────────────────────────
+
+--' Count Int packets listed in the per-element-packet manifest file.
+size_ints_packets ::
+  --' form: list
+  --' list.source: file
+  --' list.form: packet
+  [Int] -> Int
+size_ints_packets xs = py_size xs
+
+--' Sum Int packets via strict per-element packet decoding.
+sum_ints_packets ::
+  --' form: list
+  --' list.source: file
+  --' list.form: packet
+  [Int] -> Int
+sum_ints_packets xs = py_sum_int xs
+
+--' Sum Int packets via the per-element auto-classifier (no strictness).
+sum_ints_auto ::
+  --' form: list
+  --' list.source: file
+  [Int] -> Int
+sum_ints_auto xs = py_sum_int xs
+
+--' Sum Float64 packets via strict per-element packet decoding.
+sum_reals_packets ::
+  --' form: list
+  --' list.source: file
+  --' list.form: packet
+  [Float64] -> Float64
+sum_reals_packets xs = py_sum_real xs
+
+--' Count Str packets listed in the per-element-packet manifest file.
+size_strs_packets ::
+  --' form: list
+  --' list.source: file
+  --' list.form: packet
+  [Str] -> Int
+size_strs_packets xs = py_size xs
+
+--' Count (Int, Str) tuple packets via per-element packet decoding.
+size_tups_packets ::
+  --' form: list
+  --' list.source: file
+  --' list.form: packet
+  [(Int, Str)] -> Int
+size_tups_packets xs = py_size xs
+
+--' Count raw-binary files listed in the manifest (per-line bytes).
+size_byte_files ::
+  --' form: list
+  --' list.source: file
+  --' list.form: bytes
+  [[UInt8]] -> Int
+size_byte_files xss = py_size xss
+
+--' Sum total bytes across the raw-binary files in the manifest.
+total_byte_files ::
+  --' form: list
+  --' list.source: file
+  --' list.form: bytes
+  [[UInt8]] -> Int
+total_byte_files xss = py_total_bytes xss

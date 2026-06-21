@@ -1,0 +1,9 @@
+module main (foo)
+
+import root
+
+-- `[UInt8]` defaults to `source: file, form: auto`. With no fields
+-- the argv string is treated as a path; the bytes pass through
+-- `load_morloc_data_file` (packet -> JSON -> MessagePack -> ...).
+foo :: [UInt8] -> Int
+foo x = 0

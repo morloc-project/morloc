@@ -1,0 +1,7 @@
+module main (foo)
+
+import root
+
+-- Sanity: no shape directives, default everything compiles.
+foo :: Int -> Int
+foo x = x

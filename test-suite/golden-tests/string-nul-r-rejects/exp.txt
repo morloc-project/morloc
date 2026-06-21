@@ -1,4 +1,1 @@
-"hi"
-RC=0
 RC<>0
-Error: r does not support embedded NUL bytes in strings (at args[0] (byte 3 of 7))

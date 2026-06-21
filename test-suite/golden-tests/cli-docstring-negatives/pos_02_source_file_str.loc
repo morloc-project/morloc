@@ -1,0 +1,10 @@
+module main (foo)
+
+import root
+
+-- Sanity: source: file on a Str arg is legal.
+foo ::
+  --' source: file
+  Str ->
+  Int
+foo x = 0

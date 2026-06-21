@@ -1,0 +1,140 @@
+module main
+  ( str_default
+  , str_file
+  , str_check_r
+  , bytes_default
+  , bytes_hybrid
+  , bytes_only
+  , bytes_inline
+  , bytes_int32
+  , bytes_float64
+  , bytes_bool
+  , list_str
+  , list_int
+  , list_tuple_json
+  , list_tuple_tsv
+  , list_path_check
+  , many_str
+  , many_int
+  , default_tuple
+  )
+
+import root-py
+
+source Py from "helper.py"
+  ( "py_id"
+  , "py_size"
+  , "py_sum_int"
+  , "py_sum_float"
+  , "py_fst_int"
+  )
+
+py_id        :: a -> a
+py_size      :: [a] -> Int
+py_sum_int   :: [Int] -> Int
+py_sum_float :: [Float64] -> Float64
+py_fst_int   :: (Int, Str) -> Int
+
+--' Str default inline: echoes argv verbatim as the Str value.
+str_default :: Str -> Str
+str_default s = py_id s
+
+--' Str source: file: returns the contents of the path argument.
+str_file ::
+  --' source: file
+  Str -> Str
+str_file s = py_id s
+
+--' Str check.path: r: argv must be a readable path; returns the path.
+str_check_r ::
+  --' check.path: r
+  Str -> Str
+str_check_r s = py_id s
+
+--' [UInt8] default JSON inline: returns the array length.
+bytes_default :: [UInt8] -> Int
+bytes_default xs = py_size xs
+
+--' [UInt8] form: bytes: file is sniffed (packet -> raw); count bytes.
+bytes_hybrid ::
+  --' form: bytes
+  [UInt8] -> Int
+bytes_hybrid xs = py_size xs
+
+--' [UInt8] form: bytes-only: file is raw bytes (no sniff); count.
+bytes_only ::
+  --' form: bytes-only
+  [UInt8] -> Int
+bytes_only xs = py_size xs
+
+--' [UInt8] inline + form: bytes: ASCII chars become bytes; count.
+bytes_inline ::
+  --' source: inline
+  --' form: bytes
+  [UInt8] -> Int
+bytes_inline xs = py_size xs
+
+--' [Int32] form: bytes: file has packed 32-bit ints; count elements.
+bytes_int32 ::
+  --' form: bytes
+  [Int32] -> Int
+bytes_int32 xs = py_size xs
+
+--' [Float64] form: bytes-only: file is packed 8-byte floats; sum.
+bytes_float64 ::
+  --' form: bytes-only
+  [Float64] -> Float64
+bytes_float64 xs = py_sum_float xs
+
+--' [Bool] form: bytes: file is 0/1 bytes; count elements.
+bytes_bool ::
+  --' form: bytes
+  [Bool] -> Int
+bytes_bool xs = py_size xs
+
+--' [Str] form: list: file has one Str per line; count lines.
+list_str ::
+  --' form: list
+  [Str] -> Int
+list_str xs = py_size xs
+
+--' [Int] form: list: file has one Int per line; return the sum.
+list_int ::
+  --' form: list
+  [Int] -> Int
+list_int xs = py_sum_int xs
+
+--' [(Int, Str)] form: list: JSON-array-per-line tuple; count rows.
+list_tuple_json ::
+  --' form: list
+  [(Int, Str)] -> Int
+list_tuple_json xs = py_size xs
+
+--' [(Int, Str)] form: list: TSV/CSV tabular fallback; count rows.
+list_tuple_tsv ::
+  --' form: list
+  [(Int, Str)] -> Int
+list_tuple_tsv xs = py_size xs
+
+--' [Str] form: list + list.check.path: r: each line readable; count.
+list_path_check ::
+  --' form: list
+  --' list.check.path: r
+  [Str] -> Int
+list_path_check xs = py_size xs
+
+--' [Str] many: true: variadic argv tokens; count tokens.
+many_str ::
+  --' many: true
+  [Str] -> Int
+many_str xs = py_size xs
+
+--' [Int] many: true: variadic argv Int tokens; return the sum.
+many_int ::
+  --' many: true
+  [Int] -> Int
+many_int xs = py_sum_int xs
+
+--' (Int, Str) default JSON: extract the first (Int) element of argv.
+default_tuple :: (Int, Str) -> Int
+default_tuple t = py_fst_int t

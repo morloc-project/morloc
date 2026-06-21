@@ -1,16 +1,16 @@
 module main (foo)
 
-import root ((.))
-
-type Py => Str = "str"
-type R => Str = "character"
-type Cpp => Str = "std::string"
+import root-py
+import root-cpp
+import root-r
 
 source Py from "foo.py" ("pfoo")
 source R from "foo.R" ("rfoo")
 source Cpp from "foo.hpp" ("cfoo")
+
 rfoo :: Str -> Str
 pfoo :: Str -> Str
 cfoo :: Str -> Str
 
-foo = cfoo . rfoo . pfoo
+foo :: (Int, Str) -> Str
+foo = cfoo . rfoo . pfoo . .1

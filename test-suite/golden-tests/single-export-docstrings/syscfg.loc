@@ -10,7 +10,6 @@ record SysConfig where
   --' arg: --tmp-dir
   --' metavar: FILE
   --' default: "/tmp"
-  --' literal: true
   tmpDir :: Str
 
   --' arg: -t/--threads

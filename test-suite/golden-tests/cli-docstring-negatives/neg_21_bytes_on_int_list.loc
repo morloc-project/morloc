@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- `Int` is arbitrary-precision and has no fixed byte width.
+-- `form: bytes` requires a fixed-width scalar element type.
+foo ::
+  --' form: bytes
+  [Int] ->
+  Int
+foo x = 0

@@ -12,7 +12,7 @@
 //! builder, schema parser, pool send/receive) and for evaluating
 //! pure commands via `morloc_eval`.
 
-use crate::manifest::{Command, Manifest};
+use crate::manifest::{Arg, Check, Command, FormAtom, Manifest, SourceAtom};
 use crate::process::{self, PoolSocket};
 
 /// Output format enum.
@@ -234,9 +234,9 @@ pub fn dispatch_command_parsed(
     cmd: &Command,
     sockets: &mut [PoolSocket],
 ) {
-    // Run-scope log entry point. `{name}` is now bound; subsequent
-    // emit_prologue / emit_epilogue calls see it. clean_exit fires the
-    // matching epilogue at process exit.
+    // Bind `{name}` for the run-scope log before emitting the
+    // prologue; clean_exit fires the matching epilogue at process
+    // exit.
     crate::runlog::record_command(&cmd.name);
     crate::runlog::emit_prologue();
 
@@ -291,6 +291,360 @@ pub fn dispatch_command_parsed(
     }
 }
 
+/// CLI-shape directives pulled out of a manifest arg. Single-atom
+/// fields under the simplified grammar (no OR-chains).
+#[derive(Debug, Clone)]
+pub struct ArgShape<'a> {
+    pub source: SourceAtom,
+    pub form: FormAtom,
+    pub checks: &'a [Check],
+    pub list_source: SourceAtom,
+    pub list_form: FormAtom,
+    pub list_checks: &'a [Check],
+}
+
+impl<'a> ArgShape<'a> {
+    /// Extract the shape view from a manifest arg, returning `None` for
+    /// variants (Flag, Group) that have no shape vocabulary.
+    pub fn from_arg(arg: &'a Arg) -> Option<ArgShape<'a>> {
+        match arg {
+            Arg::Positional { source, form, checks, list_source, list_form, list_checks, .. } |
+            Arg::Optional   { source, form, checks, list_source, list_form, list_checks, .. } => {
+                Some(ArgShape {
+                    source: *source,
+                    form: *form,
+                    checks: checks.as_slice(),
+                    list_source: *list_source,
+                    list_form: *list_form,
+                    list_checks: list_checks.as_slice(),
+                })
+            }
+            Arg::Flag { .. } | Arg::Group { .. } => None,
+        }
+    }
+
+    /// True when every field is at its compiler-emitted default
+    /// (`source = Auto`, `form = Auto`, no checks, `list_source =
+    /// Inline`, `list_form = Auto`, no list_checks). The default shape
+    /// carries the same semantics as the existing
+    /// `parse_cli_data_argument` path, so the caller can skip the
+    /// shape-aware route entirely.
+    pub fn is_default(&self) -> bool {
+        self.source == SourceAtom::Auto
+            && self.form == FormAtom::Auto
+            && self.checks.is_empty()
+            && self.list_source == SourceAtom::Inline
+            && self.list_form == FormAtom::Auto
+            && self.list_checks.is_empty()
+    }
+}
+
+/// If the wire schema is a list (`aT` or `aT:<dim>`), return its
+/// element schema as a string. Returns `None` for non-list schemas.
+pub fn element_schema_str(schema_str: &str) -> Option<String> {
+    let mut s = schema_str.trim();
+    if let Some(rest) = s.strip_prefix('<') {
+        if let Some(end) = rest.find('>') {
+            s = &rest[end + 1..];
+        }
+    }
+    let rest = s.strip_prefix('a')?;
+    let rest = if let Some(after_colon) = rest.strip_prefix(':') {
+        after_colon.trim_start_matches(|c: char| c.is_ascii_digit())
+    } else {
+        rest
+    };
+    Some(rest.to_string())
+}
+
+/// True if the rendered wire schema reduces to a scalar `Float32`
+/// (`f4`) or `Float64` (`f8`) primitive (with optional `?` and hint
+/// wrapping). Used to decide whether an argv token like `inf`,
+/// `-inf`, or `nan` should be reinterpreted as an IEEE 754 special.
+pub fn schema_is_float_scalar(schema_str: &str) -> bool {
+    let mut s = schema_str.trim();
+    if let Some(rest) = s.strip_prefix('?') {
+        s = rest;
+    }
+    if let Some(rest) = s.strip_prefix('<') {
+        if let Some(end) = rest.find('>') {
+            s = &rest[end + 1..];
+        }
+    }
+    s == "f4" || s == "f8"
+}
+
+/// If the argv string is a recognized IEEE 754 special-value literal,
+/// return its JSON-quoted form (`"inf"`, `"-inf"`, `"nan"`). The morloc
+/// JSON wire layer accepts these quoted lowercase variants per the
+/// non-finite-Real convention; this helper lets a user type
+/// `inf` / `nan` / `\-inf` on the command line. `\-inf` is the
+/// shell-safe spelling of `-inf` — the leading backslash bypasses
+/// clap's flag-cluster interpretation of the bare `-i`/`-n`/`-f`
+/// sequence.
+pub fn maybe_float_special_to_json(argv: &str) -> Option<String> {
+    let trimmed = argv.trim();
+    let stripped = trimmed.strip_prefix('\\').unwrap_or(trimmed);
+    let inner = match stripped {
+        "inf" => "inf",
+        "-inf" => "-inf",
+        "nan" => "nan",
+        _ => return None,
+    };
+    Some(format!("\"{}\"", inner))
+}
+
+/// Process inline byte-string escape sequences. The default mapping is
+/// "argv char -> UTF-8 bytes"; the recognized escapes let users encode
+/// arbitrary byte values that wouldn't otherwise survive the shell or
+/// argv layer.
+///
+/// Recognized escapes (errors on anything else):
+///   `\\`  literal backslash
+///   `\n`  byte 0x0A
+///   `\t`  byte 0x09
+///   `\r`  byte 0x0D
+///   `\0`  byte 0x00
+///   `\xNN` byte with the given two-digit hex value
+///
+/// A `\0` escape produces a real NUL byte in the output buffer even
+/// though argv itself cannot contain NUL.
+pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
+    let mut out: Vec<u8> = Vec::with_capacity(argv.len());
+    let mut chars = argv.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            out.extend_from_slice(s.as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push(b'\\'),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('r') => out.push(b'\r'),
+            Some('0') => out.push(0),
+            Some('x') => {
+                let h1 = chars
+                    .next()
+                    .ok_or_else(|| "incomplete `\\x` escape: needs two hex digits".to_string())?;
+                let h2 = chars
+                    .next()
+                    .ok_or_else(|| "incomplete `\\x` escape: needs two hex digits".to_string())?;
+                if !h1.is_ascii_hexdigit() || !h2.is_ascii_hexdigit() {
+                    return Err(format!(
+                        "invalid `\\x` escape: `\\x{}{}` must be two hex digits",
+                        h1, h2
+                    ));
+                }
+                let byte = (h1.to_digit(16).unwrap() as u8) * 16
+                    + (h2.to_digit(16).unwrap() as u8);
+                out.push(byte);
+            }
+            Some(other) => {
+                return Err(format!(
+                    "unrecognized escape: `\\{}`; supported: \\\\ \\n \\t \\r \\0 \\xNN",
+                    other
+                ));
+            }
+            None => return Err("trailing backslash with no escape character".to_string()),
+        }
+    }
+    Ok(out)
+}
+
+/// Apply value-invariant checks against the raw argv token. Returns
+/// `Err` on the first failing check; the error message identifies the
+/// check kind so the user can locate the docstring field.
+pub fn apply_checks(argv: &str, checks: &[Check]) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::path::Path;
+    for c in checks {
+        match c {
+            Check::Path(perm) => {
+                let c_path = CString::new(argv).map_err(|_| {
+                    format!("check.path: argv '{}' contains an interior NUL byte", argv)
+                })?;
+                let path = Path::new(argv);
+                let mut required: Vec<char> = perm.chars().collect();
+                required.sort();
+                required.dedup();
+                for ch in &required {
+                    match ch {
+                        'r' => {
+                            let rc = unsafe { libc::access(c_path.as_ptr(), libc::R_OK) };
+                            if rc != 0 {
+                                return Err(format!(
+                                    "check.path: r requires path '{}' to exist and be readable",
+                                    argv
+                                ));
+                            }
+                        }
+                        'w' => {
+                            let rc = unsafe { libc::access(c_path.as_ptr(), libc::W_OK) };
+                            if rc != 0 {
+                                return Err(format!(
+                                    "check.path: w requires path '{}' to exist and be writable",
+                                    argv
+                                ));
+                            }
+                        }
+                        'c' => {
+                            // Creatable: the path itself must NOT exist,
+                            // and the parent directory must be writable.
+                            if path.exists() {
+                                return Err(format!(
+                                    "check.path: c requires path '{}' to be creatable, but it already exists",
+                                    argv
+                                ));
+                            }
+                            let parent = path.parent();
+                            let parent_dir = match parent {
+                                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                                _ => std::path::PathBuf::from("."),
+                            };
+                            let parent_c = CString::new(
+                                parent_dir.to_string_lossy().as_ref(),
+                            )
+                            .map_err(|_| {
+                                "check.path: parent directory path contains a NUL byte".to_string()
+                            })?;
+                            let rc = unsafe { libc::access(parent_c.as_ptr(), libc::W_OK) };
+                            if rc != 0 {
+                                return Err(format!(
+                                    "check.path: c requires parent directory of '{}' to be writable",
+                                    argv
+                                ));
+                            }
+                        }
+                        other => {
+                            return Err(format!(
+                                "check.path: unknown permission '{}'; expected a subset of r, w, c",
+                                other
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply the shape directives to a raw argv token: run any nexus-side
+/// transforms (inline bytes -> JSON array) and value-invariant checks
+/// (`check.path`). Any error aborts via `die_with_error`.
+///
+/// Special case: when `source: inline` and `form: bytes` (or
+/// `bytes-only`), the argv is escape-processed to a `Vec<u8>` and
+/// JSON-encoded as `[byte, byte, ...]`. The runtime then sees a JSON
+/// inline value and decodes it through `read_json_with_schema`. This
+/// is the DNA-style ASCII-bytes shortcut on `[UInt8]`.
+pub fn apply_shape_to_argv(raw: String, shape: Option<&ArgShape>, i: usize) -> String {
+    let shape = match shape {
+        Some(s) if !s.is_default() => s,
+        _ => return raw,
+    };
+
+    let inline_bytes_shortcut = shape.source == SourceAtom::Inline
+        && (shape.form == FormAtom::Bytes || shape.form == FormAtom::BytesOnly);
+    if inline_bytes_shortcut {
+        let bytes = match process_inline_bytes_escapes(&raw) {
+            Ok(b) => b,
+            Err(e) => crate::runlog::die_with_error(&format!("argument #{}: {}", i, e)),
+        };
+        let parts: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
+        return format!("[{}]", parts.join(","));
+    }
+
+    raw
+}
+
+/// Return the `(source_code, form_code)` pair to pass through the
+/// shape-aware FFI, or `None` when the runtime can use the cheaper
+/// default path. The default case includes the `source: inline +
+/// form: bytes/bytes-only` shortcut on `[UInt8]`, which is already
+/// JSON-encoded by `apply_shape_to_argv`.
+pub fn shaped_dispatch_codes(shape: &ArgShape) -> Option<(u8, u8)> {
+    let inline_bytes_shortcut = shape.source == SourceAtom::Inline
+        && (shape.form == FormAtom::Bytes || shape.form == FormAtom::BytesOnly);
+    if shape.is_default() || inline_bytes_shortcut {
+        return None;
+    }
+    Some((source_atom_code(shape.source), form_atom_code(shape.form)))
+}
+
+/// Serialize the per-element shape portion of an ArgShape into the
+/// JSON the runtime's `parse_cli_data_argument_shaped` expects.
+/// Returns `None` when every per-element field is at its default, so
+/// the runtime can skip the per-element pipeline entirely.
+pub fn build_list_config_json(shape: &ArgShape) -> Option<String> {
+    let list_source_is_default = shape.list_source == SourceAtom::Inline;
+    let list_form_is_default = shape.list_form == FormAtom::Auto;
+    if list_source_is_default && list_form_is_default && shape.list_checks.is_empty() {
+        return None;
+    }
+    let source_str = source_atom_name(shape.list_source);
+    let form_str = form_atom_name(shape.list_form);
+    let checks_parts: Vec<String> = shape
+        .list_checks
+        .iter()
+        .map(|c| match c {
+            Check::Path(p) => format!(
+                "{{\"kind\":\"path\",\"value\":{}}}",
+                serde_json::to_string(p).unwrap_or_else(|_| "\"\"".to_string())
+            ),
+        })
+        .collect();
+    Some(format!(
+        "{{\"source\":\"{}\",\"form\":\"{}\",\"checks\":[{}]}}",
+        source_str,
+        form_str,
+        checks_parts.join(",")
+    ))
+}
+
+/// Wire-stable u8 code for a source atom. Must match the dispatch
+/// arms in the runtime.
+pub fn source_atom_code(atom: SourceAtom) -> u8 {
+    match atom {
+        SourceAtom::Auto => 0,
+        SourceAtom::Inline => 1,
+        SourceAtom::File => 2,
+    }
+}
+
+/// Wire-stable u8 code for a form atom. Must match the dispatch arms
+/// in `parse_cli_data_argument_shaped` (morloc-runtime).
+pub fn form_atom_code(atom: FormAtom) -> u8 {
+    match atom {
+        FormAtom::Auto => 0,
+        FormAtom::Packet => 1,
+        FormAtom::Bytes => 2,
+        FormAtom::List => 3,
+        FormAtom::BytesOnly => 4,
+    }
+}
+
+fn source_atom_name(atom: SourceAtom) -> &'static str {
+    match atom {
+        SourceAtom::Auto => "auto",
+        SourceAtom::Inline => "inline",
+        SourceAtom::File => "file",
+    }
+}
+
+fn form_atom_name(atom: FormAtom) -> &'static str {
+    match atom {
+        FormAtom::Auto => "auto",
+        FormAtom::Packet => "packet",
+        FormAtom::Bytes => "bytes",
+        FormAtom::List => "list",
+        FormAtom::BytesOnly => "bytes-only",
+    }
+}
+
 /// Parsed CLI argument value for a manifest arg slot.
 #[derive(Debug)]
 pub enum ArgValue {
@@ -314,6 +668,51 @@ pub enum ArgValue {
 }
 
 
+/// Route a single positional value through the C-side parser. Picks
+/// the shape-aware FFI when the arg has any non-default
+/// `source:` / `form:` / `list.*` configuration; otherwise falls back
+/// to the default `parse_cli_data_argument` path. Returns the C-owned
+/// packet pointer (null on error -- caller drains `errmsg`).
+unsafe fn dispatch_one_arg(
+    shape: Option<&ArgShape>,
+    c_arg: *mut std::ffi::c_void,
+    c_schema: *const morloc_runtime_types::cschema::CSchema,
+    errmsg: &mut *mut std::ffi::c_char,
+) -> *mut u8 {
+    extern "C" {
+        fn parse_cli_data_argument(
+            dest: *mut u8, arg: *const std::ffi::c_void,
+            schema: *const morloc_runtime_types::cschema::CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut u8;
+        fn parse_cli_data_argument_shaped(
+            dest: *mut u8, arg: *const std::ffi::c_void,
+            schema: *const morloc_runtime_types::cschema::CSchema,
+            source_code: u8, form_code: u8,
+            list_config_json: *const std::ffi::c_char,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut u8;
+    }
+    let shape_codes = shape.and_then(shaped_dispatch_codes);
+    let list_cfg_json: Option<std::ffi::CString> = shape
+        .and_then(build_list_config_json)
+        .and_then(|s| std::ffi::CString::new(s).ok());
+    let list_cfg_ptr: *const std::ffi::c_char = list_cfg_json
+        .as_ref()
+        .map(|c| c.as_ptr())
+        .unwrap_or(std::ptr::null());
+    let pkt = if let Some((src_code, form_code)) = shape_codes {
+        parse_cli_data_argument_shaped(
+            std::ptr::null_mut(), c_arg, c_schema,
+            src_code, form_code, list_cfg_ptr, errmsg,
+        )
+    } else {
+        parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, errmsg)
+    };
+    drop(list_cfg_json);
+    pkt
+}
+
 // -- Command execution ------------------------------------------------------
 
 /// Execute a remote command by sending a call packet to the pool.
@@ -328,13 +727,10 @@ fn run_remote_command(
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
-    // C library functions from libmorloc.so
+    // C library functions from libmorloc.so. Per-arg parsing
+    // (`parse_cli_data_argument` / `..._shaped`) is encapsulated in
+    // `dispatch_one_arg`.
     extern "C" {
-        fn parse_cli_data_argument(
-            dest: *mut u8, arg: *const std::ffi::c_void,
-            schema: *const morloc_runtime_types::cschema::CSchema,
-            errmsg: *mut *mut std::ffi::c_char,
-        ) -> *mut u8;
         fn parse_cli_data_argument_list(
             dest: *mut u8,
             args: *const *const std::ffi::c_void,
@@ -389,10 +785,33 @@ fn run_remote_command(
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
+        // Variadic args (many: true): compile-time validation rejects
+        // every form/source modifier; only the IEEE 754 special-value
+        // wrap runs per token.
+        let mut many_override: Option<(Vec<String>, bool)> = None;
+        if let ArgValue::Many { tokens, literal } = arg_val {
+            let elem_is_float = element_schema_str(schema_str)
+                .as_deref()
+                .map(schema_is_float_scalar)
+                .unwrap_or(false);
+            if elem_is_float {
+                let rewritten: Vec<String> = tokens
+                    .iter()
+                    .map(|t| maybe_float_special_to_json(t).unwrap_or_else(|| t.to_string()))
+                    .collect();
+                if rewritten.iter().zip(tokens.iter()).any(|(r, t)| r != t) {
+                    many_override = Some((rewritten, *literal));
+                }
+            }
+        }
         let c_pkt = match arg_val {
             ArgValue::Many { tokens, literal } => unsafe {
+                let (toks_ref, lit) = match &many_override {
+                    Some((rt, lit)) => (rt.as_slice(), *lit),
+                    None => (tokens.as_slice(), *literal),
+                };
                 assemble_many_packet(
-                    tokens, *literal, c_schema, &mut errmsg,
+                    toks_ref, lit, c_schema, &mut errmsg,
                     initialize_positional, free_argument_t, parse_cli_data_argument_list,
                 )
             },
@@ -434,7 +853,7 @@ fn run_remote_command(
                 let c_arg = unsafe {
                     initialize_unrolled(n, grp_val_c, c_fields.as_mut_ptr(), c_defaults.as_mut_ptr())
                 };
-                let pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
+                let pkt = unsafe { dispatch_one_arg(None, c_arg, c_schema, &mut errmsg) };
                 unsafe { free_argument_t(c_arg) };
                 drop(grp_val_keep);
                 drop(fields_keep);
@@ -442,16 +861,25 @@ fn run_remote_command(
                 pkt
             }
             ArgValue::Value(_) | ArgValue::Null => {
-                let json_str = match arg_val {
+                let raw_str = match arg_val {
                     ArgValue::Value(s) => s.clone(),
                     ArgValue::Null => "null".to_string(),
                     _ => unreachable!(),
                 };
+                let raw_str = if schema_is_float_scalar(schema_str) {
+                    maybe_float_special_to_json(&raw_str).unwrap_or(raw_str)
+                } else {
+                    raw_str
+                };
+                let shape = ArgShape::from_arg(arg_def);
+                let json_str = apply_shape_to_argv(raw_str, shape.as_ref(), i);
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
                 let c_arg = unsafe {
                     initialize_positional(json_c.as_ptr() as *mut std::ffi::c_char)
                 };
-                let pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
+                let pkt = unsafe {
+                    dispatch_one_arg(shape.as_ref(), c_arg, c_schema, &mut errmsg)
+                };
                 unsafe { free_argument_t(c_arg) };
                 drop(json_c);
                 pkt
@@ -880,11 +1308,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
             nargs: usize,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut std::ffi::c_void; // absptr_t
-        fn parse_cli_data_argument(
-            dest: *mut u8, arg: *const std::ffi::c_void,
-            schema: *const morloc_runtime_types::cschema::CSchema,
-            errmsg: *mut *mut std::ffi::c_char,
-        ) -> *mut u8;
         fn parse_cli_data_argument_list(
             dest: *mut u8,
             args: *const *const std::ffi::c_void,
@@ -958,25 +1381,57 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         // as Null at the pure path -- pure morloc expressions cannot
         // currently consume record-unrolled args (the schema covers
         // the whole record; group plumbing lives in the remote path).
+        // Variadic args (many: true): compile-time validation rejects
+        // every form/source modifier; only the IEEE 754 special-value
+        // wrap runs per token.
+        let mut many_override: Option<(Vec<String>, bool)> = None;
+        if let ArgValue::Many { tokens, literal } = arg_val {
+            let elem_is_float = element_schema_str(schema_str)
+                .as_deref()
+                .map(schema_is_float_scalar)
+                .unwrap_or(false);
+            if elem_is_float {
+                let rewritten: Vec<String> = tokens
+                    .iter()
+                    .map(|t| maybe_float_special_to_json(t).unwrap_or_else(|| t.to_string()))
+                    .collect();
+                if rewritten.iter().zip(tokens.iter()).any(|(r, t)| r != t) {
+                    many_override = Some((rewritten, *literal));
+                }
+            }
+        }
         let c_pkt = match arg_val {
             ArgValue::Many { tokens, literal } => unsafe {
+                let (toks_ref, lit) = match &many_override {
+                    Some((rt, lit)) => (rt.as_slice(), *lit),
+                    None => (tokens.as_slice(), *literal),
+                };
                 assemble_many_packet(
-                    tokens, *literal, c_schema, &mut errmsg,
+                    toks_ref, lit, c_schema, &mut errmsg,
                     initialize_positional, free_argument_t, parse_cli_data_argument_list,
                 )
             },
             _ => {
-                let json_str = match arg_val {
+                let raw_str = match arg_val {
                     ArgValue::Value(s) => s.clone(),
                     ArgValue::Null => "null".to_string(),
                     ArgValue::Group { .. } => "null".to_string(),
                     ArgValue::Many { .. } => unreachable!(),
                 };
+                let raw_str = if schema_is_float_scalar(schema_str) {
+                    maybe_float_special_to_json(&raw_str).unwrap_or(raw_str)
+                } else {
+                    raw_str
+                };
+                let shape = ArgShape::from_arg(arg_def);
+                let json_str = apply_shape_to_argv(raw_str, shape.as_ref(), i);
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
                 let c_arg = unsafe {
                     initialize_positional(json_c.as_ptr() as *mut std::ffi::c_char)
                 };
-                let pkt = unsafe { parse_cli_data_argument(std::ptr::null_mut(), c_arg, c_schema, &mut errmsg) };
+                let pkt = unsafe {
+                    dispatch_one_arg(shape.as_ref(), c_arg, c_schema, &mut errmsg)
+                };
                 unsafe { free_argument_t(c_arg) };
                 drop(json_c);
                 pkt

@@ -103,6 +103,10 @@ module Morloc.Namespace.Type
 
     -- * Docstring related types
   , CliOpt (..)
+  , SourceAtom (..)
+  , FormAtom (..)
+  , PathPerm (..)
+  , Check (..)
   , ArgDoc (..)
   , ArgDocVars (..)
   , ExprTypeE (..)
@@ -543,6 +547,37 @@ data CliOpt
   | CliOptBoth Char Text
   deriving (Show, Ord, Eq)
 
+-- | Where the bytes for an argument come from. The implicit default
+-- (no `source:` field) is category-driven: scalar primitives and `Str`
+-- parse the argv string directly (inline), lists/tuples/records use the
+-- runtime auto-classifier (JSON inline OR file). `SourceAuto` is not a
+-- writable value; users opt into a non-default by writing `source: file`
+-- or `source: inline` (the only meaningful inline case is `[UInt8]`
+-- with `form: bytes`/`form: bytes-only`).
+data SourceAtom = SourceInline | SourceFile
+  deriving (Show, Ord, Eq)
+
+-- | How to interpret the bytes once they are resolved. Only meaningful
+-- on lists. The implicit default (no `form:`) is the structured-format
+-- classifier (JSON / MsgPack / packet / Arrow / ...); it never falls
+-- through to raw bytes, so raw-byte interpretation is opt-in via
+-- `FormBytes` (sniff packet -> raw bytes, the friendly path) or
+-- `FormBytesOnly` (raw bytes only, never sniff). `FormPacket` is the
+-- strictness guarantee (packet only, loud-fail otherwise).
+data FormAtom = FormPacket | FormBytes | FormBytesOnly | FormList
+  deriving (Show, Ord, Eq)
+
+-- | Path-permission subset, e.g. "r", "w", "c", "rw", "rwc".
+newtype PathPerm = PathPerm Text
+  deriving (Show, Ord, Eq)
+
+-- | A single value-invariant for the new `check.<kind>:` namespace.
+-- Initially only the `path` check kind is supported; future kinds slot in
+-- as additional constructors without changing the docstring grammar.
+data Check
+  = CheckPath PathPerm
+  deriving (Show, Ord, Eq)
+
 data ArgDocVars = ArgDocVars
   { docLines :: [Text]
   , docName :: Maybe Text
@@ -555,6 +590,12 @@ data ArgDocVars = ArgDocVars
   , docTrue :: Maybe CliOpt
   , docFalse :: Maybe CliOpt
   , docReturn :: Maybe Text
+  , docSource :: Maybe SourceAtom
+  , docForm :: Maybe FormAtom
+  , docChecks :: [Check]
+  , docListSource :: Maybe SourceAtom
+  , docListForm :: Maybe FormAtom
+  , docListChecks :: [Check]
   }
   deriving (Show, Ord, Eq)
 
@@ -609,6 +650,12 @@ instance Defaultable ArgDocVars where
       , docTrue = Nothing
       , docFalse = Nothing
       , docReturn = Nothing
+      , docSource = Nothing
+      , docForm = Nothing
+      , docChecks = []
+      , docListSource = Nothing
+      , docListForm = Nothing
+      , docListChecks = []
       }
 
 instance Typelike Type where

@@ -1,0 +1,12 @@
+module main (foo)
+
+import root
+
+-- `form: packet` on Str requires `source: file`. With the new Str
+-- default (source: inline), `form: packet` alone has no file to
+-- read the packet from.
+foo ::
+  --' form: packet
+  Str ->
+  Int
+foo x = 0

@@ -20,7 +20,7 @@
 
 use clap::{Arg as ClapArg, ArgAction, ArgMatches, Command as ClapCommand};
 
-use crate::dispatch::{quoted, ArgValue};
+use crate::dispatch::{apply_checks, quoted, ArgValue};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
 
 /// Leak a string into a `&'static str` for clap's static-only
@@ -251,7 +251,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { metavar, type_desc, desc, many, .. } => {
+            ManifestArg::Positional { metavar, type_desc, desc, many, format, .. } => {
                 let mut a = ClapArg::new(id)
                     .required(true)
                     .index(pos_idx as usize)
@@ -265,7 +265,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                 if *many {
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
+                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
                 cmd = cmd.arg(a);
                 pos_idx = pos_idx.saturating_add(1);
             }
@@ -277,6 +277,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                 type_desc,
                 desc,
                 many,
+                format,
                 ..
             } => {
                 let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -300,7 +301,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                     // passed after a single occurrence (`--xs 1 2 3`).
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
+                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
                 cmd = cmd.arg(a);
             }
             ManifestArg::Flag {
@@ -331,6 +332,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                     desc,
                     Some("Bool"),
                     default_val.as_deref(),
+                    None,
                 )));
                 cmd = cmd.arg(fwd);
 
@@ -373,6 +375,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                         desc,
                         type_desc.as_deref(),
                         None,
+                        None,
                     )));
                     cmd = cmd.arg(a);
                 }
@@ -398,6 +401,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             default_val,
             type_desc,
             desc,
+            format,
             ..
         } => {
             let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -415,7 +419,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             if let Some(d) = default_val {
                 a = a.default_value(leak(d));
             }
-            a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
+            a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
             cmd = cmd.arg(a);
         }
         ManifestArg::Flag {
@@ -439,6 +443,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 desc,
                 Some("Bool"),
                 default_val.as_deref(),
+                None,
             )));
             cmd = cmd.arg(fwd);
             if let Some(rev) = long_rev {
@@ -472,7 +477,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, many, .. } => {
+            ManifestArg::Positional { quoted: q, many, checks, .. } => {
                 if *many {
                     // Variadic positional: clap collects 1..N tokens
                     // via Append action; pull them all and forward as
@@ -491,6 +496,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("clap-required positional must have a value");
+                    // Run value-invariant checks on the raw argv (the
+                    // user's literal path / value) before any wrap.
+                    if let Err(e) = apply_checks(&val, checks) {
+                        crate::runlog::die_with_error(
+                            &format!("argument #{}: {}", i, e));
+                    }
                     let v = if *q { quoted(&val) } else { val };
                     out.push(ArgValue::Value(v));
                 }
@@ -499,6 +510,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 quoted: q,
                 default_val,
                 many,
+                checks,
                 ..
             } => {
                 // Distinguish "user typed the flag" from "clap
@@ -534,6 +546,10 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
+                    if let Err(e) = apply_checks(&v, checks) {
+                        crate::runlog::die_with_error(
+                            &format!("argument #{}: {}", i, e));
+                    }
                     let v = if *q { quoted(&v) } else { v };
                     out.push(ArgValue::Value(v));
                 } else if let Some(def) = default_val {
@@ -665,6 +681,7 @@ fn render_arg_help(
     desc: &[String],
     type_desc: Option<&str>,
     default_val: Option<&str>,
+    format_hint: Option<&str>,
 ) -> String {
     let mut lines: Vec<String> = desc
         .iter()
@@ -677,6 +694,11 @@ fn render_arg_help(
     if let Some(td) = type_desc {
         if !td.trim().is_empty() {
             lines.push(format!("type: {}", td));
+        }
+    }
+    if let Some(f) = format_hint {
+        if !f.trim().is_empty() {
+            lines.push(format!("format: {}", f));
         }
     }
     if let Some(d) = default_val {
@@ -750,6 +772,7 @@ mod tests {
             &["Take the first integer".into()],
             Some("Int"),
             None,
+            None,
         );
         assert_eq!(h, "Take the first integer\ntype: Int");
 
@@ -758,7 +781,7 @@ mod tests {
         // each arg. The placeholder is wrapped in ANSI italic SGR
         // codes; clap's anstream pipeline strips them when the
         // output isn't a TTY.
-        let h = render_arg_help(&[], Some("Real"), None);
+        let h = render_arg_help(&[], Some("Real"), None, None);
         assert_eq!(h, format!("{}\ntype: Real", MISSING_DESCRIPTION));
 
         // Multi-line description preserves every non-empty line in
@@ -766,6 +789,7 @@ mod tests {
         let h = render_arg_help(
             &["first".into(), "second".into()],
             Some("Str"),
+            None,
             None,
         );
         assert_eq!(h, "first\nsecond\ntype: Str");
@@ -775,13 +799,26 @@ mod tests {
             &["Verbose output".into()],
             Some("Bool"),
             Some("false"),
+            None,
         );
         assert_eq!(h, "Verbose output\ntype: Bool\ndefault: false");
 
         // Empty type_desc / default are suppressed (no trailing
         // blank lines in the rendered help).
-        let h = render_arg_help(&["just a desc".into()], None, None);
+        let h = render_arg_help(&["just a desc".into()], None, None, None);
         assert_eq!(h, "just a desc");
+
+        // Format hint slots in between type and default.
+        let h = render_arg_help(
+            &["readable file path".into()],
+            Some("Str"),
+            None,
+            Some("must be the path of an existing readable file"),
+        );
+        assert_eq!(
+            h,
+            "readable file path\ntype: Str\nformat: must be the path of an existing readable file"
+        );
     }
 
     #[test]

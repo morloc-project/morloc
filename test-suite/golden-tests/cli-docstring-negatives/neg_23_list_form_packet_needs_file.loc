@@ -1,0 +1,13 @@
+module main (foo)
+
+import root
+
+-- `list.form: packet` is strictly file-borne: each line must be a
+-- path to a packet. `list.source: inline` (the implicit default) does
+-- not make sense with packet semantics.
+foo ::
+  --' form: list
+  --' list.form: packet
+  [[Int32]] ->
+  Int
+foo x = 0

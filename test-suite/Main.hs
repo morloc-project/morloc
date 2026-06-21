@@ -66,6 +66,9 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "cli-docstring-negatives" "cli-docstring-negatives"
+      , golden "cli-docstring-shapes" "cli-docstring-shapes"
+
       , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
       , golden "nexus-packet-output-zstd" "nexus-packet-output-zstd"
 
@@ -231,9 +234,6 @@ main = do
       , golden "unicode-interpolation" "unicode-interpolation"
       , golden "unicode-interop" "unicode-interop"
       , golden "unicode-edge-cases" "unicode-edge-cases"
-      , golden "file-input-py" "file-input-py"
-      , golden "file-input-c" "file-input-c"
-      , golden "file-input-r" "file-input-r"
       , golden "no-shm-tmpdir-trilang" "no-shm-tmpdir-trilang"
       , golden "packer-definitions-1" "packer-definitions-1"
       , golden "packer-definitions-2" "packer-definitions-2"

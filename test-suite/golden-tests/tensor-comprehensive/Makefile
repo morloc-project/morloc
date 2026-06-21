@@ -79,15 +79,15 @@ all:
 	./nexus cornersPyToR >> obs.txt 2>> obs.err
 	echo "=== (4) File IO @save/@savej/@savem of a Matrix ===" >> obs.txt
 	echo "--- matFileBin ---" >> obs.txt
-	./nexus --keep-null matFileBin  '"/tmp/tensor-comprehensive-mat-bin.dat"'  >> obs.txt 2>> obs.err
+	./nexus --keep-null matFileBin  /tmp/tensor-comprehensive-mat-bin.dat  >> obs.txt 2>> obs.err
 	echo "--- matFileJson ---" >> obs.txt
-	./nexus --keep-null matFileJson '"/tmp/tensor-comprehensive-mat-json.dat"' >> obs.txt 2>> obs.err
+	./nexus --keep-null matFileJson /tmp/tensor-comprehensive-mat-json.dat >> obs.txt 2>> obs.err
 	echo "--- matFileMsg ---" >> obs.txt
-	./nexus --keep-null matFileMsg  '"/tmp/tensor-comprehensive-mat-msg.dat"'  >> obs.txt 2>> obs.err
+	./nexus --keep-null matFileMsg  /tmp/tensor-comprehensive-mat-msg.dat  >> obs.txt 2>> obs.err
 	echo "--- matFileSumBin ---" >> obs.txt
-	./nexus --keep-null matFileSumBin  '"/tmp/tensor-comprehensive-mat-sum-bin.dat"'  >> obs.txt 2>> obs.err
+	./nexus --keep-null matFileSumBin  /tmp/tensor-comprehensive-mat-sum-bin.dat >> obs.txt 2>> obs.err
 	echo "--- matFileSumJson ---" >> obs.txt
-	./nexus --keep-null matFileSumJson '"/tmp/tensor-comprehensive-mat-sum-json.dat"' >> obs.txt 2>> obs.err
+	./nexus --keep-null matFileSumJson /tmp/tensor-comprehensive-mat-sum-json.dat >> obs.txt 2>> obs.err
 	echo "=== (5) Matrix element types ===" >> obs.txt
 	echo "--- matI32CpPy ---" >> obs.txt
 	./nexus matI32CpPy >> obs.txt 2>> obs.err

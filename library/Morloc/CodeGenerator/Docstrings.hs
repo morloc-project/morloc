@@ -12,7 +12,32 @@ Processes docstring annotations from type signatures into the final
 'MDoc' records used by the nexus for @--help@ output, including argument
 names, default values, metavars, and CLI option flags.
 -}
-module Morloc.CodeGenerator.Docstrings (processDocstrings, argLocPrefix) where
+module Morloc.CodeGenerator.Docstrings
+  ( processDocstrings
+  , argLocPrefix
+  -- * CLI shape validation
+  , ArgShape (..)
+  , StrShape (..)
+  , ListPipeline (..)
+  , LineFileMode (..)
+  , BytesVariant (..)
+  , InlineBytesVariant (..)
+  , validateArgShape
+  , validateCmdArg
+  -- * Schema-text predicates (used by emit helpers in Nexus.hs)
+  , peelHint
+  , peelRecDecl
+  , isStrWireSchema
+  , isOptStrWireSchema
+  , isStrOrOptStrWireSchema
+  , isArrayWireSchema
+  , listElementSchema
+  , isListOfStrWireSchema
+  , isTabularRowWireSchema
+  , isFixedWidthScalar
+  , SchemaCat (..)
+  , classifySchema
+  ) where
 
 import qualified Data.Map as Map
 import Data.Text (Text)
@@ -161,14 +186,20 @@ processArgDoc i t r = do
 validateCommandLevelDirectives :: MDoc -> ArgDocVars -> MorlocMonad ()
 validateCommandLevelDirectives loc r =
   mapM_ check
-    [ ("literal", isJust (docLiteral r))
-    , ("many",    isJust (docMany r))
-    , ("unroll",  isJust (docUnroll r))
-    , ("default", isJust (docDefault r))
-    , ("metavar", isJust (docMetavar r))
-    , ("arg",     isJust (docArg r))
-    , ("true",    isJust (docTrue r))
-    , ("false",   isJust (docFalse r))
+    [ ("literal",     isJust (docLiteral r))
+    , ("many",        isJust (docMany r))
+    , ("unroll",      isJust (docUnroll r))
+    , ("default",     isJust (docDefault r))
+    , ("metavar",     isJust (docMetavar r))
+    , ("arg",         isJust (docArg r))
+    , ("true",        isJust (docTrue r))
+    , ("false",       isJust (docFalse r))
+    , ("source",      isJust (docSource r))
+    , ("form",        isJust (docForm r))
+    , ("check",       not (null (docChecks r)))
+    , ("list.source", isJust (docListSource r))
+    , ("list.form",   isJust (docListForm r))
+    , ("list.check",  not (null (docListChecks r)))
     ]
   where
     check :: (Text, Bool) -> MorlocMonad ()
@@ -224,6 +255,12 @@ reduceArgDoc i t@(VarT v) arg = do
         , docTrue = docTrue r1 <|> docTrue r2
         , docFalse = docFalse r1 <|> docFalse r2
         , docReturn = docReturn r1 <|> docReturn r2
+        , docSource = docSource r1 <|> docSource r2
+        , docForm = docForm r1 <|> docForm r2
+        , docChecks = if null (docChecks r1) then docChecks r2 else docChecks r1
+        , docListSource = docListSource r1 <|> docListSource r2
+        , docListForm = docListForm r1 <|> docListForm r2
+        , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
         }
 reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs
@@ -356,6 +393,12 @@ resolveFlag loc r = do
           , argPosDocMetavar = docMetavar r <|> Just "BOOL"
           , argPosDocLiteral = docLiteral r
           , argPosDocMany = False
+          , argPosDocSource = docSource r
+          , argPosDocForm = docForm r
+          , argPosDocChecks = docChecks r
+          , argPosDocListSource = docListSource r
+          , argPosDocListForm = docListForm r
+          , argPosDocListChecks = docListChecks r
           }
   where
     -- "any flag-like directive" -- true/false/default. If none is set
@@ -418,6 +461,12 @@ resolveOpt loc t r = do
         , argOptDocMany = many
         , argOptDocArg = opt
         , argOptDocDefault = def
+        , argOptDocSource = docSource r
+        , argOptDocForm = docForm r
+        , argOptDocChecks = docChecks r
+        , argOptDocListSource = docListSource r
+        , argOptDocListForm = docListForm r
+        , argOptDocListChecks = docListChecks r
         }
 
 makeArg ::
@@ -456,6 +505,12 @@ resolvePos t r = do
       , argPosDocMetavar = docMetavar r
       , argPosDocLiteral = docLiteral r
       , argPosDocMany = many
+      , argPosDocSource = docSource r
+      , argPosDocForm = docForm r
+      , argPosDocChecks = docChecks r
+      , argPosDocListSource = docListSource r
+      , argPosDocListForm = docListForm r
+      , argPosDocListChecks = docListChecks r
       }
 
 -- Validate that within a function's argument list, at most one
@@ -518,3 +573,402 @@ validateFlagRevCollisions loc cmdargs = do
     longOf (CliOptShort _)   = []
     longOf (CliOptLong l)    = [l]
     longOf (CliOptBoth _ l)  = [l]
+
+-- ======================================================================
+-- CLI shape validation
+-- ======================================================================
+--
+-- After type checking, every CLI argument has a wire schema (e.g.
+-- `s`, `aj`, `t2js`) and a bag of docstring fields (literal/source/
+-- form/checks/list.*). 'validateArgShape' folds those into an
+-- 'ArgShape' value: every constructor encodes exactly one legal
+-- configuration, so downstream emit code does not need to re-check
+-- coherence.
+
+-- | Wire-schema category. The hint and recursive-decl prefixes are
+-- stripped before classification; the outer `?` of an optional is
+-- also peeled so optional types inherit their underlying category.
+data SchemaCat
+  = CatScalarPrim
+  | CatStr
+  | CatList Text  -- ^ element schema text
+  | CatOtherCompound
+  deriving (Eq, Show)
+
+-- | Bytes-family form atoms (`form: bytes`, `form: bytes-only`,
+-- `form: packet`) on a fixed-width-scalar array.
+data BytesVariant = Bytes | BytesOnly | Packet
+  deriving (Eq, Show)
+
+-- | The two variants legal for the `source: inline + form:` ASCII
+-- shortcut on `[UInt8]`. `Packet` is excluded by construction.
+data InlineBytesVariant = IbBytes | IbBytesOnly
+  deriving (Eq, Show)
+
+-- | Per-line dispatch under `form: list + list.source: file`.
+data LineFileMode
+  = LfmAuto                       -- ^ list.form: auto (default)
+  | LfmPacket                     -- ^ list.form: packet (strict)
+  | LfmBytes InlineBytesVariant   -- ^ list.form: bytes / bytes-only
+  deriving (Eq, Show)
+
+-- | Per-line interpretation under `form: list`.
+data ListPipeline
+  = LpInlineBare                  -- ^ each line is the bare element value
+  | LpInlineCheck PathPerm        -- ^ each line is a Str path; perms checked
+  | LpFile LineFileMode           -- ^ each line is a path; opened per mode
+  deriving (Eq, Show)
+
+-- | The Str-specific shape variants.
+data StrShape
+  = StrDefault                    -- ^ Str default: argv is the literal value
+  | StrFile                       -- ^ source: file: file contents become the Str
+  | StrCheckPath PathPerm         -- ^ check.path on inline argv
+  deriving (Eq, Show)
+
+-- | Validated CLI shape. Every constructor encodes one legal
+-- configuration; invalid combinations are unrepresentable.
+data ArgShape
+  = AsScalarPrim
+      -- ^ Non-Str scalar primitive. argv is parsed bare; no modifiers.
+  | AsStr StrShape
+      -- ^ Str with its three variants.
+  | AsOtherCompound
+      -- ^ Tuple, record, map: no modifiers; default classifier handles
+      --   JSON inline or file path.
+  | AsListDefault
+      -- ^ List type, no modifiers: JSON inline OR auto-classified
+      --   file path.
+  | AsListMany
+      -- ^ `many: true` on a list. Multiple argv tokens, each parsed
+      --   as the element type. Mutex with every shape modifier.
+  | AsListBytes BytesVariant
+      -- ^ Fixed-width-scalar array with `form: bytes`/`bytes-only`/
+      --   `packet`. Always file-borne.
+  | AsListInlineBytes InlineBytesVariant
+      -- ^ `[UInt8]` with `source: inline + form: bytes`/`bytes-only`.
+      --   The ASCII byte-sequence shortcut.
+  | AsListLines ListPipeline
+      -- ^ `form: list` with per-line dispatch.
+  deriving (Eq, Show)
+
+-- ── Schema-text utilities ─────────────────────────────────────────
+
+-- | Strip a leading `<...>` hint decoration. Hints carry the
+-- concrete-type tag for newtypes / aliases over a built-in primitive.
+peelHint :: Text -> Text
+peelHint t = case MT.uncons t of
+  Just ('<', tt) -> case MT.span (/= '>') tt of
+    (_, post) -> case MT.uncons post of
+      Just ('>', after) -> peelHint after
+      _ -> t
+  _ -> t
+
+-- | Strip a leading `&<klen><name>` rec-decl prefix.
+peelRecDecl :: Text -> Text
+peelRecDecl t = case MT.uncons t of
+  Just ('&', tt) -> case MT.uncons tt of
+    Just (c, rest)
+      | c >= 'a' && c <= 'p' ->
+          let klen = fromEnum c - fromEnum 'a'
+              (_name, post) = MT.splitAt klen rest
+          in post
+    _ -> t
+  _ -> t
+
+isStrWireSchema :: Text -> Bool
+isStrWireSchema s = peelHint (peelRecDecl s) == "s"
+
+isOptStrWireSchema :: Text -> Bool
+isOptStrWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('?', rest) -> peelHint rest == "s"
+  _ -> False
+
+isStrOrOptStrWireSchema :: Text -> Bool
+isStrOrOptStrWireSchema s = isStrWireSchema s || isOptStrWireSchema s
+
+isArrayWireSchema :: Text -> Bool
+isArrayWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('a', _) -> True
+  _ -> False
+
+listElementSchema :: Text -> Maybe Text
+listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('a', rest) -> Just rest
+  _ -> Nothing
+
+isListOfStrWireSchema :: Text -> Bool
+isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
+
+isTabularRowWireSchema :: Text -> Bool
+isTabularRowWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('t', _) -> True
+  Just ('m', _) -> True
+  _ -> False
+
+isScalarPrimCore :: Text -> Bool
+isScalarPrimCore c = c `elem`
+  [ "b", "j", "z"
+  , "i1", "i2", "i4", "i8"
+  , "u1", "u2", "u4", "u8"
+  , "f4", "f8"
+  ]
+
+-- | True iff the schema is a fixed-width numeric scalar eligible for
+-- `form: bytes` / `form: bytes-only` / `form: packet` element types.
+-- `j` (`Int`, arbitrary-precision) and `z` (`Null`) are excluded.
+isFixedWidthScalar :: Text -> Bool
+isFixedWidthScalar s =
+  peelHint s `elem`
+    [ "b"
+    , "i1", "i2", "i4", "i8"
+    , "u1", "u2", "u4", "u8"
+    , "f4", "f8"
+    ]
+
+classifySchema :: Text -> SchemaCat
+classifySchema s0 =
+  let peeled = peelHint (peelRecDecl s0)
+      core = case MT.uncons peeled of
+        Just ('?', rest) -> peelHint rest
+        _ -> peeled
+  in if core == "s"
+       then CatStr
+       else if isScalarPrimCore core
+              then CatScalarPrim
+              else case MT.uncons core of
+                Just ('a', rest) -> CatList rest
+                _                -> CatOtherCompound
+
+-- ── Validation ────────────────────────────────────────────────────
+
+-- | Validate the docstring fields on a positional or optional arg
+-- against its wire-schema text. Returns the validated 'ArgShape' or
+-- a one-sentence error describing the rejected configuration.
+--
+-- `literal: true` is silently treated as the implicit default
+-- (source: inline on Str, ignored elsewhere); the field is preserved
+-- in 'ArgDocVars' only for backward-compatible parsing.
+validateArgShape :: Text -> Bool -> ArgDocVars -> Either Text ArgShape
+validateArgShape schema many docs
+  | many = validateMany schema docs
+  | otherwise = case classifySchema schema of
+      CatScalarPrim    -> validateScalarPrim schema docs
+      CatStr           -> validateStr docs
+      CatList elemS    -> validateList schema elemS docs
+      CatOtherCompound -> validateOtherCompound schema docs
+
+validateMany :: Text -> ArgDocVars -> Either Text ArgShape
+validateMany schema docs = do
+  if not (isArrayWireSchema schema)
+    then Left $ "`many: true` requires a list-typed argument (wire schema"
+              <> " starting with `a`); got `" <> schema <> "`."
+    else do
+      let banIf b name = if b then Left (name <> " is not allowed with `many: true`.") else Right ()
+      banIf (docSource docs /= Nothing)      "`source:`"
+      banIf (docForm docs /= Nothing)        "`form:`"
+      banIf (not (null (docChecks docs)))    "`check.*`"
+      banIf (docListSource docs /= Nothing)  "`list.source:`"
+      banIf (docListForm docs /= Nothing)    "`list.form:`"
+      banIf (not (null (docListChecks docs))) "`list.check.*`"
+      Right AsListMany
+
+-- | Non-Str scalars accept no shape modifiers.
+validateScalarPrim :: Text -> ArgDocVars -> Either Text ArgShape
+validateScalarPrim schema docs = do
+  let banIf b name = if b then Left
+        ("`" <> name <> "` is not allowed on a non-`Str` scalar primitive"
+         <> " (wire schema `" <> schema <> "`).") else Right ()
+  banIf (docSource docs /= Nothing)       "source:"
+  banIf (docForm docs /= Nothing)         "form:"
+  banIf (not (null (docChecks docs)))     "check.*"
+  banIf (docListSource docs /= Nothing)   "list.source:"
+  banIf (docListForm docs /= Nothing)     "list.form:"
+  banIf (not (null (docListChecks docs))) "list.check.*"
+  Right AsScalarPrim
+
+-- | Str: default inline, or `source: file`, or `check.path: <perm>`.
+-- The three are mutually exclusive.
+validateStr :: ArgDocVars -> Either Text ArgShape
+validateStr docs = do
+  when' (docForm docs /= Nothing) $
+    "`form:` is not allowed on `Str`. With `source: file` the runtime"
+    <> " sniffs packet magic and falls back to raw UTF-8 text; UTF-8's"
+    <> " structural constraints make the sniff collision-free."
+  when' (docListSource docs /= Nothing) $
+    "`list.source:` is not allowed on a `Str` argument."
+  when' (docListForm docs /= Nothing) $
+    "`list.form:` is not allowed on a `Str` argument."
+  when' (not (null (docListChecks docs))) $
+    "`list.check.*` is not allowed on a `Str` argument."
+  case (docSource docs, docChecks docs) of
+    (Nothing,           [])             -> Right (AsStr StrDefault)
+    (Just SourceInline, [])             -> Right (AsStr StrDefault)
+    (Just SourceFile,   [])             -> Right (AsStr StrFile)
+    (Nothing,           [CheckPath p])  -> Right (AsStr (StrCheckPath p))
+    (Just SourceInline, [CheckPath p])  -> Right (AsStr (StrCheckPath p))
+    (Just SourceFile,   [CheckPath _])  -> Left
+      "`check.path:` requires the argv to be the literal path; it cannot be combined with `source: file`."
+    (_, (_:_:_))                        -> Left
+      "multiple `check.*` fields on one argument are not supported in v1."
+
+-- | List arguments: a JSON / file default, a bytes-family form, the
+-- ASCII inline shortcut on `[UInt8]`, or `form: list`.
+validateList :: Text -> Text -> ArgDocVars -> Either Text ArgShape
+validateList schema elemS docs = do
+  when' (not (null (docChecks docs))) $
+    "`check.path:` requires a `Str` argument; got wire schema `" <> schema <> "`."
+  case (docSource docs, docForm docs) of
+    (Nothing, Nothing) ->
+      if hasAnyListField docs
+        then Left "`list.*` fields are only meaningful when `form: list` is set."
+        else Right AsListDefault
+    (Just SourceInline, Nothing) ->
+      if hasAnyListField docs
+        then Left "`list.*` fields are only meaningful when `form: list` is set."
+        else Right AsListDefault
+    (Just SourceInline, Just FormList) -> Left
+      "`source: inline` is contradictory with `form: list`; splitting a single argv string on newlines is not meaningful. Use `source: file` (or omit `source:`)."
+    (_, Just FormList) ->
+      AsListLines <$> validateLinesPipeline elemS docs
+    (mSrc, Just FormBytes)     -> bytesArm schema elemS mSrc Bytes docs
+    (mSrc, Just FormBytesOnly) -> bytesArm schema elemS mSrc BytesOnly docs
+    (mSrc, Just FormPacket)    -> bytesArm schema elemS mSrc Packet docs
+    (Just SourceFile, Nothing) -> Left $
+      "`source: file` on a list argument requires an explicit `form:`"
+      <> " (`form: list`, `form: bytes`, `form: bytes-only`, or `form: packet`)."
+
+bytesArm
+  :: Text -> Text -> Maybe SourceAtom -> BytesVariant -> ArgDocVars
+  -> Either Text ArgShape
+bytesArm schema elemS mSrc variant docs = do
+  when' (hasAnyListField docs) $
+    "`list.*` fields are only meaningful when `form: list` is set."
+  case (mSrc, variant) of
+    (Just SourceInline, Bytes)     ->
+      requireUInt8 schema elemS *> Right (AsListInlineBytes IbBytes)
+    (Just SourceInline, BytesOnly) ->
+      requireUInt8 schema elemS *> Right (AsListInlineBytes IbBytesOnly)
+    (Just SourceInline, Packet)    -> Left
+      "`source: inline` is not compatible with `form: packet`; packets are always file-borne."
+    (_, _) ->
+      if isFixedWidthScalar elemS
+        then Right (AsListBytes variant)
+        else Left $
+          "`form: " <> showVariant variant <> "` requires every list element"
+          <> " to be a fixed-width scalar (Bool, sized Int/UInt, sized Float)."
+          <> " Element wire schema `" <> elemS <> "` is not fixed-width."
+  where
+    requireUInt8 _ es =
+      if es == "u1"
+        then Right ()
+        else Left $
+          "`source: inline + form: " <> showVariant variant <> "` is only"
+          <> " allowed on `[UInt8]`; got element wire schema `" <> es <> "`."
+
+showVariant :: BytesVariant -> Text
+showVariant Bytes      = "bytes"
+showVariant BytesOnly  = "bytes-only"
+showVariant Packet     = "packet"
+
+-- | Validate the per-line pipeline under `form: list`. Returns the
+-- 'ListPipeline' or a one-sentence error.
+validateLinesPipeline :: Text -> ArgDocVars -> Either Text ListPipeline
+validateLinesPipeline elemS docs =
+  case (docListSource docs, docListForm docs, docListChecks docs) of
+    (Nothing,           Nothing,            [])             -> defaultPipeline elemS docs
+    (Just SourceInline, Nothing,            [])             -> defaultPipeline elemS docs
+    (Nothing,           Just FormList,      _)              -> Left
+      "`list.form: list` is not allowed -- nested list files are forbidden."
+    (Just SourceInline, Just FormList,      _)              -> Left
+      "`list.form: list` is not allowed -- nested list files are forbidden."
+    (Just SourceFile,   Just FormList,      _)              -> Left
+      "`list.form: list` is not allowed -- nested list files are forbidden."
+    (Just SourceFile,   Nothing,            [])             -> Right (LpFile LfmAuto)
+    (Just SourceFile,   Just FormPacket,    [])             -> Right (LpFile LfmPacket)
+    (Just SourceFile,   Just FormBytes,     [])             -> bytesLineFile elemS IbBytes
+    (Just SourceFile,   Just FormBytesOnly, [])             -> bytesLineFile elemS IbBytesOnly
+    (Nothing,           Nothing,            [CheckPath p])  -> inlineCheck elemS p
+    (Just SourceInline, Nothing,            [CheckPath p])  -> inlineCheck elemS p
+    (_,                 Just FormPacket,    _)              -> Left
+      "`list.form: packet` requires `list.source: file`."
+    (_,                 Just FormBytes,     _)              -> Left
+      "`list.form: bytes` requires `list.source: file` (or `list.source: inline` on inner `[UInt8]`)."
+    (_,                 Just FormBytesOnly, _)              -> Left
+      "`list.form: bytes-only` requires `list.source: file` (or `list.source: inline` on inner `[UInt8]`)."
+    _ -> Left "unsupported `list.*` combination."
+  where
+    defaultPipeline _ _ = Right LpInlineBare
+    inlineCheck es p
+      | es == "s"  = Right (LpInlineCheck p)
+      | otherwise  = Left $
+          "`list.check.path:` requires a list-of-`Str` element type; got element wire schema `"
+          <> es <> "`."
+    bytesLineFile es variant
+      | maybe (isFixedWidthScalar es) isFixedWidthScalar (listElementSchema es) = Right (LpFile (LfmBytes variant))
+      | isFixedWidthScalar es = Right (LpFile (LfmBytes variant))
+      | otherwise = Left $
+          "`list.form: bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
+          <> es <> "`."
+
+-- | Tuples, records, maps: no shape modifiers.
+validateOtherCompound :: Text -> ArgDocVars -> Either Text ArgShape
+validateOtherCompound schema docs = do
+  let banIf b name = if b then Left
+        ("`" <> name <> "` is not allowed on this compound type (wire schema `"
+         <> schema <> "`).") else Right ()
+  banIf (docSource docs /= Nothing)       "source:"
+  banIf (docForm docs /= Nothing)         "form:"
+  banIf (not (null (docChecks docs)))     "check.*"
+  banIf (docListSource docs /= Nothing)   "list.source:"
+  banIf (docListForm docs /= Nothing)     "list.form:"
+  banIf (not (null (docListChecks docs))) "list.check.*"
+  Right AsOtherCompound
+
+-- ── Internal helpers ──────────────────────────────────────────────
+
+when' :: Bool -> Text -> Either Text ()
+when' True  msg = Left msg
+when' False _   = Right ()
+
+hasAnyListField :: ArgDocVars -> Bool
+hasAnyListField docs =
+  docListSource docs /= Nothing
+  || docListForm docs /= Nothing
+  || not (null (docListChecks docs))
+
+-- | Validate a single 'CmdArg' against its rendered wire-schema text.
+-- Flag arguments have no shape (they are pure booleans); group
+-- arguments delegate to their entries' shapes at emit time.
+validateCmdArg :: Text -> CmdArg -> Either Text (Maybe ArgShape)
+validateCmdArg schema (CmdArgPos r) =
+  Just <$> validateArgShape schema (argPosDocMany r) (argDocVarsFromPos r)
+validateCmdArg schema (CmdArgOpt r) =
+  Just <$> validateArgShape schema (argOptDocMany r) (argDocVarsFromOpt r)
+validateCmdArg _ (CmdArgFlag _) = Right Nothing
+validateCmdArg _ (CmdArgGrp _)  = Right Nothing
+
+-- | Project the shape-relevant docstring fields out of an
+-- 'ArgPosDocSet'. The other fields (metavar, description, etc.) are
+-- consulted at JSON-emit time but are irrelevant to shape validation.
+argDocVarsFromPos :: ArgPosDocSet -> ArgDocVars
+argDocVarsFromPos r = defaultValue
+  { docLiteral      = argPosDocLiteral r
+  , docSource       = argPosDocSource r
+  , docForm         = argPosDocForm r
+  , docChecks       = argPosDocChecks r
+  , docListSource   = argPosDocListSource r
+  , docListForm     = argPosDocListForm r
+  , docListChecks   = argPosDocListChecks r
+  }
+
+argDocVarsFromOpt :: ArgOptDocSet -> ArgDocVars
+argDocVarsFromOpt r = defaultValue
+  { docLiteral      = argOptDocLiteral r
+  , docSource       = argOptDocSource r
+  , docForm         = argOptDocForm r
+  , docChecks       = argOptDocChecks r
+  , docListSource   = argOptDocListSource r
+  , docListForm     = argOptDocListForm r
+  , docListChecks   = argOptDocListChecks r
+  }
