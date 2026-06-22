@@ -20,7 +20,7 @@
 
 use clap::{Arg as ClapArg, ArgAction, ArgMatches, Command as ClapCommand};
 
-use crate::dispatch::{apply_checks, quoted, ArgValue};
+use crate::dispatch::{apply_checks, quoted, substitute_stdio_dash, ArgValue};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
 
 /// Leak a string into a `&'static str` for clap's static-only
@@ -212,10 +212,10 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
     cmd = cmd
         .allow_negative_numbers(true)
-        // User-declared flag-style args inherit this; positionals
-        // override with their own "Positional arguments" heading.
-        // `attach_to` resets to "General Options" afterward so the
-        // auto-added help row lands under that heading.
+        // User-declared flag-style args inherit this heading;
+        // positional args are hidden from clap's auto-render below
+        // and re-emitted by `render_positional_block` under a
+        // "Positional arguments:" header in `after_help`.
         .next_help_heading("Optional arguments");
     // Long help: concatenate every desc line so clap renders the
     // full block under `<sub> --help`.
@@ -230,7 +230,14 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     // also lives here so it stays attached to the command (clap has
     // no first-class slot for return-type metadata).
     let mut after = String::new();
+    let pos_block = render_positional_block(mcmd);
+    if !pos_block.is_empty() {
+        after.push_str(&pos_block);
+    }
     if !mcmd.ret.type_desc.is_empty() {
+        if !after.is_empty() {
+            after.push_str("\n\n");
+        }
         after.push_str(&format!("Return: {}", mcmd.ret.type_desc));
         for line in &mcmd.ret.desc {
             after.push_str(&format!("\n  {}", line));
@@ -251,21 +258,21 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { metavar, type_desc, desc, many, format, .. } => {
+            ManifestArg::Positional { many, .. } => {
+                // Positionals are rendered by `render_positional_block`
+                // (above, via `after_help`) so clap's bracketed
+                // `<argN>` default doesn't appear in help. They still
+                // need `required`/`index` here for clap to parse them.
                 let mut a = ClapArg::new(id)
                     .required(true)
                     .index(pos_idx as usize)
-                    .help_heading("Positional arguments");
-                if let Some(m) = metavar {
-                    a = a.value_name(leak(m));
-                }
+                    .hide(true);
                 // Variadic positional: accept one or more tokens.
                 // The compiler guarantees a `many` positional is the
                 // last positional, which is clap's requirement too.
                 if *many {
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
                 cmd = cmd.arg(a);
                 pos_idx = pos_idx.saturating_add(1);
             }
@@ -496,8 +503,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("clap-required positional must have a value");
-                    // Run value-invariant checks on the raw argv (the
-                    // user's literal path / value) before any wrap.
+                    // Unix `-` stdin/stdout shorthand: rewrite to the
+                    // `/dev/std{in,out}` path so the pool's fopen
+                    // works without any user-side dash handling.
+                    let val = substitute_stdio_dash(&val, checks).unwrap_or(val);
+                    // Run value-invariant checks on the (possibly
+                    // substituted) argv before any wrap.
                     if let Err(e) = apply_checks(&val, checks) {
                         crate::runlog::die_with_error(
                             &format!("argument #{}: {}", i, e));
@@ -546,6 +557,10 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
+                    // Unix `-` stdin/stdout shorthand: rewrite to the
+                    // `/dev/std{in,out}` path so the pool's fopen
+                    // works without any user-side dash handling.
+                    let v = substitute_stdio_dash(&v, checks).unwrap_or(v);
                     if let Err(e) = apply_checks(&v, checks) {
                         crate::runlog::die_with_error(
                             &format!("argument #{}: {}", i, e));
@@ -658,25 +673,13 @@ fn first_desc(desc: &[String]) -> &str {
         .unwrap_or("")
 }
 
-/// Placeholder shown when a manifest arg has no docstring.
-/// Wrapped in ANSI italic SGR codes (`\x1b[3m...\x1b[0m`); clap's
-/// help renderer pipes output through `anstream`, which strips ANSI
-/// codes automatically when the output isn't a TTY, so pipes /
-/// redirects / file targets see plain text.
-const MISSING_DESCRIPTION: &str = "\x1b[3mmissing description\x1b[0m";
-
 /// Render the help block for a manifest arg: the user's docstring
-/// description (falling back to a rendered "missing description"
-/// placeholder when the docstring is empty), followed on indented
-/// continuation lines by the arg's morloc type and, for flags with
-/// a declared default, the default value. clap's renderer wraps
-/// continuation lines under the same column as the first
-/// description line, producing the legacy multi-line layout:
-///
-/// ```text
-///   ARG1  missing description
-///         type: Real
-/// ```
+/// description, followed on indented continuation lines by the arg's
+/// morloc type and, for flags with a declared default, the default
+/// value. When the docstring is empty the type/format/default lines
+/// move up to fill the first slot, so help reads as a compact list
+/// of facts rather than padded with a placeholder. clap's renderer
+/// wraps continuation lines under the same column as the first line.
 fn render_arg_help(
     desc: &[String],
     type_desc: Option<&str>,
@@ -688,9 +691,6 @@ fn render_arg_help(
         .filter(|d| !d.trim().is_empty())
         .cloned()
         .collect();
-    if lines.is_empty() {
-        lines.push(MISSING_DESCRIPTION.to_string());
-    }
     if let Some(td) = type_desc {
         if !td.trim().is_empty() {
             lines.push(format!("type: {}", td));
@@ -707,6 +707,71 @@ fn render_arg_help(
         }
     }
     lines.join("\n")
+}
+
+/// Render the "Positional arguments:" block for a command's
+/// positional args, replacing clap's `<argN>` bracketed default with
+/// a numbered list (`1:`, `2:`, ...). Indices are right-aligned and
+/// the type line collapses up into the index line when no docstring
+/// is supplied, producing:
+///
+/// ```text
+/// Positional arguments:
+///   1:  the first thing
+///       type: UInt8
+///   2:  type: [UInt8]
+/// ```
+///
+/// Returns the empty string when the command has no positionals.
+fn render_positional_block(mcmd: &ManifestCommand) -> String {
+    let positionals: Vec<&ManifestArg> = mcmd
+        .args
+        .iter()
+        .filter(|a| matches!(a, ManifestArg::Positional { .. }))
+        .collect();
+    if positionals.is_empty() {
+        return String::new();
+    }
+    let idx_width = positionals.len().to_string().len();
+    let mut out = String::from("Positional arguments:");
+    for (i, marg) in positionals.iter().enumerate() {
+        let prefix = format!("  {:>width$}:  ", i + 1, width = idx_width);
+        let cont = " ".repeat(prefix.len());
+        let (type_desc, desc, format_hint) = match marg {
+            ManifestArg::Positional { type_desc, desc, format, .. } => (
+                type_desc.as_deref(),
+                desc.as_slice(),
+                format.as_deref(),
+            ),
+            _ => unreachable!("filtered to Positional only"),
+        };
+        let mut lines: Vec<String> = desc
+            .iter()
+            .filter(|d| !d.trim().is_empty())
+            .cloned()
+            .collect();
+        if let Some(td) = type_desc {
+            if !td.trim().is_empty() {
+                lines.push(format!("type: {}", td));
+            }
+        }
+        if let Some(f) = format_hint {
+            if !f.trim().is_empty() {
+                lines.push(format!("format: {}", f));
+            }
+        }
+        if lines.is_empty() {
+            // Nothing to say beyond the index marker; emit just that
+            // so the slot still appears in help.
+            out.push_str(&format!("\n{}", prefix.trim_end()));
+        } else {
+            for (li, line) in lines.iter().enumerate() {
+                let pad = if li == 0 { &prefix } else { &cont };
+                out.push_str(&format!("\n{}{}", pad, line));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -776,13 +841,11 @@ mod tests {
         );
         assert_eq!(h, "Take the first integer\ntype: Int");
 
-        // Empty description falls back to the "missing description"
-        // placeholder so users always see at least one line under
-        // each arg. The placeholder is wrapped in ANSI italic SGR
-        // codes; clap's anstream pipeline strips them when the
-        // output isn't a TTY.
+        // Empty description: the type line becomes the first line
+        // so help reads as a compact list of facts without a
+        // placeholder "missing description" line above the type.
         let h = render_arg_help(&[], Some("Real"), None, None);
-        assert_eq!(h, format!("{}\ntype: Real", MISSING_DESCRIPTION));
+        assert_eq!(h, "type: Real");
 
         // Multi-line description preserves every non-empty line in
         // order; the type line is appended after.
@@ -822,13 +885,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_description_carries_italic_sgr() {
-        // The placeholder is a plain `&'static str` constant that
-        // wraps the phrase in italic SGR codes; clap's anstream
-        // pipeline strips them automatically on non-TTY output.
-        assert!(MISSING_DESCRIPTION.contains("missing description"));
-        assert!(MISSING_DESCRIPTION.starts_with("\x1b[3m"));
-        assert!(MISSING_DESCRIPTION.ends_with("\x1b[0m"));
+    fn positional_block_collapses_type_into_index_when_no_desc() {
+        // fixture_single_add's two positionals have empty `desc`, so
+        // the type line takes the first slot beside the index marker
+        // rather than sitting on a continuation line under a
+        // placeholder. Indices are 1-based.
+        let m = fixture_single_add();
+        let block = render_positional_block(&m.commands[0]);
+        assert_eq!(
+            block,
+            "Positional arguments:\n  1:  type: Int\n  2:  type: Int"
+        );
     }
 
     #[test]

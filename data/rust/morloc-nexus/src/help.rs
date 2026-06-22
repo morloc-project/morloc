@@ -58,21 +58,21 @@ pub fn nexus_options_block() -> &'static str {
 }
 
 pub fn usage_single_root(prog: &str) -> String {
-    format!("{prog} <nexus_options> @ <subcommand_options>")
+    format!("{prog} <nexus_options> @ <command_options>")
 }
 
 pub fn usage_multi_root(prog: &str) -> String {
-    format!("{prog} <nexus_options> <subcommand>")
+    format!("{prog} <nexus_options> <command> <command_options>")
 }
 
 pub fn usage_multi_group(prog: &str, grp: &str) -> String {
-    format!("{prog} <nexus_options> {grp} <subcommand>")
+    format!("{prog} <nexus_options> {grp} <command> <command_options>")
 }
 
 pub fn usage_multi_sub(prog: &str, grp: Option<&str>, sub: &str) -> String {
     match grp {
-        Some(g) => format!("{prog} <nexus_options> {g} {sub} <subcommand_options>"),
-        None => format!("{prog} <nexus_options> {sub} <subcommand_options>"),
+        Some(g) => format!("{prog} <nexus_options> {g} {sub} <command_options>"),
+        None => format!("{prog} <nexus_options> {sub} <command_options>"),
     }
 }
 

@@ -454,6 +454,38 @@ pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// If `argv` is the Unix stdin/stdout shorthand `-` and the arg
+/// carries a `check.path` directive, return the OS path that selects
+/// the corresponding standard stream (so the pool's `fopen` etc. can
+/// open it as a regular file). Returns `None` when no substitution
+/// applies; the caller should keep the original value.
+///
+/// Mapping (based on the path permission flags):
+/// * `r` only  -> `/dev/stdin`
+/// * `w` only  -> `/dev/stdout`
+/// * `c` only  -> `/dev/stdout`
+/// * mixed (e.g. `rw`) -> `None` (ambiguous; the user wrote a
+///   contradictory shape, so don't guess).
+pub fn substitute_stdio_dash(argv: &str, checks: &[Check]) -> Option<String> {
+    if argv != "-" {
+        return None;
+    }
+    for c in checks {
+        match c {
+            Check::Path(perm) => {
+                let has_r = perm.contains('r');
+                let has_w = perm.contains('w') || perm.contains('c');
+                match (has_r, has_w) {
+                    (true, false) => return Some("/dev/stdin".to_string()),
+                    (false, true) => return Some("/dev/stdout".to_string()),
+                    _ => return None,
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Apply value-invariant checks against the raw argv token. Returns
 /// `Err` on the first failing check; the error message identifies the
 /// check kind so the user can locate the docstring field.
@@ -1531,5 +1563,53 @@ mod tests {
     #[test]
     fn collapse_handles_empty() {
         assert_eq!(collapse_duplicate_lines(""), "");
+    }
+
+    #[test]
+    fn apply_checks_path_rejects_missing_file() {
+        // Sanity guard: a non-`-` path that does not exist still
+        // fails the readability probe.
+        let checks = vec![Check::Path("r".into())];
+        assert!(apply_checks("/no/such/path/should/exist/x", &checks).is_err());
+    }
+
+    #[test]
+    fn substitute_stdio_dash_maps_to_dev_stdio() {
+        // r -> /dev/stdin, w/c -> /dev/stdout; the substitution lets
+        // the callee `fopen` the standard stream as a regular file.
+        let r = vec![Check::Path("r".into())];
+        assert_eq!(
+            substitute_stdio_dash("-", &r).as_deref(),
+            Some("/dev/stdin"),
+        );
+        let w = vec![Check::Path("w".into())];
+        assert_eq!(
+            substitute_stdio_dash("-", &w).as_deref(),
+            Some("/dev/stdout"),
+        );
+        let c = vec![Check::Path("c".into())];
+        assert_eq!(
+            substitute_stdio_dash("-", &c).as_deref(),
+            Some("/dev/stdout"),
+        );
+    }
+
+    #[test]
+    fn substitute_stdio_dash_leaves_non_dash_untouched() {
+        // Anything other than the literal `-` is a real path; leave it.
+        let r = vec![Check::Path("r".into())];
+        assert!(substitute_stdio_dash("foo.txt", &r).is_none());
+        assert!(substitute_stdio_dash("/dev/stdin", &r).is_none());
+        assert!(substitute_stdio_dash("", &r).is_none());
+    }
+
+    #[test]
+    fn substitute_stdio_dash_skips_mixed_and_unchecked() {
+        // Mixed `rw` is ambiguous (which stream?); no substitution.
+        // No check.path at all also means no substitution.
+        let rw = vec![Check::Path("rw".into())];
+        assert!(substitute_stdio_dash("-", &rw).is_none());
+        let none: Vec<Check> = vec![];
+        assert!(substitute_stdio_dash("-", &none).is_none());
     }
 }
