@@ -887,15 +887,31 @@ pub unsafe extern "C" fn make_data_packet_auto(
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
 
-    let flat_size = match crate::ffi::calc_voidstar_size_inner(voidstar as *const u8, &rs) {
+    let threshold = crate::packet::inline_threshold();
+    let t_sz = std::time::Instant::now();
+    // Bounded size walk: we only need to know whether the serialized
+    // form fits inline (i.e. is `<= threshold`), so cap the walk at
+    // `threshold + 1`. For payloads that clearly overflow inline the
+    // walk exits after visiting ~threshold bytes of structure rather
+    // than recursing through every nested record.
+    let flat_size = match crate::ffi::calc_voidstar_size_bounded(
+        voidstar as *const u8,
+        &rs,
+        threshold.saturating_add(1),
+    ) {
         Ok(s) => s,
         Err(e) => {
             set_errmsg(errmsg, &e);
             return ptr::null_mut();
         }
     };
+    crate::morloc_trace!(
+        "[make_data_packet_auto] calc_voidstar_size_bounded ({} KiB cap) = {} bytes in {:.2?}",
+        threshold / 1024,
+        flat_size,
+        t_sz.elapsed()
+    );
 
-    let threshold = crate::packet::inline_threshold();
     if flat_size <= threshold {
         match crate::voidstar::flatten_to_buffer(voidstar as AbsPtr, &rs) {
             Ok(blob) => {
@@ -1043,7 +1059,7 @@ pub unsafe extern "C" fn normalize_data_packet_for_output(
     // asked for it AND the input is currently uncompressed. The
     // already-ZSTD case passes through with its existing compression
     // byte intact (see header comment).
-    let compressed: Option<Vec<u8>> =
+    let compressed: Option<(Vec<u8>, Vec<crate::packet::FrameEntry>)> =
         if compression_level > 0 && compression == PACKET_COMPRESSION_NONE {
             let lvl = match crate::compression::CompressionLevel::from_u8(compression_level) {
                 Ok(l) => l,
@@ -1060,17 +1076,32 @@ pub unsafe extern "C" fn normalize_data_packet_for_output(
         } else {
             None
         };
-    let final_payload: &[u8] = compressed.as_deref().unwrap_or(raw_payload);
-    let final_compression: u8 = if compressed.is_some() {
-        PACKET_COMPRESSION_ZSTD
-    } else {
-        compression
+    // Build the output metadata. When we compressed here, splice the
+    // frame-index entry past any padding in the original block via
+    // `append_metadata_entry`. Pass-through preserves the original
+    // metadata byte-for-byte.
+    let new_metadata: Vec<u8> = match &compressed {
+        Some((_, frames)) => {
+            let body = crate::packet::encode_frame_index_entry(frames);
+            let original = std::slice::from_raw_parts(packet.add(32), metadata_size);
+            crate::packet::append_metadata_entry(
+                original,
+                crate::packet::METADATA_TYPE_FRAME_INDEX,
+                &body,
+            )
+        }
+        None => std::slice::from_raw_parts(packet.add(32), metadata_size).to_vec(),
+    };
+    let (final_payload, final_compression): (&[u8], u8) = match &compressed {
+        Some((bytes, _)) => (bytes.as_slice(), PACKET_COMPRESSION_ZSTD),
+        None => (raw_payload, compression),
     };
 
     // Phase 3: emit a libc::malloc'd buffer of exactly
-    // 32 + metadata_size + final_payload.len() and stitch the three
+    // 32 + new_metadata.len() + final_payload.len() and stitch the
     // regions into it in one pass.
-    let total = 32 + metadata_size + final_payload.len();
+    let new_metadata_size = new_metadata.len();
+    let total = 32 + new_metadata_size + final_payload.len();
     let mem = libc::malloc(total) as *mut u8;
     if mem.is_null() {
         set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
@@ -1080,18 +1111,23 @@ pub unsafe extern "C" fn normalize_data_packet_for_output(
     let mut new_header = *header;
     new_header.command.data.source = PACKET_SOURCE_MESG;
     new_header.command.data.compression = final_compression;
+    new_header.offset = new_metadata_size as u32;
     let mut hdr_bytes = new_header.to_bytes();
     let new_len = final_payload.len() as u64;
     hdr_bytes[24..32].copy_from_slice(&new_len.to_le_bytes());
 
     ptr::copy_nonoverlapping(hdr_bytes.as_ptr(), mem, 32);
-    if metadata_size > 0 {
-        ptr::copy_nonoverlapping(packet.add(32), mem.add(32), metadata_size);
+    if new_metadata_size > 0 {
+        ptr::copy_nonoverlapping(
+            new_metadata.as_ptr(),
+            mem.add(32),
+            new_metadata_size,
+        );
     }
     if !final_payload.is_empty() {
         ptr::copy_nonoverlapping(
             final_payload.as_ptr(),
-            mem.add(32 + metadata_size),
+            mem.add(32 + new_metadata_size),
             final_payload.len(),
         );
     }
@@ -1259,6 +1295,7 @@ pub unsafe extern "C" fn normalize_data_packet_to_fd(
 // be single-threaded anyway.
 const STREAMING_THRESHOLD: u64 = 1 << 20;
 
+
 // Run the existing in-memory normalizer, then write the resulting
 // buffer to the fd in one syscall. Used for every non-streamed path.
 unsafe fn buffered_packet_to_fd(
@@ -1352,6 +1389,24 @@ unsafe fn estimate_payload_size(
                 Ok(p) => p,
                 Err(e) => { set_errmsg(errmsg, &e); return None; }
             };
+            let t_est = std::time::Instant::now();
+            // O(1) shortcut: when the voidstar sits at the base of an
+            // SHM allocation, the block-header size is an exact upper
+            // bound on the serialized voidstar -- which is all we need
+            // here. The returned value drives the stream/buffered
+            // decision and the frame-index metadata reservation; it is
+            // no longer used as a strict pledged size (each frame in
+            // the multi-frame encoder sets its own exact FCS).
+            if let Some(sz) = unsafe { shm::shm_block_size(abs_ptr) } {
+                crate::morloc_trace!(
+                    "[estimate_payload_size] shm_block_size = {} MiB in {:.2?}",
+                    sz / (1 << 20),
+                    t_est.elapsed()
+                );
+                return Some(sz as u64);
+            }
+            // Below the shortcut threshold -- need the exact walk, which
+            // means parsing the schema metadata first.
             let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
             if schema_ptr.is_null() {
                 return Some(0);
@@ -1364,10 +1419,16 @@ unsafe fn estimate_payload_size(
                 Ok(s) => s,
                 Err(_) => return Some(0),
             };
-            match crate::ffi::calc_voidstar_size_inner(abs_ptr, &rs) {
+            let r = match crate::ffi::calc_voidstar_size_inner(abs_ptr, &rs) {
                 Ok(sz) => Some(sz as u64),
                 Err(_) => Some(0),
-            }
+            };
+            crate::morloc_trace!(
+                "[estimate_payload_size] calc_voidstar_size_inner = {} MiB in {:.2?}",
+                r.unwrap_or(0) / (1 << 20),
+                t_est.elapsed()
+            );
+            r
         }
         PACKET_SOURCE_FILE => {
             let filename_bytes = std::slice::from_raw_parts(
@@ -1395,6 +1456,12 @@ unsafe fn stream_packet_to_fd(
     estimated_payload_bytes: u64,
     errmsg: *mut *mut c_char,
 ) -> i64 {
+    let t_stream = std::time::Instant::now();
+    crate::morloc_trace!(
+        "[stream_packet_to_fd] entering: est_payload={} MiB, lvl={}",
+        estimated_payload_bytes / (1 << 20),
+        compression_level
+    );
     let header_in = packet as *const PacketHeader;
     let metadata_size = (*header_in).offset as usize;
     let payload_start = 32 + metadata_size;
@@ -1474,7 +1541,59 @@ unsafe fn stream_packet_to_fd(
             (0, 0)
         };
 
-    let extended_offset = metadata_size + vol_meta_size;
+    // When compressing, reserve worst-case bytes in the metadata
+    // block for the frame-index entry, sized from
+    // `estimated_payload_bytes` (an upper bound). The entry's
+    // 4-byte size field is written up front with the reserved
+    // amount; the actual frame index body is patched in via pwrite
+    // after the payload streams out. Decoders use the `frame_count`
+    // field inside the entry body -- not the entry's size field --
+    // to know how many frames to consume, so trailing zero padding
+    // is fine.
+    // Build the full output metadata block in a Vec, then write it in
+    // one shot. Compose via the metadata helpers so the
+    // "splice-past-padding + repad to alignment" logic lives in one
+    // place (`packet::prepend_metadata_entries` and
+    // `packet::append_metadata_entry`). Max metadata size is a few KB
+    // -- the frame index for the user's 2.4 GiB payload is ~2400
+    // bytes -- so the Vec allocation is negligible vs the payload.
+    let original_meta = std::slice::from_raw_parts(packet.add(32), metadata_size);
+    let mut vol_meta_entry = Vec::with_capacity(10);
+    if vol_meta_size > 0 {
+        vol_meta_entry.extend_from_slice(&crate::packet::METADATA_HEADER_MAGIC);
+        vol_meta_entry.push(METADATA_TYPE_VOL_INDEX);
+        vol_meta_entry.extend_from_slice(&2u32.to_le_bytes());
+        vol_meta_entry.extend_from_slice(&out_vol_idx.to_le_bytes());
+    }
+    let frame_index_reserved_body: usize = if lvl_opt.is_some() {
+        let max_frames =
+            crate::compression::max_frames_for(estimated_payload_bytes as usize);
+        crate::compression::frame_index_entry_max_bytes(max_frames)
+    } else {
+        0
+    };
+    let with_vol = if vol_meta_size > 0 {
+        crate::packet::prepend_metadata_entries(&vol_meta_entry, original_meta)
+    } else {
+        original_meta.to_vec()
+    };
+    let new_meta: Vec<u8> = if frame_index_reserved_body > 0 {
+        // Reserve worst-case body bytes -- zero-filled -- so the
+        // entry header records `size = max_frames * FRAME_ENTRY_BYTES
+        // + 4`. The actual frame-index body is patched in via pwrite
+        // after the payload streams out; the leading u32 frame_count
+        // tells decoders how many entries are populated.
+        let zeros = vec![0u8; frame_index_reserved_body];
+        crate::packet::append_metadata_entry(
+            &with_vol,
+            METADATA_TYPE_FRAME_INDEX,
+            &zeros,
+        )
+    } else {
+        with_vol
+    };
+
+    let extended_offset = new_meta.len();
     new_header.offset = extended_offset as u32;
     let mut hdr_bytes = new_header.to_bytes();
     hdr_bytes[24..32].copy_from_slice(&0u64.to_le_bytes());
@@ -1482,31 +1601,41 @@ unsafe fn stream_packet_to_fd(
     if write_all_fd(fd, hdr_bytes.as_ptr(), 32, errmsg) < 0 {
         return -1;
     }
-    if vol_meta_size > 0 {
-        // 8-byte metadata header + 2-byte u16 body.
-        let mut buf = [0u8; 10];
-        buf[0] = b'm'; buf[1] = b'm'; buf[2] = b'h';
-        buf[3] = METADATA_TYPE_VOL_INDEX;
-        // size field is u32 LE = 2
-        buf[4..8].copy_from_slice(&2u32.to_le_bytes());
-        buf[8..10].copy_from_slice(&out_vol_idx.to_le_bytes());
-        if write_all_fd(fd, buf.as_ptr(), 10, errmsg) < 0 {
-            return -1;
-        }
-    }
-    if metadata_size > 0 {
-        if write_all_fd(fd, packet.add(32), metadata_size, errmsg) < 0 {
+    // The frame-index body lives in `new_meta` at the offset right
+    // after the entry header (mmh + type + u32 size). We'll pwrite
+    // the actual body there after streaming finishes. Locate it by
+    // re-running `metadata_entries_end` on everything except the
+    // appended entry, which is exactly `new_meta` minus the trailing
+    // [entry header + reserved body + padding].
+    let frame_index_body_start = if frame_index_reserved_body > 0 {
+        // Find where the frame-index entry starts: walk `new_meta`
+        // until we hit our frame-index entry. Since
+        // `append_metadata_entry` placed it immediately after the
+        // last pre-existing entry (vol_meta + original), the entry
+        // header begins at `metadata_entries_end(&new_meta) - (8 +
+        // reserved_body)`. The body offset is +8 past that.
+        let entry_total = 8 + frame_index_reserved_body;
+        let entries_end_in_new = crate::packet::metadata_entries_end(&new_meta);
+        let body_offset_in_meta = entries_end_in_new - entry_total + 8;
+        Some(start_pos + 32 + body_offset_in_meta as i64)
+    } else {
+        None
+    };
+    if extended_offset > 0 {
+        if write_all_fd(fd, new_meta.as_ptr(), extended_offset, errmsg) < 0 {
             return -1;
         }
     }
 
     let payload_origin = start_pos + 32 + extended_offset as i64;
-    let est = estimated_payload_bytes as usize;
+    let t_walk = std::time::Instant::now();
     let stream_result = match source {
         PACKET_SOURCE_RPTR => stream_rptr_payload(
-            packet, payload_start, format, fd, lvl_opt, est, out_vol_idx, errmsg,
+            packet, payload_start, format, fd, lvl_opt, out_vol_idx, errmsg,
         ),
-        PACKET_SOURCE_FILE => stream_file_payload(packet, payload_start, payload_len, format, fd, lvl_opt, est, errmsg),
+        PACKET_SOURCE_FILE => stream_file_payload(
+            packet, payload_start, payload_len, format, fd, lvl_opt, errmsg,
+        ),
         _ => {
             set_errmsg(errmsg, &MorlocError::Packet(format!(
                 "stream_packet_to_fd called with unstreamable source 0x{:02x}", source
@@ -1514,9 +1643,14 @@ unsafe fn stream_packet_to_fd(
             return -1;
         }
     };
-    if stream_result.is_err() {
-        return -1;
-    }
+    crate::morloc_trace!(
+        "[stream_packet_to_fd] walk+encode took {:.2?}",
+        t_walk.elapsed()
+    );
+    let frame_index = match stream_result {
+        Ok(frames) => frames,
+        Err(()) => return -1,
+    };
 
     let end_pos = libc::lseek(fd, 0, libc::SEEK_CUR);
     if end_pos < 0 {
@@ -1536,6 +1670,46 @@ unsafe fn stream_packet_to_fd(
         return -1;
     }
 
+    // Patch the actual frame index into the reserved metadata
+    // region. Compressed packets always have a frame index; the
+    // encoder emits at least one frame per packet (possibly empty
+    // for an empty payload).
+    if let Some(body_start) = frame_index_body_start {
+        if frame_index.is_empty() {
+            set_errmsg(errmsg, &MorlocError::Packet(
+                "stream encoder returned empty frame index for compressed packet".into(),
+            ));
+            return -1;
+        }
+        let body = crate::packet::encode_frame_index_entry(&frame_index);
+        if body.len() > frame_index_reserved_body {
+            set_errmsg(errmsg, &MorlocError::Packet(format!(
+                "frame index ({} bytes) exceeds reserved space ({} bytes); \
+                 estimated payload was {} bytes",
+                body.len(),
+                frame_index_reserved_body,
+                estimated_payload_bytes,
+            )));
+            return -1;
+        }
+        let rc = libc::pwrite(
+            fd,
+            body.as_ptr() as *const c_void,
+            body.len(),
+            body_start,
+        );
+        if rc as usize != body.len() {
+            set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+            return -1;
+        }
+    }
+
+    crate::morloc_trace!(
+        "[stream_packet_to_fd] total: {:.2?} (compressed payload {} MiB, {} frames)",
+        t_stream.elapsed(),
+        payload_size / (1 << 20),
+        frame_index.len()
+    );
     (end_pos - start_pos) as i64
 }
 
@@ -1565,17 +1739,18 @@ impl std::io::Write for FdWriter {
 // Stream an RPTR+VOIDSTAR payload to fd, optionally through a zstd
 // encoder. Uses `voidstar::write_flat_to_writer` for forward-only
 // flatten so the full payload never materializes in a Vec on the
-// way out.
+// way out. Returns the per-frame index for the caller to stamp into
+// the packet's METADATA_TYPE_FRAME_INDEX entry. Uncompressed output
+// returns an empty index.
 unsafe fn stream_rptr_payload(
     packet: *const u8,
     payload_start: usize,
     format: u8,
     fd: libc::c_int,
     lvl: Option<crate::compression::CompressionLevel>,
-    estimated_input_bytes: usize,
     vol_idx_hint: u16,
     errmsg: *mut *mut c_char,
-) -> Result<(), ()> {
+) -> Result<Vec<crate::packet::FrameEntry>, ()> {
     if format != PACKET_FORMAT_VOIDSTAR {
         set_errmsg(errmsg, &MorlocError::Packet(format!(
             "stream_rptr_payload: expected VOIDSTAR, got 0x{:02x}", format
@@ -1610,28 +1785,54 @@ unsafe fn stream_rptr_payload(
         Err(e) => { set_errmsg(errmsg, &e); return Err(()); }
     };
 
-    let mut writer = FdWriter(fd);
+    let writer = FdWriter(fd);
+    // Capture the moment the walker finishes inside the closure so we
+    // can split the user-visible walk+encode number into:
+    //   * walker  -- producer thread walking the voidstar (plus any
+    //                time it spent blocked on worker queue backpressure)
+    //   * drain   -- remainder spent in BufWriter::flush and
+    //                MultiFrameEncoder::finish waiting on in-flight
+    //                worker frames after the walker had no more bytes
+    //                to produce.
+    // A walker > payload / 1 GB/s suggests parallelizing the walker;
+    // a large drain suggests compression-side optimizations are more
+    // interesting.
+    let t_total = std::time::Instant::now();
+    let mut walker_elapsed: Option<std::time::Duration> = None;
+    let walker_ref = &mut walker_elapsed;
     let result = crate::compression::stream_encode_with(
-        &mut writer,
+        writer,
         lvl,
-        estimated_input_bytes,
         |sink| {
-            crate::voidstar::write_flat_to_writer_with_vol_idx(
+            let r = crate::voidstar::write_flat_to_writer_with_vol_idx(
                 sink, abs_ptr, &rs, vol_idx_hint,
-            ).map(|_| ())
+            ).map(|_| ());
+            *walker_ref = Some(t_total.elapsed());
+            r
         },
     );
-    if let Err(e) = result {
-        set_errmsg(errmsg, &e);
-        return Err(());
+    let total = t_total.elapsed();
+    if let Some(walker) = walker_elapsed {
+        crate::morloc_trace!(
+            "[stream_rptr_payload] walker took {:.2?}, drain took {:.2?}",
+            walker,
+            total.saturating_sub(walker)
+        );
     }
-    Ok(())
+    match result {
+        Ok((_writer, frames)) => Ok(frames),
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            Err(())
+        }
+    }
 }
 
 // Stream a FILE+MSGPACK payload: open the source file, io::copy
 // through the optional encoder into the fd. Peak in-process memory
 // is bounded by the io::copy chunk size (8 KiB) + the encoder's
-// internal worker buffers.
+// internal worker buffers. Returns the per-frame index (empty for
+// the uncompressed pass-through path).
 unsafe fn stream_file_payload(
     packet: *const u8,
     payload_start: usize,
@@ -1639,9 +1840,8 @@ unsafe fn stream_file_payload(
     format: u8,
     fd: libc::c_int,
     lvl: Option<crate::compression::CompressionLevel>,
-    estimated_input_bytes: usize,
     errmsg: *mut *mut c_char,
-) -> Result<(), ()> {
+) -> Result<Vec<crate::packet::FrameEntry>, ()> {
     if format != PACKET_FORMAT_MSGPACK {
         set_errmsg(errmsg, &MorlocError::Packet(format!(
             "stream_file_payload: expected MSGPACK, got 0x{:02x}", format
@@ -1659,20 +1859,28 @@ unsafe fn stream_file_payload(
         Err(e) => { set_errmsg(errmsg, &MorlocError::Io(e)); return Err(()); }
     };
 
-    let mut writer = FdWriter(fd);
-    let result = match lvl {
-        Some(lvl) => crate::compression::stream_encode_reader(
-            &mut writer, &mut src, lvl, estimated_input_bytes,
-        ),
-        None => std::io::copy(&mut src, &mut writer)
-            .map(|_| ())
-            .map_err(MorlocError::Io),
-    };
-    if let Err(e) = result {
-        set_errmsg(errmsg, &e);
-        return Err(());
+    let writer = FdWriter(fd);
+    match lvl {
+        Some(lvl) => {
+            match crate::compression::stream_encode_reader(writer, &mut src, lvl) {
+                Ok((_writer, frames)) => Ok(frames),
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    Err(())
+                }
+            }
+        }
+        None => {
+            let mut writer = writer;
+            match std::io::copy(&mut src, &mut writer).map_err(MorlocError::Io) {
+                Ok(_) => Ok(Vec::new()),
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    Err(())
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 // libc::malloc a copy of `src[..len]` and hand it back through the
@@ -2070,6 +2278,55 @@ mod auto_routing_tests {
         // Same wrapper, one extra data byte: must flip to RPTR.
         let n = MORLOC_INLINE_THRESHOLD - byte_array_flat_overhead() + 1;
         assert_eq!(auto_route_source_for(n), PACKET_SOURCE_RPTR);
+    }
+
+    #[test]
+    fn bounded_size_exits_early_above_bound() {
+        // Build a voidstar large enough that an unbounded walk would
+        // visibly count past the bound, then verify
+        // `calc_voidstar_size_bounded` returns a value `> bound` (and
+        // therefore the inline-vs-RPTR routing test below it sees the
+        // correct "exceeded" signal). The exact returned value is the
+        // accumulator at the moment the walk short-circuited; we only
+        // assert the predicate the routing decision uses.
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        ensure_shm();
+        let schema = byte_array_schema();
+        let n = 128 * 1024;
+        let (abs, _rel) = unsafe { build_byte_array_voidstar(n) };
+        let bound = 1024usize;
+        let sz = crate::ffi::calc_voidstar_size_bounded(abs as *const u8, &schema, bound)
+            .unwrap();
+        assert!(
+            sz > bound,
+            "bounded walk returned {} for {}-byte payload; expected > bound {}",
+            sz, n, bound
+        );
+        // And the unbounded walk should still return the exact size.
+        let exact = crate::ffi::calc_voidstar_size_inner(abs as *const u8, &schema).unwrap();
+        assert!(
+            exact >= n,
+            "exact size {} smaller than raw data length {}",
+            exact, n
+        );
+        let _ = shm::shfree(abs);
+    }
+
+    #[test]
+    fn bounded_size_matches_exact_when_bound_clears_payload() {
+        // When the bound exceeds the actual size, bounded must match
+        // the unbounded inner -- no short-circuit fires.
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        ensure_shm();
+        let schema = byte_array_schema();
+        let n = 256usize;
+        let (abs, _rel) = unsafe { build_byte_array_voidstar(n) };
+        let exact = crate::ffi::calc_voidstar_size_inner(abs as *const u8, &schema).unwrap();
+        let bounded = crate::ffi::calc_voidstar_size_bounded(
+            abs as *const u8, &schema, exact + 1024,
+        ).unwrap();
+        assert_eq!(exact, bounded);
+        let _ = shm::shfree(abs);
     }
 
     #[test]

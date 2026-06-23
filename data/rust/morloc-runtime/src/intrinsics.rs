@@ -169,41 +169,86 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     }
 
     // If a compression level is selected, swap the flattened buffer for
-    // its zstd-compressed form before writing the payload region. The
+    // its zstd multi-frame form before writing the payload region. The
     // raw blob is freed either way; the compressed bytes live in `comp`
-    // for the rest of the function when level > 0.
-    let (payload_ptr, payload_len, compression_byte, comp_buf): (*const u8, usize, u8, Option<Vec<u8>>) =
-        if clvl.is_none() {
-            (blob as *const u8, blob_size, crate::packet::PACKET_COMPRESSION_NONE, None)
-        } else {
-            let raw_slice = std::slice::from_raw_parts(blob as *const u8, blob_size);
-            match crate::compression::compress_payload_zstd(raw_slice, clvl) {
-                Ok(comp) => (
-                    comp.as_ptr(),
-                    comp.len(),
-                    crate::packet::PACKET_COMPRESSION_ZSTD,
-                    Some(comp),
-                ),
-                Err(e) => {
-                    libc::free(blob as *mut c_void);
-                    libc::close(fd);
-                    libc::unlink(tmp_buf.as_ptr() as *const c_char);
-                    set_errmsg(errmsg, &e);
-                    return 1;
-                }
+    // for the rest of the function when level > 0. The frame index is
+    // stamped into the metadata block between the header and the
+    // payload. The block is padded to METADATA_BLOCK_ALIGNMENT so the
+    // payload starts on the same aligned offset other emit paths use
+    // (32-byte alignment).
+    struct CompressedOut {
+        bytes: Vec<u8>,
+        metadata_block: Vec<u8>,
+    }
+    let comp: Option<CompressedOut> = if clvl.is_none() {
+        None
+    } else {
+        let raw_slice = std::slice::from_raw_parts(blob as *const u8, blob_size);
+        match crate::compression::compress_payload_zstd(raw_slice, clvl) {
+            Ok((bytes, frames)) => {
+                let body = crate::packet::encode_frame_index_entry(&frames);
+                // Splice into an empty metadata block (no existing
+                // entries to preserve here) and pad to alignment.
+                let metadata_block = crate::packet::append_metadata_entry(
+                    &[],
+                    crate::packet::METADATA_TYPE_FRAME_INDEX,
+                    &body,
+                );
+                Some(CompressedOut { bytes, metadata_block })
             }
+            Err(e) => {
+                libc::free(blob as *mut c_void);
+                libc::close(fd);
+                libc::unlink(tmp_buf.as_ptr() as *const c_char);
+                set_errmsg(errmsg, &e);
+                return 1;
+            }
+        }
+    };
+
+    let (payload_ptr, payload_len, compression_byte, metadata_size): (*const u8, usize, u8, usize) =
+        match &comp {
+            Some(c) => (
+                c.bytes.as_ptr(),
+                c.bytes.len(),
+                crate::packet::PACKET_COMPRESSION_ZSTD,
+                c.metadata_block.len(),
+            ),
+            None => (
+                blob as *const u8,
+                blob_size,
+                crate::packet::PACKET_COMPRESSION_NONE,
+                0,
+            ),
         };
+
+    // Metadata (frame-index entry + padding) sits between the header
+    // placeholder and the payload; write it before the payload bytes.
+    if let Some(c) = &comp {
+        if write_binary_fd(
+            fd,
+            c.metadata_block.as_ptr() as *const c_char,
+            c.metadata_block.len(),
+            &mut err,
+        ) != 0 {
+            libc::free(blob as *mut c_void);
+            libc::close(fd);
+            libc::unlink(tmp_buf.as_ptr() as *const c_char);
+            *errmsg = err;
+            return 1;
+        }
+    }
 
     if write_binary_fd(fd, payload_ptr as *const c_char, payload_len, &mut err) != 0 {
         libc::free(blob as *mut c_void);
-        drop(comp_buf);
+        drop(comp);
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
         *errmsg = err;
         return 1;
     }
     libc::free(blob as *mut c_void);
-    drop(comp_buf);
+    drop(comp);
 
     // Seek back and write the real header. data_mesg fills in everything
     // except the compression byte; patch byte 15 in the serialized header
@@ -211,10 +256,11 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     // data-command compression slot: 4 magic + 2 plain + 2 version + 2
     // flavor + 2 mode + 1 cmd_type + 1 source + 1 format = 15.)
     libc::lseek(fd, 0, libc::SEEK_SET);
-    let header = crate::packet::PacketHeader::data_mesg(
+    let mut header = crate::packet::PacketHeader::data_mesg(
         crate::packet::PACKET_FORMAT_VOIDSTAR,
         payload_len as u64,
     );
+    header.offset = metadata_size as u32;
     let mut hdr_bytes = header.to_bytes();
     hdr_bytes[15] = compression_byte;
     write_binary_fd(fd, hdr_bytes.as_ptr() as *const c_char, hdr_bytes.len(), &mut err);
@@ -262,6 +308,20 @@ pub unsafe extern "C" fn mlc_load(
     // into a fresh SHM allocation, skipping the libc::malloc + read +
     // shmalloc + memcpy chain.
     match crate::cli::try_load_voidstar_packet_via_mmap(path, schema) {
+        Ok(Some(ptr)) => return ptr as *mut c_void,
+        Ok(None) => { /* fall through */ }
+        Err(e) => {
+            let path_str = CStr::from_ptr(path).to_string_lossy();
+            eprintln!("@load warning ({}): {}", path_str, e);
+            return ptr::null_mut();
+        }
+    }
+    // Compressed-VOIDSTAR fast path: stream-decompress a zstd frame
+    // directly into a fresh SHM allocation. Same memory shape as the
+    // uncompressed mmap path -- one X of the decompressed payload --
+    // and avoids the multi-Vec / libc::malloc round-trip the legacy
+    // path takes.
+    match crate::cli::try_load_compressed_voidstar_via_shm(path, schema) {
         Ok(Some(ptr)) => return ptr as *mut c_void,
         Ok(None) => { /* fall through */ }
         Err(e) => {

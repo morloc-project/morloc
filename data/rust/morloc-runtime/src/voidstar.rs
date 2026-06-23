@@ -652,7 +652,19 @@ struct EmitState<'a, W: std::io::Write + ?Sized> {
     vol_mask: u64,
 }
 
-impl<W: std::io::Write + ?Sized> EmitState<'_, W> {
+// Sink abstraction so the recursive emit_slot/emit_tail walk can target
+// any Write-compatible destination through EmitState. The trait exists
+// so future per-thread parallel emit paths can plug in alternative
+// sinks (e.g. wrapping a zstd encoder per thread) without duplicating
+// the walk.
+trait EmitSink {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), MorlocError>;
+    fn pad_to(&mut self, target: usize) -> Result<(), MorlocError>;
+    fn cursor(&self) -> usize;
+    fn vol_mask(&self) -> u64;
+}
+
+impl<W: std::io::Write + ?Sized> EmitSink for EmitState<'_, W> {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), MorlocError> {
         self.writer.write_all(bytes).map_err(MorlocError::Io)?;
         self.cursor += bytes.len();
@@ -668,10 +680,13 @@ impl<W: std::io::Write + ?Sized> EmitState<'_, W> {
         }
         Ok(())
     }
+
+    fn cursor(&self) -> usize { self.cursor }
+    fn vol_mask(&self) -> u64 { self.vol_mask }
 }
 
-fn emit_slot<W: std::io::Write + ?Sized>(
-    e: &mut EmitState<'_, W>,
+fn emit_slot<S: EmitSink>(
+    e: &mut S,
     data: AbsPtr,
     schema: &Schema,
     tail_start: usize,
@@ -680,8 +695,8 @@ fn emit_slot<W: std::io::Write + ?Sized>(
     recur::with_scope(env, schema, |env| emit_slot_inner(e, data, schema, tail_start, env))
 }
 
-fn emit_slot_inner<W: std::io::Write + ?Sized>(
-    e: &mut EmitState<'_, W>,
+fn emit_slot_inner<S: EmitSink>(
+    e: &mut S,
     data: AbsPtr,
     schema: &Schema,
     tail_start: usize,
@@ -696,7 +711,7 @@ fn emit_slot_inner<W: std::io::Write + ?Sized>(
     // in the stdlib. Wider structs fall back to a heap Vec.
     const STACK_SLOT_MAX: usize = 256;
     let width = schema.width;
-    let vol_mask = e.vol_mask;
+    let vol_mask = e.vol_mask();
     if width <= STACK_SLOT_MAX {
         let mut buf = [0u8; STACK_SLOT_MAX];
         materialize_slot(&mut buf[..width], data, schema, tail_start, vol_mask, env)?;
@@ -820,8 +835,8 @@ fn patch_slot_inner(
     Ok(())
 }
 
-fn emit_tail<W: std::io::Write + ?Sized>(
-    e: &mut EmitState<'_, W>,
+fn emit_tail<S: EmitSink>(
+    e: &mut S,
     data: AbsPtr,
     schema: &Schema,
     env: &mut RecurEnv,
@@ -829,8 +844,8 @@ fn emit_tail<W: std::io::Write + ?Sized>(
     recur::with_scope(env, schema, |env| emit_tail_inner(e, data, schema, env))
 }
 
-fn emit_tail_inner<W: std::io::Write + ?Sized>(
-    e: &mut EmitState<'_, W>,
+fn emit_tail_inner<S: EmitSink>(
+    e: &mut S,
     data: AbsPtr,
     schema: &Schema,
     env: &mut RecurEnv,
@@ -840,7 +855,7 @@ fn emit_tail_inner<W: std::io::Write + ?Sized>(
             SerialType::Int => {
                 let size = *(data as *const usize);
                 if size > 1 {
-                    let limb_pos = shm::align_up(e.cursor, std::mem::align_of::<u64>());
+                    let limb_pos = shm::align_up(e.cursor(), std::mem::align_of::<u64>());
                     e.pad_to(limb_pos)?;
                     let limb_relptr =
                         *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
@@ -858,7 +873,7 @@ fn emit_tail_inner<W: std::io::Write + ?Sized>(
                     } else {
                         elem_schema.array_data_alignment()
                     };
-                    let elem_pos = shm::align_up(e.cursor, align);
+                    let elem_pos = shm::align_up(e.cursor(), align);
                     e.pad_to(elem_pos)?;
                     let elem_data = shm::rel2abs(arr.data)?;
                     let elem_w = elem_schema.width;
@@ -924,7 +939,7 @@ fn emit_tail_inner<W: std::io::Write + ?Sized>(
                 if relptr_in != shm::RELNULL {
                     let inner_schema = &schema.parameters[0];
                     let inner_align = inner_schema.alignment().max(1);
-                    let inner_pos = shm::align_up(e.cursor, inner_align);
+                    let inner_pos = shm::align_up(e.cursor(), inner_align);
                     e.pad_to(inner_pos)?;
                     let inner_data = shm::rel2abs(relptr_in)?;
                     let after_inner_slot = inner_pos + inner_schema.width;

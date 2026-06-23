@@ -130,7 +130,116 @@ pub const METADATA_TYPE_XXHASH: u8 = 0x02;
 /// to XOR-rewrite the high bits. The 16-bit body is a little-endian
 /// u16 carrying the producer's chosen index; the high bit is reserved.
 pub const METADATA_TYPE_VOL_INDEX: u8 = 0x03;
+/// Frame index for multi-frame compressed payloads. The entry body is
+/// `[frame_count: u32 LE, [(uncompressed_size: u64 LE, compressed_size: u64 LE); frame_count]]`.
+/// Every `PACKET_COMPRESSION_ZSTD` payload carries this index so
+/// decoders can `shmalloc(total_uncompressed_size)` once, slice the
+/// destination per frame, and dispatch frame decoding to a worker
+/// pool. The frame index is mandatory on compressed packets under the
+/// multi-frame format -- a compressed packet that arrives without an
+/// index is rejected by the decoder.
+///
+/// The entry's metadata `size` field may exceed
+/// `4 + 16 * frame_count`: streaming encoders reserve worst-case room
+/// up front (from `ceil(estimated_payload_bytes / FRAME_CHUNK_SIZE)`)
+/// and patch the actual data in after the payload streams out, so
+/// trailing slots may be zero. Decoders use the `frame_count` field
+/// inside the entry body, not the entry's metadata size, to know how
+/// many frames to consume.
+pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
+
+// ── Frame-index helpers ────────────────────────────────────────────────────
+
+/// One entry in a multi-frame compressed packet's frame index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameEntry {
+    pub uncompressed_size: u64,
+    pub compressed_size: u64,
+}
+
+/// Bytes per frame slot inside the frame-index entry payload
+/// (`u64` uncompressed_size + `u64` compressed_size). Encoders use
+/// this to size the worst-case reservation: an entry covering
+/// `n` frames is `FRAME_INDEX_HEADER_BYTES + n * FRAME_ENTRY_BYTES`.
+pub const FRAME_ENTRY_BYTES: usize = 16;
+
+/// Bytes before the per-frame array in the entry payload (the
+/// `frame_count: u32 LE` prefix).
+pub const FRAME_INDEX_HEADER_BYTES: usize = 4;
+
+/// Encode a frame-index entry payload (excluding the 8-byte
+/// `mmh + type + size` metadata-entry header). The returned bytes are
+/// what an encoder writes into the body of a
+/// `METADATA_TYPE_FRAME_INDEX` entry.
+pub fn encode_frame_index_entry(frames: &[FrameEntry]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        FRAME_INDEX_HEADER_BYTES + frames.len() * FRAME_ENTRY_BYTES,
+    );
+    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    for f in frames {
+        out.extend_from_slice(&f.uncompressed_size.to_le_bytes());
+        out.extend_from_slice(&f.compressed_size.to_le_bytes());
+    }
+    out
+}
+
+/// Decode a frame-index entry payload (the body of a
+/// `METADATA_TYPE_FRAME_INDEX` entry, not the 8-byte entry header).
+/// Returns `Err` on truncation or a `frame_count` that exceeds the
+/// available data. Trailing bytes after `frame_count * FRAME_ENTRY_BYTES`
+/// are ignored (encoder may reserve more than needed; padding stays
+/// zero).
+pub fn decode_frame_index_entry(data: &[u8]) -> Result<Vec<FrameEntry>, MorlocError> {
+    if data.len() < FRAME_INDEX_HEADER_BYTES {
+        return Err(MorlocError::Packet(format!(
+            "frame index entry truncated: {} bytes",
+            data.len()
+        )));
+    }
+    let frame_count =
+        u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let needed = FRAME_INDEX_HEADER_BYTES
+        .checked_add(frame_count.checked_mul(FRAME_ENTRY_BYTES).ok_or_else(|| {
+            MorlocError::Packet("frame_count overflow".into())
+        })?)
+        .ok_or_else(|| MorlocError::Packet("frame index size overflow".into()))?;
+    if data.len() < needed {
+        return Err(MorlocError::Packet(format!(
+            "frame index claims {} frames but entry only has {} bytes",
+            frame_count,
+            data.len()
+        )));
+    }
+    let mut frames = Vec::with_capacity(frame_count);
+    let mut cur = FRAME_INDEX_HEADER_BYTES;
+    for _ in 0..frame_count {
+        let uncompressed_size = u64::from_le_bytes(
+            data[cur..cur + 8].try_into().unwrap(),
+        );
+        let compressed_size = u64::from_le_bytes(
+            data[cur + 8..cur + 16].try_into().unwrap(),
+        );
+        frames.push(FrameEntry { uncompressed_size, compressed_size });
+        cur += FRAME_ENTRY_BYTES;
+    }
+    Ok(frames)
+}
+
+/// Read the multi-frame index from a packet's metadata block, if
+/// present. Returns `Ok(None)` when the packet has no frame index
+/// entry (the legal shape for uncompressed packets); returns
+/// `Ok(Some(frames))` when the entry is present and parses cleanly.
+pub fn read_frame_index_from_meta(
+    packet: &[u8],
+) -> Result<Option<Vec<FrameEntry>>, MorlocError> {
+    for (kind, data) in iter_packet_metadata(packet)? {
+        if kind == METADATA_TYPE_FRAME_INDEX {
+            return decode_frame_index_entry(data).map(Some);
+        }
+    }
+    Ok(None)
+}
 
 // ── Packed structs matching the C binary layout ────────────────────────────
 
@@ -649,6 +758,86 @@ pub fn iter_metadata(meta: &[u8]) -> MetadataIter<'_> {
     MetadataIter { meta, pos: 0 }
 }
 
+/// Return the byte length of the valid entries at the start of `meta`,
+/// i.e. the offset of the first byte that is no longer a `mmh`-magic
+/// metadata entry header. Padding bytes after the last valid entry
+/// (e.g. the zero-pad that `make_mesg_data_packet` inserts to round
+/// the block up to 32 bytes) lie past the returned offset.
+///
+/// Used by encoders that need to splice an additional entry into an
+/// existing metadata block: the new entry must sit immediately after
+/// the last valid entry, since the metadata iterator stops at the
+/// first non-`mmh` byte and would not otherwise see the splice.
+pub fn metadata_entries_end(meta: &[u8]) -> usize {
+    let mut cur = 0usize;
+    while cur + 8 <= meta.len() {
+        if meta[cur..cur + 3] != METADATA_HEADER_MAGIC {
+            break;
+        }
+        let size = u32::from_le_bytes([
+            meta[cur + 4],
+            meta[cur + 5],
+            meta[cur + 6],
+            meta[cur + 7],
+        ]) as usize;
+        let next = match cur.checked_add(8).and_then(|v| v.checked_add(size)) {
+            Some(n) => n,
+            None => break,
+        };
+        if next > meta.len() {
+            break;
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// Width to which metadata blocks are padded so the payload starts on a
+/// well-known alignment boundary. Matches `make_mesg_data_packet`'s
+/// 32-byte rounding.
+pub const METADATA_BLOCK_ALIGNMENT: usize = 32;
+
+/// Build a new metadata block by appending a single entry `(kind, body)`
+/// to the valid entries at the start of `existing`. Any trailing
+/// padding in `existing` (zero bytes past `metadata_entries_end`) is
+/// discarded; the result is padded back up to `METADATA_BLOCK_ALIGNMENT`
+/// so the payload retains its alignment.
+///
+/// Encoders that need to insert a `METADATA_TYPE_FRAME_INDEX` entry into
+/// the metadata block of an existing packet (`compress_packet`,
+/// `normalize_data_packet_for_output`, etc.) use this helper instead of
+/// hand-stitching the entry header + body + padding.
+pub fn append_metadata_entry(existing: &[u8], kind: u8, body: &[u8]) -> Vec<u8> {
+    let entries_end = metadata_entries_end(existing);
+    let mut out = Vec::with_capacity(
+        entries_end + 8 + body.len() + METADATA_BLOCK_ALIGNMENT,
+    );
+    out.extend_from_slice(&existing[..entries_end]);
+    out.extend_from_slice(&METADATA_HEADER_MAGIC);
+    out.push(kind);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(body);
+    let padded = out.len().div_ceil(METADATA_BLOCK_ALIGNMENT) * METADATA_BLOCK_ALIGNMENT;
+    out.resize(padded, 0);
+    out
+}
+
+/// Build a new metadata block by concatenating the valid entries at the
+/// start of `existing` with `prepended` entries that should appear
+/// before them (e.g. a freshly-computed `METADATA_TYPE_VOL_INDEX` entry
+/// the streaming encoder writes before the passed-through metadata).
+/// The result is padded to `METADATA_BLOCK_ALIGNMENT`.
+pub fn prepend_metadata_entries(prepended: &[u8], existing: &[u8]) -> Vec<u8> {
+    let entries_end = metadata_entries_end(existing);
+    let mut out =
+        Vec::with_capacity(prepended.len() + entries_end + METADATA_BLOCK_ALIGNMENT);
+    out.extend_from_slice(prepended);
+    out.extend_from_slice(&existing[..entries_end]);
+    let padded = out.len().div_ceil(METADATA_BLOCK_ALIGNMENT) * METADATA_BLOCK_ALIGNMENT;
+    out.resize(padded, 0);
+    out
+}
+
 /// Iterate the entries of a full packet's metadata section. Errors
 /// on a too-small or invalid-header packet; returns an empty iterator
 /// when the packet declares no metadata.
@@ -743,5 +932,129 @@ mod tests {
         assert_eq!(fmt, PACKET_FORMAT_MSGPACK);
         let len = { data.length };
         assert_eq!(len, 256);
+    }
+
+    #[test]
+    fn frame_index_entry_roundtrip() {
+        let frames = vec![
+            FrameEntry { uncompressed_size: 16 << 20, compressed_size: 6 << 20 },
+            FrameEntry { uncompressed_size: 16 << 20, compressed_size: 5_500_000 },
+            FrameEntry { uncompressed_size: 4_532_768, compressed_size: 1_234_567 },
+        ];
+        let encoded = encode_frame_index_entry(&frames);
+        assert_eq!(
+            encoded.len(),
+            FRAME_INDEX_HEADER_BYTES + frames.len() * FRAME_ENTRY_BYTES
+        );
+        let decoded = decode_frame_index_entry(&encoded).unwrap();
+        assert_eq!(decoded, frames);
+    }
+
+    #[test]
+    fn frame_index_entry_empty_roundtrip() {
+        // Zero-frame index is legal (an encoder reserves space for the
+        // worst case and may emit zero frames if the input was empty).
+        let encoded = encode_frame_index_entry(&[]);
+        assert_eq!(encoded.len(), FRAME_INDEX_HEADER_BYTES);
+        let decoded = decode_frame_index_entry(&encoded).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn frame_index_entry_tolerates_trailing_padding() {
+        // Streaming encoders reserve max-N slots and may patch in
+        // fewer than max-N actual frames. Trailing zero padding past
+        // `frame_count * FRAME_ENTRY_BYTES` must be ignored by the
+        // decoder, which keys off the frame_count field.
+        let frames = vec![FrameEntry {
+            uncompressed_size: 16 << 20,
+            compressed_size: 5 << 20,
+        }];
+        let mut encoded = encode_frame_index_entry(&frames);
+        encoded.extend_from_slice(&[0u8; FRAME_ENTRY_BYTES * 5]); // five empty slots
+        let decoded = decode_frame_index_entry(&encoded).unwrap();
+        assert_eq!(decoded, frames);
+    }
+
+    #[test]
+    fn frame_index_entry_rejects_truncated_header() {
+        let bad = [0u8; 3];
+        assert!(decode_frame_index_entry(&bad).is_err());
+    }
+
+    #[test]
+    fn frame_index_entry_rejects_count_past_data() {
+        // frame_count = 4 but the entry only carries 1 slot.
+        let mut bad = 4u32.to_le_bytes().to_vec();
+        bad.extend_from_slice(&[0u8; FRAME_ENTRY_BYTES]);
+        let err = decode_frame_index_entry(&bad).unwrap_err();
+        assert!(matches!(err, MorlocError::Packet(_)));
+    }
+
+    #[test]
+    fn read_frame_index_from_meta_returns_none_when_absent() {
+        // Build a minimal MESG+VOIDSTAR packet with only the schema
+        // metadata entry. `read_frame_index_from_meta` should report
+        // no frame index without erroring.
+        let payload = vec![0u8; 32];
+        let schema_str = "u4"; // any short schema is fine
+        let packet = make_mesg_data_packet(&payload, schema_str);
+        let got = read_frame_index_from_meta(&packet).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn read_frame_index_from_meta_returns_entries_when_present() {
+        // Construct a packet by hand with both a schema and a
+        // frame-index metadata entry, then verify the reader returns
+        // the frames in order.
+        let schema_bytes = b"au1\0";
+        let schema_entry_size = schema_bytes.len();
+        let frames = vec![
+            FrameEntry { uncompressed_size: 100, compressed_size: 40 },
+            FrameEntry { uncompressed_size: 200, compressed_size: 80 },
+        ];
+        let index_entry = encode_frame_index_entry(&frames);
+        let meta_bytes = {
+            let mut m = Vec::new();
+            // schema entry
+            m.extend_from_slice(&METADATA_HEADER_MAGIC);
+            m.push(METADATA_TYPE_SCHEMA_STRING);
+            m.extend_from_slice(&(schema_entry_size as u32).to_le_bytes());
+            m.extend_from_slice(schema_bytes);
+            // frame index entry
+            m.extend_from_slice(&METADATA_HEADER_MAGIC);
+            m.push(METADATA_TYPE_FRAME_INDEX);
+            m.extend_from_slice(&(index_entry.len() as u32).to_le_bytes());
+            m.extend_from_slice(&index_entry);
+            m
+        };
+        // Wrap in a packet header. We only need the offset field to
+        // point past the metadata; iteration stops when meta is
+        // exhausted.
+        let mut hdr = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 0);
+        hdr.offset = meta_bytes.len() as u32;
+        let mut packet = hdr.to_bytes().to_vec();
+        packet.extend_from_slice(&meta_bytes);
+        let got = read_frame_index_from_meta(&packet).unwrap().unwrap();
+        assert_eq!(got, frames);
+    }
+
+    /// Helper: build a minimal MESG+VOIDSTAR packet with a single
+    /// schema-string metadata entry wrapping `payload`.
+    fn make_mesg_data_packet(payload: &[u8], schema: &str) -> Vec<u8> {
+        let mut schema_bytes = schema.as_bytes().to_vec();
+        schema_bytes.push(0); // null terminator
+        let mut meta = Vec::new();
+        meta.extend_from_slice(&METADATA_HEADER_MAGIC);
+        meta.push(METADATA_TYPE_SCHEMA_STRING);
+        meta.extend_from_slice(&(schema_bytes.len() as u32).to_le_bytes());
+        meta.extend_from_slice(&schema_bytes);
+        let mut hdr = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload.len() as u64);
+        hdr.offset = meta.len() as u32;
+        let mut packet = hdr.to_bytes().to_vec();
+        packet.extend_from_slice(&meta);
+        packet.extend_from_slice(payload);
+        packet
     }
 }

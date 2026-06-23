@@ -18,7 +18,11 @@ pub use morloc_runtime_types::shm_types::{
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
-/// Cross-platform file pre-allocation.
+/// Cross-platform file pre-allocation, used by the file-backed fallback
+/// path. The tmpfs path no longer goes through here -- it uses
+/// `ftruncate` + `parallel_reserve_pages` so the slow page-allocate
+/// work can run across multiple CPUs.
+///
 /// Linux: posix_fallocate (allocates disk blocks).
 /// macOS: ftruncate (extends file, may be sparse).
 #[cfg(target_os = "linux")]
@@ -29,6 +33,206 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 #[cfg(target_os = "macos")]
 unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
     if libc::ftruncate(fd, size) == -1 { -1 } else { 0 }
+}
+
+/// System page size, cached on first use. Used to align the per-worker
+/// sub-ranges in `parallel_madvise_populate_write` -- `madvise`
+/// requires page-aligned offsets and lengths.
+fn page_size() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if v <= 0 { 4096 } else { v as usize }
+    })
+}
+
+/// Worker count for parallel page reservation. Reuses the encoder's
+/// `frame_workers()` cap so all parallel-CPU work in the runtime sees
+/// the same `MORLOC_FRAME_WORKERS` override.
+fn fallocate_workers(size: usize) -> usize {
+    // Below ~64 MiB there's no headroom for parallel reservation to
+    // pay back the thread-spawn cost; stay serial.
+    if size < (64 << 20) {
+        return 1;
+    }
+    morloc_runtime_types::compression::frame_workers()
+}
+
+/// Linux Option 3 primary: ask the kernel to populate every page in
+/// the mapped region writable. After this returns 0, every page is
+/// allocated, zero-filled, AND mapped into the calling VMA's page
+/// table -- so subsequent writes don't take minor page faults either.
+/// Returns 0 on full success; on any per-worker error the first
+/// non-zero errno is returned. A return of EINVAL means the kernel is
+/// older than Linux 5.14 and the caller should retry with
+/// `parallel_posix_fallocate`.
+#[cfg(target_os = "linux")]
+unsafe fn parallel_madvise_populate_write(ptr: *mut u8, size: usize) -> i32 {
+    let workers = fallocate_workers(size);
+    // Below the parallel-payback threshold, skip the scope entirely
+    // and call madvise inline. Avoids spawning one thread + joining
+    // it just to do the same syscall.
+    if workers == 1 {
+        let r = libc::madvise(
+            ptr as *mut libc::c_void,
+            size,
+            libc::MADV_POPULATE_WRITE,
+        );
+        return if r == 0 { 0 } else { *libc::__errno_location() };
+    }
+    let ps = page_size();
+    let raw_chunk = size / workers;
+    // Each worker's range must start on a page boundary.
+    let chunk = if raw_chunk == 0 { ps } else { raw_chunk.div_ceil(ps) * ps };
+    let ptr_addr = ptr as usize;
+    let first_err = std::sync::atomic::AtomicI32::new(0);
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(workers);
+        for i in 0..workers {
+            let off = i * chunk;
+            if off >= size {
+                break;
+            }
+            let len = (size - off).min(chunk);
+            let first_err_ref = &first_err;
+            let h = s.spawn(move || unsafe {
+                let r = libc::madvise(
+                    (ptr_addr as *mut libc::c_void).add(off),
+                    len,
+                    libc::MADV_POPULATE_WRITE,
+                );
+                if r != 0 {
+                    let e = *libc::__errno_location();
+                    let _ = first_err_ref.compare_exchange(
+                        0,
+                        e,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            });
+            handles.push(h);
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+    first_err.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Linux fallback used when `MADV_POPULATE_WRITE` is unavailable
+/// (kernel < 5.14, returns EINVAL). Splits `[0, size)` into N disjoint
+/// sub-ranges and runs `posix_fallocate` on each in parallel.
+/// `posix_fallocate` returns the error code directly (it does not
+/// touch `errno`), so we collect the first non-zero return.
+#[cfg(target_os = "linux")]
+unsafe fn parallel_posix_fallocate(fd: i32, size: usize) -> i32 {
+    let workers = fallocate_workers(size);
+    if workers == 1 {
+        return libc::posix_fallocate(fd, 0, size as i64);
+    }
+    let ps = page_size();
+    let raw_chunk = size / workers;
+    let chunk = if raw_chunk == 0 { ps } else { raw_chunk.div_ceil(ps) * ps };
+    let first_err = std::sync::atomic::AtomicI32::new(0);
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(workers);
+        for i in 0..workers {
+            let off = i * chunk;
+            if off >= size {
+                break;
+            }
+            let len = (size - off).min(chunk);
+            let first_err_ref = &first_err;
+            let h = s.spawn(move || unsafe {
+                let r = libc::posix_fallocate(fd, off as i64, len as i64);
+                if r != 0 {
+                    let _ = first_err_ref.compare_exchange(
+                        0,
+                        r,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            });
+            handles.push(h);
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+    first_err.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Reserve every page in `[ptr, ptr+size)` -- the same guarantee the
+/// old single-threaded `posix_fallocate(fd, 0, size)` gave us, but
+/// parallelized. On Linux 5.14+ uses `MADV_POPULATE_WRITE` (also
+/// populates page tables, so no minor faults during the subsequent
+/// data write); on older kernels falls back to parallel
+/// `posix_fallocate` on the fd. Returns 0 on success; non-zero error
+/// code (errno from madvise, return code from posix_fallocate) on
+/// failure. macOS gets the noop path: tmpfs there is sparse by
+/// default and lazy faulting is the convention.
+#[cfg(target_os = "linux")]
+unsafe fn parallel_reserve_pages(fd: i32, ptr: *mut u8, size: usize) -> i32 {
+    let t0 = std::time::Instant::now();
+    let workers = fallocate_workers(size);
+
+    // Note: do NOT advise MADV_HUGEPAGE here. We benchmarked it and
+    // shmem (MAP_SHARED tmpfs) THP made BOTH populate and the
+    // subsequent parallel-write decompress significantly slower:
+    //   * populate: 241 ms -> 610 ms (kernel serializes inode-lock
+    //     work and may invoke memory compaction per 2 MiB page).
+    //   * decompress: 1.18 s -> 1.96 s (40% throughput drop, from
+    //     cache-line bouncing on huge pages shared between adjacent
+    //     workers whose 16 MiB frames straddle 2 MiB boundaries when
+    //     the SHM data region is not 2 MiB-aligned).
+    // The read-only phases (adjust_relptrs, output walk+encode) saw
+    // no benefit either -- single-threaded TLB pressure on the SHM
+    // region is small enough that the savings get lost in noise.
+    // If revisited, a hugetlbfs-backed mapping with explicit
+    // MAP_HUGE_2MB would dodge the compaction + khugepaged paths but
+    // require sysadmin setup. Not worth the complexity here.
+
+    let err = parallel_madvise_populate_write(ptr, size);
+    if err == 0 {
+        crate::morloc_trace!(
+            "[shmalloc] populate via madvise(POPULATE_WRITE), {} workers, {} in {:.2?}",
+            workers,
+            human_bytes(size),
+            t0.elapsed()
+        );
+        return 0;
+    }
+    if err != libc::EINVAL {
+        // ENOMEM (or anything else) -- propagate so the caller can
+        // tear the tmpfs allocation down and fall back to file-backed.
+        return err;
+    }
+    // EINVAL: kernel doesn't recognize MADV_POPULATE_WRITE (pre-5.14).
+    // Retry with parallel posix_fallocate, which is functionally
+    // identical for tmpfs (allocate + zero pages, mapped on first
+    // fault).
+    let t1 = std::time::Instant::now();
+    let err = parallel_posix_fallocate(fd, size);
+    if err == 0 {
+        crate::morloc_trace!(
+            "[shmalloc] populate via parallel posix_fallocate (madvise unsupported), {} workers, {} in {:.2?}",
+            workers,
+            human_bytes(size),
+            t1.elapsed()
+        );
+    }
+    err
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn parallel_reserve_pages(_fd: i32, _ptr: *mut u8, _size: usize) -> i32 {
+    // macOS tmpfs is sparse-by-default; `ftruncate` already extended
+    // the file and the kernel will allocate pages on first write.
+    // Lazy faulting is the macOS convention; no upfront reservation
+    // needed.
+    0
 }
 
 // ── Internal lock constants ────────────────────────────────────────────────
@@ -322,33 +526,26 @@ pub fn shinit(
         set_cstr(&mut *cb, shm_basename);
     }
 
-    // Try POSIX shared memory first, fall back to file-backed
-    let (fd, created, volume_label, actual_full_size) =
-        try_open_shm(&shm_name, full_size)?;
-
-    // SAFETY: mmap with MAP_SHARED on a valid fd obtained from shm_open/open above.
-    // The returned pointer is checked against MAP_FAILED before use.
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            actual_full_size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            fd,
-            0,
-        )
+    // Try POSIX shared memory first, fall back to file-backed.
+    // `try_open_tmpfs` does its own mmap + parallel page reservation
+    // (the work that used to be a single-threaded `posix_fallocate`).
+    // It returns Ok(None) when the tmpfs path isn't viable -- either
+    // `shm_open` failed or the reservation ran out of room. We then
+    // fall through to the slower-but-correct file-backed path.
+    let opened = match try_open_tmpfs(&shm_name, full_size)? {
+        Some(v) => v,
+        None => try_open_file_backed(&shm_name, full_size)?,
     };
-    // SAFETY: fd is a valid file descriptor opened above.
+
+    let fd = opened.fd;
+    let shm = opened.ptr;
+    let actual_full_size = opened.actual_size;
+    let created = opened.created;
+    let volume_label = opened.label;
+    // SAFETY: fd is a valid file descriptor opened by try_open_*; we no
+    // longer need it after the mapping is established (the mmap'd
+    // region survives the close on both Linux and macOS).
     unsafe { libc::close(fd) };
-
-    if ptr == libc::MAP_FAILED {
-        return Err(MorlocError::Shm(format!(
-            "Failed to mmap volume '{}' ({} bytes)",
-            volume_label, actual_full_size
-        )));
-    }
-
-    let shm = ptr as *mut ShmHeader;
 
     let actual_data_size = actual_full_size - std::mem::size_of::<ShmHeader>();
 
@@ -704,6 +901,38 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     Ok(())
 }
 
+/// Return the allocation size of an SHM block, in O(1), reading the
+/// `BlockHeader` placed immediately before `ptr` by `shmalloc`.
+///
+/// Returns `None` when `ptr` is null, not within any mapped SHM volume,
+/// or carries a corrupted/missing block magic -- conditions under which
+/// the header bytes cannot be trusted (the pointer may be heap/stack,
+/// an interior sub-pointer that doesn't sit at the start of an
+/// allocation, or memory from a torn-down volume). Callers can use a
+/// `None` return to fall back to a full walk.
+///
+/// The returned size is the rounded-up allocation size (aligned to
+/// `BLOCK_ALIGN`), not the original `shmalloc(size)` request -- callers
+/// that need the exact serialized voidstar size still have to walk the
+/// structure. The block size is suitable for use as an upper bound in
+/// inline-vs-RPTR and streaming-threshold decisions, where the encoder
+/// later computed `pledgedSrcSize` from the same `calc_voidstar_size_inner`
+/// that this block was sized from.
+pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
+    if ptr.is_null() {
+        return None;
+    }
+    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
+    if !ptr_is_in_any_volume(header_ptr) {
+        return None;
+    }
+    let header = &*(header_ptr as *const BlockHeader);
+    if header.magic != BLK_MAGIC {
+        return None;
+    }
+    Some(header.size)
+}
+
 /// Convert relative pointer to absolute pointer. O(1) under the
 /// indexed-relptr encoding: a relptr packs `(volume_index, offset)`
 /// into a 64-bit word, so we read the index, look up VOLUMES[idx],
@@ -943,13 +1172,33 @@ fn human_bytes(n: usize) -> String {
     }
 }
 
-fn try_open_shm(
+/// Volume successfully opened, sized, and (for newly-created volumes)
+/// page-reserved. `fd` is still open; caller is responsible for
+/// `libc::close(fd)` after recording the mapping in VOLUMES.
+struct OpenedVolume {
+    fd: libc::c_int,
+    ptr: *mut ShmHeader,
+    created: bool,
+    label: String,
+    actual_size: usize,
+}
+
+/// Try to open a tmpfs (POSIX SHM) volume. On Linux 5.14+ this uses
+/// `ftruncate + mmap + madvise(POPULATE_WRITE)` across `frame_workers()`
+/// threads to reserve pages in parallel; on older kernels it falls
+/// back to parallel `posix_fallocate`. Returns `None` when:
+///   * `shm_open` fails entirely (e.g. `/dev/shm` doesn't exist), or
+///   * the page reservation fails (e.g. `/dev/shm` exists but is too
+///     small for `full_size`) -- in which case we have already cleaned
+///     up via `shm_unlink` so the caller can immediately fall through
+///     to the file-backed path.
+/// Returns `Err` only for hard / unexpected failures (`fstat` failing,
+/// `mmap` failing) that the caller should propagate.
+fn try_open_tmpfs(
     shm_name: &str,
     full_size: usize,
-) -> Result<(i32, bool, String, usize), MorlocError> {
+) -> Result<Option<OpenedVolume>, MorlocError> {
     let name_cstr = std::ffi::CString::new(shm_name).unwrap();
-
-    // Try POSIX SHM
     let fd = unsafe {
         libc::shm_open(
             name_cstr.as_ptr(),
@@ -957,30 +1206,91 @@ fn try_open_shm(
             0o666,
         )
     };
+    if fd < 0 {
+        return Ok(None);
+    }
+    let mut sb: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut sb) } == -1 {
+        unsafe { libc::close(fd) };
+        return Err(MorlocError::Shm(format!("fstat failed for '{}'", shm_name)));
+    }
+    let created = sb.st_size == 0;
+    let actual_size = if created { full_size } else { sb.st_size as usize };
 
-    if fd >= 0 {
-        let mut sb: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut sb) } == -1 {
-            unsafe { libc::close(fd) };
-            return Err(MorlocError::Shm(format!("fstat failed for '{}'", shm_name)));
-        }
-        let created = sb.st_size == 0;
-        if created {
-            let err = unsafe { preallocate_fd(fd, full_size as i64) };
-            if err == 0 {
-                return Ok((fd, true, shm_name.to_string(), full_size));
-            }
-            // /dev/shm too small, clean up and try file-backed
+    if created {
+        // Set the file size; pages are NOT allocated yet.
+        if unsafe { libc::ftruncate(fd, full_size as i64) } != 0 {
             unsafe {
                 libc::close(fd);
                 libc::shm_unlink(name_cstr.as_ptr());
             }
-        } else {
-            return Ok((fd, false, shm_name.to_string(), sb.st_size as usize));
+            // ftruncate on a freshly-shm_open'd file failing is
+            // unusual but not catastrophic; fall through to file-backed.
+            return Ok(None);
         }
     }
 
-    // Try file-backed fallback
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            actual_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        unsafe {
+            libc::close(fd);
+            if created {
+                libc::shm_unlink(name_cstr.as_ptr());
+            }
+        }
+        return Err(MorlocError::Shm(format!(
+            "Failed to mmap tmpfs volume '{}' ({} bytes)",
+            shm_name, actual_size
+        )));
+    }
+
+    if created {
+        // Reserve every page upfront (atomically detects /dev/shm OOM
+        // before any data write can `SIGBUS`). On Linux this is the
+        // parallel madvise/fallocate path; on macOS it's a noop
+        // (sparse tmpfs + lazy faulting).
+        let err = unsafe {
+            parallel_reserve_pages(fd, ptr as *mut u8, full_size)
+        };
+        if err != 0 {
+            unsafe {
+                libc::munmap(ptr, actual_size);
+                libc::close(fd);
+                libc::shm_unlink(name_cstr.as_ptr());
+            }
+            // Page reservation failed (typically ENOMEM /
+            // ENOSPC on a too-small `/dev/shm`). Fall through to
+            // file-backed.
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(OpenedVolume {
+        fd,
+        ptr: ptr as *mut ShmHeader,
+        created,
+        label: shm_name.to_string(),
+        actual_size,
+    }))
+}
+
+/// Open the file-backed fallback volume. Uses the single-threaded
+/// `preallocate_fd` (= `posix_fallocate` on Linux, `ftruncate` on
+/// macOS) -- this path is uncommon (only reached when `/dev/shm` is
+/// too small) and correctness matters more than speed.
+fn try_open_file_backed(
+    shm_name: &str,
+    full_size: usize,
+) -> Result<OpenedVolume, MorlocError> {
     let fb = FALLBACK_DIR.lock().unwrap();
     let fallback = get_cstr_buf(&fb);
     if fallback.is_empty() {
@@ -1036,7 +1346,36 @@ fn try_open_shm(
         sb.st_size as usize
     };
 
-    Ok((fd, created, file_path, actual_size))
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            actual_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        unsafe {
+            libc::close(fd);
+            if created {
+                libc::unlink(path_cstr.as_ptr());
+            }
+        }
+        return Err(MorlocError::Shm(format!(
+            "Failed to mmap file-backed volume '{}' ({} bytes)",
+            file_path, actual_size
+        )));
+    }
+
+    Ok(OpenedVolume {
+        fd,
+        ptr: ptr as *mut ShmHeader,
+        created,
+        label: file_path,
+        actual_size,
+    })
 }
 
 fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
@@ -1582,6 +1921,44 @@ mod tests {
         shfree(ptr1).unwrap();
 
         // Cleanup
+        shclose().unwrap();
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn large_alloc_writes_every_page_without_crashing() {
+        // Smoke test for the parallel page-reservation path: allocate
+        // a region larger than the 64 MiB serial-fallback cutoff in
+        // `fallocate_workers`, then write every page. If the new
+        // tmpfs-with-madvise path is correct, every page is backed
+        // before our writes; if anything went wrong in `try_open_tmpfs`
+        // we'd either crash on write (page-fault SIGBUS) or fall back
+        // to the file-backed path (still correct, just slower).
+        let tmpdir = std::env::temp_dir();
+        let test_dir = tmpdir.join(format!("morloc_test_large_{}", std::process::id()));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        shm_set_fallback_dir(test_dir.to_str().unwrap());
+
+        let basename = format!("test_shm_large_{}", std::process::id());
+        // 128 MiB requested; that's > 64 MiB so `fallocate_workers`
+        // returns >= 1 worker, and on Linux 5.14+ this exercises
+        // `parallel_madvise_populate_write`.
+        let alloc_size = 128 * 1024 * 1024;
+        shinit(&basename, 0, alloc_size).unwrap();
+        let p = shmalloc(alloc_size).unwrap();
+        let ps = page_size();
+        let n_pages = alloc_size / ps;
+        // Touch one byte per page across the whole region.
+        unsafe {
+            for i in 0..n_pages {
+                std::ptr::write(p.add(i * ps), (i & 0xFF) as u8);
+            }
+            // Spot-check a few pages.
+            for &i in &[0usize, n_pages / 2, n_pages - 1] {
+                assert_eq!(*p.add(i * ps), (i & 0xFF) as u8);
+            }
+        }
+        shfree(p).unwrap();
         shclose().unwrap();
         let _ = std::fs::remove_dir_all(&test_dir);
     }

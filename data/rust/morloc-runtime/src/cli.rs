@@ -504,6 +504,359 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     Ok(Some(dest))
 }
 
+// ── rebase_voidstar_in_shm (shared by the compressed ingest fast paths) ───
+
+/// Apply the producer->consumer relptr rebase to the voidstar in `dest`
+/// in-place. Computes `delta = abs2rel(dest) - encode_relptr(hint, 0)`
+/// and walks the structure adjusting each relptr by `delta`. On any
+/// failure, frees `dest` before returning the error so callers do not
+/// need a separate cleanup path.
+unsafe fn rebase_voidstar_in_shm(
+    dest: *mut u8,
+    schema: *const CSchema,
+    vol_idx_hint: u16,
+) -> Result<(), MorlocError> {
+    let dest_rel = match shm::abs2rel(dest) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shm::shfree(dest);
+            return Err(e);
+        }
+    };
+    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+    let delta = (dest_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
+    let rs = CSchema::to_rust(schema);
+    if let Err(e) = crate::voidstar::adjust_relptrs(dest, &rs, delta) {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+    Ok(())
+}
+
+// ── try_load_compressed_voidstar_via_shm ──────────────────────────────────
+
+/// Compressed analogue of [`try_load_voidstar_packet_via_mmap`]. For
+/// files containing a large MESG+VOIDSTAR packet whose payload is a
+/// single zstd frame carrying `pledgedSrcSize` in its header, allocates
+/// SHM at the *decompressed* size and stream-decompresses straight into
+/// the SHM region -- skipping the legacy chain's libc::malloc read
+/// buffer, the growing-Vec decoder output, the `Vec`-rebuild inside
+/// `decompress_packet`, and the malloc->SHM memcpy in
+/// `read_voidstar_binary_with_hint`. Peak resident set is one X of the
+/// decompressed payload (the SHM region) plus the BufReader window and
+/// libzstd's internal buffers.
+///
+/// Returns `Ok(None)` -- triggering the caller's fall-through to the
+/// legacy path -- when any of the eligibility checks fail (wrong magic,
+/// not MESG+VOIDSTAR, not zstd-compressed, frame missing
+/// `pledgedSrcSize`, file too small, fstat/pread failures).
+pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
+    path: *const c_char,
+    schema: *const CSchema,
+) -> Result<Option<*mut u8>, MorlocError> {
+    // Same crossover as the uncompressed fast path: below this size the
+    // legacy buffered chain is competitive and the syscall overhead of
+    // the streaming path is not amortized.
+    const FAST_PATH_THRESHOLD: usize = 1024 * 1024;
+
+    if path.is_null() {
+        return Ok(None);
+    }
+
+    let fd = libc::open(path, libc::O_RDONLY);
+    if fd < 0 {
+        return Ok(None);
+    }
+
+    // Guards from here on must close `fd` on every return until ownership
+    // is handed to the File::from_raw_fd wrapper later.
+    let mut sb: libc::stat = std::mem::zeroed();
+    if libc::fstat(fd, &mut sb) != 0 {
+        libc::close(fd);
+        return Ok(None);
+    }
+    if (sb.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let file_size = sb.st_size as usize;
+    if file_size < 32 || file_size < FAST_PATH_THRESHOLD {
+        libc::close(fd);
+        return Ok(None);
+    }
+
+    let mut header_bytes = [0u8; 32];
+    let n = libc::pread(fd, header_bytes.as_mut_ptr() as *mut libc::c_void, 32, 0);
+    if n != 32 {
+        libc::close(fd);
+        return Ok(None);
+    }
+
+    let magic = u32::from_le_bytes(header_bytes[..4].try_into().unwrap());
+    if magic != packet::PACKET_MAGIC {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let header = match packet::PacketHeader::from_bytes(&header_bytes) {
+        Ok(h) => h,
+        Err(_) => {
+            libc::close(fd);
+            return Ok(None);
+        }
+    };
+    if !header.is_data() {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let source = header.command.data.source;
+    let format = header.command.data.format;
+    let compression = header.command.data.compression;
+    if source != packet::PACKET_SOURCE_MESG
+        || format != packet::PACKET_FORMAT_VOIDSTAR
+        || compression != packet::PACKET_COMPRESSION_ZSTD
+    {
+        libc::close(fd);
+        return Ok(None);
+    }
+    let metadata_size = header.offset as usize;
+    let payload_offset = 32 + metadata_size;
+    let payload_size = header.length as usize; // compressed-frame length on disk
+    if payload_offset.saturating_add(payload_size) > file_size {
+        libc::close(fd);
+        return Ok(None);
+    }
+
+    // Read the entire metadata block in one pread so we can parse out
+    // the frame index and the vol_idx hint without making multiple
+    // round-trips to the page cache.
+    let metadata_bytes: Vec<u8> = if metadata_size > 0 {
+        let mut meta = vec![0u8; metadata_size];
+        let nm = libc::pread(
+            fd,
+            meta.as_mut_ptr() as *mut libc::c_void,
+            metadata_size,
+            32,
+        );
+        if nm as usize != metadata_size {
+            libc::close(fd);
+            return Ok(None);
+        }
+        meta
+    } else {
+        Vec::new()
+    };
+    // `read_*_from_meta` expects a full packet (header + metadata); we
+    // splice the header bytes we already read with the metadata bytes
+    // we just pulled.
+    let mut full_header_and_meta = Vec::with_capacity(32 + metadata_size);
+    full_header_and_meta.extend_from_slice(&header_bytes);
+    full_header_and_meta.extend_from_slice(&metadata_bytes);
+
+    let vol_idx_hint: u16 = packet::read_vol_index_from_meta(&full_header_and_meta)
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+
+    // The frame index is mandatory under the multi-frame format. A
+    // compressed packet without one is not the new format -- skip and
+    // let the legacy path raise the hard error.
+    let frames = match packet::read_frame_index_from_meta(&full_header_and_meta) {
+        Ok(Some(f)) if !f.is_empty() => f,
+        _ => {
+            libc::close(fd);
+            return Ok(None);
+        }
+    };
+
+    // From here we will return Err on failure rather than Ok(None) --
+    // we've committed to the fast path and the file is genuinely
+    // eligible; a downstream failure is a real error, not "try the
+    // legacy path".
+
+    let total_uncompressed: usize =
+        frames.iter().map(|f| f.uncompressed_size as usize).sum();
+    let total_compressed: usize =
+        frames.iter().map(|f| f.compressed_size as usize).sum();
+    if total_compressed != payload_size {
+        libc::close(fd);
+        return Err(MorlocError::Packet(format!(
+            "frame index sums to {} compressed bytes but header.length = {}",
+            total_compressed, payload_size
+        )));
+    }
+
+    let t0 = std::time::Instant::now();
+    crate::morloc_trace!(
+        "[fastpath] entering: compressed_payload={} MiB, total_uncompressed={} MiB, frames={}",
+        payload_size / (1 << 20),
+        total_uncompressed / (1 << 20),
+        frames.len()
+    );
+
+    // Read the compressed payload region into a userspace buffer
+    // BEFORE shmalloc'ing the SHM destination. The decompress step
+    // needs both alive at once, but separating allocation in time
+    // lowers the worst-case allocator footprint by ~compressed-size
+    // (we never hold both `compressed_buf` and the unstarted
+    // `shmalloc(total_uncompressed)` reservation simultaneously
+    // during the slow shmalloc fault-in phase).
+    let t_decomp = std::time::Instant::now();
+    let mut compressed_buf = vec![0u8; payload_size];
+    let mut total_read = 0usize;
+    while total_read < payload_size {
+        let n = libc::pread(
+            fd,
+            compressed_buf.as_mut_ptr().add(total_read) as *mut libc::c_void,
+            payload_size - total_read,
+            (payload_offset + total_read) as libc::off_t,
+        );
+        if n <= 0 {
+            libc::close(fd);
+            return Err(MorlocError::Io(std::io::Error::last_os_error()));
+        }
+        total_read += n as usize;
+    }
+    libc::close(fd);
+
+    let dest = match shm::shmalloc(total_uncompressed) {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
+    crate::morloc_trace!(
+        "[fastpath] read compressed + shmalloc {} MiB took {:.2?}",
+        total_uncompressed / (1 << 20),
+        t0.elapsed()
+    );
+
+    // Decompress all frames in parallel into disjoint slices of the
+    // SHM destination. Workers each own a non-overlapping subrange by
+    // construction; no inter-worker synchronization on dest.
+    let dst_slice = std::slice::from_raw_parts_mut(dest, total_uncompressed);
+    if let Err(e) = crate::compression::parallel_decompress_frames(
+        &frames,
+        &compressed_buf,
+        dst_slice,
+    ) {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+    drop(compressed_buf);
+    crate::morloc_trace!(
+        "[fastpath] zstd decompress ({} frames, {} workers): wrote {} MiB in {:.2?} ({:.0} MB/s)",
+        frames.len(),
+        crate::compression::frame_workers().min(frames.len()),
+        total_uncompressed / (1 << 20),
+        t_decomp.elapsed(),
+        (total_uncompressed as f64 / (1 << 20) as f64) / t_decomp.elapsed().as_secs_f64()
+    );
+
+    let t_relptr = std::time::Instant::now();
+    rebase_voidstar_in_shm(dest, schema, vol_idx_hint)?;
+    crate::morloc_trace!("[fastpath] adjust_relptrs took {:.2?}", t_relptr.elapsed());
+    crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
+
+    Ok(Some(dest))
+}
+
+// ── try_decompress_voidstar_bytes_to_shm ──────────────────────────────────
+
+/// In-memory analogue of [`try_load_compressed_voidstar_via_shm`]. For
+/// callers (stdin ingest, `--call-packet`, `try_packet_strict`) that
+/// have already pulled the compressed bytes off the wire, this lands a
+/// MESG+VOIDSTAR+ZSTD payload directly into a fresh SHM allocation
+/// without the legacy chain's `Vec`+libc::malloc round-trip.
+///
+/// Reads from `data` (borrowed, not owned -- caller still owns the
+/// buffer on every return path). On `Ok(Some(_))` the SHM region holds
+/// the decompressed, relptr-adjusted voidstar; the caller should free
+/// its compressed buffer.
+///
+/// Returns `Ok(None)` -- triggering fall-through to the legacy path --
+/// when the header is not MESG+VOIDSTAR+ZSTD or otherwise ineligible.
+/// When `pledgedSrcSize` is absent the helper still wins versus the
+/// legacy chain by skipping the libc::malloc round-trip (decompress
+/// into a Vec, then `shmalloc + memcpy`, drop the Vec immediately).
+unsafe fn try_decompress_voidstar_bytes_to_shm(
+    data: *const u8,
+    data_size: usize,
+    schema: *const CSchema,
+) -> Result<Option<*mut c_void>, MorlocError> {
+    if data.is_null() || data_size < 32 {
+        return Ok(None);
+    }
+
+    let header_bytes_ref = std::slice::from_raw_parts(data, 32);
+    let mut header_bytes = [0u8; 32];
+    header_bytes.copy_from_slice(header_bytes_ref);
+    let magic = u32::from_le_bytes(header_bytes[..4].try_into().unwrap());
+    if magic != packet::PACKET_MAGIC {
+        return Ok(None);
+    }
+    let header = match packet::PacketHeader::from_bytes(&header_bytes) {
+        Ok(h) => h,
+        Err(_) => return Ok(None),
+    };
+    if !header.is_data() {
+        return Ok(None);
+    }
+    let source = header.command.data.source;
+    let format = header.command.data.format;
+    let compression = header.command.data.compression;
+    if source != packet::PACKET_SOURCE_MESG
+        || format != packet::PACKET_FORMAT_VOIDSTAR
+        || compression != packet::PACKET_COMPRESSION_ZSTD
+    {
+        return Ok(None);
+    }
+
+    let metadata_size = header.offset as usize;
+    let payload_offset = 32 + metadata_size;
+    let payload_size = header.length as usize;
+    if payload_offset.saturating_add(payload_size) > data_size {
+        return Ok(None);
+    }
+
+    let compressed = std::slice::from_raw_parts(data.add(payload_offset), payload_size);
+    let full_meta = std::slice::from_raw_parts(data, payload_offset);
+    let hint = packet::read_vol_index_from_meta(full_meta)
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+
+    // Frame index is mandatory under the multi-frame format. Without
+    // one we have no way to know per-frame sizes; bail to the legacy
+    // path (which will raise a hard error -- old single-frame packets
+    // are no longer readable under the cutover).
+    let frames = match packet::read_frame_index_from_meta(full_meta) {
+        Ok(Some(f)) if !f.is_empty() => f,
+        _ => return Ok(None),
+    };
+    let total_uncompressed: usize =
+        frames.iter().map(|f| f.uncompressed_size as usize).sum();
+    let total_compressed: usize =
+        frames.iter().map(|f| f.compressed_size as usize).sum();
+    if total_compressed != payload_size {
+        return Err(MorlocError::Packet(format!(
+            "frame index sums to {} compressed bytes but header.length = {}",
+            total_compressed, payload_size
+        )));
+    }
+
+    let dest = shm::shmalloc(total_uncompressed)?;
+    let dst_slice = std::slice::from_raw_parts_mut(dest, total_uncompressed);
+    if let Err(e) = crate::compression::parallel_decompress_frames(
+        &frames,
+        compressed,
+        dst_slice,
+    ) {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+
+    rebase_voidstar_in_shm(dest, schema, hint)?;
+    Ok(Some(dest as *mut c_void))
+}
+
 // ── read_voidstar_binary ───────────────────────────────────────────────────
 
 /// Legacy C ABI: reads a VOIDSTAR payload assuming the producer encoded
@@ -1485,6 +1838,31 @@ pub unsafe extern "C" fn load_morloc_data_file(
         return ptr::null_mut();
     }
 
+    // SHM-direct path for compressed MESG+VOIDSTAR packets. When the
+    // bytes carry a header marking them as MESG+VOIDSTAR+ZSTD we can
+    // decompress straight into a fresh SHM allocation and return early,
+    // skipping the legacy chain's Vec + libc::malloc + memcpy round-trip
+    // entirely. The helper is a no-op (returns Ok(None)) for anything
+    // else, so other compressed formats (JSON/msgpack/Arrow) still flow
+    // through the generic decompression below.
+    if !data.is_null() && data_size >= 32 {
+        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema) {
+            Ok(Some(voidstar)) => {
+                // Free the compressed input now that the decompressed
+                // payload lives in SHM. This drops peak resident set to
+                // 1X before the caller hands the voidstar to the pool.
+                libc::free(data as *mut c_void);
+                return voidstar;
+            }
+            Ok(None) => { /* fall through to generic decompression */ }
+            Err(e) => {
+                libc::free(data as *mut c_void);
+                set_errmsg(errmsg, &e);
+                return ptr::null_mut();
+            }
+        }
+    }
+
     // Decompress in place if the buffer is a compressed morloc packet.
     // This is the single choke point: every caller that hands a buffer
     // to load_morloc_data_file gets decompression for free, so we do
@@ -2016,6 +2394,19 @@ unsafe fn parse_cli_data_argument_classified(
             // straight into a fresh SHM allocation and skip the
             // libc::malloc + read + shmalloc + memcpy chain.
             match try_load_voidstar_packet_via_mmap(effective, schema) {
+                Ok(Some(payload_ptr)) => return payload_ptr,
+                Ok(None) => { /* fall through */ }
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
+                }
+            }
+            // Compressed-VOIDSTAR fast path: same shape as the
+            // uncompressed mmap fast path but stream-decompresses the
+            // file's zstd frame directly into SHM. Holds the file in
+            // a BufReader and the SHM destination only; no Vec or
+            // libc::malloc round-trip for the decompressed payload.
+            match try_load_compressed_voidstar_via_shm(effective, schema) {
                 Ok(Some(payload_ptr)) => return payload_ptr,
                 Ok(None) => { /* fall through to read path */ }
                 Err(e) => {
