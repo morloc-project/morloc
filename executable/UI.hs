@@ -30,6 +30,7 @@ import Morloc.Module (GitProtocol (..), OverwriteProtocol (..))
 import Morloc.Version (versionStr)
 import Options.Applicative
 import qualified Options.Applicative.Extra as OAE
+import Options.Applicative.Help.Pretty (Doc, pretty, vcat)
 
 opts :: ParserInfo CliCommand
 opts =
@@ -142,30 +143,55 @@ newSubcommand :: Mod CommandFields CliCommand
 newSubcommand = command "new" (info (CmdNew <$> newCommandParser) (progDesc "Create a new morloc package"))
 
 data InstallCommand = InstallCommand
-  { installConfig :: String
+  { installForce :: OverwriteProtocol
+  , installBuild :: Bool
+  , installNoTypecheck :: Bool
+  , installUseSSH :: GitProtocol
+  , installConfig :: String
   , installVanilla :: Bool
   , installVerbose :: Int
-  , installForce :: OverwriteProtocol
-  , installUseSSH :: GitProtocol
-  , installNoTypecheck :: Bool
-  , installBuild :: Bool
   , installModuleStrings :: [String]
   }
 
 makeInstallParser :: Parser InstallCommand
 makeInstallParser =
   InstallCommand
-    <$> optConfig
+    <$> optForce
+    <*> optInstallBuild
+    <*> optNoTypecheck
+    <*> optUseSSH
+    <*> optConfig
     <*> optVanilla
     <*> optVerbose
-    <*> optForce
-    <*> optUseSSH
-    <*> optNoTypecheck
-    <*> optInstallBuild
     <*> optModuleStrings
 
 installSubcommand :: Mod CommandFields CliCommand
-installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (progDesc "Install a morloc module"))
+installSubcommand =
+  command "install" $
+    info
+      (CmdInstall <$> makeInstallParser)
+      (progDescDoc (Just installDescDoc))
+
+installDescDoc :: Doc
+installDescDoc = vcat $ map pretty
+  [ "Install one or more morloc modules"
+  , ""
+  , "Examples:"
+  , "  # Remote install"
+  , "  morloc install root root-py math   # one or more stdlib modules"
+  , "  morloc install weena/calendar      # owner/repo on github"
+  , "  morloc install codeberg:weena/foo  # specify the remote"
+  , "  morloc install weena/calendar@1.0  # specific release tag"
+  , "  morloc install weena/calendar@dev  # specific branch"
+  , "  morloc install gitlab:weena/foo@version:1.0"
+  , "  morloc install github:weena/foo@hash:0123abc"
+  , ""
+  , "  # Local install"
+  , "  morloc install .                   # install working dir"
+  , "  morloc install ./mymod ~/code/foo  # install by path"
+  , "  morloc install ./mymod@branch:dev  # specific local branch"
+  , "  morloc install ./mymod@v0.2.0      # specific local tag"
+  ]
 
 data TypecheckCommand = TypecheckCommand
   { typecheckConfig :: String
@@ -327,7 +353,7 @@ optModuleStrings =
   some -- one or more
     . strArgument
     $ ( metavar "INSTALL"
-          <> help "Module install strings"
+          <> help "One or more morloc module install strings"
       )
 
 optRaw :: Parser Bool
