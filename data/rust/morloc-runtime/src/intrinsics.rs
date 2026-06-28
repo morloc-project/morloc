@@ -168,14 +168,30 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
+    // Build the SCHEMA_STRING metadata entry. Self-describing files
+    // let IFile (and tooling like `morloc-nexus file`) read the payload
+    // schema directly. We always emit this -- the size cost is tiny
+    // and makes saved files unambiguous to inspect after the fact.
+    let schema_rs = crate::cschema::CSchema::to_rust(schema);
+    let schema_str =
+        morloc_runtime_types::schema::schema_to_string(&schema_rs);
+    let mut schema_body = schema_str.as_bytes().to_vec();
+    schema_body.push(0); // NUL-terminator matches read_schema_from_meta's
+                        // decode_schema_entry expectation.
+    let base_meta = crate::packet::append_metadata_entry(
+        &[],
+        crate::packet::METADATA_TYPE_SCHEMA_STRING,
+        &schema_body,
+    );
+
     // If a compression level is selected, swap the flattened buffer for
     // its zstd multi-frame form before writing the payload region. The
     // raw blob is freed either way; the compressed bytes live in `comp`
     // for the rest of the function when level > 0. The frame index is
-    // stamped into the metadata block between the header and the
-    // payload. The block is padded to METADATA_BLOCK_ALIGNMENT so the
-    // payload starts on the same aligned offset other emit paths use
-    // (32-byte alignment).
+    // appended to the metadata block (after SCHEMA_STRING) between the
+    // header and the payload. The block is padded to
+    // METADATA_BLOCK_ALIGNMENT so the payload starts on the same
+    // aligned offset other emit paths use (32-byte alignment).
     struct CompressedOut {
         bytes: Vec<u8>,
         metadata_block: Vec<u8>,
@@ -187,10 +203,8 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         match crate::compression::compress_payload_zstd(raw_slice, clvl) {
             Ok((bytes, frames)) => {
                 let body = crate::packet::encode_frame_index_entry(&frames);
-                // Splice into an empty metadata block (no existing
-                // entries to preserve here) and pad to alignment.
                 let metadata_block = crate::packet::append_metadata_entry(
-                    &[],
+                    &base_meta,
                     crate::packet::METADATA_TYPE_FRAME_INDEX,
                     &body,
                 );
@@ -206,29 +220,30 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         }
     };
 
-    let (payload_ptr, payload_len, compression_byte, metadata_size): (*const u8, usize, u8, usize) =
+    let (payload_ptr, payload_len, compression_byte, metadata_block): (*const u8, usize, u8, &[u8]) =
         match &comp {
             Some(c) => (
                 c.bytes.as_ptr(),
                 c.bytes.len(),
                 crate::packet::PACKET_COMPRESSION_ZSTD,
-                c.metadata_block.len(),
+                c.metadata_block.as_slice(),
             ),
             None => (
                 blob as *const u8,
                 blob_size,
                 crate::packet::PACKET_COMPRESSION_NONE,
-                0,
+                base_meta.as_slice(),
             ),
         };
+    let metadata_size = metadata_block.len();
 
-    // Metadata (frame-index entry + padding) sits between the header
-    // placeholder and the payload; write it before the payload bytes.
-    if let Some(c) = &comp {
+    // Metadata (SCHEMA_STRING + optional FRAME_INDEX + padding) sits
+    // between the header placeholder and the payload.
+    if !metadata_block.is_empty() {
         if write_binary_fd(
             fd,
-            c.metadata_block.as_ptr() as *const c_char,
-            c.metadata_block.len(),
+            metadata_block.as_ptr() as *const c_char,
+            metadata_block.len(),
             &mut err,
         ) != 0 {
             libc::free(blob as *mut c_void);
@@ -479,4 +494,495 @@ unsafe fn _write_voidstar_binary_rust(
 
     libc::free(blob as *mut c_void);
     blob_size as isize
+}
+
+// ── @open / @close / @fschema ──────────────────────────────────────────────
+//
+// Thin FFI shims around `crate::stream`. The kind byte selects which
+// concrete open routine to invoke (IFile is implemented; IStream and
+// OStream return a clear "not yet implemented" error in v1).
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open(
+    path: *const c_char,
+    kind: u8,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_open: null path".into()));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::open_dispatch(path_str, kind) {
+        Ok(handle) => handle,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_close(
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    match crate::stream::close_handle(handle) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_fschema(
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    clear_errmsg(errmsg);
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_fschema: null path".into()));
+        return ptr::null_mut();
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_fschema: path is not valid UTF-8".into(),
+            ));
+            return ptr::null_mut();
+        }
+    };
+    match crate::stream::read_schema_from_file(path_str) {
+        Ok(schema) => match CString::new(schema) {
+            Ok(cs) => cs.into_raw(),
+            Err(e) => {
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "mlc_fschema: schema string contains NUL: {}", e
+                )));
+                ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
+// ── IFile pattern access (unified walker) ─────────────────────────────────
+
+/// One runtime argument to `mlc_ifile_walk`. The `has` byte encodes
+/// presence (0 = absent / use default, 1 = use `value`); `value` carries
+/// the i64 payload (an index for `.[]` steps; one of start/stop/step for
+/// `.[:]` steps). Layout is fixed: `repr(C)` packed into 16 bytes (the
+/// 7 padding bytes keep `value` aligned to its natural 8-byte boundary
+/// and let per-language wrappers memcpy directly into the array).
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IFileWalkArg {
+    pub has: u8,
+    pub _pad: [u8; 7],
+    pub value: i64,
+}
+
+/// Unified IFile pattern walker. The `path` string encodes a single
+/// walk-step chain consumed by `crate::stream::ifile_walk`:
+///
+///   * `.<int>`  - tuple/record-index field step
+///   * `.<name>` - record-field-key step
+///   * `.[]`     - bracket-index leaf, consumes 1 arg (the index)
+///   * `.[:]`    - bracket-slice leaf, consumes 3 args (start, stop, step)
+///
+/// Field steps consume no runtime args; bracket steps consume their
+/// args from `args` in DFS order. Runtime args are presence-tagged
+/// (see `IFileWalkArg`): bracket-index requires `has = 1`; bracket-
+/// slice accepts any combination of present/absent bounds.
+///
+/// Returns an AbsPtr to a freshly-allocated SHM block holding the
+/// materialized value (with sub-allocations also in SHM). The caller
+/// is responsible for freeing via `shfree` -- the active `eval_arena`
+/// does this automatically when its scope ends.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_ifile_walk(
+    handle: i64,
+    path: *const c_char,
+    args_ptr: *const IFileWalkArg,
+    n_args: u64,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    clear_errmsg(errmsg);
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_ifile_walk: null path".into()));
+        return ptr::null_mut();
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_ifile_walk: path is not valid UTF-8".into(),
+            ));
+            return ptr::null_mut();
+        }
+    };
+    let args_slice: &[IFileWalkArg] = if n_args == 0 || args_ptr.is_null() {
+        &[]
+    } else {
+        std::slice::from_raw_parts(args_ptr, n_args as usize)
+    };
+    match crate::stream::ifile_walk(handle, path_str, args_slice) {
+        Ok(p) => p as *mut c_void,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Total element count of an IFile (`length f`). Cheap: reads the
+/// cached value from the StreamDiag block populated at open time.
+/// Errors cleanly when the file's value type is not a list (the
+/// length of a tuple/record IFile is meaningless and was previously
+/// silently zero -- now returns -1 with a clear errmsg).
+#[no_mangle]
+pub unsafe extern "C" fn mlc_ifile_length(
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    match crate::stream::handle_length(handle) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+// ── Cross-pool wire codec for stream handles ──────────────────────────────
+//
+// The v1 stream registry is process-local: a handle returned by
+// `mlc_open` indexes a `Vec<StreamEntry>` that lives in this process
+// only. To cross a pool boundary the sender's bridge calls
+// `mlc_handle_pack_path` to read out the file path (and kind), the
+// path travels on the wire as a UTF-8 string, and the receiver's
+// bridge calls `mlc_handle_unpack_path` to bind a fresh local handle
+// via the normal `open_dispatch` path. Each pool's `eval_arena`
+// closes the handle it opened on scope exit; the sender's `@close`
+// does not affect the receiver, and vice versa.
+//
+// Return convention: `*mut c_char` is a malloc'd, NUL-terminated UTF-8
+// string owned by the caller. The caller frees with libc::free. Errors
+// return NULL and set errmsg.
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_handle_pack_path(
+    handle: i64,
+    out_kind: *mut u8,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    clear_errmsg(errmsg);
+    let kind = match crate::stream::handle_kind(handle) {
+        Ok(k) => k,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+    let path = match crate::stream::handle_path(handle) {
+        Ok(p) => p,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+    if !out_kind.is_null() {
+        *out_kind = kind;
+    }
+    match CString::new(path) {
+        Ok(cs) => libc::strdup(cs.as_ptr()),
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_handle_pack_path: path contains NUL byte".into(),
+            ));
+            ptr::null_mut()
+        }
+    }
+}
+
+// Length-only path lookup, for the IFile-array sizing pass in
+// per-language get_shm_size. Avoids allocating + strdup'ing the
+// path string just to take strlen of it. Returns the byte length on
+// success, or -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_handle_path_len(
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    match crate::stream::handle_path(handle) {
+        Ok(p) => p.len() as i64,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_handle_unpack_path(
+    path: *const c_char,
+    kind: u8,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_handle_unpack_path: null path".into(),
+        ));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_handle_unpack_path: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::open_dispatch(path_str, kind) {
+        Ok(handle) => {
+            // Register with the receiver's arena so scope exit closes
+            // the fresh handle. Sender's arena owns a separate slot in
+            // a separate process.
+            crate::eval_arena::record_slot_if_active(handle);
+            handle
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+// ── Voidstar wire-layout helpers for stream handles ───────────────────────
+//
+// The per-language bridges (pymorloc.c, cppmorloc.hpp, rmorloc.c) used to
+// hand-roll the Array<u8>(path) layout for every MORLOC_IFILE arm of
+// to_voidstar / from_voidstar. Centralising the layout here keeps the
+// pack/unpack format in one place: bumping the cursor, the relptr math,
+// the empty-path RELNULL sentinel, the path-length cap. Each bridge
+// becomes a one-call site.
+//
+// `dest` is the Array slot in voidstar. `cursor` is a pointer to the
+// cursor variable owned by the bridge's outer to_voidstar walker; the
+// helper advances it past the path bytes. Returns 0 on success.
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_write_handle_voidstar(
+    handle: i64,
+    dest: *mut c_void,
+    cursor: *mut *mut c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    use crate::shm;
+    use crate::shm_types::Array;
+    clear_errmsg(errmsg);
+    if dest.is_null() || cursor.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_write_handle_voidstar: null dest or cursor".into(),
+        ));
+        return 1;
+    }
+    let path = match crate::stream::handle_path(handle) {
+        Ok(p) => p,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return 1;
+        }
+    };
+    let path_bytes = path.as_bytes();
+    let path_len = path_bytes.len();
+    let result = dest as *mut Array;
+    (*result).size = path_len;
+    if path_len == 0 {
+        (*result).data = shm::RELNULL;
+        return 0;
+    }
+    let cur = *cursor as *mut u8;
+    let rel = match shm::abs2rel(cur) {
+        Ok(r) => r,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return 1;
+        }
+    };
+    (*result).data = rel;
+    std::ptr::copy_nonoverlapping(path_bytes.as_ptr(), cur, path_len);
+    *cursor = cur.add(path_len) as *mut c_void;
+    0
+}
+
+// ── Batched variants for [IFile a] arrays ─────────────────────────────────
+//
+// Per-element `mlc_handle_path_len` and `mlc_write_handle_voidstar` acquire
+// the registry mutex N times for an N-handle vector. These batched entries
+// fold the lock into one acquisition for the whole array, and also drop
+// the per-element `String::clone()` that the singular path lookups have
+// to take (we only ever need `.len()` or `.as_bytes()`).
+//
+// The bridges use these for the array overloads of get_shm_size and
+// to_voidstar; the singular path stays for cases where the handle is
+// embedded inside a wider record.
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_handles_path_lens(
+    handles: *const i64,
+    n: usize,
+    out_lens: *mut i64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if n == 0 {
+        return 0;
+    }
+    if handles.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_handles_path_lens: null handles".into(),
+        ));
+        return -1;
+    }
+    let hs = std::slice::from_raw_parts(handles, n);
+    let outs = if out_lens.is_null() {
+        None
+    } else {
+        Some(std::slice::from_raw_parts_mut(out_lens, n))
+    };
+    match crate::stream::handles_path_lens(hs, outs) {
+        Ok(sum) => sum as i64,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mlc_write_handles_voidstar(
+    handles: *const i64,
+    n: usize,
+    dest: *mut c_void,
+    elem_stride: usize,
+    cursor: *mut *mut c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    if n == 0 {
+        return 0;
+    }
+    if handles.is_null() || dest.is_null() || cursor.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_write_handles_voidstar: null handles, dest, or cursor".into(),
+        ));
+        return 1;
+    }
+    let hs = std::slice::from_raw_parts(handles, n);
+    let mut cur = *cursor as *mut u8;
+    match crate::stream::write_handles_voidstar(hs, dest as *mut u8, elem_stride, &mut cur) {
+        Ok(()) => {
+            *cursor = cur as *mut c_void;
+            0
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
+        }
+    }
+}
+
+// Read an IFile-shaped Array<u8>(path) from voidstar, open the path in
+// the receiver's process, return the fresh local handle. `arr` points
+// at the Array struct; `base_ptr` is the relptr base (NULL = treat the
+// Array's `data` field as an SHM-relative relptr; non-NULL = treat it
+// as a payload-relative offset, used when reading from mmap'd file
+// regions). On error returns -1 and sets errmsg.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_read_handle_voidstar(
+    arr: *const c_void,
+    base_ptr: *const c_void,
+    kind: u8,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    use crate::shm;
+    use crate::shm_types::Array;
+    clear_errmsg(errmsg);
+    if arr.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_read_handle_voidstar: null arr".into(),
+        ));
+        return -1;
+    }
+    let a = &*(arr as *const Array);
+    if a.size == 0 {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_read_handle_voidstar: IFile path payload is empty".into(),
+        ));
+        return -1;
+    }
+    const PATH_MAX: usize = 4096;
+    if a.size as usize >= PATH_MAX {
+        set_errmsg(errmsg, &MorlocError::Other(format!(
+            "mlc_read_handle_voidstar: path too long ({} bytes, max {})",
+            a.size, PATH_MAX - 1
+        )));
+        return -1;
+    }
+    // Resolve the path bytes. With a non-NULL base_ptr the Array's
+    // `data` is a payload-relative offset (used when reading from
+    // mmap'd file regions); otherwise it's an SHM-relative relptr.
+    let path_abs: *const u8 = if base_ptr.is_null() {
+        match shm::rel2abs(a.data) {
+            Ok(p) => p as *const u8,
+            Err(e) => {
+                set_errmsg(errmsg, &e);
+                return -1;
+            }
+        }
+    } else {
+        (base_ptr as *const u8).add(a.data as usize)
+    };
+    let mut buf = vec![0u8; a.size as usize + 1];
+    std::ptr::copy_nonoverlapping(path_abs, buf.as_mut_ptr(), a.size as usize);
+    let path_str = match std::str::from_utf8(&buf[..a.size as usize]) {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_read_handle_voidstar: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::open_dispatch(path_str, kind) {
+        Ok(handle) => {
+            crate::eval_arena::record_slot_if_active(handle);
+            handle
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
 }

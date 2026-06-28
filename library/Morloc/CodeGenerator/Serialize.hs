@@ -328,8 +328,17 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- Runtime intrinsics with thunk return types (save/load): the C functions
     -- (mlc_save, mlc_load) are eager, so we wrap them in DoBlockN to produce a
     -- proper thunk that EvalN can call.
+    --
+    -- IntrIFileWalk is intentionally NOT in this list: its morloc-level
+    -- result type is the bare element type (Express.hs assigns @out@
+    -- without an <IO> wrapper), so wrapping it in DoBlockN produces a
+    -- thunk that no EvalN insertion site invokes. The walker is eager;
+    -- emit it as a plain inline call and let surrounding expressions
+    -- consume the value directly.
     nativeExpr m (MonoIntrinsic t intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad] = do
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad,
+                     IntrOpen, IntrClose, IntrFSchema,
+                     IntrFLength] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
           es'' <- unpackDataArgIfNeeded m intr es'
@@ -447,6 +456,17 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the return type is ?a; the schema is for a
       let unwrap (OptionalF inner) = inner
+          unwrap other = other
+          dataType = unwrap tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrIFileWalk tf _ = do
+      -- The schema describes the result type the walker materializes
+      -- (the per-language wrapper deserializes the voidstar via
+      -- from_voidstar<T>). For bracket-index/struct chains the result
+      -- is a single element type; for bracket-slice it is a list type.
+      -- Either way, the post-EffectF type carries the right shape.
+      let unwrap (EffectF _ inner) = unwrap inner
           unwrap other = other
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType

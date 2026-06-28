@@ -25,6 +25,13 @@ import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.CodeGenerator.Grammars.Macro as Macro
 import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel, hasManifoldLabel)
+import Morloc.CodeGenerator.IFile
+  ( WalkStep (..)
+  , selectorToWalkSteps
+  , walkStepsToPath
+  , bracketIndexSteps
+  , bracketSliceSteps
+  )
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -638,23 +645,29 @@ expressBracketSlice
 expressBracketSlice callLang midx inputs out xsExpr =
   case (inputs, xsExpr) of
     ([sT, eT, pT, rcvT], [sE, eE, pE, rcvE]) -> do
-      -- Try Sliceable first (List, Str, ...). If absent, try
-      -- SliceableDim (Vector, future Tensor ...) -- both have the same
-      -- slot shape @?Int64 -> ?Int64 -> ?Int64 -> recv -> result@
-      -- from the codegen's point of view; only the result type's Nat
-      -- dim differs, and the typechecker has already produced the
-      -- right result type via bracketSliceResultType.
-      getSliceSrc <- requireInstance midx
-        (firstJustM
-          [ resolveInstanceForType findSliceableGetSlice    callLang midx rcvT
-          , resolveInstanceForType findSliceableDimGetSliceDim callLang midx rcvT
-          ])
-        callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
-      sW <- wrapBoundInToIndex callLang midx sT sE
-      eW <- wrapBoundInToIndex callLang midx eT eE
-      pW <- wrapBoundInToIndex callLang midx pT pE
-      let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
-      return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP getSliceSrc)) [sW, eW, pW, rcvE]
+      -- IFile receivers route to the unified runtime walker
+      -- (@mlc_ifile_walk). Each bound is still wrapped in __to_index__
+      -- because the desugar produces them with their natural types
+      -- and the wrapper marshals the optional encoding to the C ABI.
+      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      if isIFile
+        then do
+          sW <- wrapBoundInToIndex callLang midx sT sE
+          eW <- wrapBoundInToIndex callLang midx eT eE
+          pW <- wrapBoundInToIndex callLang midx pT pE
+          emitIFileWalk callLang midx out bracketSliceSteps rcvE [sW, eW, pW]
+        else do
+          getSliceSrc <- requireInstance midx
+            (firstJustM
+              [ resolveInstanceForType findSliceableGetSlice    callLang midx rcvT
+              , resolveInstanceForType findSliceableDimGetSliceDim callLang midx rcvT
+              ])
+            callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
+          sW <- wrapBoundInToIndex callLang midx sT sE
+          eW <- wrapBoundInToIndex callLang midx eT eE
+          pW <- wrapBoundInToIndex callLang midx pT pE
+          let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
+          return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP getSliceSrc)) [sW, eW, pW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketSlice expects 4 arguments"
 
 -- | Run a list of @Maybe@-returning monadic lookups in order, returning
@@ -685,13 +698,109 @@ expressBracketIndex
 expressBracketIndex callLang midx inputs out xsExpr =
   case (inputs, xsExpr) of
     ([iT, rcvT], [iE, rcvE]) -> do
-      accessSrc <- requireInstance midx
-        (resolveInstanceForType findIndexableAccessIndex callLang midx rcvT)
-        callLang "Indexable.__access_index__" rcvT
-      iW <- wrapBoundInToIndex callLang midx iT iE
-      let fT = FunT [optI64T, rcvT] out
-      return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP accessSrc)) [iW, rcvE]
+      -- IFile receivers route to the runtime intrinsic
+      -- @ifile_index, bypassing typeclass dispatch entirely. The
+      -- walker handles materialisation + bounds checks. Aliases are
+      -- resolved by walking the chain via @TE.reduceType@ until the
+      -- head TVar exposes itself.
+      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      if isIFile
+        then emitIFileWalk callLang midx out bracketIndexSteps rcvE [iE]
+        else do
+          accessSrc <- requireInstance midx
+            (resolveInstanceForType findIndexableAccessIndex callLang midx rcvT)
+            callLang "Indexable.__access_index__" rcvT
+          iW <- wrapBoundInToIndex callLang midx iT iE
+          let fT = FunT [optI64T, rcvT] out
+          return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP accessSrc)) [iW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketIndex expects 2 arguments"
+
+-- | Walk the alias chain and check whether the receiver type's head
+-- TVar matches `target`. Mirrors the alias-walking strategy of
+-- 'resolveInstanceForType' so a user-defined `type FastaFile = IFile
+-- Sequence` is detected as IFile-headed.
+typeHeadIs :: Int -> TVar -> Type -> MorlocMonad Bool
+typeHeadIs midx target originalType = do
+  scope <- MM.getGeneralScope midx
+  go scope (type2typeu originalType)
+  where
+    go scope t
+      | extractKey t == target = return True
+      | otherwise = case TE.reduceType scope t of
+          Just t' | t' /= t -> go scope t'
+          _ -> return False
+
+-- | Emit a unified @IntrIFileWalk@ call for any pattern application
+-- on an IFile receiver. The walk-step chain (struct fields followed
+-- by an optional terminal bracket op) is encoded as a path string
+-- consumed by the runtime walker. Runtime args correspond to bracket
+-- bounds in DFS order.
+emitIFileWalk
+  :: Lang
+  -> Int                       -- midx
+  -> Type                      -- result type (the value the walker materializes)
+  -> [WalkStep]                -- the static walk chain
+  -> PolyExpr                  -- the IFile-typed handle
+  -> [PolyExpr]                -- runtime args (bracket bounds, in DFS order)
+  -> MorlocMonad PolyExpr
+emitIFileWalk callLang midx out steps rcvE runtimeArgs = do
+  let pathText = walkStepsToPath steps
+  let strType = VarT BT.str
+  pathPoly <- dispatchPrimLit midx callLang strType BT.str
+                              (\tv -> PolyStr (Idx midx tv) pathText)
+  return $ PolyIntrinsic (Idx midx out) IntrIFileWalk
+    (pathPoly : rcvE : runtimeArgs)
+
+-- | Emit an IntrIFileWalk for `.field f` (and chains like `.foo.bar`)
+-- when the receiver f is IFile-typed. The selector is validated to be
+-- a single-field chain (no multi-field groups).
+expressPatternStructIFile
+  :: Lang
+  -> Int                       -- midx
+  -> Int                       -- cidxCall (unused; kept for call-site shape)
+  -> Selector
+  -> Type                      -- result type (the field's type)
+  -> PolyExpr                  -- IFile-typed receiver expression
+  -> MorlocMonad PolyExpr
+expressPatternStructIFile callLang midx _cidxCall sel out rcvE = do
+  steps <- selectorToWalkSteps midx sel
+  emitIFileWalk callLang midx out steps rcvE []
+
+-- | Unified PatternStruct dispatch. The App's args are
+-- @[bracket_bounds..., receiver]@ when the selector has bracket
+-- steps; otherwise just @[receiver]@.
+--
+-- IFile-typed receivers route to the walker via 'emitIFileWalk',
+-- regardless of selector shape. Non-IFile receivers can use the
+-- 'fallback' action (typically 'expressPolyApp') when the selector
+-- has no brackets; with brackets, non-IFile receivers raise a
+-- sourced error because the runtime path for unified-Selector
+-- patterns on in-memory values isn't implemented yet (the fragmented
+-- bracket-then-field form via separate PatCalls remains available).
+dispatchPatternStruct
+  :: Lang
+  -> Int                       -- midx
+  -> Int                       -- cidxCall (currently unused; reserved)
+  -> Selector
+  -> [Type]                    -- input types (one per App arg)
+  -> Type                      -- output type (the FunT result)
+  -> [PolyExpr]                -- expressed args, same length as inputs
+  -> MorlocMonad PolyExpr      -- fallback for non-IFile pure-field case
+  -> MorlocMonad PolyExpr
+dispatchPatternStruct callLang midx _cidxCall sel inputs out xsExpr fallback =
+  case (inputs, xsExpr) of
+    ([], []) -> fallback
+    _ -> do
+      let n         = bracketArity sel
+          rcvT      = last inputs
+          rcvE      = last xsExpr
+          bracketEs = take n xsExpr
+      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      if isIFile
+        then do
+          steps <- selectorToWalkSteps midx sel
+          emitIFileWalk callLang midx out steps rcvE bracketEs
+        else fallback
 
 -- | Resolve a typeclass-method instance for a value's type by walking
 -- the alias chain. Tests the type's outermost head TVar against the
@@ -1123,6 +1232,17 @@ expressPolyExpr
             expressBracketSlice callLang midx inputs out xsExpr
           PatternBracketIndex ->
             expressBracketIndex callLang midx inputs out xsExpr
+          PatternStruct sel ->
+            -- Unified PatternStruct dispatch. Args are
+            -- [bracket_bounds..., receiver] (DFS order). For pure-
+            -- field selectors there are no bracket bounds, just the
+            -- receiver. IFile-typed receivers route to the walker
+            -- (handles any selector shape); non-IFile receivers fall
+            -- back to standard PatCallP emission for pure-field
+            -- selectors. Bracket-in-selector on a non-IFile receiver
+            -- requires runtime support that isn't implemented yet.
+            dispatchPatternStruct callLang midx cidxCall sel inputs out xsExpr
+              (expressPolyApp parentLang f xsExpr >>= stripPolyReturn)
           _ ->
             expressPolyApp parentLang f xsExpr >>= stripPolyReturn
     -- Cross-pool bracket: receiver lives in one pool, surrounding
@@ -1157,6 +1277,11 @@ expressPolyExpr
             PolyReturn <$> expressBracketSlice callLang midx inputs out xsExpr
           PatternBracketIndex ->
             PolyReturn <$> expressBracketIndex callLang midx inputs out xsExpr
+          PatternStruct sel ->
+            -- Same unified dispatch as the isLocal branch, with a
+            -- PolyReturn wrapper for the cross-pool PolyManifold body.
+            dispatchPatternStruct callLang midx cidxCall sel inputs out xsExpr
+              (expressPolyApp parentLang f xsExpr) >>= (return . PolyReturn)
           _ ->
             expressPolyApp parentLang f xsExpr
         innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) bracketCall
@@ -1486,17 +1611,30 @@ expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x)) =
 -- so e.g. an @Array a = List a@ receiver picks up @instance Functor
 -- List@. Missing instance is a sourced codegen error citing the type
 -- and the language.
+--
+-- Chain-fusion fast path: when the IntrMap is the desugar-emitted
+-- @IntrMap (\elem -> .selector elem) (.[s:e:p] f)@ pattern with @f@
+-- IFile-typed, fold the per-element selector into the slice walker's
+-- steps and emit a SINGLE IFileWalk. The walker materialises only
+-- the projected sub-field per element, eliminating both the post-
+-- slice IntrMap pass and the deep-copy of any record fields the
+-- user's selector throws away.
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS IntrMap [funcE, listE])) = do
-  let AnnoS (Idx _ listT) _ _ = listE
-      AnnoS (Idx _ funcT) _ _ = funcE
-  mapSrc <- requireInstance midx
-    (resolveInstanceForType findFunctorMap lang midx listT)
-    lang "Functor.map" listT
-  funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
-  listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
-  let mapFunT = FunT [funcT, listT] t
-      e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP mapSrc)) [funcExpr, listExpr]
-  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+  fused <- tryFuseSliceSelectorChain midx lang funcE listE t
+  case fused of
+    Just polyExpr ->
+      expressContainer pc (Idx midx parentLang) (Idx cidx lang) args polyExpr
+    Nothing -> do
+      let AnnoS (Idx _ listT) _ _ = listE
+          AnnoS (Idx _ funcT) _ _ = funcE
+      mapSrc <- requireInstance midx
+        (resolveInstanceForType findFunctorMap lang midx listT)
+        lang "Functor.map" listT
+      funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
+      listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
+      let mapFunT = FunT [funcT, listT] t
+          e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP mapSrc)) [funcExpr, listExpr]
+      expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
   let e = PolyIntrinsic (Idx cidx t) intr xs'
@@ -1601,6 +1739,89 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (LetS v _ _) = "LetS" <+> pretty v
     tagExpr (VarS v _) = "VarS" <+> pretty v
     tagExpr (IntrinsicS _ _) = "IntrinsicS"
+
+-- | Detect the desugar-emitted @IntrMap (\v -> .selector v) (.[s:e:p] f)@
+-- pattern where @f@ is IFile-typed, and emit a fused IFileWalk whose
+-- step chain is @[WalkBracketSlice] ++ selectorSteps@. Returns Nothing
+-- if the pattern does not fire, so the caller falls back to the
+-- generic Functor.map path.
+tryFuseSliceSelectorChain
+  :: Int
+  -> Lang
+  -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+  -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+  -> Type
+  -> MorlocMonad (Maybe PolyExpr)
+tryFuseSliceSelectorChain midx callLang funcE listE outT =
+  case (matchSelectorLambda funcE, matchSliceOnIFile listE) of
+    (Just sel, Just (boundsExprs, rcvExpr, rcvT)) -> do
+      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      if not isIFile
+        then return Nothing
+        else do
+          tailSteps <- selectorToWalkSteps midx sel
+          -- Field/Key only tails are safe and cover the canonical
+          -- ".[:].0" / ".[:].foo" pattern. Bracket-in-tail would need
+          -- runtime args the slice walker doesn't allocate space for;
+          -- fall back in that case.
+          if not (all isStaticFieldStep tailSteps)
+            then return Nothing
+            else do
+              let steps = bracketSliceSteps ++ tailSteps
+                  [sE, eE, pE] = boundsExprs
+              [sT, eT, pT] <- mapM (boundTypeAt midx listE) [0, 1, 2]
+              -- Express each bound expression, then __to_index__ wrap
+              -- it the same way the standalone slice path does.
+              sP <- expressPolyArg callLang (mkIdx sE sT) sE
+              eP <- expressPolyArg callLang (mkIdx eE eT) eE
+              pP <- expressPolyArg callLang (mkIdx pE pT) pE
+              rcvP <- expressPolyArg callLang (mkIdx rcvExpr rcvT) rcvExpr
+              sW <- wrapBoundInToIndex callLang midx sT sP
+              eW <- wrapBoundInToIndex callLang midx eT eP
+              pW <- wrapBoundInToIndex callLang midx pT pP
+              fmap Just $ emitIFileWalk callLang midx outT steps rcvP [sW, eW, pW]
+    _ -> return Nothing
+  where
+    isStaticFieldStep (WalkField _) = True
+    isStaticFieldStep (WalkKey _)   = True
+    isStaticFieldStep _             = False
+
+matchSelectorLambda
+  :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+  -> Maybe Selector
+matchSelectorLambda (AnnoS _ _ (LamS [v] body)) =
+  case body of
+    AnnoS _ _ (AppS
+                 (AnnoS _ _ (ExeS (PatCall (PatternStruct sel))))
+                 [AnnoS _ _ (BndS v')])
+      | v == v' -> Just sel
+    _ -> Nothing
+matchSelectorLambda _ = Nothing
+
+matchSliceOnIFile
+  :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+  -> Maybe ( [AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])]
+           , AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+           , Type )
+matchSliceOnIFile (AnnoS _ _ (AppS
+                                 (AnnoS _ _ (ExeS (PatCall PatternBracketSlice)))
+                                 [sE, eE, pE, rcvE@(AnnoS (Idx _ rcvT) _ _)])) =
+  Just ([sE, eE, pE], rcvE, rcvT)
+matchSliceOnIFile _ = Nothing
+
+boundTypeAt
+  :: Int
+  -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+  -> Int
+  -> MorlocMonad Type
+boundTypeAt midx (AnnoS _ _ (AppS
+                                (AnnoS (Idx _ (FunT inputs _)) _ _) _)) n
+  | n < length inputs = return (inputs !! n)
+  | otherwise = MM.throwSourcedError midx
+      "chain fusion: bound-type index out of range"
+boundTypeAt midx _ _ =
+  MM.throwSourcedError midx
+    "chain fusion: cannot inspect slice's input types"
 
 expressContainer ::
   Indexed Type -> Indexed Lang -> Indexed Lang -> [Arg EVar] -> PolyExpr -> MorlocMonad PolyExpr

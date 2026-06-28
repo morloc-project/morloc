@@ -110,6 +110,20 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =
   [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicOpen kind path) =
+  [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
+printExpr (IIntrinsicClose h) =
+  [idoc|_mlc_close(#{printExpr h})|]
+printExpr (IIntrinsicFSchema path) =
+  [idoc|_mlc_fschema(#{printExpr path})|]
+printExpr (IIntrinsicFLength h) =
+  [idoc|_mlc_ifile_length(#{printExpr h})|]
+printExpr (IIntrinsicIFileWalk sid (Just t) pathExpr h runtimeArgs) =
+  let argList = "{" <> hcat (punctuate "," (map printExpr runtimeArgs)) <> "}"
+   in [idoc|_mlc_ifile_walk<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr pathExpr}, #{argList})|]
+printExpr (IIntrinsicIFileWalk sid Nothing pathExpr h runtimeArgs) =
+  let argList = "{" <> hcat (punctuate "," (map printExpr runtimeArgs)) <> "}"
+   in [idoc|_mlc_ifile_walk(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr pathExpr}, #{argList})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
 -- float-typed per C99 but convert losslessly to double; non-default Real

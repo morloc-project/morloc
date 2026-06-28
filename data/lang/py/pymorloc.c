@@ -287,6 +287,15 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
             }
             break;
         }
+        case MORLOC_IFILE: {
+            int64_t handle = PyTRY(mlc_read_handle_voidstar,
+                                   data, base_ptr, MLC_KIND_IFILE);
+            obj = PyLong_FromLongLong((long long)handle);
+            if (!obj) {
+                PyRAISE("Failed to wrap IFile handle as PyLong");
+            }
+            break;
+        }
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
             void* tmp_ptr = NULL;
@@ -605,6 +614,23 @@ error:
 
 static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj);
 
+// Extract N IFile handles from a Python list of bit64 ints into `out`.
+// Sets PyErr and returns -1 if any element isn't a Python int. Used by
+// the [IFile a] sizing and write fast paths; both batched mlc_handles_*
+// calls take `const int64_t*`, so any Python sequence whose elements
+// are Python ints can feed them after one round of extraction.
+static int extract_ifile_handles_pylist(PyObject* list, int64_t* out, Py_ssize_t n) {
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PyList_GetItem(list, i);
+        long long h = PyLong_AsLongLong(item);
+        if (h == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        out[i] = (int64_t)h;
+    }
+    return 0;
+}
+
 // Wrap get_shm_size_inner so the recursive-env stack is maintained at
 // every entry. Inner code calls get_shm_size (this wrapper), which
 // pushes the schema's declaration name (if any) before delegating to
@@ -644,6 +670,29 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
             if (nlimbs <= 1) return 16;  // inline
             return 16 + _Alignof(uint64_t) - 1 + nlimbs * sizeof(uint64_t);
         }
+        case MORLOC_IFILE: {
+            // Look up the exact path length via the registry. Returning
+            // the conservative PATH_MAX bound here makes every IFile
+            // array allocation N * PATH_MAX bytes -- 4 GB for a 1M-
+            // element array of handles. The registry lookup is a single
+            // RwLock read + Vec index, cheap enough to do once per
+            // sizing pass.
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for MORLOC_IFILE handle, but got %s",
+                        Py_TYPE(obj)->tp_name);
+            }
+            long long handle_ll = PyLong_AsLongLong(obj);
+            if (handle_ll == -1 && PyErr_Occurred()) return -1;
+            char* err = NULL;
+            int64_t n = mlc_handle_path_len((int64_t)handle_ll, &err);
+            if (n < 0) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                err ? err : "mlc_handle_path_len failed");
+                free(err);
+                return -1;
+            }
+            return sizeof(Array) + (ssize_t)n;
+        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
@@ -681,12 +730,45 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                         case MORLOC_FLOAT64:
                             required_size += list_size * element_width;
                             break;
+                        case MORLOC_IFILE: {
+                            // Batched path-length lookup for IFile arrays:
+                            // one registry lock for N handles instead of N.
+                            int64_t* handles = (int64_t*)malloc(list_size * sizeof(int64_t));
+                            if (!handles) {
+                                PyRAISE("get_shm_size: out of memory sizing IFile array");
+                            }
+                            if (extract_ifile_handles_pylist(obj, handles, list_size) != 0) {
+                                free(handles);
+                                return -1;
+                            }
+                            char* err = NULL;
+                            int64_t paths_total = mlc_handles_path_lens(
+                                handles, (size_t)list_size, NULL, &err);
+                            free(handles);
+                            if (paths_total < 0) {
+                                PyErr_SetString(PyExc_RuntimeError,
+                                    err ? err : "mlc_handles_path_lens failed");
+                                free(err);
+                                return -1;
+                            }
+                            required_size += list_size * element_width
+                                           + (ssize_t)paths_total;
+                            break;
+                        }
                         case MORLOC_INT:
                         case MORLOC_STRING:
                         case MORLOC_ARRAY:
                         case MORLOC_TUPLE:
                         case MORLOC_MAP:
                         case MORLOC_OPTIONAL:
+                            for(size_t i = 0; i < (size_t)list_size; i++){
+                               required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
+                            }
+                            break;
+                        default:
+                            // Schema layer added a new variable-width element type;
+                            // walk per-element conservatively rather than silently
+                            // under-counting and corrupting the SHM allocation.
                             for(size_t i = 0; i < (size_t)list_size; i++){
                                required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
                             }
@@ -949,6 +1031,17 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
             break;
         }
 
+        case MORLOC_IFILE: {
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for MORLOC_IFILE handle, but got %s",
+                        Py_TYPE(obj)->tp_name);
+            }
+            long long handle_ll = PyLong_AsLongLong(obj);
+            if (handle_ll == -1 && PyErr_Occurred()) { goto error; }
+            PyTRY(mlc_write_handle_voidstar,
+                  (int64_t)handle_ll, dest, cursor);
+            break;
+        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj)  || PyByteArray_Check(obj))) {
@@ -1051,6 +1144,30 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
+                    // Batched IFile-array write: one registry lock for all N handles.
+                    if (element_schema->type == MORLOC_IFILE && !numpy_per_element) {
+                        int64_t* handles = (int64_t*)malloc(size * sizeof(int64_t));
+                        if (!handles) {
+                            PyErr_SetString(PyExc_MemoryError,
+                                "to_voidstar: out of memory packing IFile array");
+                            goto error;
+                        }
+                        if (extract_ifile_handles_pylist(obj, handles, size) != 0) {
+                            free(handles);
+                            goto error;
+                        }
+                        char* err = NULL;
+                        int rc = mlc_write_handles_voidstar(
+                            handles, (size_t)size, start, width, cursor, &err);
+                        free(handles);
+                        if (rc != 0) {
+                            PyErr_SetString(PyExc_RuntimeError,
+                                err ? err : "mlc_write_handles_voidstar failed");
+                            free(err);
+                            goto error;
+                        }
+                        break;
+                    }
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item;
                         if (numpy_per_element) {
@@ -2567,6 +2684,135 @@ error:
     return NULL;
 }
 
+// ── Stream-handle bindings ──────────────────────────────────────────────
+
+static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
+    const char* path;
+    int kind_i;
+    if (!PyArg_ParseTuple(args, "si", &path, &kind_i)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t handle = PyTRY(mlc_open, path, (uint8_t)kind_i);
+    return PyLong_FromLongLong((long long)handle);
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    PyTRY(mlc_close, (int64_t)handle_ll);
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_fschema(PyObject* self, PyObject* args) { MAYFAIL
+    const char* path;
+    if (!PyArg_ParseTuple(args, "s", &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    char* s = PyTRY(mlc_fschema, path);
+    if (s == NULL) {
+        PyRAISE("mlc_fschema returned NULL");
+    }
+    PyObject* obj = PyUnicode_FromString(s);
+    free(s);
+    return obj;
+error:
+    return NULL;
+}
+
+// @ifile_walk: unified IFile pattern walker. Python signature:
+//   mlc_ifile_walk(schema_str, handle, path, args)
+// where `args` is a Python list of (None | int) values matching the
+// path's bracket steps. Field steps consume no args; bracket-index
+// consumes 1; bracket-slice consumes 3 (start, stop, step).
+static PyObject* pybinding__mlc_ifile_walk(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    const char* path;
+    PyObject* args_list;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    mlc_ifile_walk_arg* packed = NULL;
+
+    if (!PyArg_ParseTuple(args, "sLsO", &schema_str, &handle_ll, &path, &args_list)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    if (!PyList_Check(args_list)) {
+        PyRAISE("mlc_ifile_walk: args must be a list");
+    }
+    Py_ssize_t n = PyList_GET_SIZE(args_list);
+    if (n > 0) {
+        packed = (mlc_ifile_walk_arg*)calloc((size_t)n, sizeof(mlc_ifile_walk_arg));
+        if (packed == NULL) PyRAISE("mlc_ifile_walk: alloc failed");
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* a = PyList_GET_ITEM(args_list, i);
+            if (a == Py_None) {
+                packed[i].has = 0;
+                packed[i].value = 0;
+            } else {
+                long long v = PyLong_AsLongLong(a);
+                if (PyErr_Occurred()) {
+                    free(packed); packed = NULL;
+                    PyRAISE("mlc_ifile_walk: arg must be int or None");
+                }
+                packed[i].has = 1;
+                packed[i].value = (int64_t)v;
+            }
+        }
+    }
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = PyTRY(mlc_ifile_walk,
+                     (int64_t)handle_ll,
+                     path,
+                     packed,
+                     (uint64_t)n);
+    free(packed); packed = NULL;
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+    {
+        // Mirrors mlc_load's deferred-shfree pattern: from_voidstar may
+        // produce a numpy view backed by the SHM block, so defer freeing
+        // until the dispatch flushes.
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        return obj;
+    }
+error:
+    free(packed);
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_ifile_length(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t n = PyTRY(mlc_ifile_length, (int64_t)handle_ll);
+    return PyLong_FromLongLong((long long)n);
+error:
+    return NULL;
+}
+
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
@@ -2608,6 +2854,11 @@ static PyMethodDef Methods[] = {
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
+    {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
+    {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},
+    {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},
+    {"mlc_ifile_walk", pybinding__mlc_ifile_walk, METH_VARARGS, "Unified IFile pattern walker"},
+    {"mlc_ifile_length", pybinding__mlc_ifile_length, METH_VARARGS, "Total element count of an IFile handle"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

@@ -104,7 +104,11 @@ fn pack_data_inner(
                     buf.extend_from_slice(bytes);
                 }
             }
-            SerialType::String => {
+            SerialType::String | SerialType::IFile => {
+                // IFile rides the String wire form: its voidstar payload is
+                // an Array<u8> holding the file path bytes. The receiver's
+                // language bridge sees schema.serial_type == IFile and
+                // re-opens the path locally on unpack.
                 let arr = &*(ptr as *const Array);
                 let data = shm::rel2abs(arr.data)?;
                 let bytes = std::slice::from_raw_parts(data, arr.size);
@@ -269,7 +273,11 @@ fn unpack_obj_inner(
                     *(fields.add(1)) = val;
                 }
             }
-            SerialType::String => {
+            SerialType::String | SerialType::IFile => {
+                // IFile is wire-shaped like a String: the msgpack payload
+                // is the path bytes, laid into voidstar as an Array<u8>.
+                // The receiver's language bridge picks up the IFile schema
+                // tag and re-opens the path in its own registry.
                 let len = decode::read_str_len(reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str len: {}", e)))?
                     as usize;
@@ -540,7 +548,8 @@ fn calc_size_r_inner(
                 Ok(16) // Inline: just the [size, value] pair
             }
         }
-        SerialType::String => {
+        SerialType::String | SerialType::IFile => {
+            // IFile rides String's wire layout (Array<u8> + path bytes).
             let len = rmp::decode::read_str_len(reader)
                 .map_err(|e| MorlocError::Serialization(format!("size calc str: {}", e)))?
                 as usize;

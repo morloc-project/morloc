@@ -40,6 +40,7 @@ pub mod slurm_bridge;
 pub mod manifest_ffi;
 pub mod eval_arena;
 pub mod eval_ffi;
+pub mod stream;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;

@@ -36,6 +36,13 @@ RUN python3 -m pip install --break-system-packages --upgrade setuptools numpy py
 # stringi is needed for benchmarks
 RUN Rscript -e 'install.packages("stringi", repos  = "https://cloud.r-project.org")'
 
+# bit64 provides the 'integer64' S3 class that the R pool uses to
+# represent IFile handles (a 64-bit unsigned integer ID).  R's native
+# `integer` type is 32-bit, so without bit64 the per-language IFile
+# type declaration in stdlib/root-r cannot be wired up and any morloc
+# program that touches @open / IFile from R fails to typecheck.
+RUN Rscript -e 'install.packages("bit64", repos = "https://cloud.r-project.org")'
+
 # Install R Arrow package for cross-language Arrow IPC support
 ENV LIBARROW_MINIMAL=true
 ENV ARROW_S3=OFF

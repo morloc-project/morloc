@@ -30,6 +30,12 @@ pub enum SerialType {
                     // Schema's `name` field. Recursive records (e.g. Tree with a
                     // `[Tree]` field) terminate descent here; consumers resolve
                     // the cycle by walking up to the matching named declaration.
+    IFile = 21,     // Cross-pool stream handle. In-language native form is a
+                    // `uint64_t` slot id into the local stream registry; the
+                    // wire form is the file path encoded as a String
+                    // (Array<u8>). Receiving pool re-opens the path in its
+                    // own registry, sender and receiver own independent
+                    // fds/mmaps/arena lifetimes.
 }
 
 /// Schema character codes for parsing schema strings.
@@ -45,6 +51,7 @@ const SCHEMA_MAP: u8 = b'm';
 const SCHEMA_OPTIONAL: u8 = b'?';
 const SCHEMA_INT: u8 = b'j';
 const SCHEMA_TABLE: u8 = b'T';
+const SCHEMA_IFILE: u8 = b'F';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -86,7 +93,8 @@ impl Schema {
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
-            SerialType::String | SerialType::Int => std::mem::size_of::<shm::Array>(),
+            SerialType::String | SerialType::Int | SerialType::IFile
+                => std::mem::size_of::<shm::Array>(),
             _ => 0,
         };
         Schema {
@@ -134,10 +142,12 @@ impl Schema {
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
             SerialType::String | SerialType::Array | SerialType::Map
-            | SerialType::Int | SerialType::Table => {
+            | SerialType::Int | SerialType::Table | SerialType::IFile => {
                 // Table values live in SHM as a single relative pointer
                 // to an Arrow buffer; same pointer-sized alignment as
-                // other indirect types.
+                // other indirect types. IFile is wire-shaped as a String
+                // (Array<u8> path), so it shares the indirect-type
+                // alignment.
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
             // A back-ref ultimately resolves to a Map, which is pointer-aligned.
@@ -283,6 +293,23 @@ fn parse_schema_r(
             // matching the C string_schema() constructor.
             Ok((Schema {
                 serial_type: SerialType::String,
+                size: 1,
+                width: std::mem::size_of::<crate::shm_types::Array>(),
+                offsets: Vec::new(),
+                hint: None,
+                parameters: vec![Schema::primitive(SerialType::Uint8)],
+                keys: Vec::new(),
+                name: None,
+            }, cur))
+        }
+        SCHEMA_IFILE => {
+            // IFile shares String's wire layout: an Array<u8> holding the
+            // file path. The receiving pool re-opens the path locally and
+            // produces a fresh `uint64_t` handle. Matches the C
+            // ifile_schema() shape so bytes_to_voidstar walks
+            // parameters[0].width == 1.
+            Ok((Schema {
+                serial_type: SerialType::IFile,
                 size: 1,
                 width: std::mem::size_of::<crate::shm_types::Array>(),
                 offsets: Vec::new(),
@@ -753,6 +780,7 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::Float32 => buf.push_str("f4"),
         SerialType::Float64 => buf.push_str("f8"),
         SerialType::String => buf.push('s'),
+        SerialType::IFile => buf.push('F'),
         SerialType::Array => {
             buf.push('a');
             let expected = schema.offsets.first().copied().unwrap_or(0);

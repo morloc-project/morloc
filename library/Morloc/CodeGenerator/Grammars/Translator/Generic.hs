@@ -910,6 +910,37 @@ genericPrintExpr desc = go
     go (IIntrinsicRead sid _ e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_read(" <> schemaRef sid <> ", " <> go e <> ")"
+    go (IIntrinsicOpen kind path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open(" <> go path <> ", " <> pretty kind <> ")"
+    go (IIntrinsicClose h) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_close(" <> go h <> ")"
+    go (IIntrinsicFSchema path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_fschema(" <> go path <> ")"
+    go (IIntrinsicFLength handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_ifile_length(" <> go handle <> ")"
+    -- Unified pattern walker. Path string + handle + variable runtime
+    -- args (bracket bounds) marshalled by the per-language wrapper into
+    -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R
+    -- lower the args as a list of (has_value, value) tuples; the
+    -- per-language wrapper unpacks them. Container syntax follows
+    -- ldListStyle: Python uses [..], R uses list(..). The args are
+    -- complex objects (Optional Int64), so for TypeDependentList we
+    -- always pick the generic container, not the atomic one.
+    go (IIntrinsicIFileWalk sid _ pathExpr handle runtimeArgs) =
+      let prefix = ldIntrinsicPrefix desc
+          elems = map go runtimeArgs
+          argList = case ldListStyle desc of
+            BracketList -> "[" <> hsep (punctuate "," elems) <> "]"
+            _ -> pretty (ldGenericListFn desc) <> tupled elems
+       in pretty prefix <> "mlc_ifile_walk("
+            <> schemaRef sid <> ", "
+            <> go handle <> ", "
+            <> go pathExpr <> ", "
+            <> argList <> ")"
 
     schemaRef = genericSchemaRef desc
 
@@ -1169,6 +1200,21 @@ genericEvalPattern desc _ (PatternStruct (ungroup -> sss)) [m] =
   case ldTupleConstructor desc of
     "" -> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
     name -> pretty name <> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
+-- PatternStruct with bracket steps inside the Selector. App args
+-- are [bracket_bounds..., receiver] (DFS order, last is receiver).
+-- Walks the Selector recursively, threading the bracket-args list
+-- through siblings, and emits per-step native code: field access for
+-- field steps, language-native bracket syntax (or morloc_at/slice
+-- helper) for bracket steps. Multi-sibling groups produce a tuple.
+genericEvalPattern desc _ (PatternStruct s) args
+  | selectorHasBracket s, length args == bracketArity s + 1 =
+      let n = bracketArity s
+          (brackets, receivers) = splitAt n args
+          receiver = case receivers of
+            [r] -> r
+            _ -> error $ "genericEvalPattern: bracket-in-Selector expected 1 receiver, \
+                         \got " <> show (length receivers)
+      in fst (walkSelectorBrackets desc receiver brackets s)
 -- setters
 genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
   patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
@@ -1221,3 +1267,57 @@ writeSelector desc (Left i) = case ldIndexStyle desc of
   ZeroBracket -> "[" <> pretty i <> "]"
   OneBracket -> "[" <> pretty (i + 1) <> "]"
   OneDoubleBracket -> "[[" <> pretty (i + 1) <> "]]"
+
+-- | Walk a 'Selector' that may contain bracket steps, emitting
+-- per-step native source code. Threads the @brackets@ list of runtime
+-- arg expressions through bracket steps in DFS order; each call
+-- returns the produced expression and the remaining (unconsumed)
+-- bracket args. Multi-sibling groups emit a tuple.
+walkSelectorBrackets
+  :: LangDescriptor
+  -> MDoc          -- accumulated receiver expression
+  -> [MDoc]        -- remaining bracket runtime args
+  -> Selector
+  -> (MDoc, [MDoc])
+walkSelectorBrackets _ rcv brackets SelectorEnd = (rcv, brackets)
+walkSelectorBrackets desc rcv brackets (SelectorKey (k, sub) []) =
+  walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) brackets sub
+walkSelectorBrackets desc rcv brackets (SelectorIdx (i, sub) []) =
+  walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) brackets sub
+walkSelectorBrackets desc rcv (idx : restBrackets) (SelectorBracketIndex sub) =
+  let accessed = case ldIndexStyle desc of
+        ZeroBracket -> rcv <> "[" <> idx <> "]"
+        OneBracket -> rcv <> "[(" <> idx <> ") + 1]"
+        OneDoubleBracket -> rcv <> "[[(" <> idx <> ") + 1]]"
+  in walkSelectorBrackets desc accessed restBrackets sub
+walkSelectorBrackets _ _ [] (SelectorBracketIndex _) =
+  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-index step"
+walkSelectorBrackets desc rcv (start : stop : step : restBrackets) SelectorBracketSlice =
+  let sliced = case ldIndexStyle desc of
+        ZeroBracket -> rcv <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
+        _ -> "morloc_slice" <> tupled [start, stop, step, rcv]
+  in (sliced, restBrackets)
+walkSelectorBrackets _ _ _ SelectorBracketSlice =
+  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
+walkSelectorBrackets desc rcv brackets (SelectorKey hd@(_, _) others) =
+  let pairs = hd : others
+      (results, finalBrackets) = foldl
+        (\(acc, b) (k, sub) ->
+           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) b sub
+           in (acc ++ [out], b'))
+        ([], brackets) pairs
+      tupleExpr = case ldTupleConstructor desc of
+        "" -> tupled results
+        name -> pretty name <> tupled results
+  in (tupleExpr, finalBrackets)
+walkSelectorBrackets desc rcv brackets (SelectorIdx hd@(_, _) others) =
+  let pairs = hd : others
+      (results, finalBrackets) = foldl
+        (\(acc, b) (i, sub) ->
+           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) b sub
+           in (acc ++ [out], b'))
+        ([], brackets) pairs
+      tupleExpr = case ldTupleConstructor desc of
+        "" -> tupled results
+        name -> pretty name <> tupled results
+  in (tupleExpr, finalBrackets)

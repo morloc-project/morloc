@@ -441,6 +441,26 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
         // Inline BigInt: [size, value] = 16 bytes (C++ values always fit inline)
         return 16;
     }
+    if (schema->type == MORLOC_IFILE) {
+        // Look up the exact path length via the registry instead of
+        // reserving PATH_MAX per element. `if constexpr` mirrors the
+        // arithmetic guard in `to_voidstar`'s MORLOC_IFILE arm so the
+        // template still instantiates cleanly for record-type fallbacks.
+        if constexpr (std::is_arithmetic_v<Primitive>) {
+            char* err = NULL;
+            int64_t n = mlc_handle_path_len(static_cast<int64_t>(data), &err);
+            if (err) {
+                std::string msg(err);
+                free(err);
+                throw std::runtime_error("mlc_handle_path_len: " + msg);
+            }
+            return schema->width + static_cast<size_t>(n);
+        } else {
+            throw std::runtime_error(
+                "get_shm_size: MORLOC_IFILE schema requires an arithmetic handle type"
+            );
+        }
+    }
     return schema->width;
 }
 
@@ -465,6 +485,23 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
         case MORLOC_FLOAT64:
             total_size += data.size() * elem_schema->width;
             break;
+        case MORLOC_IFILE:
+            // Batched lookup amortises the registry lock across N handles.
+            if constexpr (std::is_same_v<T, int64_t>) {
+                char* err = NULL;
+                int64_t paths_total = mlc_handles_path_lens(
+                    data.data(), data.size(), nullptr, &err);
+                if (paths_total < 0) {
+                    std::string msg = err ? err : "mlc_handles_path_lens failed";
+                    free(err);
+                    throw std::runtime_error(msg);
+                }
+                total_size += data.size() * elem_schema->width
+                            + static_cast<size_t>(paths_total);
+                break;
+            }
+            // Fallthrough for handle-wrapper element types.
+            [[fallthrough]];
         case MORLOC_INT:
         case MORLOC_STRING:
         case MORLOC_ARRAY:
@@ -692,6 +729,16 @@ template<typename Primitive>
 void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
     if constexpr (std::is_arithmetic_v<Primitive>) {
         switch(schema->type) {
+            case MORLOC_IFILE: {
+                char* err = NULL;
+                if (mlc_write_handle_voidstar(
+                        static_cast<int64_t>(data), dest, cursor, &err) != 0) {
+                    std::string msg = err ? err : "mlc_write_handle_voidstar failed";
+                    free(err);
+                    throw std::runtime_error(msg);
+                }
+                break;
+            }
             case MORLOC_SINT8:   *(int8_t*)dest   = check_range_narrow<int8_t>(data, "Int8");    break;
             case MORLOC_SINT16:  *(int16_t*)dest  = check_range_narrow<int16_t>(data, "Int16");  break;
             case MORLOC_SINT32:  *(int32_t*)dest  = check_range_narrow<int32_t>(data, "Int32");  break;
@@ -736,6 +783,19 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::ve
     *cursor = static_cast<char*>(*cursor) + data.size() * elem_schema->width;
     char* start = (char*)rel2abs_cpp(result->data);
     size_t width = elem_schema->width;
+    // Batched IFile array write: one registry lock for all N handles.
+    if (elem_schema->type == MORLOC_IFILE) {
+        if constexpr (std::is_same_v<T, int64_t>) {
+            char* err = NULL;
+            if (mlc_write_handles_voidstar(
+                    data.data(), data.size(), start, width, cursor, &err) != 0) {
+                std::string msg = err ? err : "mlc_write_handles_voidstar failed";
+                free(err);
+                throw std::runtime_error(msg);
+            }
+            return dest;
+        }
+    }
     for (size_t i = 0; i < data.size(); ++i) {
          to_voidstar(start + width * i, cursor, elem_schema, data[i]);
     }
@@ -1039,6 +1099,17 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
         // convert to the C++ type so narrow concrete types (e.g. int for Int)
         // work correctly with wider morloc schemas (e.g. i8).
         switch(schema->type) {
+            case MORLOC_IFILE: {
+                char* err = NULL;
+                int64_t handle = mlc_read_handle_voidstar(
+                    data, base_ptr, MLC_KIND_IFILE, &err);
+                if (err || handle < 0) {
+                    std::string msg = err ? err : "mlc_read_handle_voidstar failed";
+                    free(err);
+                    throw std::runtime_error(msg);
+                }
+                return static_cast<T>(handle);
+            }
             case MORLOC_SINT8:   return static_cast<T>(*(int8_t*)data);
             case MORLOC_SINT16:  return static_cast<T>(*(int16_t*)data);
             case MORLOC_SINT32:  return static_cast<T>(*(int32_t*)data);

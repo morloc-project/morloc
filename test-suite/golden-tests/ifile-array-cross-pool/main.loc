@@ -1,0 +1,62 @@
+-- Cross-pool transfer of `[IFile a]`.
+--
+-- Each IFile in a list is wire-encoded as Array<u8>(path). When the
+-- list crosses a pool boundary, the receiver's `from_voidstar` must
+-- walk every element, decode each path, and re-bind a fresh local
+-- handle. The size estimator (`get_shm_size`) must account for each
+-- element's variable-length path payload, not just the fixed-width
+-- Array header.
+--
+-- Before this test there was no coverage that the per-element walk
+-- threaded path bytes correctly through the SHM allocation in
+-- pymorloc.c / cppmorloc.hpp / rmorloc.c, and a 'switch' fall-through
+-- silently under-counted the wire size, corrupting the second handle's
+-- path bytes.
+
+module main
+  ( testArrayCpp
+  , testArrayPy
+  , testArrayR
+  , testArrayMixedDispatch
+  )
+
+import root
+import root-cpp
+import root-py
+import root-r
+
+-- Send [IFile [Int]] to <lang> pool, where it is unpacked into fresh
+-- handles, the second handle's element [1] is read, and the result is
+-- returned. Exercises:
+--   * [IFile a] put_value in nexus
+--   * [IFile a] get_value in target pool (per-element path-unpack)
+--   * .[i] f IFile pattern walk in target pool
+testInPool :: (Int -> Int) -> Str -> Str -> <IO> Int
+testInPool langId pathA pathB = do
+  @save 0 [10, 20, 30, 40, 50] pathA
+  @save 0 [100, 200, 300, 400, 500] pathB
+  fa <- @open pathA :: <IO> IFile [Int]
+  fb <- @open pathB :: <IO> IFile [Int]
+  -- [fa, fb] crosses to langId's pool. Inside that pool, .[1] indexes
+  -- the list (the second IFile = fb), then .[1] on the IFile reads its
+  -- element 1 (= 200). The result returns to the nexus.
+  langId (.[1] (.[1] [fa, fb]))
+
+testArrayCpp :: Str -> Str -> <IO> Int
+testArrayCpp = testInPool idcpp
+
+testArrayPy :: Str -> Str -> <IO> Int
+testArrayPy = testInPool idpy
+
+testArrayR :: Str -> Str -> <IO> Int
+testArrayR = testInPool idr
+
+-- One IFile opened, copied into a 3-element list `[f, f, f]`, then
+-- sent to cpp. Each list slot must independently re-open the same
+-- path. Reads element 4 from the third slot (= 40). Catches the case
+-- where per-element path-bytes share storage / overwrite each other.
+testArrayMixedDispatch :: Str -> <IO> Int
+testArrayMixedDispatch path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  idcpp (.[3] (.[2] [f, f, f]))

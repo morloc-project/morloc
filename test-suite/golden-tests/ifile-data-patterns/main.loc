@@ -1,0 +1,123 @@
+-- IFile pattern access on voidstar DATA_PACKET files.
+--
+-- Each test function:
+--   1. Saves a value of some type via @save (producing a voidstar
+--      DATA_PACKET file).
+--   2. Opens the file as `IFile T` where T is the saved value's type.
+--   3. Applies a pattern accessor (.[i], .[i:j], .field, chains).
+--   4. Returns the extracted value as the do-block's final expression.
+--
+-- The IO effect is accumulated by @save / @open statements; the
+-- bracket/struct access on the IFile is pure-typed but executes the
+-- runtime call via DoBlockN thunk wrapping (Serialize.hs effect-wrap).
+--
+-- Pattern coverage:
+--   * `.[i]` on [Int] (fixed-size elements)
+--   * `.[i]` on [Str] (variable-length elements)
+--   * `.[i:j]` on [Int]
+--   * `.[i:j].1` (slice + map .1) on [(Str, Str)]
+--   * `.[i].1` (index + tuple field) on [(Str, Str)]
+--   * `.1` on (Int, [Str]) -- IFile transparency
+--   * `.1.[i]` on (Int, [Str]) -- struct then bracket
+--   * `.1.[i:j]` on (Int, [Str]) -- struct then slice
+--   * `.(.0, .2)` on a 4-tuple -- multi-field group at root
+--   * `.1.(.0, .1)` on (Int, (Int, Str)) -- nested struct + group
+
+module main
+  ( testIntIndex
+  , testStrIndex
+  , testIntSlice
+  , testTupleSliceField
+  , testTupleIndexField
+  , testTupleStructField
+  , testTupleStructIndex
+  , testTupleStructSlice
+  , testTupleGroup
+  , testNestedTupleGroup
+  )
+
+import root
+
+--------------
+-- [Int] tests
+
+testIntIndex :: Str -> <IO> Int
+testIntIndex path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[2] f                                       -- expect 30
+
+testIntSlice :: Str -> <IO> [Int]
+testIntSlice path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[1:4] f                                     -- expect [20, 30, 40]
+
+
+--------------
+-- [Str] tests
+
+testStrIndex :: Str -> <IO> Str
+testStrIndex path = do
+  @save 0 ["alpha", "beta", "gamma", "delta"] path
+  f <- @open path :: <IO> IFile [Str]
+  .[2] f                                       -- expect "gamma"
+
+
+---------------------
+-- [(Str, Str)] tests
+
+testTupleSliceField :: Str -> <IO> [Str]
+testTupleSliceField path = do
+  @save 0 [("a","X"), ("b","Y"), ("c","Z"), ("d","W")] path
+  f <- @open path :: <IO> IFile [(Str, Str)]
+  .[0:3].1 f                                   -- expect ["X","Y","Z"]
+
+testTupleIndexField :: Str -> <IO> Str
+testTupleIndexField path = do
+  @save 0 [("a","X"), ("b","Y"), ("c","Z")] path
+  f <- @open path :: <IO> IFile [(Str, Str)]
+  .[1].0 f                                     -- expect "b"
+
+
+-------------------------------------------
+-- (Int, [Str]) tests (non-list IFile root)
+
+testTupleStructField :: Str -> <IO> [Str]
+testTupleStructField path = do
+  @save 0 (42, ["one", "two", "three", "four"]) path
+  f <- @open path :: <IO> IFile (Int, [Str])
+  .1 f                                         -- expect ["one","two","three","four"]
+
+testTupleStructIndex :: Str -> <IO> Str
+testTupleStructIndex path = do
+  @save 0 (42, ["one", "two", "three", "four"]) path
+  f <- @open path :: <IO> IFile (Int, [Str])
+  .1.[2] f                                     -- expect "three"
+
+testTupleStructSlice :: Str -> <IO> [Str]
+testTupleStructSlice path = do
+  @save 0 (42, ["one", "two", "three", "four", "five"]) path
+  f <- @open path :: <IO> IFile (Int, [Str])
+  .1.[1:4] f                                   -- expect ["two","three","four"]
+
+
+--------------------
+-- Multi-field group tests
+
+-- Root-level multi-field group on a tuple. The result is a fresh tuple
+-- packing the two selected fields. Exercises the WalkGroup encoding
+-- and the runtime's materialize_group path.
+testTupleGroup :: Str -> <IO> (Int, Str)
+testTupleGroup path = do
+  @save 0 (42, "skip-me", "hello", 3.14) path
+  f <- @open path :: <IO> IFile (Int, Str, Str, Real)
+  .(.0, .2) f                                  -- expect (42, "hello")
+
+-- Group nested under a struct prefix. Tests that the prefix walk
+-- (`.1`) and the group `.(.0, .1)` compose correctly.
+testNestedTupleGroup :: Str -> <IO> (Int, Str)
+testNestedTupleGroup path = do
+  @save 0 (1, (42, "hello", 3.14)) path
+  f <- @open path :: <IO> IFile (Int, (Int, Str, Real))
+  .1.(.0, .1) f                                -- expect (42, "hello")

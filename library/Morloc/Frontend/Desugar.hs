@@ -813,20 +813,37 @@ applyAccessor sp (CABIdx idx tail') subject = do
   applied <- applyIdxPat sp idx subject
   applyTail sp tail' applied
 applyAccessor sp (CABGroup bodies) subject = do
-  -- Each branch needs its own fresh VarE node referencing the subject
-  -- variable. Sharing one ExprI across multiple AppE positions confuses the
-  -- typechecker (every ExprI ID is a unique typed position). If the subject
-  -- is already a VarE, fresh VarE references to the same name resolve via
-  -- name lookup; otherwise we bind it to a let-variable first.
+  -- First try to fold the whole group into a single unified-Selector
+  -- PatCall. This keeps the pattern as ONE first-class object
+  -- (instead of a TupE of separate PatCall applications), which lets
+  -- IFile-aware codegen emit a single walker call and gives any
+  -- future pattern-level optimisation an undisturbed AST to work on.
   --
-  -- Known limitation: when a branch of the group contains a bracket
-  -- accessor (an __access_index__ call) AND a sibling branch projects a
-  -- different record field of the same subject, the typechecker's open-
-  -- record existential does not always concretise the bracketed field's
-  -- type in time for class-instance resolution. Authors hitting this
-  -- "No instance found for Indexable::__access_index__" error can work
-  -- around it by extracting the chain into a top-level helper with an
-  -- explicit signature (see test-suite/golden-tests/bracket-accessors).
+  -- Unification falls back to the legacy TupE form when the group
+  -- contains shapes that the unified Selector ADT cannot represent:
+  -- mixed-kind siblings (key + index), bracket-headed siblings,
+  -- nested groups, or bracket-slice followed by a chain (which
+  -- lowers to IntrMap, not a Selector step).
+  mUnified <- tryUnifiedGroupSelector sp bodies
+  case mUnified of
+    Just (sel, runtimeArgs) -> do
+      patI <- freshExprSpan sp (PatE (PatternStruct sel))
+      freshExprSpan sp (AppE patI (runtimeArgs ++ [subject]))
+    Nothing ->
+      legacyGroupTupE sp bodies subject
+applyAccessor sp (CABBracket axes tail') subject =
+  lowerBracket sp axes tail' subject
+
+-- | Fall-back lowering: build a TupE of per-branch accessor
+-- applications. Used when 'tryUnifiedGroupSelector' returns Nothing.
+legacyGroupTupE :: Span -> [CstAccessorBody] -> ExprI -> D ExprI
+legacyGroupTupE sp bodies subject =
+  -- Each branch needs its own fresh VarE node referencing the subject
+  -- variable. Sharing one ExprI across multiple AppE positions confuses
+  -- the typechecker (every ExprI ID is a unique typed position). If
+  -- the subject is already a VarE, fresh VarE references to the same
+  -- name resolve via name lookup; otherwise we bind it to a let-
+  -- variable first.
   case subject of
     ExprI _ (VarE _ subjName) -> do
       parts <- mapM
@@ -845,8 +862,108 @@ applyAccessor sp (CABGroup bodies) subject = do
         bodies
       tupE <- freshExprSpan sp (TupE parts)
       freshExprSpan sp (LetE [(v, subject)] tupE)
-applyAccessor sp (CABBracket axes tail') subject =
-  lowerBracket sp axes tail' subject
+
+-- | Try to combine a list of accessor bodies into ONE unified
+-- Selector with sibling tails. Returns 'Just (selector, runtimeArgs)'
+-- on success; 'Nothing' if the group can't be unified.
+--
+-- All siblings must share a head kind (all key, or all index). The
+-- sibling tails are independent; they may contain bracket steps,
+-- field chains, or any mix thereof.
+tryUnifiedGroupSelector
+  :: Span
+  -> [CstAccessorBody]
+  -> D (Maybe (Selector, [ExprI]))
+tryUnifiedGroupSelector sp bodies = do
+  msibs <- traverse (tryBodyAsSibling sp) bodies
+  case sequence msibs of
+    Nothing -> return Nothing
+    Just sibs -> return (combineSiblings sibs)
+
+-- | Per-sibling extracted shape. A sibling is the head step (field
+-- key or index) plus its tail Selector and any runtime arg
+-- expressions the tail brings (bracket bounds, in DFS order).
+data UnifiedSibling
+  = USKey Text Selector [ExprI]
+  | USIdx Int Selector [ExprI]
+
+tryBodyAsSibling :: Span -> CstAccessorBody -> D (Maybe UnifiedSibling)
+tryBodyAsSibling sp (CABKey k tail') = do
+  mTail <- tryTailToSelector sp tail'
+  return $ case mTail of
+    Just (sel, args) -> Just (USKey k sel args)
+    Nothing          -> Nothing
+tryBodyAsSibling sp (CABIdx i tail') = do
+  mTail <- tryTailToSelector sp tail'
+  return $ case mTail of
+    Just (sel, args) -> Just (USIdx i sel args)
+    Nothing          -> Nothing
+tryBodyAsSibling _ (CABBracket _ _) = return Nothing
+tryBodyAsSibling _ (CABGroup _)     = return Nothing
+
+-- | Convert an accessor body that lives inside a chain (after a head
+-- step) into a Selector + runtime args. Used by 'tryTailToSelector'.
+tryBodyToChain :: Span -> CstAccessorBody -> D (Maybe (Selector, [ExprI]))
+tryBodyToChain sp (CABKey k tail') = do
+  mTail <- tryTailToSelector sp tail'
+  return $ case mTail of
+    Just (sel, args) -> Just (SelectorKey (k, sel) [], args)
+    Nothing          -> Nothing
+tryBodyToChain sp (CABIdx i tail') = do
+  mTail <- tryTailToSelector sp tail'
+  return $ case mTail of
+    Just (sel, args) -> Just (SelectorIdx (i, sel) [], args)
+    Nothing          -> Nothing
+tryBodyToChain sp (CABBracket axes tail') = case axes of
+  [BAxIdx eLoc] -> do
+    iExpr <- desugarExpr eLoc
+    mTail <- tryTailToSelector sp tail'
+    return $ case mTail of
+      Just (sel, args) -> Just (SelectorBracketIndex sel, iExpr : args)
+      Nothing          -> Nothing
+  [BAxSlice mStart mStop mStep] -> case tail' of
+    CATEnd -> do
+      sE <- desugarSliceBound sp mStart
+      eE <- desugarSliceBound sp mStop
+      pE <- desugarSliceBound sp mStep
+      return $ Just (SelectorBracketSlice, [sE, eE, pE])
+    -- bracket-slice with a chain tail lowers to IntrMap, not to a
+    -- Selector step. Fall back to the legacy lambda path.
+    _ -> return Nothing
+  _ -> return Nothing
+tryBodyToChain _ (CABGroup _) = return Nothing
+
+tryTailToSelector :: Span -> CstAccessorTail -> D (Maybe (Selector, [ExprI]))
+tryTailToSelector _ CATEnd          = return $ Just (SelectorEnd, [])
+tryTailToSelector _ (CATSet _)      = return Nothing
+tryTailToSelector sp (CATChain b)   = tryBodyToChain sp b
+
+-- | Combine unified siblings into a single Selector. Same-kind
+-- siblings (all keys, or all indices) compose into the existing
+-- multi-sibling 'SelectorKey' / 'SelectorIdx' form. Mixed-kind
+-- groups can't be represented and force the caller back to the
+-- legacy TupE form.
+combineSiblings :: [UnifiedSibling] -> Maybe (Selector, [ExprI])
+combineSiblings [] = Nothing
+combineSiblings sibs
+  | all isKey sibs =
+      let pairs   = [(k, s) | USKey k s _ <- sibs]
+          allArgs = concat [a | USKey _ _ a <- sibs]
+      in case pairs of
+        []     -> Nothing
+        h : tl -> Just (SelectorKey h tl, allArgs)
+  | all isIdx sibs =
+      let pairs   = [(i, s) | USIdx i s _ <- sibs]
+          allArgs = concat [a | USIdx _ _ a <- sibs]
+      in case pairs of
+        []     -> Nothing
+        h : tl -> Just (SelectorIdx h tl, allArgs)
+  | otherwise = Nothing
+  where
+    isKey USKey{} = True
+    isKey _       = False
+    isIdx USIdx{} = True
+    isIdx _       = False
 
 applyKeyPat :: Span -> Text -> ExprI -> D ExprI
 applyKeyPat sp name subject = do

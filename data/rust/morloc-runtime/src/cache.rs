@@ -564,7 +564,7 @@ fn hash_voidstar_inner(
                     Ok(hash::xxh64_with_seed(bytes, seed))
                 }
             }
-            SerialType::String | SerialType::Array => {
+            SerialType::String | SerialType::IFile | SerialType::Array => {
                 let arr = &*(data as *const shm::Array);
                 let elem_width = if schema.parameters.is_empty() {
                     1 // string bytes
@@ -573,7 +573,9 @@ fn hash_voidstar_inner(
                 };
                 let elem_data = shm::rel2abs(arr.data)?;
 
-                if schema.is_fixed_width() || schema.serial_type == SerialType::String {
+                if schema.is_fixed_width()
+                    || matches!(schema.serial_type, SerialType::String | SerialType::IFile)
+                {
                     let total = elem_width * arr.size;
                     let bytes = std::slice::from_raw_parts(elem_data, total);
                     Ok(hash::xxh64_with_seed(bytes, seed))

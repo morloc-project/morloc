@@ -60,7 +60,7 @@ fn adjust_relptrs_inner(
                 }
                 Ok(())
             }
-            SerialType::String | SerialType::Array => {
+            SerialType::String | SerialType::IFile | SerialType::Array => {
                 let arr = &mut *(data as *mut Array);
                 arr.data += base_rel;
                 if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
@@ -177,7 +177,7 @@ fn remap_volume_indices_inner(
                 }
                 Ok(())
             }
-            SerialType::String | SerialType::Array => {
+            SerialType::String | SerialType::IFile | SerialType::Array => {
                 let arr = &mut *(data as *mut Array);
                 if arr.size == 0 {
                     // Zero-sized arrays carry data = 0 (no vol_mask).
@@ -282,7 +282,12 @@ pub fn read_binary_with_hint(
 /// sub-blocks that shfree_inplace releases.
 pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     match schema.serial_type {
-        SerialType::String => {
+        SerialType::String | SerialType::IFile => {
+            // IFile's voidstar payload is an Array<u8> holding the file
+            // path -- same shape as String, so the same free path
+            // applies. The local handle the receiver minted on unpack is
+            // independent of this voidstar block; its slot is owned by
+            // the receiver's eval_arena.
             let arr = &*(ptr as *const Array);
             if arr.size > 0 && arr.data >= 0 {
                 let data = shm::rel2abs(arr.data)?;
@@ -361,13 +366,44 @@ pub unsafe fn deep_copy(
     dst: *mut u8,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
+    // Default source resolver: standard SHM rel2abs. Callers reading
+    // from file-backed regions instead use `deep_copy_with` with a
+    // custom resolver that adds an offset to the file's payload base.
+    deep_copy_with(src, dst, schema, &|p| shm::rel2abs(p))
+}
+
+/// Same as `deep_copy` but parameterised by the source-side relptr
+/// resolver. The destination side always uses the SHM allocator and
+/// `shm::rel2abs` for the destination's own sub-block relptrs; only
+/// the source relptr -> AbsPtr resolution is customisable.
+///
+/// `resolve` is called whenever the walker needs to follow a relptr
+/// embedded in the *source* data: Array.data, Optional inners, BigInt
+/// limbs, etc. The returned `AbsPtr` must be a readable byte pointer
+/// to the resolved data; the walker reads `size_bytes` from it where
+/// `size_bytes` is determined by the schema.
+///
+/// For mmap'd file-backed source, the resolver decodes the file-
+/// relative offset and returns `payload_base + offset` (with bounds
+/// checking against the payload region). For SHM-resident source,
+/// the resolver is `shm::rel2abs`.
+pub unsafe fn deep_copy_with<R>(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    resolve: &R,
+) -> Result<(), MorlocError>
+where
+    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
+{
     match schema.serial_type {
-        SerialType::String => {
+        SerialType::String | SerialType::IFile => {
+            // IFile rides String's wire shape (Array<u8> + path bytes).
             let src_arr = &*(src as *const Array);
             let dst_arr = &mut *(dst as *mut Array);
             dst_arr.size = src_arr.size;
             if src_arr.size > 0 && src_arr.data >= 0 {
-                let src_data = shm::rel2abs(src_arr.data)?;
+                let src_data = resolve(src_arr.data)?;
                 let new_data = shm::shmemcpy(src_data, src_arr.size)?;
                 dst_arr.data = shm::abs2rel(new_data)?;
             } else {
@@ -381,16 +417,17 @@ pub unsafe fn deep_copy(
             if src_arr.size > 0 && src_arr.data >= 0 && !schema.parameters.is_empty() {
                 let elem_schema = &schema.parameters[0];
                 let elem_width = elem_schema.width;
-                let src_data = shm::rel2abs(src_arr.data)?;
+                let src_data = resolve(src_arr.data)?;
                 let new_data = shm::shcalloc(src_arr.size, elem_width)?;
                 if elem_schema.is_fixed_width() {
                     std::ptr::copy_nonoverlapping(src_data, new_data, src_arr.size * elem_width);
                 } else {
                     for i in 0..src_arr.size {
-                        deep_copy(
+                        deep_copy_with(
                             src_data.add(i * elem_width),
                             new_data.add(i * elem_width),
                             elem_schema,
+                            resolve,
                         )?;
                     }
                 }
@@ -402,7 +439,7 @@ pub unsafe fn deep_copy(
         SerialType::Tuple | SerialType::Map => {
             for i in 0..schema.parameters.len() {
                 let off = schema.offsets[i];
-                deep_copy(src.add(off), dst.add(off), &schema.parameters[i])?;
+                deep_copy_with(src.add(off), dst.add(off), &schema.parameters[i], resolve)?;
             }
         }
         SerialType::Optional => {
@@ -415,10 +452,10 @@ pub unsafe fn deep_copy(
                 *dst_relptr_slot = shm::RELNULL;
             } else {
                 let inner_schema = &schema.parameters[0];
-                let src_inner = shm::rel2abs(src_relptr)?;
+                let src_inner = resolve(src_relptr)?;
                 let dst_inner = shm::shmalloc(inner_schema.width)?;
                 std::ptr::write_bytes(dst_inner, 0, inner_schema.width);
-                deep_copy(src_inner, dst_inner, inner_schema)?;
+                deep_copy_with(src_inner, dst_inner, inner_schema, resolve)?;
                 *dst_relptr_slot = shm::abs2rel(dst_inner)?;
             }
         }
@@ -430,7 +467,7 @@ pub unsafe fn deep_copy(
             if size > 1 {
                 let src_relptr = *(src.add(off) as *const RelPtr);
                 if src_relptr >= 0 {
-                    let src_limbs = shm::rel2abs(src_relptr)?;
+                    let src_limbs = resolve(src_relptr)?;
                     let new_limbs = shm::shmemcpy(src_limbs, size * std::mem::size_of::<u64>())?;
                     *(dst.add(off) as *mut RelPtr) = shm::abs2rel(new_limbs)?;
                 } else {
@@ -521,7 +558,7 @@ fn flatten_fixup_inner(
                 }
                 // size ≤ 1: inline value, no fixup needed
             }
-            SerialType::String | SerialType::Array => {
+            SerialType::String | SerialType::IFile | SerialType::Array => {
                 let orig_arr = &*(data as *const Array);
                 let buf_arr = &mut *(buf.as_mut_ptr().add(buf_offset) as *mut Array);
                 if orig_arr.size == 0 {
@@ -532,7 +569,7 @@ fn flatten_fixup_inner(
                 let elem_schema = &schema.parameters[0];
                 // String stays at natural element alignment (1 byte for chars);
                 // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
-                let align = if schema.serial_type == SerialType::String {
+                let align = if matches!(schema.serial_type, SerialType::String | SerialType::IFile) {
                     elem_schema.alignment()
                 } else {
                     elem_schema.array_data_alignment()
@@ -781,7 +818,7 @@ fn patch_slot_inner(
                         .copy_from_slice(&baked.to_le_bytes());
                 }
             }
-            SerialType::String | SerialType::Array => {
+            SerialType::String | SerialType::IFile | SerialType::Array => {
                 let arr = &*(data as *const Array);
                 let new_relptr: u64 = if arr.size == 0 {
                     // Empty arrays use 0 as a sentinel for "no data"
@@ -790,7 +827,7 @@ fn patch_slot_inner(
                     0
                 } else {
                     let elem_schema = &schema.parameters[0];
-                    let align = if schema.serial_type == SerialType::String {
+                    let align = if matches!(schema.serial_type, SerialType::String | SerialType::IFile) {
                         elem_schema.alignment()
                     } else {
                         elem_schema.array_data_alignment()
@@ -864,11 +901,11 @@ fn emit_tail_inner<S: EmitSink>(
                     e.write_bytes(std::slice::from_raw_parts(limb_data, total_bytes))?;
                 }
             }
-            SerialType::String | SerialType::Array => {
+            SerialType::String | SerialType::IFile | SerialType::Array => {
                 let arr = &*(data as *const Array);
                 if arr.size > 0 {
                     let elem_schema = &schema.parameters[0];
-                    let align = if schema.serial_type == SerialType::String {
+                    let align = if matches!(schema.serial_type, SerialType::String | SerialType::IFile) {
                         elem_schema.alignment()
                     } else {
                         elem_schema.array_data_alignment()
@@ -993,7 +1030,8 @@ fn tail_end_pos_inner(
                     Ok(aligned + size * std::mem::size_of::<u64>())
                 }
             }
-            SerialType::String => {
+            SerialType::String | SerialType::IFile => {
+                // IFile rides String's wire shape (Array<u8> + path bytes).
                 let arr = &*(data as *const Array);
                 if arr.size == 0 {
                     Ok(start)

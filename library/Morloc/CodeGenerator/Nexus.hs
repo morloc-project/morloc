@@ -24,6 +24,7 @@ import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BSL
 import Data.Int (Int64)
+import Data.Word (Word8)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
@@ -40,6 +41,7 @@ import qualified Morloc.CodeGenerator.Docstrings as Docstrings
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc (concatWith, hardline, pretty, render, (<+>))
@@ -109,6 +111,19 @@ data NexusExpr
                                    -- element. Only the desugar's bracket-accessor
                                    -- lowering generates this; there is no
                                    -- user-facing @map syntax.
+  -- ── IFile/IStream/OStream handle intrinsics ─────────────────────────
+  -- The schema in each variant is the result type's msgpack schema. For
+  -- handle-returning intrinsics the schema is the IFile a type (which
+  -- newtypes to UInt64 = "u8" at the wire level). For bracket/struct
+  -- access the schema is the materialised result type.
+  | OpenX     Text Word8 NexusExpr  -- schema, kind byte, path expr -> handle
+  | CloseX    NexusExpr             -- handle expr -> () (no schema needed)
+  | FSchemaX  Text NexusExpr        -- schema (Str), path expr -> schema string
+  | FLengthX  Text NexusExpr        -- schema (Int), handle expr -> total element count
+  | IFileWalkX Text NexusExpr Text [NexusExpr]
+      -- ^ Unified IFile pattern walker: result schema, handle, path
+      -- string (e.g. ".1.[]"), runtime args in DFS order. Each bracket
+      -- step in the path consumes args (1 for `.[]`, 3 for `.[:]`).
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -278,6 +293,11 @@ generalTypeToSerialAST' anc (VarT v)
         x -> error $ "Unexpected scope: " <> show x
 generalTypeToSerialAST' anc (AppT (VarT v) [t])
   | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' anc t
+  -- IFile a: cross-pool stream handle. Wire is the file path (String);
+  -- the receiving pool re-opens locally. The phantom element type @a@
+  -- is dropped here -- it is only meaningful inside the file and is
+  -- carried separately on the StreamEntry by `open_dispatch`.
+  | v == MBT.ifileVar = return $ SerialIFile (FV v (CV ""))
   | otherwise = resolveAliasApp anc v [t]
 generalTypeToSerialAST' anc (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) =
@@ -405,6 +425,23 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     type2schema :: Type -> MorlocMonad Text
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST t
 
+    -- Construct an IFileWalkX node for a unified IFile pattern walk.
+    -- Used by every IFile-routing case in toNexusExpr (BracketSlice,
+    -- BracketIndex, PatternStruct) so the path-encoding logic is in one
+    -- place.
+    emitIFileWalkX
+      :: Type
+      -> AnnoS (Indexed Type) One ()
+      -> [IFile.WalkStep]
+      -> [AnnoS (Indexed Type) One ()]
+      -> MorlocMonad NexusExpr
+    emitIFileWalkX resultT handleE steps runtimeArgs =
+      IFileWalkX
+        <$> type2schema resultT
+        <*> toNexusExpr handleE
+        <*> pure (IFile.walkStepsToPath steps)
+        <*> mapM toNexusExpr runtimeArgs
+
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
     -- Pure-path bracket validation: each non-Null bound must resolve
     -- to a wire integer type. There is no per-language IndexLike
@@ -413,20 +450,71 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- @(Null :: ?Int64)@ (from the desugar's empty-bound annotation),
     -- bare integer literals, and explicit @(_ :: Int*)@ annotations
     -- all pass.
+    -- IFile pattern detection at the nexus path: any PatCall on an
+    -- IFile-typed receiver routes to the unified IFile walker rather
+    -- than the generic Array/Tuple dispatch. The receiver is a u64
+    -- handle, not an in-memory structure; the standard apply_*
+    -- functions would cast garbage. Mirrors Express.hs's pool-path
+    -- IFile detection.
     toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) [sE, eE, pE, rE])) = do
       validateBracketBound "start" sE
       validateBracketBound "stop"  eE
       validateBracketBound "step"  pE
-      AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
+      if recvIsIFile rE
+        then emitIFileWalkX t rE IFile.bracketSliceSteps [sE, eE, pE]
+        else AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
     toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) [iE, rE])) = do
       validateBracketBound "index" iE
-      AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
+      if recvIsIFile rE
+        then emitIFileWalkX t rE IFile.bracketIndexSteps [iE]
+        else AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
+    -- PatternStruct app with brackets in the Selector. The first
+    -- bracketArity(sel) args are the bracket bounds (DFS order) and
+    -- the LAST arg is the receiver. IFile receivers route to the
+    -- walker; non-IFile receivers with bracket-in-Selector are
+    -- currently unsupported by the runtime (codegen for that case
+    -- isn't wired yet).
+    toNexusExpr (AnnoS (Idx midx t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) appArgs))
+      | bracketArity sel > 0 =
+          let n        = bracketArity sel
+              rE       = last appArgs
+              brackets = take n appArgs
+          in if length appArgs /= n + 1
+               then MM.throwSourcedError midx
+                      ("PatternStruct app with brackets: expected "
+                       <> pretty (n + 1)
+                       <> " args (bracket bounds + receiver), got "
+                       <> pretty (length appArgs))
+               else do
+                 mapM_ (validateBracketBound "bracket") brackets
+                 if recvIsIFile rE
+                   then do
+                     steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
+                     emitIFileWalkX t rE steps brackets
+                   else
+                     AppX <$> type2schema t
+                          <*> toNexusExpr funcE
+                          <*> mapM toNexusExpr appArgs
+    -- Pure-field PatternStruct getter on an IFile receiver (no
+    -- brackets, single receiver arg). Routes to the walker.
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) [rE]))
+      | recvIsIFile rE = do
+          steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
+          emitIFileWalkX t rE steps []
+      | otherwise =
+          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
     toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> type2schema t <*> mapM toNexusExpr es
-    toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> type2schema t <*> mapM toNexusExpr es
+    -- TupS construction. Multi-field patterns are no longer fragmented
+    -- at desugar time (they emit a unified PatCall (PatternStruct ...)
+    -- instead), so any TupS reaching here is a user-written tuple
+    -- literal or the legacy fall-back form for mixed-kind groups that
+    -- can't be unified. Standard per-element rendering applies.
+    toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) =
+      TupX <$> type2schema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
@@ -527,6 +615,50 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
       LoadX <$> type2schema t <*> toNexusExpr path
+    -- @open: kind byte from the result type's head. The result type
+    -- may be wrapped in an EffectT (the `<IO>` ascription) and/or be a
+    -- bare VarT for nullary type constructors -- peel both before
+    -- inspecting the head.
+    toNexusExpr (AnnoS (Idx i t) _ (IntrinsicS IntrOpen [path])) = do
+      let peel (EffectT _ inner) = peel inner
+          peel (AppT h _) = peel h
+          peel ot = ot
+          head_ = peel t
+      kind <- case head_ of
+        VarT v
+          | v == MBT.ifileVar   -> return MBT.mlcKindIFile
+          | v == MBT.istreamVar ->
+              MM.throwSourcedError i $ "@open :: IStream a -- not yet implemented"
+          | v == MBT.ostreamVar ->
+              MM.throwSourcedError i $ "@open :: OStream a -- not yet implemented"
+          | otherwise ->
+              MM.throwSourcedError i $
+                "@open: result type must be IFile/IStream/OStream, got " <> pretty v
+        _ ->
+          MM.throwSourcedError i $
+            "@open: unsupported handle type" <+> pretty (show t)
+      OpenX <$> type2schema t <*> pure kind <*> toNexusExpr path
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrClose [handle])) =
+      CloseX <$> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
+      FSchemaX <$> type2schema t <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
+      FLengthX <$> type2schema t <*> toNexusExpr handle
+    -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
+    -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
+    -- path normally constructs IFileWalkX directly from PatCall +
+    -- IFile-receiver detection (see toNexusExpr cases above); this
+    -- handler exists to support any future site that synthesises the
+    -- IntrinsicS form directly.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrIFileWalk (pathExpr : handle : runtimeArgs))) = do
+      pathText <- case pathExpr of
+        AnnoS _ _ (StrS s) -> return s
+        _ -> error "IntrIFileWalk's first arg must be a string literal (compiler bug)"
+      IFileWalkX
+        <$> type2schema t
+        <*> toNexusExpr handle
+        <*> pure pathText
+        <*> mapM toNexusExpr runtimeArgs
     -- @lang in a language-independent context is always "morloc"; the
     -- nexus has no pool dispatch here.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLang _)) =
@@ -1189,6 +1321,10 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   (SerialNull _,    Aeson.Null)     -> return ()
   (SerialBool _,    Aeson.Bool _)   -> return ()
   (SerialString _,  Aeson.String _) -> return ()
+  -- IFile is a handle: at the JSON CLI boundary it appears as the path
+  -- string the receiving pool will re-open. Same wire shape as
+  -- SerialString.
+  (SerialIFile _,   Aeson.String _) -> return ()
   (SerialReal _,    v)              -> checkRealLike   loc path ast v
   (SerialFloat32 _, v)              -> checkRealLike   loc path ast v
   (SerialFloat64 _, v)              -> checkRealLike   loc path ast v
@@ -1358,6 +1494,7 @@ expectedJsonShape = go
     go (SerialNull _)                = "null"
     go (SerialBool _)                = "Bool"
     go (SerialString _)              = "Str"
+    go (SerialIFile _)               = "IFile path (Str)"
     go (SerialReal _)                = "Real"
     go (SerialFloat32 _)             = "Float32"
     go (SerialFloat64 _)             = "Float64"
@@ -1501,6 +1638,17 @@ validateBracketBound role (AnnoS (Idx i t) _ _) =
       "Bracket" <+> pretty role <+> "bound must be an integer wire type"
       <+> "in pure morloc (one of Int, Int8/16/32/64, UInt8/16/32/64);"
       <+> "got" <+> pretty t
+
+-- | True if the receiver expression has an IFile-headed type. Used to
+-- route bracket and struct patterns through the IFile runtime walker
+-- rather than the generic Array/Tuple dispatch.
+recvIsIFile :: AnnoS (Indexed Type) One () -> Bool
+recvIsIFile (AnnoS (Idx _ t) _ _) = MBT.isIFileHead t
+
+-- | Manifold index of an AnnoS subtree (used to anchor sourced errors
+-- on the closest source span).
+annoIdx :: AnnoS (Indexed Type) One () -> Int
+annoIdx (AnnoS (Idx i _) _ _) = i
 
 -- | True if 't' is an integer wire type, possibly wrapped in a single
 -- 'OptionalT' (the @(Null :: ?Int64)@ shape from the desugar's empty
@@ -1659,6 +1807,38 @@ exprToJson (LoadX schema child) =
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
     ]
+exprToJson (OpenX schema kind path) =
+  jsonObj
+    [ ("tag", jsonStr "open")
+    , ("schema", jsonStr schema)
+    , ("kind", jsonInt (fromIntegral kind))
+    , ("path", exprToJson path)
+    ]
+exprToJson (CloseX handle) =
+  jsonObj
+    [ ("tag", jsonStr "close")
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (FSchemaX schema path) =
+  jsonObj
+    [ ("tag", jsonStr "fschema")
+    , ("schema", jsonStr schema)
+    , ("path", exprToJson path)
+    ]
+exprToJson (FLengthX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "flen")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (IFileWalkX schema handle path runtimeArgs) =
+  jsonObj
+    [ ("tag", jsonStr "ifile_walk")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    , ("path", jsonStr path)
+    , ("args", jsonArr (map exprToJson runtimeArgs))
+    ]
 exprToJson (OptX schema child) =
   jsonObj
     [ ("tag", jsonStr "container")
@@ -1725,6 +1905,24 @@ selectorToJson (SelectorKey t ts) =
         [ ("key", jsonStr k)
         , ("sub", selectorToJson sub)
         ]
+-- Bracket steps inside a Selector chain: emitted as their own JSON
+-- nodes. The runtime's apply_getter walks into them, consumes one
+-- bracket runtime arg (index for bracket_index; three for
+-- bracket_slice), and continues with the bracket result.
+--
+-- 'bracket_index' carries a "sub" selector that runs on the indexed
+-- element. 'bracket_slice' is terminal (slice returns a list; any
+-- per-element walk is morloc's IntrMap territory, not a single
+-- selector walk).
+selectorToJson (SelectorBracketIndex sub) =
+  jsonObj
+    [ ("type", jsonStr "bracket_index")
+    , ("sub", selectorToJson sub)
+    ]
+selectorToJson SelectorBracketSlice =
+  jsonObj
+    [ ("type", jsonStr "bracket_slice")
+    ]
 
 litSchemaStr :: LitType -> Text
 litSchemaStr F32X = "f4"

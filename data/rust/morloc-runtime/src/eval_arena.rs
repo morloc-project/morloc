@@ -43,6 +43,11 @@ use crate::shm::{self, AbsPtr};
 struct ArenaState {
     blocks: Vec<AbsPtr>,
     files: Vec<PathBuf>,
+    // Stream registry slot IDs (handle integers) opened during this
+    // arena scope. Auto-closed at guard drop. Prevents slot leaks under
+    // exception unwinding in pools that bypass the explicit `@close`.
+    // The slot ID is the morloc handle Int — (generation << 16) | slot.
+    slots: Vec<i64>,
 }
 
 thread_local! {
@@ -92,6 +97,22 @@ impl Drop for ArenaGuard {
                         }
                     }
                 }
+                // Close any stream handles that were opened in this
+                // arena scope and not explicitly `@close`d. Without
+                // this, an exception unwinding out of a Python pool
+                // would leak slots forever and eventually exhaust the
+                // 16-bit slot space in long-running daemons. Errors
+                // (e.g. handle already invalidated by a separate close)
+                // are non-fatal — the goal is to release resources, not
+                // to surface diagnostics during unwind.
+                for handle in state.slots {
+                    if let Err(e) = crate::stream::close_handle(handle) {
+                        eprintln!(
+                            "eval_arena drop: close_handle({}) failed: {:?}",
+                            handle, e
+                        );
+                    }
+                }
             }
         });
     }
@@ -113,6 +134,7 @@ pub fn enter() -> Result<ArenaGuard, MorlocError> {
         *slot = Some(ArenaState {
             blocks: Vec::with_capacity(INITIAL_CAPACITY),
             files: Vec::new(),
+            slots: Vec::new(),
         });
         crate::cli::reset_stdin_claim();
         Ok(ArenaGuard { _priv: () })
@@ -184,6 +206,39 @@ pub fn forget_file_if_active(path: &std::path::Path) {
         if let Some(s) = cell.borrow_mut().as_mut() {
             if let Some(idx) = s.files.iter().rposition(|p| p == path) {
                 s.files.swap_remove(idx);
+            }
+        }
+    });
+}
+
+/// Record a stream handle in the active arena. Called from
+/// `stream::open_*` after a successful slot allocation. No-op if no
+/// arena is active (the caller is then responsible for cleanup).
+#[inline]
+pub fn record_slot_if_active(handle: i64) {
+    if handle < 0 {
+        return;
+    }
+    ARENA.with(|cell| {
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            s.slots.push(handle);
+        }
+    });
+}
+
+/// Remove `handle` from the active arena's slot list. Called from
+/// `stream::close_handle` before the actual close, so an explicit
+/// `@close` during the arena window correctly removes the handle from
+/// the tracking list and won't be double-closed at guard drop.
+#[inline]
+pub fn forget_slot_if_active(handle: i64) {
+    if handle < 0 {
+        return;
+    }
+    ARENA.with(|cell| {
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            if let Some(idx) = s.slots.iter().rposition(|&h| h == handle) {
+                s.slots.swap_remove(idx);
             }
         }
     });

@@ -103,6 +103,9 @@ fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
         // help text shows e.g. `Tree` where the body would otherwise
         // recurse.
         Recur => s.name.clone().unwrap_or_else(|| "?".into()),
+        // Cross-pool stream handle: surface as `IFile a` in help text.
+        // The wire is a path string; this is the user-facing morloc type.
+        IFile => "IFile a".into(),
     }
 }
 

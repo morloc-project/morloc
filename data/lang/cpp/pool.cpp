@@ -378,6 +378,72 @@ std::optional<T> _mlc_load(Schema* schema, const std::string& path) {
     return result;
 }
 
+// ── Stream-handle wrappers ───────────────────────────────────────────────
+// @open: returns a 64-bit handle (kind = MLC_KIND_{IFILE|ISTREAM|OSTREAM}).
+inline int64_t _mlc_open(const std::string& path, uint8_t kind) {
+    char* errmsg = NULL;
+    int64_t handle = mlc_open(path.c_str(), kind, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return handle;
+}
+// @close: returns void; the runtime bumps generation and frees the slot.
+inline void _mlc_close(int64_t handle) {
+    char* errmsg = NULL;
+    mlc_close(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+}
+// @fschema: read a file's element schema string without opening it.
+inline std::string _mlc_fschema(const std::string& path) {
+    char* errmsg = NULL;
+    char* s = mlc_fschema(path.c_str(), &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    std::string out(s ? s : "");
+    if (s) free(s);
+    return out;
+}
+// @flen: total element count of an IFile (`length f`). Cheap; reads
+// from the cached StreamDiag at open time.
+inline int64_t _mlc_ifile_length(int64_t handle) {
+    char* errmsg = NULL;
+    int64_t n = mlc_ifile_length(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return n;
+}
+
+// @ifile_walk: unified IFile pattern walker. The `path` encodes the
+// walk-step chain (".[]", ".[:]", ".1.foo", etc.); `args` carries the
+// runtime bracket bounds (Python-style optional ints; absent slots
+// take the default). T is the materialized result type the wrapper
+// converts the returned voidstar into.
+template <typename T>
+T _mlc_ifile_walk(
+    Schema* schema, int64_t handle,
+    const std::string& path,
+    std::initializer_list<std::optional<int64_t>> args
+) {
+    // Pack the optional<int64_t> args into the C-ABI struct array. The
+    // struct is fixed-size (16 bytes) so a contiguous vector is the
+    // natural marshal target. Empty initializer -> nullptr / n_args=0.
+    std::vector<mlc_ifile_walk_arg> packed;
+    packed.reserve(args.size());
+    for (const auto& a : args) {
+        mlc_ifile_walk_arg w{};
+        if (a.has_value()) { w.has = 1; w.value = *a; }
+        packed.push_back(w);
+    }
+    char* errmsg = NULL;
+    void* voidstar = mlc_ifile_walk(
+        handle, path.c_str(),
+        packed.empty() ? nullptr : packed.data(),
+        (uint64_t)packed.size(),
+        &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    T* dummy = nullptr;
+    T result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     char* errmsg = NULL;
     va_list args;

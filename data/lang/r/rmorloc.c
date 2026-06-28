@@ -148,6 +148,69 @@ static const Schema* recur_env_lookup(const char* name) {
     return NULL;
 }
 
+// {{{ bit64 (integer64) helpers
+//
+// Int64 / UInt64 / IFile handles are mapped to the `bit64::integer64`
+// R class (stdlib/root-r/main.loc). integer64 is implemented as a
+// REALSXP whose 8 bytes per cell are reinterpreted as int64_t; the S3
+// class attribute "integer64" tags the storage. The R-level package
+// `bit64` must be loaded for downstream R code to do arithmetic on
+// these vectors; the C runtime itself only needs the in-band byte
+// layout, which we marshal here.
+
+static int is_integer64(SEXP obj) {
+    if (TYPEOF(obj) != REALSXP) return 0;
+    SEXP cls = getAttrib(obj, R_ClassSymbol);
+    if (cls == R_NilValue || TYPEOF(cls) != STRSXP) return 0;
+    for (R_xlen_t i = 0; i < LENGTH(cls); i++) {
+        if (strcmp(CHAR(STRING_ELT(cls, i)), "integer64") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Allocate a fresh REALSXP and tag it with class "integer64". Caller
+// is responsible for PROTECTing the result if it escapes into a
+// longer-lived scope.
+static SEXP alloc_integer64(R_xlen_t n) {
+    SEXP v = PROTECT(allocVector(REALSXP, n));
+    SEXP cls = PROTECT(mkString("integer64"));
+    setAttrib(v, R_ClassSymbol, cls);
+    UNPROTECT(2);
+    return v;
+}
+
+// Wrap a single int64_t as a length-1 integer64 SEXP.
+static SEXP make_integer64_scalar(int64_t v) {
+    SEXP s = PROTECT(alloc_integer64(1));
+    memcpy(&REAL(s)[0], &v, sizeof(int64_t));
+    UNPROTECT(1);
+    return s;
+}
+
+// Read an int64_t from an R SEXP. Accepts:
+//   * INTSXP            -- widen from int32
+//   * REALSXP integer64 -- bit-reinterpret 8 bytes as int64
+//   * REALSXP plain     -- truncate the double (range-checked by callers)
+// Returns 0 on type error so callers handle it via their own guards.
+static int64_t i64_from_sexp(SEXP obj) {
+    if (TYPEOF(obj) == INTSXP) {
+        return (int64_t)INTEGER(obj)[0];
+    }
+    if (TYPEOF(obj) == REALSXP) {
+        if (is_integer64(obj)) {
+            int64_t v;
+            memcpy(&v, &REAL(obj)[0], sizeof(int64_t));
+            return v;
+        }
+        return (int64_t)REAL(obj)[0];
+    }
+    return 0;
+}
+
+// }}} bit64 helpers
+
 // {{{ to_voidstar
 
 static size_t get_shm_size_inner(const Schema* schema, SEXP obj);
@@ -180,6 +243,22 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         case MORLOC_INT:
             // Inline BigInt: R values always fit inline (16 bytes)
             return 16;
+        case MORLOC_IFILE: {
+            // Look up the exact path length via the registry instead of
+            // reserving PATH_MAX per element (4 GB slack on a 1M-handle
+            // array). One RwLock read + Vec index per element.
+            int64_t handle = i64_from_sexp(obj);
+            char* err = NULL;
+            int64_t n = mlc_handle_path_len(handle, &err);
+            if (n < 0) {
+                char msg[512];
+                snprintf(msg, sizeof(msg), "mlc_handle_path_len: %s",
+                         err ? err : "(null)");
+                free(err);
+                MORLOC_ERROR("%s", msg);
+            }
+            return sizeof(Array) + (size_t)n;
+        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             {
@@ -192,6 +271,39 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                     ? schema_alignment(schema->parameters[0])
                     : array_data_alignment(schema->parameters[0]);
                 size += buf_align - 1;
+                // Array of IFile handles: each element is wire-encoded as
+                // Array<u8>(path). The REALSXP fast-path below would treat
+                // bit64-backed IFile handles as fixed-width 8-byte ints
+                // and silently under-count by path_len per element. Use
+                // the batched registry call so we acquire the stream-
+                // registry mutex once instead of N times.
+                if (schema->type == MORLOC_ARRAY
+                    && schema->parameters[0]->type == MORLOC_IFILE) {
+                    int is_b64 = is_integer64(obj);
+                    int is_list = (TYPEOF(obj) == VECSXP);
+                    if (!is_b64 && !is_list) {
+                        MORLOC_ERROR(
+                            "Expected list or bit64::integer64 vector for [IFile a],"
+                            " got %s", type2char(TYPEOF(obj)));
+                    }
+                    // bit64 stores int64 directly in REALSXP slots; pass
+                    // the buffer through. Lists must be extracted first.
+                    const int64_t* handles;
+                    if (is_b64) {
+                        handles = (const int64_t*)REAL(obj);
+                    } else {
+                        int64_t* scratch = (int64_t*)R_alloc(length, sizeof(int64_t));
+                        for (size_t i = 0; i < length; i++) {
+                            scratch[i] = i64_from_sexp(VECTOR_ELT(obj, i));
+                        }
+                        handles = scratch;
+                    }
+                    char* child_errmsg_ = NULL;
+                    int64_t paths_total = R_TRY(mlc_handles_path_lens,
+                        handles, length, NULL);
+                    size += length * sizeof(Array) + (size_t)paths_total;
+                    return size;
+                }
                 const char* str;
 
                 // R's NULL stands in for a zero-length vector (e.g. an
@@ -372,11 +484,21 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
 
-// 64-bit fixed-width: can't reuse HANDLE_*_TYPE because (double)INT64_MAX
-// and (double)UINT64_MAX both round to 2^63 / 2^64, so the range check
-// admits values that then cast to INT64_MIN / 0 silently.
+// 64-bit fixed-width: distinct from HANDLE_*_TYPE because the full 64-bit
+// range is only representable when the SEXP arrives as a bit64::integer64
+// (REALSXP whose 8 bytes are an int64). For integer64 values the bits are
+// memcpy'd directly -- no double round-trip, so the full [-2^63, 2^63-1]
+// range round-trips losslessly. Plain REALSXP / INTSXP still work for
+// convenience (e.g. integer literals from R user code), with the existing
+// 2^53 precision ceiling.
 #define HANDLE_SINT64() \
     do { \
+        if (is_integer64(obj)) { \
+            int64_t v; \
+            memcpy(&v, &REAL(obj)[0], sizeof(int64_t)); \
+            *(int64_t*)dest = v; \
+            break; \
+        } \
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for int64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
@@ -390,7 +512,8 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) { \
             MORLOC_ERROR( \
                 "Integer %.0f does not fit in R's numeric type" \
-                " (max 2^53 = 9007199254740992 for integer precision).", \
+                " (max 2^53 = 9007199254740992 for integer precision)." \
+                " Wrap with bit64::as.integer64() for the full Int64 range.", \
                 value); \
         } \
         *(int64_t*)dest = (int64_t)value; \
@@ -398,6 +521,12 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
 
 #define HANDLE_UINT64() \
     do { \
+        if (is_integer64(obj)) { \
+            int64_t v; \
+            memcpy(&v, &REAL(obj)[0], sizeof(int64_t)); \
+            *(uint64_t*)dest = (uint64_t)v; \
+            break; \
+        } \
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for uint64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
@@ -411,7 +540,8 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         if (value < 0 || value > (double)R_DOUBLE_INT_MAX) { \
             MORLOC_ERROR( \
                 "Unsigned integer %.0f does not fit in R's numeric type" \
-                " (max 2^53 = 9007199254740992 for integer precision).", \
+                " (max 2^53 = 9007199254740992 for integer precision)." \
+                " Wrap with bit64::as.integer64() for the full UInt64 range.", \
                 value); \
         } \
         *(uint64_t*)dest = (uint64_t)value; \
@@ -508,6 +638,11 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             }
             *((double*)dest) = asReal(obj);
             break;
+        case MORLOC_IFILE: {
+            int64_t handle = i64_from_sexp(obj);
+            R_TRY(mlc_write_handle_voidstar, handle, dest, cursor);
+            break;
+        }
         case MORLOC_STRING:
             {
                 const char* str = NULL;
@@ -564,6 +699,29 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             Schema* element_schema = schema->parameters[0];
             char* start;
 
+            // Batched IFile array write: one registry lock for all N
+            // handles. Accepts both VECSXP (list of bit64 scalars) and
+            // REALSXP (bit64 vector, which stores int64 in REAL slots).
+            if (element_schema->type == MORLOC_IFILE
+                && (TYPEOF(obj) == VECSXP
+                    || (TYPEOF(obj) == REALSXP && is_integer64(obj)))) {
+                const int64_t* handles;
+                if (TYPEOF(obj) == REALSXP) {
+                    handles = (const int64_t*)REAL(obj);
+                } else {
+                    int64_t* scratch = (int64_t*)R_alloc(array->size, sizeof(int64_t));
+                    for (size_t i = 0; i < array->size; i++) {
+                        scratch[i] = i64_from_sexp(VECTOR_ELT(obj, i));
+                    }
+                    handles = scratch;
+                }
+                *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
+                start = R_TRY(rel2abs, array->data);
+                R_TRY(mlc_write_handles_voidstar,
+                    handles, array->size, start, element_schema->width, cursor);
+                break;
+            }
+
             switch (TYPEOF(obj)) {
                 case STRSXP:
                     {
@@ -617,6 +775,16 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 case REALSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
                     start = R_TRY(rel2abs, array->data);
+                    // bit64::integer64 storage: REALSXP's 8 bytes per
+                    // cell ARE the int64. For SINT64 / UINT64 element
+                    // schemas we can memcpy the whole vector directly
+                    // and bypass the per-element ScalarReal round-trip
+                    // (which would strip the integer64 class).
+                    if (is_integer64(obj) && (element_schema->type == MORLOC_SINT64
+                                              || element_schema->type == MORLOC_UINT64)) {
+                        memcpy(start, REAL(obj), array->size * sizeof(int64_t));
+                        break;
+                    }
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarReal(REAL(obj)[i]));
                         to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
@@ -783,18 +951,16 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
             obj = ScalarReal((double)(*(int32_t*)data));
             break;
         case MORLOC_SINT64: {
-            // R's "numeric" is a double; values outside [-2^53, 2^53] are
-            // not exactly representable, and a silent (double) cast would
-            // collapse distinct int64 values onto the same double. Reject
-            // rather than corrupt.
+            // Int64 maps to bit64::integer64 in R. The S3 class is a
+            // tagged REALSXP whose 8 bytes are the int64; we memcpy the
+            // value into the storage and set the class. No range check
+            // is needed -- integer64 covers the full Int64 range
+            // losslessly. (NA_INTEGER64 is INT64_MIN; legitimate
+            // INT64_MIN values become NA, which is a known bit64
+            // tradeoff; we let the wire value through unchanged.)
             int64_t val = *(int64_t*)data;
-            if (val < -R_DOUBLE_INT_MAX || val > R_DOUBLE_INT_MAX) {
-                MORLOC_ERROR(
-                    "Integer overflow: int64_t value %lld does not fit in R's numeric type"
-                    " (max 2^53 = 9007199254740992 for integer precision).",
-                    (long long)val);
-            }
-            obj = ScalarReal((double)val);
+            obj = PROTECT(make_integer64_scalar(val));
+            UNPROTECT(1);
             break;
         }
         case MORLOC_UINT8:
@@ -807,14 +973,15 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
             obj = ScalarReal((double)(*(uint32_t*)data));
             break;
         case MORLOC_UINT64: {
+            // UInt64 maps to bit64::integer64 in R. bit64 is signed,
+            // so values with the high bit set will appear negative in R
+            // user code -- this is the bit64 contract and matches how
+            // we tag (uint64_t)val by reinterpret. No range check
+            // needed; the full UInt64 range round-trips bit-for-bit.
             uint64_t val = *(uint64_t*)data;
-            if (val > (uint64_t)R_DOUBLE_INT_MAX) {
-                MORLOC_ERROR(
-                    "Integer overflow: uint64_t value %llu does not fit in R's numeric type"
-                    " (max 2^53 = 9007199254740992 for integer precision).",
-                    (unsigned long long)val);
-            }
-            obj = ScalarReal((double)val);
+            int64_t bits = (int64_t)val;
+            obj = PROTECT(make_integer64_scalar(bits));
+            UNPROTECT(1);
             break;
         }
         case MORLOC_FLOAT32:
@@ -857,6 +1024,12 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                     obj = ScalarReal((double)val);
                 }
             }
+            break;
+        }
+        case MORLOC_IFILE: {
+            int64_t handle = R_TRY(mlc_read_handle_voidstar,
+                                   data, base_ptr, MLC_KIND_IFILE);
+            obj = make_integer64_scalar(handle);
             break;
         }
         case MORLOC_STRING: {
@@ -943,24 +1116,16 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                         UNPROTECT(1);
                         break;
                     case MORLOC_SINT64:
-                        obj = PROTECT(allocVector(REALSXP, array->size));
+                        // bit64::integer64 vector. The REALSXP storage
+                        // is bit-identical to a C int64_t array, so we
+                        // memcpy the whole element block.
+                        obj = PROTECT(alloc_integer64(array->size));
                         if(array->size == 0) {
                             UNPROTECT(1);
                             break;
                         }
                         start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
-                        for (size_t i = 0; i < array->size; i++) {
-                            int64_t v = *(int64_t*)(start + i * sizeof(int64_t));
-                            if (v < -R_DOUBLE_INT_MAX || v > R_DOUBLE_INT_MAX) {
-                                UNPROTECT(1);
-                                MORLOC_ERROR(
-                                    "Integer overflow at array index %zu: int64_t value %lld"
-                                    " does not fit in R's numeric type"
-                                    " (max 2^53 = 9007199254740992 for integer precision).",
-                                    i, (long long)v);
-                            }
-                            REAL(obj)[i] = (double)v;
-                        }
+                        memcpy(REAL(obj), start, array->size * sizeof(int64_t));
                         UNPROTECT(1);
                         break;
                     // Interpret the uint8 as a raw vector
@@ -999,27 +1164,17 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                         UNPROTECT(1);
                         break;
                     case MORLOC_UINT64:
-                        // NOTE: the R integer cannot store a 64 bit int.
-                        // Values beyond 2^53 are not exactly representable in
-                        // R's numeric (double); reject rather than corrupt.
-                        obj = PROTECT(allocVector(REALSXP, array->size));
+                        // bit64::integer64 vector (bit64 is signed but
+                        // we keep the wire bytes verbatim; the high bit
+                        // surfaces as a negative integer64 in R, which
+                        // matches bit64's documented behaviour).
+                        obj = PROTECT(alloc_integer64(array->size));
                         if(array->size == 0) {
                             UNPROTECT(1);
                             break;
                         }
                         start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
-                        for (size_t i = 0; i < array->size; i++) {
-                            uint64_t v = *(uint64_t*)(start + i * sizeof(uint64_t));
-                            if (v > (uint64_t)R_DOUBLE_INT_MAX) {
-                                UNPROTECT(1);
-                                MORLOC_ERROR(
-                                    "Integer overflow at array index %zu: uint64_t value %llu"
-                                    " does not fit in R's numeric type"
-                                    " (max 2^53 = 9007199254740992 for integer precision).",
-                                    i, (unsigned long long)v);
-                            }
-                            REAL(obj)[i] = (double)v;
-                        }
+                        memcpy(REAL(obj), start, array->size * sizeof(uint64_t));
                         UNPROTECT(1);
                         break;
                     case MORLOC_FLOAT32:
@@ -1623,6 +1778,331 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         free_schema(schema);
     }
 
+    UNPROTECT(1);
+    return result;
+}
+
+
+// ── Stream-handle bindings ───────────────────────────────────────────────
+
+// @open: returns a 64-bit handle. R has no native int64 SEXP type, so
+// we marshal via a length-1 numeric vector (double) which preserves
+// the 48 generation bits + 16 slot bits without precision loss for any
+// realistic morloc program.
+SEXP morloc_mlc_open(SEXP path_r, SEXP kind_r) { MAYFAIL
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("mlc_open: path must be a single string");
+    }
+    if ((TYPEOF(kind_r) != INTSXP && TYPEOF(kind_r) != REALSXP) || LENGTH(kind_r) != 1) {
+        MORLOC_ERROR("mlc_open: kind must be a single integer");
+    }
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    int kind_i = (TYPEOF(kind_r) == INTSXP) ? INTEGER(kind_r)[0] : (int)REAL(kind_r)[0];
+    int64_t handle = R_TRY(mlc_open, path, (uint8_t)kind_i);
+    // IFile handles use the full UInt64 range (48 generation bits + 16
+    // slot bits + per-process salt). Returning as bit64::integer64
+    // preserves the bit pattern losslessly across R user code, which
+    // would otherwise silently round high generations to nearby doubles.
+    return make_integer64_scalar(handle);
+}
+
+SEXP morloc_mlc_close(SEXP handle_r) { MAYFAIL
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_ERROR("mlc_close: handle must be a single number");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    R_TRY(mlc_close, handle);
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_fschema(SEXP path_r) { MAYFAIL
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("mlc_fschema: path must be a single string");
+    }
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    char* s = R_TRY(mlc_fschema, path);
+    if (s == NULL) {
+        MORLOC_ERROR("mlc_fschema returned NULL");
+    }
+    SEXP result = PROTECT(mkString(s));
+    free(s);
+    UNPROTECT(1);
+    return result;
+}
+
+// Shared scaffold for the @save family. The three formats (voidstar,
+// msgpack, JSON) share the same R-side shape: pack value -> SHM voidstar,
+// hand off to the corresponding libmorloc save function, free the SHM
+// block. Each wrapper passes the libmorloc function pointer for the
+// format-specific write.
+typedef int (*morloc_save_fn)(const absptr_t, const Schema*, uint8_t,
+                              const char*, char**);
+
+static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
+                                     SEXP level_r, SEXP path_r,
+                                     morloc_save_fn save_fn,
+                                     const char* fn_name) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("%s: schema must be a single string", fn_name);
+    }
+    if (!(TYPEOF(level_r) == INTSXP || TYPEOF(level_r) == REALSXP)
+        || LENGTH(level_r) != 1) {
+        MORLOC_ERROR("%s: level must be a single integer 0-9", fn_name);
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("%s: path must be a single string", fn_name);
+    }
+    uint8_t level = (uint8_t)asInteger(level_r);
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    void* voidstar = to_voidstar(obj_r, schema);
+    if (!voidstar) {
+        free_schema(schema);
+        MORLOC_ERROR("%s: failed to convert R object to voidstar", fn_name);
+    }
+
+    R_TRY_WITH(
+        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        save_fn, (absptr_t)voidstar, schema, level, path);
+
+    {
+        char* err = NULL;
+        shfree(voidstar, &err);
+        free(err);
+    }
+    free_schema(schema);
+    return R_NilValue;
+}
+
+// @save :: voidstar binary file format. `level` is the zstd preset
+// (0 = uncompressed, 1-9 = increasing ratio).
+SEXP morloc_mlc_save_voidstar(SEXP obj_r, SEXP schema_str_r,
+                              SEXP level_r, SEXP path_r) {
+    return morloc_mlc_save_dispatch(obj_r, schema_str_r, level_r, path_r,
+                                    mlc_save_voidstar, "mlc_save_voidstar");
+}
+
+// @savem :: msgpack file format. The runtime ignores `level` for the
+// msgpack path (no packet header in which to record compression), but
+// the ABI keeps it for uniformity with the voidstar family.
+SEXP morloc_mlc_save(SEXP obj_r, SEXP schema_str_r,
+                    SEXP level_r, SEXP path_r) {
+    return morloc_mlc_save_dispatch(obj_r, schema_str_r, level_r, path_r,
+                                    mlc_save, "mlc_save");
+}
+
+// @savej :: JSON file format. `level` is currently ignored.
+SEXP morloc_mlc_save_json(SEXP obj_r, SEXP schema_str_r,
+                         SEXP level_r, SEXP path_r) {
+    return morloc_mlc_save_dispatch(obj_r, schema_str_r, level_r, path_r,
+                                    mlc_save_json, "mlc_save_json");
+}
+
+// @hash :: content-addressed digest of a value. Returns a hex string.
+// Mirrors pymorloc.c's pybinding__mlc_hash / pool.cpp's _mlc_hash.
+SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_hash: schema must be a single string");
+    }
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    void* voidstar = to_voidstar(obj_r, schema);
+    if (!voidstar) {
+        free_schema(schema);
+        MORLOC_ERROR("mlc_hash: failed to convert R object to voidstar");
+    }
+
+    char* hex = R_TRY_WITH(
+        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        mlc_hash, voidstar, schema);
+
+    {
+        char* err = NULL;
+        shfree(voidstar, &err);
+        free(err);
+    }
+    free_schema(schema);
+
+    SEXP result = PROTECT(mkString(hex));
+    free(hex);
+    UNPROTECT(1);
+    return result;
+}
+
+// @load :: load a value from a file (auto-detects voidstar / msgpack
+// based on the file's header). Returns the decoded value, or NULL on
+// IO / parse error. Mirrors pymorloc.c's pybinding__mlc_load.
+SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_load: schema must be a single string");
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("mlc_load: path must be a single string");
+    }
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_load, path, schema);
+    if (voidstar == NULL) {
+        // Clean parse/IO failure with no errmsg -> surface as R NULL so
+        // morloc's <Maybe>-typed @load arm can pattern-match.
+        free_schema(schema);
+        return R_NilValue;
+    }
+
+    SEXP obj = from_voidstar(voidstar, schema, NULL);
+    // shm_tracker matches the pymorloc / cppmorloc deferred-cleanup
+    // pattern: defer the shfree until the next request so any
+    // R-side view that points at the SHM block stays valid for the
+    // current call's lifetime.
+    shm_tracker_push((absptr_t)voidstar, schema);
+    // ownership of `schema` is transferred to shm_tracker; do NOT
+    // free_schema here.
+    return obj;
+}
+
+// @read :: parse a JSON string into a value. Returns the decoded value,
+// or NULL on parse error. Mirrors pymorloc.c's pybinding__mlc_read.
+SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_read: schema must be a single string");
+    }
+    if (TYPEOF(json_str_r) != STRSXP || LENGTH(json_str_r) != 1) {
+        MORLOC_ERROR("mlc_read: json must be a single string");
+    }
+    const char* json_str = CHAR(STRING_ELT(json_str_r, 0));
+
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    // mlc_read may legitimately return NULL on parse failure even with
+    // no errmsg set; the morloc <Maybe>-typed @read arm relies on that
+    // to surface as R NULL.
+    char* errmsg = NULL;
+    void* voidstar = mlc_read(json_str, schema, &errmsg);
+    if (errmsg != NULL) {
+        free(errmsg);
+    }
+    if (voidstar == NULL) {
+        free_schema(schema);
+        return R_NilValue;
+    }
+
+    SEXP obj = from_voidstar(voidstar, schema, NULL);
+    shm_tracker_push((absptr_t)voidstar, schema);
+    return obj;
+}
+
+// Helper: R bound -> (has_X, value) pair for one mlc_ifile_walk arg.
+// NULL / NA / NA_integer_ / NA_real_ -> absent (has=0); else use the
+// integer / real / integer64 value.
+static inline void r_optint_to_pair(SEXP x, uint8_t* has_out, int64_t* val_out) {
+    *has_out = 1;
+    *val_out = 0;
+    if (x == R_NilValue) { *has_out = 0; return; }
+    if (TYPEOF(x) == INTSXP) {
+        if (LENGTH(x) == 0 || INTEGER(x)[0] == NA_INTEGER) { *has_out = 0; return; }
+        *val_out = (int64_t)INTEGER(x)[0];
+        return;
+    }
+    if (TYPEOF(x) == REALSXP) {
+        if (LENGTH(x) == 0) { *has_out = 0; return; }
+        if (is_integer64(x)) {
+            // bit64::integer64: 8 bytes are the int64. NA_INTEGER64
+            // is INT64_MIN; we surface NA as has=0 to match the
+            // optional-bound semantics callers expect.
+            int64_t v;
+            memcpy(&v, &REAL(x)[0], sizeof(int64_t));
+            if (v == INT64_MIN) { *has_out = 0; return; }
+            *val_out = v;
+            return;
+        }
+        if (ISNA(REAL(x)[0])) { *has_out = 0; return; }
+        *val_out = (int64_t)REAL(x)[0];
+        return;
+    }
+    *has_out = 0;
+}
+
+// Unified IFile pattern walker. R signature:
+//   morloc_mlc_ifile_walk(schema_str, handle, path, args_list)
+// where `args_list` is an R list of (NULL | integer | numeric), one per
+// bracket runtime arg in DFS order (field steps consume no args;
+// bracket-index consumes 1; bracket-slice consumes 3).
+SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
+                           SEXP path_r, SEXP args_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_ifile_walk: schema must be a single string");
+    }
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_ERROR("mlc_ifile_walk: handle must be a single number");
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("mlc_ifile_walk: path must be a single string");
+    }
+    if (TYPEOF(args_r) != VECSXP) {
+        MORLOC_ERROR("mlc_ifile_walk: args must be a list");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+
+    R_xlen_t n = XLENGTH(args_r);
+    mlc_ifile_walk_arg* packed = NULL;
+    if (n > 0) {
+        packed = (mlc_ifile_walk_arg*)calloc((size_t)n, sizeof(mlc_ifile_walk_arg));
+        if (packed == NULL) MORLOC_ERROR("mlc_ifile_walk: alloc failed");
+        for (R_xlen_t i = 0; i < n; i++) {
+            r_optint_to_pair(VECTOR_ELT(args_r, i), &packed[i].has, &packed[i].value);
+        }
+    }
+
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(do { free(schema_str); free(packed); } while(0),
+                                parse_schema, schema_str);
+    free(schema_str);
+
+    void* voidstar = R_TRY_WITH(do { free_schema(schema); free(packed); } while(0),
+                                mlc_ifile_walk,
+                                handle, path, packed, (uint64_t)n);
+    free(packed);
+    if (voidstar == NULL) {
+        free_schema(schema);
+        return R_NilValue;
+    }
+    SEXP result = from_voidstar(voidstar, schema, NULL);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return result;
+}
+
+SEXP morloc_mlc_ifile_length(SEXP handle_r) { MAYFAIL
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_ERROR("mlc_ifile_length: handle must be a single number");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    int64_t n = R_TRY(mlc_ifile_length, handle);
+    // length returns Int (morloc); on the R side Int maps to "integer"
+    // (32-bit) -- which would overflow for very large lengths. Use
+    // numeric/double here for compatibility with the existing R Int
+    // pack/unpack path (Int < 2^53 round-trips losslessly). Callers
+    // who need the full 64-bit range can switch to mlc_ifile_walk's
+    // path-string + arg list directly.
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)n;
     UNPROTECT(1);
     return result;
 }
@@ -2712,6 +3192,17 @@ static void _r_init_impl(DllInfo *info) {
         {"r_morloc_cache_record_hit", (DL_FUNC) &morloc_cache_record_hit_r, 0},
         {"r_morloc_cache_record_miss", (DL_FUNC) &morloc_cache_record_miss_r, 0},
         {"r_morloc_cache_record_store", (DL_FUNC) &morloc_cache_record_store_r, 0},
+        {"morloc_mlc_open", (DL_FUNC) &morloc_mlc_open, 2},
+        {"morloc_mlc_close", (DL_FUNC) &morloc_mlc_close, 1},
+        {"morloc_mlc_fschema", (DL_FUNC) &morloc_mlc_fschema, 1},
+        {"morloc_mlc_ifile_walk", (DL_FUNC) &morloc_mlc_ifile_walk, 4},
+        {"morloc_mlc_ifile_length", (DL_FUNC) &morloc_mlc_ifile_length, 1},
+        {"morloc_mlc_save_voidstar", (DL_FUNC) &morloc_mlc_save_voidstar, 4},
+        {"morloc_mlc_save", (DL_FUNC) &morloc_mlc_save, 4},
+        {"morloc_mlc_save_json", (DL_FUNC) &morloc_mlc_save_json, 4},
+        {"morloc_mlc_hash", (DL_FUNC) &morloc_mlc_hash, 2},
+        {"morloc_mlc_load", (DL_FUNC) &morloc_mlc_load, 2},
+        {"morloc_mlc_read", (DL_FUNC) &morloc_mlc_read, 2},
         {NULL, NULL, 0}
     };
 

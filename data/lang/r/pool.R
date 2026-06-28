@@ -19,6 +19,17 @@ morloc_get_value                     <- function(...){ .Call("morloc_get_value",
 morloc_put_value                     <- function(...){ .Call("morloc_put_value",                     ...) }
 morloc_release_packet_shm            <- function(...){ .Call("morloc_release_packet_shm",            ...) }
 morloc_mlc_show                      <- function(...){ .Call("morloc_mlc_show",                      ...) }
+morloc_mlc_save                      <- function(...){ .Call("morloc_mlc_save",                      ...) }
+morloc_mlc_save_voidstar             <- function(...){ .Call("morloc_mlc_save_voidstar",             ...) }
+morloc_mlc_save_json                 <- function(...){ .Call("morloc_mlc_save_json",                 ...) }
+morloc_mlc_load                      <- function(...){ .Call("morloc_mlc_load",                      ...) }
+morloc_mlc_hash                      <- function(...){ .Call("morloc_mlc_hash",                      ...) }
+morloc_mlc_read                      <- function(...){ .Call("morloc_mlc_read",                      ...) }
+morloc_mlc_open                      <- function(...){ .Call("morloc_mlc_open",                      ...) }
+morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",                     ...) }
+morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
+morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
+morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
 morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }

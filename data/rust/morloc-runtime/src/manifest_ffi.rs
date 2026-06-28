@@ -53,6 +53,15 @@ pub enum MorlocExpressionType {
     Save = 9,
     Load = 10,
     Map = 11,
+    // IFile/IStream/OStream handle intrinsics.
+    Open = 12,        // path -> handle (i64). Kind byte selects IFile/IStream/OStream.
+    Close = 13,       // handle -> () (just bumps registry generation).
+    FSchema = 14,     // path -> schema string.
+    FLength = 15,     // handle -> Int total element count.
+    IFileWalk = 16,   // handle + path string + DFS-ordered runtime args -> value.
+                      // Unified IFile pattern walker; the path encodes the
+                      // walk chain (".[]", ".[:]", ".1.foo", etc.) and the
+                      // args list carries bracket bounds.
 }
 
 #[repr(C)]
@@ -189,6 +198,26 @@ pub struct MorlocMapExpression {
     pub list: *mut MorlocExpression,
 }
 
+// IFile-family handle intrinsics.
+#[repr(C)]
+pub struct MorlocOpenExpression {
+    pub kind: u8,
+    pub path: *mut MorlocExpression,
+}
+
+#[repr(C)]
+pub struct MorlocIFileWalkExpression {
+    pub handle: *mut MorlocExpression,
+    // Compile-time-resolved walk-step path (".[]", ".[:]", ".1.foo", etc.).
+    // Owned by the expression; freed at expression destruction.
+    pub path: *mut c_char,
+    // DFS-ordered runtime args (bracket-index consumes 1, bracket-slice
+    // consumes 3). Each arg is itself a MorlocExpression that evaluates
+    // to an `?Int64`-shaped value (presence flag + i64 value).
+    pub args: *mut *mut MorlocExpression,
+    pub n_args: u64,
+}
+
 #[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
@@ -201,6 +230,9 @@ pub union ExprUnion {
     pub unary_expr: *mut MorlocExpression,
     pub save_expr: *mut MorlocSaveExpression,
     pub map_expr: *mut MorlocMapExpression,
+    // IFile-family expressions.
+    pub open_expr: *mut MorlocOpenExpression,
+    pub ifile_walk_expr: *mut MorlocIFileWalkExpression,
 }
 
 #[repr(C)]
@@ -473,16 +505,38 @@ unsafe fn build_pattern(jp: &serde_json::Value) -> Result<*mut MorlocPattern, Mo
         return Ok(make_morloc_pattern_end());
     }
 
-    if ptype == "bracket_index" || ptype == "bracket_slice" {
-        // Leaf bracket pattern: no selectors, no fields. The evaluator
-        // dispatches on ptype and uses the surrounding App's args
-        // directly.
+    if ptype == "bracket_index" {
+        // Two modes:
+        //   * Leaf (no "sub" field): used as a standalone PatCall
+        //     PatternBracketIndex; the evaluator dispatches on the
+        //     surrounding App's args directly (index + receiver).
+        //   * Chain step ("sub" present): the bracket lives INSIDE a
+        //     unified Selector chain; selectors[0] is the inner
+        //     sub-Selector applied to the bracketed element.
         let pat = libc::calloc(1, std::mem::size_of::<MorlocPattern>()) as *mut MorlocPattern;
-        (*pat).ptype = if ptype == "bracket_index" {
-            MorlocPatternType::BracketIndex
-        } else {
-            MorlocPatternType::BracketSlice
-        };
+        (*pat).ptype = MorlocPatternType::BracketIndex;
+        (*pat).fields = PatternFields { indices: ptr::null_mut() };
+        match jp.get("sub") {
+            Some(sub_json) => {
+                (*pat).size = 1;
+                (*pat).selectors = libc::calloc(
+                    1, std::mem::size_of::<*mut MorlocPattern>()
+                ) as *mut *mut MorlocPattern;
+                *(*pat).selectors.add(0) = build_pattern(sub_json)?;
+            }
+            None => {
+                (*pat).size = 0;
+                (*pat).selectors = ptr::null_mut();
+            }
+        }
+        return Ok(pat);
+    }
+    if ptype == "bracket_slice" {
+        // Bracket-slice is always terminal: the slice returns a list,
+        // and any further per-element walk is morloc's IntrMap
+        // territory rather than a selector continuation.
+        let pat = libc::calloc(1, std::mem::size_of::<MorlocPattern>()) as *mut MorlocPattern;
+        (*pat).ptype = MorlocPatternType::BracketSlice;
         (*pat).size = 0;
         (*pat).fields = PatternFields { indices: ptr::null_mut() };
         (*pat).selectors = ptr::null_mut();
@@ -849,6 +903,128 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 return Err(MorlocError::Other(msg));
             }
             Ok(result)
+        }
+
+        // IFile/IStream/OStream handle intrinsics. Each
+        // builds a MorlocExpression that the evaluator dispatches
+        // through eval_ffi.rs to the corresponding libmorloc.so
+        // mlc_* function.
+        "open" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let kind = je.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
+            let open = libc::calloc(1, std::mem::size_of::<MorlocOpenExpression>()) as *mut MorlocOpenExpression;
+            (*open).kind = kind;
+            (*open).path = path;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Open;
+            (*expr).schema = schema;
+            (*expr).expr.open_expr = open;
+            Ok(expr)
+        }
+
+        "close" => {
+            // close has no return-typed schema (returns unit); parse a
+            // sentinel "z" schema so the schema slot is non-null.
+            let c_schema_str = CString::new("z").unwrap();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Close;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
+        "fschema" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::FSchema;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = path;
+            Ok(expr)
+        }
+
+        "flen" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::FLength;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
+        "ifile_walk" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let path_str = je.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let c_path = CString::new(path_str).unwrap_or_default();
+            // Build the runtime-arg list. JSON shape: "args": [expr, expr, ...]
+            // where each expr evaluates to an ?Int64 value. Field steps in the
+            // path contribute no args; bracket-index contributes 1, bracket-
+            // slice contributes 3 (start, stop, step).
+            let args_vec = match je.get("args") {
+                Some(serde_json::Value::Array(arr)) => {
+                    let mut v: Vec<*mut MorlocExpression> = Vec::with_capacity(arr.len());
+                    for a in arr {
+                        v.push(build_expr(a)?);
+                    }
+                    v
+                }
+                _ => Vec::new(),
+            };
+            let n_args = args_vec.len() as u64;
+            let args_ptr: *mut *mut MorlocExpression = if args_vec.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                let boxed = args_vec.into_boxed_slice();
+                Box::into_raw(boxed) as *mut *mut MorlocExpression
+            };
+            let w = libc::calloc(1, std::mem::size_of::<MorlocIFileWalkExpression>()) as *mut MorlocIFileWalkExpression;
+            (*w).handle = handle;
+            (*w).path = c_path.into_raw();
+            (*w).args = args_ptr;
+            (*w).n_args = n_args;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::IFileWalk;
+            (*expr).schema = schema;
+            (*expr).expr.ifile_walk_expr = w;
+            Ok(expr)
         }
 
         _ => Err(MorlocError::Other(format!("Unknown expression tag: {}", tag))),

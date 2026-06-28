@@ -1788,6 +1788,20 @@ selectorType g0 (SelectorKey x xs) = do
   xs' <- mapM (secondM weaveSelectors) (groupSort (x : xs))
   (g1, ss) <- statefulMapM selectorType g0 (map snd xs')
   return $ newvarRich ([], Closed) (zip (map (Key . fst) xs') ss, Open) "_pattern_" g1
+selectorType g0 (SelectorBracketIndex s) = do
+  -- The receiver must be a list; bracket-index strips one Array layer
+  -- and the inner selector applies to the element type. Produce an
+  -- existential @Array a@ where @a@ is the type the inner selector
+  -- expects of an element.
+  (g1, elemT) <- selectorType g0 s
+  let listConT = VarU BT.list
+  return (g1, AppU listConT [elemT])
+selectorType g0 SelectorBracketSlice = do
+  -- The receiver must be a list; slice preserves the Array shape.
+  -- Produce an @Array a@ existential with a fresh element type.
+  let (g1, elemT) = newvar "_pattern_slice_" g0
+  let listConT = VarU BT.list
+  return (g1, AppU listConT [elemT])
 
 weaveSelectors :: [Selector] -> MorlocMonad Selector
 weaveSelectors [] = return SelectorEnd
@@ -1803,7 +1817,12 @@ weaveSelectors (s0 : ss0) = foldrM weavePair s0 ss0
       xs <- mapM (secondM weaveSelectors) (groupSort ((s1 : ss1) <> (s2 : ss2)))
       return $ SelectorKey (head xs) (tail xs)
     weavePair x@(SelectorKey _ _) y@(SelectorIdx _ _) = weavePair y x
-    weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwSystemError $ "Bad pattern, cannot merge index and keyword patterns"
+    weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwSystemError "Bad pattern, cannot merge index and keyword patterns"
+    -- Bracket selectors cannot be merged with field selectors at the
+    -- same position: a value is either a tuple/record or an array,
+    -- not both. The desugar only ever weaves siblings of the same
+    -- kind, so reaching this branch means a malformed selector.
+    weavePair _ _ = MM.throwSystemError "Bad pattern, cannot merge bracket selectors with field selectors at the same position"
 
 selectorGetter :: TypeU -> Selector -> [TypeU]
 selectorGetter t SelectorEnd = [t]
@@ -1811,6 +1830,17 @@ selectorGetter (ExistU _ _ (ks, _)) (SelectorKey x xs) =
   concat [maybe [] (\t -> selectorGetter t s) (lookup (Key k) ks) | (k, s) <- (x : xs)]
 selectorGetter (ExistU _ (ts, _) _) (SelectorIdx x xs) =
   concat [selectorGetter (ts !! i) s | (i, s) <- (x : xs)]
+-- Bracket-index on @Array a@ strips one Array layer and recurses on the
+-- element type. Receiver type is either @AppU list [a]@ (typical, from
+-- the desugar's @[a]@ syntax) or an existential whose first positional
+-- type-arg is the element type (less common). Both shapes are handled.
+selectorGetter (AppU _ (elemT : _)) (SelectorBracketIndex s) =
+  selectorGetter elemT s
+selectorGetter (ExistU _ (elemT : _, _) _) (SelectorBracketIndex s) =
+  selectorGetter elemT s
+-- Bracket-slice preserves the Array shape; the receiver type IS the
+-- result type.
+selectorGetter t SelectorBracketSlice = [t]
 selectorGetter _ _ = error "Unreachable"
 
 -- | map over a type using a selector and update the type using set values
@@ -1849,6 +1879,15 @@ selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0)
            in (AppU t ts', setTypes2)
       -- otherwise die
       | otherwise = error "Unreachable case"
+    -- Bracket selectors are not valid as setter targets: there is no
+    -- well-defined "set the i-th element of a list" semantics in the
+    -- record-setter framework, and the parser explicitly rejects
+    -- setters on accessor chains containing brackets. Reaching here
+    -- means an upstream invariant was violated.
+    f _ _ (SelectorBracketIndex _) =
+      error "selectorSetter: bracket-index step in a setter selector"
+    f _ _ SelectorBracketSlice =
+      error "selectorSetter: bracket-slice step in a setter selector"
     -- and die some more
     f _ _ _ = error "Unreachable pattern case"
 

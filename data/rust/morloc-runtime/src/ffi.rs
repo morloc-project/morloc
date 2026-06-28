@@ -393,7 +393,8 @@ fn calc_voidstar_size_inner_walk(
                        + size * std::mem::size_of::<u64>())
                 }
             }
-            SerialType::String => {
+            SerialType::String | SerialType::IFile => {
+                // IFile rides String's wire form (Array<u8> + path bytes).
                 let arr = &*(data as *const Array);
                 Ok(std::mem::size_of::<Array>() + arr.size)
             }

@@ -256,7 +256,13 @@ fn json_to_voidstar_inner(
             Ok(w.as_ptr())
         }
 
-        SerialType::String => {
+        SerialType::String | SerialType::IFile => {
+            // IFile rides String's wire form: the JSON value is the file
+            // path, laid into voidstar as an Array<u8>. Receiver's
+            // language bridge sees the IFile schema tag and re-opens the
+            // path in its own registry. Treating IFile here identically
+            // to String lets @save / @load round-trip handle values
+            // through JSON as a path.
             // serde_json::from_str::<String> decodes JSON escapes (\n, \uXXXX, etc.)
             let s: String = serde_json::from_str(text)
                 .map_err(|e| err(&format!("expected string: {}", e)))?;
@@ -625,7 +631,9 @@ fn to_json_inner(
             }
         }
 
-        SerialType::String => {
+        SerialType::String | SerialType::IFile => {
+            // IFile rides String's wire form (Array<u8> + path bytes).
+            // The JSON view is the file path.
             let arr = r.read_array(0);
             if arr.size == 0 || arr.data == RELNULL {
                 buf.push_str("\"\"");

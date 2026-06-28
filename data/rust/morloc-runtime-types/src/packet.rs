@@ -24,6 +24,35 @@ pub const DEFAULT_MODE: u16 = 0;
 pub const PACKET_TYPE_DATA: u8 = 0;
 pub const PACKET_TYPE_CALL: u8 = 1;
 pub const PACKET_TYPE_PING: u8 = 2;
+pub const PACKET_TYPE_STREAM: u8 = 3;
+pub const PACKET_TYPE_FOOTER: u8 = 4;
+
+// Stream packet length-field sentinel. Streams are append-only and have
+// no global content length; the header's `length` field is always set to
+// `u64::MAX`. Future versions may interpret a non-sentinel value as a
+// declared maximum stream length, but no current writer or reader uses
+// that semantics.
+pub const STREAM_LENGTH_SENTINEL: u64 = u64::MAX;
+
+// ── Stream/file handle kinds ───────────────────────────────────────────────
+//
+// `mlc_open` takes a `kind` byte selecting which handle type to create.
+// The registry stores the kind alongside each entry so subsequent
+// operations (`mlc_close`, `mlc_eval_pattern`, etc.) can dispatch
+// internally without the caller having to specify the kind.
+
+pub const MLC_KIND_IFILE: u8 = 0;
+pub const MLC_KIND_ISTREAM: u8 = 1;
+pub const MLC_KIND_OSTREAM: u8 = 2;
+
+pub const fn handle_kind_name(k: u8) -> &'static str {
+    match k {
+        MLC_KIND_IFILE => "IFile",
+        MLC_KIND_ISTREAM => "IStream",
+        MLC_KIND_OSTREAM => "OStream",
+        _ => "unknown",
+    }
+}
 
 // ── Data source ────────────────────────────────────────────────────────────
 
@@ -68,6 +97,8 @@ pub const fn packet_type_name(t: u8) -> &'static str {
         PACKET_TYPE_DATA => "data",
         PACKET_TYPE_CALL => "call",
         PACKET_TYPE_PING => "ping",
+        PACKET_TYPE_STREAM => "stream",
+        PACKET_TYPE_FOOTER => "footer",
         _ => "unknown",
     }
 }
@@ -119,6 +150,55 @@ pub const MORLOC_INLINE_THRESHOLD: usize = 64 * 1024;
 
 // ── Metadata ───────────────────────────────────────────────────────────────
 
+// ── Stream EOF tail ────────────────────────────────────────────────────────
+//
+// Stream files (`PACKET_TYPE_STREAM`) optionally end with a
+// `PACKET_TYPE_FOOTER` packet, followed by a fixed 8-byte tail at the
+// end of the file. The tail lets a reader detect footer presence in a
+// single `pread` of the last 8 bytes, without scanning the body.
+//
+// Tail layout (8 bytes total):
+//   bytes 0..4: footer_length  (u32 LE) -- byte size of the footer packet
+//                                          *not* including this tail
+//   bytes 4..8: footer_magic   ([u8; 4]) -- PACKET_MAGIC written
+//                                          with bytes reversed
+//                                          (07 07 f8 6d), so it cannot
+//                                          collide with a packet header
+//                                          start (which is the same
+//                                          bytes in LE: 6d f8 07 07).
+//
+// A reader that sees `STREAM_TAIL_MAGIC` at `file_size - 4` walks back
+// `footer_length + 8` bytes to the footer packet's first byte. The
+// reader then re-validates the candidate footer (`PACKET_MAGIC` + a
+// `PACKET_TYPE_FOOTER` command-type byte) before trusting it -- the
+// 4-byte tail magic plus a 32-byte well-formed footer header give
+// sufficient defence against accidental data-look-alikes. Footer
+// absence (writer crashed, stream in-progress) is the case where the
+// tail magic does not match.
+
+pub const STREAM_TAIL_SIZE: usize = 8;
+/// PACKET_MAGIC (0x0707_f86d) with its bytes reversed.
+/// PACKET_MAGIC in LE is `[0x6d, 0xf8, 0x07, 0x07]`; the reversed bytes
+/// `[0x07, 0x07, 0xf8, 0x6d]` cannot start a packet header.
+pub const STREAM_TAIL_MAGIC: [u8; 4] = [0x07, 0x07, 0xf8, 0x6d];
+
+/// Encode the 8-byte tail for an EOF-finalised stream file.
+pub fn encode_stream_tail(footer_length: u32) -> [u8; STREAM_TAIL_SIZE] {
+    let mut out = [0u8; STREAM_TAIL_SIZE];
+    out[..4].copy_from_slice(&footer_length.to_le_bytes());
+    out[4..].copy_from_slice(&STREAM_TAIL_MAGIC);
+    out
+}
+
+/// Decode the 8-byte tail. Returns `Some(footer_length)` if the magic
+/// matches; `None` otherwise (no footer present).
+pub fn decode_stream_tail(tail: &[u8; STREAM_TAIL_SIZE]) -> Option<u32> {
+    if tail[4..] != STREAM_TAIL_MAGIC {
+        return None;
+    }
+    Some(u32::from_le_bytes(tail[..4].try_into().unwrap()))
+}
+
 pub const METADATA_TYPE_SCHEMA_STRING: u8 = 0x01;
 pub const METADATA_TYPE_XXHASH: u8 = 0x02;
 /// Layer 3 vol_idx hint: the producer of an on-disk MESG+VOIDSTAR
@@ -147,6 +227,29 @@ pub const METADATA_TYPE_VOL_INDEX: u8 = 0x03;
 /// inside the entry body, not the entry's metadata size, to know how
 /// many frames to consume.
 pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
+
+// ── Stream-footer metadata block types ────────────────────────────────────
+//
+// These types appear in the body of a `PACKET_TYPE_FOOTER` packet that
+// terminates a `PACKET_TYPE_STREAM` file.
+//
+// Layout commitments:
+//   - `SUBPACKET_INDEX` (`0x05`) appears only in the *final* footer (the
+//     one written by `@close` / implicit-close-on-exit). Body is
+//     `u64 count` followed by `count * u64` byte-offsets (offset of each
+//     sub-packet header within the file, relative to file start).
+//   - `STREAM_DIAG` (`0x06`) is a fixed-size `StreamDiag` struct (see
+//     below) carrying running counters + tail window. Appears in both
+//     temp and final footers. The temp footer's whole purpose is this
+//     block.
+//   - `FOOTER_FINAL` (`0x07`) is presence-only (zero-length body). Set in
+//     the final footer; absent in temp footers. A reader uses this to
+//     distinguish "writer crashed mid-stream" (temp footer only) from
+//     "writer closed cleanly" (final footer).
+pub const METADATA_TYPE_SUBPACKET_INDEX: u8 = 0x05;
+pub const METADATA_TYPE_STREAM_DIAG: u8 = 0x06;
+pub const METADATA_TYPE_FOOTER_FINAL: u8 = 0x07;
+
 pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
 
 // ── Frame-index helpers ────────────────────────────────────────────────────
@@ -299,6 +402,8 @@ impl std::fmt::Debug for PacketCommand {
             PACKET_TYPE_DATA => write!(f, "Command::Data({:?})", unsafe { self.data }),
             PACKET_TYPE_CALL => write!(f, "Command::Call({:?})", unsafe { self.call }),
             PACKET_TYPE_PING => write!(f, "Command::Ping"),
+            PACKET_TYPE_STREAM => write!(f, "Command::Stream"),
+            PACKET_TYPE_FOOTER => write!(f, "Command::Footer"),
             _ => write!(f, "Command::Unknown({tag})"),
         }
     }
@@ -434,6 +539,41 @@ impl PacketHeader {
         )
     }
 
+    /// Create a stream packet header. Length is fixed at
+    /// `STREAM_LENGTH_SENTINEL` (`u64::MAX`); writers never touch the
+    /// header after creation. Metadata blocks (e.g. the element schema)
+    /// live between the header and the first sub-packet; the caller
+    /// sets `offset` directly after construction to the metadata size.
+    pub fn stream() -> Self {
+        Self::new(
+            PacketCommand {
+                ping: CommandPing {
+                    cmd_type: PACKET_TYPE_STREAM,
+                    padding: [0; 7],
+                },
+            },
+            0, // metadata size set separately when building the full header
+            STREAM_LENGTH_SENTINEL,
+        )
+    }
+
+    /// Create a footer packet header. `length` is the byte size of the
+    /// footer's tagged-block payload (analogous to a data packet's
+    /// payload). Metadata blocks before the payload are optional;
+    /// callers may set `offset` after construction if needed.
+    pub fn footer(payload_len: u64) -> Self {
+        Self::new(
+            PacketCommand {
+                ping: CommandPing {
+                    cmd_type: PACKET_TYPE_FOOTER,
+                    padding: [0; 7],
+                },
+            },
+            0,
+            payload_len,
+        )
+    }
+
     /// Create a fail packet with an error message.
     pub fn fail(error_msg_len: u64) -> Self {
         Self::new(
@@ -478,6 +618,14 @@ impl PacketHeader {
 
     pub fn is_data(&self) -> bool {
         self.command_type() == PACKET_TYPE_DATA
+    }
+
+    pub fn is_stream(&self) -> bool {
+        self.command_type() == PACKET_TYPE_STREAM
+    }
+
+    pub fn is_footer(&self) -> bool {
+        self.command_type() == PACKET_TYPE_FOOTER
     }
 
     pub fn is_local_call(&self) -> bool {
@@ -668,6 +816,289 @@ pub fn make_local_call_packet(midx: u32, arg_packets: &[Vec<u8>]) -> Vec<u8> {
     }
 
     packet
+}
+
+/// Build a stream-file prefix: the 32-byte STREAM header plus a
+/// metadata block carrying the element schema.
+///
+/// The result is *not* a complete packet — it is the opening bytes of
+/// a stream file. A writer appends one or more full DATA sub-packets
+/// after this prefix, then optionally a FOOTER packet plus the
+/// `STREAM_TAIL_SIZE`-byte EOF tail.
+///
+/// The STREAM header's `length` field is `STREAM_LENGTH_SENTINEL`
+/// (writers never touch the header again), and `offset` is the byte
+/// size of the metadata block.
+pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
+    let schema_str = crate::schema::schema_to_string(schema);
+    let schema_bytes = schema_str.as_bytes();
+    let schema_len = schema_bytes.len() + 1; // null terminator
+
+    let meta_header_size = std::mem::size_of::<MetadataHeader>();
+    let raw_meta_len = meta_header_size + schema_len;
+    let padded_meta_len = raw_meta_len.div_ceil(METADATA_BLOCK_ALIGNMENT)
+        * METADATA_BLOCK_ALIGNMENT;
+
+    let total = 32 + padded_meta_len;
+    let mut out = vec![0u8; total];
+
+    // Write header
+    let mut hdr = PacketHeader::stream();
+    hdr.offset = padded_meta_len as u32;
+    let hdr_bytes = hdr.to_bytes();
+    out[..32].copy_from_slice(&hdr_bytes);
+
+    // Write the schema metadata entry
+    let meta_start = 32;
+    out[meta_start..meta_start + 3].copy_from_slice(&METADATA_HEADER_MAGIC);
+    out[meta_start + 3] = METADATA_TYPE_SCHEMA_STRING;
+    out[meta_start + 4..meta_start + 8]
+        .copy_from_slice(&(schema_len as u32).to_le_bytes());
+    let schema_data_start = meta_start + meta_header_size;
+    out[schema_data_start..schema_data_start + schema_bytes.len()]
+        .copy_from_slice(schema_bytes);
+    // Null terminator already there from the zero-initialised vec.
+
+    out
+}
+
+/// Build a FOOTER packet from a sequence of tagged metadata blocks.
+/// The payload is exactly `metadata_entries_end(...)`-style entries,
+/// not padded (the FOOTER's `length` field gives the exact byte
+/// count). Passing an empty `blocks` slice yields a header-only footer,
+/// useful as a clean-close marker even when no cached indices exist.
+pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
+    let payload_len: usize = blocks
+        .iter()
+        .map(|(_, body)| std::mem::size_of::<MetadataHeader>() + body.len())
+        .sum();
+
+    let total = 32 + payload_len;
+    let mut out = vec![0u8; total];
+
+    let hdr = PacketHeader::footer(payload_len as u64);
+    let hdr_bytes = hdr.to_bytes();
+    out[..32].copy_from_slice(&hdr_bytes);
+
+    let mut cur = 32;
+    for &(kind, body) in blocks {
+        out[cur..cur + 3].copy_from_slice(&METADATA_HEADER_MAGIC);
+        out[cur + 3] = kind;
+        out[cur + 4..cur + 8]
+            .copy_from_slice(&(body.len() as u32).to_le_bytes());
+        cur += 8;
+        out[cur..cur + body.len()].copy_from_slice(body);
+        cur += body.len();
+    }
+
+    out
+}
+
+// ── Stream diagnostic block (StreamDiag) ──────────────────────────────────
+//
+// Fixed-size diagnostic block carried inside every stream footer (both
+// temp and final). The temp footer's whole purpose is this block; it
+// rewritten on every `@write` flush, so its size MUST stay constant.
+//
+// Field order is chosen so each u64 is on a natural 8-byte boundary
+// without padding. Total payload = 160 bytes
+// (16 B header lane + 8 B reserved + 72 B totals/timing + 64 B tail).
+
+/// Current StreamDiag struct version. Bump when adding new trailing
+/// fields. Older tooling reads only what it understands; newer fields
+/// are appended at the end of the struct (via `_reserved` budget).
+pub const STREAM_DIAG_VERSION: u32 = 1;
+
+/// Capacity of the StreamDiag tail-window array. The diag's `tail_len`
+/// field indicates how many entries are populated; entries beyond
+/// `tail_len` are uninitialised and MUST NOT be consulted.
+pub const STREAM_DIAG_TAIL_MAX: usize = 8;
+
+/// Wire layout of the diagnostic block carried inside `METADATA_TYPE_
+/// STREAM_DIAG`. Packed `#[repr(C)]` so every host-language tool can
+/// read this directly from the on-disk bytes without going through a
+/// parser.
+///
+/// Byte-counter semantics (locked in):
+///   - `bytes_uncompressed_total` is the sum of each sub-packet's
+///     uncompressed PAYLOAD size (not headers / metadata / footer).
+///   - `bytes_compressed_total` is the sum of each sub-packet's on-disk
+///     PAYLOAD size (not headers / metadata / footer).
+///   - The ratio `bytes_uncompressed_total / bytes_compressed_total` is
+///     therefore a clean payload-only compression ratio.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct StreamDiag {
+    // ── Header lane: four u32s, two natural u64-aligned slots (16 B) ──
+    pub diag_version:                u32,
+    pub writer_pid:                  u32,
+    pub n_oversize_subpackets:       u32,
+    pub tail_len:                    u32,
+
+    // ── Reserved (8 B) for future-extensible fields ───────────────────
+    pub _reserved:                   u64,
+
+    // ── Identification + running totals (80 B) ────────────────────────
+    pub writer_start_time:           u64, // unix-epoch microseconds at @open
+    pub subpacket_count:             u64,
+    pub element_count:               u64,
+    pub bytes_uncompressed_total:    u64,
+    pub bytes_compressed_total:      u64,
+    pub largest_packet_uncompressed: u64,
+    pub largest_packet_idx:          u64,
+    pub first_flush_time:            u64,
+    pub last_flush_time:             u64,
+
+    // ── Tail window (STREAM_DIAG_TAIL_MAX * 8 = 64 B) ─────────────────
+    // tail[0..tail_len] holds the byte offsets of the most-recent
+    // tail_len sub-packets in chronological order (oldest at index 0).
+    // Slots beyond tail_len are uninitialised; readers MUST only
+    // consult tail[0..tail_len].
+    pub tail: [u64; STREAM_DIAG_TAIL_MAX],
+}
+
+const _: () = assert!(std::mem::size_of::<StreamDiag>() == 160);
+
+impl StreamDiag {
+    /// Construct a zero-initialised StreamDiag with `diag_version` set.
+    /// Other fields are left zero; the caller populates them as it
+    /// accumulates sub-packet flushes.
+    pub fn new() -> Self {
+        StreamDiag {
+            diag_version: STREAM_DIAG_VERSION,
+            writer_pid: 0,
+            n_oversize_subpackets: 0,
+            tail_len: 0,
+            _reserved: 0,
+            writer_start_time: 0,
+            subpacket_count: 0,
+            element_count: 0,
+            bytes_uncompressed_total: 0,
+            bytes_compressed_total: 0,
+            largest_packet_uncompressed: 0,
+            largest_packet_idx: 0,
+            first_flush_time: 0,
+            last_flush_time: 0,
+            tail: [0; STREAM_DIAG_TAIL_MAX],
+        }
+    }
+
+    /// View the in-memory struct as its raw on-disk bytes. Safe because
+    /// `StreamDiag` is `#[repr(C, packed)]` with no relptrs and no
+    /// padding (asserted at compile time).
+    pub fn as_bytes(&self) -> [u8; 160] {
+        let mut out = [0u8; 160];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self as *const StreamDiag as *const u8,
+                out.as_mut_ptr(),
+                160,
+            );
+        }
+        out
+    }
+
+    /// Reconstitute a StreamDiag from its on-disk bytes. Returns Err if
+    /// `data` is shorter than `size_of::<StreamDiag>()`. Extra trailing
+    /// bytes are ignored (future tooling may extend the struct; older
+    /// readers must continue to parse the prefix they understand).
+    pub fn from_bytes(data: &[u8]) -> Result<Self, MorlocError> {
+        if data.len() < 160 {
+            return Err(MorlocError::Packet(format!(
+                "StreamDiag truncated: {} bytes < 160", data.len()
+            )));
+        }
+        let mut buf = [0u8; 160];
+        buf.copy_from_slice(&data[..160]);
+        let diag: StreamDiag = unsafe {
+            std::ptr::read_unaligned(buf.as_ptr() as *const StreamDiag)
+        };
+        Ok(diag)
+    }
+}
+
+impl Default for StreamDiag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Total bytes a temp footer occupies on disk: footer packet header
+/// (32 B) + one metadata block header (8 B) + StreamDiag payload
+/// (160 B) + EOF tail (8 B). This number is exposed so OStream writers
+/// can pwrite a fixed-size buffer of this exact length on every flush.
+pub const STREAM_TEMP_FOOTER_BYTES: usize = 32 + 8 + 160 + STREAM_TAIL_SIZE;
+
+/// Encode the bytes of a `temp` footer (no SUBPACKET_INDEX, no
+/// FOOTER_FINAL). The returned vector is exactly `STREAM_TEMP_FOOTER_
+/// BYTES` long: footer packet + EOF tail. Callers pwrite this in one
+/// shot at the end of the data region and the new EOF tail offset
+/// becomes `data_end + STREAM_TEMP_FOOTER_BYTES`.
+pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
+    let diag_bytes = diag.as_bytes();
+    let footer_packet = make_footer_packet(&[
+        (METADATA_TYPE_STREAM_DIAG, &diag_bytes),
+    ]);
+    debug_assert_eq!(footer_packet.len(), 32 + 8 + 160);
+    let mut out = Vec::with_capacity(STREAM_TEMP_FOOTER_BYTES);
+    out.extend_from_slice(&footer_packet);
+    let tail = encode_stream_tail(footer_packet.len() as u32);
+    out.extend_from_slice(&tail);
+    debug_assert_eq!(out.len(), STREAM_TEMP_FOOTER_BYTES);
+    out
+}
+
+/// Encode the bytes of a `final` footer (with full SUBPACKET_INDEX,
+/// the StreamDiag block, and the FOOTER_FINAL flag). The returned
+/// vector is `footer_packet + 8B tail`; size depends on the index
+/// length but is always written once, at `@close`.
+pub fn make_final_footer_packet(
+    diag: &StreamDiag,
+    subpacket_index: &[u64],
+) -> Vec<u8> {
+    // Build the subpacket-index body: u64 count followed by u64 offsets.
+    let mut idx_body = Vec::with_capacity(8 + subpacket_index.len() * 8);
+    idx_body.extend_from_slice(&(subpacket_index.len() as u64).to_le_bytes());
+    for off in subpacket_index {
+        idx_body.extend_from_slice(&off.to_le_bytes());
+    }
+
+    let diag_bytes = diag.as_bytes();
+    let footer_packet = make_footer_packet(&[
+        (METADATA_TYPE_STREAM_DIAG, &diag_bytes),
+        (METADATA_TYPE_SUBPACKET_INDEX, &idx_body),
+        (METADATA_TYPE_FOOTER_FINAL, &[]),
+    ]);
+    let mut out = Vec::with_capacity(footer_packet.len() + STREAM_TAIL_SIZE);
+    out.extend_from_slice(&footer_packet);
+    let tail = encode_stream_tail(footer_packet.len() as u32);
+    out.extend_from_slice(&tail);
+    out
+}
+
+/// Parse the SUBPACKET_INDEX entry payload (without the 8-byte mmh-
+/// type-size header). Body is `u64 count` followed by `count * u64`.
+pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<u64>, MorlocError> {
+    if data.len() < 8 {
+        return Err(MorlocError::Packet(format!(
+            "SUBPACKET_INDEX entry truncated: {} bytes", data.len()
+        )));
+    }
+    let count = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
+    let needed = 8 + count * 8;
+    if data.len() < needed {
+        return Err(MorlocError::Packet(format!(
+            "SUBPACKET_INDEX claims {} entries but payload has {} bytes",
+            count, data.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(count);
+    let mut cur = 8;
+    for _ in 0..count {
+        out.push(u64::from_le_bytes(data[cur..cur + 8].try_into().unwrap()));
+        cur += 8;
+    }
+    Ok(out)
 }
 
 /// Build a fail packet with an error message string.
@@ -1004,6 +1435,274 @@ mod tests {
     }
 
     #[test]
+    fn stream_header_roundtrip() {
+        let stream = PacketHeader::stream();
+        assert!(stream.is_valid());
+        assert!(stream.is_stream());
+        assert!(!stream.is_data());
+        assert!(!stream.is_call());
+        assert!(!stream.is_ping());
+        assert!(!stream.is_footer());
+        let len = { stream.length };
+        assert_eq!(len, STREAM_LENGTH_SENTINEL);
+        let bytes = stream.to_bytes();
+        let recovered = PacketHeader::from_bytes(&bytes).unwrap();
+        assert!(recovered.is_stream());
+        let recovered_len = { recovered.length };
+        assert_eq!(recovered_len, STREAM_LENGTH_SENTINEL);
+    }
+
+    #[test]
+    fn footer_header_roundtrip() {
+        let footer = PacketHeader::footer(1234);
+        assert!(footer.is_valid());
+        assert!(footer.is_footer());
+        assert!(!footer.is_stream());
+        assert!(!footer.is_data());
+        let len = { footer.length };
+        assert_eq!(len, 1234);
+        let bytes = footer.to_bytes();
+        let recovered = PacketHeader::from_bytes(&bytes).unwrap();
+        assert!(recovered.is_footer());
+        let recovered_len = { recovered.length };
+        assert_eq!(recovered_len, 1234);
+    }
+
+    #[test]
+    fn stream_tail_roundtrip() {
+        for footer_len in [0u32, 1, 256, 1 << 20, u32::MAX] {
+            let tail = encode_stream_tail(footer_len);
+            assert_eq!(tail.len(), STREAM_TAIL_SIZE);
+            assert_eq!(&tail[4..], &STREAM_TAIL_MAGIC);
+            let decoded = decode_stream_tail(&tail).unwrap();
+            assert_eq!(decoded, footer_len);
+        }
+    }
+
+    #[test]
+    fn stream_tail_magic_is_reversed_packet_magic() {
+        // PACKET_MAGIC bytes in LE: [0x6d, 0xf8, 0x07, 0x07].
+        // Tail magic must be those bytes reversed: [0x07, 0x07, 0xf8, 0x6d].
+        // This guarantees the tail magic cannot start a packet header.
+        let packet_magic_le = PACKET_MAGIC.to_le_bytes();
+        let mut reversed = packet_magic_le;
+        reversed.reverse();
+        assert_eq!(STREAM_TAIL_MAGIC, reversed);
+    }
+
+    #[test]
+    fn stream_tail_rejects_wrong_magic() {
+        let mut tail = encode_stream_tail(42);
+        tail[4] ^= 0xFF;
+        assert!(decode_stream_tail(&tail).is_none());
+    }
+
+    #[test]
+    fn stream_tail_rejects_zero_bytes() {
+        let tail = [0u8; STREAM_TAIL_SIZE];
+        assert!(decode_stream_tail(&tail).is_none());
+    }
+
+    #[test]
+    fn packet_type_names_cover_new_types() {
+        assert_eq!(packet_type_name(PACKET_TYPE_STREAM), "stream");
+        assert_eq!(packet_type_name(PACKET_TYPE_FOOTER), "footer");
+    }
+
+    // ── Stage 1: end-to-end stream-file layout round-trips ─────────────
+
+    /// Helper: build N "data" sub-packets carrying `i: u32` for i in 0..n.
+    /// Uses the test-local `make_mesg_data_packet` (string schema).
+    fn build_subpackets(schema_str: &str, n: u32) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                let bytes = i.to_le_bytes();
+                make_mesg_data_packet(&bytes, schema_str)
+            })
+            .collect()
+    }
+
+    /// Helper: build a complete stream file = header + sub-packets + footer + tail.
+    fn build_stream_file(schema: &Schema, schema_str: &str, n: u32) -> Vec<u8> {
+        let mut file = make_stream_header_block(schema);
+        for sp in build_subpackets(schema_str, n) {
+            file.extend_from_slice(&sp);
+        }
+        let footer = make_footer_packet(&[]);
+        file.extend_from_slice(&footer);
+        let tail = encode_stream_tail(footer.len() as u32);
+        file.extend_from_slice(&tail);
+        file
+    }
+
+    /// Walk forward through a stream file's body, returning the byte
+    /// ranges of each contained sub-packet. Stops at EOF or at the
+    /// first non-DATA packet (which is the footer, if present).
+    fn enumerate_subpackets(file: &[u8]) -> Vec<(usize, usize)> {
+        let header = PacketHeader::from_bytes(file[..32].try_into().unwrap()).unwrap();
+        assert!(header.is_stream());
+        let mut cur = 32 + header.offset as usize;
+        let mut out = Vec::new();
+        while cur + 32 <= file.len() {
+            let sub_hdr = PacketHeader::from_bytes(
+                file[cur..cur + 32].try_into().unwrap(),
+            )
+            .unwrap();
+            if !sub_hdr.is_data() {
+                break; // hit footer or unknown packet
+            }
+            let total = 32 + sub_hdr.offset as usize + sub_hdr.length as usize;
+            out.push((cur, cur + total));
+            cur += total;
+        }
+        out
+    }
+
+    #[test]
+    fn stream_file_roundtrip_with_footer() {
+        let schema = crate::schema::parse_schema("u4").unwrap();
+        let file = build_stream_file(&schema, "u4", 5);
+
+        // 1. EOF tail says footer is present.
+        let tail_off = file.len() - STREAM_TAIL_SIZE;
+        let tail: &[u8; STREAM_TAIL_SIZE] = file[tail_off..].try_into().unwrap();
+        let footer_len = decode_stream_tail(tail).expect("footer should be present");
+
+        // 2. Footer packet sits at `file_size - tail - footer_len`.
+        let footer_off = tail_off - footer_len as usize;
+        let footer_hdr = PacketHeader::from_bytes(
+            file[footer_off..footer_off + 32].try_into().unwrap(),
+        )
+        .unwrap();
+        assert!(footer_hdr.is_footer());
+
+        // 3. Stream header is at file[0..]. Schema metadata recovers.
+        let stream_hdr = PacketHeader::from_bytes(file[..32].try_into().unwrap()).unwrap();
+        assert!(stream_hdr.is_stream());
+        let stream_hdr_len = { stream_hdr.length };
+        assert_eq!(stream_hdr_len, STREAM_LENGTH_SENTINEL);
+        let recovered_schema = read_schema_from_meta(&file[..32 + stream_hdr.offset as usize])
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered_schema, crate::schema::schema_to_string(&schema));
+
+        // 4. Sub-packets enumerable; payloads contain 0..5 in u32 LE.
+        let ranges = enumerate_subpackets(&file);
+        assert_eq!(ranges.len(), 5);
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            let pkt = &file[start..end];
+            let payload = get_data_payload(pkt).unwrap();
+            assert_eq!(payload.len(), 4);
+            let val = u32::from_le_bytes(payload.try_into().unwrap());
+            assert_eq!(val as usize, i);
+        }
+    }
+
+    #[test]
+    fn stream_file_roundtrip_without_footer() {
+        // Simulate a writer that crashed (or in-progress stream): all
+        // sub-packets written, but no footer and no EOF tail.
+        let schema = crate::schema::parse_schema("u4").unwrap();
+        let mut file = make_stream_header_block(&schema);
+        for sp in build_subpackets("u4", 3) {
+            file.extend_from_slice(&sp);
+        }
+
+        // EOF tail check: last 16 bytes should NOT match the magic.
+        let tail_off = file.len() - STREAM_TAIL_SIZE;
+        let tail: &[u8; STREAM_TAIL_SIZE] = file[tail_off..].try_into().unwrap();
+        assert!(decode_stream_tail(tail).is_none());
+
+        // Forward-scan still recovers all 3 sub-packets.
+        let ranges = enumerate_subpackets(&file);
+        assert_eq!(ranges.len(), 3);
+    }
+
+    #[test]
+    fn stream_concat_invariant() {
+        // Two footer-less streams of matching schema: their bodies
+        // (sub-packets) can be concatenated under one of the headers
+        // into a single valid stream containing all sub-packets in
+        // order.
+        let schema = crate::schema::parse_schema("u4").unwrap();
+
+        // Stream A: 3 sub-packets carrying 0, 1, 2.
+        let mut a = make_stream_header_block(&schema);
+        for sp in build_subpackets("u4", 3) {
+            a.extend_from_slice(&sp);
+        }
+
+        // Stream B: 2 sub-packets, renumber to 10, 11.
+        let mut b = make_stream_header_block(&schema);
+        for v in &[10u32, 11] {
+            let pkt = make_mesg_data_packet(&v.to_le_bytes(), "u4");
+            b.extend_from_slice(&pkt);
+        }
+
+        // Concat: keep A's header+metadata, append B's body only.
+        let a_header_len = 32 + PacketHeader::from_bytes(a[..32].try_into().unwrap())
+            .unwrap()
+            .offset as usize;
+        let b_header_len = 32 + PacketHeader::from_bytes(b[..32].try_into().unwrap())
+            .unwrap()
+            .offset as usize;
+        let mut merged = a.clone();
+        merged.extend_from_slice(&b[b_header_len..]);
+
+        // Sanity: the merged file's header is unchanged.
+        assert_eq!(&merged[..a_header_len], &a[..a_header_len]);
+
+        // Forward-scan recovers all 5 sub-packets in order.
+        let ranges = enumerate_subpackets(&merged);
+        assert_eq!(ranges.len(), 5);
+        let expected = [0u32, 1, 2, 10, 11];
+        for (i, &(start, end)) in ranges.iter().enumerate() {
+            let payload = get_data_payload(&merged[start..end]).unwrap();
+            let val = u32::from_le_bytes(payload.try_into().unwrap());
+            assert_eq!(val, expected[i]);
+        }
+    }
+
+    #[test]
+    fn footer_packet_carries_tagged_blocks() {
+        // The footer is meant to be an extensible tagged-block payload.
+        // Verify we can encode N blocks and decode them via the existing
+        // metadata iterator.
+        let block_a: &[u8] = b"hello";
+        let block_b: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8];
+        let footer = make_footer_packet(&[
+            (0x10, block_a),
+            (0x11, block_b),
+        ]);
+        let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
+        assert!(hdr.is_footer());
+
+        // The footer's payload starts immediately after the header
+        // (offset = 0); length is the payload byte count.
+        let off = { hdr.offset } as usize;
+        let len = { hdr.length } as usize;
+        assert_eq!(off, 0);
+        let payload = &footer[32..32 + len];
+
+        let entries: Vec<(u8, &[u8])> = iter_metadata(payload).collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 0x10);
+        assert_eq!(entries[0].1, block_a);
+        assert_eq!(entries[1].0, 0x11);
+        assert_eq!(entries[1].1, block_b);
+    }
+
+    #[test]
+    fn stream_type_distinguishable_from_data() {
+        // A reader inspecting the first byte of the command field must
+        // be able to tell a STREAM file apart from a DATA file without
+        // any additional context. Verify the discriminants do not collide.
+        let stream = PacketHeader::stream();
+        let data = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, 0);
+        assert_ne!(stream.command_type(), data.command_type());
+    }
+
+    #[test]
     fn read_frame_index_from_meta_returns_entries_when_present() {
         // Construct a packet by hand with both a schema and a
         // frame-index metadata entry, then verify the reader returns
@@ -1056,5 +1755,175 @@ mod tests {
         packet.extend_from_slice(&meta);
         packet.extend_from_slice(payload);
         packet
+    }
+
+    #[test]
+    fn stream_diag_size_is_160() {
+        // Locks in the wire format: any future field addition must
+        // bump STREAM_DIAG_VERSION and either fit in the _reserved
+        // u64 or extend the struct deliberately.
+        assert_eq!(std::mem::size_of::<StreamDiag>(), 160);
+    }
+
+    #[test]
+    fn stream_diag_roundtrip() {
+        let mut diag = StreamDiag::new();
+        diag.writer_pid = 12345;
+        diag.subpacket_count = 42;
+        diag.element_count = 12_345_678;
+        diag.bytes_uncompressed_total = 16 << 20;
+        diag.bytes_compressed_total = 5 << 20;
+        diag.largest_packet_uncompressed = 100 << 20;
+        diag.largest_packet_idx = 7;
+        diag.first_flush_time = 1_700_000_000_000_000;
+        diag.last_flush_time = 1_700_000_001_000_000;
+        diag.tail_len = 3;
+        diag.tail[0] = 64;
+        diag.tail[1] = 16 << 20;
+        diag.tail[2] = 32 << 20;
+
+        let bytes = diag.as_bytes();
+        let recovered = StreamDiag::from_bytes(&bytes).unwrap();
+
+        assert_eq!({ recovered.diag_version }, STREAM_DIAG_VERSION);
+        assert_eq!({ recovered.writer_pid }, 12345);
+        assert_eq!({ recovered.subpacket_count }, 42);
+        assert_eq!({ recovered.element_count }, 12_345_678);
+        assert_eq!({ recovered.bytes_uncompressed_total }, 16 << 20);
+        assert_eq!({ recovered.bytes_compressed_total }, 5 << 20);
+        assert_eq!({ recovered.largest_packet_uncompressed }, 100 << 20);
+        assert_eq!({ recovered.largest_packet_idx }, 7);
+        assert_eq!({ recovered.tail_len }, 3);
+        assert_eq!({ recovered.tail[0] }, 64);
+        assert_eq!({ recovered.tail[1] }, 16 << 20);
+        assert_eq!({ recovered.tail[2] }, 32 << 20);
+    }
+
+    #[test]
+    fn stream_diag_from_bytes_rejects_truncated() {
+        let short = [0u8; 100];
+        assert!(StreamDiag::from_bytes(&short).is_err());
+    }
+
+    #[test]
+    fn stream_diag_from_bytes_tolerates_trailing_bytes() {
+        // Forward-compat: a future writer extends the struct; older
+        // readers should still parse the prefix they know.
+        let diag = StreamDiag::new();
+        let mut padded = diag.as_bytes().to_vec();
+        padded.extend_from_slice(&[0xAB; 32]);
+        let recovered = StreamDiag::from_bytes(&padded).unwrap();
+        assert_eq!({ recovered.diag_version }, STREAM_DIAG_VERSION);
+    }
+
+    #[test]
+    fn temp_footer_packet_has_fixed_size() {
+        // The headline performance commitment for OStream: temp footer
+        // rewrite is a fixed-size pwrite regardless of file size.
+        let mut diag = StreamDiag::new();
+        diag.writer_pid = 1;
+        diag.subpacket_count = 1_000_000;
+        let bytes = make_temp_footer_packet(&diag);
+        assert_eq!(bytes.len(), STREAM_TEMP_FOOTER_BYTES);
+
+        let mut bigger_diag = StreamDiag::new();
+        bigger_diag.subpacket_count = u64::MAX;
+        let bigger_bytes = make_temp_footer_packet(&bigger_diag);
+        assert_eq!(bigger_bytes.len(), STREAM_TEMP_FOOTER_BYTES);
+    }
+
+    #[test]
+    fn temp_footer_packet_is_parseable() {
+        let mut diag = StreamDiag::new();
+        diag.subpacket_count = 99;
+        diag.tail_len = 1;
+        diag.tail[0] = 256;
+        let bytes = make_temp_footer_packet(&diag);
+
+        // Parse the footer packet header (skip the 8-byte EOF tail).
+        let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
+        let footer = &bytes[..footer_packet_len];
+        let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
+        assert!(hdr.is_footer());
+
+        // Iterate metadata. Should find STREAM_DIAG only (no
+        // FOOTER_FINAL, no SUBPACKET_INDEX in temp footers).
+        let meta = iter_packet_metadata(footer).unwrap();
+        let mut saw_diag = false;
+        let mut saw_final = false;
+        let mut saw_index = false;
+        for (kind, body) in meta {
+            match kind {
+                METADATA_TYPE_STREAM_DIAG => {
+                    saw_diag = true;
+                    let parsed = StreamDiag::from_bytes(body).unwrap();
+                    assert_eq!({ parsed.subpacket_count }, 99);
+                    assert_eq!({ parsed.tail_len }, 1);
+                    assert_eq!({ parsed.tail[0] }, 256);
+                }
+                METADATA_TYPE_FOOTER_FINAL => saw_final = true,
+                METADATA_TYPE_SUBPACKET_INDEX => saw_index = true,
+                _ => {}
+            }
+        }
+        assert!(saw_diag, "temp footer must carry StreamDiag");
+        assert!(!saw_final, "temp footer must NOT carry FOOTER_FINAL");
+        assert!(!saw_index, "temp footer must NOT carry SUBPACKET_INDEX");
+
+        // EOF tail decodes to the footer-packet length.
+        let tail: [u8; STREAM_TAIL_SIZE] =
+            bytes[footer_packet_len..].try_into().unwrap();
+        let recovered_len = decode_stream_tail(&tail).unwrap();
+        assert_eq!(recovered_len as usize, footer_packet_len);
+    }
+
+    #[test]
+    fn final_footer_packet_carries_all_three_blocks() {
+        let diag = StreamDiag::new();
+        let index: Vec<u64> = (0..5).map(|i| (i as u64) * (16 << 20)).collect();
+        let bytes = make_final_footer_packet(&diag, &index);
+
+        let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
+        let footer = &bytes[..footer_packet_len];
+        let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
+        assert!(hdr.is_footer());
+
+        let mut saw_diag = false;
+        let mut saw_final = false;
+        let mut recovered_index: Option<Vec<u64>> = None;
+        for (kind, body) in iter_packet_metadata(footer).unwrap() {
+            match kind {
+                METADATA_TYPE_STREAM_DIAG => saw_diag = true,
+                METADATA_TYPE_FOOTER_FINAL => {
+                    saw_final = true;
+                    assert_eq!(body.len(), 0);
+                }
+                METADATA_TYPE_SUBPACKET_INDEX => {
+                    recovered_index = Some(decode_subpacket_index(body).unwrap());
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_diag);
+        assert!(saw_final, "final footer must carry FOOTER_FINAL");
+        assert_eq!(recovered_index.as_deref(), Some(index.as_slice()));
+    }
+
+    #[test]
+    fn subpacket_index_decode_rejects_truncated() {
+        // count claims 4 entries but only 2 offsets provided.
+        let mut bad = 4u64.to_le_bytes().to_vec();
+        bad.extend_from_slice(&0u64.to_le_bytes());
+        bad.extend_from_slice(&1u64.to_le_bytes());
+        assert!(decode_subpacket_index(&bad).is_err());
+    }
+
+    #[test]
+    fn subpacket_index_empty_roundtrip() {
+        // Zero sub-packets is legal (writer crashed before first flush);
+        // decoder must handle the count=0 case.
+        let body = 0u64.to_le_bytes();
+        let recovered = decode_subpacket_index(&body).unwrap();
+        assert!(recovered.is_empty());
     }
 }

@@ -983,7 +983,8 @@ pub unsafe extern "C" fn try_packet_strict(
 fn format_field_as_json(field: &str, st: crate::schema::SerialType) -> String {
     use crate::schema::SerialType;
     match st {
-        SerialType::String => {
+        SerialType::String | SerialType::IFile => {
+            // IFile's CLI string view is a file path; escape like a String.
             serde_json::to_string(field).unwrap_or_else(|_| "\"\"".to_string())
         }
         _ => field.to_string(),
@@ -1395,7 +1396,8 @@ unsafe fn try_list_with_config(
                 format!("[{}]", bytes_str.join(","))
             } else {
                 match elem_serial {
-                    SerialType::String => format_field_as_json(line, SerialType::String),
+                    SerialType::String | SerialType::IFile =>
+                        format_field_as_json(line, elem_serial),
                     _ => line.to_string(),
                 }
             };
@@ -1907,11 +1909,11 @@ pub unsafe extern "C" fn load_morloc_data_file(
         use crate::schema::SerialType;
         let rs = CSchema::to_rust(schema);
         let bare_str = match rs.serial_type {
-            SerialType::String => true,
+            SerialType::String | SerialType::IFile => true,
             SerialType::Optional => rs
                 .parameters
                 .first()
-                .map(|p| p.serial_type == SerialType::String)
+                .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile))
                 .unwrap_or(false),
             _ => false,
         };
@@ -2276,7 +2278,7 @@ unsafe fn upload_packet_inner(
     use crate::schema::SerialType;
 
     match rs.serial_type {
-        SerialType::String | SerialType::Array => {
+        SerialType::String | SerialType::IFile | SerialType::Array => {
             if (data as usize + rs.width - 1) <= data_end {
                 return Err(MorlocError::Packet("Data is too small to store an array header".into()));
             }

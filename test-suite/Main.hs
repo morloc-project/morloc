@@ -66,6 +66,8 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "ifile-data-patterns" "ifile-data-patterns"
+
       , golden "cli-docstring-negatives" "cli-docstring-negatives"
       , golden "cli-docstring-shapes" "cli-docstring-shapes"
 
@@ -93,6 +95,8 @@ main = do
 
       , golden "bracket-accessors" "bracket-accessors"
       , golden "bracket-accessors-pure" "bracket-accessors-pure"
+      , golden "bracket-accessors-ifile" "bracket-accessors-ifile"
+      , golden "ifile-array-cross-pool" "ifile-array-cross-pool"
 
       , golden "native-recursive-illegal" "native-recursive-illegal"
       , golden "native-recursive-mixed" "native-recursive-mixed"

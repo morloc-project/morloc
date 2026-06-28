@@ -1048,6 +1048,20 @@ evaluatePattern _ _ (PatternStruct (ungroup -> [ss])) [m] =
   writeSelector m ss
 evaluatePattern _ _ (PatternStruct (ungroup -> sss)) [m] =
   encloseSep "{" "}" "," (map (writeSelector m) sss)
+-- PatternStruct with bracket steps inside the Selector. App args are
+-- [bracket_bounds..., receiver]. Walk the Selector recursively,
+-- emitting C++ source for each step: `.field`, `std::get<N>(...)`,
+-- `morloc_at(idx, value)`, `morloc_slice(...)`. Multi-sibling groups
+-- emit `std::make_tuple(...)`.
+evaluatePattern _ _ (PatternStruct s) args
+  | selectorHasBracket s, length args == bracketArity s + 1 =
+      let n = bracketArity s
+          (brackets, receivers) = splitAt n args
+          receiver = case receivers of
+            [r] -> r
+            _ -> error $ "evaluatePattern: bracket-in-Selector expected 1 receiver, \
+                         \got " <> show (length receivers)
+      in fst (walkCppSelectorBrackets receiver brackets s)
 evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) =
   patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
   where
@@ -1078,6 +1092,46 @@ writeSelector :: MDoc -> [Either Int Text] -> MDoc
 writeSelector d [] = d
 writeSelector d (Right k : rs) = writeSelector (d <> "." <> pretty k) rs
 writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
+
+-- | Walk a 'Selector' that may contain bracket steps, emitting C++
+-- source code per step. Threads the bracket runtime args through
+-- bracket steps in DFS order; returns the produced expression and
+-- the remaining (unconsumed) bracket args. Multi-sibling groups
+-- emit @std::make_tuple(...)@.
+walkCppSelectorBrackets
+  :: MDoc          -- accumulated receiver expression
+  -> [MDoc]        -- remaining bracket runtime args
+  -> Selector
+  -> (MDoc, [MDoc])
+walkCppSelectorBrackets rcv brackets SelectorEnd = (rcv, brackets)
+walkCppSelectorBrackets rcv brackets (SelectorKey (k, sub) []) =
+  walkCppSelectorBrackets (rcv <> "." <> pretty k) brackets sub
+walkCppSelectorBrackets rcv brackets (SelectorIdx (i, sub) []) =
+  walkCppSelectorBrackets ("std::get<" <> pretty i <> ">" <> parens rcv) brackets sub
+walkCppSelectorBrackets rcv (idx : restBrackets) (SelectorBracketIndex sub) =
+  walkCppSelectorBrackets ("morloc_at" <> tupled [idx, rcv]) restBrackets sub
+walkCppSelectorBrackets _ [] (SelectorBracketIndex _) =
+  error "walkCppSelectorBrackets: ran out of bracket runtime args for bracket-index step"
+walkCppSelectorBrackets rcv (start : stop : step : restBrackets) SelectorBracketSlice =
+  ("morloc_slice" <> tupled [start, stop, step, rcv], restBrackets)
+walkCppSelectorBrackets _ _ SelectorBracketSlice =
+  error "walkCppSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
+walkCppSelectorBrackets rcv brackets (SelectorKey hd@(_, _) others) =
+  let pairs = hd : others
+      (results, finalBrackets) = foldl
+        (\(acc, b) (k, sub) ->
+           let (out, b') = walkCppSelectorBrackets (rcv <> "." <> pretty k) b sub
+           in (acc ++ [out], b'))
+        ([], brackets) pairs
+  in ("std::make_tuple" <> tupled results, finalBrackets)
+walkCppSelectorBrackets rcv brackets (SelectorIdx hd@(_, _) others) =
+  let pairs = hd : others
+      (results, finalBrackets) = foldl
+        (\(acc, b) (i, sub) ->
+           let (out, b') = walkCppSelectorBrackets ("std::get<" <> pretty i <> ">" <> parens rcv) b sub
+           in (acc ++ [out], b'))
+        ([], brackets) pairs
+  in ("std::make_tuple" <> tupled results, finalBrackets)
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]

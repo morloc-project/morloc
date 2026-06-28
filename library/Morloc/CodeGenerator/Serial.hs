@@ -81,6 +81,7 @@ serialAstToType (SerialUInt32 x) = VarF x
 serialAstToType (SerialUInt64 x) = VarF x
 serialAstToType (SerialBool x) = VarF x
 serialAstToType (SerialString x) = VarF x
+serialAstToType (SerialIFile x) = VarF x
 serialAstToType (SerialNull x) = VarF x
 serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
@@ -166,6 +167,11 @@ serialAstToMsgpackSchema ast = emit ast
     emit (SerialUInt64 v) = addHint v <> "u8"
     emit (SerialBool v) = addHint v <> "b"
     emit (SerialString v) = addHint v <> "s"
+    -- IFile wire form is a path String routed through a special schema
+    -- so the runtime can re-bind a local handle on the receiving pool
+    -- side. The hint preserves the user's per-language native (uint64_t,
+    -- int, bit64) so generated foreign code keeps its typed surface.
+    emit (SerialIFile v) = addHint v <> "F"
     emit (SerialNull v) = addHint v <> "z"
     emit (SerialOptional v s) = addHint v <> "?" <> emit s
     emit (SerialUnknown v) = addHint v <> "*"
@@ -254,6 +260,7 @@ shallowType (SerialUInt32 x) = VarF x
 shallowType (SerialUInt64 x) = VarF x
 shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
+shallowType (SerialIFile x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- A back-reference re-uses the ancestor's NamF identity; downstream
@@ -530,6 +537,15 @@ makeSerialAST m lang t0 = do
 
         dispatchAppF anc
           | null runtimeTs = makeSerialAST' gscope typepackers (VarF fv)
+          -- IFile is a cross-pool stream handle. Its in-language native
+          -- form is a uint64_t slot id, but the wire form is the file
+          -- path encoded as a String -- the receiving pool re-opens the
+          -- path locally and binds a fresh handle. We intercept here so
+          -- the wire path does not collapse onto the IFile newtype's
+          -- bare UInt64 (which would round-trip the i64 verbatim and
+          -- leave the receiver with a slot id meaningful only in the
+          -- sender's process).
+          | generalTypeName == BT.ifileVar = return $ SerialIFile fv
           -- Typed `Table n r`: when the Rec arg lowered to a ground record
           -- (NamF NamRecord ...), surface it as a SerialObject NamTable
           -- carrying the column schema. The wire encoder emits @T:K<entries>@
@@ -608,6 +624,12 @@ makeSerialAST m lang t0 = do
                 , h == BT.tuple (length bodyRT) ->
                     AliasIsTuple bodyRT
                 | otherwise -> AliasIsOther expanded
+              -- Newtype-to-primitive wire form (e.g. @newtype IFile a = UInt64@):
+              -- expandWireParent peels through the newtype to a bare VarU.
+              -- Route through the body's serializer so IFile handles marshal
+              -- as their wire type without needing a redundant Packable
+              -- instance for every newtype with phantom params.
+              Just expanded@(VarU _) -> AliasIsOther expanded
               _ -> AliasIsNone
 
         -- Look up a Packable instance for the outer type and emit a
@@ -1013,6 +1035,7 @@ isSerializable (SerialUInt32 _) = True
 isSerializable (SerialUInt64 _) = True
 isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
+isSerializable (SerialIFile _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
 -- A back-reference is serializable iff its referenced object is.
@@ -1045,6 +1068,7 @@ prettySerialOne (SerialUInt32 _) = "SerialUInt32"
 prettySerialOne (SerialUInt64 _) = "SerialUInt64"
 prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
+prettySerialOne (SerialIFile _) = "SerialIFile"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
 prettySerialOne (SerialRec v) = "SerialRec" <> angles (pretty v)

@@ -17,6 +17,7 @@ module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, p
 
 import qualified Data.IntMap.Strict as IntMap
 import Data.Text (Text)
+import qualified Data.Text as MT
 import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -651,28 +652,110 @@ synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
 
 -- handle getter patterns
 synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall (PatternStruct _)))) []) = error "Unreachable application pattern to no data"
+-- Unified PatternStruct with bracket steps in the Selector. The
+-- desugar produces this form for any accessor whose chain or group
+-- contains a bracket-index / bracket-slice -- including
+-- @.(.0.[i], .1) f@. The App's args are the bracket bounds in DFS
+-- order followed by the receiver; the receiver synthesises against
+-- the same selectorType-based structural existential as the pure-
+-- field case, with the extra bracket bounds checked individually.
+synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) args)
+  | bracketArity s > 0 = do
+      let n = bracketArity s
+      when (length args /= n + 1) $
+        MM.throwSourcedError i $
+          "PatternStruct with bracket-containing selector expects"
+          <+> pretty (n + 1) <+> "args, got" <+> pretty (length args)
+      let bracketArgs = take n args
+          rcvArg      = last args
+      -- Generate fresh existentials for each bracket arg's type. We
+      -- intentionally do NOT pin to Int/?Int here: the same flexibility
+      -- as the standalone PatternBracketIndex/Slice handlers (codegen
+      -- inserts the per-language __to_index__ cast).
+      let nameForArgIx j = MT.pack ("_pat_bracket_arg_" <> show j <> "_")
+          (gArgs, bracketArgTypes) =
+            foldl (\(gAcc, ts) j ->
+                     let (gNext, ty) = newvar (nameForArgIx j) gAcc
+                     in (gNext, ts ++ [ty]))
+                  (g0, [])
+                  ([0 .. n - 1] :: [Int])
+      -- Receiver synth + IFile transparency.
+      (gsyn, rcvSyn, rcvExpr) <- synthG gArgs rcvArg
+      let rcvResolved = apply gsyn rcvSyn
+      (gReady, expectedInner, isIFile) <- case (extractKey rcvResolved, rcvResolved) of
+        (v, AppU _ (innerType : _))
+          | v == BT.ifileVar -> return (gsyn, innerType, True)
+        _                    -> return (gsyn, rcvResolved, False)
+      -- Generate the structural existential the selector expects of
+      -- the receiver (or its IFile inner type) and unify. selectorGetter
+      -- is computed on the EXISTENTIAL form (structural), and the
+      -- existential's solutions then propagate via 'apply'.
+      (gSel, datType) <- selectorType gReady s
+      gUnified <- subtype' fgidx datType expectedInner gSel
+      rejectListSelectorTarget fgidx s (apply gUnified datType)
+      -- Result type: tuple of leaf types (or single type if just one).
+      let retType = case selectorGetter datType s of
+            []  -> error "Illegal empty selection"
+            [t] -> t
+            ts  -> BT.tupleU ts
+      -- Type-check each bracket arg against its fresh existential.
+      (gArgChecked, bracketArgsChecked) <- typecheckBracketArgs gUnified bracketArgs bracketArgTypes
+      let resolvedRetType = apply gArgChecked retType
+          rcvFunInputType = if isIFile then rcvResolved else apply gArgChecked expectedInner
+          ft = FunU (map (apply gArgChecked) bracketArgTypes <> [rcvFunInputType]) resolvedRetType
+          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
+      return (gArgChecked, resolvedRetType, AppS f1 (bracketArgsChecked <> [rcvExpr]))
+  where
+    typecheckBracketArgs
+      :: Gamma
+      -> [AnnoS Int ManyPoly Int]
+      -> [TypeU]
+      -> MorlocMonad (Gamma, [AnnoS (Indexed TypeU) ManyPoly Int])
+    typecheckBracketArgs g [] [] = return (g, [])
+    typecheckBracketArgs g (e:es) (t:ts) = do
+      (g', _, e') <- checkG g e t
+      (g'', es') <- typecheckBracketArgs g' es ts
+      return (g'', e' : es')
+    typecheckBracketArgs _ _ _ =
+      error "typecheckBracketArgs: length mismatch (should be unreachable)"
 synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) = do
-  -- generate an existential type that contains the pattern
-  (g1, datType) <- selectorType g0 s
-
-  -- type returned from pattern (with one element for each extracted value)
-  retType <- return $ case selectorGetter datType s of
-    [] -> error "Illegal empty selection"
-    [t] -> t
-    ts -> BT.tupleU ts
-  let ft = FunU [datType] retType
-
-  -- use selector-derived type to update context and data expression
-  (g2, _, e') <- checkG g1 e0 datType
-
-  -- Reject getter/selector pattern applied to a list. The selector
-  -- existential unifies with List<a> as a single-slot tuple, producing
-  -- garbage at runtime. Tuple/record getters only.
-  rejectListSelectorTarget fgidx s (apply g2 datType)
-
-  let f1 = (AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s))))
-
-  return (g2, apply g2 retType, AppS f1 [e'])
+  -- IFile pattern transparency: when the receiver synthesizes to
+  -- `IFile a`, the selector operates on `a`'s structure (the user
+  -- sees the file's value directly). The result still gets the
+  -- field's type (not wrapped in IFile). At codegen, Express.hs
+  -- detects the IFile receiver and emits an IFileField intrinsic
+  -- that walks to the field in the file. Non-IFile receivers stay
+  -- on the existing structural-existential unification path.
+  (gsyn, rcvSyn, e0Syn) <- synthG g0 e0
+  let rcvResolved = apply gsyn rcvSyn
+  case (extractKey rcvResolved, rcvResolved) of
+    (v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
+      -- Generate the structural existential and unify with the
+      -- IFile's inner type. The function's input stays as IFile a
+      -- so codegen can detect it.
+      (g1, structType) <- selectorType gsyn s
+      retType <- return $ case selectorGetter structType s of
+        [] -> error "Illegal empty selection"
+        [t] -> t
+        ts -> BT.tupleU ts
+      g2 <- subtype' fgidx structType innerType g1
+      rejectListSelectorTarget fgidx s (apply g2 innerType)
+      let ft = FunU [rcvResolved] (apply g2 retType)
+          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
+      return (g2, apply g2 retType, AppS f1 [e0Syn])
+    _ -> do
+      -- Existing path: generate structural existential, check the
+      -- receiver against it.
+      (g1, datType) <- selectorType gsyn s
+      retType <- return $ case selectorGetter datType s of
+        [] -> error "Illegal empty selection"
+        [t] -> t
+        ts -> BT.tupleU ts
+      let ft = FunU [datType] retType
+      (g2, _, e') <- checkG g1 e0 datType
+      rejectListSelectorTarget fgidx s (apply g2 datType)
+      let f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
+      return (g2, apply g2 retType, AppS f1 [e'])
 
 -- handle setter patterns
 synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
@@ -702,15 +785,38 @@ synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
 -- container constructor and the element type left as existentials so
 -- chained record/bracket accessors propagate constraints correctly.
 synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExpr, rcvExpr]) = do
-  let (g1, elemType) = newvar "bidx_elem_" g0
-      (g2, fExist)   = newvar "bidx_f_" g1
-      (g3, idxType)  = newvar "bidx_idx_" g2
-      expectedRcv    = AppU fExist [elemType]
-  (g4, _, rcv') <- checkG g3 rcvExpr expectedRcv
-  (g5, _, i')   <- checkG g4 iExpr idxType
-  let ft = FunU [apply g5 idxType, apply g5 expectedRcv] (apply g5 elemType)
-      f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
-  return (g5, apply g5 elemType, AppS f1 [i', rcv'])
+  -- IFile pattern transparency: if rcvExpr synthesizes to IFile a,
+  -- peel the IFile and continue with `a` as the receiver structure
+  -- for the bracket pattern. The function's argument keeps its IFile
+  -- wrapper so Express.hs can detect it; the result is the bracketed
+  -- element type. Pure-typed (IO effect is implicit; Serialize.hs
+  -- effect-wrap thunks the runtime call). Non-IFile receivers stay
+  -- on the existing structural-existential path.
+  (gsyn, rcvSyn, rcvSynExpr) <- synthG g0 rcvExpr
+  let rcvResolved = apply gsyn rcvSyn
+  case (extractKey rcvResolved, rcvResolved) of
+    (v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
+      let (g1, elemType) = newvar "bidx_elem_" gsyn
+          (g2, fExist)   = newvar "bidx_f_" g1
+          (g3, idxType)  = newvar "bidx_idx_" g2
+          expectedInner  = AppU fExist [elemType]
+      g4 <- subtype' fgidx expectedInner innerType g3
+      (g5, _, i') <- checkG g4 iExpr idxType
+      let resultType = apply g5 elemType
+          ft = FunU [apply g5 idxType, rcvResolved] resultType
+          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
+      return (g5, resultType, AppS f1 [i', rcvSynExpr])
+    _ -> do
+      let (g1, elemType) = newvar "bidx_elem_" gsyn
+          (g2, fExist)   = newvar "bidx_f_" g1
+          (g3, idxType)  = newvar "bidx_idx_" g2
+          expectedRcv    = AppU fExist [elemType]
+      g4 <- subtype' fgidx expectedRcv rcvResolved g3
+      (g5, _, i')   <- checkG g4 iExpr idxType
+      let resultType = apply g5 elemType
+          ft = FunU [apply g5 idxType, apply g5 expectedRcv] resultType
+          f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
+      return (g5, resultType, AppS f1 [i', rcvSynExpr])
 synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
   error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
 
@@ -729,17 +835,30 @@ synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
 synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [startE, stopE, stepE, rcvExpr]) = do
   (g1, rcvType, rcv') <- synthG g0 rcvExpr
   let rcvType' = apply g1 rcvType
-      (g1a, resultType) = bracketSliceResultType g1 rcvType'
+      (g1a, bareResultType) = bracketSliceResultType g1 rcvType'
       (g2, startTy) = newvar "bslice_start_" g1a
       (g3, stopTy)  = newvar "bslice_stop_"  g2
       (g4, stepTy)  = newvar "bslice_step_"  g3
   (g5, _, s1) <- checkG g4 startE startTy
   (g6, _, s2) <- checkG g5 stopE  stopTy
   (g7, _, s3) <- checkG g6 stepE  stepTy
-  let ft = FunU [apply g7 startTy, apply g7 stopTy, apply g7 stepTy, rcvType']
+  -- IFile slice: peel the IFile and use the inner type as the slice
+  -- result (which must itself be a list type for the slice to make
+  -- sense; codegen errors if not). Pure-typed for chain-composability
+  -- reasons (see PatternBracketIndex above). Non-IFile receivers use
+  -- the existing bracketSliceResultType logic.
+  let resolvedRcv = apply g7 rcvType'
+      isIFile = extractKey resolvedRcv == BT.ifileVar
+      resultType =
+        if isIFile
+          then case resolvedRcv of
+            AppU _ (innerType : _) -> innerType
+            _ -> apply g7 bareResultType
+          else apply g7 bareResultType
+      ft = FunU [apply g7 startTy, apply g7 stopTy, apply g7 stepTy, rcvType']
               resultType
       f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketSlice))
-  return (g7, apply g7 resultType, AppS f1 [s1, s2, s3, rcv'])
+  return (g7, resultType, AppS f1 [s1, s2, s3, rcv'])
 synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) args) =
   error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
 
@@ -1137,6 +1256,17 @@ intrinsicTypeG g IntrLoad =
 intrinsicTypeG g IntrRead =
   let (g', readType) = newvar "read_" g
   in (g', OptionalU readType)
+-- @open: polymorphic return -- the user's inline ascription (e.g.
+-- `@open path :: IFile Sequence`) resolves the existential to the
+-- concrete handle type at typecheck time; codegen then inspects the
+-- resolved TypeF to dispatch to the right runtime entry point.
+intrinsicTypeG g IntrOpen =
+  let (g', openType) = newvar "open_" g
+  in (g', EffectU ioEffectSet openType)
+-- @close: arg is any handle type (a fresh existential); user-side use
+-- always has the handle bound to a known type, so this resolves
+-- without needing ascription.
+intrinsicTypeG g IntrClose = (g, EffectU ioEffectSet BT.unitU)
 intrinsicTypeG g intr = (g, intrinsicType intr)
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
@@ -1154,9 +1284,20 @@ intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
 intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
+-- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
+intrinsicType IntrOpen =
+  error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
+intrinsicType IntrClose =
+  error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
+intrinsicType IntrFSchema = EffectU ioEffectSet BT.strU
+intrinsicType IntrFLength = EffectU ioEffectSet BT.intU
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
+-- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
+-- it never appears as a user-facing intrinsic so no type rule is needed.
+intrinsicType IntrIFileWalk =
+  error "intrinsicType: IntrIFileWalk is synthesized post-typecheck and carries its result type from the originating pattern application"
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 
@@ -1205,6 +1346,15 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrRead, [strT]) -> subtype' i strT BT.strU g
         -- @datafile: Str -> Str (path must be string literal)
         (IntrDatafile, [pathT]) -> subtype' i pathT BT.strU g
+        -- @open: Str -> <IO> a (return type resolved by user ascription)
+        (IntrOpen, [pathT]) -> subtype' i pathT BT.strU g
+        -- @close: any handle type -> <IO> ()
+        (IntrClose, [_]) -> return g
+        -- @fschema: Str -> <IO> Str
+        (IntrFSchema, [pathT]) -> subtype' i pathT BT.strU g
+        -- @flen: IFile a -> <IO> Int. Receiver is any handle type;
+        -- the runtime enforces kind == IFILE.
+        (IntrFLength, [_]) -> return g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g

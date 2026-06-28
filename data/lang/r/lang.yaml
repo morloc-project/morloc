@@ -13,6 +13,13 @@ cost: 4
 # on NUL-bearing CHARSXPs. The morloc runtime rejects NULs at the R boundary.
 allow_string_null: false
 preamble:
+  # bit64 provides the 'integer64' S3 class used by R to represent
+  # Int64 / UInt64 / IFile handles (stdlib/root-r/main.loc). Loaded
+  # silently because morloc-generated pools should not emit user-
+  # visible R startup noise. The C runtime (rmorloc.c) marshals the
+  # integer64 bytes directly, but downstream R code (arithmetic,
+  # printing, coercion) needs the bit64 S3 methods on PATH.
+  - 'suppressPackageStartupMessages(library(bit64))'
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
   - '.morloc.srcdir <- normalizePath(file.path(dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1])), "..", ".."), mustWork=FALSE)'
   - '.morloc.libdir <- "{{home}}/lib/R"'

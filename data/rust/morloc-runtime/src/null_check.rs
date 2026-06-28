@@ -41,7 +41,7 @@ pub unsafe fn first_null_in_strings(ptr: AbsPtr, schema: &Schema) -> Option<Stri
 
 unsafe fn walk(ptr: AbsPtr, schema: &Schema, path: &mut String) -> Option<String> {
     match schema.serial_type {
-        SerialType::String => check_string(ptr, path),
+        SerialType::String | SerialType::IFile => check_string(ptr, path),
         SerialType::Array => {
             // schema.parameters[0] is the element schema; the slot at
             // `ptr` is an Array { size, data: relptr }.
