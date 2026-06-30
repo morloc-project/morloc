@@ -62,6 +62,57 @@ pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shclose().map(|_| true))
 }
 
+/// Initialise the shared stream registry for the current nexus
+/// invocation. Allocates (or attaches to) the registry's SHM volume
+/// and publishes the magic gate. Safe to call multiple times --
+/// subsequent calls observe the cached state and return immediately.
+///
+/// Pool processes that attach to an already-initialised session
+/// can also call this; the bootstrap CAS handles concurrent callers
+/// safely.
+///
+/// Returns the slot count in effect, or `usize::MAX` on error (with
+/// `errmsg` populated).
+#[no_mangle]
+pub unsafe extern "C" fn stream_registry_init(
+    errmsg: *mut *mut c_char,
+) -> usize {
+    ffi_try!(errmsg, usize::MAX, crate::stream::registry_init())
+}
+
+/// Enqueue a PID-sweep request to the dedicated sweeper thread.
+/// Used by the nexus when it detects a pool has died (clean exit or
+/// crash) so any slots that pool left open in the shared registry
+/// are released without waiting for the per-call sweep (which only
+/// fires when a dispatch ends normally).
+///
+/// `pid` and `start_time` together identify a unique process across
+/// PID reuse. The sweeper walks the registry and discards slots whose
+/// `(opener_pid, opener_pid_start_time)` matches both. Pass
+/// `start_time = 0` to skip the start-time check (accepts the rare
+/// PID-reuse false positive).
+///
+/// Non-blocking; the actual sweep runs on the sweeper thread.
+#[no_mangle]
+pub unsafe extern "C" fn stream_sweep_pid(
+    pid: u32,
+    start_time: u64,
+) {
+    crate::stream::sweeper_enqueue_pid(pid, start_time);
+}
+
+/// Read this process's start time from `/proc/PID/stat` (field 22,
+/// clock ticks since boot). Used by the nexus to capture the
+/// start_time of each spawned pool, which it then pairs with the
+/// PID when enqueueing a PID sweep. Returns 0 on read failure (the
+/// sweep will then accept a PID-only match).
+#[no_mangle]
+pub unsafe extern "C" fn stream_pid_start_time(
+    pid: u32,
+) -> u64 {
+    crate::stream::read_pid_start_time_for(pid)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn shm_set_fallback_dir(dir: *const c_char) {
     if !dir.is_null() {

@@ -2813,6 +2813,179 @@ error:
     return NULL;
 }
 
+// _mlc_next(schema_str, handle) -> Python list of materialised elements.
+// Mirrors _mlc_ifile_walk's shfree-deferred pattern so from_voidstar
+// can produce numpy views that outlive this call.
+static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    if (!PyArg_ParseTuple(args, "sL", &schema_str, &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = PyTRY(mlc_next, (int64_t)handle_ll);
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+    {
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        return obj;
+    }
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_stream(PyObject* self, PyObject* args) { MAYFAIL
+    long long ifile_handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &ifile_handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_stream, (int64_t)ifile_handle_ll);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_open_ostream(schema_str, path) -> handle
+static PyObject* pybinding__mlc_open_ostream(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* path;
+    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_ostream, schema_str, path);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_write(schema_str, level, value_obj, handle) -> None
+// value_obj is serialised to voidstar via to_voidstar before being
+// passed to the runtime.
+static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long level_ll;
+    PyObject* value_obj;
+    long long handle_ll;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    if (!PyArg_ParseTuple(args, "sLOL",
+            &schema_str, &level_ll, &value_obj, &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    schema = PyTRY(parse_schema, schema_str);
+    ssize_t bytes = get_shm_size(schema, value_obj);
+    if (bytes < 0) { goto error; }
+    voidstar = PyTRY(shmalloc, (size_t)bytes);
+    void* cursor = (uint8_t*)voidstar + schema->width;
+    if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
+        goto error;
+    }
+    PyTRY(mlc_write, (uint8_t)level_ll, (int64_t)handle_ll, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+// _mlc_append(schema_str, path) -> handle
+static PyObject* pybinding__mlc_append(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* path;
+    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_append, schema_str, path);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_concat(paths_list, dest) -> None
+static PyObject* pybinding__mlc_concat(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* paths_list;
+    const char* dest;
+    if (!PyArg_ParseTuple(args, "Os", &paths_list, &dest)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    if (!PyList_Check(paths_list)) {
+        PyRAISE("mlc_concat: paths must be a list");
+    }
+    Py_ssize_t n = PyList_GET_SIZE(paths_list);
+    const char** raw = NULL;
+    if (n > 0) {
+        raw = (const char**)malloc((size_t)n * sizeof(char*));
+        if (!raw) PyRAISE("mlc_concat: out of memory");
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* p = PyList_GET_ITEM(paths_list, i);
+            if (!PyUnicode_Check(p)) {
+                free(raw);
+                PyRAISE("mlc_concat: paths[%zd] is not a string", i);
+            }
+            raw[i] = PyUnicode_AsUTF8(p);
+        }
+    }
+    int rc;
+    {
+        char* child_errmsg_ = NULL;
+        rc = mlc_concat(raw, (size_t)n, dest, &child_errmsg_);
+        if (child_errmsg_ != NULL) {
+            free(raw);
+            PyErr_Format(PyExc_RuntimeError, "mlc_concat: %s", child_errmsg_);
+            free(child_errmsg_);
+            goto error;
+        }
+    }
+    free(raw);
+    if (rc != 0) {
+        PyRAISE("mlc_concat: failed with no errmsg");
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// _mlc_flush(handle) -> None. Force the OStream's SHM buffer to
+// flush as a sub-packet now (instead of waiting for full / @close).
+static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    PyTRY(mlc_flush, (int64_t)handle_ll);
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
@@ -2859,6 +3032,13 @@ static PyMethodDef Methods[] = {
     {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},
     {"mlc_ifile_walk", pybinding__mlc_ifile_walk, METH_VARARGS, "Unified IFile pattern walker"},
     {"mlc_ifile_length", pybinding__mlc_ifile_length, METH_VARARGS, "Total element count of an IFile handle"},
+    {"mlc_next", pybinding__mlc_next, METH_VARARGS, "Materialise an IStream's current sub-packet and advance the cursor"},
+    {"mlc_stream", pybinding__mlc_stream, METH_VARARGS, "Derive an IStream handle from an open IFile handle"},
+    {"mlc_open_ostream", pybinding__mlc_open_ostream, METH_VARARGS, "Open a fresh OStream handle for the given schema + path"},
+    {"mlc_write", pybinding__mlc_write, METH_VARARGS, "Emit one sub-packet of [a] to an OStream handle"},
+    {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
+    {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
+    {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

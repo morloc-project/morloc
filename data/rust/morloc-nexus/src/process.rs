@@ -144,6 +144,12 @@ extern "C" fn pool_check_and_recover(
     _sockets: *mut morloc_runtime_types::daemon_socket::MorlocSocket,
     n_pools: usize,
 ) {
+    // First, enqueue PID-sweep requests for any pool that has died
+    // since our last visit. The sweeper thread releases the dead
+    // pool's slots in the shared SHM registry off this latency path.
+    // Cheap on the no-death fast path (one Relaxed load per pool).
+    sweep_dead_pools(n_pools);
+
     // Fast path: if no pool has died, we're done. This runs every
     // poll cycle so it must be cheap.
     let mut any_dead = false;
@@ -258,6 +264,25 @@ extern "C" fn pool_check_and_recover(
             };
             return Err(format!("shinit({}) after recovery failed: {}", new_basename, msg));
         }
+        // Re-bootstrap the stream registry under the fresh basename so
+        // pools spawned by `start_daemons` below see the registry as
+        // part of their session.
+        extern "C" {
+            fn stream_registry_init(errmsg: *mut *mut std::ffi::c_char) -> usize;
+        }
+        let slot_count = unsafe { stream_registry_init(&mut err) };
+        if slot_count == usize::MAX {
+            let msg = if !err.is_null() {
+                let s = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
+                unsafe { libc::free(err as *mut libc::c_void) };
+                s
+            } else {
+                "unknown stream_registry_init error".into()
+            };
+            return Err(format!(
+                "stream_registry_init after recovery failed: {}", msg
+            ));
+        }
 
         // Spawn each pool fresh.
         let indices: Vec<usize> = (0..n_pools).collect();
@@ -316,6 +341,23 @@ static EXIT_STATUSES: [AtomicI32; MAX_DAEMONS] = {
     [INIT; MAX_DAEMONS]
 };
 
+/// Start-times of pool processes, captured at spawn time from
+/// `/proc/PID/stat` field 22. Paired with PIDs for the §1.7 PID
+/// sweep. Zero entries (unset, or non-Linux fallback) cause the
+/// sweeper to fall back to PID-only matching.
+static POOL_START_TIMES: [std::sync::atomic::AtomicU64; MAX_DAEMONS] = {
+    const INIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    [INIT; MAX_DAEMONS]
+};
+
+/// Per-pool flag: has this pool's PID sweep already been enqueued?
+/// Prevents duplicate sweeps after the same death is observed across
+/// multiple dispatch cycles. Reset when a pool is respawned.
+static POOL_SWEPT: [AtomicBool; MAX_DAEMONS] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; MAX_DAEMONS]
+};
+
 /// Re-entrancy guard for clean_exit.
 static CLEANING_UP: AtomicBool = AtomicBool::new(false);
 
@@ -336,6 +378,12 @@ pub struct PoolSocket {
     pub socket_path: String,
     pub syscmd: Vec<CString>,
     pub pid: i32,
+    /// Process start-time of `pid`, read from `/proc/PID/stat` field
+    /// 22 right after the daemon was spawned. Paired with `pid` when
+    /// the nexus enqueues a PID sweep on pool death, so the sweeper
+    /// rejects PID-reuse false positives. 0 if start_time couldn't
+    /// be read (non-Linux fallback; sweep falls back to PID-only).
+    pub pid_start_time: u64,
     /// XXH64 fingerprint (16-char hex) of this pool's emitted source +
     /// any declared @hash-include@ files. Exported to the spawned pool
     /// process as @MORLOC_POOL_HASH@ so the runtime cache key changes
@@ -433,6 +481,7 @@ pub fn init_shm() -> (String, String) {
             shm_size: usize,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut std::ffi::c_void;
+        fn stream_registry_init(errmsg: *mut *mut std::ffi::c_char) -> usize;
     }
 
     let tmpdir_c = std::ffi::CString::new(tmpdir.as_str()).unwrap();
@@ -450,6 +499,23 @@ pub fn init_shm() -> (String, String) {
                 "unknown error".into()
             };
             eprintln!("Error: failed to initialize shared memory: {}", msg);
+            clean_exit(1);
+        }
+        // After the main SHM allocation pool is up, bootstrap the
+        // shared stream registry. This allocates a dedicated volume
+        // (`STREAM_REGISTRY_VOLUME`) holding the slot table all pools
+        // will share. Subsequent pool processes attach to the same
+        // segment via `stream_registry_init`, which is idempotent.
+        let slot_count = stream_registry_init(&mut errmsg);
+        if slot_count == usize::MAX {
+            let msg = if !errmsg.is_null() {
+                let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
+                libc::free(errmsg as *mut std::ffi::c_void);
+                s
+            } else {
+                "unknown error".into()
+            };
+            eprintln!("Error: failed to initialise stream registry: {}", msg);
             clean_exit(1);
         }
     }
@@ -644,6 +710,7 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
                 socket_path,
                 syscmd,
                 pid: 0,
+                pid_start_time: 0,
                 pool_hash: CString::new(pool.pool_hash.as_str())
                     .unwrap_or_else(|_| CString::new("").unwrap()),
             }
@@ -702,9 +769,22 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
 
 /// Start pool daemons for the given socket indices and wait for them to respond to pings.
 pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<(), String> {
+    extern "C" {
+        fn stream_pid_start_time(pid: u32) -> u64;
+    }
     for &idx in indices {
         let pid = start_language_server(&sockets[idx])?;
         sockets[idx].pid = pid;
+        // Capture the pool's start_time at spawn so the PID-based crash
+        // sweep can detect PID reuse correctly. Best-effort: reads
+        // /proc/PID/stat. Zero on non-Linux or if the read races a fast
+        // exit; sweep falls back to PID-only match in that case.
+        let start_time = unsafe { stream_pid_start_time(pid as u32) };
+        sockets[idx].pid_start_time = start_time;
+        POOL_START_TIMES[idx].store(start_time, Ordering::Release);
+        // Fresh incarnation: clear the sweep-done flag so the next
+        // death of this pool is detected.
+        POOL_SWEPT[idx].store(false, Ordering::Relaxed);
         PIDS[idx].store(pid, Ordering::Relaxed);
         PGIDS[idx].store(pid, Ordering::Relaxed);
     }
@@ -715,6 +795,45 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
     }
 
     Ok(())
+}
+
+/// Walk the per-index PIDs/PGIDs/start-times arrays and enqueue a
+/// PID sweep for any pool that has died (`PIDS[i] == -1`) but hasn't
+/// been swept yet. Idempotent per pool index until the pool is
+/// respawned (which clears `POOL_SWEPT[i]`).
+///
+/// Called by the daemon poll-cycle hook (alongside
+/// `pool_check_and_recover`) so pool clean-exits between dispatches
+/// release their slots promptly. The crash-recovery path tears down
+/// the SHM registry so any racy sweep enqueue against the new
+/// registry is harmless (no slots will match).
+///
+/// Walks the global `PIDS` / `POOL_START_TIMES` / `POOL_SWEPT`
+/// statics rather than a `&[PoolSocket]` so it can be called from
+/// any context (including the C-ABI callback from libmorloc.so).
+pub fn sweep_dead_pools(n_pools: usize) {
+    extern "C" {
+        fn stream_sweep_pid(pid: u32, start_time: u64);
+    }
+    let limit = n_pools.min(MAX_DAEMONS);
+    for i in 0..limit {
+        if POOL_SWEPT[i].load(Ordering::Relaxed) { continue; }
+        let pid = PIDS[i].load(Ordering::Relaxed);
+        if pid != -1 { continue; }
+        // The PID stored before SIGCHLD cleared PIDS lives in
+        // PGIDS (process-group same as pid for the initial fork).
+        // We saved that on spawn and never clear it.
+        let dead_pid = PGIDS[i].load(Ordering::Relaxed);
+        if dead_pid <= 0 { continue; }
+        let start_time = POOL_START_TIMES[i].load(Ordering::Acquire);
+        if POOL_SWEPT[i]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            continue;
+        }
+        unsafe { stream_sweep_pid(dead_pid as u32, start_time) };
+    }
 }
 
 /// Ping a daemon with exponential backoff until it responds.

@@ -1,0 +1,38 @@
+-- Multiple @write calls without @flush or @close-in-between
+-- accumulate in the OStream's SHM buffer. At @close the buffer
+-- emits ONE sub-packet containing all accumulated elements.
+--
+-- Contract: three @writes of small batches followed by @close
+-- produce a single on-disk sub-packet. The IStream sees the
+-- whole concatenation on its first @next; the second @next sees
+-- EOF.
+
+module main
+  ( testCoalesceAll
+  , testOneSubpacketOnly
+  )
+
+import root
+
+testCoalesceAll :: Str -> <IO> [Int]
+testCoalesceAll path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @write 0 [4, 5] o
+  @write 0 [6, 7, 8, 9] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+-- Sister: after one @next pulls the coalesced packet, the next
+-- @next must return [] (no second sub-packet exists).
+testOneSubpacketOnly :: Str -> <IO> [Int]
+testOneSubpacketOnly path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @write 0 [4, 5] o
+  @write 0 [6, 7, 8, 9] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s

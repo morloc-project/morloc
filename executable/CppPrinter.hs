@@ -124,6 +124,22 @@ printExpr (IIntrinsicIFileWalk sid (Just t) pathExpr h runtimeArgs) =
 printExpr (IIntrinsicIFileWalk sid Nothing pathExpr h runtimeArgs) =
   let argList = "{" <> hcat (punctuate "," (map printExpr runtimeArgs)) <> "}"
    in [idoc|_mlc_ifile_walk(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr pathExpr}, #{argList})|]
+printExpr (IIntrinsicNext sid (Just t) h) =
+  [idoc|_mlc_next<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicNext sid Nothing h) =
+  [idoc|_mlc_next(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicStream h) =
+  [idoc|_mlc_stream(#{printExpr h})|]
+printExpr (IIntrinsicOpenOStream sid path) =
+  [idoc|_mlc_open_ostream(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicWrite sid level value handle) =
+  [idoc|_mlc_write(mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr value}, #{printExpr handle})|]
+printExpr (IIntrinsicAppend sid path) =
+  [idoc|_mlc_append(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicConcat paths dest) =
+  [idoc|_mlc_concat(#{printExpr paths}, #{printExpr dest})|]
+printExpr (IIntrinsicFlush h) =
+  [idoc|_mlc_flush(#{printExpr h})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
 -- float-typed per C99 but convert losslessly to double; non-default Real

@@ -45,11 +45,11 @@ mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
 
 -- | Smart constructor that classifies a PolyManifold by whether its midx
--- carries observability hooks. Currently the only hook is the log label
--- (Stage 1); when caching, remote dispatch, and debug-trace land, extend
--- the @observable@ predicate here -- downstream optimization passes
--- (strip sites in 'Serialize.hs', plus future passes) read the
--- 'ManifoldKind' field rather than re-checking config flags.
+-- carries observability hooks. Currently the only hook is the log label;
+-- when caching, remote dispatch, and debug-trace land, extend the
+-- @observable@ predicate here -- downstream optimization passes (strip
+-- sites in 'Serialize.hs', plus future passes) read the 'ManifoldKind'
+-- field rather than re-checking config flags.
 mkPolyManifold ::
   Lang -> Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> MorlocMonad PolyExpr
 mkPolyManifold lang midx form body = do

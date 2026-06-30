@@ -30,6 +30,13 @@ morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",
 morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
 morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
+morloc_mlc_next                      <- function(...){ .Call("morloc_mlc_next",                      ...) }
+morloc_mlc_stream                    <- function(...){ .Call("morloc_mlc_stream",                    ...) }
+morloc_mlc_open_ostream              <- function(...){ .Call("morloc_mlc_open_ostream",              ...) }
+morloc_mlc_write                     <- function(...){ .Call("morloc_mlc_write",                     ...) }
+morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append",                    ...) }
+morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
+morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
 morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }

@@ -67,6 +67,33 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "ifile-data-patterns" "ifile-data-patterns"
+      , golden "ostream-write-roundtrip" "ostream-write-roundtrip"
+      , golden "ostream-implicit-close" "ostream-implicit-close"
+      , golden "istream-multi-subpacket-roundtrip" "istream-multi-subpacket-roundtrip"
+      , golden "istream-compressed-subpacket" "istream-compressed-subpacket"
+
+      -- Write-buffer correctness tests (Part A of the buffering work).
+      -- These exercise @write's coalescing behaviour, @flush boundaries,
+      -- oversize-element handling, element-level split on overflow,
+      -- variable-width-type round-trip, and index-section growth.
+      , golden "write-buffer-coalesces" "write-buffer-coalesces"
+      , golden "write-buffer-flush-explicit" "write-buffer-flush-explicit"
+      , golden "write-buffer-flush-no-op-on-empty" "write-buffer-flush-no-op-on-empty"
+      , golden "write-buffer-oversize-element" "write-buffer-oversize-element"
+      , golden "write-buffer-multi-element-split" "write-buffer-multi-element-split"
+      , golden "write-buffer-variable-width-roundtrip" "write-buffer-variable-width-roundtrip"
+      , golden "write-buffer-index-grow" "write-buffer-index-grow"
+
+      -- Shared SHM registry contracts: cross-pool handle passing,
+      -- multi-writer / multi-reader semantics, forgotten-close sweep,
+      -- explicit-share-only enforcement. B5 (crash recovery) and B7
+      -- (cross-dispatch persistence) need additional harness work.
+      , golden "shared-registry-multi-pool-write" "shared-registry-multi-pool-write"
+      , golden "shared-registry-multi-pool-read" "shared-registry-multi-pool-read"
+      , golden "shared-registry-cross-pool-handle-passing" "shared-registry-cross-pool-handle-passing"
+      , golden "shared-registry-forgotten-close-swept" "shared-registry-forgotten-close-swept"
+      , golden "shared-registry-double-open-rejected" "shared-registry-double-open-rejected"
+      , golden "shared-registry-stress (wait ~10s)" "shared-registry-stress"
 
       , golden "cli-docstring-negatives" "cli-docstring-negatives"
       , golden "cli-docstring-shapes" "cli-docstring-shapes"

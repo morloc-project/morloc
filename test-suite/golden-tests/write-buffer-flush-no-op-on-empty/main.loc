@@ -1,0 +1,40 @@
+-- @flush on an empty buffer is a clean no-op: no spurious empty
+-- sub-packet appears on disk. Two consecutive @flush calls before
+-- the first @write produce no sub-packets at all. A subsequent
+-- @write + @flush produces exactly ONE sub-packet.
+--
+-- Without this guarantee, careless user code that calls @flush
+-- defensively would emit empty packets that bloat the file and
+-- confuse readers.
+
+module main
+  ( testEmptyFlushIsNoop
+  , testEmptyFlushThenEof
+  )
+
+import root
+
+writeWithLeadingEmptyFlushes :: Str -> <IO> ()
+writeWithLeadingEmptyFlushes path = do
+  o <- @open path :: <IO> OStream Int
+  @flush o
+  @flush o
+  @write 0 [100, 200, 300] o
+  @flush o
+  @close o
+
+testEmptyFlushIsNoop :: Str -> <IO> [Int]
+testEmptyFlushIsNoop path = do
+  writeWithLeadingEmptyFlushes path
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+-- After the first (and only) sub-packet drains, the next @next
+-- returns []. Spurious empty packets would surface here as
+-- multiple [] reads or interleaving.
+testEmptyFlushThenEof :: Str -> <IO> [Int]
+testEmptyFlushThenEof path = do
+  writeWithLeadingEmptyFlushes path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s

@@ -1,0 +1,81 @@
+-- OStream end-to-end: write -> close -> reopen as IFile/IStream.
+--
+-- Stage 4 introduces:
+--   * @open path :: <IO> (OStream T) -- typed create + flock + header
+--   * @write level value handle      -- emit one sub-packet
+--   * @close handle                  -- write final footer, fsync, close
+--   * @append schema path            -- resume an existing stream
+--   * @concat [src..] dest           -- byte-level merge
+--
+-- The IFile/IStream readers (Stages 2/3) consume the result.
+
+module main
+  ( testWriteOne
+  , testWriteMulti
+  , testWriteIStream
+  , testAppendThenLength
+  , testConcatTwo
+  )
+
+import root
+
+-- 1. Write one sub-packet of three ints; reopen as IStream and read it
+-- back with one @next call (single sub-packet -> single @next).
+testWriteOne :: Str -> <IO> [Int]
+testWriteOne path = do
+  s <- @open path :: <IO> OStream Int
+  @write 0 [10, 20, 30] s
+  @close s
+  r <- @open path :: <IO> IStream Int
+  @next r
+
+-- 2. Write three sub-packets; reopen as IFile, check length.
+testWriteMulti :: Str -> <IO> Int
+testWriteMulti path = do
+  s <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] s
+  @flush s
+  @write 0 [4, 5, 6, 7] s
+  @flush s
+  @write 0 [8] s
+  @close s
+  f <- @open path :: <IO> IFile Int
+  @flen f
+
+-- 3. Write multi-sub-packet file, reopen as IStream, @next loop.
+testWriteIStream :: Str -> <IO> [Int]
+testWriteIStream path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [100, 200] o
+  @flush o
+  @write 0 [300, 400, 500] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  -- Take the first sub-packet; later @next would give [300,400,500],
+  -- but Stage 3's golden already exercises the EOF loop.
+  @next s
+
+-- 4. Append to a closed stream; total element count = sum of both runs.
+testAppendThenLength :: Str -> <IO> Int
+testAppendThenLength path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @close o
+  o2 <- @append path :: <IO> OStream Int
+  @write 0 [4, 5] o2
+  @close o2
+  f <- @open path :: <IO> IFile Int
+  @flen f
+
+-- 5. Concat two source files; total element count = 3 + 2.
+testConcatTwo :: Str -> Str -> Str -> <IO> Int
+testConcatTwo a b dest = do
+  oa <- @open a :: <IO> OStream Int
+  @write 0 [11, 22, 33] oa
+  @close oa
+  ob <- @open b :: <IO> OStream Int
+  @write 0 [44, 55] ob
+  @close ob
+  @concat [a, b] dest
+  f <- @open dest :: <IO> IFile Int
+  @flen f

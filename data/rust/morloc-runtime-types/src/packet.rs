@@ -876,7 +876,13 @@ pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
     let total = 32 + payload_len;
     let mut out = vec![0u8; total];
 
-    let hdr = PacketHeader::footer(payload_len as u64);
+    // The footer's metadata blocks sit directly after the 32-byte header.
+    // `iter_packet_metadata` keys off `header.offset` to find the metadata
+    // range (see iter_packet_metadata: meta_end = 32 + offset), so the
+    // offset field must be set to the blocks' total byte length even
+    // though footer packets have no separate post-metadata payload.
+    let mut hdr = PacketHeader::footer(payload_len as u64);
+    hdr.offset = payload_len as u32;
     let hdr_bytes = hdr.to_bytes();
     out[..32].copy_from_slice(&hdr_bytes);
 
@@ -1509,7 +1515,7 @@ mod tests {
         assert_eq!(packet_type_name(PACKET_TYPE_FOOTER), "footer");
     }
 
-    // ── Stage 1: end-to-end stream-file layout round-trips ─────────────
+    // ── End-to-end stream-file layout round-trips ──────────────────────
 
     /// Helper: build N "data" sub-packets carrying `i: u32` for i in 0..n.
     /// Uses the test-local `make_mesg_data_packet` (string schema).
@@ -1677,12 +1683,14 @@ mod tests {
         let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
         assert!(hdr.is_footer());
 
-        // The footer's payload starts immediately after the header
-        // (offset = 0); length is the payload byte count.
+        // Footer metadata blocks sit between offset 32 and 32+offset
+        // -- the standard `iter_packet_metadata` layout. Footers have
+        // no separate post-metadata payload, so `header.offset ==
+        // header.length`. Both fields point at the same byte boundary.
         let off = { hdr.offset } as usize;
         let len = { hdr.length } as usize;
-        assert_eq!(off, 0);
-        let payload = &footer[32..32 + len];
+        assert_eq!(off, len);
+        let payload = &footer[32..32 + off];
 
         let entries: Vec<(u8, &[u8])> = iter_metadata(payload).collect();
         assert_eq!(entries.len(), 2);

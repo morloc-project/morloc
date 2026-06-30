@@ -97,18 +97,28 @@ impl Drop for ArenaGuard {
                         }
                     }
                 }
-                // Close any stream handles that were opened in this
+                // Release any stream handles that were opened in this
                 // arena scope and not explicitly `@close`d. Without
                 // this, an exception unwinding out of a Python pool
                 // would leak slots forever and eventually exhaust the
-                // 16-bit slot space in long-running daemons. Errors
-                // (e.g. handle already invalidated by a separate close)
-                // are non-fatal — the goal is to release resources, not
-                // to surface diagnostics during unwind.
+                // 16-bit slot space in long-running daemons.
+                //
+                // We use `discard_handle` (not `close_handle`) so an
+                // OStream that goes out of scope without an explicit
+                // `@close` does NOT silently grow a final footer. The
+                // file on disk keeps its temp footer, which is the
+                // honest signal that the writer never reached `@close`
+                // (crash, exception, or just an omitted call). Readers
+                // can drain it via IStream; IFile refuses it. The
+                // explicit-close path stays the only way to produce a
+                // final-footer file.
+                //
+                // Errors here are non-fatal -- the goal is to release
+                // resources, not to surface diagnostics during unwind.
                 for handle in state.slots {
-                    if let Err(e) = crate::stream::close_handle(handle) {
+                    if let Err(e) = crate::stream::discard_handle(handle) {
                         eprintln!(
-                            "eval_arena drop: close_handle({}) failed: {:?}",
+                            "eval_arena drop: discard_handle({}) failed: {:?}",
                             handle, e
                         );
                     }

@@ -100,7 +100,7 @@ pub unsafe extern "C" fn mlc_save_json(
 // On disk: 32-byte morloc packet header + flattened voidstar payload. When
 // `level > 0` the payload region is zstd-compressed and the header's
 // compression byte is set to PACKET_COMPRESSION_ZSTD; level == 0 writes
-// the legacy uncompressed shape.
+// the payload uncompressed.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_voidstar(
     data: *const c_void,
@@ -334,8 +334,8 @@ pub unsafe extern "C" fn mlc_load(
     // Compressed-VOIDSTAR fast path: stream-decompress a zstd frame
     // directly into a fresh SHM allocation. Same memory shape as the
     // uncompressed mmap path -- one X of the decompressed payload --
-    // and avoids the multi-Vec / libc::malloc round-trip the legacy
-    // path takes.
+    // and avoids the multi-Vec / libc::malloc round-trip the generic
+    // fallback below takes.
     match crate::cli::try_load_compressed_voidstar_via_shm(path, schema) {
         Ok(Some(ptr)) => return ptr as *mut c_void,
         Ok(None) => { /* fall through */ }
@@ -499,8 +499,9 @@ unsafe fn _write_voidstar_binary_rust(
 // ── @open / @close / @fschema ──────────────────────────────────────────────
 //
 // Thin FFI shims around `crate::stream`. The kind byte selects which
-// concrete open routine to invoke (IFile is implemented; IStream and
-// OStream return a clear "not yet implemented" error in v1).
+// concrete open routine to invoke. OStream is routed through the typed
+// entry point `mlc_open_ostream(schema_str, path)` because the writer
+// needs the element schema at open time.
 
 #[no_mangle]
 pub unsafe extern "C" fn mlc_open(
@@ -531,13 +532,57 @@ pub unsafe extern "C" fn mlc_open(
     }
 }
 
+/// `@open path :: <IO> (OStream T)` -- typed open. The codegen has the
+/// element schema string for T in hand at compile time and threads it
+/// through. The file is created (`O_CREAT | O_EXCL`), flock-acquired,
+/// and the stream header is written with the schema metadata block.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_ostream(
+    schema_str: *const c_char,
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_open_ostream: null path or schema".into(),
+        ));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open_ostream: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    let s_str = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open_ostream: schema is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::shared_open_ostream_with_schema(path_str, s_str) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mlc_close(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    match crate::stream::close_handle(handle) {
+    match crate::stream::shared_close_handle(handle) {
         Ok(()) => 0,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -642,7 +687,7 @@ pub unsafe extern "C" fn mlc_ifile_walk(
     } else {
         std::slice::from_raw_parts(args_ptr, n_args as usize)
     };
-    match crate::stream::ifile_walk(handle, path_str, args_slice) {
+    match crate::stream::shared_ifile_walk(handle, path_str, args_slice) {
         Ok(p) => p as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -651,18 +696,203 @@ pub unsafe extern "C" fn mlc_ifile_walk(
     }
 }
 
+/// `@next` on an IStream handle: materialise the current sub-packet,
+/// advance the cursor, return an AbsPtr to a freshly-allocated SHM
+/// Array<a> ready to be wrapped by the per-language `from_voidstar`.
+/// On EOF returns an Array with size 0 and `data == RELNULL`; the
+/// pool surfaces this as an empty list.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_next(
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_next_subpacket(handle) {
+        Ok(p) => p as *mut c_void,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// `@write level value handle`: append the elements of `value`
+/// (a SHM voidstar `Array<T>`) to the OStream's internal SHM buffer.
+/// The buffer flushes as one sub-packet when it fills (default 16
+/// MiB, overridable via `MORLOC_WRITE_BUFFER_BYTES`), at `@flush`,
+/// or at `@close`. The compression level is locked in by the first
+/// write and enforced uniform on subsequent writes.
+///
+/// Element atomicity: a single element wider than the buffer is
+/// written as its own oversize sub-packet. Lists that partly fit
+/// flush, then resume buffering in the fresh buffer.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_write(
+    level: u8,
+    handle: i64,
+    payload_voidstar: *const c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_write_subpacket(handle, level, payload_voidstar as crate::shm::AbsPtr) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
+        }
+    }
+}
+
+/// `@flush handle`: force any buffered elements to be written as a
+/// sub-packet now, without closing the stream. No-op when the buffer
+/// is empty. Useful for tests that need deterministic sub-packet
+/// boundaries and for user code wanting to make progress visible to
+/// concurrent readers.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_flush(
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_flush_buffer(handle) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
+        }
+    }
+}
+
+/// `@append schema_str path`: open an existing stream file for append.
+/// The schema must match the file's stored schema (mismatches error
+/// before any bytes are written). Returns a fresh OSTREAM handle whose
+/// cursor sits at the resume offset (end of the last complete sub-packet).
+#[no_mangle]
+pub unsafe extern "C" fn mlc_append(
+    schema_str: *const c_char,
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_append: null path or schema".into(),
+        ));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_append: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    let s_str = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_append: schema is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::shared_append_to_path(path_str, s_str) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+/// `@concat paths dest`: byte-level concat of stream files into `dest`.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_concat(
+    paths: *const *const c_char,
+    n_paths: usize,
+    dest: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    if dest.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_concat: null dest".into()));
+        return 1;
+    }
+    let dest_str = match CStr::from_ptr(dest).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_concat: dest is not valid UTF-8".into(),
+            ));
+            return 1;
+        }
+    };
+    if n_paths == 0 {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_concat: empty paths".into()));
+        return 1;
+    }
+    if paths.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_concat: null paths".into()));
+        return 1;
+    }
+    let mut path_strs: Vec<&str> = Vec::with_capacity(n_paths);
+    for i in 0..n_paths {
+        let p = *paths.add(i);
+        if p.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "mlc_concat: null path at index {}", i
+            )));
+            return 1;
+        }
+        match CStr::from_ptr(p).to_str() {
+            Ok(s) => path_strs.push(s),
+            Err(_) => {
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "mlc_concat: path at index {} not valid UTF-8", i
+                )));
+                return 1;
+            }
+        }
+    }
+    match crate::stream::concat_files(&path_strs, dest_str) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
+        }
+    }
+}
+
+/// `@stream :: IFile a -> <IO> IStream a`: open a fresh IStream slot
+/// bound to the same path as the source IFile.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_stream(
+    ifile_handle: i64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_derive_istream(ifile_handle) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 /// Total element count of an IFile (`length f`). Cheap: reads the
 /// cached value from the StreamDiag block populated at open time.
-/// Errors cleanly when the file's value type is not a list (the
-/// length of a tuple/record IFile is meaningless and was previously
-/// silently zero -- now returns -1 with a clear errmsg).
+/// Errors when the file's value type is not a list (the length of a
+/// tuple/record IFile is meaningless).
 #[no_mangle]
 pub unsafe extern "C" fn mlc_ifile_length(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i64 {
     clear_errmsg(errmsg);
-    match crate::stream::handle_length(handle) {
+    match crate::stream::shared_handle_length(handle) {
         Ok(n) => n as i64,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -673,15 +903,15 @@ pub unsafe extern "C" fn mlc_ifile_length(
 
 // ── Cross-pool wire codec for stream handles ──────────────────────────────
 //
-// The v1 stream registry is process-local: a handle returned by
-// `mlc_open` indexes a `Vec<StreamEntry>` that lives in this process
-// only. To cross a pool boundary the sender's bridge calls
-// `mlc_handle_pack_path` to read out the file path (and kind), the
-// path travels on the wire as a UTF-8 string, and the receiver's
-// bridge calls `mlc_handle_unpack_path` to bind a fresh local handle
-// via the normal `open_dispatch` path. Each pool's `eval_arena`
-// closes the handle it opened on scope exit; the sender's `@close`
-// does not affect the receiver, and vice versa.
+// The SHM stream registry stores each handle's identity (path, schema,
+// cursor, etc.) but the file descriptor + mmap region are per-process
+// and not shareable across forks. So to pass a handle across a pool
+// boundary the sender's bridge calls `mlc_handle_pack_path` to read out
+// the file path (and kind), the path travels on the wire as a UTF-8
+// string, and the receiver's bridge calls `mlc_handle_unpack_path` to
+// bind a fresh local handle via `open_dispatch`. Each pool's
+// `eval_arena` closes the handle it opened on scope exit; the sender's
+// `@close` does not affect the receiver, and vice versa.
 //
 // Return convention: `*mut c_char` is a malloc'd, NUL-terminated UTF-8
 // string owned by the caller. The caller frees with libc::free. Errors
@@ -694,14 +924,14 @@ pub unsafe extern "C" fn mlc_handle_pack_path(
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
     clear_errmsg(errmsg);
-    let kind = match crate::stream::handle_kind(handle) {
+    let kind = match crate::stream::shared_handle_kind(handle) {
         Ok(k) => k,
         Err(e) => {
             set_errmsg(errmsg, &e);
             return ptr::null_mut();
         }
     };
-    let path = match crate::stream::handle_path(handle) {
+    let path = match crate::stream::shared_handle_path(handle) {
         Ok(p) => p,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -732,7 +962,7 @@ pub unsafe extern "C" fn mlc_handle_path_len(
     errmsg: *mut *mut c_char,
 ) -> i64 {
     clear_errmsg(errmsg);
-    match crate::stream::handle_path(handle) {
+    match crate::stream::shared_handle_path(handle) {
         Ok(p) => p.len() as i64,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -763,14 +993,13 @@ pub unsafe extern "C" fn mlc_handle_unpack_path(
             return -1;
         }
     };
+    // Route through the shared-registry `open_dispatch`. The fresh
+    // slot's `call_id` is tagged from the thread-local set by the
+    // daemon dispatch loop, so the per-call sweeper cleans it up at
+    // scope exit. (Replaces the prior `eval_arena::record_slot_if_active`
+    // bookkeeping under the process-local registry.)
     match crate::stream::open_dispatch(path_str, kind) {
-        Ok(handle) => {
-            // Register with the receiver's arena so scope exit closes
-            // the fresh handle. Sender's arena owns a separate slot in
-            // a separate process.
-            crate::eval_arena::record_slot_if_active(handle);
-            handle
-        }
+        Ok(handle) => handle,
         Err(e) => {
             set_errmsg(errmsg, &e);
             -1
@@ -871,7 +1100,7 @@ pub unsafe extern "C" fn mlc_handles_path_lens(
     } else {
         Some(std::slice::from_raw_parts_mut(out_lens, n))
     };
-    match crate::stream::handles_path_lens(hs, outs) {
+    match crate::stream::shared_handles_path_lens(hs, outs) {
         Ok(sum) => sum as i64,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -901,7 +1130,7 @@ pub unsafe extern "C" fn mlc_write_handles_voidstar(
     }
     let hs = std::slice::from_raw_parts(handles, n);
     let mut cur = *cursor as *mut u8;
-    match crate::stream::write_handles_voidstar(hs, dest as *mut u8, elem_stride, &mut cur) {
+    match crate::stream::shared_write_handles_voidstar(hs, dest as *mut u8, elem_stride, &mut cur) {
         Ok(()) => {
             *cursor = cur as *mut c_void;
             0

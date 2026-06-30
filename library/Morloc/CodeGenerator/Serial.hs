@@ -546,6 +546,11 @@ makeSerialAST m lang t0 = do
           -- leave the receiver with a slot id meaningful only in the
           -- sender's process).
           | generalTypeName == BT.ifileVar = return $ SerialIFile fv
+          -- IStream / OStream stay as their underlying newtype wire form
+          -- (UInt64) so cross-pool transfer of a stateful handle errors
+          -- explicitly rather than silently re-opening (which would lose
+          -- IStream's cursor or fail O_EXCL on OStream). Fall through to
+          -- the normal newtype resolution path.
           -- Typed `Table n r`: when the Rec arg lowered to a ground record
           -- (NamF NamRecord ...), surface it as a SerialObject NamTable
           -- carrying the column schema. The wire encoder emits @T:K<entries>@

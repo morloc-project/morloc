@@ -447,6 +447,15 @@ static COMMON_BASENAME: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FI
 
 static FALLBACK_DIR: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
 
+/// Read the common SHM basename set by the first `shinit` call in
+/// this process. Returns an empty string if no `shinit` has been
+/// called yet. Used by callers that need to allocate additional
+/// volumes (e.g. the stream registry) under the same session.
+pub fn get_common_basename() -> String {
+    let cb = COMMON_BASENAME.lock().unwrap();
+    get_cstr_buf(&cb).to_string()
+}
+
 /// Whether atexit handler has been registered (once per process).
 static ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
 

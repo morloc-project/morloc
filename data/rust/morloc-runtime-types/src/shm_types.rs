@@ -19,6 +19,30 @@ pub const MAX_VOLUME_NUMBER: usize = 32768;
 pub const MAX_FILENAME_SIZE: usize = 128;
 pub const MAX_PATH_SIZE: usize = 512;
 
+/// Reserved volume index for the shared stream registry. The registry
+/// is allocated once per nexus invocation and holds the SHM-resident
+/// slot table for `IFile` / `IStream` / `OStream` handles. All pools
+/// in one nexus invocation see the same slots through this volume.
+///
+/// Placed at the top of the volume-index space so it never collides
+/// with the main allocation pool (volume 0) or per-pool worker volumes
+/// (1..N, where N is the number of language pools).
+pub const STREAM_REGISTRY_VOLUME: usize = MAX_VOLUME_NUMBER - 1;
+
+/// Magic word written at the start of the stream-registry volume's
+/// data region by the bootstrap winner. Loser processes (and pool
+/// attaches) spin-wait on an Acquire-load of this until it appears,
+/// so all subsequent reads of slot fields happen-after the winner's
+/// initialization writes.
+pub const STREAM_REGISTRY_MAGIC: u64 = 0x4D4C_5354_5245_4757; // "MLSTREGW"
+
+/// Sentinel value used during bootstrap. A process that CAS-swaps the
+/// magic from 0 to this value has won the bootstrap and is responsible
+/// for filling `slot_count` / `gen_salt` and finally storing
+/// `STREAM_REGISTRY_MAGIC` with Release ordering. Concurrent attaching
+/// processes observe this sentinel and continue spin-waiting.
+pub const STREAM_REGISTRY_MAGIC_INIT: u64 = 0x4D4C_5354_5245_4749; // "MLSTREGI"
+
 // ── Pointer types ──────────────────────────────────────────────────────────
 
 /// Relative pointer: encodes a (volume index, in-volume offset) pair.

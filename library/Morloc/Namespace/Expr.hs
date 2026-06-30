@@ -361,6 +361,29 @@ data Intrinsic
   | IntrFLength     -- ^ @flen :: IFile a -> <IO> Int@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
+  | IntrNext        -- ^ @next :: IStream a -> <IO> [a]@ -- materialise the
+                    -- current sub-packet and advance the cursor. Returns an
+                    -- empty list at EOF (further calls keep returning empty).
+  | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
+                    -- forward-only IStream from an open IFile, bound to the
+                    -- same path with an independent fd, mmap, and cursor.
+  | IntrWrite       -- ^ @write :: Int -> [a] -> OStream a -> <IO> ()@ --
+                    -- emit one sub-packet of element-list type. The Int is
+                    -- the zstd compression level (0 = uncompressed); the
+                    -- first @write fixes the level for the file's lifetime.
+  | IntrAppend      -- ^ @append :: Str -> <IO> (OStream a)@ -- open an
+                    -- existing stream file for append. Forward-scan recovers
+                    -- the resume cursor; mismatched element schemas error
+                    -- before any bytes are written.
+  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO> ()@ -- concatenate
+                    -- a sequence of stream files via sendfile, exploiting
+                    -- the stream-packet concat invariant.
+  | IntrFlush       -- ^ @flush :: OStream a -> <IO> ()@ -- force buffered
+                    -- writes to be emitted as a sub-packet immediately,
+                    -- without closing the stream. No-op on an empty
+                    -- buffer. Useful for tests that need deterministic
+                    -- packet boundaries and for user code that wants to
+                    -- make progress visible to concurrent readers.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -392,6 +415,12 @@ intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
 intrinsicName IntrFLength = "flen"
+intrinsicName IntrNext = "next"
+intrinsicName IntrStream = "stream"
+intrinsicName IntrWrite = "write"
+intrinsicName IntrAppend = "append"
+intrinsicName IntrConcat = "concat"
+intrinsicName IntrFlush = "flush"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
@@ -416,6 +445,12 @@ parseIntrinsic "fschema" = Just IntrFSchema
 -- IntrIFileWalk is compiler-internal (synthesized from `.[i] f`, `.foo f`,
 -- etc. by Express.hs and Nexus.hs); no entry here.
 parseIntrinsic "flen" = Just IntrFLength
+parseIntrinsic "next" = Just IntrNext
+parseIntrinsic "stream" = Just IntrStream
+parseIntrinsic "write" = Just IntrWrite
+parseIntrinsic "append" = Just IntrAppend
+parseIntrinsic "concat" = Just IntrConcat
+parseIntrinsic "flush" = Just IntrFlush
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -438,6 +473,12 @@ intrinsicArity IntrClose = 1
 intrinsicArity IntrFSchema = 1
 intrinsicArity IntrMap = 2
 intrinsicArity IntrFLength = 1
+intrinsicArity IntrNext = 1
+intrinsicArity IntrStream = 1
+intrinsicArity IntrWrite = 3
+intrinsicArity IntrAppend = 1
+intrinsicArity IntrConcat = 2
+intrinsicArity IntrFlush = 1
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

@@ -922,6 +922,33 @@ genericPrintExpr desc = go
     go (IIntrinsicFLength handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_ifile_length(" <> go handle <> ")"
+    go (IIntrinsicNext sid _ handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_next("
+            <> schemaRef sid <> ", " <> go handle <> ")"
+    go (IIntrinsicStream handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_stream(" <> go handle <> ")"
+    go (IIntrinsicOpenOStream sid path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_ostream("
+            <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicWrite sid level value handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_write("
+            <> schemaRef sid <> ", " <> go level
+            <> ", " <> go value <> ", " <> go handle <> ")"
+    go (IIntrinsicAppend sid path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_append("
+            <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicConcat paths dest) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_concat("
+            <> go paths <> ", " <> go dest <> ")"
+    go (IIntrinsicFlush handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_flush(" <> go handle <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R

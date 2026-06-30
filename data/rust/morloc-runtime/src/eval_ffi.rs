@@ -679,6 +679,72 @@ unsafe fn read_int_as_i64(
     }
 }
 
+/// Write an i64 into a destination slot whose schema is one of the
+/// fixed-width integer types or the inline BigInt `Int`. For the
+/// BigInt layout, we emit `[size=1, value=n]` (16 bytes) when n is
+/// non-zero, or `[size=0, 0]` when n is zero -- both fit the inline
+/// shape, no overflow relptr needed.
+///
+/// Used by intrinsic eval handlers (currently `@flen`) whose runtime
+/// return type is the user-facing `Int` -- writing only the low 8
+/// bytes would leave the high 8 bytes interpreted as a relptr to
+/// overflow limbs and the JSON encoder would dereference garbage.
+unsafe fn write_int_to_dest(
+    dest: AbsPtr,
+    schema: *const CSchema,
+    n: i64,
+) -> Result<(), MorlocError> {
+    use crate::schema::SerialType;
+    let stype = (*schema).serial_type;
+    if stype == SerialType::Int as u32 {
+        let size: usize = if n == 0 { 0 } else { 1 };
+        ptr::copy_nonoverlapping(
+            &size as *const usize as *const u8,
+            dest,
+            std::mem::size_of::<usize>(),
+        );
+        ptr::copy_nonoverlapping(
+            &n as *const i64 as *const u8,
+            dest.add(std::mem::size_of::<usize>()),
+            std::mem::size_of::<i64>(),
+        );
+        Ok(())
+    } else if stype == SerialType::Sint64 as u32 || stype == SerialType::Uint64 as u32 {
+        ptr::copy_nonoverlapping(
+            &n as *const i64 as *const u8,
+            dest,
+            std::mem::size_of::<i64>(),
+        );
+        Ok(())
+    } else if stype == SerialType::Sint32 as u32 {
+        let v = n as i32;
+        ptr::copy_nonoverlapping(&v as *const i32 as *const u8, dest, 4);
+        Ok(())
+    } else if stype == SerialType::Uint32 as u32 {
+        let v = n as u32;
+        ptr::copy_nonoverlapping(&v as *const u32 as *const u8, dest, 4);
+        Ok(())
+    } else if stype == SerialType::Sint16 as u32 {
+        let v = n as i16;
+        ptr::copy_nonoverlapping(&v as *const i16 as *const u8, dest, 2);
+        Ok(())
+    } else if stype == SerialType::Uint16 as u32 {
+        let v = n as u16;
+        ptr::copy_nonoverlapping(&v as *const u16 as *const u8, dest, 2);
+        Ok(())
+    } else if stype == SerialType::Sint8 as u32 {
+        *(dest as *mut i8) = n as i8;
+        Ok(())
+    } else if stype == SerialType::Uint8 as u32 {
+        *(dest as *mut u8) = n as u8;
+        Ok(())
+    } else {
+        Err(MorlocError::Other(format!(
+            "write_int_to_dest: schema type {} is not an integer", stype,
+        )))
+    }
+}
+
 /// Read an optional integer slot. RELNULL (or empty Optional schema)
 /// returns `None`; a present value returns `Some(read_int_as_i64)`.
 /// Non-Optional integer schemas pass through to `read_int_as_i64`.
@@ -1437,36 +1503,62 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Open => {
-            // IFile voidstar layout is the wire-form Array<u8>(path): the
-            // path bytes are copied into SHM and the Array header is laid
-            // into `dest`. Same shape every cross-pool packet payload
-            // uses, so a value flowing nexus -> pool through put_value /
-            // get_value round-trips byte-identically. Validation is
-            // lazy: the first downstream read goes through
-            // mlc_handle_unpack_path, which opens the file and surfaces
-            // any ENOENT / format error at that point. Eager validation
-            // here would force a redundant open whose handle is closed
-            // by the eval_arena at scope exit.
+            // Dispatch on handle kind. IFile's wire form is the path
+            // (Array<u8>); the receiving pool reopens locally. IStream
+            // needs a stable cursor and OStream cannot be reopened
+            // (O_EXCL), so for those the nexus opens once and stores
+            // the real i64 handle in dest.
             let open = (*expr).expr.open_expr;
+            let kind = (*open).kind;
             let path_expr = (*open).path;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
             let path_cstr = path_voidstar_to_cstr(path_result, "@open")?;
-            let path_len = libc::strlen(path_cstr);
-            let arr = if path_len == 0 {
-                shm::Array { size: 0, data: shm::RELNULL }
+
+            if kind == 0 {
+                // IFile: write the path Array<u8> wire form into dest.
+                // Lazy validation: the first downstream read goes
+                // through mlc_handle_unpack_path which opens and
+                // surfaces any ENOENT / format error then.
+                let path_len = libc::strlen(path_cstr);
+                let arr = if path_len == 0 {
+                    shm::Array { size: 0, data: shm::RELNULL }
+                } else {
+                    let data_abs = shm::shmemcpy(path_cstr as *const u8, path_len)?;
+                    shm::Array { size: path_len, data: shm::abs2rel(data_abs)? }
+                };
+                ptr::copy_nonoverlapping(
+                    &arr as *const shm::Array as *const u8,
+                    dest,
+                    std::mem::size_of::<shm::Array>(),
+                );
+                libc::free(path_cstr as *mut c_void);
             } else {
-                let data_abs = shm::shmemcpy(path_cstr as *const u8, path_len)?;
-                shm::Array { size: path_len, data: shm::abs2rel(data_abs)? }
-            };
-            ptr::copy_nonoverlapping(
-                &arr as *const shm::Array as *const u8,
-                dest,
-                std::mem::size_of::<shm::Array>(),
-            );
-            libc::free(path_cstr as *mut c_void);
-            // `kind` is currently always MLC_KIND_IFILE; future IStream /
-            // OStream paths will introduce their own intrinsic types.
-            let _ = (*open).kind;
+                // IStream / OStream: actually open via the runtime so
+                // the cursor / fd is stable across subsequent ops in
+                // this nexus scope. The eval_arena tracks and closes
+                // the handle when the scope ends.
+                extern "C" {
+                    fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
+                }
+                let mut err: *mut c_char = ptr::null_mut();
+                let handle = mlc_open(path_cstr, kind, &mut err);
+                libc::free(path_cstr as *mut c_void);
+                if handle < 0 {
+                    let msg = if !err.is_null() {
+                        let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                        libc::free(err as *mut c_void);
+                        m
+                    } else {
+                        format!("mlc_open(kind={}) returned -1 without errmsg", kind)
+                    };
+                    return Err(MorlocError::Other(msg));
+                }
+                ptr::copy_nonoverlapping(
+                    &handle as *const i64 as *const u8,
+                    dest,
+                    std::mem::size_of::<i64>(),
+                );
+            }
         }
 
         MorlocExpressionType::Close => {
@@ -1546,9 +1638,56 @@ unsafe fn morloc_eval_r(
                 };
                 return Err(MorlocError::Other(msg));
             }
-            // Write n as i64 into the dest slot.
+            write_int_to_dest(dest, schema, n)?;
+        }
+
+        MorlocExpressionType::Next => {
+            extern "C" {
+                fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+            }
+            let handle_expr = (*expr).expr.unary_expr;
+            let handle_schema = (*handle_expr).schema;
+            let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
+            let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
+            let mut err: *mut c_char = ptr::null_mut();
+            let voidstar = mlc_next(handle_i, &mut err);
+            if voidstar.is_null() {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_next returned NULL".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            let result_rs = crate::cschema::CSchema::to_rust(schema);
+            crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
+            let _ = shm::shfree(voidstar as shm::AbsPtr);
+        }
+
+        MorlocExpressionType::Stream => {
+            extern "C" {
+                fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
+            }
+            let handle_expr = (*expr).expr.unary_expr;
+            let handle_schema = (*handle_expr).schema;
+            let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
+            let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
+            let mut err: *mut c_char = ptr::null_mut();
+            let new_h = mlc_stream(handle_i, &mut err);
+            if new_h < 0 {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_stream returned -1".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
             ptr::copy_nonoverlapping(
-                &n as *const i64 as *const u8,
+                &new_h as *const i64 as *const u8,
                 dest,
                 std::mem::size_of::<i64>(),
             );
@@ -1621,8 +1760,243 @@ unsafe fn morloc_eval_r(
             let _ = shm::shfree(voidstar as shm::AbsPtr);
         }
 
-        _ => {
-            return Err(MorlocError::Other("Illegal top expression".into()));
+        MorlocExpressionType::OpenOStream => {
+            // Typed OStream open: schema (parsed CSchema sitting in
+            // expr.schema) + path expression on open_expr. Serialise
+            // the schema back to its canonical string for the runtime
+            // entry, then store the returned i64 handle in dest.
+            extern "C" {
+                fn mlc_open_ostream(
+                    schema_str: *const c_char,
+                    path: *const c_char,
+                    errmsg: *mut *mut c_char,
+                ) -> i64;
+                fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
+            }
+            let open = (*expr).expr.open_expr;
+            let path_expr = (*open).path;
+            let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
+            let path_cstr = path_voidstar_to_cstr(path_result, "@open OStream")?;
+            let schema_cstr = schema_to_string(schema);
+            if schema_cstr.is_null() {
+                libc::free(path_cstr as *mut c_void);
+                return Err(MorlocError::Other(
+                    "@open OStream: schema_to_string returned NULL".into(),
+                ));
+            }
+            let mut err: *mut c_char = ptr::null_mut();
+            let handle = mlc_open_ostream(schema_cstr, path_cstr, &mut err);
+            libc::free(path_cstr as *mut c_void);
+            libc::free(schema_cstr as *mut c_void);
+            if handle < 0 {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_open_ostream returned -1 without errmsg".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            ptr::copy_nonoverlapping(
+                &handle as *const i64 as *const u8,
+                dest,
+                std::mem::size_of::<i64>(),
+            );
+        }
+
+        MorlocExpressionType::Write => {
+            // @write: layout via ifile_walk_expr -- handle in .handle,
+            // args[0] = level, args[1] = value (a `[a]` voidstar).
+            extern "C" {
+                fn mlc_write(
+                    level: u8, handle: i64,
+                    payload_voidstar: *const c_void,
+                    errmsg: *mut *mut c_char,
+                ) -> i32;
+            }
+            let w = (*expr).expr.ifile_walk_expr;
+            let handle_expr = (*w).handle;
+            let handle_schema = (*handle_expr).schema;
+            let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
+            let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
+            if (*w).n_args < 2 || (*w).args.is_null() {
+                return Err(MorlocError::Other(
+                    "@write: missing level or value args (manifest corruption)".into(),
+                ));
+            }
+            let level_expr = *(*w).args.add(0);
+            let value_expr = *(*w).args.add(1);
+            let level_schema = (*level_expr).schema;
+            let level_ptr = morloc_eval_r(level_expr, ptr::null_mut(), 0, bndvars)?;
+            let level_i = read_int_as_i64(level_ptr, level_schema)?;
+            let value_voidstar = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
+            let mut err: *mut c_char = ptr::null_mut();
+            let rc = mlc_write(level_i as u8, handle_i, value_voidstar as *const c_void, &mut err);
+            if rc != 0 {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_write returned non-zero without errmsg".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            // Return unit (zero-fill dest).
+            ptr::write_bytes(dest, 0, width);
+        }
+
+        MorlocExpressionType::Append => {
+            extern "C" {
+                fn mlc_append(
+                    schema_str: *const c_char,
+                    path: *const c_char,
+                    errmsg: *mut *mut c_char,
+                ) -> i64;
+                fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
+            }
+            let open = (*expr).expr.open_expr;
+            let path_expr = (*open).path;
+            let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
+            let path_cstr = path_voidstar_to_cstr(path_result, "@append")?;
+            let schema_cstr = schema_to_string(schema);
+            if schema_cstr.is_null() {
+                libc::free(path_cstr as *mut c_void);
+                return Err(MorlocError::Other(
+                    "@append: schema_to_string returned NULL".into(),
+                ));
+            }
+            let mut err: *mut c_char = ptr::null_mut();
+            let handle = mlc_append(schema_cstr, path_cstr, &mut err);
+            libc::free(path_cstr as *mut c_void);
+            libc::free(schema_cstr as *mut c_void);
+            if handle < 0 {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_append returned -1 without errmsg".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            ptr::copy_nonoverlapping(
+                &handle as *const i64 as *const u8,
+                dest,
+                std::mem::size_of::<i64>(),
+            );
+        }
+
+        MorlocExpressionType::Concat => {
+            // @concat: ifile_walk_expr layout -- handle = paths
+            // (a `[Str]` voidstar Array<Array<u8>>), args[0] = dest path.
+            extern "C" {
+                fn mlc_concat(
+                    paths: *const *const c_char,
+                    n_paths: usize,
+                    dest: *const c_char,
+                    errmsg: *mut *mut c_char,
+                ) -> i32;
+            }
+            let w = (*expr).expr.ifile_walk_expr;
+            let paths_expr = (*w).handle;
+            if (*w).n_args < 1 || (*w).args.is_null() {
+                return Err(MorlocError::Other(
+                    "@concat: missing dest arg (manifest corruption)".into(),
+                ));
+            }
+            let dest_expr = *(*w).args.add(0);
+            let paths_result = morloc_eval_r(paths_expr, ptr::null_mut(), 0, bndvars)?;
+            let dest_result = morloc_eval_r(dest_expr, ptr::null_mut(), 0, bndvars)?;
+            let dest_cstr = path_voidstar_to_cstr(dest_result, "@concat dest")?;
+
+            // Unpack the `[Str]` voidstar at paths_result. Each element
+            // is an Array<u8> path. Build a Vec<CString> + Vec<*const c_char>.
+            let paths_arr = &*(paths_result as *const shm::Array);
+            let n = paths_arr.size;
+            let mut owned: Vec<*mut c_char> = Vec::with_capacity(n);
+            let mut raw: Vec<*const c_char> = Vec::with_capacity(n);
+            let elem_data = if n > 0 {
+                shm::rel2abs(paths_arr.data)?
+            } else {
+                ptr::null_mut()
+            };
+            for i in 0..n {
+                let elem_ptr = (elem_data as *const u8)
+                    .add(i * std::mem::size_of::<shm::Array>())
+                    as *const shm::Array;
+                let one = path_voidstar_to_cstr(
+                    elem_ptr as shm::AbsPtr,
+                    "@concat path element",
+                )?;
+                owned.push(one);
+                raw.push(one);
+            }
+
+            let mut err: *mut c_char = ptr::null_mut();
+            let rc = mlc_concat(
+                if raw.is_empty() { ptr::null() } else { raw.as_ptr() },
+                n,
+                dest_cstr,
+                &mut err,
+            );
+            for p in owned { libc::free(p as *mut c_void); }
+            libc::free(dest_cstr as *mut c_void);
+            if rc != 0 {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_concat returned non-zero without errmsg".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            // Return unit.
+            ptr::write_bytes(dest, 0, width);
+        }
+
+        MorlocExpressionType::Flush => {
+            extern "C" {
+                fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
+            }
+            let handle_expr = (*expr).expr.unary_expr;
+            let handle_schema = (*handle_expr).schema;
+            let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
+            let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
+            let mut err: *mut c_char = ptr::null_mut();
+            let rc = mlc_flush(handle_i, &mut err);
+            if rc != 0 {
+                let msg = if !err.is_null() {
+                    let s = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    s
+                } else {
+                    "mlc_flush returned non-zero with no error message".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            ptr::write_bytes(dest, 0, width);
+        }
+
+        other => {
+            // Catch-all: the manifest carried an expression type that
+            // this eval handler doesn't recognise. Include the
+            // numeric tag and the variant name so the diagnostic
+            // points at the missing case (typically: new JSON tag was
+            // added on the codegen side, MorlocExpressionType variant
+            // was added on the runtime side, but the eval_ffi match
+            // arm wasn't wired -- this is the symptom).
+            return Err(MorlocError::Other(format!(
+                "eval_ffi: no handler for MorlocExpressionType::{:?} \
+                 (numeric tag {}). The manifest references an \
+                 expression kind this runtime build doesn't implement \
+                 -- either the morloc compiler emitted a tag the \
+                 runtime doesn't know, or the eval_ffi.rs match arm \
+                 for this variant is missing.",
+                other, other as u32,
+            )));
         }
     }
 

@@ -2107,6 +2107,139 @@ SEXP morloc_mlc_ifile_length(SEXP handle_r) { MAYFAIL
     return result;
 }
 
+// @next: materialise the IStream's current sub-packet into R-side
+// `[a]`, advancing the cursor. Mirrors mlc_ifile_walk's shfree-deferred
+// pattern so from_voidstar can produce zero-copy views.
+SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_next: schema must be a single string");
+    }
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_ERROR("mlc_next: handle must be a single number");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t handle = i64_from_sexp(handle_r);
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    void* voidstar = R_TRY(mlc_next, handle);
+    if (voidstar == NULL) {
+        free_schema(schema);
+        return R_NilValue;
+    }
+    SEXP result = from_voidstar(voidstar, schema, NULL);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return result;
+}
+
+SEXP morloc_mlc_stream(SEXP ifile_handle_r) { MAYFAIL
+    if ((TYPEOF(ifile_handle_r) != INTSXP && TYPEOF(ifile_handle_r) != REALSXP)
+        || LENGTH(ifile_handle_r) != 1) {
+        MORLOC_ERROR("mlc_stream: ifile handle must be a single number");
+    }
+    int64_t ifh = i64_from_sexp(ifile_handle_r);
+    int64_t new_h = R_TRY(mlc_stream, ifh);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)new_h;
+    UNPROTECT(1);
+    return result;
+}
+
+// @open path :: <IO> (OStream T) -- typed open binding.
+SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_open_ostream: schema must be a single string");
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("mlc_open_ostream: path must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    int64_t h = R_TRY(mlc_open_ostream, schema_str, path);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)h;
+    UNPROTECT(1);
+    return result;
+}
+
+// @write: serialise value to voidstar, emit one sub-packet.
+SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_write: schema must be a single string");
+    }
+    if ((TYPEOF(level_r) != INTSXP && TYPEOF(level_r) != REALSXP)
+        || LENGTH(level_r) != 1) {
+        MORLOC_ERROR("mlc_write: level must be a single number");
+    }
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP)
+        || LENGTH(handle_r) != 1) {
+        MORLOC_ERROR("mlc_write: handle must be a single number");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t handle = i64_from_sexp(handle_r);
+    uint8_t level = (uint8_t)i64_from_sexp(level_r);
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    size_t bytes = get_shm_size(schema, value_r);
+    void* voidstar = R_TRY(shmalloc, bytes);
+    void* cursor = (uint8_t*)voidstar + schema->width;
+    to_voidstar_inner(voidstar, &cursor, value_r, schema);
+    R_TRY(mlc_write, level, handle, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_append: schema must be a single string");
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_ERROR("mlc_append: path must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    int64_t h = R_TRY(mlc_append, schema_str, path);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)h;
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_mlc_concat(SEXP paths_r, SEXP dest_r) { MAYFAIL
+    if (TYPEOF(paths_r) != STRSXP) {
+        MORLOC_ERROR("mlc_concat: paths must be a character vector");
+    }
+    if (TYPEOF(dest_r) != STRSXP || LENGTH(dest_r) != 1) {
+        MORLOC_ERROR("mlc_concat: dest must be a single string");
+    }
+    R_xlen_t n = XLENGTH(paths_r);
+    const char** raw = NULL;
+    if (n > 0) {
+        raw = (const char**)R_alloc((size_t)n, sizeof(char*));
+        for (R_xlen_t i = 0; i < n; i++) {
+            raw[i] = CHAR(STRING_ELT(paths_r, i));
+        }
+    }
+    R_TRY(mlc_concat, raw, (size_t)n, CHAR(STRING_ELT(dest_r, 0)));
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_flush(SEXP handle_r) { MAYFAIL
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_ERROR("mlc_flush: handle must be a single number");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    R_TRY(mlc_flush, handle);
+    return R_NilValue;
+}
+
 
 // mlc_show: serialize a value to a JSON string
 SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
@@ -3197,6 +3330,13 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_fschema", (DL_FUNC) &morloc_mlc_fschema, 1},
         {"morloc_mlc_ifile_walk", (DL_FUNC) &morloc_mlc_ifile_walk, 4},
         {"morloc_mlc_ifile_length", (DL_FUNC) &morloc_mlc_ifile_length, 1},
+        {"morloc_mlc_next", (DL_FUNC) &morloc_mlc_next, 2},
+        {"morloc_mlc_stream", (DL_FUNC) &morloc_mlc_stream, 1},
+        {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},
+        {"morloc_mlc_write", (DL_FUNC) &morloc_mlc_write, 4},
+        {"morloc_mlc_append", (DL_FUNC) &morloc_mlc_append, 2},
+        {"morloc_mlc_concat", (DL_FUNC) &morloc_mlc_concat, 2},
+        {"morloc_mlc_flush", (DL_FUNC) &morloc_mlc_flush, 1},
         {"morloc_mlc_save_voidstar", (DL_FUNC) &morloc_mlc_save_voidstar, 4},
         {"morloc_mlc_save", (DL_FUNC) &morloc_mlc_save, 4},
         {"morloc_mlc_save_json", (DL_FUNC) &morloc_mlc_save_json, 4},

@@ -444,6 +444,104 @@ T _mlc_ifile_walk(
     return result;
 }
 
+// @next: materialise the IStream's current sub-packet as `[a]` and
+// advance the cursor. Empty list at EOF.
+template <typename T>
+T _mlc_next(Schema* schema, int64_t handle) {
+    char* errmsg = NULL;
+    void* voidstar = mlc_next(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    T* dummy = nullptr;
+    T result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
+// @stream: derive an IStream handle from an open IFile handle.
+inline int64_t _mlc_stream(int64_t ifile_handle) {
+    char* errmsg = NULL;
+    int64_t h = mlc_stream(ifile_handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+// @open path :: <IO> (OStream T) -- typed open. The schema string for T
+// is baked into the codegen and passed alongside the path. We serialise
+// the parsed Schema back to its canonical string via libmorloc's
+// `schema_to_string` helper.
+inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) {
+        throw std::runtime_error("_mlc_open_ostream: schema_to_string returned NULL");
+    }
+    int64_t h = mlc_open_ostream(s, path.c_str(), &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+// @write: serialize T to voidstar and emit one sub-packet.
+template <typename T>
+inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+    char* errmsg = NULL;
+    // Stage value into a SHM block via to_voidstar so the runtime can
+    // read it as a contiguous voidstar payload. The eval_arena tracks
+    // the allocation; we shfree explicitly after the runtime is done.
+    size_t bytes = get_shm_size(schema, value);
+    void* voidstar = shmalloc_cpp(bytes);
+    void* cursor = (uint8_t*)voidstar + schema->width;
+    to_voidstar(voidstar, &cursor, schema, value);
+    int rc = mlc_write(static_cast<uint8_t>(level), handle, voidstar, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (rc != 0) {
+        throw std::runtime_error("mlc_write failed with no errmsg");
+    }
+}
+
+// @append: open existing file for append; schema must match.
+inline int64_t _mlc_append(Schema* schema, const std::string& path) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) {
+        throw std::runtime_error("_mlc_append: schema_to_string returned NULL");
+    }
+    int64_t h = mlc_append(s, path.c_str(), &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+// @concat: byte-level concat of stream files via sendfile.
+inline void _mlc_concat(const std::vector<std::string>& paths, const std::string& dest) {
+    char* errmsg = NULL;
+    std::vector<const char*> raw_paths;
+    raw_paths.reserve(paths.size());
+    for (const auto& p : paths) {
+        raw_paths.push_back(p.c_str());
+    }
+    int rc = mlc_concat(
+        raw_paths.empty() ? nullptr : raw_paths.data(),
+        raw_paths.size(),
+        dest.c_str(),
+        &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (rc != 0) {
+        throw std::runtime_error("mlc_concat failed with no errmsg");
+    }
+}
+
+// @flush: force buffered writes to be emitted as a sub-packet now.
+inline void _mlc_flush(int64_t handle) {
+    char* errmsg = NULL;
+    int rc = mlc_flush(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (rc != 0) {
+        throw std::runtime_error("mlc_flush failed with no errmsg");
+    }
+}
+
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     char* errmsg = NULL;
     va_list args;

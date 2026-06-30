@@ -62,6 +62,16 @@ pub enum MorlocExpressionType {
                       // Unified IFile pattern walker; the path encodes the
                       // walk chain (".[]", ".[:]", ".1.foo", etc.) and the
                       // args list carries bracket bounds.
+    Next = 17,        // IStream handle -> [a]. Materialise current sub-packet
+                      // and advance the cursor; empty list at EOF.
+    Stream = 18,      // IFile handle -> IStream handle. Derive a forward-only
+                      // IStream bound to the same path.
+    OpenOStream = 19, // schema_str + path -> OStream handle (typed open).
+    Write = 20,       // (level, value, handle) -> (). Emit one sub-packet
+                      // of element-list type [a] to the OStream.
+    Append = 21,      // schema_str + path -> OStream handle (append mode).
+    Concat = 22,      // [paths] + dest -> (). Byte-level stream concat.
+    Flush = 23,       // handle -> (). Force buffered writes out as a sub-packet.
 }
 
 #[repr(C)]
@@ -217,6 +227,7 @@ pub struct MorlocIFileWalkExpression {
     pub args: *mut *mut MorlocExpression,
     pub n_args: u64,
 }
+
 
 #[repr(C)]
 pub union ExprUnion {
@@ -814,8 +825,12 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         }
 
         "save" => {
-            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            // @save returns `<IO> ()` (Unit). Use the sentinel "z" (Nil)
+            // schema for the expression slot so `morloc_eval_r`'s width
+            // check matches the Unit dest the caller allocates. The
+            // value's own schema travels on `value_expr.schema` and is
+            // read by the Save handler from there.
+            let c_schema_str = CString::new("z").unwrap();
             let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
             if !err.is_null() {
                 let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
@@ -1024,6 +1039,170 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::IFileWalk;
             (*expr).schema = schema;
             (*expr).expr.ifile_walk_expr = w;
+            Ok(expr)
+        }
+
+        "next" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Next;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
+        "stream" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Stream;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
+        "open_ostream" => {
+            // OStream typed-open: schema + path. We keep the schema in
+            // expr.schema (the parsed CSchema) and the path expression in
+            // open_expr. The eval handler dispatches on kind == OSTREAM
+            // to mlc_open_ostream, deriving the schema string from the
+            // parsed schema via schema_to_string.
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
+            let oe = libc::calloc(1, std::mem::size_of::<MorlocOpenExpression>()) as *mut MorlocOpenExpression;
+            (*oe).kind = 2; // MLC_KIND_OSTREAM
+            (*oe).path = path;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::OpenOStream;
+            (*expr).schema = schema;
+            (*expr).expr.open_expr = oe;
+            Ok(expr)
+        }
+
+        "write" => {
+            // The morloc-level return is `<IO> ()` (Unit); the schema slot
+            // must still be non-null because `morloc_eval_r`'s entry reads
+            // `(*schema).width` to size the dest buffer. Sentinel "z" (Nil)
+            // mirrors the Close/Concat handlers. The value's own type
+            // schema travels on `value_expr.schema`, set by `build_expr`.
+            //
+            // The JSON's "schema" field carries the value's type for
+            // tooling and is intentionally ignored here.
+            let c_schema_str = CString::new("z").unwrap();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let level = build_expr(je.get("level").unwrap_or(&serde_json::Value::Null))?;
+            let value = build_expr(je.get("value").unwrap_or(&serde_json::Value::Null))?;
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let args_vec: Vec<*mut MorlocExpression> = vec![level, value];
+            let n_args = args_vec.len() as u64;
+            let boxed = args_vec.into_boxed_slice();
+            let args_ptr = Box::into_raw(boxed) as *mut *mut MorlocExpression;
+            let w = libc::calloc(1, std::mem::size_of::<MorlocIFileWalkExpression>()) as *mut MorlocIFileWalkExpression;
+            (*w).handle = handle;
+            (*w).path = ptr::null_mut();
+            (*w).args = args_ptr;
+            (*w).n_args = n_args;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Write;
+            (*expr).schema = schema;
+            (*expr).expr.ifile_walk_expr = w;
+            Ok(expr)
+        }
+
+        "append" => {
+            // Mirror of open_ostream: schema in expr.schema, path in open_expr.
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
+            let oe = libc::calloc(1, std::mem::size_of::<MorlocOpenExpression>()) as *mut MorlocOpenExpression;
+            (*oe).kind = 2; // MLC_KIND_OSTREAM (append always opens as OSTREAM)
+            (*oe).path = path;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Append;
+            (*expr).schema = schema;
+            (*expr).expr.open_expr = oe;
+            Ok(expr)
+        }
+
+        "concat" => {
+            // paths + dest. We piggyback on ifile_walk_expr: handle slot
+            // holds the paths expression, args[0] holds the dest expression.
+            // The morloc-level return is `<IO> ()` (Unit); the schema slot
+            // must still be non-null because `morloc_eval_r`'s entry reads
+            // `(*schema).width` to size the dest buffer. Sentinel "z" (Nil)
+            // mirrors the Close handler.
+            let c_schema_str = CString::new("z").unwrap();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let paths = build_expr(je.get("paths").unwrap_or(&serde_json::Value::Null))?;
+            let dest = build_expr(je.get("dest").unwrap_or(&serde_json::Value::Null))?;
+            let args_vec: Vec<*mut MorlocExpression> = vec![dest];
+            let boxed = args_vec.into_boxed_slice();
+            let args_ptr = Box::into_raw(boxed) as *mut *mut MorlocExpression;
+            let w = libc::calloc(1, std::mem::size_of::<MorlocIFileWalkExpression>()) as *mut MorlocIFileWalkExpression;
+            (*w).handle = paths;
+            (*w).path = ptr::null_mut();
+            (*w).args = args_ptr;
+            (*w).n_args = 1;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Concat;
+            (*expr).schema = schema;
+            (*expr).expr.ifile_walk_expr = w;
+            Ok(expr)
+        }
+
+        "flush" => {
+            // Mirrors `close` but lowers to MorlocExpressionType::Flush.
+            // Returns Unit; sentinel "z" schema slot.
+            let c_schema_str = CString::new("z").unwrap();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Flush;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
             Ok(expr)
         }
 

@@ -3420,16 +3420,6 @@ effectSubtypeTests =
       , assertSubtypeGamma "deferral: <IO,Error> A <: <e1> A passes (var on right)"
           [] (ioErrEff a) (effVar "e1" a) []
 
-        -- === Effect row may fill an inferred type variable ===
-        -- A non-empty effect row solves a bare existential (mirrors the
-        -- ExistU <: EffectU direction).  This lets a generic combinator
-        -- ($, ., id) thread an effectful value through a type variable;
-        -- the over-broad rejection here previously broke `f $ effExpr`.
-        -- Soundness is enforced where serialization happens, not here.
-      , assertSubtypeOk "effect into tyvar: <a> -| <Error> A <: <a> accepted"
-          [eag] (errEff a) ea
-      , assertSubtypeOk "effect into tyvar: <a> -| <IO,Error> A <: <a> accepted"
-          [eag] (ioErrEff a) ea
         -- ...but a genuinely effectful value still cannot satisfy a
         -- concrete non-effect type (that rejection is unchanged).
       , assertSubtypeBad "effect into concrete still rejected: <Error> A </: A"
@@ -3857,7 +3847,9 @@ effectPartialApplicationTests =
         effect IO
         foo :: a -> b -> c -> a
         bar :: Str -> <IO> Str
-        f1 = foo (bar "hi")
+        f1 y z = do
+          x <- bar "hi"
+          foo x y z
           |]
           (fun [exist "a", exist "b", ioEff str])
 
@@ -3872,7 +3864,9 @@ effectPartialApplicationTests =
         effect IO
         foo :: a -> b -> c -> a
         bar :: Str -> <IO> Str
-        f2 = foo 42 (bar "hi")
+        f2 y = do
+          x <- bar "hi"
+          foo 42 x y
           |]
           (fun [exist "a", ioEff int])
 
@@ -3886,7 +3880,9 @@ effectPartialApplicationTests =
         effect IO
         foo :: a -> b -> c -> a
         bar :: Str -> <IO> Str
-        f3 = foo 42 (bar "hi") True
+        f3 = do
+          x <- bar "hi"
+          foo 42 x True
           |]
           (ioEff int)
 
@@ -3902,7 +3898,10 @@ effectPartialApplicationTests =
         foo :: a -> b -> c -> a
         bar :: Str -> <IO> Str
         qux :: Str -> <IO> Str
-        f4 = foo (bar "hi") (qux "by")
+        f4 z = do
+          x <- bar "hi"
+          y <- qux "by"
+          foo x y z
           |]
           (fun [exist "a", ioEff str])
 
@@ -3918,7 +3917,10 @@ effectPartialApplicationTests =
         foo :: a -> b -> c -> a
         bar :: Str -> <IO> Str
         qux :: Str -> <Error> Str
-        f6 = foo 1 (bar "hi") (qux "by")
+        f6 = do
+          x <- bar "hi"
+          y <- qux "by"
+          foo 1 x y 
           |]
           (ioErrEff int)
 
@@ -3933,9 +3935,9 @@ effectPartialApplicationTests =
         effect IO
         foo :: a -> b -> c -> a
         bar :: Str -> <IO> Str
-        f5 =
-          let x = bar "hi"
-          in foo 42 x True
+        f5 = do
+          x <- bar "hi"
+          foo 42 x True
           |]
           (ioEff int)
 

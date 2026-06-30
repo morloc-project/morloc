@@ -1,0 +1,42 @@
+-- Variable-width element types (e.g. Str) exercise the buffer's
+-- index + data section layout: each element's inline part lives
+-- in the index section (16 B per Str = {size, relptr}); each
+-- element's variable bytes live in the data section. The flush
+-- path compacts the wasted index space and shifts inline relptrs
+-- to point at their data in the compacted output.
+--
+-- Two @writes with strings of different lengths exercise that
+-- the runtime correctly:
+--   * appends inline {size, relptr} pairs to the index
+--   * copies variable str bytes into the data section
+--   * shifts each str's relptr at flush time to be packet-relative
+--
+-- All five strings must round-trip identically.
+
+module main
+  ( testStringsRoundtrip
+  , testStringsCount
+  )
+
+import root
+
+writeStrings :: Str -> <IO> ()
+writeStrings path = do
+  o <- @open path :: <IO> OStream Str
+  @write 0 ["apple", "banana", "cherry"] o
+  @write 0 ["date", "elderberry"] o
+  @close o
+
+-- Coalesces into one sub-packet via the buffer; reader sees
+-- all five strings in order.
+testStringsRoundtrip :: Str -> <IO> [Str]
+testStringsRoundtrip path = do
+  writeStrings path
+  s <- @open path :: <IO> IStream Str
+  @next s
+
+testStringsCount :: Str -> <IO> Int
+testStringsCount path = do
+  writeStrings path
+  s <- @open path :: <IO> IStream Str
+  @flen s

@@ -1,6 +1,5 @@
 all:
-	rm -f *.err
-	: > obs.txt
+	rm -f *.err obs.txt
 	rm -f /tmp/ifile-pat-*.dat
 	morloc make -o nexus main.loc 2> build.err
 	./nexus testIntIndex          "/tmp/ifile-pat-int-index.dat"      >> obs.txt 2>> obs.err

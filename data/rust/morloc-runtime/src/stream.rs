@@ -1,29 +1,31 @@
 //! Stream registry, IFile mmap management, and file-targeting pattern
 //! walker support for the streaming I/O system.
 //!
-//! ## Scope (v1)
+//! ## Scope
 //!
-//! - **Process-local registry**: one `Mutex<StreamRegistry>` per
-//!   libmorloc.so instance. Each pool process has its own slot table.
-//!   Cross-pool sharing of decompression work is deferred to v2 (kernel
-//!   pagecache already shares the underlying file bytes across pools that
-//!   mmap the same path).
-//! - **Handle layout**: `(generation << 16) | slot`. Generation is per-slot
-//!   and bumps by a random salt step on each close; double-close,
-//!   foreign-int collision, and ABA reuse all return a clean error.
-//! - **IFile only** in this stage: `mlc_open` for `MLC_KIND_ISTREAM` and
-//!   `MLC_KIND_OSTREAM` returns a clear "not yet implemented" error and
-//!   will be filled in by Stages 3 and 4.
-//! - **Voidstar-only sub-packets**: `open_ifile` rejects a stream whose
+//! - **Shared SHM registry**: one slot table per nexus invocation in a
+//!   reserved SHM volume; all pools attach to the same table. Cross-pool
+//!   sharing of compressed bytes is handled by the kernel pagecache (every
+//!   pool mmaps the same file); the SHM cache holds decompressed
+//!   sub-packets per handle to avoid redundant zstd work.
+//! - **Handle layout**: `(generation << 16) | slot`. Generation occupies
+//!   47 bits (bit 63 stays clear so negative i64 is reserved for the FFI
+//!   error sentinel) and bumps by a salted random step on each close;
+//!   double-close, foreign-int collision, and ABA reuse all return a
+//!   clean error.
+//! - **IFile / IStream / OStream** all implemented against the shared
+//!   registry; cross-pool writers/readers share the SHM-resident
+//!   sub-packet index under each slot's futex.
+//! - **Voidstar-only sub-packets**: open paths reject a stream whose
 //!   first sub-packet's format byte is not `PACKET_FORMAT_VOIDSTAR`.
 //!
-//! ## Future-extension hooks
+//! ## Per-handle caches
 //!
-//! - `StreamEntry::cache` is the per-handle LRU; today it is allocated but
-//!   not consulted (walker lands in task #13).
-//! - `subpacket_index` is built greedily at open time (cheap for small N,
-//!   acceptable for the million-sub-packet case at ~8 MiB). v2 may stream-
-//!   populate it on demand.
+//! - `ProcessLocalSlot::cache` is the per-handle decompressed-sub-packet
+//!   LRU; consulted by `cache_get_or_materialize` and survives across
+//!   bracket accesses (refcount-shared with caller via `shincref`).
+//! - `subpacket_index_local` is built greedily at open time (cheap for
+//!   small N, acceptable for the million-sub-packet case at ~8 MiB).
 
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
@@ -59,27 +61,3109 @@ use crate::voidstar;
 /// Aligns with the architectural commitment of a 16-bit slot index.
 pub const STREAM_SLOT_COUNT: usize = 65_536;
 
-/// State markers for a slot. `OPEN` slots are eligible for operations;
-/// `CLOSED` is freed and re-allocatable; `INVALIDATED` is reserved for
-/// future use (e.g. daemon-recovery invalidation).
-// SLOT_STATE_FREE is implicit -- a Vec<Option<StreamEntry>> slot at None
-// is free. The state byte on an OPEN entry exists so future v2 work
-// (SHM-shared registry) can distinguish OPEN from INVALIDATED without
-// dropping the entry; in v1 it's always OPEN for occupied slots.
-const SLOT_STATE_OPEN: u8 = 1;
+/// Default slot count for the shared SHM stream registry. Overridable
+/// via `MORLOC_REGISTRY_SLOT_COUNT`. 4096 covers realistic workloads
+/// (hundreds of concurrent open files at peak); the env override is
+/// for niche cases where a single nexus invocation needs more.
+pub const STREAM_REGISTRY_DEFAULT_SLOT_COUNT: usize = 4096;
+
+/// Maximum slot count the registry will honour (16-bit slot index).
+/// Hard cap mirrors `STREAM_SLOT_COUNT`; the user can request fewer
+/// via the env var but never more.
+pub const STREAM_REGISTRY_MAX_SLOT_COUNT: usize = STREAM_SLOT_COUNT;
+
+/// Fixed on-disk size of one `RegistrySlot`. The actual struct carries
+/// a `#[repr(C, align(64))]` annotation and a `const_assert!` so the
+/// layout matches this constant; pinning the size as a constant
+/// decouples the volume-size computation from the field-by-field
+/// struct layout.
+pub const STREAM_ENTRY_SIZE: usize = 512;
+
+/// Default OStream write-buffer capacity in bytes. Each `@write`
+/// appends its elements to this SHM-resident per-slot buffer; when
+/// the buffer fills, contents are flushed as a single sub-packet.
+/// Overridable via `MORLOC_WRITE_BUFFER_BYTES`.
+///
+/// 16 MiB matches the planfile's FRAME_CHUNK_SIZE: large enough for
+/// zstd to build a useful compression dictionary, small enough that
+/// a single buffer doesn't dominate per-slot memory. With 4096 slots
+/// fully populated the worst-case total is 64 GiB -- normal workloads
+/// have only a handful of OStreams open at once.
+pub const WRITE_BUFFER_BYTES_DEFAULT: usize = 16 * 1024 * 1024;
+
+/// Initial capacity (number of elements) of the buffer's index
+/// section. The index section is preallocated so growth happens by
+/// doubling (amortised O(1) per element) rather than by reallocating
+/// on every @write. 1024 covers most small @write call sequences
+/// without resize; larger workloads pay the doubling cost a handful
+/// of times to reach their working set.
+pub const WRITE_BUFFER_INDEX_INITIAL_CAP: u64 = 1024;
+
+/// Initial capacity (number of u64 entries) of an OStream slot's
+/// SHM-resident sub-packet index. Sub-packet boundaries from every
+/// writer pool append here under the slot futex; @close reads it to
+/// build the file's final footer. Grows by doubling. 16 covers the
+/// common "open + a few flushes + close" shape without resize; larger
+/// workloads pay the doubling cost a handful of times.
+pub const OSTREAM_SUBPACKET_INDEX_INITIAL_CAP: u64 = 16;
 
 /// Default cache capacity (bytes) for decompressed sub-packets per
 /// handle. Overridable via `MORLOC_IFILE_CACHE_BYTES`.
 const DEFAULT_IFILE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
+// ── Shared SHM stream registry: bootstrap ────────────────────────────────
+//
+// The registry lives in a dedicated SHM volume (`STREAM_REGISTRY_VOLUME`)
+// allocated once per nexus invocation. Layout of the volume's data
+// region:
+//
+//   offset 0:                 RegistryHeader (64 bytes)
+//   offset 64:                slot[0]
+//   offset 64 + N*512:        slot[N-1]
+//
+// All slot fields are atomically accessed. The header holds the `magic`
+// gate that publishes "init is complete" to attaching processes plus the
+// slot count (so attaching processes know the volume bounds without
+// re-reading the env).
+//
+// The volume is created by the FIRST process to call `registry_init()`
+// for a given nexus session. Other processes (typically pool daemons)
+// call `registry_attach()`, which uses the existing `shopen` machinery
+// and then spin-waits on the magic gate.
+
+/// Header at offset 0 of the registry volume's data region. Pinned at
+/// 64 bytes (one cache line) so it doesn't share a line with slot[0].
+///
+/// `magic` is the publication gate: the bootstrap winner writes
+/// `STREAM_REGISTRY_MAGIC` with `Release` ordering AFTER zero-init'ing
+/// the slot array. Attaching processes Acquire-load `magic` in a spin
+/// loop; once the magic is observed, all subsequent reads of slot
+/// fields happen-after the winner's zeroing.
+#[repr(C, align(64))]
+struct RegistryHeader {
+    /// Publication gate. Zero until the bootstrap winner completes
+    /// initialization, then `STREAM_REGISTRY_MAGIC`.
+    magic:        std::sync::atomic::AtomicU64,
+
+    /// Number of slots in the slot array following this header.
+    /// Written by the bootstrap winner BEFORE `magic`; readers see
+    /// it as part of the happens-before established by the magic.
+    slot_count:   u64,
+
+    /// Per-process random salt mixed into the generation increment on
+    /// every slot close. Drawn from /dev/urandom by the bootstrap
+    /// winner; nonzero so the increment is never trivially zero. All
+    /// processes attaching to the registry observe the same salt.
+    gen_salt:     u64,
+
+    /// Reserved for future use (e.g. format versioning, sweeper-thread
+    /// liveness counter). Zero-initialised.
+    _reserved:    [u8; 40],
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<RegistryHeader>() == 64);
+};
+
+/// Compute the volume size required to hold the registry header + N
+/// slots. Result is page-aligned by `shinit`, so we just return the
+/// logical byte requirement.
+///
+/// We add `sizeof(BlockHeader)` because `shinit` initialises a single
+/// allocator BlockHeader at the start of the data region (regular
+/// volumes are managed by the SHM allocator). The registry skips
+/// past that BlockHeader -- it doesn't go through shmalloc/shfree
+/// -- so we need to reserve that prefix in the volume size.
+///
+/// The header offset is rounded up to `align_of::<RegistryHeader>()`
+/// (= 64) so the header and the slot array following it are correctly
+/// aligned. The padding is added here so the volume is large enough
+/// to fit the aligned layout.
+const fn registry_volume_size(slot_count: usize) -> usize {
+    let raw_offset = std::mem::size_of::<shm_types_crate::BlockHeader>();
+    let align = std::mem::align_of::<RegistryHeader>();
+    let aligned_offset = (raw_offset + align - 1) & !(align - 1);
+    aligned_offset
+        + std::mem::size_of::<RegistryHeader>()
+        + slot_count * STREAM_ENTRY_SIZE
+}
+
+/// Read the desired slot count from the `MORLOC_REGISTRY_SLOT_COUNT`
+/// env var, defaulting to `STREAM_REGISTRY_DEFAULT_SLOT_COUNT`. Caps
+/// at `STREAM_REGISTRY_MAX_SLOT_COUNT`; rejects 0 (use default instead).
+fn read_registry_slot_count() -> usize {
+    if let Ok(s) = std::env::var("MORLOC_REGISTRY_SLOT_COUNT") {
+        if let Ok(n) = s.parse::<usize>() {
+            if n == 0 {
+                return STREAM_REGISTRY_DEFAULT_SLOT_COUNT;
+            }
+            return n.min(STREAM_REGISTRY_MAX_SLOT_COUNT);
+        }
+    }
+    STREAM_REGISTRY_DEFAULT_SLOT_COUNT
+}
+
+/// Read 8 bytes of entropy from `/dev/urandom` for the per-nexus
+/// generation-increment salt. ORs with 1 so the increment is never
+/// zero (else a close+open cycle wouldn't bump generation). Falls
+/// back to a time-mixed value if /dev/urandom is unavailable.
+fn read_gen_salt() -> u64 {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let mut buf = [0u8; 8];
+        if f.read_exact(&mut buf).is_ok() {
+            return u64::from_le_bytes(buf) | 1;
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEAD_BEEF);
+    (now ^ 0xA5A5_A5A5_A5A5_A5A5) | 1
+}
+
+/// Process-local cache of the attached registry's base pointer + slot
+/// count. Set on first successful `registry_init` or `registry_attach`
+/// in this process; stays set for the process lifetime.
+///
+/// The pointer is into the registry SHM volume mapped at process attach
+/// time; subsequent `rel2abs` of slots in this volume goes through
+/// `MORLOC_VOL_TABLE` without needing this cache.
+static REGISTRY_BASE: std::sync::atomic::AtomicPtr<RegistryHeader> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static REGISTRY_SLOT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Initialise the shared stream registry for this nexus invocation.
+/// Allocates (or attaches to, if already created by an earlier
+/// libmorloc.so caller in the same session) the `STREAM_REGISTRY_VOLUME`
+/// SHM segment, zero-fills the slot array, and writes the magic gate.
+///
+/// Called by the nexus startup path before any dispatch fires. Pool
+/// processes that join the session later call `registry_attach()`
+/// instead.
+///
+/// Safe to call more than once: subsequent calls observe the cached
+/// `REGISTRY_BASE` and short-circuit. Returns the slot count in effect
+/// so callers can sanity-check.
+pub fn registry_init() -> Result<usize, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    // Fast path: already initialised in this process.
+    let cached = REGISTRY_BASE.load(Ordering::Acquire);
+    if !cached.is_null() {
+        return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
+    }
+
+    let slot_count = read_registry_slot_count();
+    let volume_bytes = registry_volume_size(slot_count);
+
+    // `shinit` is idempotent on a given (basename, volume_index) pair:
+    // the first caller creates the segment and fills the header; later
+    // callers attach to the existing one. The `created` distinction is
+    // internal to `shinit`; we don't need it here because we use a
+    // separate publication gate (the registry's own `magic` word) to
+    // serialise initialisation across processes.
+    let shm = shm::shinit(
+        &shm::get_common_basename(),
+        shm_types_crate::STREAM_REGISTRY_VOLUME,
+        volume_bytes,
+    )?;
+
+    // The data region starts after the ShmHeader + BlockHeader prefix
+    // shinit lays down for regular allocator-managed volumes. We skip
+    // those because the registry owns a fixed, immutable region. The
+    // raw offset (sizeof(ShmHeader) + sizeof(BlockHeader)) is not
+    // a multiple of `align_of::<RegistryHeader>()` (= 64), so we
+    // round the offset up before reinterpreting as RegistryHeader.
+    // Without this rounding, every RegistrySlot following the header
+    // sits at the same sub-64-byte offset; codegen that assumes the
+    // struct's declared 64-byte alignment (e.g. vectorised batch
+    // stores in `release_slot_locked`'s field-reset block) issues
+    // aligned-vector instructions that fault on the misaligned slot.
+    let raw_offset = std::mem::size_of::<shm_types_crate::ShmHeader>()
+        + std::mem::size_of::<shm_types_crate::BlockHeader>();
+    let align = std::mem::align_of::<RegistryHeader>();
+    let aligned_offset = (raw_offset + align - 1) & !(align - 1);
+    let data_base = unsafe {
+        (shm as *mut u8).add(aligned_offset)
+    } as *mut RegistryHeader;
+    let header = unsafe { &*data_base };
+
+    // CAS-arbitrated bootstrap. Exactly one process transitions
+    // `magic` from 0 to `STREAM_REGISTRY_MAGIC_INIT`, writes
+    // `slot_count` + `gen_salt`, then Release-stores `magic` to
+    // `STREAM_REGISTRY_MAGIC`. Other processes observe a non-zero
+    // magic and spin-wait until it reaches the final value.
+    //
+    // The freshly-mmap'd file is zero on first touch (kernel guarantees
+    // zero pages for sparse file mappings), so `magic.load() == 0` is
+    // the bootstrap-not-started signal.
+    let cas = header.magic.compare_exchange(
+        0,
+        shm_types_crate::STREAM_REGISTRY_MAGIC_INIT,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    match cas {
+        Ok(_) => {
+            // We won; fill the header. Plain u64 writes are safe here
+            // because no other process can read these fields until we
+            // Release-store the final magic below.
+            unsafe {
+                (*data_base).slot_count = slot_count as u64;
+                (*data_base).gen_salt = read_gen_salt();
+            }
+            header.magic.store(
+                shm_types_crate::STREAM_REGISTRY_MAGIC,
+                Ordering::Release,
+            );
+        }
+        Err(observed)
+            if observed != shm_types_crate::STREAM_REGISTRY_MAGIC
+                && observed != shm_types_crate::STREAM_REGISTRY_MAGIC_INIT
+        => {
+            return Err(MorlocError::Other(format!(
+                "stream registry: unexpected magic {:#x} in volume {} \
+                 (expected {:#x} or init sentinel); concurrent libmorloc.so \
+                 version mismatch?",
+                observed,
+                shm_types_crate::STREAM_REGISTRY_VOLUME,
+                shm_types_crate::STREAM_REGISTRY_MAGIC,
+            )));
+        }
+        Err(_) => {
+            // Lost the race; another process is mid-bootstrap or done.
+            // Spin below.
+        }
+    }
+
+    // Spin until magic is the final value. Bounded so a stuck
+    // bootstrapper can't hang us indefinitely.
+    let mut spins: u32 = 0;
+    loop {
+        let m = header.magic.load(Ordering::Acquire);
+        if m == shm_types_crate::STREAM_REGISTRY_MAGIC {
+            break;
+        }
+        spins += 1;
+        if spins > 1_000_000 {
+            return Err(MorlocError::Other(format!(
+                "stream registry: magic never published in volume {} \
+                 (spin-wait exhausted; bootstrapper stalled?)",
+                shm_types_crate::STREAM_REGISTRY_VOLUME,
+            )));
+        }
+        std::hint::spin_loop();
+    }
+
+    REGISTRY_BASE.store(data_base, Ordering::Release);
+    REGISTRY_SLOT_COUNT.store(slot_count, Ordering::Relaxed);
+
+    // Spawn the dedicated sweeper thread now that the registry is
+    // published. `sweeper_init` is itself idempotent so the second-
+    // and subsequent-attaching processes that pass through here
+    // (pool daemons, worker children) get a fast no-op.
+    sweeper_init();
+
+    Ok(slot_count)
+}
+
+/// Attach to an already-initialised stream registry (the path pool
+/// processes take when they join a nexus session that the nexus binary
+/// has already bootstrapped). Returns the slot count on success.
+///
+/// Internally just calls `registry_init`: the `shinit` it triggers
+/// is idempotent for an already-created volume (attaches to the
+/// existing one), and the publication-gate logic handles the "winner
+/// already set the magic" case as a no-op spin that resolves on the
+/// first Acquire-load.
+pub fn registry_attach() -> Result<usize, MorlocError> {
+    registry_init()
+}
+
+/// Return a typed pointer to the slot array start, or null if the
+/// registry isn't yet attached in this process. Callers MUST call
+/// `registry_init` / `registry_attach` first. The returned pointer is
+/// process-local but stable for the registry's lifetime (the registry
+/// SHM volume isn't remapped after init).
+#[inline]
+pub(crate) fn registry_slot_array() -> (*mut u8, usize) {
+    use std::sync::atomic::Ordering;
+    let base = REGISTRY_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return (std::ptr::null_mut(), 0);
+    }
+    // Slot array starts immediately after the 64-byte header.
+    let slots = unsafe {
+        (base as *mut u8).add(std::mem::size_of::<RegistryHeader>())
+    };
+    let count = REGISTRY_SLOT_COUNT.load(Ordering::Relaxed);
+    (slots, count)
+}
+
+/// Return the registry's per-nexus generation-increment salt. The salt
+/// is set by the bootstrap winner and is the same value seen by every
+/// attached process. Used by the slot-close path to bump the generation
+/// by a salted-random step instead of monotonic +1.
+#[inline]
+pub(crate) fn registry_gen_salt() -> u64 {
+    use std::sync::atomic::Ordering;
+    let base = REGISTRY_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return 0;
+    }
+    unsafe { (*base).gen_salt }
+}
+
+// ── Shared SHM stream registry: slot layout ──────────────────────────────
+//
+// `RegistrySlot` is the SHM-resident per-slot record. The registry's
+// data region holds:
+//
+//   offset 0:                       RegistryHeader (64 bytes)
+//   offset 64:                      RegistrySlot[0]
+//   offset 64 + N*STREAM_ENTRY_SIZE: RegistrySlot[N-1]
+//
+// All concurrent access goes through the atomic fields. The publication
+// protocol for immutable-after-@open fields (file_path, schema_str,
+// kind, final_footer, subpacket_index, body_start) is:
+//
+//   Writer (in @open): write fields with plain stores, then
+//                      generation.store(new_gen, Release).
+//   Reader (any pool): generation.load(Acquire) = g0;
+//                      read fields;
+//                      generation.load(Acquire) = g1;
+//                      if g0 != g1, retry from the top.
+//
+// Mutable-under-futex fields (cursor, element_count, diag) require
+// taking `futex` before read or write. Lockfree snapshot reads of
+// these are explicitly NOT supported by this protocol.
+
+/// Per-slot state byte. Stored in the `state` AtomicU8. `FREE` is
+/// re-allocatable (implicit zero on init); `OPEN_SHARED` marks a slot
+/// in active use; `REMOTE_PAUSED` is reserved for cross-nexus IStream
+/// pause-on-egress.
+pub const SLOT_STATE_FREE: u8 = 0;
+pub const SLOT_STATE_OPEN_SHARED: u8 = 1;
+pub const SLOT_STATE_REMOTE_PAUSED: u8 = 2;
+
+/// Sentinel `call_id` value: "this slot should NOT be swept at end of
+/// any call". Used by the cross-nexus return-serialization path to
+/// transfer slot ownership from the remote's call to the caller's
+/// scope. The sweeper compares against non-zero `call_id`s only, so
+/// slots with this value are always skipped.
+pub const CALL_ID_NO_SWEEP: u64 = 0;
+
+/// SHM-resident per-slot record. Layout is pinned at 512 bytes
+/// (`STREAM_ENTRY_SIZE`) so the slot array can be addressed by
+/// fixed-stride arithmetic without indirection.
+///
+/// Fields are grouped by mutability + protection:
+///   - **Immutable after @open**: `kind`, `opener_pid`,
+///     `opener_pid_start_time`, `file_path`, `file_path_len`,
+///     `schema_str`, `schema_str_len`, `final_footer`,
+///     `compression_level`, `subpacket_index`, `subpacket_index_len`,
+///     `body_start`. Readers use the versioned-pointer pattern
+///     described above.
+///   - **Mutated under `futex`**: `cursor`, `element_count`, `diag`.
+///   - **Independently atomic**: `generation`, `call_id`, `state`,
+///     `futex`. These are accessed without holding any other lock.
+#[repr(C, align(64))]
+pub struct RegistrySlot {
+    // ── Identity / lifecycle (atomically accessed) ──────────────────
+    /// Bumped by salted random increment on every close. Publication-
+    /// order: all field writes happen-before the Release-store of this
+    /// at @open's end. Cross-pool readers Acquire-load this BEFORE
+    /// reading other fields and re-load AFTER; if changed, retry.
+    pub generation:           std::sync::atomic::AtomicU64,    // off 0..8
+
+    /// call_id assigned at @open time. `CALL_ID_NO_SWEEP` (= 0) means
+    /// "do not sweep" -- used by cross-nexus return-serialization to
+    /// transfer ownership.
+    pub call_id:              std::sync::atomic::AtomicU64,    // off 8..16
+
+    /// SLOT_STATE_FREE / SLOT_STATE_OPEN_SHARED / SLOT_STATE_REMOTE_PAUSED.
+    /// Allocation is a CAS on this field (FREE -> OPEN_SHARED).
+    pub state:                std::sync::atomic::AtomicU8,     // off 16
+    /// MLC_KIND_IFILE / MLC_KIND_ISTREAM / MLC_KIND_OSTREAM.
+    /// Immutable after @open's generation publication.
+    pub kind:                 u8,                              // off 17
+    _pad0:                    [u8; 6],                         // off 18..24
+
+    /// Opener-pool process start time, read from `/proc/PID/stat`
+    /// field 22 (clock ticks since boot). Defends against PID reuse
+    /// across pool restarts in the §1.7 PID sweep. Plain u64;
+    /// immutable after @open publication.
+    pub opener_pid_start_time: u64,                            // off 24..32
+
+    /// OS PID of the pool that opened the slot. Used only by the §1.7
+    /// PID sweep on pool exit / crash recovery.
+    pub opener_pid:           u32,                             // off 32..36
+    _pad1:                    [u8; 4],                         // off 36..40
+
+    /// Per-slot mutation futex. Held for cursor / element_count / diag
+    /// updates. NOT held for lockfree reads of immutable-after-open
+    /// fields (those use the versioned-pointer pattern against
+    /// `generation`).
+    pub futex:                std::sync::atomic::AtomicU32,    // off 40..44
+    _pad2:                    [u8; 4],                         // off 44..48
+
+    // ── File identity (immutable after publication) ─────────────────
+    /// SHM RelPtr to a UTF-8 path string. Allocated from the shared
+    /// SHM allocator at @open; freed at @close via shfree. Length is
+    /// in `file_path_len`. NOT canonicalised; the planfile commits
+    /// to explicit-only multi-writer sharing (no realpath dedup).
+    pub file_path:            RelPtr,                          // off 48..56
+    pub file_path_len:        u32,                             // off 56..60
+    _pad3:                    [u8; 4],                         // off 60..64
+
+    pub schema_str:           RelPtr,                          // off 64..72
+    pub schema_str_len:       u32,                             // off 72..76
+    _pad4:                    [u8; 4],                         // off 76..80
+
+    // ── Mutable state under `futex` ─────────────────────────────────
+    /// IStream/OStream cursor (byte offset). IFile leaves at 0
+    /// (random access goes through `subpacket_index` instead).
+    pub cursor:               u64,                             // off 80..88
+    pub element_count:        u64,                             // off 88..96
+
+    /// IFile only; set at @open from the file's footer. Plain u8 0/1
+    /// for cross-process clarity. Immutable after @open publication.
+    pub final_footer:         u8,                              // off 96
+    pub compression_level:    u8,                              // off 97
+    _pad5:                    [u8; 6],                         // off 98..104
+
+    /// IFile only; SHM RelPtr to a `[u64]` array of sub-packet byte
+    /// offsets. Length in `subpacket_index_len`. Immutable after @open
+    /// publication; freed at @close.
+    pub subpacket_index:      RelPtr,                          // off 104..112
+    pub subpacket_index_len:  u64,                             // off 112..120
+
+    /// IStream initial cursor (right after stream header). Immutable
+    /// after @open publication.
+    pub body_start:           u64,                             // off 120..128
+
+    /// Per-write diagnostic / running counters. Updated by OStream
+    /// writers under `futex`; readers either hold the futex or accept
+    /// momentarily-stale values. ~160 bytes embedded inline.
+    pub diag:                 StreamDiag,                      // off 128..288
+
+    // ── OStream write buffer (Part A of the buffering work) ────────
+    /// SHM RelPtr to a per-slot write buffer. Allocated at @open
+    /// OStream (`WRITE_BUFFER_BYTES_DEFAULT` bytes, env-overridable),
+    /// freed at slot release. The buffer's first 16 bytes are
+    /// reserved for the Array header (filled at flush); bytes 16..
+    /// 16+`index_cap`*elem_width are the inline element index; the
+    /// remainder is the variable-data section. Cross-pool writers
+    /// append to this same buffer under the slot futex.
+    pub write_buffer:           RelPtr,                        // off 288..296
+
+    /// Current index-section capacity in ELEMENTS. Starts at
+    /// `WRITE_BUFFER_INDEX_INITIAL_CAP` (1024); doubles when filled
+    /// (shifting the data region right). Always >= write_buffer_index_count.
+    pub write_buffer_index_cap: u64,                           // off 296..304
+
+    /// Number of elements currently buffered (i.e. inline entries
+    /// in the index section). Reset to 0 after each flush.
+    pub write_buffer_index_count: u64,                         // off 304..312
+
+    /// Bytes currently used in the data section (variable-length
+    /// portion). Reset to 0 after each flush.
+    pub write_buffer_data_used: u64,                           // off 312..320
+
+    /// OStream-only: capacity in entries of the SHM-resident sub-packet
+    /// index whose RelPtr lives in `subpacket_index`. Grown by doubling
+    /// under the slot futex when `subpacket_index_len` reaches it. For
+    /// IFile this field is 0 (the index is set once from the parsed
+    /// final footer and never grows).
+    pub subpacket_index_cap:  u64,                             // off 320..328
+
+    /// Padding to round the slot up to STREAM_ENTRY_SIZE so the next
+    /// slot starts on a fresh cache-line-aligned boundary.
+    _tail_pad:                [u8; 184],                       // off 328..512
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<RegistrySlot>() == STREAM_ENTRY_SIZE);
+};
+
+/// Resolve a slot index to a typed reference into the SHM-resident
+/// slot array. Returns `None` if the registry isn't attached yet or
+/// the index is out of range. The reference is valid for the rest of
+/// the registry's lifetime (the SHM volume isn't remapped after init).
+#[inline]
+pub(crate) fn slot_ref(slot_idx: usize) -> Option<&'static RegistrySlot> {
+    // Pool processes attach lazily; see allocate_slot_cas for rationale.
+    let _ = registry_init();
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() || slot_idx >= slot_count {
+        return None;
+    }
+    let ptr = unsafe {
+        slots_base.add(slot_idx * STREAM_ENTRY_SIZE) as *const RegistrySlot
+    };
+    // SAFETY: ptr points into a valid SHM-mapped region of size
+    // `slot_count * STREAM_ENTRY_SIZE`; the registry stays mapped for
+    // the lifetime of the process (until shclose at exit).
+    Some(unsafe { &*ptr })
+}
+
+/// Pack a slot's current generation + slot index into a handle int.
+/// Layout: 47 bits of generation in bits 16-62, 16 bits of slot
+/// index in bits 0-15. Bit 63 is held at 0 so that handles are
+/// always non-negative i64 -- callers across the FFI use a
+/// negative return value as the error sentinel.
+#[inline]
+pub(crate) fn pack_handle(generation: u64, slot_idx: usize) -> i64 {
+    ((generation << 16) | (slot_idx as u64 & 0xFFFF)) as i64
+}
+
+/// Decode a handle int into (generation, slot_idx). Inverse of
+/// `pack_handle`. Returns the upper-47-bit generation and the
+/// 16-bit slot index.
+#[inline]
+pub(crate) fn unpack_handle(handle: i64) -> (u64, usize) {
+    let h = handle as u64;
+    let generation = h >> 16;
+    let slot_idx = (h & 0xFFFF) as usize;
+    (generation, slot_idx)
+}
+
+/// Bit mask for the generation field carried in handle ints. The
+/// generation occupies 47 bits so that `pack_handle`'s output --
+/// formed by left-shifting the masked generation by 16 -- always
+/// has bit 63 clear, keeping handles non-negative. FFI callers
+/// treat negative return values as error sentinels, so a packed
+/// handle must never collide with that domain.
+pub(crate) const GENERATION_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
+
+// ── Slot futex helpers ────────────────────────────────────────────────────
+//
+// Each `RegistrySlot` has its own `futex: AtomicU32` word that
+// serialises mutations to `cursor`, `element_count`, and `diag`.
+// Held briefly; never across mmap / file I/O. We use a simple
+// spin-then-yield protocol rather than a real futex syscall because
+// hold times are O(memcpy) and contention is rare. The `_yield`
+// import keeps us out of the kernel even under heavy contention.
+
+const SLOT_FUTEX_UNLOCKED: u32 = 0;
+const SLOT_FUTEX_LOCKED:   u32 = 1;
+
+/// Acquire the slot's mutation lock. Spins with `spin_loop` hints
+/// until the CAS succeeds, then a `yield_now` if we've spun more
+/// than a few thousand iterations. No timeout (the lock should
+/// never be held across blocking I/O).
+fn slot_futex_lock(slot: &RegistrySlot) {
+    use std::sync::atomic::Ordering;
+    let mut spins: u32 = 0;
+    loop {
+        if slot.futex
+            .compare_exchange(
+                SLOT_FUTEX_UNLOCKED, SLOT_FUTEX_LOCKED,
+                Ordering::Acquire, Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return;
+        }
+        spins = spins.wrapping_add(1);
+        if spins & 0x3FF == 0 {
+            std::thread::yield_now();
+        } else {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+fn slot_futex_unlock(slot: &RegistrySlot) {
+    use std::sync::atomic::Ordering;
+    slot.futex.store(SLOT_FUTEX_UNLOCKED, Ordering::Release);
+}
+
+/// RAII helper: locks the slot's futex on construction, unlocks on
+/// Drop. Use this in code that takes the futex on entry and may
+/// have multiple return paths.
+struct SlotFutexGuard<'a> {
+    slot: &'a RegistrySlot,
+}
+impl<'a> SlotFutexGuard<'a> {
+    fn lock(slot: &'a RegistrySlot) -> Self {
+        slot_futex_lock(slot);
+        SlotFutexGuard { slot }
+    }
+}
+impl<'a> Drop for SlotFutexGuard<'a> {
+    fn drop(&mut self) { slot_futex_unlock(self.slot); }
+}
+
+// ── Process-local mmap cache ─────────────────────────────────────────────
+//
+// The SHM `RegistrySlot` holds the IDENTITY of an open stream (path,
+// schema, cursor, etc.). The per-process `ProcessLocalSlot` holds the
+// PHYSICAL OS state for that slot in this process: fd, mmap region,
+// decompression cache. Splitting them this way lets the SHM slot be
+// shared across pools without trying to share fds (which can't be
+// safely shared across forks anyway).
+//
+// Lazy invalidation: every access through `with_process_local_slot`
+// re-checks the SHM slot's generation against the cached_generation.
+// On mismatch, the local entry is dropped (closing the fd and unmap)
+// and the access falls back to attach-by-path-from-SHM.
+
+/// Per-process physical state for an open SHM slot.
+pub struct ProcessLocalSlot {
+    /// Generation observed at the last validation. If the SHM slot's
+    /// current generation differs, this entry is stale and must be
+    /// dropped before use.
+    pub cached_generation: u64,
+
+    /// PROT_READ mmap of the underlying file. For IFile/IStream this
+    /// covers the entire file. For OStream this is null (writes go
+    /// through `pwrite` against `fd`).
+    pub mmap_ptr:  AbsPtr,
+    pub mmap_size: u64,
+
+    /// Underlying file descriptor. For OStream this is the fd that
+    /// holds the flock (only the OPENER pool acquires the flock;
+    /// non-opener writers use their own non-flock'd fd). For
+    /// IFile/IStream this is -1 (we close after mmap).
+    pub fd: i32,
+
+    /// Per-handle decompressed-sub-packet LRU. Lives on the heap so
+    /// dropping the entry from the HashMap shfree's the SHM blocks
+    /// referenced by the cache.
+    pub cache: Box<StreamCache>,
+
+    /// Parsed value schema cached from the SHM slot's `schema_str`.
+    /// Each pool parses on first attach; the cost is a microsecond-
+    /// scale string parse that's done once per pool per handle.
+    pub value_schema: Schema,
+
+    /// Parsed element schema (for list-valued kinds, the schema of
+    /// one element). For non-list values this equals `value_schema`.
+    pub elem_schema: Schema,
+
+    /// IFile only: copy of the SHM slot's sub-packet index. Resident
+    /// in process-local memory for fast random access without going
+    /// through `rel2abs` per query. Empty for IStream / OStream.
+    pub subpacket_index_local: Vec<u64>,
+
+    /// IFile only: cumulative element-count per sub-packet, built
+    /// lazily on first random-access query. `cum[i]` is the total
+    /// element count of sub-packets `0..i`, so a global element index
+    /// `g` lands in the sub-packet `partition_point(g)`. Survives
+    /// across bracket accesses on the same handle -- rebuilding on
+    /// every access would be O(N sub-packet headers read) per call.
+    pub subpacket_elem_cum: Option<Vec<u64>>,
+
+    /// For DATA_PACKET files opened as IFile, the file is a single
+    /// "sub-packet" starting at offset 0 and the subpacket_index has
+    /// one entry [0]. The walker handles this flag to skip the
+    /// stream-header / footer parsing paths.
+    pub is_data_packet: bool,
+}
+
+impl Drop for ProcessLocalSlot {
+    fn drop(&mut self) {
+        // Drop the decompression cache first; this shfree's any
+        // SHM blocks the cache references. Then unmap the file
+        // region. Then close the fd (which releases flock if held).
+        for entry in self.cache.entries.drain(..) {
+            let _ = crate::shm::shfree(entry.shm_packet);
+        }
+        if !self.mmap_ptr.is_null() && self.mmap_size > 0 {
+            unsafe {
+                libc::munmap(self.mmap_ptr as *mut libc::c_void, self.mmap_size as usize);
+            }
+        }
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd); }
+        }
+    }
+}
+
+// SAFETY: ProcessLocalSlot's only !Send field is `mmap_ptr` (a raw
+// `*mut u8` returned by mmap) and the AbsPtr fields inside `cache`.
+// The mmap region is process-wide (kernel-resident, not thread-bound),
+// the fd is a kernel handle with no thread affinity, and the cache's
+// SHM blocks are refcounted in SHM. Access is serialised by the
+// PROCESS_LOCAL_SLOTS Mutex; we move ownership across threads only
+// while the entry is detached from the map.
+unsafe impl Send for ProcessLocalSlot {}
+
+/// Per-process map from handle int to physical OS state. Lazily
+/// initialised on first access; cleared on `shclose_atexit`-style
+/// teardown.
+///
+/// The Mutex protects the HashMap; per-handle work happens with the
+/// Mutex released (the lookup briefly takes the lock to find or
+/// install the entry, then operates on the entry via raw pointers
+/// to avoid holding the map lock across blocking I/O).
+static PROCESS_LOCAL_SLOTS: Mutex<Option<std::collections::HashMap<i64, ProcessLocalSlot>>> =
+    Mutex::new(None);
+
+/// Run `f` against the process-local slot for `handle`. On entry the
+/// function validates the SHM slot's generation against the cached
+/// entry; if stale (or missing), it drops any stale entry and
+/// attaches afresh by reading the SHM slot's path + kind.
+///
+/// The cached entry is removed from the map for the duration of `f`,
+/// then re-inserted on completion. This avoids holding the map lock
+/// across `f`'s body (which may do file I/O or hold the slot futex).
+pub fn with_process_local_slot<R>(
+    handle: i64,
+    f: impl FnOnce(&mut ProcessLocalSlot, &'static RegistrySlot) -> Result<R, MorlocError>,
+) -> Result<R, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "stream handle {:#x}: slot index {} out of range; \
+         registry not initialised or handle is corrupt",
+        handle, slot_idx,
+    )))?;
+
+    // Versioned-pointer pre-check: read generation under Acquire so
+    // any subsequent reads of immutable-after-open fields see the
+    // current publication.
+    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_now != gen_claim {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: generation mismatch (claim {}, slot has {}); \
+             handle was closed or refers to a recycled slot",
+            handle, gen_claim, gen_now,
+        )));
+    }
+    let state = slot.state.load(Ordering::Acquire);
+    if state != SLOT_STATE_OPEN_SHARED {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: slot is not OPEN (state = {})",
+            handle, state,
+        )));
+    }
+
+    // Take the entry out of the map for the duration of f, so we
+    // don't hold the map lock during file I/O.
+    let mut taken = take_process_local_slot(handle);
+
+    // Validate cached_generation; drop on mismatch.
+    if let Some(existing) = &taken {
+        if existing.cached_generation != gen_now {
+            taken = None;  // drop triggers Drop::drop on the old entry
+        }
+    }
+    let mut local = match taken {
+        Some(s) => s,
+        None => attach_process_local_slot(handle, slot, gen_now)?,
+    };
+
+    // Re-validate generation AFTER reads of immutable-after-open
+    // fields (versioned-pointer pattern epilogue). If the slot was
+    // closed and reopened during attach, the second read catches
+    // it; we error and let the caller retry rather than papering
+    // over the race.
+    let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_after != gen_now {
+        // The freshly attached local slot is now stale; drop it
+        // (Drop::drop runs).
+        drop(local);
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: slot was closed mid-attach (generation \
+             went from {} to {}); retry",
+            handle, gen_now, gen_after,
+        )));
+    }
+
+    // Run f with the validated local slot.
+    let result = f(&mut local, slot);
+
+    // Re-install the local slot in the map for future calls. We
+    // always re-install, even on Err, so the cache isn't dropped
+    // just because the operation failed.
+    install_process_local_slot(handle, local);
+
+    result
+}
+
+/// Helper: remove and return the entry for `handle` from the
+/// process-local map, leaving the slot to be re-installed by the
+/// caller. Lazily creates the map on first use.
+fn take_process_local_slot(handle: i64) -> Option<ProcessLocalSlot> {
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.remove(&handle)
+}
+
+/// Helper: insert an entry into the process-local map, replacing any
+/// existing entry (the caller already validated generation).
+fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.insert(handle, slot);
+}
+
+/// Explicitly invalidate (drop) the process-local entry for `handle`
+/// without consulting the SHM slot. Used by `shared_close_handle`
+/// after it releases the SHM slot, so the next access reattaches
+/// (which will then fail the generation check cleanly).
+pub fn invalidate_process_local_slot(handle: i64) {
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    if let Some(map) = guard.as_mut() {
+        map.remove(&handle);  // Drop::drop runs on the entry
+    }
+}
+
+/// Open the underlying file and mmap it (for read kinds), producing
+/// a fresh `ProcessLocalSlot` for this pool. Reads `file_path` and
+/// `kind` from the SHM slot via versioned-pointer reads (the caller
+/// has already confirmed the slot is OPEN at this generation).
+fn attach_process_local_slot(
+    handle: i64,
+    slot: &'static RegistrySlot,
+    cached_generation: u64,
+) -> Result<ProcessLocalSlot, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    // Versioned-pointer read of immutable-after-open fields. Read
+    // `kind` and the path's RelPtr + length, then re-verify
+    // generation. The caller will re-verify again after we return,
+    // so a torn read manifests as a clean retry.
+    let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_before != cached_generation {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: slot raced during attach (gen went from \
+             {} to {})",
+            handle, cached_generation, gen_before,
+        )));
+    }
+    let kind = slot.kind;
+    let path_rel = slot.file_path;
+    let path_len = slot.file_path_len as usize;
+
+    if path_rel == shm_types_crate::RELNULL || path_len == 0 {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: slot has no file_path (corrupt slot \
+             or partially-published @open)",
+            handle,
+        )));
+    }
+    let path_abs = crate::shm::rel2abs(path_rel)?;
+    // SAFETY: path_abs + path_len are bounded by the SHM block that
+    // backs the path string; verified by rel2abs above.
+    let path_bytes = unsafe { std::slice::from_raw_parts(path_abs, path_len) };
+    let path_str = std::str::from_utf8(path_bytes).map_err(|e| {
+        MorlocError::Other(format!(
+            "stream handle {:#x}: file_path is not valid UTF-8: {}",
+            handle, e,
+        ))
+    })?.to_string();
+
+    // Open + mmap depending on kind.
+    let (fd, mmap_ptr, mmap_size) = match kind {
+        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
+            let (mp, sz) = mmap_file_readonly(&path_str)?;
+            (-1i32, mp, sz)
+        }
+        x if x == MLC_KIND_OSTREAM => {
+            // Non-opener pools open RDWR but DO NOT acquire flock
+            // (the opener holds it for the slot's lifetime). The fd
+            // exists only for `pwrite` of sub-packets.
+            use std::ffi::CString;
+            let c_path = CString::new(path_str.as_bytes()).map_err(|e| {
+                MorlocError::Other(format!(
+                    "OStream attach: path contains NUL: {}", e,
+                ))
+            })?;
+            let fd = unsafe {
+                libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC, 0)
+            };
+            if fd < 0 {
+                return Err(MorlocError::Io(std::io::Error::last_os_error()));
+            }
+            (fd, std::ptr::null_mut(), 0)
+        }
+        other => {
+            return Err(MorlocError::Other(format!(
+                "stream handle {:#x}: unknown kind byte {}", handle, other,
+            )));
+        }
+    };
+
+    // Cache the parsed schema. For non-OStream (which always reads
+    // the schema from disk on open) we re-parse here.
+    let schema_rel = slot.schema_str;
+    let schema_len = slot.schema_str_len as usize;
+    let schema_str = if schema_rel == shm_types_crate::RELNULL || schema_len == 0 {
+        String::new()
+    } else {
+        let abs = crate::shm::rel2abs(schema_rel)?;
+        let bytes = unsafe { std::slice::from_raw_parts(abs, schema_len) };
+        std::str::from_utf8(bytes).map_err(|e| {
+            MorlocError::Other(format!(
+                "stream handle {:#x}: schema_str is not UTF-8: {}", handle, e,
+            ))
+        })?.to_string()
+    };
+    let parsed_schema = if schema_str.is_empty() {
+        Schema::primitive(SerialType::Nil)
+    } else {
+        parse_schema(&schema_str).map_err(|e| {
+            MorlocError::Other(format!(
+                "stream handle {:#x}: unparseable schema '{}': {}",
+                handle, schema_str, e,
+            ))
+        })?
+    };
+    // value_schema is the top-level type; elem_schema is the element
+    // type for list-valued kinds (IFile/IStream/OStream all carry
+    // their element schema in their stream header, which is what
+    // schema_str holds). For OStream, the value sent over @write is a
+    // `[a]` list whose element type matches.
+    let (value_schema, elem_schema) = match kind {
+        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
+            (array_schema(&parsed_schema), parsed_schema.clone())
+        }
+        x if x == MLC_KIND_OSTREAM => {
+            (array_schema(&parsed_schema), parsed_schema.clone())
+        }
+        _ => (parsed_schema.clone(), parsed_schema.clone()),
+    };
+
+    // Copy IFile sub-packet index from SHM into a process-local Vec.
+    // This is a one-time cost at attach; subsequent index lookups
+    // hit the local Vec without rel2abs.
+    let subpacket_index_local = {
+        let idx_rel = slot.subpacket_index;
+        let idx_len = slot.subpacket_index_len as usize;
+        if idx_rel == shm_types_crate::RELNULL || idx_len == 0 {
+            Vec::new()
+        } else {
+            let abs = crate::shm::rel2abs(idx_rel)?;
+            let raw = unsafe {
+                std::slice::from_raw_parts(abs as *const u64, idx_len)
+            };
+            raw.to_vec()
+        }
+    };
+
+    // Detect DATA_PACKET shape (single sub-packet at offset 0, no
+    // stream header). Convention from `parse_stream_file`:
+    // is_data_packet => body_start == 0 AND subpacket_index == [0].
+    let is_data_packet = slot.body_start == 0
+        && subpacket_index_local == [0];
+
+    let cap_bytes = read_cache_cap_env();
+    let cache = Box::new(StreamCache::new(cap_bytes));
+    Ok(ProcessLocalSlot {
+        cached_generation,
+        mmap_ptr,
+        mmap_size,
+        fd,
+        cache,
+        value_schema,
+        elem_schema,
+        subpacket_index_local,
+        subpacket_elem_cum: None,
+        is_data_packet,
+    })
+}
+
+// ── Slot allocation + lifecycle ──────────────────────────────────────────
+//
+// `allocate_slot_cas`: random-probe the slot array, CAS the `state`
+// byte from FREE to OPEN_SHARED. Returns the slot index and a guard
+// reference to fill in. Caller is responsible for writing the
+// remaining fields (path, schema, kind, etc.) and Release-storing
+// the new generation last.
+//
+// `release_slot_locked`: caller already holds the slot futex; we
+// just zero `state` and bump `generation`. Used by both
+// `shared_close_handle` (after finalisation) and the sweeper.
+
+/// Pull 4 bytes of entropy as a slot-probe seed. We don't need
+/// cryptographic randomness; the goal is just to spread allocations
+/// across the slot space.
+fn slot_probe_seed() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEED: AtomicUsize = AtomicUsize::new(0);
+    let prev = SEED.fetch_add(1, Ordering::Relaxed);
+    if prev == 0 {
+        // First call: mix in /dev/urandom so independent processes
+        // start at different positions.
+        use std::io::Read;
+        let mut buf = [0u8; std::mem::size_of::<usize>()];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let _ = f.read_exact(&mut buf);
+        }
+        let seed = usize::from_le_bytes(buf);
+        SEED.store(seed, Ordering::Relaxed);
+        return seed;
+    }
+    prev
+}
+
+/// Allocate a free slot via random-probe CAS. On success returns the
+/// (slot_idx, slot_ref) pair with `state` set to `OPEN_SHARED` but
+/// `generation` NOT YET bumped. The caller must fill in the other
+/// fields and Release-store the new generation last to complete
+/// publication.
+///
+/// Returns `Err` if all slots are occupied.
+pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), MorlocError> {
+    use std::sync::atomic::Ordering;
+    // Lazily attach to the shared registry. Pool processes (py/r/cpp)
+    // only call `shinit` on startup, not `stream_registry_init`; the
+    // first stream FFI call from a pool would otherwise see "not
+    // initialised". `registry_init` is idempotent and cheap on the
+    // fast path (a single Acquire-load of REGISTRY_BASE).
+    registry_init()?;
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() || slot_count == 0 {
+        return Err(MorlocError::Other(
+            "stream registry: not initialised (call registry_init first)".into(),
+        ));
+    }
+    let start = slot_probe_seed() % slot_count;
+    for off in 0..slot_count {
+        let idx = (start + off) % slot_count;
+        // SAFETY: idx < slot_count and slots_base points to a valid
+        // region of slot_count * STREAM_ENTRY_SIZE bytes.
+        let slot = unsafe {
+            &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
+        };
+        if slot.state
+            .compare_exchange(
+                SLOT_STATE_FREE, SLOT_STATE_OPEN_SHARED,
+                Ordering::AcqRel, Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return Ok((idx, slot));
+        }
+    }
+    Err(MorlocError::Other(format!(
+        "stream registry: all {} slots are in use; raise \
+         MORLOC_REGISTRY_SLOT_COUNT (current cap {}) or close more handles",
+        slot_count, STREAM_REGISTRY_MAX_SLOT_COUNT,
+    )))
+}
+
+/// Free a slot. Caller must hold the slot futex; the slot's state
+/// transitions to FREE and the generation bumps by the salted-random
+/// increment. After this call, any handle that referenced this slot
+/// fails the generation check.
+///
+/// Also frees the SHM-resident strings (path, schema) and
+/// subpacket_index that the slot referenced. The caller must already
+/// have done any kind-specific finalisation (e.g. write final footer
+/// for OStream).
+fn release_slot_locked(slot: &RegistrySlot) {
+    use std::sync::atomic::Ordering;
+
+    // Free path / schema / subpacket_index / write_buffer SHM blocks.
+    // Best-effort: a leaked block here is bounded by the registry's
+    // lifetime (cleaned at nexus shclose), and erroring would obscure
+    // the primary `state = FREE` transition.
+    let path = slot.file_path;
+    if path != shm_types_crate::RELNULL {
+        if let Ok(abs) = crate::shm::rel2abs(path) {
+            let _ = crate::shm::shfree(abs);
+        }
+    }
+    let schema = slot.schema_str;
+    if schema != shm_types_crate::RELNULL {
+        if let Ok(abs) = crate::shm::rel2abs(schema) {
+            let _ = crate::shm::shfree(abs);
+        }
+    }
+    let idx = slot.subpacket_index;
+    if idx != shm_types_crate::RELNULL {
+        if let Ok(abs) = crate::shm::rel2abs(idx) {
+            let _ = crate::shm::shfree(abs);
+        }
+    }
+    let wbuf = slot.write_buffer;
+    if wbuf != shm_types_crate::RELNULL {
+        if let Ok(abs) = crate::shm::rel2abs(wbuf) {
+            let _ = crate::shm::shfree(abs);
+        }
+    }
+
+    // Zero out the RelPtr fields so a future allocator sees a clean
+    // slot. The `state` and `generation` writes below close the
+    // publication window.
+    //
+    // SAFETY: we hold the slot futex AND `state` is about to become
+    // FREE (so no other thread is reading via the versioned-pointer
+    // pattern -- they'd fail the state check). The plain stores are
+    // visible to future allocators by happens-before via the Release
+    // store of `state` below.
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).file_path = shm_types_crate::RELNULL;
+        (*mp).file_path_len = 0;
+        (*mp).schema_str = shm_types_crate::RELNULL;
+        (*mp).schema_str_len = 0;
+        (*mp).subpacket_index = shm_types_crate::RELNULL;
+        (*mp).subpacket_index_len = 0;
+        (*mp).subpacket_index_cap = 0;
+        (*mp).cursor = 0;
+        (*mp).element_count = 0;
+        (*mp).final_footer = 0;
+        (*mp).compression_level = 0;
+        (*mp).body_start = 0;
+        (*mp).opener_pid = 0;
+        (*mp).opener_pid_start_time = 0;
+        (*mp).kind = 0;
+        (*mp).write_buffer = shm_types_crate::RELNULL;
+        (*mp).write_buffer_index_cap = 0;
+        (*mp).write_buffer_index_count = 0;
+        (*mp).write_buffer_data_used = 0;
+    }
+
+    // Bump generation by the salted random increment. Use fetch_add
+    // so concurrent attaches that snapshot the old generation still
+    // detect the change.
+    let bump = registry_gen_salt() | 1;
+    slot.generation.fetch_add(bump, Ordering::AcqRel);
+
+    // Reset call_id to the no-sweep sentinel (which is also the
+    // logical "free slot" value -- the sweeper skips it anyway).
+    slot.call_id.store(CALL_ID_NO_SWEEP, Ordering::Release);
+
+    // Finally: release the slot. State = FREE is the publication
+    // gate that allows other allocators' CAS to succeed.
+    slot.state.store(SLOT_STATE_FREE, Ordering::Release);
+}
+
+/// Read this process's start time from `/proc/self/stat` (field 22,
+/// clock ticks since boot). Used to populate the slot's
+/// `opener_pid_start_time` so the §1.7 PID sweep can distinguish a
+/// reused PID from the original opener. Falls back to 0 if the read
+/// fails (most likely on non-Linux); the PID sweep still works
+/// without it, just with a small false-negative window.
+fn read_pid_start_time() -> u64 {
+    read_pid_start_time_for(std::process::id())
+}
+
+/// Read the start time of an arbitrary PID from `/proc/PID/stat`
+/// (field 22, clock ticks since boot). Returns 0 if the process no
+/// longer exists or the read otherwise fails.
+///
+/// Used by the nexus to capture pool start times at spawn time so
+/// the PID sweep can match the right process even across PID reuse.
+pub fn read_pid_start_time_for(pid: u32) -> u64 {
+    use std::io::Read;
+    let path = format!("/proc/{}/stat", pid);
+    let mut f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let mut buf = String::with_capacity(512);
+    if f.read_to_string(&mut buf).is_err() {
+        return 0;
+    }
+    let close_paren = match buf.rfind(')') {
+        Some(p) => p,
+        None => return 0,
+    };
+    let rest = buf[close_paren + 1..].trim();
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    fields.get(19).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+}
+
+/// Pull the current dispatch's `call_id` from thread-local storage.
+/// Returns `CALL_ID_NO_SWEEP` (= 0) if no call is active, which
+/// means the slot will never be swept by the per-call_id sweeper
+/// (a deliberate no-op for handles opened outside a dispatch, e.g.
+/// from unit tests).
+fn current_call_id() -> u64 {
+    CURRENT_CALL_ID.with(|c| c.get())
+}
+
+thread_local! {
+    /// Per-thread current `call_id`. Set by the daemon dispatch loop
+    /// at the start of a request; read by `@open` to tag freshly-allocated
+    /// slots for the sweeper.
+    static CURRENT_CALL_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(CALL_ID_NO_SWEEP) };
+}
+
+/// Set the current thread's `call_id`. Called by the daemon dispatch
+/// loop before invoking `morloc_eval`. Returns the previous value
+/// so callers can restore on dispatch completion (which the dispatch
+/// loop does explicitly so a panic during `morloc_eval` doesn't
+/// leave the TLS in an inconsistent state).
+pub fn set_current_call_id(new: u64) -> u64 {
+    CURRENT_CALL_ID.with(|c| {
+        let old = c.get();
+        c.set(new);
+        old
+    })
+}
+
+/// Allocate an SHM-resident copy of `bytes` and return its RelPtr.
+/// Used to publish path / schema strings into the slot's RelPtr
+/// fields. The caller frees via `shfree(rel2abs(rel))` at slot close.
+fn shm_copy_bytes(bytes: &[u8]) -> Result<RelPtr, MorlocError> {
+    let abs = crate::shm::shmemcpy(bytes.as_ptr(), bytes.len())?;
+    crate::shm::abs2rel(abs)
+}
+
+/// Allocate an SHM-resident copy of a `[u64]` array (used for the
+/// IFile sub-packet index). Returns the RelPtr.
+fn shm_copy_u64_slice(slice: &[u64]) -> Result<RelPtr, MorlocError> {
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr() as *const u8,
+            slice.len() * std::mem::size_of::<u64>(),
+        )
+    };
+    shm_copy_bytes(bytes)
+}
+
+/// Open a file as `IFile` against the shared SHM registry. Allocates
+/// a slot, mmaps the file, parses its stream metadata, publishes the
+/// path + schema + subpacket_index into SHM, and returns the handle.
+///
+/// Rejects STREAM files lacking a final footer (the 2026-06-28
+/// design contract: random access requires the full index, which
+/// only a clean close writes).
+pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    // mmap + parse the file BEFORE we touch the registry, so a bad
+    // file doesn't leave a half-initialised slot.
+    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
+        Ok(p) => p,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    // Enforce the IFile-on-clean-footer contract (matches the
+    // process-local `open_file_as` check for IFile).
+    if !parsed.is_data_packet && !parsed.final_footer {
+        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        return Err(MorlocError::Other(format!(
+            "@open IFile '{}': file is not cleanly closed (no final footer). \
+             Open it as IStream to drain forward, or repair it with morloc-nexus.",
+            path,
+        )));
+    }
+
+    // Allocate a slot.
+    let (slot_idx, slot) = match allocate_slot_cas() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    let _guard = SlotFutexGuard::lock(slot);
+
+    // Publish path + schema + subpacket_index. On any error, release
+    // the slot via `release_slot_locked` (which itself shfree's any
+    // partials we may have already published).
+    let publish_result = (|| -> Result<u64, MorlocError> {
+        let path_rel = shm_copy_bytes(path.as_bytes())?;
+        let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
+        let idx_rel = if !parsed.subpacket_index.is_empty() {
+            shm_copy_u64_slice(&parsed.subpacket_index)?
+        } else {
+            shm_types_crate::RELNULL
+        };
+        // SAFETY: we hold the slot's futex; state is OPEN_SHARED but
+        // generation has NOT been bumped to the new value yet, so no
+        // cross-pool reader can observe these field writes (the
+        // versioned-pointer pattern gates on the new generation).
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).kind = MLC_KIND_IFILE;
+            (*mp).file_path = path_rel;
+            (*mp).file_path_len = path.len() as u32;
+            (*mp).schema_str = schema_rel;
+            (*mp).schema_str_len = parsed.schema_str.len() as u32;
+            (*mp).subpacket_index = idx_rel;
+            (*mp).subpacket_index_len = parsed.subpacket_index.len() as u64;
+            // IFile's sub-packet index is immutable -- set once from
+            // the parsed final footer and never grown. cap = 0 marks
+            // "not OStream-growable" so release_slot_locked treats
+            // subpacket_index_len, not _cap, as the freed extent.
+            (*mp).subpacket_index_cap = 0;
+            (*mp).body_start = parsed.body_start;
+            (*mp).final_footer = if parsed.final_footer { 1 } else { 0 };
+            (*mp).cursor = 0;
+            (*mp).element_count = parsed.element_count;
+            (*mp).compression_level = 0;
+            (*mp).opener_pid = std::process::id();
+            (*mp).opener_pid_start_time = read_pid_start_time();
+            // IFile/IStream don't write; clear buffer fields so
+            // release_slot_locked doesn't attempt an spurious shfree
+            // on a freshly-allocated never-released slot whose
+            // zero-init bytes look like a real volume-0 relptr.
+            (*mp).write_buffer = shm_types_crate::RELNULL;
+            (*mp).write_buffer_index_cap = 0;
+            (*mp).write_buffer_index_count = 0;
+            (*mp).write_buffer_data_used = 0;
+            if let Some(d) = parsed.diag.as_ref() {
+                (*mp).diag = *d;
+            }
+        }
+        slot.call_id.store(current_call_id(), Ordering::Release);
+        // Bump generation by the salted random increment. This is
+        // the publication store: cross-pool readers Acquire-load
+        // this and observe all prior writes happens-before.
+        let bump = registry_gen_salt() | 1;
+        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        Ok(new_gen)
+    })();
+    let new_gen = match publish_result {
+        Ok(g) => g,
+        Err(e) => {
+            // Roll back the slot. release_slot_locked shfree's any
+            // RelPtrs we've published; the futex guard releases on
+            // drop.
+            release_slot_locked(slot);
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+
+    // Install the process-local slot with the mmap we already have.
+    let cap_bytes = read_cache_cap_env();
+    let local = ProcessLocalSlot {
+        cached_generation: new_gen,
+        mmap_ptr,
+        mmap_size,
+        fd: -1,
+        cache: Box::new(StreamCache::new(cap_bytes)),
+        value_schema: parsed.value_schema.clone(),
+        elem_schema: parsed.elem_schema.clone(),
+        subpacket_index_local: parsed.subpacket_index.clone(),
+        subpacket_elem_cum: None,
+        is_data_packet: parsed.is_data_packet,
+    };
+    let handle = pack_handle(new_gen, slot_idx);
+    install_process_local_slot(handle, local);
+    Ok(handle)
+}
+
+/// Open a file as `IStream` against the shared SHM registry. Unlike
+/// IFile, IStream walks forward by byte cursor and works on
+/// temp-footer files (writer in progress).
+pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
+        Ok(p) => p,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    // Forward-only access: kernel readahead is the right hint.
+    unsafe {
+        libc::madvise(
+            mmap_ptr as *mut libc::c_void,
+            mmap_size as usize,
+            libc::MADV_SEQUENTIAL,
+        );
+    }
+
+    let (slot_idx, slot) = match allocate_slot_cas() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    let _guard = SlotFutexGuard::lock(slot);
+
+    let publish_result = (|| -> Result<u64, MorlocError> {
+        let path_rel = shm_copy_bytes(path.as_bytes())?;
+        let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).kind = MLC_KIND_ISTREAM;
+            (*mp).file_path = path_rel;
+            (*mp).file_path_len = path.len() as u32;
+            (*mp).schema_str = schema_rel;
+            (*mp).schema_str_len = parsed.schema_str.len() as u32;
+            (*mp).subpacket_index = shm_types_crate::RELNULL;
+            (*mp).subpacket_index_len = 0;
+            (*mp).subpacket_index_cap = 0;
+            (*mp).body_start = parsed.body_start;
+            (*mp).final_footer = if parsed.final_footer { 1 } else { 0 };
+            // IStream walks by cursor starting at body_start.
+            (*mp).cursor = parsed.body_start;
+            (*mp).element_count = parsed.element_count;
+            (*mp).compression_level = 0;
+            (*mp).opener_pid = std::process::id();
+            (*mp).opener_pid_start_time = read_pid_start_time();
+            (*mp).write_buffer = shm_types_crate::RELNULL;
+            (*mp).write_buffer_index_cap = 0;
+            (*mp).write_buffer_index_count = 0;
+            (*mp).write_buffer_data_used = 0;
+            if let Some(d) = parsed.diag.as_ref() {
+                (*mp).diag = *d;
+            }
+        }
+        slot.call_id.store(current_call_id(), Ordering::Release);
+        let bump = registry_gen_salt() | 1;
+        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        Ok(new_gen)
+    })();
+    let new_gen = match publish_result {
+        Ok(g) => g,
+        Err(e) => {
+            release_slot_locked(slot);
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+
+    let cap_bytes = read_cache_cap_env();
+    let local = ProcessLocalSlot {
+        cached_generation: new_gen,
+        mmap_ptr,
+        mmap_size,
+        fd: -1,
+        cache: Box::new(StreamCache::new(cap_bytes)),
+        value_schema: parsed.value_schema.clone(),
+        elem_schema: parsed.elem_schema.clone(),
+        subpacket_index_local: parsed.subpacket_index.clone(),
+        subpacket_elem_cum: None,
+        is_data_packet: parsed.is_data_packet,
+    };
+    let handle = pack_handle(new_gen, slot_idx);
+    install_process_local_slot(handle, local);
+    Ok(handle)
+}
+
+/// Open a file as `OStream` with the element schema known up front.
+/// Creates the file (`O_CREAT | O_EXCL`), acquires an exclusive
+/// flock, writes the stream header, and allocates a slot.
+///
+/// Rejects a second `@open` of the same path with EEXIST: the
+/// 2026-06-28 design contract requires explicit handle-passing
+/// across pools for multi-writer sharing, not transparent
+/// path-based dedup.
+pub fn shared_open_ostream_with_schema(
+    path: &str,
+    schema_str: &str,
+) -> Result<i64, MorlocError> {
+    use std::ffi::CString;
+    use std::sync::atomic::Ordering;
+    use morloc_runtime_types::schema::SerialType;
+    use morloc_runtime_types::packet::make_stream_header_block;
+
+    let c_path = CString::new(path.as_bytes()).map_err(|e| {
+        MorlocError::Other(format!("OStream open: path contains NUL: {}", e))
+    })?;
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        let e = std::io::Error::last_os_error();
+        // EEXIST is the multi-writer case. We can't tell whether
+        // it's an in-nexus existing slot (which the planfile says
+        // should error with the existing handle in the message) or
+        // an external writer; we surface the OS error and let the
+        // caller's diagnostic carry the path.
+        return Err(MorlocError::Io(e));
+    }
+    let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if lock_rc != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd); }
+        return Err(MorlocError::Other(format!(
+            "@open OStream '{}': could not acquire exclusive flock: {}",
+            path, e,
+        )));
+    }
+
+    // Parse the schema (we need it to write the stream header). An
+    // empty schema string is accepted as a placeholder, falling
+    // back to Nil; the bridge always supplies a real schema.
+    let parsed_schema = if schema_str.is_empty() {
+        morloc_runtime_types::schema::Schema::primitive(SerialType::Nil)
+    } else {
+        match parse_schema(schema_str) {
+            Ok(s) => s,
+            Err(e) => {
+                unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+                return Err(MorlocError::Schema(format!(
+                    "OStream open: unparseable schema '{}': {}", schema_str, e,
+                )));
+            }
+        }
+    };
+    let header_bytes = make_stream_header_block(&parsed_schema);
+    if let Err(e) = write_all_fd(fd, &header_bytes) {
+        unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+        return Err(e);
+    }
+    let body_start = header_bytes.len() as u64;
+
+    let (slot_idx, slot) = match allocate_slot_cas() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+            return Err(e);
+        }
+    };
+    let _guard = SlotFutexGuard::lock(slot);
+
+    let publish_result = (|| -> Result<u64, MorlocError> {
+        let path_rel = shm_copy_bytes(path.as_bytes())?;
+        let schema_rel = shm_copy_bytes(schema_str.as_bytes())?;
+        // Allocate the write buffer in SHM. shcalloc zero-fills, which
+        // matches `_tail_pad`'s implicit zero start (no leaked bytes
+        // from a previous slot use). Sized from MORLOC_WRITE_BUFFER_BYTES.
+        let buf_bytes = read_write_buffer_bytes_env();
+        let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
+        let buf_rel = crate::shm::abs2rel(buf_abs)?;
+        // SHM-resident sub-packet index, shared across all writer pools
+        // so the final footer at @close reflects every flush regardless
+        // of which pool emitted it. Initial cap is small and grows
+        // exponentially under the slot futex in emit_subpacket_to_disk.
+        let idx_cap_initial: u64 = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
+        let idx_buf_bytes = (idx_cap_initial as usize) * std::mem::size_of::<u64>();
+        let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
+        let idx_buf_rel = crate::shm::abs2rel(idx_buf_abs)?;
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).kind = MLC_KIND_OSTREAM;
+            (*mp).file_path = path_rel;
+            (*mp).file_path_len = path.len() as u32;
+            (*mp).schema_str = schema_rel;
+            (*mp).schema_str_len = schema_str.len() as u32;
+            (*mp).subpacket_index = idx_buf_rel;
+            (*mp).subpacket_index_len = 0;
+            (*mp).subpacket_index_cap = idx_cap_initial;
+            (*mp).body_start = body_start;
+            (*mp).final_footer = 0;
+            (*mp).cursor = body_start;
+            (*mp).element_count = 0;
+            (*mp).compression_level = 0;
+            (*mp).opener_pid = std::process::id();
+            (*mp).opener_pid_start_time = read_pid_start_time();
+            (*mp).diag = StreamDiag::new();
+            // Write buffer fields. index_cap is set lazily on first
+            // @write -- elem_width isn't known until then since the
+            // schema-string parse happens below.
+            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer_index_cap = 0;
+            (*mp).write_buffer_index_count = 0;
+            (*mp).write_buffer_data_used = 0;
+        }
+        slot.call_id.store(current_call_id(), Ordering::Release);
+        let bump = registry_gen_salt() | 1;
+        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        Ok(new_gen)
+    })();
+    let new_gen = match publish_result {
+        Ok(g) => g,
+        Err(e) => {
+            release_slot_locked(slot);
+            unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+            return Err(e);
+        }
+    };
+
+    // OStream: parse the schema once for caching. `array_schema`
+    // wraps it as `[a]` so @write payloads of type `[a]` match.
+    let elem_schema_parsed = if schema_str.is_empty() {
+        morloc_runtime_types::schema::Schema::primitive(
+            morloc_runtime_types::schema::SerialType::Nil,
+        )
+    } else {
+        parse_schema(schema_str).unwrap_or_else(|_| {
+            morloc_runtime_types::schema::Schema::primitive(
+                morloc_runtime_types::schema::SerialType::Nil,
+            )
+        })
+    };
+    let local = ProcessLocalSlot {
+        cached_generation: new_gen,
+        mmap_ptr: std::ptr::null_mut(),
+        mmap_size: 0,
+        fd,                       // opener holds flock for slot lifetime
+        cache: Box::new(StreamCache::new(0)),
+        value_schema: array_schema(&elem_schema_parsed),
+        elem_schema: elem_schema_parsed,
+        subpacket_index_local: Vec::new(),
+        subpacket_elem_cum: None,
+        is_data_packet: false,
+    };
+    let handle = pack_handle(new_gen, slot_idx);
+    install_process_local_slot(handle, local);
+    Ok(handle)
+}
+
+/// Explicit `@close`: writes final footer + fdatasync for OStream,
+/// then releases the slot. Caller-visible failures (pwrite, fsync)
+/// propagate to the user; the slot stays OPEN on error so a retry
+/// can succeed.
+pub fn shared_close_handle(handle: i64) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "shared_close_handle: slot index {} out of range", slot_idx,
+    )))?;
+
+    // Snapshot the kind under a versioned read; if mismatch, abort.
+    let gen_pre = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_pre != gen_claim {
+        return Err(MorlocError::Other(format!(
+            "shared_close_handle: generation mismatch (claim {}, slot {})",
+            gen_claim, gen_pre,
+        )));
+    }
+    if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+        return Err(MorlocError::Other(
+            "shared_close_handle: slot is not OPEN".into(),
+        ));
+    }
+    let kind = slot.kind;
+
+    if kind == MLC_KIND_OSTREAM {
+        // OStream close uses with_process_local_slot so the buffer
+        // flush (which appends to local.subpacket_index_local) and
+        // the subsequent final-footer write share one futex-held
+        // critical section. The flush + footer write together can
+        // be sizable (one buffered sub-packet + a final footer)
+        // but cross-pool contention during close is rare; the
+        // shared-buffer story trumps minimising hold time here.
+        with_process_local_slot(handle, |local, slot| {
+            let _guard = SlotFutexGuard::lock(slot);
+            let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+            if gen_now != gen_claim {
+                return Err(MorlocError::Other(
+                    "shared_close_handle: slot generation changed under us".into(),
+                ));
+            }
+            // Flush any buffered elements as a final sub-packet so
+            // they're durably on disk before the footer.
+            flush_write_buffer(slot, local)?;
+            // Build + write the final footer from the SHM-resident
+            // shared sub-packet index. Every flush across every pool
+            // that has written through this slot appended to it under
+            // the slot futex (see append_shared_subpacket_index), so
+            // the resulting final footer's random-access index covers
+            // the file completely -- subsequent `@open IFile` works
+            // regardless of which pool wrote which sub-packet.
+            let cursor = slot.cursor;
+            let diag = slot.diag;
+            let shared_index = read_shared_subpacket_index(slot)?;
+            let footer = morloc_runtime_types::packet::make_final_footer_packet(
+                &diag, &shared_index,
+            );
+            pwrite_all_fd(local.fd, &footer, cursor)?;
+            let rc = unsafe { libc::fdatasync(local.fd) };
+            if rc != 0 {
+                return Err(MorlocError::Io(std::io::Error::last_os_error()));
+            }
+            release_slot_locked(slot);
+            drop(_guard);
+            Ok(())
+        })?;
+    } else {
+        // IFile / IStream: no finalisation; just release.
+        let _guard = SlotFutexGuard::lock(slot);
+        let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        if gen_now != gen_claim {
+            return Err(MorlocError::Other(
+                "shared_close_handle: slot generation changed under us".into(),
+            ));
+        }
+        release_slot_locked(slot);
+        drop(_guard);
+    }
+
+    invalidate_process_local_slot(handle);
+    Ok(())
+}
+
+/// Sweep-path close: releases the slot WITHOUT writing a final footer.
+/// Used by the per-call_id sweeper and the PID-based pool-crash sweep.
+/// Leaves the on-disk OStream in temp-footer state (the honest "writer
+/// didn't finish" signal — a downstream reader sees a temp footer iff the
+/// writer never reached an explicit close).
+pub fn shared_discard_handle(handle: i64) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "shared_discard_handle: slot index {} out of range", slot_idx,
+    )))?;
+    let _guard = SlotFutexGuard::lock(slot);
+    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_now != gen_claim {
+        return Err(MorlocError::Other(format!(
+            "shared_discard_handle: generation mismatch (handle {}, slot {})",
+            gen_claim, gen_now,
+        )));
+    }
+    release_slot_locked(slot);
+    drop(_guard);
+    invalidate_process_local_slot(handle);
+    Ok(())
+}
+
+/// Same as `shared_discard_handle` but assumes the caller already
+/// holds the slot's futex. Used by the per-call_id sweeper, which
+/// takes the futex to re-check `state` + `call_id` and then
+/// proceeds to the discard while still holding it.
+pub fn shared_discard_handle_locked(
+    slot: &RegistrySlot,
+    slot_idx: usize,
+) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    let handle = pack_handle(gen_now, slot_idx);
+    release_slot_locked(slot);
+    invalidate_process_local_slot(handle);
+    Ok(())
+}
+
+// Shared op functions run against the SHM slot + process-local mmap cache.
+// They coordinate cursor + sub-packet-index updates via the slot futex so
+// concurrent pools writing to or reading from the same handle stay
+// consistent.
+
+/// Emit one sub-packet from a payload byte slice, write it at the slot's
+/// current cursor, and update slot bookkeeping (cursor, diag, temp footer,
+/// shared sub-packet index). Caller MUST hold the slot futex.
+///
+/// `payload_bytes` is the uncompressed `[a]` voidstar payload (Array
+/// header + inline + variable). If `level > 0` it gets zstd-compressed
+/// here and the FRAME_INDEX metadata entry is added.
+fn emit_subpacket_to_disk(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    payload_bytes: &[u8],
+    level: u8,
+) -> Result<(), MorlocError> {
+    use morloc_runtime_types::packet::{
+        PacketHeader, METADATA_TYPE_SCHEMA_STRING, METADATA_TYPE_FRAME_INDEX,
+        METADATA_BLOCK_ALIGNMENT, PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
+        make_temp_footer_packet,
+    };
+    use morloc_runtime_types::schema::schema_to_string;
+
+    let clvl = crate::compression::CompressionLevel::from_u8(level)?;
+    let (final_payload, compression_byte, frame_index_body): (Vec<u8>, u8, Option<Vec<u8>>) =
+        if clvl.is_none() {
+            (payload_bytes.to_vec(), PACKET_COMPRESSION_NONE, None)
+        } else {
+            let (bytes, frames) =
+                crate::compression::compress_payload_zstd(payload_bytes, clvl)?;
+            let body = crate::packet::encode_frame_index_entry(&frames);
+            (bytes, PACKET_COMPRESSION_ZSTD, Some(body))
+        };
+    let value_schema_str = schema_to_string(&local.value_schema);
+    let mut schema_body = value_schema_str.into_bytes();
+    schema_body.push(0);
+    let base_meta = crate::packet::append_metadata_entry(
+        &[], METADATA_TYPE_SCHEMA_STRING, &schema_body,
+    );
+    let meta_unpadded = match &frame_index_body {
+        Some(body) => crate::packet::append_metadata_entry(
+            &base_meta, METADATA_TYPE_FRAME_INDEX, body,
+        ),
+        None => base_meta,
+    };
+    let padded_meta_len = meta_unpadded.len()
+        .div_ceil(METADATA_BLOCK_ALIGNMENT)
+        * METADATA_BLOCK_ALIGNMENT;
+    let mut meta = meta_unpadded;
+    meta.resize(padded_meta_len, 0);
+    let mut hdr = PacketHeader::data_rptr(
+        morloc_runtime_types::packet::PACKET_FORMAT_VOIDSTAR,
+        final_payload.len() as u64,
+    );
+    hdr.offset = padded_meta_len as u32;
+    let mut hdr_bytes = hdr.to_bytes();
+    hdr_bytes[15] = compression_byte;
+
+    let mut packet = Vec::with_capacity(
+        hdr_bytes.len() + meta.len() + final_payload.len(),
+    );
+    packet.extend_from_slice(&hdr_bytes);
+    packet.extend_from_slice(&meta);
+    packet.extend_from_slice(&final_payload);
+
+    let cursor = slot.cursor;
+    pwrite_all_fd(local.fd, &packet, cursor)?;
+    let subpacket_end = cursor + packet.len() as u64;
+
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).cursor = subpacket_end;
+        let d = &mut (*mp).diag;
+        d.subpacket_count += 1;
+        d.bytes_compressed_total += final_payload.len() as u64;
+        let now_us = unix_micros_now();
+        if d.first_flush_time == 0 { d.first_flush_time = now_us; }
+        d.last_flush_time = now_us;
+        push_tail_window(d, cursor);
+    }
+    // Publish the sub-packet boundary into the SHM-resident shared
+    // index. Caller (shared_write_subpacket / shared_flush_buffer /
+    // shared_close_handle) already holds the slot futex, so the
+    // append is serialised across every writer pool. The opener's
+    // @close then reads this single index to build the final footer
+    // -- every pool's flushes appear regardless of who emitted them.
+    append_shared_subpacket_index(slot, cursor)?;
+
+    let footer = make_temp_footer_packet(&slot.diag);
+    pwrite_all_fd(local.fd, &footer, subpacket_end)?;
+    Ok(())
+}
+
+/// Snapshot the SHM-resident shared sub-packet index into a heap
+/// `Vec<u64>` suitable for `make_final_footer_packet`. Caller MUST
+/// hold the slot futex so the index can't grow underneath us. Returns
+/// an empty vec when the slot has no index allocated (IFile/IStream
+/// slots, or an OStream with no flushes yet).
+fn read_shared_subpacket_index(
+    slot: &RegistrySlot,
+) -> Result<Vec<u64>, MorlocError> {
+    let len = slot.subpacket_index_len as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let idx_rel = slot.subpacket_index;
+    if idx_rel == shm_types_crate::RELNULL {
+        return Ok(Vec::new());
+    }
+    let idx_abs = crate::shm::rel2abs(idx_rel)? as *const u64;
+    let mut out = Vec::with_capacity(len);
+    unsafe {
+        out.set_len(len);
+        std::ptr::copy_nonoverlapping(idx_abs, out.as_mut_ptr(), len);
+    }
+    Ok(out)
+}
+
+/// Append a sub-packet starting offset to the SHM-resident shared
+/// sub-packet index. Caller MUST hold the slot futex. Doubles the
+/// capacity (and reallocates the SHM block) when full. The relptr in
+/// `slot.subpacket_index` is updated to the new block before the old
+/// one is freed -- readers under the same futex see a single
+/// publication step.
+fn append_shared_subpacket_index(
+    slot: &RegistrySlot,
+    offset: u64,
+) -> Result<(), MorlocError> {
+    let cap = slot.subpacket_index_cap;
+    if cap == 0 {
+        // OStream slots seed this to >= OSTREAM_SUBPACKET_INDEX_INITIAL_CAP
+        // at open. A zero cap here means this slot isn't OStream-shaped
+        // (IFile/IStream readers don't emit sub-packets); the emit path
+        // shouldn't be called against them.
+        return Err(MorlocError::Other(
+            "append_shared_subpacket_index: slot has no growable index \
+             (kind is not OStream or open path forgot to allocate)".into(),
+        ));
+    }
+    let len = slot.subpacket_index_len;
+    let idx_rel = slot.subpacket_index;
+    let idx_abs = crate::shm::rel2abs(idx_rel)? as *mut u64;
+    if len < cap {
+        unsafe { *idx_abs.add(len as usize) = offset; }
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).subpacket_index_len = len + 1;
+        }
+        return Ok(());
+    }
+    // Grow by doubling.
+    let new_cap = cap.checked_mul(2).ok_or_else(|| MorlocError::Other(
+        "append_shared_subpacket_index: capacity overflow".into(),
+    ))?;
+    let new_bytes = (new_cap as usize) * std::mem::size_of::<u64>();
+    let new_abs = crate::shm::shcalloc(1, new_bytes)? as *mut u64;
+    unsafe {
+        std::ptr::copy_nonoverlapping(idx_abs, new_abs, len as usize);
+        *new_abs.add(len as usize) = offset;
+    }
+    let new_rel = crate::shm::abs2rel(new_abs as *mut u8)?;
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).subpacket_index = new_rel;
+        (*mp).subpacket_index_len = len + 1;
+        (*mp).subpacket_index_cap = new_cap;
+    }
+    // Free the old block AFTER the publication. Readers under the
+    // futex see the new relptr; no one is holding a pointer to the
+    // old block.
+    let _ = crate::shm::shfree(idx_abs as *mut u8);
+    Ok(())
+}
+
+/// Double the write buffer's index-section capacity. Caller MUST hold
+/// the slot futex and have already verified that the new capacity
+/// (plus current data_used) still fits in the buffer. Memmoves the
+/// data region right by `(new_cap - old_cap) * elem_width` and
+/// shifts every inline element's relptrs by the same amount.
+fn grow_index_capacity(
+    slot: &RegistrySlot,
+    local: &ProcessLocalSlot,
+    new_cap: u64,
+) -> Result<(), MorlocError> {
+    let w = local.elem_schema.width;
+    let old_cap = slot.write_buffer_index_cap;
+    let data_used = slot.write_buffer_data_used as usize;
+    let n = slot.write_buffer_index_count;
+
+    let old_data_offset = 16 + (old_cap as usize) * w;
+    let new_data_offset = 16 + (new_cap as usize) * w;
+    let shift: isize = (new_data_offset - old_data_offset) as isize;
+
+    let buf_abs = crate::shm::rel2abs(slot.write_buffer)?;
+    if data_used > 0 {
+        unsafe {
+            std::ptr::copy(
+                buf_abs.add(old_data_offset),
+                buf_abs.add(new_data_offset),
+                data_used,
+            );
+        }
+        for i in 0..n {
+            let elem_ptr = unsafe { buf_abs.add(16 + (i as usize) * w) };
+            crate::voidstar::adjust_relptrs(elem_ptr, &local.elem_schema, shift)?;
+        }
+    }
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).write_buffer_index_cap = new_cap;
+    }
+    Ok(())
+}
+
+/// Compact the write buffer (remove wasted index space) and emit its
+/// contents as one sub-packet at the slot's cursor. Caller MUST hold
+/// the slot futex. No-op when the buffer is empty. Resets buffer
+/// counters after a successful flush.
+fn flush_write_buffer(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+) -> Result<(), MorlocError> {
+    let n = slot.write_buffer_index_count;
+    if n == 0 {
+        return Ok(());
+    }
+    let w = local.elem_schema.width;
+    let index_cap = slot.write_buffer_index_cap as usize;
+    let data_used = slot.write_buffer_data_used as usize;
+
+    let buf_abs = crate::shm::rel2abs(slot.write_buffer)?;
+
+    // Compact: remove the wasted index space between the used inline
+    // elements and the data region. Shift data region left, adjust
+    // relptrs in inline elements by -wasted.
+    let wasted = (index_cap - n as usize) * w;
+    if wasted > 0 && data_used > 0 {
+        let old_data_offset = 16 + index_cap * w;
+        let new_data_offset = 16 + (n as usize) * w;
+        unsafe {
+            std::ptr::copy(
+                buf_abs.add(old_data_offset),
+                buf_abs.add(new_data_offset),
+                data_used,
+            );
+        }
+        for i in 0..n {
+            let elem_ptr = unsafe { buf_abs.add(16 + (i as usize) * w) };
+            crate::voidstar::adjust_relptrs(
+                elem_ptr, &local.elem_schema, -(wasted as isize),
+            )?;
+        }
+    }
+
+    // Write the Array header at buffer[0..16]: {size: n, data: 16}.
+    unsafe {
+        let hdr_ptr = buf_abs as *mut shm_types_crate::Array;
+        (*hdr_ptr).size = n as usize;
+        (*hdr_ptr).data = 16 as RelPtr;
+    }
+
+    let payload_len = 16 + (n as usize) * w + data_used;
+    let payload_slice = unsafe { std::slice::from_raw_parts(buf_abs, payload_len) };
+
+    let level = slot.compression_level;
+    emit_subpacket_to_disk(slot, local, payload_slice, level)?;
+
+    // Reset buffer counters. The buffer bytes don't need to be cleared;
+    // the next @write overwrites them.
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).write_buffer_index_count = 0;
+        (*mp).write_buffer_data_used = 0;
+    }
+    Ok(())
+}
+
+/// Try to append one element from `elem_src` into the write buffer.
+/// Returns Ok(()) on success (whether the element went into the
+/// buffer or was emitted directly as an oversize sub-packet). Caller
+/// MUST hold the slot futex.
+fn append_one_element(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    elem_src: AbsPtr,
+) -> Result<(), MorlocError> {
+    let w = local.elem_schema.width;
+    let buf_size = read_write_buffer_bytes_env();
+
+    // Flatten the single element to a self-contained blob:
+    //   blob[0..w]: inline (with buffer-relative relptrs into blob[w..])
+    //   blob[w..]:  variable bytes (sub-allocations)
+    let elem_blob = crate::voidstar::flatten_to_buffer(elem_src, &local.elem_schema)?;
+    let variable_size = elem_blob.len().saturating_sub(w);
+
+    // Initialise the index cap on first write into this slot. Clamp
+    // to what the buffer can actually hold: with a small env-overridden
+    // buf_size (e.g. 4 KiB) and the default INITIAL_CAP (1024) at
+    // 8-byte elements, a literal INITIAL_CAP-sized index section would
+    // be 8 KiB on its own and the buffer would have no room left for
+    // a single element.
+    if slot.write_buffer_index_cap == 0 {
+        let max_index_cap = (buf_size.saturating_sub(16)) / w.max(1);
+        let initial_cap = (WRITE_BUFFER_INDEX_INITIAL_CAP as usize)
+            .min(max_index_cap)
+            .max(1) as u64;
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).write_buffer_index_cap = initial_cap;
+        }
+    }
+
+    // Single oversize element: doesn't fit even in a fully-empty buffer
+    // with the smallest possible index (one slot). The buffer's layout
+    // is header (16) + index (>= 1 element) + variable data. If even
+    // that minimum exceeds buf_size, the element is truly oversize.
+    let min_required = 16 + w + variable_size;
+    if min_required > buf_size {
+        // Even on an empty buffer, this element wouldn't fit. Flush
+        // and emit oversize. The oversize packet is a one-element
+        // Array<a> built from elem_blob.
+        flush_write_buffer(slot, local)?;
+        // Build oversize payload: Array{size=1, data=16} + elem_blob,
+        // with elem_blob's inline relptrs shifted by +16 to account
+        // for the Array header.
+        let oversize_len = 16 + elem_blob.len();
+        let mut oversize_payload = Vec::with_capacity(oversize_len);
+        // Array header
+        let arr_hdr = shm_types_crate::Array { size: 1, data: 16 as RelPtr };
+        oversize_payload.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(
+                &arr_hdr as *const _ as *const u8,
+                16,
+            )
+        });
+        // Element blob
+        oversize_payload.extend_from_slice(&elem_blob);
+        // Shift relptrs in the appended element by +16.
+        let elem_in_payload = unsafe {
+            oversize_payload.as_mut_ptr().add(16)
+        };
+        crate::voidstar::adjust_relptrs(
+            elem_in_payload, &local.elem_schema, 16isize,
+        )?;
+        let level = slot.compression_level;
+        emit_subpacket_to_disk(slot, local, &oversize_payload, level)?;
+        return Ok(());
+    }
+
+    // Try to fit one more element. If neither growing the index nor
+    // the current data region's remaining space is enough, flush
+    // first then retry (next iteration's empty buffer makes room).
+    loop {
+        let need_index_grow =
+            slot.write_buffer_index_count + 1 > slot.write_buffer_index_cap;
+        let candidate_cap = if need_index_grow {
+            slot.write_buffer_index_cap.saturating_mul(2)
+        } else {
+            slot.write_buffer_index_cap
+        };
+        let candidate_index_bytes = (candidate_cap as usize) * w;
+        let required = 16 + candidate_index_bytes
+            + (slot.write_buffer_data_used as usize)
+            + variable_size;
+        if required <= buf_size {
+            if need_index_grow {
+                grow_index_capacity(slot, local, candidate_cap)?;
+            }
+            break;
+        }
+        // Doesn't fit. If buffer is empty we've already established
+        // the element doesn't fit even minimally (handled above);
+        // anything else here is an unexpected edge case.
+        if slot.write_buffer_index_count == 0 {
+            return Err(MorlocError::Other(
+                "@write: internal error -- empty buffer can't fit element \
+                 that passed the oversize check".into(),
+            ));
+        }
+        flush_write_buffer(slot, local)?;
+        // Loop: buffer is empty now, try again.
+    }
+
+    // Copy inline + variable into the buffer and rebase relptrs.
+    let buf_abs = crate::shm::rel2abs(slot.write_buffer)?;
+    let index_offset = 16 + (slot.write_buffer_index_count as usize) * w;
+    let data_region_start = 16 + (slot.write_buffer_index_cap as usize) * w;
+    let data_offset = data_region_start + (slot.write_buffer_data_used as usize);
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            elem_blob.as_ptr(), buf_abs.add(index_offset), w,
+        );
+        if variable_size > 0 {
+            std::ptr::copy_nonoverlapping(
+                elem_blob.as_ptr().add(w),
+                buf_abs.add(data_offset),
+                variable_size,
+            );
+        }
+    }
+    // Shift the copied element's relptrs from "blob-relative" (where
+    // sub-allocations start at offset w) to "buffer-relative" (where
+    // they now start at `data_offset`).
+    let shift: isize = (data_offset as isize) - (w as isize);
+    if shift != 0 {
+        let elem_ptr = unsafe { buf_abs.add(index_offset) };
+        crate::voidstar::adjust_relptrs(elem_ptr, &local.elem_schema, shift)?;
+    }
+
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).write_buffer_index_count += 1;
+        (*mp).write_buffer_data_used += variable_size as u64;
+    }
+    Ok(())
+}
+
+/// `@write level value handle` on an OStream slot. Appends each
+/// element of the incoming `[a]` to the slot's SHM write buffer;
+/// flushes a sub-packet when the buffer fills. Oversize single
+/// elements (>buffer-size) get their own sub-packet.
+///
+/// Element atomicity is preserved: a single element is never split
+/// across sub-packets. Multi-element overflow (a list that partly
+/// fits and partly doesn't) is handled per-element -- elements that
+/// fit are appended, then the buffer flushes, then the remaining
+/// elements continue accumulating in the fresh buffer.
+pub fn shared_write_subpacket(
+    handle: i64,
+    level: u8,
+    payload_voidstar: AbsPtr,
+) -> Result<(), MorlocError> {
+    if payload_voidstar.is_null() {
+        return Err(MorlocError::Other("@write: null payload".into()));
+    }
+    // Validate the level before any I/O.
+    let _ = crate::compression::CompressionLevel::from_u8(level)?;
+
+    with_process_local_slot(handle, |local, slot| {
+        if slot.kind != MLC_KIND_OSTREAM {
+            return Err(MorlocError::Other(format!(
+                "@write on non-OStream handle (kind = {})",
+                handle_kind_name(slot.kind),
+            )));
+        }
+
+        let arr = unsafe { &*(payload_voidstar as *const shm_types_crate::Array) };
+        let n_elements = arr.size as u64;
+        let w = local.elem_schema.width;
+        let elem_data_base = if n_elements == 0 {
+            std::ptr::null_mut()
+        } else {
+            crate::shm::rel2abs(arr.data)?
+        };
+
+        let _guard = SlotFutexGuard::lock(slot);
+
+        // Pin compression level on first @write into this slot
+        // (across all pools); subsequent writes must match.
+        if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).compression_level = level;
+            }
+        } else if slot.compression_level != level {
+            return Err(MorlocError::Other(format!(
+                "@write level mismatch: stream was opened/written at level {} \
+                 but this call passed {}. All sub-packets must share a level.",
+                slot.compression_level, level,
+            )));
+        }
+
+        // Walk the elements and append each. element_count updates
+        // here (not at flush) so @flen reflects buffered elements too.
+        for i in 0..n_elements {
+            let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
+            append_one_element(slot, local, elem_src)?;
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).element_count += 1;
+                let d = &mut (*mp).diag;
+                d.element_count += 1;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// `@flush handle`: force any buffered elements to be written as a
+/// sub-packet immediately, without closing the stream. Useful for
+/// tests that need predictable packet boundaries and for user code
+/// that wants to commit progress visibly to readers.
+pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
+    with_process_local_slot(handle, |local, slot| {
+        if slot.kind != MLC_KIND_OSTREAM {
+            return Err(MorlocError::Other(format!(
+                "@flush on non-OStream handle (kind = {})",
+                handle_kind_name(slot.kind),
+            )));
+        }
+        let _guard = SlotFutexGuard::lock(slot);
+        flush_write_buffer(slot, local)
+    })
+}
+
+/// `@next handle` on an IStream slot. Reads the next sub-packet's
+/// header at the slot's current cursor (via this pool's mmap),
+/// materialises it, advances the cursor, and returns an SHM
+/// `Array<a>` AbsPtr.
+///
+/// The cursor advance is under the slot futex, so concurrent
+/// readers from multiple pools each pull a distinct sub-packet
+/// (the multi-reader IStream work-queue pattern). On EOF (cursor
+/// at or past the file's footer / end-of-data) returns an empty
+/// `Array<a>`.
+pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
+    with_process_local_slot(handle, |local, slot| {
+        if slot.kind != MLC_KIND_ISTREAM {
+            return Err(MorlocError::Other(format!(
+                "@next on non-IStream handle (kind = {})",
+                handle_kind_name(slot.kind),
+            )));
+        }
+
+        // Claim the next sub-packet under the futex. The lock window
+        // is just header-read + cursor-advance; the actual
+        // decompression / deep-copy happens with the lock dropped.
+        let (claim_cursor, on_disk_size, header_is_data) = {
+            let _guard = SlotFutexGuard::lock(slot);
+            let cursor = slot.cursor;
+            if cursor >= local.mmap_size || cursor + 32 > local.mmap_size {
+                // EOF: leave cursor where it is, return empty Array.
+                return empty_shm_array();
+            }
+            let hdr_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (local.mmap_ptr as *const u8).add(cursor as usize),
+                    32,
+                )
+            };
+            let header = morloc_runtime_types::packet::PacketHeader::from_bytes(
+                hdr_bytes.try_into().unwrap(),
+            )?;
+            if !header.is_data() {
+                // Footer encountered: end-of-stream. Return empty.
+                return empty_shm_array();
+            }
+            let size = 32 + header.offset as u64 + header.length;
+            // Advance the cursor BEFORE we drop the futex so concurrent
+            // @next on this slot from another pool reads from
+            // cursor+size and claims a DIFFERENT sub-packet.
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).cursor = cursor + size;
+            }
+            (cursor, size, true)
+        };
+        let _ = (on_disk_size, header_is_data); // (currently only on_disk_size feeds cursor advance)
+
+        // Materialise the claimed sub-packet without holding the
+        // futex. Other pools can advance through subsequent
+        // sub-packets in parallel.
+        materialize_and_finalise_subpacket(local, slot, claim_cursor)
+    })
+}
+
+/// Read the sub-packet at the given byte offset in this pool's mmap
+/// and produce a fresh SHM `Array<a>` to return to the caller.
+/// Decompresses if needed, walks relptrs, deep-copies.
+fn materialize_and_finalise_subpacket(
+    local: &ProcessLocalSlot,
+    _slot: &RegistrySlot,
+    subpacket_off: u64,
+) -> Result<AbsPtr, MorlocError> {
+    let (src, _on_disk_size) =
+        materialize_subpacket_at_offset(local, subpacket_off)?;
+    let arr_base = src.arr_base();
+    let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
+    let arr_size = arr.size as u64;
+    let elem_width = local.elem_schema.width;
+
+    match src {
+        SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
+            let resolver = make_file_resolver(payload_base, payload_len);
+            let arr_data = resolver(arr.data)?;
+            let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
+            if arr_size == 0 {
+                let a = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+                a.size = 0;
+                a.data = shm::RELNULL;
+                Ok(arr_ptr)
+            } else {
+                match slice_bulk_copy_contiguous(
+                    0, arr_size as usize, arr_size, arr_data,
+                    payload_base, payload_len, vol_idx_hint,
+                    &local.elem_schema, elem_width, arr_ptr,
+                ) {
+                    Ok(()) => Ok(arr_ptr),
+                    Err(e) => {
+                        let _ = shm::shfree(arr_ptr);
+                        Err(e)
+                    }
+                }
+            }
+        }
+        SubpacketSrc::Shm { arr_base } => Ok(arr_base),
+    }
+}
+
+/// Allocate and return a SHM `Array` of size 0, the EOF return value
+/// of `shared_next_subpacket`. Mirrors `empty_array()` in the
+/// process-local path.
+fn empty_shm_array() -> Result<AbsPtr, MorlocError> {
+    let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
+    let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+    arr.size = 0;
+    arr.data = shm::RELNULL;
+    Ok(arr_ptr)
+}
+
+/// `@flen handle`: return the element_count from the slot. Works on
+/// IFile (count comes from the final footer's StreamDiag at @open)
+/// and IStream (count comes from whichever footer was present).
+pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "shared_handle_length: slot index {} out of range", slot_idx,
+    )))?;
+    // Versioned-pointer read; element_count is futex-protected for
+    // OStream writes but we accept a momentarily-stale snapshot
+    // for IFile/IStream readers. For OStream callers (which would
+    // be unusual for @flen) take the futex.
+    let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_before != gen_claim {
+        return Err(MorlocError::Other(format!(
+            "shared_handle_length: generation mismatch (claim {}, slot {})",
+            gen_claim, gen_before,
+        )));
+    }
+    if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+        return Err(MorlocError::Other(
+            "shared_handle_length: slot is not OPEN".into(),
+        ));
+    }
+    if slot.kind != MLC_KIND_IFILE && slot.kind != MLC_KIND_ISTREAM {
+        return Err(MorlocError::Other(format!(
+            "@flen is only defined on IFile / IStream handles (got kind = {})",
+            handle_kind_name(slot.kind),
+        )));
+    }
+    let count = if slot.kind == MLC_KIND_OSTREAM {
+        let _guard = SlotFutexGuard::lock(slot);
+        slot.element_count
+    } else {
+        slot.element_count
+    };
+    let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_after != gen_before {
+        return Err(MorlocError::Other(
+            "shared_handle_length: slot was closed mid-read; retry".into(),
+        ));
+    }
+    Ok(count)
+}
+
+/// Versioned-pointer read of `kind` from a shared slot. Used by the
+/// cross-pool wire codec to know which `open_dispatch` arm to call on
+/// the receiving side.
+pub fn shared_handle_kind(handle: i64) -> Result<u8, MorlocError> {
+    use std::sync::atomic::Ordering;
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "shared_handle_kind: slot index {} out of range", slot_idx,
+    )))?;
+    let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_before != gen_claim {
+        return Err(MorlocError::Other(format!(
+            "shared_handle_kind: generation mismatch (claim {}, slot {})",
+            gen_claim, gen_before,
+        )));
+    }
+    let kind = slot.kind;
+    let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_after != gen_before {
+        return Err(MorlocError::Other(
+            "shared_handle_kind: slot was closed mid-read; retry".into(),
+        ));
+    }
+    Ok(kind)
+}
+
+/// Versioned-pointer read of the file path bound to an open handle.
+/// Used by the cross-pool wire codec (`mlc_handle_pack_path` /
+/// `mlc_handle_path_len`).
+pub fn shared_handle_path(handle: i64) -> Result<String, MorlocError> {
+    use std::sync::atomic::Ordering;
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "shared_handle_path: slot index {} out of range", slot_idx,
+    )))?;
+    loop {
+        let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        if gen_before != gen_claim {
+            return Err(MorlocError::Other(format!(
+                "shared_handle_path: generation mismatch (claim {}, slot {})",
+                gen_claim, gen_before,
+            )));
+        }
+        if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+            return Err(MorlocError::Other(
+                "shared_handle_path: slot is not OPEN".into(),
+            ));
+        }
+        let path_rel = slot.file_path;
+        let path_len = slot.file_path_len as usize;
+        if path_rel == shm_types_crate::RELNULL || path_len == 0 {
+            return Err(MorlocError::Other(
+                "shared_handle_path: slot has empty file_path".into(),
+            ));
+        }
+        let path_abs = crate::shm::rel2abs(path_rel)?;
+        // Snapshot bytes into an owned String, then re-verify
+        // generation. If a close raced, retry.
+        let path_bytes = unsafe {
+            std::slice::from_raw_parts(path_abs, path_len)
+        };
+        let path_string = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                // Could be a torn read; check generation before
+                // surfacing the UTF-8 error.
+                let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+                if gen_after != gen_before {
+                    continue;  // retry
+                }
+                return Err(MorlocError::Other(
+                    "shared_handle_path: file_path is not valid UTF-8".into(),
+                ));
+            }
+        };
+        let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        if gen_after == gen_before {
+            return Ok(path_string);
+        }
+        // Raced; retry from the top.
+    }
+}
+
+/// `@stream :: IFile a -> <IO> IStream a`: open a fresh IStream slot
+/// at the same path as the given IFile handle. The two handles have
+/// independent cursors (the new IStream walks from `body_start`).
+pub fn shared_derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {
+    let kind = shared_handle_kind(ifile_handle)?;
+    if kind != MLC_KIND_IFILE {
+        return Err(MorlocError::Other(format!(
+            "@stream expects an IFile handle (got kind = {})",
+            handle_kind_name(kind),
+        )));
+    }
+    let path = shared_handle_path(ifile_handle)?;
+    shared_open_istream(&path)
+}
+
+/// Batched length lookup over a slice of shared-registry handles.
+/// Each handle is resolved via the versioned-pointer pattern; per-
+/// handle results are written into `out_lens` if `Some`. Returns the
+/// sum of all lengths.
+pub fn shared_handles_path_lens(
+    handles: &[i64],
+    mut out_lens: Option<&mut [i64]>,
+) -> Result<u64, MorlocError> {
+    if let Some(ref outs) = out_lens {
+        debug_assert_eq!(handles.len(), outs.len());
+    }
+    let mut sum: u64 = 0;
+    for (i, &h) in handles.iter().enumerate() {
+        let p = shared_handle_path(h).map_err(|e| {
+            MorlocError::Other(format!(
+                "handle at index {}: {}", i, e
+            ))
+        })?;
+        let len = p.len() as i64;
+        if let Some(ref mut outs) = out_lens {
+            outs[i] = len;
+        }
+        sum += len as u64;
+    }
+    Ok(sum)
+}
+
+/// Batched voidstar write for an `[IFile a]` pack pass. Per-handle
+/// resolution goes through the versioned-pointer pattern; the path
+/// bytes are then memcpy'd into the destination buffer at the running
+/// cursor position. `cursor` is advanced past the concatenated bytes.
+pub fn shared_write_handles_voidstar(
+    handles: &[i64],
+    dest_base: *mut u8,
+    elem_stride: usize,
+    cursor: &mut *mut u8,
+) -> Result<(), MorlocError> {
+    use crate::shm_types::Array;
+    for (i, &h) in handles.iter().enumerate() {
+        let path = shared_handle_path(h).map_err(|e| {
+            MorlocError::Other(format!("handle at index {}: {}", i, e))
+        })?;
+        let bytes = path.as_bytes();
+        let slot = unsafe { dest_base.add(i * elem_stride) as *mut Array };
+        unsafe { (*slot).size = bytes.len(); }
+        if bytes.is_empty() {
+            unsafe { (*slot).data = shm::RELNULL; }
+            continue;
+        }
+        let cur = *cursor;
+        let rel = shm::abs2rel(cur)?;
+        unsafe {
+            (*slot).data = rel;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), cur, bytes.len());
+            *cursor = cur.add(bytes.len());
+        }
+    }
+    Ok(())
+}
+
+/// `@open IFile path` + pattern walk on the shared registry. Dispatches
+/// to root-bracket fast paths or the general field walker, mirroring
+/// the existing process-local `ifile_walk` but reading from the
+/// SHM slot's process-local cache.
+pub fn shared_ifile_walk(
+    handle: i64,
+    path: &str,
+    args: &[crate::intrinsics::IFileWalkArg],
+) -> Result<AbsPtr, MorlocError> {
+    // Root-only `.[]` (single-index): shared bracket-index.
+    if path == ".[]" {
+        if args.len() != 1 {
+            return Err(MorlocError::Other(format!(
+                "ifile_walk: \".[]\" expects 1 runtime arg, got {}", args.len()
+            )));
+        }
+        if args[0].has == 0 {
+            return Err(MorlocError::Other(
+                "ifile_walk: \".[]\" requires a present index (got None)".into(),
+            ));
+        }
+        return shared_ifile_bracket_index(handle, args[0].value);
+    }
+    // Root-only `.[:]` (slice) with optional field/key tail.
+    if let Some(rest) = path.strip_prefix(".[:]") {
+        if args.len() != 3 {
+            return Err(MorlocError::Other(format!(
+                "ifile_walk: \".[:]\" expects 3 runtime args, got {}", args.len()
+            )));
+        }
+        let opt = |a: &crate::intrinsics::IFileWalkArg| {
+            if a.has != 0 { Some(a.value) } else { None }
+        };
+        let tail_steps = if rest.is_empty() {
+            Vec::new()
+        } else {
+            let parsed = parse_field_only_tail(rest)?;
+            if parsed.is_none() {
+                return shared_ifile_general(handle, path, args);
+            }
+            parsed.unwrap()
+        };
+        return shared_ifile_bracket_slice_with_tail(
+            handle, opt(&args[0]), opt(&args[1]), opt(&args[2]), &tail_steps,
+        );
+    }
+    // General field-walk path.
+    shared_ifile_general(handle, path, args)
+}
+
+fn shared_ifile_general(
+    handle: i64,
+    path: &str,
+    args: &[crate::intrinsics::IFileWalkArg],
+) -> Result<AbsPtr, MorlocError> {
+    let steps = parse_walk_path(path)?;
+    with_process_local_slot(handle, |local, slot| {
+        if slot.kind != MLC_KIND_IFILE {
+            return Err(MorlocError::Other(format!(
+                "field access on non-IFile handle (kind = {})",
+                handle_kind_name(slot.kind),
+            )));
+        }
+        if local.subpacket_index_local.is_empty() {
+            return Err(MorlocError::Other(
+                "IFile has no sub-packets (empty file?)".into(),
+            ));
+        }
+        let src = materialize_subpacket(local, 0)?;
+        let r = walk_into_fresh(&local.value_schema, &src, &steps, args);
+        src.release();
+        r
+    })
+}
+
+fn shared_ifile_bracket_index(handle: i64, index: i64) -> Result<AbsPtr, MorlocError> {
+    with_process_local_slot(handle, |local, slot| {
+        ifile_bracket_index_against_slot(local, slot, index)
+    })
+}
+
+fn shared_ifile_bracket_slice_with_tail(
+    handle: i64,
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
+    tail_steps: &[WalkStep],
+) -> Result<AbsPtr, MorlocError> {
+    with_process_local_slot(handle, |local, slot| {
+        ifile_bracket_slice_against_slot(
+            local, slot, start, stop, step, tail_steps,
+        )
+    })
+}
+
+/// `@append schema_str path`: open an existing stream file for append
+/// and allocate a fresh OSTREAM slot in the shared registry. The
+/// schema must match the file's stored schema; mismatches error
+/// before any bytes are written. Trailing partial bytes (orphaned
+/// temp footer from the prior writer, partial flush) are truncated
+/// at the last complete sub-packet boundary.
+pub fn shared_append_to_path(
+    path: &str,
+    expected_schema_str: &str,
+) -> Result<i64, MorlocError> {
+    use std::ffi::CString;
+    use std::sync::atomic::Ordering;
+
+    // Step 1: mmap read-only to find the resume offset and validate
+    // the schema. Mmap is unmapped before reopening RW.
+    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
+        Ok(p) => p,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    if parsed.schema_str != expected_schema_str {
+        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        return Err(MorlocError::Other(format!(
+            "@append: schema mismatch on '{}': file has '{}', open requested '{}'",
+            path, parsed.schema_str, expected_schema_str
+        )));
+    }
+    let stream_hdr = match parse_stream_header(mmap_ptr, mmap_size) {
+        Ok(h) => h,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    let resume_off = if let Some(&last_off) = parsed.subpacket_index.last() {
+        match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
+            Ok(sz) => last_off + sz,
+            Err(e) => {
+                unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+                return Err(e);
+            }
+        }
+    } else {
+        stream_hdr.body_start
+    };
+    let element_count_at_resume = parsed.element_count;
+    let value_schema_clone = parsed.value_schema.clone();
+    let elem_schema_clone = parsed.elem_schema.clone();
+    let subpacket_index_clone = parsed.subpacket_index.clone();
+    let schema_str_clone = parsed.schema_str.clone();
+    unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+
+    // Step 2: reopen RW, flock, truncate at resume offset.
+    let c_path = CString::new(path).map_err(|e| {
+        MorlocError::Other(format!("@append: path contains NUL: {}", e))
+    })?;
+    let fd = unsafe {
+        libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC, 0)
+    };
+    if fd < 0 {
+        return Err(MorlocError::Io(std::io::Error::last_os_error()));
+    }
+    let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if lock_rc != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd); }
+        return Err(MorlocError::Other(format!(
+            "@append: failed to flock '{}': {}", path, e
+        )));
+    }
+    let trunc_rc = unsafe { libc::ftruncate(fd, resume_off as libc::off_t) };
+    if trunc_rc != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd); }
+        return Err(MorlocError::Io(e));
+    }
+
+    // Step 3: allocate a fresh OSTREAM slot in the shared registry,
+    // pre-seeded with the resume cursor + element_count.
+    let (slot_idx, slot) = match allocate_slot_cas() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { libc::close(fd); }
+            return Err(e);
+        }
+    };
+    let _guard = SlotFutexGuard::lock(slot);
+    let publish_result = (|| -> Result<u64, MorlocError> {
+        let path_rel = shm_copy_bytes(path.as_bytes())?;
+        let schema_rel = shm_copy_bytes(schema_str_clone.as_bytes())?;
+        let buf_bytes = read_write_buffer_bytes_env();
+        let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
+        let buf_rel = crate::shm::abs2rel(buf_abs)?;
+        let mut diag = StreamDiag::new();
+        diag.subpacket_count = subpacket_index_clone.len() as u64;
+        diag.element_count = element_count_at_resume;
+        // SHM-resident sub-packet index pre-seeded with the on-disk
+        // offsets discovered during forward-scan recovery. Subsequent
+        // flushes from any pool append under the slot futex. Initial
+        // capacity is at least the current length so we don't grow
+        // during the first append.
+        let preseed_len = subpacket_index_clone.len();
+        let idx_cap_initial: u64 = std::cmp::max(
+            OSTREAM_SUBPACKET_INDEX_INITIAL_CAP,
+            (preseed_len as u64).next_power_of_two().max(1),
+        );
+        let idx_buf_bytes = (idx_cap_initial as usize) * std::mem::size_of::<u64>();
+        let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
+        let idx_buf_rel = crate::shm::abs2rel(idx_buf_abs)?;
+        if preseed_len > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    subpacket_index_clone.as_ptr(),
+                    idx_buf_abs as *mut u64,
+                    preseed_len,
+                );
+            }
+        }
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).kind = MLC_KIND_OSTREAM;
+            (*mp).file_path = path_rel;
+            (*mp).file_path_len = path.len() as u32;
+            (*mp).schema_str = schema_rel;
+            (*mp).schema_str_len = schema_str_clone.len() as u32;
+            (*mp).subpacket_index = idx_buf_rel;
+            (*mp).subpacket_index_len = preseed_len as u64;
+            (*mp).subpacket_index_cap = idx_cap_initial;
+            (*mp).body_start = stream_hdr.body_start;
+            (*mp).final_footer = 0;
+            (*mp).cursor = resume_off;
+            (*mp).element_count = element_count_at_resume;
+            (*mp).compression_level = 0;
+            (*mp).opener_pid = std::process::id();
+            (*mp).opener_pid_start_time = read_pid_start_time();
+            (*mp).diag = diag;
+            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer_index_cap = 0;
+            (*mp).write_buffer_index_count = 0;
+            (*mp).write_buffer_data_used = 0;
+        }
+        slot.call_id.store(current_call_id(), Ordering::Release);
+        let bump = registry_gen_salt() | 1;
+        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        Ok(new_gen)
+    })();
+    let new_gen = match publish_result {
+        Ok(g) => g,
+        Err(e) => {
+            release_slot_locked(slot);
+            unsafe { libc::close(fd); }
+            return Err(e);
+        }
+    };
+
+    // Install the process-local cache. The OPENER's sub-packet index is
+    // handed to this fresh slot so subsequent @close can rebuild the final
+    // footer correctly. In the multi-pool case, the `@append`er is the
+    // canonical "opener" of the new slot and owns the final-footer write.
+    let local = ProcessLocalSlot {
+        cached_generation: new_gen,
+        mmap_ptr: std::ptr::null_mut(),
+        mmap_size: 0,
+        fd,
+        cache: Box::new(StreamCache::new(0)),
+        value_schema: value_schema_clone,
+        elem_schema: elem_schema_clone,
+        subpacket_index_local: subpacket_index_clone,
+        subpacket_elem_cum: None,
+        is_data_packet: false,
+    };
+    let handle = pack_handle(new_gen, slot_idx);
+    install_process_local_slot(handle, local);
+    Ok(handle)
+}
+
+// ── Off-worker-thread sweeper ────────────────────────────────────────────
+//
+// Daemon workers tag every `@open` with the current dispatch's `call_id`
+// (held in TLS, set at start of the dispatch). After the daemon sends its
+// response back to the nexus, it enqueues a per-call sweep request and
+// clears its TLS. A single dedicated sweeper thread drains the queue and
+// walks the registry, discarding any slots whose `call_id` matches.
+//
+// The sweep is OFF the worker thread (so a slow sweep doesn't block the
+// next dispatch on the same worker) and confirms `state` + `call_id`
+// UNDER the slot futex before discarding (so a fresh allocation that
+// landed in the same slot index between pre-filter and discard isn't
+// accidentally swept).
+//
+// Per-PID sweeps (for crashed pools) flow through the same thread and
+// queue.
+
+/// A request enqueued to the sweeper thread.
+#[derive(Debug, Clone, Copy)]
+pub enum SweepRequest {
+    /// Discard all slots whose `call_id` field matches.
+    PerCall(u64),
+    /// Discard all slots whose (`opener_pid`, `opener_pid_start_time`)
+    /// matches a (PID, start_time) pair. Used when a pool is detected
+    /// to have crashed.
+    PerPid(u32, u64),
+}
+
+/// Sender half of the sweeper queue. Cloned to every daemon worker
+/// that needs to enqueue a sweep. Initialised by `sweeper_init`.
+static SWEEPER_TX: Mutex<Option<std::sync::mpsc::Sender<SweepRequest>>> =
+    Mutex::new(None);
+
+/// Spawn the dedicated sweeper thread and install its `Sender` in
+/// `SWEEPER_TX`. Idempotent: subsequent calls observe the existing
+/// sender and return immediately. Called from the daemon startup
+/// path (or any other place that wants per-call cleanup).
+///
+/// The thread is detached: it lives for the lifetime of the
+/// process. On process exit, the OS reclaims it. No clean-shutdown
+/// handshake is needed because the sweep is best-effort (the registry
+/// SHM volume is unlinked at shclose anyway, freeing any straggler
+/// slots).
+pub fn sweeper_init() {
+    let mut guard = SWEEPER_TX.lock().unwrap();
+    if guard.is_some() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
+    *guard = Some(tx);
+    drop(guard);
+    std::thread::Builder::new()
+        .name("morloc-stream-sweeper".into())
+        .spawn(move || sweeper_main(rx))
+        .expect("morloc-stream-sweeper: thread spawn failed");
+}
+
+/// Enqueue a per-call sweep request. Non-blocking. Returns silently
+/// if the sweeper isn't initialised (which would be a runtime bug:
+/// the daemon path is supposed to call `sweeper_init` at startup).
+///
+/// `CALL_ID_NO_SWEEP` (0) is filtered here: enqueueing a sweep for
+/// the sentinel value would needlessly walk the registry without
+/// matching anything.
+pub fn sweeper_enqueue_call(call_id: u64) {
+    if call_id == CALL_ID_NO_SWEEP {
+        return;
+    }
+    let guard = SWEEPER_TX.lock().unwrap();
+    if let Some(tx) = guard.as_ref() {
+        // Errors mean the receiver has been dropped (process is
+        // shutting down). Discard silently.
+        let _ = tx.send(SweepRequest::PerCall(call_id));
+    }
+}
+
+/// Enqueue a per-PID sweep request. Called when a pool crash is detected
+/// (the pool's PID + start_time uniquely identify the dead pool's slots).
+pub fn sweeper_enqueue_pid(pid: u32, start_time: u64) {
+    let guard = SWEEPER_TX.lock().unwrap();
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(SweepRequest::PerPid(pid, start_time));
+    }
+}
+
+/// Sweeper thread main loop. Drains the queue forever; exits when
+/// the `Sender` half is dropped (only happens at clean shutdown if
+/// somebody calls `sweeper_shutdown`).
+fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
+    while let Ok(req) = rx.recv() {
+        match req {
+            SweepRequest::PerCall(call_id) => sweep_per_call(call_id),
+            SweepRequest::PerPid(pid, start_time) => {
+                sweep_per_pid(pid, start_time);
+            }
+        }
+    }
+}
+
+/// Walk the registry and discard any OPEN slot whose `call_id`
+/// matches. Two-phase: lockfree pre-filter (`state` + `call_id`
+/// Acquire-loads), then take the slot futex and re-confirm before
+/// calling `shared_discard_handle_locked`.
+///
+/// The re-confirm protects against the race where another dispatch
+/// (on a different worker) reallocates the slot in the window
+/// between the pre-filter and the discard.
+fn sweep_per_call(call_id: u64) {
+    use std::sync::atomic::Ordering;
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() || slot_count == 0 {
+        return;
+    }
+    for idx in 0..slot_count {
+        // SAFETY: idx < slot_count and the array is mapped in SHM.
+        let slot = unsafe {
+            &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
+        };
+        if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+            continue;
+        }
+        if slot.call_id.load(Ordering::Acquire) != call_id {
+            continue;
+        }
+        // Confirm under the slot futex.
+        slot_futex_lock(slot);
+        let still_open = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED;
+        let still_matches = slot.call_id.load(Ordering::Acquire) == call_id;
+        if still_open && still_matches {
+            // shared_discard_handle_locked frees the slot in place
+            // without taking the futex again (we hold it).
+            let _ = shared_discard_handle_locked(slot, idx);
+        }
+        slot_futex_unlock(slot);
+    }
+}
+
+/// Walk the registry and discard any OPEN slot whose
+/// (`opener_pid`, `opener_pid_start_time`) matches. The start-time
+/// disambiguates PID reuse: a slot owned by the original PID
+/// has the start time matching that process's `/proc/PID/stat`
+/// field 22; a new process inheriting the same PID after the
+/// original exits has a different start time.
+fn sweep_per_pid(pid: u32, start_time: u64) {
+    use std::sync::atomic::Ordering;
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() || slot_count == 0 {
+        return;
+    }
+    for idx in 0..slot_count {
+        let slot = unsafe {
+            &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
+        };
+        if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+            continue;
+        }
+        // `opener_pid` and `opener_pid_start_time` are immutable
+        // after @open publication, so a lockfree read (under the
+        // versioned-pointer pattern) is safe. Read generation
+        // before and after, retry on mismatch.
+        let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        let read_pid = slot.opener_pid;
+        let read_start = slot.opener_pid_start_time;
+        let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        if gen_before != gen_after {
+            continue;  // raced; next sweep iteration may catch it
+        }
+        if read_pid != pid || read_start != start_time {
+            continue;
+        }
+        slot_futex_lock(slot);
+        // Re-confirm under the futex (state could have changed).
+        if slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
+            && slot.opener_pid == pid
+            && slot.opener_pid_start_time == start_time
+        {
+            let _ = shared_discard_handle_locked(slot, idx);
+        }
+        slot_futex_unlock(slot);
+    }
+}
+
+/// Read the configured write-buffer capacity in bytes from the
+/// `MORLOC_WRITE_BUFFER_BYTES` env var, defaulting to
+/// `WRITE_BUFFER_BYTES_DEFAULT` (16 MiB). Tests use this to lower
+/// the threshold and exercise flush logic without writing megabytes.
+/// Minimum is 4 KiB so the Array header + a few elements always fit.
+pub fn read_write_buffer_bytes_env() -> usize {
+    const MIN: usize = 4096;
+    if let Ok(s) = std::env::var("MORLOC_WRITE_BUFFER_BYTES") {
+        if let Ok(n) = s.parse::<usize>() {
+            return n.max(MIN);
+        }
+    }
+    WRITE_BUFFER_BYTES_DEFAULT
+}
+
+/// Generate a fresh `call_id`. Reads 8 bytes from `/dev/urandom` and
+/// ORs with 1 to ensure the value is never `CALL_ID_NO_SWEEP` (0).
+/// Reusing a `call_id` is statistically negligible (2^-63 per call)
+/// and would only matter for a stale sweep entry; the under-futex
+/// re-check rejects.
+pub fn generate_call_id() -> u64 {
+    use std::io::Read;
+    let mut buf = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            return u64::from_le_bytes(buf) | 1;
+        }
+    }
+    // Fallback: time + counter. Process-private, monotonic enough.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEAD_BEEF);
+    let n = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    (now.wrapping_add(n) ^ 0xA5A5_A5A5_A5A5_A5A5) | 1
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 /// Per-handle cache of decompressed (and relptr-adjusted) sub-packets in
-/// SHM. v1 uses an approximate clock-hand LRU; eviction is `shfree` on
-/// the entry's `shm_packet` block (the `BlockHeader` refcount handles
-/// any still-in-flight reader via the existing `shincref` mechanism;
-/// see plan A4). Walker landing in task #13 will populate and consult
-/// this table.
+/// SHM. Approximate clock-hand LRU; eviction is `shfree` on the entry's
+/// `shm_packet` block — the `BlockHeader` refcount makes any still-in-
+/// flight reader safe via the existing `shincref` mechanism.
 #[derive(Debug)]
 pub struct StreamCache {
     pub capacity_bytes: u64,
@@ -150,7 +3234,7 @@ impl SubpacketSrc {
         }
     }
     /// Drop the caller's reference to the source. For `File`, this is
-    /// a no-op (the mmap is owned by the StreamEntry). For `Shm`, we
+    /// a no-op (the mmap is owned by the ProcessLocalSlot). For `Shm`, we
     /// `shfree` the SHM block, decrementing the refcount; the cache's
     /// own reference keeps the block alive for future hits.
     fn release(self) {
@@ -192,118 +3276,6 @@ fn make_file_resolver(
     }
 }
 
-/// One slot in the per-process stream registry. Only `IFile` is fully
-/// populated in v1; `IStream` and `OStream` extensions land in
-/// Stages 3 and 4.
-#[derive(Debug)]
-pub struct StreamEntry {
-    pub generation:        u64,
-    pub kind:              u8,
-    pub state:             u8,
-    pub file_path:         String,
-    pub schema_str:        String,
-    /// Full schema of the file's logical value. For DATA_PACKET this
-    /// is the file's payload schema directly (any voidstar type). For
-    /// STREAM_PACKET this is `[elem_schema]` (the concatenated array
-    /// view of all sub-packets). PatternStruct walkers navigate this
-    /// type; bracket walkers consult `value_schema.parameters[0]`
-    /// when this resolves to an Array.
-    pub value_schema:      Schema,
-    /// Element schema = `value_schema.parameters[0]` when the file's
-    /// logical value is an Array; equal to `value_schema` otherwise
-    /// (in which case bracket access on the IFile directly is a
-    /// type error, but PatternStruct access can still work).
-    pub elem_schema:       Schema,
-    pub mmap_ptr:          AbsPtr,   // null for stdin/stdout/stderr
-    pub mmap_size:         u64,
-    pub subpacket_index:   Vec<u64>, // file byte-offsets, one per sub-packet
-    /// Cumulative element count BEFORE each sub-packet. Length equals
-    /// `subpacket_index.len() + 1`; the last entry is the grand total
-    /// element count. Built lazily on first random-access query
-    /// (BracketIndex / BracketSlice). For a file with no final footer
-    /// the build cost is one `pread(16 B)`-equivalent slice read per
-    /// sub-packet against the mmap'd region (~1 page-fault per
-    /// sub-packet on cold pagecache).
-    pub subpacket_elem_cum: Option<Vec<u64>>,
-    pub element_count:     u64,
-    pub diag:              Option<StreamDiag>,
-    pub final_footer:      bool,     // true if METADATA_TYPE_FOOTER_FINAL present
-    pub cache:             StreamCache,
-}
-
-impl Drop for StreamEntry {
-    fn drop(&mut self) {
-        // Best-effort cleanup if a slot is dropped without going through
-        // close_handle (shouldn't happen, but defends against bugs).
-        if !self.mmap_ptr.is_null() && self.mmap_size > 0 {
-            // SAFETY: mmap_ptr was returned by libc::mmap with
-            // mmap_size, and we are the unique owner of this slot.
-            unsafe {
-                libc::munmap(self.mmap_ptr as *mut libc::c_void, self.mmap_size as usize);
-            }
-        }
-        // Evict any cached sub-packets; shfree decrements the per-block
-        // refcount so still-held SHM relptrs from earlier walkers survive.
-        for entry in self.cache.entries.drain(..) {
-            let _ = crate::shm::shfree(entry.shm_packet);
-        }
-    }
-}
-
-// ── Registry ──────────────────────────────────────────────────────────────
-
-struct StreamRegistry {
-    slots: Vec<Option<StreamEntry>>,
-    /// Per-process random salt used to perturb generation increments.
-    /// Mixing this in makes adversarial-int handle collision require
-    /// knowing the salt, not just guessing low bits.
-    gen_salt: u64,
-}
-
-// SAFETY: The registry's only !Send field is StreamEntry.mmap_ptr (a
-// raw `*mut u8` returned by mmap) and CacheEntry.shm_packet (a raw
-// `AbsPtr` to a refcounted SHM block). The mmap region is process-wide
-// read-only; SHM blocks are protected by the existing refcount + the
-// registry mutex serialises every access to the slot. The pointers
-// are never dereferenced without going through the per-slot access
-// gate.
-unsafe impl Send for StreamRegistry {}
-unsafe impl Sync for StreamRegistry {}
-
-impl StreamRegistry {
-    fn new() -> Self {
-        // Slots are lazily Some'd on allocation. We size the Vec to
-        // STREAM_SLOT_COUNT up front so slot-index arithmetic is direct.
-        let mut slots = Vec::with_capacity(STREAM_SLOT_COUNT);
-        for _ in 0..STREAM_SLOT_COUNT {
-            slots.push(None);
-        }
-        let gen_salt = read_random_salt();
-        Self { slots, gen_salt }
-    }
-}
-
-fn read_random_salt() -> u64 {
-    // Cheap: read 8 bytes of /dev/urandom; fall back to a time-mixed
-    // value if that fails. The salt only needs to be unpredictable to
-    // a foreign-language adversary that might forge handle bits; it
-    // does not need to be cryptographically strong.
-    use std::io::Read;
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let mut buf = [0u8; 8];
-        if f.read_exact(&mut buf).is_ok() {
-            // OR with 1 so the increment is always non-zero (else a
-            // close+open cycle would never bump generation).
-            return u64::from_le_bytes(buf) | 1;
-        }
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xDEADBEEF);
-    (now ^ 0xA5A5_A5A5_A5A5_A5A5) | 1
-}
-
 fn read_cache_cap_env() -> u64 {
     if let Ok(s) = std::env::var("MORLOC_IFILE_CACHE_BYTES") {
         if let Ok(n) = s.parse::<u64>() {
@@ -313,193 +3285,109 @@ fn read_cache_cap_env() -> u64 {
     DEFAULT_IFILE_CACHE_BYTES
 }
 
-static REGISTRY: Mutex<Option<StreamRegistry>> = Mutex::new(None);
-
-/// Lazily initialise the per-process registry on first use.
-fn registry_with<R>(f: impl FnOnce(&mut StreamRegistry) -> R) -> R {
-    let mut guard = REGISTRY.lock().expect("stream registry mutex poisoned");
-    if guard.is_none() {
-        *guard = Some(StreamRegistry::new());
-    }
-    f(guard.as_mut().expect("stream registry init"))
-}
-
-// ── Handle encoding ───────────────────────────────────────────────────────
-
-fn make_handle(generation: u64, slot: usize) -> i64 {
-    // High 48 bits: generation; low 16 bits: slot.
-    let gen_bits = generation & 0x0000_FFFF_FFFF_FFFF;
-    ((gen_bits << 16) | (slot as u64 & 0xFFFF)) as i64
-}
-
-fn decode_handle(handle: i64) -> (u64, usize) {
-    let h = handle as u64;
-    let slot = (h & 0xFFFF) as usize;
-    let generation = h >> 16;
-    (generation, slot)
-}
-
-// ── Slot allocation / free ────────────────────────────────────────────────
-
-fn allocate_slot(
-    reg: &mut StreamRegistry,
-    entry_init: impl FnOnce(/*generation*/ u64) -> StreamEntry,
-) -> Result<i64, MorlocError> {
-    // Random-probe scan for a free slot. Random starting offset spreads
-    // contention away from a hot prefix and makes successive opens land
-    // in different cache lines.
-    let start = {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        (now ^ reg.gen_salt) as usize & (STREAM_SLOT_COUNT - 1)
-    };
-    for off in 0..STREAM_SLOT_COUNT {
-        let idx = (start + off) & (STREAM_SLOT_COUNT - 1);
-        if reg.slots[idx].is_none() {
-            // First-time init: generation starts at 1 (never 0; 0 is a
-            // valid "default-initialised int" and we want generation
-            // mismatch on such an int).
-            let generation = 1u64;
-            let entry = entry_init(generation);
-            reg.slots[idx] = Some(entry);
-            return Ok(make_handle(generation, idx));
-        }
-    }
-    Err(MorlocError::Other(format!(
-        "stream registry exhausted ({} slots all in use)", STREAM_SLOT_COUNT
-    )))
-}
-
-/// Mark a slot free, bumping its generation by the per-process salt so
-/// the next allocation in this slot produces a different handle ID and
-/// any held stale handle fails the generation check.
-fn release_slot(reg: &mut StreamRegistry, slot: usize) -> Option<u64> {
-    let entry = reg.slots[slot].take()?;
-    // Compute the next generation seed (held only for diagnostics; the
-    // ALLOCATION above starts at 1, but we mix the salt in here so an
-    // adversarial caller can't predict the next handle from the
-    // previous one. The fresh entry's effective generation is the seed
-    // we'll reuse when this slot is next re-allocated.)
-    let new_gen = entry.generation.wrapping_add(reg.gen_salt) | 1;
-    drop(entry); // explicit; runs Drop (mmun map, cache shfree).
-    Some(new_gen)
-}
-
-// ── Resolve a handle (with generation re-check) ───────────────────────────
-
-/// Run `f` against the StreamEntry behind `handle`. Returns a clean
-/// generation-mismatch error if the slot has been closed and reused, or
-/// if the handle was forged.
-///
-/// Holds the registry lock for the duration of `f`. In v1 (process-
-/// local registry) the cost is acceptable; future v2 SHM-shared variant
-/// will switch to a per-slot lock.
-fn with_entry<R>(
-    handle: i64,
-    f: impl FnOnce(&mut StreamEntry) -> Result<R, MorlocError>,
-) -> Result<R, MorlocError> {
-    if handle < 0 {
-        return Err(MorlocError::Other(format!("invalid handle: {}", handle)));
-    }
-    let (gen_claim, slot) = decode_handle(handle);
-    if slot >= STREAM_SLOT_COUNT {
-        return Err(MorlocError::Other(format!(
-            "handle slot {} out of range", slot
-        )));
-    }
-    registry_with(|reg| {
-        match reg.slots[slot].as_mut() {
-            Some(entry) if entry.generation == gen_claim
-                && entry.state == SLOT_STATE_OPEN => f(entry),
-            Some(_) => Err(MorlocError::Other(
-                "stream handle stale: generation mismatch (was the handle reused after close?)"
-                    .into(),
-            )),
-            None => Err(MorlocError::Other(
-                "stream handle invalid: slot is free (handle never opened or already closed)"
-                    .into(),
-            )),
-        }
-    })
-}
-
 // ── Public API: open / close / fschema ────────────────────────────────────
 
-/// Open a STREAM_PACKET or DATA_PACKET file as a random-access IFile.
-/// Returns the morloc-level Int handle on success.
-///
-/// DATA_PACKET files are treated as a degenerate STREAM with one
-/// implicit "sub-packet" -- the file's own packet IS the sub-packet
-/// the walker locates. Reading `.[i] f` from a DATA_PACKET works
-/// zero-copy via the file resolver; compressed DATA_PACKET files are
-/// rejected (decompressing the whole payload defeats IFile's purpose).
+/// Open a stream/data packet file as an IFile (random access). Thin
+/// delegation to `shared_open_ifile`; kept so the in-file test suite
+/// can drive the runtime without naming the shared variant.
 pub fn open_ifile(path: &str) -> Result<i64, MorlocError> {
-    // 1. mmap the file PROT_READ + MADV_RANDOM.
-    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    shared_open_ifile(path)
+}
 
-    // 2. Peek the first packet header to dispatch between STREAM and
-    //    DATA. Cleanup on early error: munmap before returning so we
-    //    don't leak file mappings to libc.
+/// Open a stream file as an IStream (forward-only). Delegation to
+/// `shared_open_istream`.
+pub fn open_istream(path: &str) -> Result<i64, MorlocError> {
+    shared_open_istream(path)
+}
+
+/// Open a fresh OStream with the empty-schema placeholder; the typed
+/// path is `open_ostream_with_schema` which the codegen wires to
+/// `mlc_open_ostream`. Delegation to `shared_open_ostream_with_schema`.
+pub fn open_ostream(path: &str) -> Result<i64, MorlocError> {
+    shared_open_ostream_with_schema(path, "")
+}
+
+/// Open an OStream with the element schema known up-front. Delegation
+/// to `shared_open_ostream_with_schema`.
+pub fn open_ostream_with_schema(
+    path: &str,
+    schema_str: &str,
+) -> Result<i64, MorlocError> {
+    shared_open_ostream_with_schema(path, schema_str)
+}
+
+/// Parsed form of a stream/data packet file ready to populate a
+/// `ProcessLocalSlot` + SHM `RegistrySlot`. Shared by `shared_open_ifile`
+/// and `shared_open_istream` since the on-disk format is identical for
+/// both kinds; only post-open access semantics differ.
+struct ParsedStreamFile {
+    schema_str: String,
+    value_schema: Schema,
+    elem_schema: Schema,
+    subpacket_index: Vec<u64>,
+    element_count: u64,
+    diag: Option<StreamDiag>,
+    /// True iff the file is a STREAM_PACKET that carries a
+    /// `METADATA_TYPE_FOOTER_FINAL` block. False for STREAM_PACKET files
+    /// that only have a temp footer (or none at all), and false for
+    /// DATA_PACKET files (which inherently have no footer concept; see
+    /// `is_data_packet` for that signal).
+    final_footer: bool,
+    /// True iff the file is a single DATA_PACKET (the `@save` shape),
+    /// false for STREAM_PACKET. DATA-packet files are self-contained
+    /// and inherently complete: they have no header / footer concept,
+    /// and IFile can always open them for random access.
+    is_data_packet: bool,
+    /// Byte offset of the first sub-packet header (i.e. end of the
+    /// stream header). For DATA-packet files (single-packet shape) this
+    /// is 0: the whole file IS the sub-packet. IStream uses this as the
+    /// initial cursor position; IFile ignores it.
+    body_start: u64,
+}
+
+/// Parse a mmap'd stream or data packet file into a `ParsedStreamFile`.
+/// Caller is responsible for munmap on error.
+fn parse_stream_file(
+    path: &str,
+    mmap_ptr: AbsPtr,
+    mmap_size: u64,
+) -> Result<ParsedStreamFile, MorlocError> {
     if mmap_size < 32 {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
         return Err(MorlocError::Packet(
             "file too short for a packet header".into(),
         ));
     }
-    // SAFETY: bounds verified.
     let hdr_bytes = unsafe {
         std::slice::from_raw_parts(mmap_ptr as *const u8, 32)
     };
     let outer_header = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
 
-    // `is_data_packet` distinguishes the DATA-PACKET path (full payload
-    // schema in metadata; one virtual sub-packet) from the STREAM-PACKET
-    // path (stream header schema is the element schema, value type is
-    // a List of those elements concatenated across sub-packets).
     let is_data_packet = outer_header.is_data();
-    let (schema_str, subpacket_index, element_count, diag, final_footer) =
-    if is_data_packet {
-        // Single DATA_PACKET file. The whole file's payload IS the
-        // value of type `value_schema`. We synthesise a one-entry
-        // sub-packet index pointing at offset 0 so the rest of the
-        // IFile walker works without special-casing.
-        let result = open_data_packet(path, mmap_ptr, mmap_size);
-        match result {
-            Ok((schema, index, count)) => (schema, index, count, None, false),
-            Err(e) => {
-                unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-                return Err(e);
-            }
-        }
+    let (schema_str, subpacket_index, element_count, diag, final_footer, body_start):
+        (String, Vec<u64>, u64, Option<StreamDiag>, bool, u64) = if is_data_packet {
+        let (schema, index, count) = open_data_packet(path, mmap_ptr, mmap_size)?;
+        // DATA-packet files have no stream header; the whole file is a
+        // single sub-packet that starts at offset 0. IStream's forward
+        // walker reads this as one sub-packet, then sees EOF. There is
+        // no StreamDiag and no footer of either kind, so diag = None
+        // and final_footer = false; the IFile gate uses is_data_packet
+        // separately to know this branch is still random-access safe.
+        (schema, index, count, None, false, 0u64)
     } else if outer_header.is_stream() {
-        // STREAM_PACKET: existing multi-sub-packet handling.
         let StreamHeader { schema: schema_str, body_start } =
-            match parse_stream_header(mmap_ptr, mmap_size) {
-                Ok(h) => h,
-                Err(e) => {
-                    unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-                    return Err(e);
-                }
-            };
-        // Reject non-voidstar sub-packets.
+            parse_stream_header(mmap_ptr, mmap_size)?;
         if body_start < mmap_size {
-            let fmt = match read_subpacket_format(mmap_ptr, mmap_size, body_start) {
-                Ok(f) => f,
-                Err(e) => {
-                    unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-                    return Err(e);
-                }
-            };
+            let fmt = read_subpacket_format(mmap_ptr, mmap_size, body_start)?;
             if fmt != PACKET_FORMAT_VOIDSTAR {
-                unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
                 return Err(MorlocError::Other(format!(
-                    "file '{}' has {}-format sub-packets; only voidstar is supported for IFile (reopen as IStream or use @load)",
+                    "file '{}' has {}-format sub-packets; only voidstar is supported",
                     path, packet_format_name(fmt)
                 )));
             }
         }
+        // IStream walks forward from body_start without needing an
+        // index, so an empty subpacket_index on temp-footer files is
+        // fine here; IFile's open path enforces final_footer separately.
         let (subpacket_index, element_count, diag, final_footer) =
             match try_read_footer(mmap_ptr, mmap_size) {
                 Ok(Some(parsed)) => (
@@ -509,19 +3397,16 @@ pub fn open_ifile(path: &str) -> Result<i64, MorlocError> {
                     parsed.final_footer,
                 ),
                 Ok(None) | Err(_) => {
-                    let scanned = match forward_scan_subpackets(mmap_ptr, mmap_size, body_start) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-                            return Err(e);
-                        }
-                    };
+                    // No footer at all (writer crashed mid-write or
+                    // before the first temp-footer pwrite). Scan the
+                    // headers to recover counts; IFile open will refuse
+                    // this kind of file too.
+                    let scanned = forward_scan_subpackets(mmap_ptr, mmap_size, body_start)?;
                     (scanned.subpacket_index, scanned.element_count, None, false)
                 }
             };
-        (schema_str, subpacket_index, element_count, diag, final_footer)
+        (schema_str, subpacket_index, element_count, diag, final_footer, body_start)
     } else {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
         return Err(MorlocError::Packet(format!(
             "file '{}' is neither a STREAM_PACKET nor a DATA_PACKET (cmd_type = {})",
             path,
@@ -529,24 +3414,12 @@ pub fn open_ifile(path: &str) -> Result<i64, MorlocError> {
         )));
     };
 
-    // 3. Parse schemas once; reused on every random access. For
-    //    DATA_PACKET, schema_str is the full payload schema (the
-    //    value's type). For STREAM_PACKET, schema_str is the
-    //    element type and value_schema is `Array(elem_schema)`.
     let parsed_schema = parse_schema(&schema_str).map_err(|e| {
-        unsafe {
-            libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-        }
         MorlocError::Schema(format!(
-            "file '{}' has unparseable schema '{}': {}",
-            path, schema_str, e
+            "file '{}' has unparseable schema '{}': {}", path, schema_str, e
         ))
     })?;
     let (value_schema, elem_schema) = if is_data_packet {
-        // value_schema = full payload schema; elem_schema =
-        // value_schema.parameters[0] when value is an Array, else the
-        // value type itself (used by walkers that don't depend on
-        // arrayness; bracket walkers check at runtime).
         let elem = if parsed_schema.serial_type == SerialType::Array
             && !parsed_schema.parameters.is_empty()
         {
@@ -556,73 +3429,51 @@ pub fn open_ifile(path: &str) -> Result<i64, MorlocError> {
         };
         (parsed_schema.clone(), elem)
     } else {
-        // STREAM_PACKET: schema_str is the element type. Value type
-        // is List of those elements concatenated across sub-packets.
         (array_schema(&parsed_schema), parsed_schema.clone())
     };
 
-    // 6. Allocate a slot and return the handle. Re-read the cache
-    //    cap from the env each open so tests can adjust between
-    //    handles without process restart.
-    let cap_bytes = read_cache_cap_env();
-    let handle = registry_with(|reg| {
-        allocate_slot(reg, |generation| StreamEntry {
-            generation,
-            kind: MLC_KIND_IFILE,
-            state: SLOT_STATE_OPEN,
-            file_path: path.to_string(),
-            schema_str: schema_str.clone(),
-            value_schema: value_schema.clone(),
-            elem_schema: elem_schema.clone(),
-            mmap_ptr,
-            mmap_size,
-            subpacket_index,
-            subpacket_elem_cum: None,
-            element_count,
-            diag,
-            final_footer,
-            cache: StreamCache::new(cap_bytes),
-        })
-    })?;
-
-    // 6. Record in the active eval_arena so a Python exception unwinding
-    //    out of the pool auto-closes us at scope exit.
-    crate::eval_arena::record_slot_if_active(handle);
-
-    Ok(handle)
+    Ok(ParsedStreamFile {
+        schema_str,
+        value_schema,
+        elem_schema,
+        subpacket_index,
+        element_count,
+        diag,
+        final_footer,
+        is_data_packet,
+        body_start,
+    })
 }
 
 /// Close any open handle. Bumps the slot's generation; subsequent
 /// operations on the same Int return a clean generation-mismatch error.
+///
+/// For OStream, this is the **explicit-close** path: it runs
+/// `finalise_ostream` which pwrites the final footer and fdatasyncs
+/// before releasing the slot. A file closed this way is "cleanly
+/// closed" -- the final footer carries the full sub-packet index, and
+/// IFile can open it for random access.
+///
+/// For arena-drop unwinding (writer crashed, exception, manifold scope
+/// exit without explicit `@close`), use `discard_handle` instead: that
+/// path leaves the temp footer in place so the file's on-disk state
+/// honestly reflects "writer did not finish".
 pub fn close_handle(handle: i64) -> Result<(), MorlocError> {
-    if handle < 0 {
-        return Err(MorlocError::Other(format!("invalid handle: {}", handle)));
-    }
-    let (gen_claim, slot) = decode_handle(handle);
-    if slot >= STREAM_SLOT_COUNT {
-        return Err(MorlocError::Other(format!(
-            "handle slot {} out of range", slot
-        )));
-    }
-    let result = registry_with(|reg| {
-        match reg.slots[slot].as_ref() {
-            Some(entry) if entry.generation == gen_claim => {
-                release_slot(reg, slot);
-                Ok(())
-            }
-            Some(_) => Err(MorlocError::Other(
-                "close_handle: generation mismatch (handle already closed and reused?)".into(),
-            )),
-            None => Err(MorlocError::Other(
-                "close_handle: slot is already free (double-close?)".into(),
-            )),
-        }
-    });
-    // Forget the handle from the active arena AFTER the close so an
-    // exception during close still produces a recovery attempt at arena
-    // drop. Forget is a no-op if not tracked.
-    crate::eval_arena::forget_slot_if_active(handle);
-    result
+    shared_close_handle(handle)
+}
+
+/// Release a handle without writing a final footer. Used by the
+/// eval_arena Drop path: when an OStream goes out of scope without an
+/// explicit `@close`, we deliberately leave the temp footer in place
+/// so downstream tooling can distinguish "writer crashed / never
+/// finished" from "writer completed cleanly". The fd is closed (which
+/// also releases the flock) and the slot is freed; subsequent ops on
+/// the handle return generation-mismatch errors.
+///
+/// IFile / IStream entries take the same release path as `close_handle`
+/// (they have nothing to finalise either way).
+pub fn discard_handle(handle: i64) -> Result<(), MorlocError> {
+    shared_discard_handle(handle)
 }
 
 /// Read the schema string from a stream/data file without opening it as
@@ -1075,7 +3926,12 @@ fn forward_scan_subpackets(
 /// Look up the kind of an open handle. Useful for error messages from
 /// IStream/OStream-specific intrinsics that receive an IFile handle.
 pub fn handle_kind(handle: i64) -> Result<u8, MorlocError> {
-    with_entry(handle, |e| Ok(e.kind))
+    // Legacy entry point; delegates to the shared-SHM-registry impl.
+    // The old process-local registry is never populated by the new
+    // `shared_open_*` path, so a direct `with_entry` lookup would
+    // always report "slot is free". See `handle_path` for the same
+    // pattern.
+    shared_handle_kind(handle)
 }
 
 /// Read the file path bound to an open handle. The cross-pool wire
@@ -1086,37 +3942,7 @@ pub fn handle_kind(handle: i64) -> Result<u8, MorlocError> {
 /// exit. Symmetric path on the receive side: `open_dispatch` after
 /// reading `(kind, path)` off the wire.
 pub fn handle_path(handle: i64) -> Result<String, MorlocError> {
-    with_entry(handle, |e| Ok(e.file_path.clone()))
-}
-
-/// Resolve a handle to its open StreamEntry under an already-held registry
-/// lock. Shared by the batch IFile-array entry points so they can amortise
-/// the lock across N handles instead of acquiring it per element.
-fn resolve_open_slot<'a>(
-    reg: &'a StreamRegistry,
-    handle: i64,
-    idx: usize,
-) -> Result<&'a StreamEntry, MorlocError> {
-    if handle < 0 {
-        return Err(MorlocError::Other(format!(
-            "handle at index {}: invalid handle {}", idx, handle
-        )));
-    }
-    let (gen_claim, slot) = decode_handle(handle);
-    if slot >= STREAM_SLOT_COUNT {
-        return Err(MorlocError::Other(format!(
-            "handle at index {}: slot {} out of range", idx, slot
-        )));
-    }
-    match reg.slots[slot].as_ref() {
-        Some(e) if e.generation == gen_claim && e.state == SLOT_STATE_OPEN => Ok(e),
-        Some(_) => Err(MorlocError::Other(format!(
-            "handle at index {}: generation mismatch (stale handle?)", idx
-        ))),
-        None => Err(MorlocError::Other(format!(
-            "handle at index {}: slot is free (never opened or already closed)", idx
-        ))),
-    }
+    shared_handle_path(handle)
 }
 
 /// Batched length lookup for an [IFile a] sizing pass: one registry
@@ -1126,23 +3952,9 @@ fn resolve_open_slot<'a>(
 /// `.len()`.
 pub fn handles_path_lens(
     handles: &[i64],
-    mut out_lens: Option<&mut [i64]>,
+    out_lens: Option<&mut [i64]>,
 ) -> Result<u64, MorlocError> {
-    if let Some(ref outs) = out_lens {
-        debug_assert_eq!(handles.len(), outs.len());
-    }
-    registry_with(|reg| {
-        let mut sum: u64 = 0;
-        for (i, &h) in handles.iter().enumerate() {
-            let e = resolve_open_slot(reg, h, i)?;
-            let len = e.file_path.len() as i64;
-            if let Some(ref mut outs) = out_lens {
-                outs[i] = len;
-            }
-            sum += len as u64;
-        }
-        Ok(sum)
-    })
+    shared_handles_path_lens(handles, out_lens)
 }
 
 /// Batched voidstar write for an [IFile a] pack pass. One registry
@@ -1156,33 +3968,7 @@ pub fn write_handles_voidstar(
     elem_stride: usize,
     cursor: &mut *mut u8,
 ) -> Result<(), MorlocError> {
-    use crate::shm_types::Array;
-    registry_with(|reg| {
-        for (i, &h) in handles.iter().enumerate() {
-            let e = resolve_open_slot(reg, h, i)?;
-            let bytes = e.file_path.as_bytes();
-            let slot = unsafe { dest_base.add(i * elem_stride) as *mut Array };
-            unsafe { (*slot).size = bytes.len(); }
-            if bytes.is_empty() {
-                unsafe { (*slot).data = shm::RELNULL; }
-                continue;
-            }
-            let cur = *cursor;
-            let rel = shm::abs2rel(cur)?;
-            unsafe {
-                (*slot).data = rel;
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), cur, bytes.len());
-                *cursor = cur.add(bytes.len());
-            }
-        }
-        Ok(())
-    })
-}
-
-/// Read a copy of the schema string stored for an open handle. Used by
-/// the runtime schema-recheck-on-access defense.
-pub fn handle_schema(handle: i64) -> Result<String, MorlocError> {
-    with_entry(handle, |e| Ok(e.schema_str.clone()))
+    shared_write_handles_voidstar(handles, dest_base, elem_stride, cursor)
 }
 
 /// Read the total element count for an IFile handle.
@@ -1197,22 +3983,7 @@ pub fn handle_schema(handle: i64) -> Result<String, MorlocError> {
 /// does not currently re-tally elements. That is a known limitation
 /// of the recovery path, NOT a non-list signal.
 pub fn handle_length(handle: i64) -> Result<u64, MorlocError> {
-    with_entry(handle, |e| {
-        if e.kind != MLC_KIND_IFILE {
-            return Err(MorlocError::Other(format!(
-                "length on non-IFile handle (kind = {})",
-                handle_kind_name(e.kind),
-            )));
-        }
-        if e.value_schema.serial_type != SerialType::Array {
-            return Err(MorlocError::Other(format!(
-                "length is undefined for IFile of non-list value type (schema {:?}); \
-                 length only applies to lists",
-                e.value_schema.serial_type,
-            )));
-        }
-        Ok(e.element_count)
-    })
+    shared_handle_length(handle)
 }
 
 /// Unified IFile pattern walker. Parses the path string and runs the
@@ -1240,87 +4011,7 @@ pub fn ifile_walk(
     path: &str,
     args: &[crate::intrinsics::IFileWalkArg],
 ) -> Result<AbsPtr, MorlocError> {
-    // Root-only brackets keep the dedicated fast paths -- they carry
-    // the sub-packet selection logic used by STREAM_PACKET IFiles
-    // (looking up which sub-packet holds element K, decompressing it
-    // if needed). The general walker only navigates within a single
-    // sub-packet's payload.
-    if path == ".[]" {
-        if args.len() != 1 {
-            return Err(MorlocError::Other(format!(
-                "ifile_walk: \".[]\" expects 1 runtime arg, got {}", args.len()
-            )));
-        }
-        if args[0].has == 0 {
-            return Err(MorlocError::Other(
-                "ifile_walk: \".[]\" requires a present index (got None)".into(),
-            ));
-        }
-        return ifile_bracket_index(handle, args[0].value);
-    }
-    // Bracket slice at the path root, with or without a static
-    // field/key tail. Chain fusion: `.[:].0`, `.[:].foo`, `.[:].0.bar`
-    // etc. are routed through the slice walker with a per-element
-    // projection offset, so the walker only deep-copies the projected
-    // sub-field rather than each full record. The plain `.[:]` case
-    // is just the empty tail.
-    if let Some(rest) = path.strip_prefix(".[:]") {
-        if args.len() != 3 {
-            return Err(MorlocError::Other(format!(
-                "ifile_walk: \".[:]\" expects 3 runtime args, got {}", args.len()
-            )));
-        }
-        let opt = |a: &crate::intrinsics::IFileWalkArg| {
-            if a.has != 0 { Some(a.value) } else { None }
-        };
-        let tail_steps = if rest.is_empty() {
-            Vec::new()
-        } else {
-            let parsed = parse_field_only_tail(rest)?;
-            // If the tail contains anything other than Field/Key, fall
-            // through to ifile_general -- it handles bracket-in-tail
-            // via the per-sub-packet walker.
-            if parsed.is_none() {
-                return ifile_general(handle, path, args);
-            }
-            parsed.unwrap()
-        };
-        return ifile_bracket_slice_with_tail(
-            handle, opt(&args[0]), opt(&args[1]), opt(&args[2]), &tail_steps,
-        );
-    }
-    // General path: anything else (field chains, groups, mixed
-    // field+bracket inside groups). The walker validates arg counts
-    // internally as it consumes them in DFS order.
-    ifile_general(handle, path, args)
-}
-
-/// General-purpose dispatch for any walk path that isn't a root-only
-/// bracket. Parses the path, opens sub-packet 0 (DATA_PACKET case),
-/// and runs the recursive walker.
-fn ifile_general(
-    handle: i64,
-    path: &str,
-    args: &[crate::intrinsics::IFileWalkArg],
-) -> Result<AbsPtr, MorlocError> {
-    let steps = parse_walk_path(path)?;
-    with_entry(handle, |entry| {
-        if entry.kind != MLC_KIND_IFILE {
-            return Err(MorlocError::Other(format!(
-                "field access on non-IFile handle (kind = {})",
-                handle_kind_name(entry.kind),
-            )));
-        }
-        if entry.subpacket_index.is_empty() {
-            return Err(MorlocError::Other(
-                "IFile has no sub-packets (empty file?)".into(),
-            ));
-        }
-        let src = materialize_subpacket(entry, 0)?;
-        let result = walk_into_fresh(&entry.value_schema, &src, &steps, args);
-        src.release();
-        result
-    })
+    shared_ifile_walk(handle, path, args)
 }
 
 // ── IFile pattern walker (BracketIndex / BracketSlice) ────────────────────
@@ -1360,37 +4051,33 @@ fn array_schema(elem: &Schema) -> Schema {
 
 /// Build the cumulative element-count index for this entry, if not
 /// already cached. Idempotent.
-fn ensure_elem_index(entry: &mut StreamEntry) -> Result<(), MorlocError> {
-    if entry.subpacket_elem_cum.is_some() {
+fn ensure_elem_index(local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+    if local.subpacket_elem_cum.is_some() {
         return Ok(());
     }
-    let n = entry.subpacket_index.len();
+    let n = local.subpacket_index_local.len();
     let mut cum = Vec::with_capacity(n + 1);
     cum.push(0u64);
-    for &subpacket_off in &entry.subpacket_index {
+    for &subpacket_off in &local.subpacket_index_local {
         let sz = read_subpacket_element_count(
-            entry.mmap_ptr,
-            entry.mmap_size,
+            local.mmap_ptr,
+            local.mmap_size,
             subpacket_off,
-            &entry.elem_schema,
+            &local.elem_schema,
         )?;
         let last = *cum.last().unwrap();
         cum.push(last.saturating_add(sz));
     }
-    entry.subpacket_elem_cum = Some(cum);
+    local.subpacket_elem_cum = Some(cum);
     Ok(())
 }
 
 /// Read the element count from a sub-packet's payload header. The
 /// payload of each sub-packet is a voidstar Array; the first 16 bytes
-/// are `{ size: usize, data: RelPtr }`.
-///
-/// For compressed sub-packets the size is encoded inside the
-/// compressed payload; in v1 we decompress just enough to read the
-/// first frame's first 16 bytes via the existing per-packet
-/// decompressor. v1.0 takes the simpler path: refuse to build the
-/// element-count index against a stream with any compressed sub-packet
-/// until decompression-on-demand is wired through here (task #13b).
+/// are `{ size: usize, data: RelPtr }`. For compressed sub-packets we
+/// decompress the whole sub-packet just to read those 16 bytes — the
+/// element-count index is built once at open time so the per-sub-packet
+/// cost is amortised against many subsequent random-access reads.
 fn read_subpacket_element_count(
     mmap_ptr: AbsPtr,
     file_size: u64,
@@ -1436,10 +4123,9 @@ fn read_subpacket_element_count(
     };
     let payload_bytes: std::borrow::Cow<'_, [u8]> =
         if data.compression == PACKET_COMPRESSION_ZSTD {
-            // Decompress just to read the 16-byte Array header. For v1
-            // simplicity we decompress the whole sub-packet (the
-            // compression module's decompress_packet expects a full
-            // packet, not a payload-only slice, so reconstruct it).
+            // Decompress to read the 16-byte Array header.
+            // `decompress_packet` expects a full packet (header + meta +
+            // payload), not a payload-only slice, so reconstruct it.
             let mut full = Vec::with_capacity(32 + header.offset as usize + payload_len as usize);
             full.extend_from_slice(hdr_bytes);
             // Include metadata block.
@@ -1491,10 +4177,10 @@ fn read_subpacket_element_count(
 /// bytes (the latter needed to reconstruct a full packet for the
 /// compressed-decompress path).
 fn read_subpacket_header(
-    entry: &StreamEntry,
+    local: &ProcessLocalSlot,
     subpacket_off: u64,
 ) -> Result<(PacketHeader, u64 /*payload_off*/, u64 /*payload_len*/, u64 /*meta_off*/), MorlocError> {
-    if subpacket_off + 32 > entry.mmap_size {
+    if subpacket_off + 32 > local.mmap_size {
         return Err(MorlocError::Packet(
             "sub-packet header past EOF".into(),
         ));
@@ -1502,7 +4188,7 @@ fn read_subpacket_header(
     // SAFETY: bounds verified.
     let hdr_bytes = unsafe {
         std::slice::from_raw_parts(
-            (entry.mmap_ptr as *const u8).add(subpacket_off as usize),
+            (local.mmap_ptr as *const u8).add(subpacket_off as usize),
             32,
         )
     };
@@ -1518,7 +4204,7 @@ fn read_subpacket_header(
     let meta_off = subpacket_off + 32;
     let payload_off = meta_off + header.offset as u64;
     let payload_len = header.length as u64;
-    if payload_off + payload_len > entry.mmap_size {
+    if payload_off + payload_len > local.mmap_size {
         return Err(MorlocError::Packet(
             "sub-packet payload past EOF".into(),
         ));
@@ -1532,18 +4218,34 @@ fn read_subpacket_header(
 /// SHM block, rebases its relptrs to be SHM-relative, and returns a
 /// `Shm` descriptor (refcount = 1, owned by the caller).
 fn materialize_subpacket(
-    entry: &StreamEntry,
+    local: &ProcessLocalSlot,
     sub_k: usize,
 ) -> Result<SubpacketSrc, MorlocError> {
-    if sub_k >= entry.subpacket_index.len() {
+    if sub_k >= local.subpacket_index_local.len() {
         return Err(MorlocError::Other(format!(
             "sub-packet index {} out of range (have {})",
-            sub_k, entry.subpacket_index.len(),
+            sub_k, local.subpacket_index_local.len(),
         )));
     }
-    let subpacket_off = entry.subpacket_index[sub_k];
+    let subpacket_off = local.subpacket_index_local[sub_k];
+    let (src, _on_disk_size) = materialize_subpacket_at_offset(local, subpacket_off)?;
+    Ok(src)
+}
+
+/// Materialise the sub-packet whose header starts at `subpacket_off`
+/// (a byte offset into the mmap'd file). Returns the materialised
+/// source AND the sub-packet's full on-disk size (header + metadata +
+/// payload), so the caller can advance a byte cursor past it.
+///
+/// Used by IStream's forward walker (cursor-driven, no index needed)
+/// and by `materialize_subpacket` (index-driven, used by IFile).
+fn materialize_subpacket_at_offset(
+    local: &ProcessLocalSlot,
+    subpacket_off: u64,
+) -> Result<(SubpacketSrc, u64), MorlocError> {
     let (header, payload_off, payload_len, meta_off) =
-        read_subpacket_header(entry, subpacket_off)?;
+        read_subpacket_header(local, subpacket_off)?;
+    let on_disk_size = 32 + header.offset as u64 + header.length;
     let data = unsafe { header.command.data };
 
     // Fast path: uncompressed. The walker reads directly from the
@@ -1551,7 +4253,7 @@ fn materialize_subpacket(
     // cache shares pages across pools opening the same path.
     if data.compression == PACKET_COMPRESSION_NONE {
         let arr_base = unsafe {
-            (entry.mmap_ptr as *const u8).add(payload_off as usize) as AbsPtr
+            (local.mmap_ptr as *const u8).add(payload_off as usize) as AbsPtr
         };
         // Parse the producer's Layer-3 vol_idx hint from the header +
         // metadata bytes (zero-allocation; the slices view directly
@@ -1561,7 +4263,7 @@ fn materialize_subpacket(
         let mut hint_buf = Vec::with_capacity(hint_bytes_len);
         unsafe {
             hint_buf.extend_from_slice(std::slice::from_raw_parts(
-                (entry.mmap_ptr as *const u8).add(subpacket_off as usize),
+                (local.mmap_ptr as *const u8).add(subpacket_off as usize),
                 hint_bytes_len,
             ));
         }
@@ -1569,12 +4271,12 @@ fn materialize_subpacket(
             .ok()
             .flatten()
             .unwrap_or(0);
-        return Ok(SubpacketSrc::File {
+        return Ok((SubpacketSrc::File {
             arr_base,
             payload_base: arr_base,
             payload_len,
             vol_idx_hint,
-        });
+        }, on_disk_size));
     }
 
     // Slow path: compressed. Decompress the sub-packet's full bytes
@@ -1589,19 +4291,19 @@ fn materialize_subpacket(
     // SAFETY: all bounds verified by read_subpacket_header.
     let hdr_bytes = unsafe {
         std::slice::from_raw_parts(
-            (entry.mmap_ptr as *const u8).add(subpacket_off as usize),
+            (local.mmap_ptr as *const u8).add(subpacket_off as usize),
             32,
         )
     };
     let meta = unsafe {
         std::slice::from_raw_parts(
-            (entry.mmap_ptr as *const u8).add(meta_off as usize),
+            (local.mmap_ptr as *const u8).add(meta_off as usize),
             header.offset as usize,
         )
     };
     let payload = unsafe {
         std::slice::from_raw_parts(
-            (entry.mmap_ptr as *const u8).add(payload_off as usize),
+            (local.mmap_ptr as *const u8).add(payload_off as usize),
             payload_len as usize,
         )
     };
@@ -1638,22 +4340,22 @@ fn materialize_subpacket(
         Ok(r) => r,
         Err(e) => { let _ = shm::shfree(base); return Err(e); }
     };
-    let arr_schema = array_schema(&entry.elem_schema);
+    let arr_schema = array_schema(&local.elem_schema);
     if let Err(e) = voidstar::adjust_relptrs(base, &arr_schema, base_rel) {
         let _ = shm::shfree(base);
         return Err(e);
     }
-    Ok(SubpacketSrc::Shm { arr_base: base })
+    Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size))
 }
 
 /// Resolve a global element index, normalising negatives Python-style.
 /// Returns `(sub_packet_k, local_idx)`.
 fn resolve_global_index(
-    entry: &mut StreamEntry,
+    local: &mut ProcessLocalSlot,
     requested: i64,
 ) -> Result<(usize, u64), MorlocError> {
-    ensure_elem_index(entry)?;
-    let cum = entry
+    ensure_elem_index(local)?;
+    let cum = local
         .subpacket_elem_cum
         .as_ref()
         .expect("ensure_elem_index just populated subpacket_elem_cum");
@@ -1670,29 +4372,317 @@ fn resolve_global_index(
     // sub-packet K contains elements [cum[K], cum[K+1]).
     let upper = cum.partition_point(|&c| c <= idx_u);
     let k = upper - 1;
-    let local = idx_u - cum[k];
-    Ok((k, local))
+    let local_idx = idx_u - cum[k];
+    Ok((k, local_idx))
+}
+
+/// `@next` on an IStream handle: materialise the current sub-packet as
+/// `[a]` into a fresh SHM block, advance the cursor, return the AbsPtr
+/// to the materialised Array. At EOF the returned Array has size 0 and
+/// `data = RELNULL` -- the user-visible empty list.
+pub fn next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
+    shared_next_subpacket(handle)
+}
+
+/// `@write level value handle` on an OStream: write one sub-packet
+/// whose payload is `value` (already materialised by the bridge into
+/// a SHM voidstar Array<T> via `to_voidstar<vector<T>>`). The user
+/// chooses sub-packet granularity at the morloc level by batching
+/// elements into the list passed to `@write`.
+///
+/// First-call semantics: `level` is locked in for the file's lifetime
+/// so downstream tooling can read a uniform compression level. Mixed
+/// levels on subsequent writes are an error.
+pub fn write_subpacket(
+    handle: i64,
+    level: u8,
+    payload_voidstar: AbsPtr,
+) -> Result<(), MorlocError> {
+    shared_write_subpacket(handle, level, payload_voidstar)
+}
+
+/// Push a sub-packet offset into the diag's tail-window. The window is
+/// length-prefixed; once full, slide forward by overwriting the oldest.
+///
+/// Manipulates the packed struct via local copies because `StreamDiag`
+/// is `#[repr(C, packed)]` -- direct field references are unaligned.
+fn push_tail_window(d: &mut StreamDiag, offset: u64) {
+    let cap = morloc_runtime_types::packet::STREAM_DIAG_TAIL_MAX as u32;
+    let len = d.tail_len;
+    if len < cap {
+        let mut tail = d.tail;
+        tail[len as usize] = offset;
+        d.tail = tail;
+        d.tail_len = len + 1;
+    } else {
+        let mut tail = d.tail;
+        for i in 1..cap as usize {
+            tail[i - 1] = tail[i];
+        }
+        tail[cap as usize - 1] = offset;
+        d.tail = tail;
+    }
+}
+
+fn unix_micros_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// `@append :: Str -> <IO> (OStream a)`: open an existing stream file
+/// for append. Forward-scans to find the last complete sub-packet,
+/// truncates any partial trailing bytes, reopens RW, flock-acquires,
+/// and registers a fresh OSTREAM slot whose cursor sits at the resume
+/// offset. Schema must match the existing file's schema.
+pub fn append_to_path(
+    path: &str,
+    expected_schema_str: &str,
+) -> Result<i64, MorlocError> {
+    shared_append_to_path(path, expected_schema_str)
+}
+
+/// Read the on-disk byte size of a sub-packet at `offset`. Used by
+/// `@append` to advance past the last complete sub-packet to the
+/// resume cursor.
+fn read_subpacket_size(
+    mmap_ptr: AbsPtr,
+    mmap_size: u64,
+    offset: u64,
+) -> Result<u64, MorlocError> {
+    if offset + 32 > mmap_size {
+        return Err(MorlocError::Packet(
+            "sub-packet header past EOF in @append".into(),
+        ));
+    }
+    let hdr_bytes = unsafe {
+        std::slice::from_raw_parts(
+            (mmap_ptr as *const u8).add(offset as usize), 32,
+        )
+    };
+    let hdr = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
+    Ok(32 + hdr.offset as u64 + hdr.length as u64)
+}
+
+/// `@concat :: [Str] -> Str -> <IO> ()`: byte-level concat of N stream
+/// files into one. Exploits the stream-packet concat invariant: take
+/// src[0] from its stream header through its last sub-packet, then
+/// each subsequent src[i] from its FIRST sub-packet through its LAST
+/// sub-packet (dropping headers and footers). Finally write one final
+/// footer with the merged subpacket index over the dest's tail.
+pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
+    use std::ffi::CString;
+    if paths.is_empty() {
+        return Err(MorlocError::Other("@concat: paths list is empty".into()));
+    }
+
+    let c_dest = CString::new(dest).map_err(|e| {
+        MorlocError::Other(format!("@concat: dest path contains NUL: {}", e))
+    })?;
+    let dest_fd = unsafe {
+        libc::open(
+            c_dest.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if dest_fd < 0 {
+        return Err(MorlocError::Io(std::io::Error::last_os_error()));
+    }
+    let mut dest_cursor: u64 = 0;
+    let mut merged_index: Vec<u64> = Vec::new();
+    let mut total_element_count: u64 = 0;
+    let mut reference_schema: Option<String> = None;
+
+    for (i, &p) in paths.iter().enumerate() {
+        // Parse via mmap (cheap: we only touch the header + footer +
+        // sub-packet index). The bulk byte copy below uses sendfile()
+        // against a separate fd so the kernel moves the data without
+        // crossing into userspace.
+        let (mmap_ptr, mmap_size) = match mmap_file_readonly(p) {
+            Ok(t) => t,
+            Err(e) => {
+                unsafe { libc::close(dest_fd); }
+                let _ = unsafe { libc::unlink(c_dest.as_ptr()) };
+                return Err(e);
+            }
+        };
+        let parsed = match parse_stream_file(p, mmap_ptr, mmap_size) {
+            Ok(p2) => p2,
+            Err(e) => {
+                unsafe {
+                    libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
+                    libc::close(dest_fd);
+                    libc::unlink(c_dest.as_ptr());
+                }
+                return Err(e);
+            }
+        };
+        match &reference_schema {
+            None => {
+                reference_schema = Some(parsed.schema_str.clone());
+            }
+            Some(ref_str) if *ref_str != parsed.schema_str => {
+                unsafe {
+                    libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
+                    libc::close(dest_fd);
+                    libc::unlink(c_dest.as_ptr());
+                }
+                return Err(MorlocError::Other(format!(
+                    "@concat: schema mismatch -- '{}' has '{}', earlier had '{}'",
+                    p, parsed.schema_str, ref_str
+                )));
+            }
+            _ => {}
+        }
+        let hdr = match parse_stream_header(mmap_ptr, mmap_size) {
+            Ok(h) => h,
+            Err(e) => {
+                unsafe {
+                    libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
+                    libc::close(dest_fd);
+                    libc::unlink(c_dest.as_ptr());
+                }
+                return Err(e);
+            }
+        };
+
+        // First sub-packet's body start = stream header end.
+        let body_start = hdr.body_start;
+        // Last sub-packet's end: take the largest start offset from the
+        // index and read its size, OR if no index, body_start (empty
+        // source contributes nothing).
+        let body_end = if let Some(&last_off) = parsed.subpacket_index.last() {
+            match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
+                Ok(sz) => last_off + sz,
+                Err(e) => {
+                    unsafe {
+                        libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
+                        libc::close(dest_fd);
+                        libc::unlink(c_dest.as_ptr());
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            body_start
+        };
+
+        // Done with mmap (parsing complete); release it before sendfile.
+        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+
+        // Reopen the source RDONLY for sendfile. The previous fd that
+        // mmap was built on was dropped in mmap_file_readonly; sendfile
+        // needs its own fd anyway.
+        let c_src = match CString::new(p) {
+            Ok(c) => c,
+            Err(e) => {
+                unsafe { libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
+                return Err(MorlocError::Other(format!(
+                    "@concat: source path '{}' contains NUL: {}", p, e
+                )));
+            }
+        };
+        let src_fd = unsafe {
+            libc::open(c_src.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0)
+        };
+        if src_fd < 0 {
+            let e = std::io::Error::last_os_error();
+            unsafe { libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
+            return Err(MorlocError::Io(e));
+        }
+
+        if i == 0 {
+            // Preserve the source's stream header verbatim so the
+            // merged file's schema metadata block matches.
+            if let Err(e) = sendfile_range(dest_fd, src_fd, 0, body_start, dest_cursor) {
+                unsafe { libc::close(src_fd); libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
+                return Err(e);
+            }
+            dest_cursor += body_start;
+        }
+
+        // Record sub-packet offsets remapped to the dest cursor space.
+        for &src_off in &parsed.subpacket_index {
+            let delta = src_off - body_start;
+            merged_index.push(dest_cursor + delta);
+        }
+        if body_end > body_start {
+            let body_len = body_end - body_start;
+            if let Err(e) = sendfile_range(dest_fd, src_fd, body_start, body_len, dest_cursor) {
+                unsafe { libc::close(src_fd); libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
+                return Err(e);
+            }
+            dest_cursor += body_len;
+        }
+        unsafe { libc::close(src_fd); }
+        total_element_count += parsed.element_count;
+    }
+
+    // Write the merged final footer (small, fine to pwrite from userspace).
+    let mut diag = morloc_runtime_types::packet::StreamDiag::new();
+    diag.subpacket_count = merged_index.len() as u64;
+    diag.element_count = total_element_count;
+    let footer = morloc_runtime_types::packet::make_final_footer_packet(
+        &diag, &merged_index,
+    );
+    if let Err(e) = pwrite_all_fd(dest_fd, &footer, dest_cursor) {
+        unsafe {
+            libc::close(dest_fd);
+            libc::unlink(c_dest.as_ptr());
+        }
+        return Err(e);
+    }
+    let rc = unsafe { libc::fdatasync(dest_fd) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(dest_fd); }
+        return Err(MorlocError::Io(e));
+    }
+    unsafe { libc::close(dest_fd); }
+    Ok(())
+}
+
+/// Finalise an OStream on close: replace the temp footer with a final
+/// footer carrying the full sub-packet index, the StreamDiag block,
+/// and the FOOTER_FINAL marker. fdatasync before returning so the
+/// on-disk file is consistent before the fd is closed.
+///
+/// `@stream :: IFile a -> <IO> IStream a`: open a fresh ISTREAM handle
+/// bound to the same path as the source IFile. Independent fd + mmap +
+/// cursor so the two handles can be walked concurrently.
+pub fn derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {
+    shared_derive_istream(ifile_handle)
 }
 
 /// Implementation of `.[i] f` on an IFile handle. Returns an AbsPtr to
 /// a freshly-allocated SHM block of `elem_schema.width` bytes holding
 /// the materialized element (with any sub-allocations also in SHM).
 pub fn ifile_bracket_index(handle: i64, index: i64) -> Result<AbsPtr, MorlocError> {
-    with_entry(handle, |entry| {
-        if entry.kind != MLC_KIND_IFILE {
-            return Err(MorlocError::Other(format!(
-                "bracket index on non-IFile handle (kind = {})",
-                handle_kind_name(entry.kind),
-            )));
-        }
-        let (sub_k, local_idx) = resolve_global_index(entry, index)?;
-        let src = cache_get_or_materialize(entry, sub_k)?;
-        let result = ifile_extract_element(&entry.elem_schema, &src, local_idx);
-        // For File variant this is a no-op; for Shm variant it
-        // decrements the caller's ref (the cache keeps its own).
-        src.release();
-        result
-    })
+    shared_ifile_bracket_index(handle, index)
+}
+
+/// Inner body of `ifile_bracket_index`. Operates on the SHM slot's
+/// process-local cache directly; `local.cache` and
+/// `local.subpacket_elem_cum` persist across bracket accesses so the
+/// decompression LRU and the cumulative element-count index survive.
+fn ifile_bracket_index_against_slot(
+    local: &mut ProcessLocalSlot,
+    slot: &RegistrySlot,
+    index: i64,
+) -> Result<AbsPtr, MorlocError> {
+    if slot.kind != MLC_KIND_IFILE {
+        return Err(MorlocError::Other(format!(
+            "bracket index on non-IFile handle (kind = {})",
+            handle_kind_name(slot.kind),
+        )));
+    }
+    let (sub_k, local_idx) = resolve_global_index(local, index)?;
+    let src = cache_get_or_materialize(local, sub_k)?;
+    let result = ifile_extract_element(&local.elem_schema, &src, local_idx);
+    src.release();
+    result
 }
 
 /// Acquire a source descriptor for sub-packet `sub_k`. Uncompressed
@@ -1703,12 +4693,12 @@ pub fn ifile_bracket_index(handle: i64, index: i64) -> Result<AbsPtr, MorlocErro
 ///
 /// Caller drops their source descriptor via `SubpacketSrc::release()`.
 fn cache_get_or_materialize(
-    entry: &mut StreamEntry,
+    local: &mut ProcessLocalSlot,
     sub_k: usize,
 ) -> Result<SubpacketSrc, MorlocError> {
     // Hit path (compressed only -- uncompressed sub-packets bypass
     // the cache since the mmap'd region serves the walker directly).
-    for ce in entry.cache.entries.iter_mut() {
+    for ce in local.cache.entries.iter_mut() {
         if ce.subpacket_idx == sub_k as u64 {
             ce.clock_bit = 1;
             shm::shincref(ce.shm_packet)?;
@@ -1718,23 +4708,23 @@ fn cache_get_or_materialize(
     // Miss: materialise. For uncompressed sub-packets this returns a
     // File descriptor pointing at the mmap (no SHM allocation); for
     // compressed sub-packets a fresh SHM block (refcount = 1).
-    let src = materialize_subpacket(entry, sub_k)?;
+    let src = materialize_subpacket(local, sub_k)?;
 
     // Cache compressed (Shm) sub-packets; uncompressed (File) ones
     // don't need our cache -- the kernel pagecache handles them.
     if let SubpacketSrc::Shm { arr_base } = src {
         let size_bytes = unsafe { shm::shm_block_size(arr_base).unwrap_or(0) } as u64;
-        cache_make_room_for(&mut entry.cache, size_bytes);
+        cache_make_room_for(&mut local.cache, size_bytes);
         // Install: shincref so the cache owns one ref and the caller
         // owns the other. Both decrement independently on shfree.
         shm::shincref(arr_base)?;
-        entry.cache.entries.push(CacheEntry {
+        local.cache.entries.push(CacheEntry {
             subpacket_idx: sub_k as u64,
             shm_packet: arr_base,
             size_bytes,
             clock_bit: 1,
         });
-        entry.cache.current_bytes = entry.cache.current_bytes.saturating_add(size_bytes);
+        local.cache.current_bytes = local.cache.current_bytes.saturating_add(size_bytes);
     }
     Ok(src)
 }
@@ -1844,17 +4834,16 @@ pub fn ifile_bracket_slice(
     stop: Option<i64>,
     step: Option<i64>,
 ) -> Result<AbsPtr, MorlocError> {
-    ifile_bracket_slice_with_tail(handle, start, stop, step, &[])
+    shared_ifile_bracket_slice_with_tail(handle, start, stop, step, &[])
 }
 
-/// Bracket-slice + statically-resolved field projection. The tail is
-/// a sequence of Field/Key steps applied per element BEFORE the deep
-/// copy, so the walker only materialises the projected sub-field
-/// rather than the full element. Chain-fused at codegen time when the
-/// caller has `.[:].field` (or longer field chains); the empty tail
-/// degenerates to the plain slice path.
-fn ifile_bracket_slice_with_tail(
-    handle: i64,
+/// Inner body of `ifile_bracket_slice_with_tail`. Operates on the
+/// SHM slot's process-local cache directly; the decompression LRU
+/// and cumulative element-count index live on `ProcessLocalSlot`
+/// so they survive across slice accesses.
+fn ifile_bracket_slice_against_slot(
+    local: &mut ProcessLocalSlot,
+    slot: &RegistrySlot,
     start: Option<i64>,
     stop: Option<i64>,
     step: Option<i64>,
@@ -1885,15 +4874,15 @@ fn ifile_bracket_slice_with_tail(
         materialised: std::collections::BTreeMap<usize, SubpacketSrc>,
     }
 
-    let mut work: SliceWork = with_entry(handle, |entry| {
-        if entry.kind != MLC_KIND_IFILE {
+    let mut work: SliceWork = {
+        if slot.kind != MLC_KIND_IFILE {
             return Err(MorlocError::Other(format!(
                 "bracket slice on non-IFile handle (kind = {})",
-                handle_kind_name(entry.kind),
+                handle_kind_name(slot.kind),
             )));
         }
-        ensure_elem_index(entry)?;
-        let cum = entry
+        ensure_elem_index(local)?;
+        let cum = local
             .subpacket_elem_cum
             .as_ref()
             .expect("ensure_elem_index populates subpacket_elem_cum");
@@ -1917,11 +4906,6 @@ fn ifile_bracket_slice_with_tail(
             None => if step_val > 0 { n } else { -1 },
         };
 
-        // Build the (sub_k, local) plan via binary search per index.
-        // This is O(|slice| * log N_sub) which dominates the in-sub-
-        // packet linear scan you'd get if you walked sub-packets;
-        // typical slices touch 1-2 sub-packets so the log term is
-        // ~1-2 lookups per element.
         let mut plan: Vec<(usize, u64)> = Vec::new();
         let mut i = start_norm;
         if step_val > 0 {
@@ -1943,23 +4927,22 @@ fn ifile_bracket_slice_with_tail(
                 i += step_val;
             }
         }
-        // Resolve the static projection inside each element.
         let (proj_offset, proj_schema) =
-            navigate_static_field_offset(&entry.elem_schema, tail_steps)?;
-        Ok(SliceWork {
+            navigate_static_field_offset(&local.elem_schema, tail_steps)?;
+        SliceWork {
             proj_offset,
             proj_schema,
-            elem_width: entry.elem_schema.width,
+            elem_width: local.elem_schema.width,
             plan,
             materialised: std::collections::BTreeMap::new(),
-        })
-    })?;
+        }
+    };
 
     let n_out = work.plan.len();
 
-    // Phase 2: allocate the output Array structure (16 B) + the
-    // element-data buffer (n_out * elem_width bytes). The Array struct
-    // is a separate SHM block; its `data` relptr points to the buffer.
+    // Allocate the output Array structure (16 B) + the element-data buffer
+    // (n_out * elem_width bytes). The Array struct is a separate SHM block;
+    // its `data` relptr points to the buffer.
     let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
     // Output element width is the PROJECTED schema's width (just the
     // tail field's width when chain-fused; the full record width when
@@ -2002,18 +4985,14 @@ fn ifile_bracket_slice_with_tail(
         let j_local = i_local + n_out;
 
         // Materialise the sub-packet source once for the bulk copy.
-        let src = with_entry(handle, |entry| {
-            cache_get_or_materialize(entry, sub_k)
-        })?;
+        let src = cache_get_or_materialize(local, sub_k)?;
         let arr_base = src.arr_base();
         let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
         let arr_size = arr.size as u64;
         if let SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } = src {
             let resolver = make_file_resolver(payload_base, payload_len);
             let arr_data = resolver(arr.data)?;
-            // Snapshot the entry's elem_schema so we don't hold the
-            // registry lock across the shmalloc + memcpys.
-            let elem_schema = with_entry(handle, |e| Ok(e.elem_schema.clone()))?;
+            let elem_schema = local.elem_schema.clone();
             let r = slice_bulk_copy_contiguous(
                 i_local, j_local, arr_size, arr_data,
                 payload_base, payload_len, vol_idx_hint,
@@ -2044,7 +5023,7 @@ fn ifile_bracket_slice_with_tail(
     // below, which already handles the full schema zoo.
     if work.proj_schema.serial_type == SerialType::String {
         let r = slice_bulk_pack_str(
-            handle, &mut work.plan, &mut work.materialised,
+            local, &mut work.plan, &mut work.materialised,
             work.elem_width, work.proj_offset, arr_ptr,
         );
         for (_, s) in std::mem::take(&mut work.materialised) {
@@ -2058,16 +5037,14 @@ fn ifile_bracket_slice_with_tail(
     }
     let buf_ptr: AbsPtr = shm::shcalloc(n_out, out_elem_width)?;
 
-    // Phase 3: for each output slot, ensure the source sub-packet is
-    // located, then deep_copy the projected sub-field into the output
-    // buffer slot. Sub-packets are cached by sub_k for the duration of
-    // the walk so a slice spanning many elements within one sub-packet
-    // pays only one location cost.
+    // For each output slot, ensure the source sub-packet is located, then
+    // deep_copy the projected sub-field into the output buffer slot.
+    // Sub-packets are cached by sub_k for the duration of the walk so a
+    // slice spanning many elements within one sub-packet pays only one
+    // location cost.
     for (out_i, &(sub_k, local_idx)) in work.plan.iter().enumerate() {
         if !work.materialised.contains_key(&sub_k) {
-            let src = with_entry(handle, |entry| {
-                cache_get_or_materialize(entry, sub_k)
-            })?;
+            let src = cache_get_or_materialize(local, sub_k)?;
             work.materialised.insert(sub_k, src);
         }
         let src = work.materialised.get(&sub_k).unwrap();
@@ -2122,9 +5099,9 @@ fn ifile_bracket_slice_with_tail(
         }
     }
 
-    // Phase 4: release our source descriptors and fill in the output
-    // Array struct. The cache (for Shm variants) keeps its own refs;
-    // File variants are no-op releases.
+    // Release source descriptors and fill in the output Array struct.
+    // The cache (for Shm variants) keeps its own refs; File variants are
+    // no-op releases.
     for (_, s) in std::mem::take(&mut work.materialised) {
         s.release();
     }
@@ -2272,7 +5249,7 @@ fn slice_bulk_copy_contiguous(
 /// Caller is responsible for releasing `work.materialised` and
 /// freeing `arr_ptr` on the error path.
 fn slice_bulk_pack_str(
-    handle: i64,
+    local: &mut ProcessLocalSlot,
     plan: &mut Vec<(usize, u64)>,
     materialised: &mut std::collections::BTreeMap<usize, SubpacketSrc>,
     elem_width: usize,
@@ -2313,9 +5290,7 @@ fn slice_bulk_pack_str(
     for &(sub_k, local_idx) in plan.iter() {
         if ctx.sub_k != Some(sub_k) {
             if !materialised.contains_key(&sub_k) {
-                let src = with_entry(handle, |entry| {
-                    cache_get_or_materialize(entry, sub_k)
-                })?;
+                let src = cache_get_or_materialize(local, sub_k)?;
                 materialised.insert(sub_k, src);
             }
             let src = materialised.get(&sub_k).unwrap();
@@ -3309,26 +6284,108 @@ fn deep_copy_one(
     }
 }
 
-// ── ISTREAM / OSTREAM stubs ───────────────────────────────────────────────
-
-pub fn open_istream(_path: &str) -> Result<i64, MorlocError> {
-    Err(MorlocError::Other(
-        "open IStream: not yet implemented".into(),
-    ))
+/// `write_all` for a raw fd: loops past EINTR / partial writes.
+fn write_all_fd(fd: i32, mut buf: &[u8]) -> Result<(), MorlocError> {
+    while !buf.is_empty() {
+        let n = unsafe {
+            libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len())
+        };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+            return Err(MorlocError::Io(e));
+        }
+        if n == 0 {
+            return Err(MorlocError::Other("write_all_fd: zero-byte write".into()));
+        }
+        buf = &buf[n as usize..];
+    }
+    Ok(())
 }
 
-pub fn open_ostream(_path: &str) -> Result<i64, MorlocError> {
-    Err(MorlocError::Other(
-        "open OStream: not yet implemented".into(),
-    ))
+/// `pwrite_all`: positional write that loops past EINTR / partials.
+fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<(), MorlocError> {
+    while !buf.is_empty() {
+        let n = unsafe {
+            libc::pwrite(
+                fd,
+                buf.as_ptr() as *const libc::c_void,
+                buf.len(),
+                offset as libc::off_t,
+            )
+        };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+            return Err(MorlocError::Io(e));
+        }
+        if n == 0 {
+            return Err(MorlocError::Other("pwrite_all_fd: zero-byte write".into()));
+        }
+        buf = &buf[n as usize..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+/// Copy `count` bytes from `src_fd[src_off..src_off+count]` to
+/// `dest_fd[dest_off..]` using `sendfile()` for zero-copy via the
+/// kernel pagecache. Loops past EINTR + partial transfers; advances
+/// dest_fd's file offset by the bytes written.
+///
+/// Used by `@concat` to glue stream files together without crossing
+/// the data through userspace.
+fn sendfile_range(
+    dest_fd: i32, src_fd: i32,
+    src_off: u64, count: u64, dest_off: u64,
+) -> Result<(), MorlocError> {
+    // sendfile writes at dest_fd's current file offset; seek to where
+    // we want this slice to land. lseek is also needed when the caller
+    // mixed pwrite and sendfile on the same fd, since pwrite leaves the
+    // file offset untouched.
+    let s = unsafe {
+        libc::lseek(dest_fd, dest_off as libc::off_t, libc::SEEK_SET)
+    };
+    if s < 0 {
+        return Err(MorlocError::Io(std::io::Error::last_os_error()));
+    }
+    let mut offset = src_off as libc::off_t;
+    let mut remaining = count;
+    while remaining > 0 {
+        let n = unsafe {
+            libc::sendfile(dest_fd, src_fd, &mut offset, remaining as libc::size_t)
+        };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+            return Err(MorlocError::Io(e));
+        }
+        if n == 0 {
+            return Err(MorlocError::Other(
+                "sendfile_range: zero-byte transfer (source truncated?)".into(),
+            ));
+        }
+        remaining = remaining.saturating_sub(n as u64);
+    }
+    Ok(())
 }
 
 /// Dispatch entry point used by the FFI shim in `intrinsics.rs`.
+///
+/// OSTREAM is intentionally NOT dispatched here -- the writer needs the
+/// element schema in hand at open time, which the typed entry point
+/// `mlc_open_ostream(schema_str, path)` provides. Routing OSTREAM
+/// through `mlc_open(path, kind)` would create a Nil-schema header on
+/// disk, breaking the receiving IStream/IFile reader's schema parse.
 pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
     match kind {
-        MLC_KIND_IFILE => open_ifile(path),
-        MLC_KIND_ISTREAM => open_istream(path),
-        MLC_KIND_OSTREAM => open_ostream(path),
+        MLC_KIND_IFILE => shared_open_ifile(path),
+        MLC_KIND_ISTREAM => shared_open_istream(path),
+        MLC_KIND_OSTREAM => Err(MorlocError::Other(
+            "mlc_open: OSTREAM requires the typed entry point \
+             mlc_open_ostream(schema_str, path) -- the codegen wires \
+             this automatically for `@open :: <IO> (OStream T)`".into(),
+        )),
         _ => Err(MorlocError::Other(format!(
             "mlc_open: unknown handle kind {} ({})",
             kind, handle_kind_name(kind),
@@ -3441,24 +6498,29 @@ mod tests {
         let header = morloc_runtime_types::packet::make_stream_header_block(&schema);
         std::fs::write(&path, &header).unwrap();
 
-        let handle = open_ifile(path.to_str().unwrap()).unwrap();
+        let handle = shared_open_ifile(path.to_str().unwrap()).unwrap();
         assert!(handle > 0);
-        let kind = handle_kind(handle).unwrap();
+        let kind = shared_handle_kind(handle).unwrap();
         assert_eq!(kind, MLC_KIND_IFILE);
-        close_handle(handle).unwrap();
+        shared_close_handle(handle).unwrap();
 
         // Re-close is an error.
-        assert!(close_handle(handle).is_err());
+        assert!(shared_close_handle(handle).is_err());
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn handle_encoding_roundtrip() {
-        let h = make_handle(0xDEAD_BEEF_CAFE, 0x1234);
-        let (g, s) = decode_handle(h);
-        assert_eq!(g, 0xDEAD_BEEF_CAFE);
-        assert_eq!(s, 0x1234);
+        // pack_handle's generation field is 47 bits (bit 63 stays clear so
+        // the i64 sentinel domain is reserved for errors), so the test
+        // value must fit that bound.
+        let g_in: u64 = 0x7EAD_BEEF_CAFE;
+        let s_in: usize = 0x1234;
+        let h = pack_handle(g_in, s_in);
+        let (g, s) = unpack_handle(h);
+        assert_eq!(g, g_in);
+        assert_eq!(s, s_in);
     }
 
     #[test]

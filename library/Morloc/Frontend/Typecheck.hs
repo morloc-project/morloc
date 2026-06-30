@@ -1236,10 +1236,32 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
+-- IntrWrite: @Int -> [a] -> OStream a -> <IO> ()@. The handle is
+-- check-mode'd FIRST so the OStream's element type pins the fresh
+-- existential @a@; then the list is check-mode'd against @[a]@,
+-- which gives the integer literals inside it a chance to inhabit
+-- the OStream's type (e.g. UInt64) via the check-mode IntS rule.
+-- The generic synth path would synth the list first and freeze its
+-- elements to @Int@ before @a@ is visible -- @write 0 [1] (o ::
+-- OStream UInt64)@ would then fail with "Cannot compare types
+-- UInt64 and Int" at the handle subtyping step.
+synthE _ g (IntrinsicS IntrWrite [levelE, listE, handleE]) = do
+  let (g1, a) = newvar "write_a_" g
+      listExpectedT   = AppU (VarU BT.list) [a]
+      handleExpectedT = AppU (VarU BT.ostreamVar) [a]
+  (g2, _, handleE') <- checkG g1 handleE handleExpectedT
+  (g3, _, levelE')  <- checkG g2 levelE  BT.intU
+  (g4, _, listE')   <- checkG g3 listE   listExpectedT
+  return ( g4
+         , EffectU ioEffectSet BT.unitU
+         , IntrinsicS IntrWrite [levelE', listE', handleE']
+         )
+synthE _ _ (IntrinsicS IntrWrite args) =
+  error $ "IntrWrite expects 3 args (level, list, handle), got " <> show (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
-  let (g''', expectedType) = intrinsicTypeG g'' intr
+  let (g''', expectedType) = intrinsicTypeG g'' intr argTypes
   return (g''', expectedType, IntrinsicS intr args')
 
 -- | Strip ForallU wrappers by instantiating bound variables as existentials.
@@ -1248,26 +1270,53 @@ stripForallU :: Gamma -> TypeU -> (Gamma, TypeU)
 stripForallU g (ForallU v t) = stripForallU (g +> v) (substitute v t)
 stripForallU g t = (g, t)
 
--- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials
-intrinsicTypeG :: Gamma -> Intrinsic -> (Gamma, TypeU)
-intrinsicTypeG g IntrLoad =
+-- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials.
+-- Receives the synthesized argument types so result types like `@next`'s `[a]`
+-- can extract `a` from the receiver's type.
+intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> (Gamma, TypeU)
+intrinsicTypeG g IntrLoad _ =
   let (g', loadType) = newvar "load_" g
   in (g', EffectU ioEffectSet (OptionalU loadType))
-intrinsicTypeG g IntrRead =
+intrinsicTypeG g IntrRead _ =
   let (g', readType) = newvar "read_" g
   in (g', OptionalU readType)
 -- @open: polymorphic return -- the user's inline ascription (e.g.
 -- `@open path :: IFile Sequence`) resolves the existential to the
 -- concrete handle type at typecheck time; codegen then inspects the
 -- resolved TypeF to dispatch to the right runtime entry point.
-intrinsicTypeG g IntrOpen =
+intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
   in (g', EffectU ioEffectSet openType)
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
-intrinsicTypeG g IntrClose = (g, EffectU ioEffectSet BT.unitU)
-intrinsicTypeG g intr = (g, intrinsicType intr)
+intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
+-- @next :: IStream a -> <IO> [a]. Pull `a` straight from the IStream
+-- receiver's apply head; subtyping in checkIntrinsicArgs has already
+-- pinned the receiver to `IStream <fresh>`.
+intrinsicTypeG g IntrNext [argT] =
+  let a = streamElemTypeU argT in
+  (g, EffectU ioEffectSet (BT.listU a))
+-- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
+-- head on the result side.
+intrinsicTypeG g IntrStream [argT] =
+  let a = streamElemTypeU argT in
+  (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
+-- @append: polymorphic return like @open; the user ascription resolves
+-- to the concrete OStream/IStream/IFile shape.
+intrinsicTypeG g IntrAppend _ =
+  let (g', appendType) = newvar "append_" g
+  in (g', EffectU ioEffectSet appendType)
+intrinsicTypeG g intr _ = (g, intrinsicType intr)
+
+-- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
+-- after typecheck has constrained it. Falls back to a placeholder if the
+-- expected subtype constraint failed silently -- that branch is
+-- unreachable on a well-typed program but defends codegen against
+-- a missing-arg-type assertion.
+streamElemTypeU :: TypeU -> TypeU
+streamElemTypeU (AppU _ (a : _)) = a
+streamElemTypeU t = t
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
@@ -1291,6 +1340,15 @@ intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
 intrinsicType IntrFSchema = EffectU ioEffectSet BT.strU
 intrinsicType IntrFLength = EffectU ioEffectSet BT.intU
+intrinsicType IntrNext =
+  error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
+intrinsicType IntrStream =
+  error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
+intrinsicType IntrWrite = EffectU ioEffectSet BT.unitU
+intrinsicType IntrAppend =
+  error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
+intrinsicType IntrConcat = EffectU ioEffectSet BT.unitU
+intrinsicType IntrFlush = EffectU ioEffectSet BT.unitU
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
@@ -1355,6 +1413,35 @@ checkIntrinsicArgs i g intr argTypes = do
         -- @flen: IFile a -> <IO> Int. Receiver is any handle type;
         -- the runtime enforces kind == IFILE.
         (IntrFLength, [_]) -> return g
+        -- @next: IStream a -> <IO> [a]. Pin the receiver shape so the
+        -- result type's [a] is constrained to the same `a`. Runtime
+        -- enforces kind == ISTREAM.
+        (IntrNext, [argT]) ->
+          let (g'a, a) = newvar "next_a_" g
+              expected = AppU (VarU BT.istreamVar) [a]
+           in subtype' i argT expected g'a
+        -- @stream: IFile a -> <IO> IStream a. Same trick.
+        (IntrStream, [argT]) ->
+          let (g'a, a) = newvar "stream_a_" g
+              expected = AppU (VarU BT.ifileVar) [a]
+           in subtype' i argT expected g'a
+        -- @write is special-cased in synthE so the OStream's element
+        -- type can pin the list literals' element type via check-mode
+        -- propagation; see the synthE branch above.
+        -- @append: Str -> <IO> a (user ascription resolves)
+        (IntrAppend, [pathT]) -> subtype' i pathT BT.strU g
+        -- @concat: [Str] -> Str -> <IO> ()
+        (IntrConcat, [pathsT, destT]) -> do
+          g1 <- subtype' i pathsT (AppU (VarU BT.list) [BT.strU]) g
+          subtype' i destT BT.strU g1
+        -- @flush: OStream a -> <IO> (). Pin the receiver to OStream so
+        -- the type system catches misuse on IFile/IStream at compile
+        -- time. The runtime ALSO enforces kind == OSTREAM (defence in
+        -- depth) but the static check is the user-facing diagnostic.
+        (IntrFlush, [handleT]) ->
+          let (g'a, a) = newvar "flush_a_" g
+              expected = AppU (VarU BT.ostreamVar) [a]
+           in subtype' i handleT expected g'a
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g

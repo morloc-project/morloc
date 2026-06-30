@@ -927,25 +927,23 @@ subtype scope a@ExistU {} b@ExistU {} g
 subtype scope (EffectU e1 i1) (EffectU e2 i2) g = subtypeEffRows scope e1 e2 i1 i2 g
 -- Effectful type on the left, non-effectful on the right. The empty
 -- effect set is the monoid identity (<> A == A), so a left side that
--- solves to empty is just its inner type. An inferred type variable (a
--- closed existential) may be solved to the effect type, mirroring the
--- symmetric ExistU <: EffectU instantiation; this lets a generic
--- combinator thread an effectful value through a type variable. A
--- non-serializable value in a type variable is not special-cased here:
--- soundness is enforced where serialization happens, exactly as for a
--- function value -- the thunk is realized in its own pool when local, or
--- forced before a remote boundary (pushForceIntoRemote / makeSerialAST
--- EffectF). A genuinely effectful value still cannot satisfy a concrete
--- non-effect expected type.
+-- solves to empty is just its inner type. Effects CANNOT fill a
+-- polymorphic type variable: a bare existential (a closed type variable
+-- from a polymorphic function) is rejected so that identity-style
+-- combinators don't silently accept effectful arguments they have no
+-- way to discharge. To pass an effectful value through such a
+-- combinator, the user must bind it in a do-block first, e.g.
+-- @do { x <- e ; f x }@. Functions that are genuinely effect-aware
+-- declare their parameters with explicit @<...> a@ row-polymorphic
+-- effects; those match the EffectU <: EffectU clause above.
 subtype scope t1@(EffectU e1 i1) t2 g
   | isEmptyEffectSet (applyEff g e1) = subtype scope i1 t2 g
-  | ExistU _ ([], _) _ <- t2 =
-      occursCheck t2 t1 "InstantiateR" >> instantiate scope t1 t2 g
   | otherwise =
       subtypeError t1 t2 $
         "an effectful value cannot be used where a non-effectful type is"
-          <+> "expected; run it in a do-block first (x <- e) and use the"
-          <+> "bound value"
+          <+> "expected; bind it in a do-block first (x <- e) and pass"
+          <+> "the bound value, e.g. `do { x <- e ; f x }` instead of"
+          <+> "`f e`"
 -- OptionalU: covariant subtyping
 subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 --  g1 |- B1 <: A1 -| g2

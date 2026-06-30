@@ -1438,6 +1438,57 @@ int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
                                    void* dest, size_t elem_stride,
                                    void** cursor, ERRMSG);
 
+// IStream: forward-only file readers.
+//
+// `mlc_next(handle)` materialises the IStream's current sub-packet into
+// a fresh SHM block typed `[a]` (an Array struct, with element + sub-
+// allocation bytes following), advances the IStream cursor, and returns
+// the AbsPtr to the Array. At EOF the returned Array has `size == 0`
+// and `data == RELNULL`; the per-language wrapper surfaces this as the
+// language's empty list. On error returns NULL with errmsg set.
+//
+// `mlc_stream(ifile_handle)` opens a fresh IStream slot bound to the
+// same path as the source IFile (independent fd + mmap + cursor). The
+// new handle is auto-registered with the current `eval_arena`.
+void* mlc_next(int64_t handle, ERRMSG);
+int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
+
+// OStream: forward-only file writers.
+//
+// `mlc_open_ostream(schema_str, path)` is the typed-open path for
+// `@open path :: <IO> (OStream T)`. The codegen has the element schema
+// string for T in hand at compile time. The runtime creates the file
+// (O_CREAT|O_EXCL), flock'-acquires it, writes the stream header with
+// the schema metadata block, and returns a fresh OSTREAM slot handle.
+//
+// `mlc_write(level, handle, payload_voidstar)` writes one sub-packet
+// of element-list type [T]. `payload_voidstar` points to a SHM Array
+// struct (the user's `[T]` value materialised by the bridge's
+// `to_voidstar<vector<T>>`). `level` is the zstd compression level (0
+// = uncompressed); the first @write fixes the level for the file's
+// lifetime, subsequent writes must match.
+//
+// `mlc_append(schema_str, path)` opens an existing OStream file for
+// append: forward-scans to find the last complete sub-packet, truncates
+// any partial trailing bytes, re-opens with append semantics, and
+// returns a fresh OSTREAM handle whose cursor sits at the resume offset.
+// The schema must match the file's stored schema (mismatches error
+// before any bytes are written).
+//
+// `mlc_concat(paths, n_paths, dest)` concatenates a sequence of stream
+// files via sendfile, exploiting the stream-packet concat invariant.
+// The dest file is created with a merged final footer.
+int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
+int32_t mlc_write(uint8_t level, int64_t handle,
+                  const void* payload_voidstar, ERRMSG);
+int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);
+int32_t mlc_concat(const char* const* paths, size_t n_paths,
+                   const char* dest, ERRMSG);
+// `mlc_flush(handle)` forces any elements buffered for an OStream to
+// be written as a sub-packet now (instead of waiting for the buffer
+// to fill or for @close). No-op when the buffer is empty.
+int32_t mlc_flush(int64_t handle, ERRMSG);
+
 // ========================================================================
 // Section 26: Function declarations -- Slurm
 // ========================================================================

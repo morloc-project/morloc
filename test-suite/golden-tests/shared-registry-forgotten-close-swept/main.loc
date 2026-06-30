@@ -1,0 +1,60 @@
+-- A handle opened but never @close'd is swept by the per-call_id
+-- sweeper at dispatch end. The sweep calls discard_handle (not
+-- close_handle) so the on-disk file stays in temp-footer state
+-- and the buffer is dropped without flushing.
+--
+-- Contracts pinned:
+--   * leakNoFlush opens + writes + exits. Sweep drops the
+--     buffer (no flush). On-disk file has no sub-packets;
+--     reader sees @flen = 0 and @next = [].
+--   * leakWithFlush opens + writes + flushes + exits. Sweep
+--     drops the slot AFTER the flush already committed data.
+--     Reader sees @flen = 4 and @next = [10, 20, 30, 40].
+--   * After both leak invocations, slots are returned to the
+--     registry's free pool; subsequent @open calls succeed
+--     (no slot exhaustion).
+--
+-- /dev/shm growth assertion is out of scope for the morloc
+-- layer; the stress test handles that separately.
+
+module main
+  ( leakNoFlush
+  , leakWithFlush
+  , observeNoFlush
+  , observeWithFlush
+  , observeNoFlushNext
+  , observeWithFlushNext
+  )
+
+import root
+
+leakNoFlush :: Str -> <IO> ()
+leakNoFlush path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+
+leakWithFlush :: Str -> <IO> ()
+leakWithFlush path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [10, 20, 30, 40] o
+  @flush o
+
+observeNoFlush :: Str -> <IO> Int
+observeNoFlush path = do
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+observeWithFlush :: Str -> <IO> Int
+observeWithFlush path = do
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+observeNoFlushNext :: Str -> <IO> [Int]
+observeNoFlushNext path = do
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+observeWithFlushNext :: Str -> <IO> [Int]
+observeWithFlushNext path = do
+  s <- @open path :: <IO> IStream Int
+  @next s

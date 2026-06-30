@@ -1,0 +1,45 @@
+-- OStream end-to-end through a C++ pool manifold.
+--
+-- The companion test `ostream-write-roundtrip` exercises the nexus
+-- eval handlers for @open/@write/@close/@next/@flen. This test wraps
+-- the same operations in `idcpp` so the manifold compiles to C++ and
+-- routes through `pool.cpp`'s `_mlc_open_ostream<T>` /
+-- `_mlc_write<T>` / `_mlc_close` / `_mlc_next<T>` template wrappers.
+--
+-- If the bridge wrappers are wired correctly, this produces the same
+-- outputs as the nexus-path test. Differences here vs there localise
+-- the bug to the C++ bridge layer.
+
+module main
+  ( testPoolWriteRoundtrip
+  , testPoolWriteMulti
+  )
+
+import root
+import root-cpp
+
+-- The whole do-block runs inside a Cpp manifold thanks to the outer
+-- `idcpp`. Every @open / @write / @close / @next fires through
+-- `pool.cpp`'s `_mlc_*` bridge wrappers.
+testPoolWriteRoundtrip :: Str -> <IO> [Int]
+testPoolWriteRoundtrip path = idcpp (do
+  s <- @open path :: <IO> OStream Int
+  @write 0 [10, 20, 30] s
+  @close s
+  r <- @open path :: <IO> IStream Int
+  @next r)
+
+-- Three @write calls inside a single Cpp manifold so the pool-side
+-- state mutation across calls is exercised (each call holds the
+-- registry lock briefly, mutates entry.cursor + subpacket_index, and
+-- releases). After @close, the @flen on the IFile reads the final
+-- footer's element count.
+testPoolWriteMulti :: Str -> <IO> Int
+testPoolWriteMulti path = idcpp (do
+  s <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] s
+  @write 0 [4, 5, 6, 7] s
+  @write 0 [8] s
+  @close s
+  f <- @open path :: <IO> IFile Int
+  @flen f)

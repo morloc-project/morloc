@@ -1,0 +1,52 @@
+-- IStream forward-iteration on voidstar DATA_PACKET files.
+--
+-- Stage 3 of streaming I/O. A DATA_PACKET file presents to the IStream
+-- walker as a single-sub-packet stream: @next materialises the whole
+-- list once, then returns an empty list at EOF. The cursor is part of
+-- the registry slot, so subsequent @next calls keep returning empty.
+--
+-- @stream :: IFile a -> <IO> IStream a derives a forward-only IStream
+-- from an open IFile, bound to the same path with an independent fd
+-- and cursor. The two handles read independently.
+--
+-- Stage 4 will introduce STREAM_PACKET writes; multi-sub-packet
+-- streaming gets tested then.
+
+module main
+  ( testNextOnce
+  , testNextEofTwice
+  , testStreamFromIFile
+  , testIntList
+  )
+
+import root
+
+-- 1. Open as IStream and pull the first (only) sub-packet.
+testNextOnce :: Str -> <IO> [Str]
+testNextOnce path = do
+  @save 0 ["one", "two", "three"] path
+  s <- @open path :: <IO> IStream Str
+  @next s
+
+-- 2. After EOF, subsequent @next calls return empty.
+testNextEofTwice :: Str -> <IO> [Str]
+testNextEofTwice path = do
+  @save 0 ["alpha", "beta"] path
+  s <- @open path :: <IO> IStream Str
+  _ <- @next s
+  @next s
+
+-- 3. Derive an IStream from an IFile and walk it.
+testStreamFromIFile :: Str -> <IO> [Int]
+testStreamFromIFile path = do
+  @save 0 [11, 22, 33] path
+  f <- @open path :: <IO> IFile Int
+  s <- @stream f
+  @next s
+
+-- 4. Int element type round-trip.
+testIntList :: Str -> <IO> [Int]
+testIntList path = do
+  @save 0 [100, 200, 300, 400] path
+  s <- @open path :: <IO> IStream Int
+  @next s

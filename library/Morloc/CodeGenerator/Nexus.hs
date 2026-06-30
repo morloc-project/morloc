@@ -124,6 +124,13 @@ data NexusExpr
       -- ^ Unified IFile pattern walker: result schema, handle, path
       -- string (e.g. ".1.[]"), runtime args in DFS order. Each bracket
       -- step in the path consumes args (1 for `.[]`, 3 for `.[:]`).
+  | NextX     Text NexusExpr        -- result schema ([a]), IStream handle expr
+  | StreamX   Text NexusExpr        -- result schema (IStream a), IFile handle expr
+  | OpenOStreamX Text NexusExpr     -- element schema, path expr (typed OStream open)
+  | WriteX    Text NexusExpr NexusExpr NexusExpr -- value [a] schema, level, value, handle
+  | AppendX   Text NexusExpr        -- element schema, path expr
+  | ConcatX   NexusExpr NexusExpr   -- paths [Str], dest Str
+  | FlushX    NexusExpr             -- handle expr -> () (force buffer flush)
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -230,15 +237,18 @@ applyNatDimsFromType (AppT _ args) ast =
 applyNatDimsFromType _ ast = ast
 
 -- | SerialASTs for a pure (gast) function's return + argument types.
--- The 'FunT' input puts the return type first, then arguments.
-makeGastSerialASTs :: Type -> MorlocMonad (SerialAST, [SerialAST])
-makeGastSerialASTs (FunT ts t) = do
-  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM generalTypeToSerialAST (t : ts)
+-- The 'FunT' input puts the return type first, then arguments. The
+-- source index `i` is the export's manifold id; threaded into
+-- 'generalTypeToSerialAST' so any "cannot serialize" error carets at
+-- the export rather than surfacing as an unlocalized SystemError.
+makeGastSerialASTs :: Int -> Type -> MorlocMonad (SerialAST, [SerialAST])
+makeGastSerialASTs i (FunT ts t) = do
+  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM (generalTypeToSerialAST i) (t : ts)
   case serialAsts of
     (s : ss) -> return (s, ss)
     [] -> error "makeGastSerialASTs: FunT produced empty serial AST list"
-makeGastSerialASTs t = do
-  s <- applyNatDimsFromType t <$> generalTypeToSerialAST t
+makeGastSerialASTs i t = do
+  s <- applyNatDimsFromType t <$> generalTypeToSerialAST i t
   return (s, [])
 
 -- | Build a SerialAST for a general (nexus-side) type. The Set
@@ -249,11 +259,11 @@ makeGastSerialASTs t = do
 -- on the pool side -- the nexus needs the same protection because
 -- top-level constant bindings whose RHS is a recursive-type literal
 -- route through @annotateGasts@ here rather than through a pool.
-generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
-generalTypeToSerialAST = generalTypeToSerialAST' Set.empty
+generalTypeToSerialAST :: Int -> Type -> MorlocMonad SerialAST
+generalTypeToSerialAST i = generalTypeToSerialAST' i Set.empty
 
-generalTypeToSerialAST' :: Set TVar -> Type -> MorlocMonad SerialAST
-generalTypeToSerialAST' anc (VarT v)
+generalTypeToSerialAST' :: Int -> Set TVar -> Type -> MorlocMonad SerialAST
+generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
   -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
   -- not SerialReal. checkRealBounds (and any future bound check) keys off
@@ -286,22 +296,34 @@ generalTypeToSerialAST' anc (VarT v)
           -- @type Pat = [Pat]@), but the @&Pat@/@^Pat@ pair must agree
           -- on the alias's own name. Retag the outer SerialAST node
           -- with @v@ after recursing.
-          inner <- generalTypeToSerialAST' (Set.insert v anc) (typeOf t')
+          inner <- generalTypeToSerialAST' i (Set.insert v anc) (typeOf t')
           return $ retagOuterName v inner
-        (Just [_]) -> error $ "Cannot currently handle parameterized pure morloc types"
-        Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
-        x -> error $ "Unexpected scope: " <> show x
-generalTypeToSerialAST' anc (AppT (VarT v) [t])
-  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' anc t
-  -- IFile a: cross-pool stream handle. Wire is the file path (String);
-  -- the receiving pool re-opens locally. The phantom element type @a@
-  -- is dropped here -- it is only meaningful inside the file and is
-  -- carried separately on the StreamEntry by `open_dispatch`.
-  | v == MBT.ifileVar = return $ SerialIFile (FV v (CV ""))
-  | otherwise = resolveAliasApp anc v [t]
-generalTypeToSerialAST' anc (AppT (VarT v) ts)
+        (Just [_]) -> MM.throwSourcedError i $
+          "cannot serialize parameterised pure morloc type:" <+> pretty v
+        Nothing -> MM.throwSourcedError i $
+          "cannot serialize unknown type variable:" <+> pretty v
+        x -> MM.throwSourcedError i $
+          "cannot serialize type" <+> pretty v
+            <+> "-- unexpected scope shape" <+> pretty (show x)
+generalTypeToSerialAST' i anc (AppT (VarT v) [t])
+  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
+  -- IFile: cross-pool stream descriptors. The wire form is the file path
+  -- (String); the receiving pool reopens locally. Per-access reopening
+  -- is wasteful but acceptable for read-only random-access files (the
+  -- mmap is cheap and the cursor is irrelevant).
+  | v == MBT.ifileVar   = return $ SerialIFile (FV v (CV ""))
+  -- IStream / OStream: stateful handles. Per-access reopening would
+  -- reset the IStream cursor (incorrect) or fail O_EXCL for OStream
+  -- (broken). The nexus keeps the real i64 handle in flight; the
+  -- nexus's `Open` / `OpenOStream` eval handlers call the runtime
+  -- and write the i64 directly into dest. Cross-pool transfer of an
+  -- in-flight stateful handle is unsupported in v1.
+  | v == MBT.istreamVar = return $ SerialUInt64 (FV v (CV ""))
+  | v == MBT.ostreamVar = return $ SerialUInt64 (FV v (CV ""))
+  | otherwise = resolveAliasApp i anc v [t]
+generalTypeToSerialAST' i anc (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) =
-      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' anc) ts
+      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
   -- @T@ wire token (or @T:K<entries>@ when the row is concrete);
   -- 'Serial.hasArrowHint' identifies these structurally for the
@@ -312,13 +334,13 @@ generalTypeToSerialAST' anc (AppT (VarT v) ts)
             [_, NamT _ _ _ rs] -> rs
             _                  -> []
       in SerialObject NamTable (FV MBT.table (CV "")) []
-           <$> mapM (secondM (generalTypeToSerialAST' anc)) cols
-  | otherwise = resolveAliasApp anc v ts
-generalTypeToSerialAST' anc (EffectT _ t) = generalTypeToSerialAST' anc t
-generalTypeToSerialAST' anc (OptionalT t) = do
-  inner <- generalTypeToSerialAST' anc t
+           <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
+  | otherwise = resolveAliasApp i anc v ts
+generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
+generalTypeToSerialAST' i anc (OptionalT t) = do
+  inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
-generalTypeToSerialAST' anc (NamT o v _ rs) =
+generalTypeToSerialAST' i anc (NamT o v _ rs) =
   -- Add @v@ to the ancestor set before recursing into the record's
   -- fields: a recursive record (e.g. @record Tree where children :: [Tree]@)
   -- has a field whose type mentions @Tree@ again, which would otherwise
@@ -327,8 +349,9 @@ generalTypeToSerialAST' anc (NamT o v _ rs) =
   -- they do not need to appear in the resulting SerialAST.
   let anc' = Set.insert v anc
   in SerialObject o (FV v (CV "")) []
-       <$> mapM (secondM (generalTypeToSerialAST' anc')) rs
-generalTypeToSerialAST' _ t = MM.throwSystemError $ "cannot serialize this type: " <> pretty (show t)
+       <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
+generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
+  "cannot serialize type:" <+> pretty t
 
 -- | Check whether a type contains a function type anywhere in its structure.
 -- Used to detect higher-order functions appearing as arguments or in
@@ -349,8 +372,8 @@ exportHasHigherOrder :: Type -> Bool
 exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
 exportHasHigherOrder t = containsFunT t
 
-resolveAliasApp :: Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
-resolveAliasApp anc v ts
+resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp i anc v ts
   -- The same self-recursion cutoff as in the @VarT@ clause above:
   -- if we encounter an alias we are already expanding, emit a
   -- @SerialRec@ back-reference instead of recursing into its body.
@@ -364,7 +387,7 @@ resolveAliasApp anc v ts
           let tvars = [tv | Left (tv, _) <- params]
               resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
               anc' = Set.insert v anc
-          inner <- generalTypeToSerialAST' anc' resolved
+          inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's
           -- underlying shape (e.g. @Tuple2@ for @type Pair a = (a, ?(Pair a))@).
           -- We must retag the outer SerialAST node with the alias's own
@@ -375,7 +398,11 @@ resolveAliasApp anc v ts
           -- produces no @&Pair@ on the wire and the @^Pair@ inside
           -- becomes a dangling back-reference.
           return $ retagOuterName v inner
-        _ -> MM.throwSystemError $ "Cannot serialize type: " <> pretty (show (AppT (VarT v) ts))
+        _ -> MM.throwSourcedError i $
+          "cannot serialize type" <+> pretty (AppT (VarT v) ts)
+            <+> "-- no per-language alias resolution for" <+> pretty v
+            <> ". If" <+> pretty v <+> "is a newtype handle, add"
+            <+> "`newtype" <+> pretty v <+> "<params> = <wire-type>` in stdlib/internal."
 
 -- | Replace the outermost FVar's general name with the alias's name.
 -- Used after expanding an alias body to keep the alias's identity on
@@ -405,7 +432,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   CM.when (exportHasHigherOrder gtype) $
     MM.throwSourcedError i "cannot export higher-order functions through the CLI"
 
-  (retAst, argAsts) <- makeGastSerialASTs gtype
+  (retAst, argAsts) <- makeGastSerialASTs i gtype
   let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
       argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
   validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
@@ -423,7 +450,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       }
   where
     type2schema :: Type -> MorlocMonad Text
-    type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST t
+    type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
 
     -- Construct an IFileWalkX node for a unified IFile pattern walk.
     -- Used by every IFile-routing case in toNexusExpr (BracketSlice,
@@ -524,7 +551,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- the canonical wire string ("inf" / "-inf" / "nan"); the runtime JSON
     -- decoder accepts these on parse.
     toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) = do
-      s <- generalTypeToSerialAST t
+      s <- generalTypeToSerialAST litIx t
       checkRealBounds litIx v s
       let litCode = case s of
             (SerialFloat32 _) -> F32X
@@ -535,7 +562,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- which after term inlining is often the export reference, not the
     -- literal itself. See Treeify.collectExprS for where litIx is set.
     toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) = do
-      s <- generalTypeToSerialAST t
+      s <- generalTypeToSerialAST litIx t
       checkIntBounds litIx v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
@@ -615,35 +642,62 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
       LoadX <$> type2schema t <*> toNexusExpr path
-    -- @open: kind byte from the result type's head. The result type
-    -- may be wrapped in an EffectT (the `<IO>` ascription) and/or be a
-    -- bare VarT for nullary type constructors -- peel both before
-    -- inspecting the head.
+    -- @open: dispatch by result-type head. IFile/IStream go to OpenX
+    -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
+    -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
+    -- needs the element schema at open time.
     toNexusExpr (AnnoS (Idx i t) _ (IntrinsicS IntrOpen [path])) = do
-      let peel (EffectT _ inner) = peel inner
-          peel (AppT h _) = peel h
-          peel ot = ot
-          head_ = peel t
-      kind <- case head_ of
+      let peelEffect (EffectT _ inner) = peelEffect inner
+          peelEffect ot = ot
+          unwrapped = peelEffect t
+          peelHead (AppT h _) = peelHead h
+          peelHead ot = ot
+          head_ = peelHead unwrapped
+          elemT = case unwrapped of
+            AppT _ (a : _) -> a
+            _ -> unwrapped
+      case head_ of
         VarT v
-          | v == MBT.ifileVar   -> return MBT.mlcKindIFile
+          | v == MBT.ifileVar   ->
+              OpenX <$> type2schema t <*> pure MBT.mlcKindIFile <*> toNexusExpr path
           | v == MBT.istreamVar ->
-              MM.throwSourcedError i $ "@open :: IStream a -- not yet implemented"
+              OpenX <$> type2schema t <*> pure MBT.mlcKindIStream <*> toNexusExpr path
           | v == MBT.ostreamVar ->
-              MM.throwSourcedError i $ "@open :: OStream a -- not yet implemented"
+              OpenOStreamX <$> type2schema elemT <*> toNexusExpr path
           | otherwise ->
               MM.throwSourcedError i $
                 "@open: result type must be IFile/IStream/OStream, got " <> pretty v
         _ ->
           MM.throwSourcedError i $
             "@open: unsupported handle type" <+> pretty (show t)
-      OpenX <$> type2schema t <*> pure kind <*> toNexusExpr path
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrClose [handle])) =
       CloseX <$> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
       FSchemaX <$> type2schema t <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
       FLengthX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
+      NextX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
+      StreamX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, valE@(AnnoS (Idx _ valT) _ _), handleE])) =
+      WriteX
+        <$> type2schema valT
+        <*> toNexusExpr levelE
+        <*> toNexusExpr valE
+        <*> toNexusExpr handleE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) = do
+      -- Peel <IO> and the OStream/IFile/IStream head to get the element
+      -- type, then emit its schema string.
+      let peel (EffectT _ inner) = peel inner
+          peel (AppT _ (a : _)) = a
+          peel ot = ot
+          elemT = peel t
+      AppendX <$> type2schema elemT <*> toNexusExpr pathE
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
+      ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
+      FlushX <$> toNexusExpr handle
     -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
     -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
     -- path normally constructs IFileWalkX directly from PatCall +
@@ -1838,6 +1892,49 @@ exprToJson (IFileWalkX schema handle path runtimeArgs) =
     , ("handle", exprToJson handle)
     , ("path", jsonStr path)
     , ("args", jsonArr (map exprToJson runtimeArgs))
+    ]
+exprToJson (NextX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "next")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (StreamX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "stream")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (OpenOStreamX schema path) =
+  jsonObj
+    [ ("tag", jsonStr "open_ostream")
+    , ("schema", jsonStr schema)
+    , ("path", exprToJson path)
+    ]
+exprToJson (WriteX schema level value handle) =
+  jsonObj
+    [ ("tag", jsonStr "write")
+    , ("schema", jsonStr schema)
+    , ("level", exprToJson level)
+    , ("value", exprToJson value)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (AppendX schema path) =
+  jsonObj
+    [ ("tag", jsonStr "append")
+    , ("schema", jsonStr schema)
+    , ("path", exprToJson path)
+    ]
+exprToJson (ConcatX paths dest) =
+  jsonObj
+    [ ("tag", jsonStr "concat")
+    , ("paths", exprToJson paths)
+    , ("dest", exprToJson dest)
+    ]
+exprToJson (FlushX handle) =
+  jsonObj
+    [ ("tag", jsonStr "flush")
+    , ("handle", exprToJson handle)
     ]
 exprToJson (OptX schema child) =
   jsonObj

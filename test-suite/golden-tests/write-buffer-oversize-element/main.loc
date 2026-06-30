@@ -1,0 +1,89 @@
+-- OStream sub-packet boundaries are buffer-driven, not @write-call
+-- driven. When a single @write supplies more elements than the
+-- current buffer can hold, the buffer flushes mid-loop and the
+-- remaining elements continue into a fresh buffer. The buffer
+-- itself accumulates across consecutive @write calls until @flush
+-- or @close emits.
+--
+-- Buffer = MORLOC_WRITE_BUFFER_BYTES = 4096 (Makefile override).
+-- Int is stored as an inline BigInt [size: usize, value: i64] so the
+-- on-wire element width is w = 16. The buffer holds
+-- (4096 - 16) / 16 = 255 entries before forcing a flush.
+--
+-- writeMixed produces:
+--   @write [1,2,3,4,5] -> buffered (5 in buffer)
+--   @flush             -> sub-packet 1 = [1,2,3,4,5]
+--   @write [1..2001]   -> 2000 elements; flushes seven times
+--                         mid-write at 255 elements each. Buffer
+--                         retains the 215-element tail (the unflushed
+--                         remainder = 2000 - 7 * 255).
+--   @write [9001..]    -> 3 more appended; buffer now holds 218.
+--   @close             -> emits sub-packet 9 (218 elements) plus
+--                         the final footer.
+-- Final layout: 9 sub-packets, sizes 5, 255, 255, 255, 255, 255,
+-- 255, 255, 218 (total 2008 elements).
+
+module main
+  ( testFirstSubpacket
+  , testTotalCount
+  , testSplitSize
+  , testEof
+  )
+
+import root-py
+
+writeMixed :: Str -> <IO> ()
+writeMixed path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3, 4, 5] o
+  @flush o
+  @write 0 (range 1 2001) o
+  @write 0 [9001, 9002, 9003] o
+  @close o
+
+-- First @next returns the explicitly flushed batch verbatim. This
+-- pins the contract that @flush emits exactly the buffer's current
+-- contents -- no coalescing with later writes.
+testFirstSubpacket :: Str -> <IO> [Int]
+testFirstSubpacket path = do
+  writeMixed path
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+-- Total element count is invariant under sub-packet splits: this
+-- pins that mid-@write flushes lose no elements and emit no
+-- duplicates, regardless of how the runtime chooses to split.
+testTotalCount :: Str -> <IO> Int
+testTotalCount path = do
+  writeMixed path
+  f <- @open path :: <IO> IFile Int
+  @flen f
+
+-- Sub-packet 2 is the first chunk of the 2000-element @write. The
+-- split size is (buf_size - 16) / w = 255 for the 16-byte BigInt
+-- wire form. Pins the splitting formula so the test notices if
+-- buffer-fit math changes.
+testSplitSize :: Str -> <IO> Int
+testSplitSize path = do
+  writeMixed path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  xs <- @next s
+  size xs
+
+-- The file holds nine sub-packets; the tenth @next is past the
+-- final footer and returns an empty list.
+testEof :: Str -> <IO> [Int]
+testEof path = do
+  writeMixed path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s

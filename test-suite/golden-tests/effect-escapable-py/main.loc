@@ -46,11 +46,14 @@ gDoForce x = handleError (do { v <- foo x ; v })
 gDoBind :: Int -> Int
 gDoBind x = handleError (do { foo x })
 
--- a generic combinator ($) threads the effectful do-block through a type
--- variable; the handler discharges Error, so gMany typechecks as Int->Int
+-- handleError takes an explicitly effect-typed parameter (<Error, e> a),
+-- so the effectful do-block matches by EffectU subtyping. We apply it
+-- as a direct application (parentheses) rather than via `($)`: `($) ::
+-- (a -> b) -> a -> b` has a polymorphic `a`, and the type checker now
+-- rejects unifying a bare type variable with an effectful type.
 gMany :: Int -> Int
 gMany x =
-  let y = handleError $ do
+  let y = handleError (do
     z <- foo x
-    foo z
+    foo z)
   in x + 1
