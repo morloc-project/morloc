@@ -37,8 +37,8 @@ use morloc_runtime_types::packet::{
     iter_packet_metadata,
     read_schema_from_meta,
     PacketHeader,
-    METADATA_TYPE_FOOTER_FINAL, METADATA_TYPE_STREAM_DIAG,
-    METADATA_TYPE_SUBPACKET_INDEX,
+    METADATA_TYPE_FOOTER_FINAL, METADATA_TYPE_FOOTER_STATUS,
+    METADATA_TYPE_STREAM_DIAG, METADATA_TYPE_SUBPACKET_INDEX,
     MLC_KIND_IFILE, MLC_KIND_ISTREAM, MLC_KIND_OSTREAM,
     PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
     PACKET_FORMAT_VOIDSTAR,
@@ -1015,21 +1015,6 @@ fn attach_process_local_slot(
             ))
         })?
     };
-    // value_schema is the top-level type; elem_schema is the element
-    // type for list-valued kinds (IFile/IStream/OStream all carry
-    // their element schema in their stream header, which is what
-    // schema_str holds). For OStream, the value sent over @write is a
-    // `[a]` list whose element type matches.
-    let (value_schema, elem_schema) = match kind {
-        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
-            (array_schema(&parsed_schema), parsed_schema.clone())
-        }
-        x if x == MLC_KIND_OSTREAM => {
-            (array_schema(&parsed_schema), parsed_schema.clone())
-        }
-        _ => (parsed_schema.clone(), parsed_schema.clone()),
-    };
-
     // Copy IFile sub-packet index from SHM into a process-local Vec.
     // This is a one-time cost at attach; subsequent index lookups
     // hit the local Vec without rel2abs.
@@ -1052,6 +1037,34 @@ fn attach_process_local_slot(
     // is_data_packet => body_start == 0 AND subpacket_index == [0].
     let is_data_packet = slot.body_start == 0
         && subpacket_index_local == [0];
+
+    // value_schema / elem_schema derivation must mirror
+    // `parse_stream_file`: STREAM files stash the ELEMENT schema in
+    // `schema_str` (so the value is `[element]`), whereas DATA_PACKET
+    // files stash the FULL value schema (so the element is
+    // `parameters[0]` when Array). Getting this wrong on a lazy
+    // attach makes the walker interpret record bytes with an
+    // inflated element schema and mis-resolve relptrs downstream.
+    let (value_schema, elem_schema) = match kind {
+        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
+            if is_data_packet {
+                let elem = if parsed_schema.serial_type == SerialType::Array
+                    && !parsed_schema.parameters.is_empty()
+                {
+                    parsed_schema.parameters[0].clone()
+                } else {
+                    parsed_schema.clone()
+                };
+                (parsed_schema.clone(), elem)
+            } else {
+                (array_schema(&parsed_schema), parsed_schema.clone())
+            }
+        }
+        x if x == MLC_KIND_OSTREAM => {
+            (array_schema(&parsed_schema), parsed_schema.clone())
+        }
+        _ => (parsed_schema.clone(), parsed_schema.clone()),
+    };
 
     let cap_bytes = read_cache_cap_env();
     let cache = Box::new(StreamCache::new(cap_bytes));
@@ -1708,11 +1721,26 @@ pub fn shared_open_ostream_with_schema(
     Ok(handle)
 }
 
-/// Explicit `@close`: writes final footer + fdatasync for OStream,
-/// then releases the slot. Caller-visible failures (pwrite, fsync)
-/// propagate to the user; the slot stays OPEN on error so a retry
+/// Explicit `@close`: writes final footer (status = CLOSED) + fdatasync
+/// for OStream, then releases the slot. Caller-visible failures (pwrite,
+/// fsync) propagate to the user; the slot stays OPEN on error so a retry
 /// can succeed.
 pub fn shared_close_handle(handle: i64) -> Result<(), MorlocError> {
+    shared_close_handle_with_status(
+        handle,
+        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
+    )
+}
+
+/// Same as `shared_close_handle` but records `status` in the final
+/// footer's `METADATA_TYPE_FOOTER_STATUS` block. Used by the per-call_id
+/// sweeper to mark OStream slots auto-closed at remote-child dispatch
+/// exit with `FOOTER_STATUS_PAUSED` so the parent can distinguish a
+/// hand-off from a `@close` that ran to completion.
+pub fn shared_close_handle_with_status(
+    handle: i64,
+    status: u8,
+) -> Result<(), MorlocError> {
     use std::sync::atomic::Ordering;
 
     let (gen_claim, slot_idx) = unpack_handle(handle);
@@ -1765,7 +1793,7 @@ pub fn shared_close_handle(handle: i64) -> Result<(), MorlocError> {
             let diag = slot.diag;
             let shared_index = read_shared_subpacket_index(slot)?;
             let footer = morloc_runtime_types::packet::make_final_footer_packet(
-                &diag, &shared_index,
+                &diag, &shared_index, status,
             );
             pwrite_all_fd(local.fd, &footer, cursor)?;
             let rc = unsafe { libc::fdatasync(local.fd) };
@@ -1833,6 +1861,62 @@ pub fn shared_discard_handle_locked(
     release_slot_locked(slot);
     invalidate_process_local_slot(handle);
     Ok(())
+}
+
+/// Finalise an OPEN OStream slot in place: flush its write buffer, write
+/// the final footer with `status`, and fdatasync. Caller MUST hold the
+/// slot's futex and have confirmed `slot.kind == MLC_KIND_OSTREAM` and
+/// `slot.state == OPEN_SHARED`. The slot is left OPEN; the caller must
+/// follow up with `shared_discard_handle_locked` (or equivalent) to
+/// release it.
+///
+/// Used by the per-call_id sweeper at dispatch exit so an OStream that a
+/// remote-child returned without an explicit `@close` lands on disk as a
+/// well-formed file (status = PAUSED) the parent can `@append` to.
+///
+/// Errors propagate but do NOT release the slot. The sweeper logs and
+/// continues to the discard step so a single I/O failure on one slot
+/// doesn't strand others.
+pub fn shared_finalize_ostream_locked(
+    slot: &RegistrySlot,
+    slot_idx: usize,
+    status: u8,
+) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    let handle = pack_handle(gen_now, slot_idx);
+    let mut local = match take_process_local_slot(handle) {
+        Some(l) => l,
+        None => {
+            // No process-local entry. This can happen if the slot was
+            // opened in a different process (cross-pool sharing where the
+            // opener is not the current sweep-runner). Without the fd we
+            // can't flush or fdatasync, so leave the file in temp-footer
+            // state -- a clean "writer didn't finish" signal that a reader
+            // can recover from via forward-scan.
+            return Ok(());
+        }
+    };
+    let result = (|| -> Result<(), MorlocError> {
+        flush_write_buffer(slot, &mut local)?;
+        let cursor = slot.cursor;
+        let diag = slot.diag;
+        let shared_index = read_shared_subpacket_index(slot)?;
+        let footer = morloc_runtime_types::packet::make_final_footer_packet(
+            &diag, &shared_index, status,
+        );
+        pwrite_all_fd(local.fd, &footer, cursor)?;
+        let rc = unsafe { libc::fdatasync(local.fd) };
+        if rc != 0 {
+            return Err(MorlocError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    })();
+    // Drop `local` here so its fd closes before the slot is released by
+    // the caller's discard step. Re-installing it in the map would just
+    // get torn down on the next access via the generation check.
+    drop(local);
+    result
 }
 
 // Shared op functions run against the SHM slot + process-local mmap cache.
@@ -2603,10 +2687,12 @@ pub fn shared_derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {
     shared_open_istream(&path)
 }
 
-/// Batched length lookup over a slice of shared-registry handles.
-/// Each handle is resolved via the versioned-pointer pattern; per-
-/// handle results are written into `out_lens` if `Some`. Returns the
-/// sum of all lengths.
+/// Batched suballoc-size lookup over a slice of shared-registry handles.
+/// Since bridges now uniformly emit TAG_HANDLE for stream-handle
+/// fields (see `mlc_write_handle_voidstar`), no suballoc bytes are
+/// needed and the sum is always 0. Kept for ABI parity: callers that
+/// pre-size their output buffers from this result get a clean 0 and
+/// the bridge writes only the 16-byte inline field per handle.
 pub fn shared_handles_path_lens(
     handles: &[i64],
     mut out_lens: Option<&mut [i64]>,
@@ -2614,51 +2700,26 @@ pub fn shared_handles_path_lens(
     if let Some(ref outs) = out_lens {
         debug_assert_eq!(handles.len(), outs.len());
     }
-    let mut sum: u64 = 0;
-    for (i, &h) in handles.iter().enumerate() {
-        let p = shared_handle_path(h).map_err(|e| {
-            MorlocError::Other(format!(
-                "handle at index {}: {}", i, e
-            ))
-        })?;
-        let len = p.len() as i64;
-        if let Some(ref mut outs) = out_lens {
-            outs[i] = len;
-        }
-        sum += len as u64;
+    if let Some(ref mut outs) = out_lens {
+        for slot in outs.iter_mut() { *slot = 0; }
     }
-    Ok(sum)
+    let _ = handles; // no-op: TAG_HANDLE has no per-handle suballoc.
+    Ok(0)
 }
 
-/// Batched voidstar write for an `[IFile a]` pack pass. Per-handle
-/// resolution goes through the versioned-pointer pattern; the path
-/// bytes are then memcpy'd into the destination buffer at the running
-/// cursor position. `cursor` is advanced past the concatenated bytes.
+/// Batched voidstar write for a `[stream-handle a]` pack pass. Every
+/// handle is written in TAG_HANDLE form (bare slot id in the inline
+/// 16-byte field). Cursor is not advanced -- there are no suballocs.
 pub fn shared_write_handles_voidstar(
     handles: &[i64],
     dest_base: *mut u8,
     elem_stride: usize,
-    cursor: &mut *mut u8,
+    _cursor: &mut *mut u8,
 ) -> Result<(), MorlocError> {
-    use crate::shm_types::Array;
+    use morloc_runtime_types::stream_handle as sh;
     for (i, &h) in handles.iter().enumerate() {
-        let path = shared_handle_path(h).map_err(|e| {
-            MorlocError::Other(format!("handle at index {}: {}", i, e))
-        })?;
-        let bytes = path.as_bytes();
-        let slot = unsafe { dest_base.add(i * elem_stride) as *mut Array };
-        unsafe { (*slot).size = bytes.len(); }
-        if bytes.is_empty() {
-            unsafe { (*slot).data = shm::RELNULL; }
-            continue;
-        }
-        let cur = *cursor;
-        let rel = shm::abs2rel(cur)?;
-        unsafe {
-            (*slot).data = rel;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), cur, bytes.len());
-            *cursor = cur.add(bytes.len());
-        }
+        let slot = unsafe { dest_base.add(i * elem_stride) };
+        unsafe { sh::write_field(slot, sh::TAG_HANDLE, h as u64); }
     }
     Ok(())
 }
@@ -3066,6 +3127,19 @@ fn sweep_per_call(call_id: u64) {
         let still_open = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED;
         let still_matches = slot.call_id.load(Ordering::Acquire) == call_id;
         if still_open && still_matches {
+            // OStream slots get a paused-status final footer so a
+            // downstream reader (typically a parent nexus expecting an
+            // OStream return) sees a clean file rather than a temp
+            // footer. Finalise errors are ignored here -- the slot is
+            // still released so a single bad slot doesn't strand the
+            // sweep across the registry.
+            if slot.kind == MLC_KIND_OSTREAM {
+                let _ = shared_finalize_ostream_locked(
+                    slot,
+                    idx,
+                    morloc_runtime_types::packet::FOOTER_STATUS_PAUSED,
+                );
+            }
             // shared_discard_handle_locked frees the slot in place
             // without taking the futex again (we hold it).
             let _ = shared_discard_handle_locked(slot, idx);
@@ -3113,6 +3187,17 @@ fn sweep_per_pid(pid: u32, start_time: u64) {
             && slot.opener_pid == pid
             && slot.opener_pid_start_time == start_time
         {
+            // A dead pool's OStream lands on disk as paused so a
+            // downstream consumer can distinguish "crashed mid-flush"
+            // (no footer at all) from "the producer pool exited while
+            // we still had buffered elements".
+            if slot.kind == MLC_KIND_OSTREAM {
+                let _ = shared_finalize_ostream_locked(
+                    slot,
+                    idx,
+                    morloc_runtime_types::packet::FOOTER_STATUS_PAUSED,
+                );
+            }
             let _ = shared_discard_handle_locked(slot, idx);
         }
         slot_futex_unlock(slot);
@@ -3765,6 +3850,13 @@ struct ParsedFooter {
     element_count: u64,
     diag: Option<StreamDiag>,
     final_footer: bool,
+    /// Status byte from `METADATA_TYPE_FOOTER_STATUS` if present, or
+    /// `FOOTER_STATUS_CLOSED` when the block is absent (legacy footer).
+    /// Parsed here so downstream tooling (`morloc-nexus file`, a
+    /// future `@fstatus` intrinsic) can surface it without re-reading
+    /// the footer.
+    #[allow(dead_code)]
+    footer_status: u8,
 }
 
 /// Try to read the footer at EOF; returns `Ok(None)` if no footer tail
@@ -3821,6 +3913,8 @@ fn try_read_footer(
     let mut subpacket_index = Vec::new();
     let mut diag: Option<StreamDiag> = None;
     let mut final_footer = false;
+    let mut footer_status =
+        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED;
     for (kind, body) in iter_packet_metadata(footer_slice)? {
         match kind {
             METADATA_TYPE_FOOTER_FINAL => { final_footer = true; }
@@ -3830,6 +3924,10 @@ fn try_read_footer(
             METADATA_TYPE_SUBPACKET_INDEX => {
                 subpacket_index =
                     morloc_runtime_types::packet::decode_subpacket_index(body)?;
+            }
+            METADATA_TYPE_FOOTER_STATUS => {
+                footer_status =
+                    morloc_runtime_types::packet::decode_footer_status(body);
             }
             _ => {}  // unknown blocks are tolerated
         }
@@ -3846,6 +3944,7 @@ fn try_read_footer(
         element_count,
         diag,
         final_footer,
+        footer_status,
     }))
 }
 
@@ -4625,7 +4724,9 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
     diag.subpacket_count = merged_index.len() as u64;
     diag.element_count = total_element_count;
     let footer = morloc_runtime_types::packet::make_final_footer_packet(
-        &diag, &merged_index,
+        &diag,
+        &merged_index,
+        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
     );
     if let Err(e) = pwrite_all_fd(dest_fd, &footer, dest_cursor) {
         unsafe {
@@ -5470,7 +5571,8 @@ fn first_suballoc_offset(
 ) -> Result<Option<usize>, MorlocError> {
     unsafe {
         match elem_schema.serial_type {
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::String | SerialType::IFile
+            | SerialType::OStream | SerialType::IStream | SerialType::Array => {
                 let arr = &*(elem_ptr as *const shm_types_crate::Array);
                 if arr.size == 0 || arr.data == shm::RELNULL {
                     return Ok(None);
@@ -6627,7 +6729,10 @@ mod tests {
         let mut diag = TStreamDiag::new();
         diag.subpacket_count = sub_values.len() as u64;
         diag.element_count = element_count;
-        let footer = make_final_footer_packet(&diag, &subpacket_offsets);
+        let footer = make_final_footer_packet(
+            &diag, &subpacket_offsets,
+            morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
+        );
         out.extend_from_slice(&footer);
         out
     }

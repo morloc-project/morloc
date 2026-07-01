@@ -564,7 +564,36 @@ fn hash_voidstar_inner(
                     Ok(hash::xxh64_with_seed(bytes, seed))
                 }
             }
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Cache key is content-derived. Resolve TAG_HANDLE to its
+                // path via the local SHM registry so two handles to the
+                // same file produce the same hash. TAG_PATH reads the
+                // path straight out of the suballoc.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                let tag = sh::read_tag(field);
+                let payload = sh::read_payload(field);
+                let owned: Vec<u8>;
+                let borrowed: &[u8];
+                if tag == sh::TAG_PATH {
+                    if payload == sh::RELNULL_PAYLOAD {
+                        borrowed = &[];
+                    } else {
+                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                        let path_len = sh::read_path_size(suballoc) as usize;
+                        borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
+                    }
+                } else if tag == sh::TAG_HANDLE {
+                    owned = crate::stream::handle_path(payload as i64)?.into_bytes();
+                    borrowed = &owned;
+                } else {
+                    return Err(MorlocError::Other(format!(
+                        "cache hash: unsupported stream-handle tag {}", tag,
+                    )));
+                }
+                Ok(hash::xxh64_with_seed(borrowed, seed))
+            }
+            SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const shm::Array);
                 let elem_width = if schema.parameters.is_empty() {
                     1 // string bytes
@@ -574,7 +603,7 @@ fn hash_voidstar_inner(
                 let elem_data = shm::rel2abs(arr.data)?;
 
                 if schema.is_fixed_width()
-                    || matches!(schema.serial_type, SerialType::String | SerialType::IFile)
+                    || matches!(schema.serial_type, SerialType::String)
                 {
                     let total = elem_width * arr.size;
                     let bytes = std::slice::from_raw_parts(elem_data, total);

@@ -165,14 +165,19 @@ typedef enum {
                           // referenced name in `Schema.name`; structurally
                           // terminates descent at the back-ref point. Wire form
                           // is `^<klen><name>`.
-    MORLOC_IFILE    = 21  // Cross-pool stream handle. In-language native form
-                          // is a `uint64_t` slot id into the local stream
-                          // registry; the wire form is the file path encoded
-                          // as a String (Array<u8>). The receiving pool
-                          // re-opens the path in its own registry on
-                          // deserialization; sender and receiver each own
-                          // independent fds, mmaps, and arena-tracked
-                          // close lifetimes.
+    MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
+    MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
+    MORLOC_ISTREAM  = 23  // Sequential stream-file reader handle.
+    // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
+    // form. The schema code selects the morloc-level type; the tag byte
+    // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
+    // payload is a relptr to a path suballoc `{size: u64, bytes...}`,
+    // `TAG_HANDLE` (1) means the payload is a bare slot id valid only in
+    // the sender+receiver's shared SHM registry (intra-nexus). See
+    // `morloc_runtime_types::stream_handle` for the layout. The in-
+    // language native form is `uint64_t` (the local slot id) regardless
+    // of tag; sender and receiver each own independent fds, mmaps, and
+    // arena-tracked close lifetimes.
 } morloc_serial_type;
 
 // Single-character schema encoding tokens.
@@ -189,6 +194,8 @@ typedef enum {
 #define SCHEMA_INT      'j'
 #define SCHEMA_TABLE    'T'
 #define SCHEMA_IFILE    'F'
+#define SCHEMA_OSTREAM  'O'
+#define SCHEMA_ISTREAM  'I'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //

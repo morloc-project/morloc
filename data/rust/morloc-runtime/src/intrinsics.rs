@@ -952,23 +952,21 @@ pub unsafe extern "C" fn mlc_handle_pack_path(
     }
 }
 
-// Length-only path lookup, for the IFile-array sizing pass in
-// per-language get_shm_size. Avoids allocating + strdup'ing the
-// path string just to take strlen of it. Returns the byte length on
-// success, or -1 on error.
+// Suballoc-cost lookup for the per-language `get_shm_size` sizing pass on
+// embedded stream-handle fields. Since bridge codecs now uniformly emit
+// TAG_HANDLE (the intra-nexus fast path -- bare slot id in the inline
+// 16-byte field, no suballoc), every kind returns 0. The cross-nexus
+// TAG_PATH rewrite happens at the SLURM boundary via
+// `handle_scan::rewrite_data_packet_for_remote`, not through the bridge
+// codec. Returns -1 on error (kept for ABI parity with the earlier
+// variant).
 #[no_mangle]
 pub unsafe extern "C" fn mlc_handle_path_len(
-    handle: i64,
+    _handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i64 {
     clear_errmsg(errmsg);
-    match crate::stream::shared_handle_path(handle) {
-        Ok(p) => p.len() as i64,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1
-        }
-    }
+    0
 }
 
 #[no_mangle]
@@ -1009,17 +1007,99 @@ pub unsafe extern "C" fn mlc_handle_unpack_path(
 
 // ── Voidstar wire-layout helpers for stream handles ───────────────────────
 //
-// The per-language bridges (pymorloc.c, cppmorloc.hpp, rmorloc.c) used to
-// hand-roll the Array<u8>(path) layout for every MORLOC_IFILE arm of
-// to_voidstar / from_voidstar. Centralising the layout here keeps the
-// pack/unpack format in one place: bumping the cursor, the relptr math,
-// the empty-path RELNULL sentinel, the path-length cap. Each bridge
-// becomes a one-call site.
-//
-// `dest` is the Array slot in voidstar. `cursor` is a pointer to the
-// cursor variable owned by the bridge's outer to_voidstar walker; the
-// helper advances it past the path bytes. Returns 0 on success.
+// A stream-handle field on the wire is the 16-byte tagged form documented
+// in `morloc_runtime_types::stream_handle`. The tag byte at offset 0
+// picks the encoding (`TAG_PATH = 0`: payload is a relptr to a path
+// suballoc; `TAG_HANDLE = 1`: payload is a bare slot id). Per-language
+// bridges call the entries below to lay down or read back the field
+// without hand-rolling the byte layout.
 
+/// Write a stream-handle field at `dest` using `tag` to pick the
+/// encoding. For `TAG_PATH`, the path bytes (with a `u64` length prefix)
+/// are written into the suballoc region at `*cursor` and `*cursor` is
+/// advanced. For `TAG_HANDLE`, only the inline field is touched.
+///
+/// `dest` points at a 16-byte stream-handle field slot. `cursor` points
+/// at the bridge's voidstar suballoc cursor; only consulted when
+/// `tag == TAG_PATH`. Returns 0 on success, 1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_write_stream_field(
+    handle: i64,
+    dest: *mut c_void,
+    cursor: *mut *mut c_void,
+    tag: u8,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    use crate::shm;
+    use morloc_runtime_types::stream_handle as sh;
+    clear_errmsg(errmsg);
+    if dest.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_write_stream_field: null dest".into(),
+        ));
+        return 1;
+    }
+    let field_ptr = dest as *mut u8;
+    match tag {
+        sh::TAG_PATH => {
+            if cursor.is_null() {
+                set_errmsg(errmsg, &MorlocError::Other(
+                    "mlc_write_stream_field: null cursor for TAG_PATH".into(),
+                ));
+                return 1;
+            }
+            let path = match crate::stream::handle_path(handle) {
+                Ok(p) => p,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return 1;
+                }
+            };
+            let path_bytes = path.as_bytes();
+            if path_bytes.is_empty() {
+                sh::write_field(field_ptr, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                return 0;
+            }
+            let cur = *cursor as *mut u8;
+            let rel = match shm::abs2rel(cur) {
+                Ok(r) => r,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return 1;
+                }
+            };
+            sh::write_path_suballoc(cur, path_bytes);
+            sh::write_field(field_ptr, sh::TAG_PATH, rel as u64);
+            *cursor = cur.add(sh::path_suballoc_size(path_bytes.len()))
+                as *mut c_void;
+            0
+        }
+        sh::TAG_HANDLE => {
+            sh::write_field(field_ptr, sh::TAG_HANDLE, handle as u64);
+            0
+        }
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "mlc_write_stream_field: unsupported tag {}", tag,
+            )));
+            1
+        }
+    }
+}
+
+/// Legacy entry point: writes a stream-handle field. Always emits
+/// `TAG_HANDLE` (the intra-nexus fast path -- bare slot id, no path
+/// suballoc). This is correct for every pool-to-pool call within one
+/// nexus because both sides attach to the same SHM registry.
+///
+/// Packets that cross a nexus boundary (SLURM egress in
+/// `slurm_ffi::remote_call`) are rewritten to `TAG_PATH` form by
+/// `handle_scan::rewrite_data_packet_for_remote` before they leave the
+/// local registry -- the boundary is a much better place to know
+/// "does the receiver share my SHM?" than every bridge marshal site.
+///
+/// Forwarded to `mlc_write_stream_field` until per-language bridges
+/// migrate to call that directly with an explicit tag.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_write_handle_voidstar(
     handle: i64,
@@ -1027,42 +1107,8 @@ pub unsafe extern "C" fn mlc_write_handle_voidstar(
     cursor: *mut *mut c_void,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    use crate::shm;
-    use crate::shm_types::Array;
-    clear_errmsg(errmsg);
-    if dest.is_null() || cursor.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other(
-            "mlc_write_handle_voidstar: null dest or cursor".into(),
-        ));
-        return 1;
-    }
-    let path = match crate::stream::handle_path(handle) {
-        Ok(p) => p,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return 1;
-        }
-    };
-    let path_bytes = path.as_bytes();
-    let path_len = path_bytes.len();
-    let result = dest as *mut Array;
-    (*result).size = path_len;
-    if path_len == 0 {
-        (*result).data = shm::RELNULL;
-        return 0;
-    }
-    let cur = *cursor as *mut u8;
-    let rel = match shm::abs2rel(cur) {
-        Ok(r) => r,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return 1;
-        }
-    };
-    (*result).data = rel;
-    std::ptr::copy_nonoverlapping(path_bytes.as_ptr(), cur, path_len);
-    *cursor = cur.add(path_len) as *mut c_void;
-    0
+    use morloc_runtime_types::stream_handle as sh;
+    mlc_write_stream_field(handle, dest, cursor, sh::TAG_HANDLE, errmsg)
 }
 
 // ── Batched variants for [IFile a] arrays ─────────────────────────────────
@@ -1142,12 +1188,147 @@ pub unsafe extern "C" fn mlc_write_handles_voidstar(
     }
 }
 
-// Read an IFile-shaped Array<u8>(path) from voidstar, open the path in
-// the receiver's process, return the fresh local handle. `arr` points
-// at the Array struct; `base_ptr` is the relptr base (NULL = treat the
-// Array's `data` field as an SHM-relative relptr; non-NULL = treat it
-// as a payload-relative offset, used when reading from mmap'd file
-// regions). On error returns -1 and sets errmsg.
+/// Read a stream-handle field from voidstar and produce a local handle.
+///
+/// `field_ptr` points at the 16-byte stream-handle field. `base_ptr` is
+/// the relptr base for `TAG_PATH` payloads: NULL means the payload is
+/// SHM-relative; non-NULL means payload is a base-relative offset
+/// (used when reading from mmap'd file regions). `kind` selects the
+/// receiver's open kind (`MLC_KIND_IFILE` / `MLC_KIND_OSTREAM` /
+/// `MLC_KIND_ISTREAM`) when a `TAG_PATH` field has to be opened locally.
+///
+/// On `TAG_HANDLE`, the bare slot id in the payload is returned after
+/// generation-checking it against the local SHM registry — a foreign
+/// nexus's handle that accidentally arrives here surfaces as a clean
+/// generation-mismatch error.
+///
+/// Returns -1 and sets errmsg on any failure.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_read_stream_field(
+    field_ptr: *const c_void,
+    base_ptr: *const c_void,
+    kind: u8,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    use crate::shm;
+    use morloc_runtime_types::stream_handle as sh;
+    clear_errmsg(errmsg);
+    if field_ptr.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_read_stream_field: null field_ptr".into(),
+        ));
+        return -1;
+    }
+    let field_bytes = field_ptr as *const u8;
+    let tag = sh::read_tag(field_bytes);
+    let payload = sh::read_payload(field_bytes);
+    match tag {
+        sh::TAG_PATH => {
+            if payload == sh::RELNULL_PAYLOAD {
+                set_errmsg(errmsg, &MorlocError::Other(
+                    "mlc_read_stream_field: path-form field has RELNULL payload".into(),
+                ));
+                return -1;
+            }
+            // Resolve the suballoc {size: u64, bytes...}. With a non-NULL
+            // base_ptr the payload is a payload-relative offset (used
+            // when reading from mmap'd file regions); otherwise it's an
+            // SHM-relative relptr.
+            let suballoc_abs: *const u8 = if base_ptr.is_null() {
+                match shm::rel2abs(payload as shm::RelPtr) {
+                    Ok(p) => p as *const u8,
+                    Err(e) => {
+                        set_errmsg(errmsg, &e);
+                        return -1;
+                    }
+                }
+            } else {
+                (base_ptr as *const u8).add(payload as usize)
+            };
+            let path_len = sh::read_path_size(suballoc_abs);
+            const PATH_MAX: u64 = 4096;
+            if path_len == 0 {
+                set_errmsg(errmsg, &MorlocError::Other(
+                    "mlc_read_stream_field: empty path".into(),
+                ));
+                return -1;
+            }
+            if path_len >= PATH_MAX {
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "mlc_read_stream_field: path too long ({} bytes, max {})",
+                    path_len, PATH_MAX - 1,
+                )));
+                return -1;
+            }
+            let path_bytes = std::slice::from_raw_parts(
+                suballoc_abs.add(8), path_len as usize,
+            );
+            let path_str = match std::str::from_utf8(path_bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    set_errmsg(errmsg, &MorlocError::Other(
+                        "mlc_read_stream_field: path is not valid UTF-8".into(),
+                    ));
+                    return -1;
+                }
+            };
+            match crate::stream::open_dispatch(path_str, kind) {
+                Ok(handle) => {
+                    crate::eval_arena::record_slot_if_active(handle);
+                    handle
+                }
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    -1
+                }
+            }
+        }
+        sh::TAG_HANDLE => {
+            // Intra-nexus shared-slot fast path. Verify the slot is live
+            // at the claimed generation; anything else means the handle
+            // crossed a nexus boundary it shouldn't have (or the slot
+            // was reused), and we surface a generation-mismatch error
+            // instead of returning a wild value.
+            let handle = payload as i64;
+            let (gen_claim, slot_idx) = crate::stream::unpack_handle(handle);
+            let slot = match crate::stream::slot_ref(slot_idx) {
+                Some(s) => s,
+                None => {
+                    set_errmsg(errmsg, &MorlocError::Other(format!(
+                        "mlc_read_stream_field: handle-form payload references \
+                         slot {} which is out of range in this registry; the \
+                         handle likely originated in a different nexus",
+                         slot_idx,
+                    )));
+                    return -1;
+                }
+            };
+            use std::sync::atomic::Ordering;
+            let gen_now = slot.generation.load(Ordering::Acquire)
+                & crate::stream::GENERATION_MASK;
+            if gen_now != gen_claim {
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "mlc_read_stream_field: handle-form generation mismatch \
+                     (claim {}, slot {}); handle is stale or from another nexus",
+                     gen_claim, gen_now,
+                )));
+                return -1;
+            }
+            handle
+        }
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "mlc_read_stream_field: unsupported encoding tag {}", tag,
+            )));
+            -1
+        }
+    }
+}
+
+/// Legacy entry point: reads a stream-handle field assumed to be in path
+/// form. Forwards to `mlc_read_stream_field`. The tag check in the new
+/// codec means a TAG_HANDLE field passed through this entry still works;
+/// the name "handle_voidstar" is historical.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_read_handle_voidstar(
     arr: *const c_void,
@@ -1155,63 +1336,5 @@ pub unsafe extern "C" fn mlc_read_handle_voidstar(
     kind: u8,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    use crate::shm;
-    use crate::shm_types::Array;
-    clear_errmsg(errmsg);
-    if arr.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other(
-            "mlc_read_handle_voidstar: null arr".into(),
-        ));
-        return -1;
-    }
-    let a = &*(arr as *const Array);
-    if a.size == 0 {
-        set_errmsg(errmsg, &MorlocError::Other(
-            "mlc_read_handle_voidstar: IFile path payload is empty".into(),
-        ));
-        return -1;
-    }
-    const PATH_MAX: usize = 4096;
-    if a.size as usize >= PATH_MAX {
-        set_errmsg(errmsg, &MorlocError::Other(format!(
-            "mlc_read_handle_voidstar: path too long ({} bytes, max {})",
-            a.size, PATH_MAX - 1
-        )));
-        return -1;
-    }
-    // Resolve the path bytes. With a non-NULL base_ptr the Array's
-    // `data` is a payload-relative offset (used when reading from
-    // mmap'd file regions); otherwise it's an SHM-relative relptr.
-    let path_abs: *const u8 = if base_ptr.is_null() {
-        match shm::rel2abs(a.data) {
-            Ok(p) => p as *const u8,
-            Err(e) => {
-                set_errmsg(errmsg, &e);
-                return -1;
-            }
-        }
-    } else {
-        (base_ptr as *const u8).add(a.data as usize)
-    };
-    let mut buf = vec![0u8; a.size as usize + 1];
-    std::ptr::copy_nonoverlapping(path_abs, buf.as_mut_ptr(), a.size as usize);
-    let path_str = match std::str::from_utf8(&buf[..a.size as usize]) {
-        Ok(s) => s,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_read_handle_voidstar: path is not valid UTF-8".into(),
-            ));
-            return -1;
-        }
-    };
-    match crate::stream::open_dispatch(path_str, kind) {
-        Ok(handle) => {
-            crate::eval_arena::record_slot_if_active(handle);
-            handle
-        }
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1
-        }
-    }
+    mlc_read_stream_field(arr, base_ptr, kind, errmsg)
 }

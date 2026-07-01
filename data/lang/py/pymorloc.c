@@ -287,12 +287,17 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
             }
             break;
         }
-        case MORLOC_IFILE: {
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
+                         : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
+                         :                                    MLC_KIND_ISTREAM;
             int64_t handle = PyTRY(mlc_read_handle_voidstar,
-                                   data, base_ptr, MLC_KIND_IFILE);
+                                   data, base_ptr, kind);
             obj = PyLong_FromLongLong((long long)handle);
             if (!obj) {
-                PyRAISE("Failed to wrap IFile handle as PyLong");
+                PyRAISE("Failed to wrap stream handle as PyLong");
             }
             break;
         }
@@ -670,15 +675,14 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
             if (nlimbs <= 1) return 16;  // inline
             return 16 + _Alignof(uint64_t) - 1 + nlimbs * sizeof(uint64_t);
         }
-        case MORLOC_IFILE: {
-            // Look up the exact path length via the registry. Returning
-            // the conservative PATH_MAX bound here makes every IFile
-            // array allocation N * PATH_MAX bytes -- 4 GB for a 1M-
-            // element array of handles. The registry lookup is a single
-            // RwLock read + Vec index, cheap enough to do once per
-            // sizing pass.
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            // F/O/I share the tagged stream-handle field wire form; look
+            // up the exact suballoc cost via the registry (returns 8 +
+            // path_len for TAG_PATH, 0 for empty).
             if (!PyLong_Check(obj)) {
-                PyRAISE("Expected int for MORLOC_IFILE handle, but got %s",
+                PyRAISE("Expected int for stream-handle, but got %s",
                         Py_TYPE(obj)->tp_name);
             }
             long long handle_ll = PyLong_AsLongLong(obj);
@@ -730,12 +734,15 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                         case MORLOC_FLOAT64:
                             required_size += list_size * element_width;
                             break;
-                        case MORLOC_IFILE: {
-                            // Batched path-length lookup for IFile arrays:
-                            // one registry lock for N handles instead of N.
+                        case MORLOC_IFILE:
+                        case MORLOC_OSTREAM:
+                        case MORLOC_ISTREAM: {
+                            // Batched suballoc-size lookup for arrays of
+                            // stream handles: one registry lock for N
+                            // handles instead of N.
                             int64_t* handles = (int64_t*)malloc(list_size * sizeof(int64_t));
                             if (!handles) {
-                                PyRAISE("get_shm_size: out of memory sizing IFile array");
+                                PyRAISE("get_shm_size: out of memory sizing stream-handle array");
                             }
                             if (extract_ifile_handles_pylist(obj, handles, list_size) != 0) {
                                 free(handles);
@@ -1031,9 +1038,11 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
             break;
         }
 
-        case MORLOC_IFILE: {
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
             if (!PyLong_Check(obj)) {
-                PyRAISE("Expected int for MORLOC_IFILE handle, but got %s",
+                PyRAISE("Expected int for stream-handle, but got %s",
                         Py_TYPE(obj)->tp_name);
             }
             long long handle_ll = PyLong_AsLongLong(obj);
@@ -1144,8 +1153,10 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
-                    // Batched IFile-array write: one registry lock for all N handles.
-                    if (element_schema->type == MORLOC_IFILE && !numpy_per_element) {
+                    // Batched stream-handle-array write: one registry lock for all N handles.
+                    if ((element_schema->type == MORLOC_IFILE
+                      || element_schema->type == MORLOC_OSTREAM
+                      || element_schema->type == MORLOC_ISTREAM) && !numpy_per_element) {
                         int64_t* handles = (int64_t*)malloc(size * sizeof(int64_t));
                         if (!handles) {
                             PyErr_SetString(PyExc_MemoryError,

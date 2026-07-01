@@ -243,10 +243,12 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         case MORLOC_INT:
             // Inline BigInt: R values always fit inline (16 bytes)
             return 16;
-        case MORLOC_IFILE: {
-            // Look up the exact path length via the registry instead of
-            // reserving PATH_MAX per element (4 GB slack on a 1M-handle
-            // array). One RwLock read + Vec index per element.
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            // Stream-handle field: look up the exact suballoc cost via
+            // the registry (returns 8 + path_len for TAG_PATH, 0 for
+            // empty).
             int64_t handle = i64_from_sexp(obj);
             char* err = NULL;
             int64_t n = mlc_handle_path_len(handle, &err);
@@ -278,7 +280,9 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                 // the batched registry call so we acquire the stream-
                 // registry mutex once instead of N times.
                 if (schema->type == MORLOC_ARRAY
-                    && schema->parameters[0]->type == MORLOC_IFILE) {
+                    && (schema->parameters[0]->type == MORLOC_IFILE
+                     || schema->parameters[0]->type == MORLOC_OSTREAM
+                     || schema->parameters[0]->type == MORLOC_ISTREAM)) {
                     int is_b64 = is_integer64(obj);
                     int is_list = (TYPEOF(obj) == VECSXP);
                     if (!is_b64 && !is_list) {
@@ -638,7 +642,9 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             }
             *((double*)dest) = asReal(obj);
             break;
-        case MORLOC_IFILE: {
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
             int64_t handle = i64_from_sexp(obj);
             R_TRY(mlc_write_handle_voidstar, handle, dest, cursor);
             break;
@@ -699,10 +705,13 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             Schema* element_schema = schema->parameters[0];
             char* start;
 
-            // Batched IFile array write: one registry lock for all N
-            // handles. Accepts both VECSXP (list of bit64 scalars) and
-            // REALSXP (bit64 vector, which stores int64 in REAL slots).
-            if (element_schema->type == MORLOC_IFILE
+            // Batched stream-handle array write: one registry lock for
+            // all N handles. Accepts both VECSXP (list of bit64 scalars)
+            // and REALSXP (bit64 vector, which stores int64 in REAL
+            // slots).
+            if ((element_schema->type == MORLOC_IFILE
+                 || element_schema->type == MORLOC_OSTREAM
+                 || element_schema->type == MORLOC_ISTREAM)
                 && (TYPEOF(obj) == VECSXP
                     || (TYPEOF(obj) == REALSXP && is_integer64(obj)))) {
                 const int64_t* handles;
@@ -1026,9 +1035,14 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
             }
             break;
         }
-        case MORLOC_IFILE: {
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
+                         : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
+                         :                                    MLC_KIND_ISTREAM;
             int64_t handle = R_TRY(mlc_read_handle_voidstar,
-                                   data, base_ptr, MLC_KIND_IFILE);
+                                   data, base_ptr, kind);
             obj = make_integer64_scalar(handle);
             break;
         }

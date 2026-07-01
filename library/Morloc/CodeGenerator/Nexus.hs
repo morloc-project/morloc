@@ -307,19 +307,12 @@ generalTypeToSerialAST' i anc (VarT v)
             <+> "-- unexpected scope shape" <+> pretty (show x)
 generalTypeToSerialAST' i anc (AppT (VarT v) [t])
   | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
-  -- IFile: cross-pool stream descriptors. The wire form is the file path
-  -- (String); the receiving pool reopens locally. Per-access reopening
-  -- is wasteful but acceptable for read-only random-access files (the
-  -- mmap is cheap and the cursor is irrelevant).
-  | v == MBT.ifileVar   = return $ SerialIFile (FV v (CV ""))
-  -- IStream / OStream: stateful handles. Per-access reopening would
-  -- reset the IStream cursor (incorrect) or fail O_EXCL for OStream
-  -- (broken). The nexus keeps the real i64 handle in flight; the
-  -- nexus's `Open` / `OpenOStream` eval handlers call the runtime
-  -- and write the i64 directly into dest. Cross-pool transfer of an
-  -- in-flight stateful handle is unsupported in v1.
-  | v == MBT.istreamVar = return $ SerialUInt64 (FV v (CV ""))
-  | v == MBT.ostreamVar = return $ SerialUInt64 (FV v (CV ""))
+  -- Stream-handle types share the 16-byte tagged-union wire form. The
+  -- schema code (F/O/I) picks the receiver's open kind; the per-instance
+  -- tag byte picks the encoding (path or intra-nexus handle).
+  | v == MBT.ifileVar   = return $ SerialIFile   (FV v (CV ""))
+  | v == MBT.ostreamVar = return $ SerialOStream (FV v (CV ""))
+  | v == MBT.istreamVar = return $ SerialIStream (FV v (CV ""))
   | otherwise = resolveAliasApp i anc v [t]
 generalTypeToSerialAST' i anc (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) =
@@ -1375,10 +1368,12 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   (SerialNull _,    Aeson.Null)     -> return ()
   (SerialBool _,    Aeson.Bool _)   -> return ()
   (SerialString _,  Aeson.String _) -> return ()
-  -- IFile is a handle: at the JSON CLI boundary it appears as the path
+  -- Stream-handle types at the JSON CLI boundary appear as the path
   -- string the receiving pool will re-open. Same wire shape as
   -- SerialString.
   (SerialIFile _,   Aeson.String _) -> return ()
+  (SerialOStream _, Aeson.String _) -> return ()
+  (SerialIStream _, Aeson.String _) -> return ()
   (SerialReal _,    v)              -> checkRealLike   loc path ast v
   (SerialFloat32 _, v)              -> checkRealLike   loc path ast v
   (SerialFloat64 _, v)              -> checkRealLike   loc path ast v
@@ -1549,6 +1544,8 @@ expectedJsonShape = go
     go (SerialBool _)                = "Bool"
     go (SerialString _)              = "Str"
     go (SerialIFile _)               = "IFile path (Str)"
+    go (SerialOStream _)             = "OStream path (Str)"
+    go (SerialIStream _)             = "IStream path (Str)"
     go (SerialReal _)                = "Real"
     go (SerialFloat32 _)             = "Float32"
     go (SerialFloat64 _)             = "Float64"

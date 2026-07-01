@@ -642,7 +642,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     }
 
     // Send to pool and receive response
-    let result_packet = unsafe {
+    let mut result_packet = unsafe {
         send_and_receive_over_socket(socket_c.as_ptr(), call_packet, &mut errmsg)
     };
     unsafe { libc::free(call_packet as *mut c_void) };
@@ -665,6 +665,58 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         unsafe { libc::free(run_err as *mut c_void) };
         eprintln!("Error: run failed: {}", s);
         process::clean_exit(1);
+    }
+
+    // Cross-nexus return egress: rewrite any TAG_HANDLE stream-handle
+    // field in the pool's voidstar return payload to TAG_PATH so the
+    // parent nexus (which doesn't share our SHM registry) can open it
+    // locally. No-op for non-voidstar returns; a null out_ptr signals
+    // the packet was left unchanged and we keep our existing buffer.
+    {
+        extern "C" {
+            fn mlc_rewrite_packet_for_remote(
+                packet: *const u8, packet_len: usize,
+                out_ptr: *mut *mut u8, out_len: *mut usize,
+                errmsg: *mut *mut c_char,
+            ) -> i32;
+        }
+        let packet_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
+        if errmsg.is_null() && packet_size > 0 {
+            let mut rewritten_ptr: *mut u8 = std::ptr::null_mut();
+            let mut rewritten_len: usize = 0;
+            let mut rerr: *mut c_char = std::ptr::null_mut();
+            let rc = unsafe {
+                mlc_rewrite_packet_for_remote(
+                    result_packet,
+                    packet_size,
+                    &mut rewritten_ptr,
+                    &mut rewritten_len,
+                    &mut rerr,
+                )
+            };
+            if rc != 0 {
+                let msg = if !rerr.is_null() {
+                    let s = unsafe {
+                        std::ffi::CStr::from_ptr(rerr).to_string_lossy().into_owned()
+                    };
+                    unsafe { libc::free(rerr as *mut c_void) };
+                    s
+                } else {
+                    "unknown error".into()
+                };
+                eprintln!("Error: return-egress rewrite failed: {}", msg);
+                unsafe { libc::free(result_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
+            if !rewritten_ptr.is_null() {
+                unsafe { libc::free(result_packet as *mut c_void) };
+                result_packet = rewritten_ptr;
+            }
+        }
+        if !errmsg.is_null() {
+            unsafe { libc::free(errmsg as *mut c_void) };
+            errmsg = std::ptr::null_mut();
+        }
     }
 
     // Write the morloc result packet to --output-file. The driver-side

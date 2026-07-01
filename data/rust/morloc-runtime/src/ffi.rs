@@ -444,10 +444,26 @@ fn calc_voidstar_size_inner_walk(
                        + size * std::mem::size_of::<u64>())
                 }
             }
-            SerialType::String | SerialType::IFile => {
-                // IFile rides String's wire form (Array<u8> + path bytes).
+            SerialType::String => {
                 let arr = &*(data as *const Array);
                 Ok(std::mem::size_of::<Array>() + arr.size)
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Tagged stream-handle field: 16-byte inline + path
+                // suballoc (`8 + path_len`) for TAG_PATH; no suballoc for
+                // TAG_HANDLE.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                let mut total = sh::STREAM_HANDLE_FIELD_SIZE;
+                if sh::read_tag(field) == sh::TAG_PATH {
+                    let payload = sh::read_payload(field);
+                    if payload != shm::RELNULL as u64 {
+                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                        let path_len = sh::read_path_size(suballoc) as usize;
+                        total += sh::path_suballoc_size(path_len);
+                    }
+                }
+                Ok(total)
             }
             SerialType::Array => {
                 let arr = &*(data as *const Array);

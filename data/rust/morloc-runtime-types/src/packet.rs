@@ -246,9 +246,28 @@ pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 //     the final footer; absent in temp footers. A reader uses this to
 //     distinguish "writer crashed mid-stream" (temp footer only) from
 //     "writer closed cleanly" (final footer).
+//   - `FOOTER_STATUS` (`0x08`) is a one-byte body recording WHY the final
+//     footer was written. See `FOOTER_STATUS_*` constants below. Absent
+//     in temp footers and in legacy final footers; readers default to
+//     `FOOTER_STATUS_CLOSED` when the block is missing.
 pub const METADATA_TYPE_SUBPACKET_INDEX: u8 = 0x05;
 pub const METADATA_TYPE_STREAM_DIAG: u8 = 0x06;
 pub const METADATA_TYPE_FOOTER_FINAL: u8 = 0x07;
+pub const METADATA_TYPE_FOOTER_STATUS: u8 = 0x08;
+
+/// Final-footer status enum values (the body of `METADATA_TYPE_FOOTER_STATUS`).
+///
+/// `CLOSED` is the explicit `@close` path -- the writer reached the end of
+/// its work and finalised the file on purpose. `PAUSED` is the auto-close
+/// path taken when a remote child dispatch returns an OStream without an
+/// explicit `@close`; the file is well-formed and safe to `@append` to.
+/// `FAILED` / `REPAIRED` are reserved for future use: a writer that
+/// detected an internal inconsistency at close time and a `morloc-nexus`
+/// repair pass that reconstructed a final footer from a temp-footer file.
+pub const FOOTER_STATUS_CLOSED: u8 = 0;
+pub const FOOTER_STATUS_PAUSED: u8 = 1;
+pub const FOOTER_STATUS_FAILED: u8 = 2;
+pub const FOOTER_STATUS_REPAIRED: u8 = 3;
 
 pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
 
@@ -1055,12 +1074,13 @@ pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
 }
 
 /// Encode the bytes of a `final` footer (with full SUBPACKET_INDEX,
-/// the StreamDiag block, and the FOOTER_FINAL flag). The returned
-/// vector is `footer_packet + 8B tail`; size depends on the index
-/// length but is always written once, at `@close`.
+/// the StreamDiag block, the FOOTER_FINAL flag, and a FOOTER_STATUS
+/// byte). The returned vector is `footer_packet + 8B tail`; size
+/// depends on the index length but is always written once, at `@close`.
 pub fn make_final_footer_packet(
     diag: &StreamDiag,
     subpacket_index: &[u64],
+    status: u8,
 ) -> Vec<u8> {
     // Build the subpacket-index body: u64 count followed by u64 offsets.
     let mut idx_body = Vec::with_capacity(8 + subpacket_index.len() * 8);
@@ -1070,16 +1090,29 @@ pub fn make_final_footer_packet(
     }
 
     let diag_bytes = diag.as_bytes();
+    let status_body = [status];
     let footer_packet = make_footer_packet(&[
         (METADATA_TYPE_STREAM_DIAG, &diag_bytes),
         (METADATA_TYPE_SUBPACKET_INDEX, &idx_body),
         (METADATA_TYPE_FOOTER_FINAL, &[]),
+        (METADATA_TYPE_FOOTER_STATUS, &status_body),
     ]);
     let mut out = Vec::with_capacity(footer_packet.len() + STREAM_TAIL_SIZE);
     out.extend_from_slice(&footer_packet);
     let tail = encode_stream_tail(footer_packet.len() as u32);
     out.extend_from_slice(&tail);
     out
+}
+
+/// Parse the FOOTER_STATUS entry body (a single byte). Returns
+/// `FOOTER_STATUS_CLOSED` when the entry is malformed or absent so
+/// readers can default safely on legacy footers that predate this block.
+pub fn decode_footer_status(data: &[u8]) -> u8 {
+    if data.is_empty() {
+        FOOTER_STATUS_CLOSED
+    } else {
+        data[0]
+    }
 }
 
 /// Parse the SUBPACKET_INDEX entry payload (without the 8-byte mmh-
@@ -1886,10 +1919,10 @@ mod tests {
     }
 
     #[test]
-    fn final_footer_packet_carries_all_three_blocks() {
+    fn final_footer_packet_carries_all_blocks_including_status() {
         let diag = StreamDiag::new();
         let index: Vec<u64> = (0..5).map(|i| (i as u64) * (16 << 20)).collect();
-        let bytes = make_final_footer_packet(&diag, &index);
+        let bytes = make_final_footer_packet(&diag, &index, FOOTER_STATUS_PAUSED);
 
         let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
         let footer = &bytes[..footer_packet_len];
@@ -1899,6 +1932,7 @@ mod tests {
         let mut saw_diag = false;
         let mut saw_final = false;
         let mut recovered_index: Option<Vec<u64>> = None;
+        let mut recovered_status: Option<u8> = None;
         for (kind, body) in iter_packet_metadata(footer).unwrap() {
             match kind {
                 METADATA_TYPE_STREAM_DIAG => saw_diag = true,
@@ -1909,12 +1943,26 @@ mod tests {
                 METADATA_TYPE_SUBPACKET_INDEX => {
                     recovered_index = Some(decode_subpacket_index(body).unwrap());
                 }
+                METADATA_TYPE_FOOTER_STATUS => {
+                    recovered_status = Some(decode_footer_status(body));
+                }
                 _ => {}
             }
         }
         assert!(saw_diag);
         assert!(saw_final, "final footer must carry FOOTER_FINAL");
         assert_eq!(recovered_index.as_deref(), Some(index.as_slice()));
+        assert_eq!(recovered_status, Some(FOOTER_STATUS_PAUSED));
+    }
+
+    #[test]
+    fn decode_footer_status_defaults_on_missing_body() {
+        // A reader of a legacy final footer that predates the FOOTER_STATUS
+        // block sees an empty body slice; the helper must surface that as
+        // CLOSED so a clean @close stays the historical default.
+        assert_eq!(decode_footer_status(&[]), FOOTER_STATUS_CLOSED);
+        assert_eq!(decode_footer_status(&[FOOTER_STATUS_PAUSED]), FOOTER_STATUS_PAUSED);
+        assert_eq!(decode_footer_status(&[FOOTER_STATUS_REPAIRED]), FOOTER_STATUS_REPAIRED);
     }
 
     #[test]

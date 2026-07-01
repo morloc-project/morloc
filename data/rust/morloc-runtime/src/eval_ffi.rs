@@ -649,16 +649,27 @@ unsafe fn read_int_as_i64(
                 "Bracket bound: BigInt with more than 1 limb does not fit in i64".into()
             ))
         }
-    } else if stype == SerialType::IFile as u32 {
-        // Every read pays one mmap + footer parse via the registry; the
-        // kernel pagecache covers the I/O so the steady-state cost is
-        // bounded to tens of microseconds per access. A future
-        // optimisation is a per-arena (path -> handle) cache.
+    } else if stype == SerialType::IFile as u32
+        || stype == SerialType::OStream as u32
+        || stype == SerialType::IStream as u32
+    {
+        // Stream-handle field: the codec branches on the tag byte
+        // (TAG_PATH -> open the path locally, TAG_HANDLE -> use the
+        // slot id directly). `kind` maps the schema code back to the
+        // runtime's MLC_KIND_* so a TAG_PATH decode opens with the
+        // right morloc-level type.
+        let kind = if stype == SerialType::IFile as u32 {
+            morloc_runtime_types::packet::MLC_KIND_IFILE
+        } else if stype == SerialType::OStream as u32 {
+            morloc_runtime_types::packet::MLC_KIND_OSTREAM
+        } else {
+            morloc_runtime_types::packet::MLC_KIND_ISTREAM
+        };
         let mut err: *mut c_char = ptr::null_mut();
-        let handle = crate::intrinsics::mlc_read_handle_voidstar(
+        let handle = crate::intrinsics::mlc_read_stream_field(
             ptr as *const std::ffi::c_void,
             ptr::null(),
-            morloc_runtime_types::packet::MLC_KIND_IFILE,
+            kind,
             &mut err,
         );
         if handle < 0 {
@@ -667,7 +678,7 @@ unsafe fn read_int_as_i64(
                 libc::free(err as *mut c_void);
                 m
             } else {
-                "mlc_read_handle_voidstar returned -1".to_string()
+                "mlc_read_stream_field returned -1".to_string()
             };
             return Err(MorlocError::Other(msg));
         }
@@ -1504,10 +1515,11 @@ unsafe fn morloc_eval_r(
 
         MorlocExpressionType::Open => {
             // Dispatch on handle kind. IFile's wire form is the path
-            // (Array<u8>); the receiving pool reopens locally. IStream
-            // needs a stable cursor and OStream cannot be reopened
-            // (O_EXCL), so for those the nexus opens once and stores
-            // the real i64 handle in dest.
+            // laid into a tagged stream-handle field (TAG_PATH); the
+            // receiving pool reopens locally. IStream needs a stable
+            // cursor and OStream cannot be reopened (O_EXCL), so for
+            // those the nexus opens once and stores the real i64
+            // handle in dest.
             let open = (*expr).expr.open_expr;
             let kind = (*open).kind;
             let path_expr = (*open).path;
@@ -1515,31 +1527,36 @@ unsafe fn morloc_eval_r(
             let path_cstr = path_voidstar_to_cstr(path_result, "@open")?;
 
             if kind == 0 {
-                // IFile: write the path Array<u8> wire form into dest.
-                // Lazy validation: the first downstream read goes
-                // through mlc_handle_unpack_path which opens and
+                // IFile: write the path into a TAG_PATH stream-handle
+                // field. Lazy validation: the first downstream read
+                // goes through mlc_read_stream_field which opens and
                 // surfaces any ENOENT / format error then.
+                use morloc_runtime_types::stream_handle as sh;
                 let path_len = libc::strlen(path_cstr);
-                let arr = if path_len == 0 {
-                    shm::Array { size: 0, data: shm::RELNULL }
+                let payload = if path_len == 0 {
+                    sh::RELNULL_PAYLOAD
                 } else {
-                    let data_abs = shm::shmemcpy(path_cstr as *const u8, path_len)?;
-                    shm::Array { size: path_len, data: shm::abs2rel(data_abs)? }
+                    let block = shm::shmalloc(sh::path_suballoc_size(path_len))?;
+                    sh::write_path_suballoc(
+                        block,
+                        std::slice::from_raw_parts(path_cstr as *const u8, path_len),
+                    );
+                    shm::abs2rel(block)? as u64
                 };
-                ptr::copy_nonoverlapping(
-                    &arr as *const shm::Array as *const u8,
-                    dest,
-                    std::mem::size_of::<shm::Array>(),
-                );
+                sh::write_field(dest, sh::TAG_PATH, payload);
                 libc::free(path_cstr as *mut c_void);
             } else {
                 // IStream / OStream: actually open via the runtime so
                 // the cursor / fd is stable across subsequent ops in
                 // this nexus scope. The eval_arena tracks and closes
-                // the handle when the scope ends.
+                // the handle when the scope ends. The result lands in
+                // dest as a TAG_HANDLE stream-handle field so downstream
+                // reads go through mlc_read_stream_field uniformly with
+                // the IFile TAG_PATH case above.
                 extern "C" {
                     fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
                 }
+                use morloc_runtime_types::stream_handle as sh;
                 let mut err: *mut c_char = ptr::null_mut();
                 let handle = mlc_open(path_cstr, kind, &mut err);
                 libc::free(path_cstr as *mut c_void);
@@ -1553,11 +1570,7 @@ unsafe fn morloc_eval_r(
                     };
                     return Err(MorlocError::Other(msg));
                 }
-                ptr::copy_nonoverlapping(
-                    &handle as *const i64 as *const u8,
-                    dest,
-                    std::mem::size_of::<i64>(),
-                );
+                sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
             }
         }
 
@@ -1670,6 +1683,7 @@ unsafe fn morloc_eval_r(
             extern "C" {
                 fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
             }
+            use morloc_runtime_types::stream_handle as sh;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1686,11 +1700,7 @@ unsafe fn morloc_eval_r(
                 };
                 return Err(MorlocError::Other(msg));
             }
-            ptr::copy_nonoverlapping(
-                &new_h as *const i64 as *const u8,
-                dest,
-                std::mem::size_of::<i64>(),
-            );
+            sh::write_field(dest, sh::TAG_HANDLE, new_h as u64);
         }
 
         MorlocExpressionType::IFileWalk => {
@@ -1764,7 +1774,10 @@ unsafe fn morloc_eval_r(
             // Typed OStream open: schema (parsed CSchema sitting in
             // expr.schema) + path expression on open_expr. Serialise
             // the schema back to its canonical string for the runtime
-            // entry, then store the returned i64 handle in dest.
+            // entry, then store the returned handle in dest as a
+            // TAG_HANDLE stream-handle field so downstream reads go
+            // through mlc_read_stream_field uniformly with the IFile
+            // TAG_PATH / IStream TAG_HANDLE cases.
             extern "C" {
                 fn mlc_open_ostream(
                     schema_str: *const c_char,
@@ -1773,6 +1786,7 @@ unsafe fn morloc_eval_r(
                 ) -> i64;
                 fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
             }
+            use morloc_runtime_types::stream_handle as sh;
             let open = (*expr).expr.open_expr;
             let path_expr = (*open).path;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1798,11 +1812,7 @@ unsafe fn morloc_eval_r(
                 };
                 return Err(MorlocError::Other(msg));
             }
-            ptr::copy_nonoverlapping(
-                &handle as *const i64 as *const u8,
-                dest,
-                std::mem::size_of::<i64>(),
-            );
+            sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
         }
 
         MorlocExpressionType::Write => {
@@ -1881,11 +1891,8 @@ unsafe fn morloc_eval_r(
                 };
                 return Err(MorlocError::Other(msg));
             }
-            ptr::copy_nonoverlapping(
-                &handle as *const i64 as *const u8,
-                dest,
-                std::mem::size_of::<i64>(),
-            );
+            use morloc_runtime_types::stream_handle as sh;
+            sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
         }
 
         MorlocExpressionType::Concat => {

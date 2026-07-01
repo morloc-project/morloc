@@ -983,7 +983,8 @@ pub unsafe extern "C" fn try_packet_strict(
 fn format_field_as_json(field: &str, st: crate::schema::SerialType) -> String {
     use crate::schema::SerialType;
     match st {
-        SerialType::String | SerialType::IFile => {
+        SerialType::String | SerialType::IFile
+        | SerialType::OStream | SerialType::IStream => {
             // IFile's CLI string view is a file path; escape like a String.
             serde_json::to_string(field).unwrap_or_else(|_| "\"\"".to_string())
         }
@@ -1396,7 +1397,8 @@ unsafe fn try_list_with_config(
                 format!("[{}]", bytes_str.join(","))
             } else {
                 match elem_serial {
-                    SerialType::String | SerialType::IFile =>
+                    SerialType::String | SerialType::IFile
+        | SerialType::OStream | SerialType::IStream =>
                         format_field_as_json(line, elem_serial),
                     _ => line.to_string(),
                 }
@@ -1909,11 +1911,13 @@ pub unsafe extern "C" fn load_morloc_data_file(
         use crate::schema::SerialType;
         let rs = CSchema::to_rust(schema);
         let bare_str = match rs.serial_type {
-            SerialType::String | SerialType::IFile => true,
+            SerialType::String | SerialType::IFile
+        | SerialType::OStream | SerialType::IStream => true,
             SerialType::Optional => rs
                 .parameters
                 .first()
-                .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile))
+                .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile
+                    | SerialType::OStream | SerialType::IStream))
                 .unwrap_or(false),
             _ => false,
         };
@@ -2278,7 +2282,7 @@ unsafe fn upload_packet_inner(
     use crate::schema::SerialType;
 
     match rs.serial_type {
-        SerialType::String | SerialType::IFile | SerialType::Array => {
+        SerialType::String | SerialType::Array => {
             if (data as usize + rs.width - 1) <= data_end {
                 return Err(MorlocError::Packet("Data is too small to store an array header".into()));
             }
@@ -2314,6 +2318,42 @@ unsafe fn upload_packet_inner(
             }
 
             arr.data = shm::abs2rel(data_ptr)?;
+        }
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            // Tagged stream-handle field: copy the 16-byte inline, then
+            // for TAG_PATH copy the `{size, bytes}` suballoc and rebase
+            // the payload relptr. TAG_HANDLE has no suballoc.
+            use morloc_runtime_types::stream_handle as sh;
+            if (data as usize + rs.width - 1) <= data_end {
+                return Err(MorlocError::Packet(
+                    "Data is too small to store a stream-handle field".into(),
+                ));
+            }
+            ptr::copy_nonoverlapping(data, dest, rs.width);
+            let dest_field = dest;
+            let tag = sh::read_tag(dest_field);
+            let payload = sh::read_payload(dest_field);
+            if tag == sh::TAG_PATH && payload != shm::RELNULL as u64 {
+                let src_suballoc = data.add(payload as usize);
+                if (src_suballoc as usize + 7) > data_end {
+                    return Err(MorlocError::Packet(
+                        "Data is too small to contain stream-handle path header".into(),
+                    ));
+                }
+                let path_len = sh::read_path_size(src_suballoc) as usize;
+                let total = sh::path_suballoc_size(path_len);
+                if (src_suballoc as usize + total - 1) > data_end {
+                    return Err(MorlocError::Packet(
+                        "Data is too small to contain stream-handle path bytes".into(),
+                    ));
+                }
+                let new_block = shm::shmemcpy(src_suballoc, total)?;
+                sh::write_field(
+                    dest_field,
+                    sh::TAG_PATH,
+                    shm::abs2rel(new_block)? as u64,
+                );
+            }
         }
         SerialType::Tuple | SerialType::Map => {
             for i in 0..rs.parameters.len() {

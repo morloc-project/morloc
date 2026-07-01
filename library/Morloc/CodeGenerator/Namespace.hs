@@ -312,11 +312,16 @@ data SerialAST
   | SerialUInt64 FVar
   | SerialBool FVar
   | SerialString FVar
-  -- | Cross-pool stream handle. In-language native form is uint64_t (the
-  -- local slot id). Wire form is the file path encoded as a String
-  -- (Array<u8>) so the receiving pool can open its own fresh handle.
-  -- See SCHEMA_IFILE in data/morloc/morloc.h.
+  -- | Cross-pool stream handles. In-language native form is uint64_t
+  -- (the local slot id). The wire form is a 16-byte tagged union:
+  -- `TAG_PATH` carries the file path so the receiving pool can open a
+  -- fresh handle, `TAG_HANDLE` carries the raw slot id for the
+  -- intra-nexus shared-registry case. See SCHEMA_IFILE / SCHEMA_OSTREAM
+  -- / SCHEMA_ISTREAM in data/morloc/morloc.h and
+  -- morloc-runtime-types::stream_handle for the wire layout.
   | SerialIFile FVar
+  | SerialOStream FVar
+  | SerialIStream FVar
   | SerialNull FVar
   | SerialOptional FVar SerialAST
   | -- | Back-reference to an ancestor 'SerialObject' with this FVar in
@@ -362,6 +367,8 @@ instance Pretty SerialAST where
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialIFile v) = parens ("SerialIFile" <+> pretty v)
+  pretty (SerialOStream v) = parens ("SerialOStream" <+> pretty v)
+  pretty (SerialIStream v) = parens ("SerialIStream" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)

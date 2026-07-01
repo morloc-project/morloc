@@ -60,7 +60,7 @@ fn adjust_relptrs_inner(
                 }
                 Ok(())
             }
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::String | SerialType::Array => {
                 let arr = &mut *(data as *mut Array);
                 arr.data += base_rel;
                 if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
@@ -69,6 +69,22 @@ fn adjust_relptrs_inner(
                     let w = elem_schema.width;
                     for i in 0..arr.size {
                         adjust_relptrs_with_env(arr_data.add(i * w), elem_schema, base_rel, env)?;
+                    }
+                }
+                Ok(())
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Stream-handle tagged field. Only TAG_PATH payloads carry
+                // a relptr that needs rebasing; TAG_HANDLE's payload is an
+                // intra-nexus slot id with no offset semantics. RELNULL
+                // payloads (empty path) stay unchanged.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *mut u8;
+                let tag = sh::read_tag(field);
+                if tag == sh::TAG_PATH {
+                    let payload = sh::read_payload(field);
+                    if payload != sh::RELNULL_PAYLOAD {
+                        sh::write_field(field, sh::TAG_PATH, payload.wrapping_add(base_rel as u64));
                     }
                 }
                 Ok(())
@@ -177,7 +193,7 @@ fn remap_volume_indices_inner(
                 }
                 Ok(())
             }
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::String | SerialType::Array => {
                 let arr = &mut *(data as *mut Array);
                 if arr.size == 0 {
                     // Zero-sized arrays carry data = 0 (no vol_mask).
@@ -195,6 +211,20 @@ fn remap_volume_indices_inner(
                         remap_volume_indices_with_env(
                             arr_data.add(i * w), elem_schema, xor_mask, env,
                         )?;
+                    }
+                }
+                Ok(())
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // TAG_PATH payloads carry a vol-tagged relptr that must
+                // be XOR-rewritten; TAG_HANDLE payloads are bare slot ids
+                // and don't carry vol bits.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *mut u8;
+                if sh::read_tag(field) == sh::TAG_PATH {
+                    let payload = sh::read_payload(field);
+                    if payload != sh::RELNULL_PAYLOAD {
+                        sh::write_field(field, sh::TAG_PATH, payload ^ xor_mask);
                     }
                 }
                 Ok(())
@@ -282,16 +312,26 @@ pub fn read_binary_with_hint(
 /// sub-blocks that shfree_inplace releases.
 pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     match schema.serial_type {
-        SerialType::String | SerialType::IFile => {
-            // IFile's voidstar payload is an Array<u8> holding the file
-            // path -- same shape as String, so the same free path
-            // applies. The local handle the receiver minted on unpack is
-            // independent of this voidstar block; its slot is owned by
-            // the receiver's eval_arena.
+        SerialType::String => {
             let arr = &*(ptr as *const Array);
             if arr.size > 0 && arr.data >= 0 {
                 let data = shm::rel2abs(arr.data)?;
                 shm::shfree(data)?;
+            }
+        }
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            // TAG_PATH owns a path suballoc (`{size, bytes}`); free it
+            // here. TAG_HANDLE owns no suballoc. The local handle the
+            // receiver minted on unpack is independent of this voidstar
+            // block; its slot is owned by the receiver's eval_arena.
+            use morloc_runtime_types::stream_handle as sh;
+            let field = ptr as *const u8;
+            if sh::read_tag(field) == sh::TAG_PATH {
+                let payload = sh::read_payload(field);
+                if payload != sh::RELNULL_PAYLOAD {
+                    let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                    shm::shfree(suballoc)?;
+                }
             }
         }
         SerialType::Array => {
@@ -397,8 +437,7 @@ where
     R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
 {
     match schema.serial_type {
-        SerialType::String | SerialType::IFile => {
-            // IFile rides String's wire shape (Array<u8> + path bytes).
+        SerialType::String => {
             let src_arr = &*(src as *const Array);
             let dst_arr = &mut *(dst as *mut Array);
             dst_arr.size = src_arr.size;
@@ -408,6 +447,40 @@ where
                 dst_arr.data = shm::abs2rel(new_data)?;
             } else {
                 dst_arr.data = shm::RELNULL;
+            }
+        }
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            // Stream-handle tagged field. TAG_PATH copies the suballoc
+            // (`{size: u64, bytes...}`); TAG_HANDLE has no suballoc.
+            use morloc_runtime_types::stream_handle as sh;
+            let src_field = src as *const u8;
+            let tag = sh::read_tag(src_field);
+            let src_payload = sh::read_payload(src_field);
+            let dst_field = dst as *mut u8;
+            match tag {
+                t if t == sh::TAG_PATH => {
+                    if src_payload == sh::RELNULL_PAYLOAD {
+                        sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                    } else {
+                        let src_suballoc = resolve(src_payload as RelPtr)?;
+                        let path_len = sh::read_path_size(src_suballoc) as usize;
+                        let total = sh::path_suballoc_size(path_len);
+                        let new_suballoc = shm::shmemcpy(src_suballoc, total)?;
+                        sh::write_field(
+                            dst_field,
+                            sh::TAG_PATH,
+                            shm::abs2rel(new_suballoc)? as u64,
+                        );
+                    }
+                }
+                t if t == sh::TAG_HANDLE => {
+                    sh::write_field(dst_field, sh::TAG_HANDLE, src_payload);
+                }
+                t => {
+                    return Err(MorlocError::Other(format!(
+                        "deep_copy: unsupported stream-handle tag {}", t,
+                    )));
+                }
             }
         }
         SerialType::Array => {
@@ -558,7 +631,7 @@ fn flatten_fixup_inner(
                 }
                 // size ≤ 1: inline value, no fixup needed
             }
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::String | SerialType::Array => {
                 let orig_arr = &*(data as *const Array);
                 let buf_arr = &mut *(buf.as_mut_ptr().add(buf_offset) as *mut Array);
                 if orig_arr.size == 0 {
@@ -569,7 +642,7 @@ fn flatten_fixup_inner(
                 let elem_schema = &schema.parameters[0];
                 // String stays at natural element alignment (1 byte for chars);
                 // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
-                let align = if matches!(schema.serial_type, SerialType::String | SerialType::IFile) {
+                let align = if matches!(schema.serial_type, SerialType::String) {
                     elem_schema.alignment()
                 } else {
                     elem_schema.array_data_alignment()
@@ -589,6 +662,47 @@ fn flatten_fixup_inner(
                             buf, elem_start + i * elem_w,
                             orig_data.add(i * elem_w), elem_schema, cursor, env,
                         )?;
+                    }
+                }
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Tagged stream-handle field: TAG_PATH copies the
+                // `{size, bytes}` suballoc into the flatten buffer;
+                // TAG_HANDLE has no suballoc.
+                use morloc_runtime_types::stream_handle as sh;
+                let src_field = data as *const u8;
+                let tag = sh::read_tag(src_field);
+                let src_payload = sh::read_payload(src_field);
+                let dst_field = buf.as_mut_ptr().add(buf_offset);
+                match tag {
+                    t if t == sh::TAG_PATH => {
+                        if src_payload == sh::RELNULL_PAYLOAD {
+                            sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                        } else {
+                            let src_suballoc = shm::rel2abs(src_payload as RelPtr)?;
+                            let path_len = sh::read_path_size(src_suballoc) as usize;
+                            let total = sh::path_suballoc_size(path_len);
+                            *cursor = shm::align_up(*cursor, 8);
+                            let suballoc_offset = *cursor;
+                            buf[suballoc_offset..suballoc_offset + total]
+                                .copy_from_slice(
+                                    std::slice::from_raw_parts(src_suballoc, total)
+                                );
+                            *cursor += total;
+                            sh::write_field(
+                                dst_field,
+                                sh::TAG_PATH,
+                                suballoc_offset as u64,
+                            );
+                        }
+                    }
+                    t if t == sh::TAG_HANDLE => {
+                        sh::write_field(dst_field, sh::TAG_HANDLE, src_payload);
+                    }
+                    t => {
+                        return Err(MorlocError::Other(format!(
+                            "flatten_fixup: unsupported stream-handle tag {}", t,
+                        )));
                     }
                 }
             }
@@ -818,7 +932,7 @@ fn patch_slot_inner(
                         .copy_from_slice(&baked.to_le_bytes());
                 }
             }
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const Array);
                 let new_relptr: u64 = if arr.size == 0 {
                     // Empty arrays use 0 as a sentinel for "no data"
@@ -827,7 +941,7 @@ fn patch_slot_inner(
                     0
                 } else {
                     let elem_schema = &schema.parameters[0];
-                    let align = if matches!(schema.serial_type, SerialType::String | SerialType::IFile) {
+                    let align = if matches!(schema.serial_type, SerialType::String) {
                         elem_schema.alignment()
                     } else {
                         elem_schema.array_data_alignment()
@@ -835,6 +949,30 @@ fn patch_slot_inner(
                     shm::align_up(tail_start, align) as u64 | vol_mask
                 };
                 dest[8..16].copy_from_slice(&new_relptr.to_le_bytes());
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Patch the payload word of the tagged stream-handle
+                // field. TAG_PATH gets a fresh relptr pointing at the
+                // tail-region position where the path suballoc will land
+                // (or 0 for RELNULL/empty). TAG_HANDLE has no tail data,
+                // so we just keep whatever bytes the source carried (the
+                // slot id rides through unchanged via `dest`'s memcpy).
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                let tag = sh::read_tag(field);
+                let src_payload = sh::read_payload(field);
+                dest[0] = tag;
+                for b in &mut dest[1..8] { *b = 0; }
+                let new_payload: u64 = if tag == sh::TAG_PATH {
+                    if src_payload == sh::RELNULL_PAYLOAD {
+                        sh::RELNULL_PAYLOAD
+                    } else {
+                        shm::align_up(tail_start, 8) as u64 | vol_mask
+                    }
+                } else {
+                    src_payload
+                };
+                dest[8..16].copy_from_slice(&new_payload.to_le_bytes());
             }
             SerialType::Tuple | SerialType::Map => {
                 let mut field_tail_start = tail_start;
@@ -901,11 +1039,11 @@ fn emit_tail_inner<S: EmitSink>(
                     e.write_bytes(std::slice::from_raw_parts(limb_data, total_bytes))?;
                 }
             }
-            SerialType::String | SerialType::IFile | SerialType::Array => {
+            SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const Array);
                 if arr.size > 0 {
                     let elem_schema = &schema.parameters[0];
-                    let align = if matches!(schema.serial_type, SerialType::String | SerialType::IFile) {
+                    let align = if matches!(schema.serial_type, SerialType::String) {
                         elem_schema.alignment()
                     } else {
                         elem_schema.array_data_alignment()
@@ -960,6 +1098,26 @@ fn emit_tail_inner<S: EmitSink>(
                         }
                     }
                 }
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Emit the path suballoc into the tail region for TAG_PATH;
+                // TAG_HANDLE has no tail bytes.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                let tag = sh::read_tag(field);
+                if tag != sh::TAG_PATH {
+                    return Ok(());
+                }
+                let payload = sh::read_payload(field);
+                if payload == sh::RELNULL_PAYLOAD {
+                    return Ok(());
+                }
+                let suballoc = shm::rel2abs(payload as RelPtr)?;
+                let path_len = sh::read_path_size(suballoc) as usize;
+                let total = sh::path_suballoc_size(path_len);
+                let aligned = shm::align_up(e.cursor(), 8);
+                e.pad_to(aligned)?;
+                e.write_bytes(std::slice::from_raw_parts(suballoc, total))?;
             }
             SerialType::Tuple | SerialType::Map => {
                 for i in 0..schema.parameters.len() {
@@ -1030,8 +1188,7 @@ fn tail_end_pos_inner(
                     Ok(aligned + size * std::mem::size_of::<u64>())
                 }
             }
-            SerialType::String | SerialType::IFile => {
-                // IFile rides String's wire shape (Array<u8> + path bytes).
+            SerialType::String => {
                 let arr = &*(data as *const Array);
                 if arr.size == 0 {
                     Ok(start)
@@ -1040,6 +1197,24 @@ fn tail_end_pos_inner(
                     let elem_pos = shm::align_up(start, elem_schema.alignment());
                     Ok(elem_pos + arr.size * elem_schema.width)
                 }
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Tagged stream-handle field. TAG_PATH consumes 8-aligned
+                // suballoc bytes (`8 + path_len`); TAG_HANDLE consumes
+                // nothing.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                if sh::read_tag(field) != sh::TAG_PATH {
+                    return Ok(start);
+                }
+                let payload = sh::read_payload(field);
+                if payload == sh::RELNULL_PAYLOAD {
+                    return Ok(start);
+                }
+                let suballoc = shm::rel2abs(payload as RelPtr)?;
+                let path_len = sh::read_path_size(suballoc) as usize;
+                let aligned = shm::align_up(start, 8);
+                Ok(aligned + sh::path_suballoc_size(path_len))
             }
             SerialType::Array => {
                 let arr = &*(data as *const Array);

@@ -444,6 +444,33 @@ pub unsafe extern "C" fn remote_call(
         arg_schemas[i] = parse_schema(schema_str, &mut err);
         if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
 
+        // Cross-nexus argument restrictions. IStream and OStream carry
+        // per-nexus state (cursor / write buffer / open fd) that has no
+        // meaning in a fresh child nexus's registry, so we reject them
+        // at the boundary rather than shipping a handle the child can't
+        // interpret. IFile is allowed because both sides share the
+        // filesystem and the child can open the same path locally.
+        {
+            let rs = crate::cschema::CSchema::to_rust(arg_schemas[i]);
+            for (bad_kind, label) in [
+                (crate::handle_scan::StreamFieldKind::IStream, "IStream"),
+                (crate::handle_scan::StreamFieldKind::OStream, "OStream"),
+            ] {
+                if crate::handle_scan::schema_contains_kind(&rs, bad_kind) {
+                    set_errmsg(
+                        &mut err as *mut *mut c_char,
+                        &MorlocError::Other(format!(
+                            "remote_call: argument {} contains {}, which cannot cross \
+                             a nexus boundary; only IFile is supported in argument \
+                             position for cross-nexus calls",
+                            i, label,
+                        )),
+                    );
+                    goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+                }
+            }
+        }
+
         arg_voidstars[i] = get_morloc_data_packet_value(*arg_packets.add(i), arg_schemas[i], &mut err);
         if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
 
@@ -484,6 +511,41 @@ pub unsafe extern "C" fn remote_call(
             let mut file_size: usize = 0;
             cached_arg_packets[i] = read_binary_file(cached_arg_filenames[i], &mut file_size, &mut err);
             if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
+
+            // Cross-nexus rewrite: intra-nexus bridges emit stream-
+            // handle fields in TAG_HANDLE form (bare slot id, valid
+            // only in the local SHM registry). Convert those to
+            // TAG_PATH so the child nexus can `mlc_open` locally.
+            // No-op for non-VOIDSTAR payloads.
+            let src_slice = std::slice::from_raw_parts(cached_arg_packets[i], file_size);
+            match crate::handle_scan::rewrite_data_packet_for_remote(src_slice) {
+                Ok(rewritten) => {
+                    if rewritten.len() != file_size
+                        || rewritten.as_slice() != src_slice
+                    {
+                        let new_buf = libc::malloc(rewritten.len()) as *mut u8;
+                        if new_buf.is_null() {
+                            set_errmsg(
+                                &mut err as *mut *mut c_char,
+                                &MorlocError::Other(
+                                    "remote_call: malloc failed while rewriting arg packet"
+                                        .into(),
+                                ),
+                            );
+                            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+                        }
+                        std::ptr::copy_nonoverlapping(
+                            rewritten.as_ptr(), new_buf, rewritten.len(),
+                        );
+                        libc::free(cached_arg_packets[i] as *mut c_void);
+                        cached_arg_packets[i] = new_buf;
+                    }
+                }
+                Err(e) => {
+                    set_errmsg(&mut err as *mut *mut c_char, &e);
+                    goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+                }
+            }
         }
 
         // Build call packet
@@ -577,6 +639,43 @@ pub unsafe extern "C" fn remote_call(
             );
             libc::unlink(result_cache_filename);
             libc::free(failure as *mut c_void);
+        }
+
+        // Cross-nexus return restriction: IStream cannot come back from
+        // a remote call (the child's cursor state is discarded when its
+        // nexus exits). IFile and OStream are allowed -- the child's
+        // filesystem path stays reachable via shared FS.
+        {
+            let ret_schema_str = read_schema_from_packet_meta(return_packet, &mut err);
+            if !ret_schema_str.is_null() && err.is_null() {
+                let ret_schema_c = parse_schema(ret_schema_str, &mut err);
+                libc::free(ret_schema_str as *mut c_void);
+                if err.is_null() && !ret_schema_c.is_null() {
+                    let rs = crate::cschema::CSchema::to_rust(ret_schema_c);
+                    let has_istream = crate::handle_scan::schema_contains_kind(
+                        &rs,
+                        crate::handle_scan::StreamFieldKind::IStream,
+                    );
+                    free_schema(ret_schema_c);
+                    if has_istream {
+                        set_errmsg(
+                            &mut err as *mut *mut c_char,
+                            &MorlocError::Other(
+                                "remote_call: result contains IStream, which cannot \
+                                 be returned from a cross-nexus call".into(),
+                            ),
+                        );
+                        libc::unlink(result_cache_filename);
+                        goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
+                    }
+                }
+            }
+            // Any parse failure on the return schema is deferred to the
+            // downstream reader -- validation is a policy check, not a
+            // structural correctness check. The `err` local exits scope
+            // right after this block, so we only need to release the
+            // owning pointer, not reset the local.
+            if !err.is_null() { libc::free(err as *mut c_void); }
         }
     }
 

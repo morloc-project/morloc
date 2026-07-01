@@ -441,11 +441,14 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
         // Inline BigInt: [size, value] = 16 bytes (C++ values always fit inline)
         return 16;
     }
-    if (schema->type == MORLOC_IFILE) {
-        // Look up the exact path length via the registry instead of
-        // reserving PATH_MAX per element. `if constexpr` mirrors the
-        // arithmetic guard in `to_voidstar`'s MORLOC_IFILE arm so the
-        // template still instantiates cleanly for record-type fallbacks.
+    if (schema->type == MORLOC_IFILE
+     || schema->type == MORLOC_OSTREAM
+     || schema->type == MORLOC_ISTREAM) {
+        // Stream-handle field: look up the exact suballoc cost via the
+        // registry (returns 8 + path_len for TAG_PATH, 0 for empty).
+        // `if constexpr` mirrors the arithmetic guard in `to_voidstar`'s
+        // MORLOC_IFILE arm so the template still instantiates cleanly
+        // for record-type fallbacks.
         if constexpr (std::is_arithmetic_v<Primitive>) {
             char* err = NULL;
             int64_t n = mlc_handle_path_len(static_cast<int64_t>(data), &err);
@@ -457,7 +460,7 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
             return schema->width + static_cast<size_t>(n);
         } else {
             throw std::runtime_error(
-                "get_shm_size: MORLOC_IFILE schema requires an arithmetic handle type"
+                "get_shm_size: stream-handle schema requires an arithmetic handle type"
             );
         }
     }
@@ -486,7 +489,10 @@ size_t get_shm_size(const Schema* schema, const std::vector<T>& data) {
             total_size += data.size() * elem_schema->width;
             break;
         case MORLOC_IFILE:
-            // Batched lookup amortises the registry lock across N handles.
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM:
+            // Batched suballoc-size lookup amortises the registry lock
+            // across N handles.
             if constexpr (std::is_same_v<T, int64_t>) {
                 char* err = NULL;
                 int64_t paths_total = mlc_handles_path_lens(
@@ -729,7 +735,9 @@ template<typename Primitive>
 void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
     if constexpr (std::is_arithmetic_v<Primitive>) {
         switch(schema->type) {
-            case MORLOC_IFILE: {
+            case MORLOC_IFILE:
+            case MORLOC_OSTREAM:
+            case MORLOC_ISTREAM: {
                 char* err = NULL;
                 if (mlc_write_handle_voidstar(
                         static_cast<int64_t>(data), dest, cursor, &err) != 0) {
@@ -783,8 +791,10 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::ve
     *cursor = static_cast<char*>(*cursor) + data.size() * elem_schema->width;
     char* start = (char*)rel2abs_cpp(result->data);
     size_t width = elem_schema->width;
-    // Batched IFile array write: one registry lock for all N handles.
-    if (elem_schema->type == MORLOC_IFILE) {
+    // Batched stream-handle array write: one registry lock for all N handles.
+    if (elem_schema->type == MORLOC_IFILE
+     || elem_schema->type == MORLOC_OSTREAM
+     || elem_schema->type == MORLOC_ISTREAM) {
         if constexpr (std::is_same_v<T, int64_t>) {
             char* err = NULL;
             if (mlc_write_handles_voidstar(
@@ -1099,10 +1109,15 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
         // convert to the C++ type so narrow concrete types (e.g. int for Int)
         // work correctly with wider morloc schemas (e.g. i8).
         switch(schema->type) {
-            case MORLOC_IFILE: {
+            case MORLOC_IFILE:
+            case MORLOC_OSTREAM:
+            case MORLOC_ISTREAM: {
                 char* err = NULL;
+                uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
+                             : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
+                             :                                    MLC_KIND_ISTREAM;
                 int64_t handle = mlc_read_handle_voidstar(
-                    data, base_ptr, MLC_KIND_IFILE, &err);
+                    data, base_ptr, kind, &err);
                 if (err || handle < 0) {
                     std::string msg = err ? err : "mlc_read_handle_voidstar failed";
                     free(err);
