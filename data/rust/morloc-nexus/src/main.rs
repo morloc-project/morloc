@@ -674,7 +674,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     // the packet was left unchanged and we keep our existing buffer.
     {
         extern "C" {
-            fn mlc_rewrite_packet_for_remote(
+            fn mlc_rewrite_packet_for_persistence(
                 packet: *const u8, packet_len: usize,
                 out_ptr: *mut *mut u8, out_len: *mut usize,
                 errmsg: *mut *mut c_char,
@@ -686,7 +686,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
             let mut rewritten_len: usize = 0;
             let mut rerr: *mut c_char = std::ptr::null_mut();
             let rc = unsafe {
-                mlc_rewrite_packet_for_remote(
+                mlc_rewrite_packet_for_persistence(
                     result_packet,
                     packet_size,
                     &mut rewritten_ptr,

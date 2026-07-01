@@ -1,10 +1,12 @@
 //! Schema-aware walker that finds stream-handle (`IFile` / `OStream` /
 //! `IStream`) fields inside a flattened voidstar payload.
 //!
-//! Used by the cross-nexus boundary code to (a) reject IStream in any
-//! position and OStream in argument position, and (b) rewrite intra-
-//! nexus `TAG_HANDLE` fields to portable `TAG_PATH` fields before the
-//! packet leaves the local SHM registry.
+//! Used at every persistence boundary -- SLURM egress, cache write --
+//! to (a) reject IStream in any position and OStream in argument
+//! position, (b) reject stdio-bound handles (whose validity is
+//! process-scoped), and (c) rewrite intra-nexus `TAG_HANDLE` fields
+//! to portable `TAG_PATH` fields before the packet leaves the local
+//! SHM registry.
 //!
 //! The walker operates on the buffer produced by `voidstar::flatten_to
 //! _buffer`: a contiguous `Vec<u8>` whose relptrs are payload-buffer-
@@ -272,6 +274,19 @@ pub fn rewrite_handles_to_paths(
                 field_start, e,
             ))
         })?;
+        // Stdio-bound handles are process-scoped; refuse to serialize
+        // them so a receiver never tries to "reopen stdout" in a
+        // different process where the semantics don't apply.
+        if path == crate::stream::STDIO_SENTINEL_STD
+            || path == crate::stream::STDIO_SENTINEL_ERR
+        {
+            return Err(MorlocError::Other(format!(
+                "handle at offset {} is bound to stdio (stdin/stdout/stderr); \
+                 stream handle bound to stdio cannot cross a persistence \
+                 boundary; materialize with `@save` first",
+                field_start,
+            )));
+        }
         let path_bytes = path.as_bytes();
         if path_bytes.is_empty() {
             unsafe {
@@ -307,14 +322,20 @@ pub fn rewrite_handles_to_paths(
 /// pass through unchanged. Returns a fresh `Vec<u8>` sized to the
 /// rewritten packet.
 ///
-/// Used at the SLURM boundary: intra-nexus bridges emit IFile fields
-/// in `TAG_HANDLE` form (fast, one slot per file per nexus); shipping
-/// a packet to a remote nexus needs the portable `TAG_PATH` form so
-/// the receiver can `mlc_open` locally.
+/// Used at every persistence boundary (SLURM egress, cache write):
+/// intra-nexus bridges emit stream-handle fields in `TAG_HANDLE` form
+/// (fast, bare slot id valid only in the current nexus's SHM registry);
+/// shipping a packet across a nexus lifetime -- to a remote nexus, or
+/// to an on-disk cache that will outlive the current process -- needs
+/// the portable `TAG_PATH` form so the receiver can `mlc_open` locally.
+///
+/// Stdio-bound handles are rejected with a typed error since their
+/// validity is process-scoped; the user must materialize with `@save`
+/// before serializing.
 ///
 /// Non-DATA / non-voidstar packets are returned unchanged so callers
 /// can apply this uniformly to a mixed stream of packet types.
-pub fn rewrite_data_packet_for_remote(
+pub fn rewrite_data_packet_for_persistence(
     packet: &[u8],
 ) -> Result<Vec<u8>, MorlocError> {
     use morloc_runtime_types::packet::{
@@ -344,11 +365,11 @@ pub fn rewrite_data_packet_for_remote(
         .checked_add(meta_len)
         .and_then(|n| n.checked_add(payload_len))
         .ok_or_else(|| MorlocError::Other(
-            "rewrite_data_packet_for_remote: header offset+length overflow".into(),
+            "rewrite_data_packet_for_persistence: header offset+length overflow".into(),
         ))?;
     if expected > packet.len() {
         return Err(MorlocError::Other(format!(
-            "rewrite_data_packet_for_remote: header claims {} bytes but packet has {}",
+            "rewrite_data_packet_for_persistence: header claims {} bytes but packet has {}",
             expected, packet.len(),
         )));
     }
@@ -358,7 +379,7 @@ pub fn rewrite_data_packet_for_remote(
 
     let schema_str = read_schema_from_meta(packet)?
         .ok_or_else(|| MorlocError::Other(
-            "rewrite_data_packet_for_remote: packet has no schema metadata".into(),
+            "rewrite_data_packet_for_persistence: packet has no schema metadata".into(),
         ))?;
     let schema = parse_schema(&schema_str)?;
 
@@ -382,7 +403,7 @@ pub fn rewrite_data_packet_for_remote(
     Ok(out)
 }
 
-/// C-ABI wrapper around [`rewrite_data_packet_for_remote`] for the
+/// C-ABI wrapper around [`rewrite_data_packet_for_persistence`] for the
 /// nexus binary, which doesn't link morloc-runtime as a Rust crate.
 ///
 /// On success sets `*out_ptr` to a `libc::malloc`'d buffer holding the
@@ -398,7 +419,7 @@ pub fn rewrite_data_packet_for_remote(
 /// pointers; `packet_len` must accurately size the readable region of
 /// `packet`.
 #[no_mangle]
-pub unsafe extern "C" fn mlc_rewrite_packet_for_remote(
+pub unsafe extern "C" fn mlc_rewrite_packet_for_persistence(
     packet: *const u8,
     packet_len: usize,
     out_ptr: *mut *mut u8,
@@ -412,13 +433,13 @@ pub unsafe extern "C" fn mlc_rewrite_packet_for_remote(
     if packet.is_null() || out_ptr.is_null() || out_len.is_null() {
         if !errmsg.is_null() {
             set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_rewrite_packet_for_remote: null pointer argument".into(),
+                "mlc_rewrite_packet_for_persistence: null pointer argument".into(),
             ));
         }
         return -1;
     }
     let src = std::slice::from_raw_parts(packet, packet_len);
-    match rewrite_data_packet_for_remote(src) {
+    match rewrite_data_packet_for_persistence(src) {
         Ok(rewritten) => {
             if rewritten.len() == packet_len && rewritten.as_slice() == src {
                 // No-op rewrite: caller keeps its buffer.
@@ -429,7 +450,7 @@ pub unsafe extern "C" fn mlc_rewrite_packet_for_remote(
             let buf = libc::malloc(rewritten.len()) as *mut u8;
             if buf.is_null() {
                 set_errmsg(errmsg, &MorlocError::Other(
-                    "mlc_rewrite_packet_for_remote: malloc failed".into(),
+                    "mlc_rewrite_packet_for_persistence: malloc failed".into(),
                 ));
                 return -1;
             }

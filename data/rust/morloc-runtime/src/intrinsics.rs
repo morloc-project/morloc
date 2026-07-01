@@ -957,7 +957,7 @@ pub unsafe extern "C" fn mlc_handle_pack_path(
 // TAG_HANDLE (the intra-nexus fast path -- bare slot id in the inline
 // 16-byte field, no suballoc), every kind returns 0. The cross-nexus
 // TAG_PATH rewrite happens at the SLURM boundary via
-// `handle_scan::rewrite_data_packet_for_remote`, not through the bridge
+// `handle_scan::rewrite_data_packet_for_persistence`, not through the bridge
 // codec. Returns -1 on error (kept for ABI parity with the earlier
 // variant).
 #[no_mangle]
@@ -1094,7 +1094,7 @@ pub unsafe extern "C" fn mlc_write_stream_field(
 ///
 /// Packets that cross a nexus boundary (SLURM egress in
 /// `slurm_ffi::remote_call`) are rewritten to `TAG_PATH` form by
-/// `handle_scan::rewrite_data_packet_for_remote` before they leave the
+/// `handle_scan::rewrite_data_packet_for_persistence` before they leave the
 /// local registry -- the boundary is a much better place to know
 /// "does the receiver share my SHM?" than every bridge marshal site.
 ///

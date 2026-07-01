@@ -1096,6 +1096,7 @@ uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
+uint8_t* make_data_indirection_packet(const char* dat_filename, const Schema* schema);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
 char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);

@@ -317,6 +317,32 @@ pub unsafe extern "C" fn make_mpk_data_packet(
     )
 }
 
+/// FILE-source indirection whose referenced file is itself a morloc
+/// data packet (`PACKET_FORMAT_DATA`). The outer packet's `compression`
+/// byte refers to the filename bytes (always NONE); the referenced
+/// file carries its own header + compression byte. Used by the cache
+/// and debug-dump writers to point at a content-addressed `.dat`
+/// sidecar without inlining its bytes.
+#[no_mangle]
+pub unsafe extern "C" fn make_data_indirection_packet(
+    dat_filename: *const c_char,
+    schema: *const CSchema,
+) -> *mut u8 {
+    if dat_filename.is_null() { return ptr::null_mut(); }
+    let filename = CStr::from_ptr(dat_filename);
+    let bytes = filename.to_bytes();
+    make_data_packet_with_schema(
+        bytes.as_ptr(),
+        bytes.len(),
+        schema,
+        PACKET_SOURCE_FILE,
+        PACKET_FORMAT_DATA,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS,
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn make_data_packet_from_mpk(
     mpk: *const c_char,
@@ -597,10 +623,10 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
             }
         }
         PACKET_SOURCE_FILE => {
+            let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len.min(4096));
+            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+            let filename = filename.trim_end_matches('\0');
             if format == PACKET_FORMAT_MSGPACK {
-                let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len.min(4096));
-                let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-                let filename = filename.trim_end_matches('\0');
                 match std::fs::read(filename) {
                     Ok(file_data) => {
                         match crate::mpack::unpack_with_schema(&file_data, &rs) {
@@ -613,6 +639,59 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                         ptr::null_mut()
                     }
                 }
+            } else if format == PACKET_FORMAT_DATA {
+                // Indirection: the file at `filename` is a complete
+                // morloc data packet. Tiered load mirrors mlc_load's
+                // paths but with strict error propagation -- a missing
+                // sidecar or corrupt payload surfaces to the caller
+                // rather than being consumed as an @load-style miss.
+                extern "C" {
+                    fn read_binary_file(
+                        filename: *const c_char, file_size: *mut usize,
+                        errmsg: *mut *mut c_char,
+                    ) -> *mut u8;
+                    fn load_morloc_data_file(
+                        path: *const c_char, data: *mut u8, data_size: usize,
+                        schema: *const CSchema, errmsg: *mut *mut c_char,
+                    ) -> *mut c_void;
+                }
+                let filename_cstr = match std::ffi::CString::new(filename) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        set_errmsg(errmsg, &MorlocError::Packet(
+                            "FILE+DATA payload has embedded NUL".into()
+                        ));
+                        return ptr::null_mut();
+                    }
+                };
+                // Fast path: uncompressed voidstar mmap'd straight into SHM.
+                match crate::cli::try_load_voidstar_packet_via_mmap(
+                    filename_cstr.as_ptr(), schema,
+                ) {
+                    Ok(Some(ptr)) => return ptr,
+                    Ok(None) => { /* fall through */ }
+                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+                }
+                // Fast path: compressed voidstar decompressed into SHM.
+                match crate::cli::try_load_compressed_voidstar_via_shm(
+                    filename_cstr.as_ptr(), schema,
+                ) {
+                    Ok(Some(ptr)) => return ptr,
+                    Ok(None) => { /* fall through */ }
+                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+                }
+                // Slow path: bulk read + generic dispatch.
+                let mut file_size: usize = 0;
+                let file_data = read_binary_file(
+                    filename_cstr.as_ptr(), &mut file_size, errmsg,
+                );
+                if file_data.is_null() {
+                    return ptr::null_mut();
+                }
+                load_morloc_data_file(
+                    filename_cstr.as_ptr(), file_data, file_size,
+                    schema, errmsg,
+                ) as *mut u8
             } else {
                 set_errmsg(errmsg, &MorlocError::Packet(
                     format!("Invalid format from file: 0x{:02x}", format)

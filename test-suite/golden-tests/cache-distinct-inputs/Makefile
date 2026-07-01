@@ -29,7 +29,7 @@ all:
 	$(call RUN,P)
 	$(call RUN,R)
 	$(call RUN,C)
-	echo "a_packets: $$(ls cache/a/*.packet 2>/dev/null | wc -l)" >> obs.txt
+	echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l)" >> obs.txt
 	echo "dats:      $$(ls cache/data/*.dat 2>/dev/null | wc -l)" >> obs.txt
 	cat obs.run.*.err > obs.err
 

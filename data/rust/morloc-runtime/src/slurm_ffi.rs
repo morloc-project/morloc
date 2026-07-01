@@ -381,7 +381,7 @@ pub unsafe extern "C" fn remote_call(
         fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut crate::cschema::CSchema;
         fn free_schema(schema: *mut crate::cschema::CSchema);
         fn get_morloc_data_packet_value(data: *const u8, schema: *const crate::cschema::CSchema, errmsg: *mut *mut c_char) -> *mut u8;
-        fn hash_voidstar(data: *const u8, schema: *const crate::cschema::CSchema, seed: u64, hash: *mut u64, errmsg: *mut *mut c_char) -> bool;
+        fn hash_voidstar(data: *const c_void, schema: *const crate::cschema::CSchema, seed: u64, errmsg: *mut *mut c_char) -> u64;
         fn mix(a: u64, b: u64) -> u64;
         fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
         fn check_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
@@ -474,8 +474,7 @@ pub unsafe extern "C" fn remote_call(
         arg_voidstars[i] = get_morloc_data_packet_value(*arg_packets.add(i), arg_schemas[i], &mut err);
         if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
 
-        let mut h: u64 = 0;
-        hash_voidstar(arg_voidstars[i], arg_schemas[i], DEFAULT_XXHASH_SEED, &mut h, &mut err);
+        let h = hash_voidstar(arg_voidstars[i] as *const c_void, arg_schemas[i], DEFAULT_XXHASH_SEED, &mut err);
         if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
         arg_hashes[i] = h;
 
@@ -518,7 +517,7 @@ pub unsafe extern "C" fn remote_call(
             // TAG_PATH so the child nexus can `mlc_open` locally.
             // No-op for non-VOIDSTAR payloads.
             let src_slice = std::slice::from_raw_parts(cached_arg_packets[i], file_size);
-            match crate::handle_scan::rewrite_data_packet_for_remote(src_slice) {
+            match crate::handle_scan::rewrite_data_packet_for_persistence(src_slice) {
                 Ok(rewritten) => {
                     if rewritten.len() != file_size
                         || rewritten.as_slice() != src_slice

@@ -2672,6 +2672,12 @@ pub fn shared_handle_path(handle: i64) -> Result<String, MorlocError> {
     }
 }
 
+/// Sentinel path for STDIN (IStream) / STDOUT (OStream). Matches the
+/// `-` convention shared by cat/sort/etc.
+pub const STDIO_SENTINEL_STD: &str = "-";
+/// Sentinel path for STDERR (OStream).
+pub const STDIO_SENTINEL_ERR: &str = "-2";
+
 /// `@stream :: IFile a -> <IO> IStream a`: open a fresh IStream slot
 /// at the same path as the given IFile handle. The two handles have
 /// independent cursors (the new IStream walks from `body_start`).
