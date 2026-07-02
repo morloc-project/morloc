@@ -14,6 +14,8 @@ mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod stdio_bridge;
+mod stdio_server;
 mod view;
 
 use dispatch::NexusConfig;
@@ -244,6 +246,12 @@ fn main() {
     // -- it existed only to bypass symbol shadowing by the rlib's static
     // copy of shinit, which is now absent.
     let (tmpdir, shm_basename) = process::init_shm();
+
+    // Start the stdio RPC server. Pools reach @stdin / @stdout /
+    // @stderr through this dedicated socket; the fork-side child fd
+    // hygiene installed in start_language_server takes fd 0/1 away
+    // from the pool so the nexus keeps its bytes clean.
+    stdio_server::start(&tmpdir);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();

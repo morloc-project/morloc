@@ -481,6 +481,39 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
     return h;
 }
 
+// @stdin / @stdout / @stderr: nullary intrinsics. Element schema is
+// rendered from the parsed Schema and passed to the runtime; the nexus
+// owns fd 0/1/2 and services @next / @write over the RPC socket.
+inline int64_t _mlc_open_stdin(Schema* schema) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) throw std::runtime_error("_mlc_open_stdin: schema_to_string NULL");
+    int64_t h = mlc_open_stdin(s, &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+inline int64_t _mlc_open_stdout(Schema* schema) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) throw std::runtime_error("_mlc_open_stdout: schema_to_string NULL");
+    int64_t h = mlc_open_stdout(s, &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+inline int64_t _mlc_open_stderr(Schema* schema) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) throw std::runtime_error("_mlc_open_stderr: schema_to_string NULL");
+    int64_t h = mlc_open_stderr(s, &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
 // @write: serialize T to voidstar and emit one sub-packet.
 template <typename T>
 inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {

@@ -595,6 +595,23 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
     // Clear any errmsg from get_morloc_data_packet_error_message
     clear_errmsg(errmsg);
 
+    // If the packet body is zstd-compressed, expand it to a heap Vec
+    // and re-enter with the decompressed packet. This is the shared
+    // entry point for stdio-received sub-packets (the file-OStream
+    // reader has its own compression branch in
+    // `materialize_subpacket_at_offset` and never comes through here
+    // for compressed data).
+    let compression = (*header).command.data.compression;
+    if compression == morloc_runtime_types::packet::PACKET_COMPRESSION_ZSTD {
+        let packet_size = 32 + (*header).offset as usize + (*header).length as usize;
+        let packet_bytes = std::slice::from_raw_parts(data, packet_size);
+        let decompressed = match morloc_runtime_types::compression::decompress_packet(packet_bytes) {
+            Ok(v) => v,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        };
+        return get_morloc_data_packet_value(decompressed.as_ptr(), schema, errmsg);
+    }
+
     let rs = CSchema::to_rust(schema);
     let source = (*header).command.data.source;
     let format = (*header).command.data.format;

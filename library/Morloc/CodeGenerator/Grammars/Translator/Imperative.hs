@@ -172,6 +172,12 @@ data IExpr
   | IIntrinsicFlush IExpr
       -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
       --   to be emitted as a sub-packet. Single-argument: handle expr.
+  | IIntrinsicStdin Int
+      -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `a`.
+  | IIntrinsicStdout Int
+      -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `a`.
+  | IIntrinsicStderr Int
+      -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `a`.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -840,6 +846,21 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
     }
+-- @stdin / @stdout / @stderr: nullary intrinsics. The runtime enforces
+-- singleton opens per stdio kind; codegen just emits the call with the
+-- element schema.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStdin (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg (IIntrinsicStdin sid) }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStdout (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg (IIntrinsicStdout sid) }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStderr (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg (IIntrinsicStderr sid) }
 -- @ifile_walk: unified IFile pattern walker.
 -- Args: [pathDocs, handleDocs, runtimeArg0, runtimeArg1, ...].
 -- Express.hs assembles the path string and runtime args according to

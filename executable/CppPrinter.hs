@@ -140,6 +140,12 @@ printExpr (IIntrinsicConcat paths dest) =
   [idoc|_mlc_concat(#{printExpr paths}, #{printExpr dest})|]
 printExpr (IIntrinsicFlush h) =
   [idoc|_mlc_flush(#{printExpr h})|]
+printExpr (IIntrinsicStdin sid) =
+  [idoc|_mlc_open_stdin(mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicStdout sid) =
+  [idoc|_mlc_open_stdout(mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicStderr sid) =
+  [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
 -- float-typed per C99 but convert losslessly to double; non-default Real

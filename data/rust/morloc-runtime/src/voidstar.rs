@@ -130,6 +130,120 @@ fn adjust_relptrs_inner(
     }
 }
 
+// ── shift_buffer_relptrs ───────────────────────────────────────────────────
+
+/// Add `delta` to every relptr slot inside a self-contained voidstar
+/// buffer, without dereferencing through `rel2abs`. The buffer's
+/// relptrs are pure offsets from `buf_base` (i.e. `vol_idx = 0` in the
+/// encoded form); an intermediate `rel2abs` on them would land in the
+/// primary SHM volume rather than in the buffer, so any descent must
+/// use buffer-local pointer arithmetic (`buf_base + offset`).
+///
+/// Use this instead of `adjust_relptrs` when the target of the shift
+/// is not a fresh SHM allocation but an in-place move within a Vec /
+/// per-slot write buffer -- e.g. the write-buffer compaction step and
+/// the per-element blob relocation inside `append_one_element`.
+pub unsafe fn shift_buffer_relptrs(
+    buf_base: *mut u8,
+    field_offset: usize,
+    schema: &Schema,
+    delta: isize,
+) -> Result<(), MorlocError> {
+    let mut env: RecurEnv = Vec::new();
+    shift_buffer_relptrs_with_env(buf_base, field_offset, schema, delta, &mut env)
+}
+
+unsafe fn shift_buffer_relptrs_with_env(
+    buf_base: *mut u8,
+    field_offset: usize,
+    schema: &Schema,
+    delta: isize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| {
+        shift_buffer_relptrs_inner(buf_base, field_offset, schema, delta, env)
+    })
+}
+
+unsafe fn shift_buffer_relptrs_inner(
+    buf_base: *mut u8,
+    field_offset: usize,
+    schema: &Schema,
+    delta: isize,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    match schema.serial_type {
+        SerialType::Int => {
+            let size = *(buf_base.add(field_offset) as *const usize);
+            if size > 1 {
+                let relptr = &mut *(
+                    buf_base.add(field_offset + std::mem::size_of::<usize>())
+                        as *mut RelPtr
+                );
+                *relptr += delta;
+                // BigInt limbs are a fixed-width u64 array; no nested relptrs.
+            }
+        }
+        SerialType::String | SerialType::Array => {
+            let arr = &mut *(buf_base.add(field_offset) as *mut Array);
+            if arr.size == 0 || arr.data <= 0 {
+                return Ok(());
+            }
+            arr.data += delta;
+            if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
+                let elem_schema = &schema.parameters[0];
+                let w = elem_schema.width;
+                let base_off = arr.data as usize;
+                for i in 0..arr.size {
+                    shift_buffer_relptrs_with_env(
+                        buf_base, base_off + i * w, elem_schema, delta, env,
+                    )?;
+                }
+            }
+        }
+        SerialType::Optional => {
+            if schema.parameters.is_empty() { return Ok(()); }
+            let relptr_slot = &mut *(buf_base.add(field_offset) as *mut RelPtr);
+            if *relptr_slot == shm::RELNULL {
+                return Ok(());
+            }
+            *relptr_slot += delta;
+            let inner_offset = *relptr_slot as usize;
+            shift_buffer_relptrs_with_env(
+                buf_base, inner_offset, &schema.parameters[0], delta, env,
+            )?;
+        }
+        SerialType::Tuple | SerialType::Map => {
+            for i in 0..schema.parameters.len() {
+                let inner_offset = field_offset + schema.offsets[i];
+                shift_buffer_relptrs_with_env(
+                    buf_base, inner_offset, &schema.parameters[i], delta, env,
+                )?;
+            }
+        }
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            use morloc_runtime_types::stream_handle as sh;
+            let field = buf_base.add(field_offset) as *mut u8;
+            if sh::read_tag(field) == sh::TAG_PATH {
+                let payload = sh::read_payload(field);
+                if payload != sh::RELNULL_PAYLOAD {
+                    sh::write_field(
+                        field, sh::TAG_PATH, payload.wrapping_add(delta as u64),
+                    );
+                }
+            }
+        }
+        SerialType::Recur => {
+            let name = schema.name.as_deref().unwrap_or("");
+            let target_ptr = recur::lookup(env, name)?;
+            let target = &*target_ptr;
+            shift_buffer_relptrs_inner(buf_base, field_offset, target, delta, env)?;
+        }
+        _ => {} // primitives have no relptrs
+    }
+    Ok(())
+}
+
 // ── remap_volume_indices ───────────────────────────────────────────────────
 //
 // Not currently used by any live load path: the production loaders

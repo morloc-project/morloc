@@ -576,6 +576,91 @@ pub unsafe extern "C" fn mlc_open_ostream(
     }
 }
 
+/// `@stdin :: <IO> IStream a` -- typed intrinsic. Element schema is
+/// passed by the codegen from `T`. Nexus owns fd 0; this call
+/// registers a slot that routes `mlc_next` through the pool-nexus
+/// RPC socket. At most one `@stdin` per nexus (enforced via CAS on
+/// the registry's stdin claim slot).
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_stdin(
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    open_stdio_ffi(
+        schema_str,
+        morloc_runtime_types::packet::MLC_KIND_ISTREAM,
+        crate::stream::STDIO_KIND_STDIN,
+        "mlc_open_stdin",
+        errmsg,
+    )
+}
+
+/// `@stdout :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 1;
+/// `mlc_write` routes through the pool-nexus RPC socket. At most one
+/// `@stdout` per nexus.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_stdout(
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    open_stdio_ffi(
+        schema_str,
+        morloc_runtime_types::packet::MLC_KIND_OSTREAM,
+        crate::stream::STDIO_KIND_STDOUT,
+        "mlc_open_stdout",
+        errmsg,
+    )
+}
+
+/// `@stderr :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 2;
+/// `mlc_write` routes through the pool-nexus RPC socket. At most one
+/// `@stderr` per nexus.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_stderr(
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    open_stdio_ffi(
+        schema_str,
+        morloc_runtime_types::packet::MLC_KIND_OSTREAM,
+        crate::stream::STDIO_KIND_STDERR,
+        "mlc_open_stderr",
+        errmsg,
+    )
+}
+
+/// Shared FFI shim behind the three `mlc_open_std{in,out,err}` entry
+/// points. Validates the schema string and dispatches to
+/// `stream::open_stdio` with the appropriate kind pair.
+unsafe fn open_stdio_ffi(
+    schema_str: *const c_char,
+    kind: u8,
+    stdio_kind: u8,
+    fn_name: &str,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(format!(
+            "{}: null schema", fn_name,
+        )));
+        return -1;
+    }
+    let s_str = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "{}: schema is not valid UTF-8", fn_name,
+            )));
+            return -1;
+        }
+    };
+    match crate::stream::open_stdio(kind, stdio_kind, s_str) {
+        Ok(h) => h,
+        Err(e) => { set_errmsg(errmsg, &e); -1 }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mlc_close(
     handle: i64,
@@ -1337,4 +1422,107 @@ pub unsafe extern "C" fn mlc_read_handle_voidstar(
     errmsg: *mut *mut c_char,
 ) -> i64 {
     mlc_read_stream_field(arr, base_ptr, kind, errmsg)
+}
+
+// ── stdio-server bridge FFI ────────────────────────────────────────────────
+
+/// Return the `STDIO_KIND_*` byte for a stdio-bound slot. Used by the
+/// nexus stdio server to route a `WRITE_STDIO` request to fd 1 or fd 2.
+///
+/// Returns 0 on success (kind byte written to `*kind_out`), -1 if the
+/// handle is not stdio-bound (no errmsg), or a positive error code
+/// with `*errmsg` set for any other failure.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_stdio_slot_kind(
+    handle: i64,
+    kind_out: *mut u8,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_handle_stdio_kind(handle) {
+        Ok(Some(k)) => { *kind_out = k; 0 }
+        Ok(None) => -1,
+        Err(e) => { set_errmsg(errmsg, &e); 1 }
+    }
+}
+
+/// Build a MORLOC_STREAM_PACKET prefix (32-byte header + SCHEMA_STRING
+/// metadata block) from a stdio OStream slot's cached element schema.
+/// Used by the nexus stdio server on the first `WRITE_STDIO` per slot
+/// to emit the stream header before any sub-packet bytes flow.
+///
+/// On success returns 0 and sets `*buf_out` to a libc::malloc-owned
+/// buffer of `*len_out` bytes; caller frees via `libc::free`. Returns
+/// non-zero and sets `*errmsg` on failure.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_stdio_build_stream_header(
+    handle: i64,
+    buf_out: *mut *mut u8,
+    len_out: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    *buf_out = ptr::null_mut();
+    *len_out = 0;
+    let schema_str = match crate::stream::shared_handle_schema_str(handle) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+    };
+    let schema = match morloc_runtime_types::schema::parse_schema(&schema_str) {
+        Ok(s) => s,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "mlc_stdio_build_stream_header: parse_schema({:?}): {}",
+                schema_str, e,
+            )));
+            return 1;
+        }
+    };
+    let bytes = morloc_runtime_types::packet::make_stream_header_block(&schema);
+    let n = bytes.len();
+    let dst = libc::malloc(n) as *mut u8;
+    if dst.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_stdio_build_stream_header: malloc failed".into(),
+        ));
+        return 1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, n);
+    *buf_out = dst;
+    *len_out = n;
+    0
+}
+
+/// Return a stdio slot's cached element-schema string as a
+/// libc::malloc'd NUL-terminated buffer. Used by the nexus stdio
+/// server to validate that an incoming STREAM_PACKET on stdin
+/// commits to the same element type the opener declared.
+///
+/// Returns 0 on success; caller frees `*out_buf` via libc::free.
+/// Returns non-zero and sets errmsg on failure.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_stdio_slot_schema(
+    handle: i64,
+    out_buf: *mut *mut c_char,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    *out_buf = ptr::null_mut();
+    let schema_str = match crate::stream::shared_handle_schema_str(handle) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+    };
+    let bytes = schema_str.as_bytes();
+    let n = bytes.len();
+    let dst = libc::malloc(n + 1) as *mut c_char;
+    if dst.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_stdio_slot_schema: malloc failed".into(),
+        ));
+        return 1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, dst, n);
+    *dst.add(n) = 0;
+    *out_buf = dst;
+    0
 }

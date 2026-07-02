@@ -1964,6 +1964,42 @@ unsafe fn morloc_eval_r(
             ptr::write_bytes(dest, 0, width);
         }
 
+        MorlocExpressionType::Stdin
+        | MorlocExpressionType::Stdout
+        | MorlocExpressionType::Stderr => {
+            extern "C" {
+                fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+                fn mlc_open_stdout(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+                fn mlc_open_stderr(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+                fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
+            }
+            use morloc_runtime_types::stream_handle as sh;
+            let schema_cstr = schema_to_string(schema);
+            if schema_cstr.is_null() {
+                return Err(MorlocError::Other(
+                    "@stdin/@stdout/@stderr: schema_to_string returned NULL".into(),
+                ));
+            }
+            let mut err: *mut c_char = ptr::null_mut();
+            let handle = match (*expr).etype {
+                MorlocExpressionType::Stdin  => mlc_open_stdin (schema_cstr, &mut err),
+                MorlocExpressionType::Stdout => mlc_open_stdout(schema_cstr, &mut err),
+                _                            => mlc_open_stderr(schema_cstr, &mut err),
+            };
+            libc::free(schema_cstr as *mut c_void);
+            if handle < 0 {
+                let msg = if !err.is_null() {
+                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+                    libc::free(err as *mut c_void);
+                    m
+                } else {
+                    "mlc_open_std* returned -1 without errmsg".to_string()
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+        }
+
         MorlocExpressionType::Flush => {
             extern "C" {
                 fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;

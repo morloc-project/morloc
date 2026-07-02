@@ -125,6 +125,12 @@ main = do
       , golden "bracket-accessors-ifile" "bracket-accessors-ifile"
       , golden "ifile-array-cross-pool" "ifile-array-cross-pool"
 
+      , golden "stdio-roundtrip" "stdio-roundtrip"
+      , golden "stdio-single-open" "stdio-single-open"
+      , golden "stdio-both-writers" "stdio-both-writers"
+      , golden "stdio-filter" "stdio-filter"
+      , golden "remote-streaming-consolidated" "remote-streaming-consolidated"
+
       , golden "native-recursive-illegal" "native-recursive-illegal"
       , golden "native-recursive-mixed" "native-recursive-mixed"
       , golden "native-recursive-record" "native-recursive-record"

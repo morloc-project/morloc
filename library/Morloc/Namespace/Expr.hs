@@ -384,6 +384,15 @@ data Intrinsic
                     -- buffer. Useful for tests that need deterministic
                     -- packet boundaries and for user code that wants to
                     -- make progress visible to concurrent readers.
+  | IntrStdin       -- ^ @stdin :: <IO> IStream a@ -- nullary intrinsic
+                    -- that opens process stdin as an IStream. The nexus is
+                    -- the sole owner of fd 0; @next routes through the
+                    -- pool-nexus RPC socket. At most one @stdin per nexus.
+  | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
+                    -- process stdout as an OStream. @write routes through
+                    -- the nexus. At most one @stdout per nexus.
+  | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
+                    -- @stdout for stderr.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -421,6 +430,9 @@ intrinsicName IntrWrite = "write"
 intrinsicName IntrAppend = "append"
 intrinsicName IntrConcat = "concat"
 intrinsicName IntrFlush = "flush"
+intrinsicName IntrStdin = "stdin"
+intrinsicName IntrStdout = "stdout"
+intrinsicName IntrStderr = "stderr"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
@@ -451,6 +463,9 @@ parseIntrinsic "write" = Just IntrWrite
 parseIntrinsic "append" = Just IntrAppend
 parseIntrinsic "concat" = Just IntrConcat
 parseIntrinsic "flush" = Just IntrFlush
+parseIntrinsic "stdin" = Just IntrStdin
+parseIntrinsic "stdout" = Just IntrStdout
+parseIntrinsic "stderr" = Just IntrStderr
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -479,6 +494,9 @@ intrinsicArity IntrWrite = 3
 intrinsicArity IntrAppend = 1
 intrinsicArity IntrConcat = 2
 intrinsicArity IntrFlush = 1
+intrinsicArity IntrStdin = 0
+intrinsicArity IntrStdout = 0
+intrinsicArity IntrStderr = 0
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

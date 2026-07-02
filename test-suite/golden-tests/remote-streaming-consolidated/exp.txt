@@ -1,0 +1,18 @@
+=== tuples ===
+"abbcccdde:15"
+=== optional ===
+60
+=== empty ===
+0
+=== compression L1 ===
+55
+=== compression L3 ===
+55
+=== compression L7 ===
+55
+=== handles ===
+600
+=== oversize ===
+1275
+=== file cross-invocation ===
+550

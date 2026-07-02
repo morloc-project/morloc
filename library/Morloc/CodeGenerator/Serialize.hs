@@ -340,7 +340,8 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrNext, IntrStream,
-                     IntrWrite, IntrAppend, IntrConcat, IntrFlush] = do
+                     IntrWrite, IntrAppend, IntrConcat, IntrFlush,
+                     IntrStdin, IntrStdout, IntrStderr] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
           es'' <- unpackDataArgIfNeeded m intr es'
@@ -511,6 +512,17 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @stdin / @stdout / @stderr: schema is the element type. The
+    -- result type is `<IO> (IStream a)` or `<IO> (OStream a)`; peel
+    -- the effect wrap and the handle head to get `a`.
+    intrinsicSchema m intr tf _
+      | intr `elem` [IntrStdin, IntrStdout, IntrStderr] = do
+          let peel (EffectF _ inner) = peel inner
+              peel (AppF _ (a : _)) = a
+              peel other = other
+              dataType = peel tf
+          ast <- Serial.makeSerialAST m lang dataType
+          return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ _ _ _ = return Nothing
 
     -- Extract (Handle-tvar, element-tf) from the result type of `@open`.

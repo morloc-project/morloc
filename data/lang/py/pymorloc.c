@@ -2887,6 +2887,43 @@ error:
     return NULL;
 }
 
+// _mlc_open_stdin/stdout/stderr(schema_str) -> handle
+// Nullary intrinsics that bind stdio to a typed stream handle. The
+// nexus is the sole owner of fd 0/1/2; these register a slot in the
+// SHM registry and route @next / @write through the pool-nexus RPC.
+static PyObject* pybinding__mlc_open_stdin(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_stdin, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_open_stdout(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_stdout, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_open_stderr(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_stderr, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
 // _mlc_write(schema_str, level, value_obj, handle) -> None
 // value_obj is serialised to voidstar via to_voidstar before being
 // passed to the runtime.
@@ -3046,6 +3083,9 @@ static PyMethodDef Methods[] = {
     {"mlc_next", pybinding__mlc_next, METH_VARARGS, "Materialise an IStream's current sub-packet and advance the cursor"},
     {"mlc_stream", pybinding__mlc_stream, METH_VARARGS, "Derive an IStream handle from an open IFile handle"},
     {"mlc_open_ostream", pybinding__mlc_open_ostream, METH_VARARGS, "Open a fresh OStream handle for the given schema + path"},
+    {"mlc_open_stdin",  pybinding__mlc_open_stdin,  METH_VARARGS, "Open @stdin :: IStream a as a typed handle (nullary)"},
+    {"mlc_open_stdout", pybinding__mlc_open_stdout, METH_VARARGS, "Open @stdout :: OStream a as a typed handle (nullary)"},
+    {"mlc_open_stderr", pybinding__mlc_open_stderr, METH_VARARGS, "Open @stderr :: OStream a as a typed handle (nullary)"},
     {"mlc_write", pybinding__mlc_write, METH_VARARGS, "Emit one sub-packet of [a] to an OStream handle"},
     {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},

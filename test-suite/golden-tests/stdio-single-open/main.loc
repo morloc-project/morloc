@@ -1,0 +1,63 @@
+-- Uniqueness (CAS-per-kind) and refusal guards on stdio.
+--
+--   * `twoStdin`, `twoStdout`, `twoStderr` -- second open of the same
+--     stdio kind hits the SHM claim CAS and errors.
+--   * `reopenAfterClose` -- @close releases the claim, so a subsequent
+--     open of the same kind succeeds.
+--   * `allThreeAtOnce` -- the three claim slots are independent.
+--   * `openDev{Stdin,Stdout,Stderr}` -- `@open` on the `/dev/std*`
+--     paths is refused with an error pointing at the intrinsic
+--     (otherwise a naive user would race the nexus's own fd 0/1/2).
+
+module main
+  ( twoStdin
+  , twoStdout
+  , twoStderr
+  , reopenAfterClose
+  , allThreeAtOnce
+  , openDevStdin
+  , openDevStdout
+  , openDevStderr
+  )
+
+import root-py
+
+twoStdin :: <IO> (IStream Int)
+twoStdin = do
+  @stdin :: <IO> IStream Int
+  @stdin :: <IO> IStream Int
+
+twoStdout :: <IO> (OStream Int)
+twoStdout = do
+  @stdout :: <IO> OStream Int
+  @stdout :: <IO> OStream Int
+
+twoStderr :: <IO> (OStream Int)
+twoStderr = do
+  @stderr :: <IO> OStream Int
+  @stderr :: <IO> OStream Int
+
+reopenAfterClose :: <IO> ()
+reopenAfterClose = do
+  s1 <- @stdin :: <IO> IStream Int
+  @close s1
+  s2 <- @stdin :: <IO> IStream Int
+  @close s2
+
+allThreeAtOnce :: <IO> ()
+allThreeAtOnce = do
+  i <- @stdin :: <IO> IStream Int
+  o <- @stdout :: <IO> OStream Int
+  e <- @stderr :: <IO> OStream Int
+  @close i
+  @close o
+  @close e
+
+openDevStdin :: <IO> (IStream Int)
+openDevStdin = @open "/dev/stdin" :: <IO> IStream Int
+
+openDevStdout :: <IO> (OStream Int)
+openDevStdout = @open "/dev/stdout" :: <IO> OStream Int
+
+openDevStderr :: <IO> (OStream Int)
+openDevStderr = @open "/dev/stderr" :: <IO> OStream Int

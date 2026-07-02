@@ -131,6 +131,9 @@ data NexusExpr
   | AppendX   Text NexusExpr        -- element schema, path expr
   | ConcatX   NexusExpr NexusExpr   -- paths [Str], dest Str
   | FlushX    NexusExpr             -- handle expr -> () (force buffer flush)
+  | StdinX    Text                  -- element schema (a) -- @stdin :: <IO> IStream a
+  | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
+  | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -679,18 +682,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> toNexusExpr levelE
         <*> toNexusExpr valE
         <*> toNexusExpr handleE
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) = do
-      -- Peel <IO> and the OStream/IFile/IStream head to get the element
-      -- type, then emit its schema string.
-      let peel (EffectT _ inner) = peel inner
-          peel (AppT _ (a : _)) = a
-          peel ot = ot
-          elemT = peel t
-      AppendX <$> type2schema elemT <*> toNexusExpr pathE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
+      AppendX <$> type2schema (peelHandleElemT t) <*> toNexusExpr pathE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
       ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
       FlushX <$> toNexusExpr handle
+    -- @stdin / @stdout / @stderr: nullary. Result type is
+    -- <IO> IStream a / <IO> OStream a; peel the effect and the head
+    -- to get the element type, then serialise its schema.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
+      StdinX <$> type2schema (peelHandleElemT t)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
+      StdoutX <$> type2schema (peelHandleElemT t)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
+      StderrX <$> type2schema (peelHandleElemT t)
     -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
     -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
     -- path normally constructs IFileWalkX directly from PatCall +
@@ -778,6 +784,13 @@ checkRealBounds i (RealFinite v) s = case s of
               "Float literal " <> pretty (show v)
               <> " overflows Float64 (|x| > 1.8e308)"
 checkRealBounds _ _ _ = return ()
+
+-- | Strip a leading `<IO>` and one `AppT` head to reach the element
+-- type carried by an `IStream a` / `OStream a` / `IFile a` result.
+peelHandleElemT :: Type -> Type
+peelHandleElemT (EffectT _ inner) = peelHandleElemT inner
+peelHandleElemT (AppT _ (a : _)) = a
+peelHandleElemT other = other
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
@@ -1932,6 +1945,21 @@ exprToJson (FlushX handle) =
   jsonObj
     [ ("tag", jsonStr "flush")
     , ("handle", exprToJson handle)
+    ]
+exprToJson (StdinX schema) =
+  jsonObj
+    [ ("tag", jsonStr "stdin")
+    , ("schema", jsonStr schema)
+    ]
+exprToJson (StdoutX schema) =
+  jsonObj
+    [ ("tag", jsonStr "stdout")
+    , ("schema", jsonStr schema)
+    ]
+exprToJson (StderrX schema) =
+  jsonObj
+    [ ("tag", jsonStr "stderr")
+    , ("schema", jsonStr schema)
     ]
 exprToJson (OptX schema child) =
   jsonObj

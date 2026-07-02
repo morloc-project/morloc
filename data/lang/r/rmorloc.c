@@ -2179,6 +2179,45 @@ SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     return result;
 }
 
+// @stdin / @stdout / @stderr :: <IO> Handle T -- nullary intrinsics.
+// Nexus owns fd 0/1/2; the runtime routes @next / @write through the
+// pool-nexus RPC socket.
+SEXP morloc_mlc_open_stdin(SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_open_stdin: schema must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t h = R_TRY(mlc_open_stdin, schema_str);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)h;
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_mlc_open_stdout(SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_open_stdout: schema must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t h = R_TRY(mlc_open_stdout, schema_str);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)h;
+    UNPROTECT(1);
+    return result;
+}
+
+SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_ERROR("mlc_open_stderr: schema must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t h = R_TRY(mlc_open_stderr, schema_str);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)h;
+    UNPROTECT(1);
+    return result;
+}
+
 // @write: serialise value to voidstar, emit one sub-packet.
 SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
@@ -3347,6 +3386,9 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_next", (DL_FUNC) &morloc_mlc_next, 2},
         {"morloc_mlc_stream", (DL_FUNC) &morloc_mlc_stream, 1},
         {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},
+        {"morloc_mlc_open_stdin",   (DL_FUNC) &morloc_mlc_open_stdin,   1},
+        {"morloc_mlc_open_stdout",  (DL_FUNC) &morloc_mlc_open_stdout,  1},
+        {"morloc_mlc_open_stderr",  (DL_FUNC) &morloc_mlc_open_stderr,  1},
         {"morloc_mlc_write", (DL_FUNC) &morloc_mlc_write, 4},
         {"morloc_mlc_append", (DL_FUNC) &morloc_mlc_append, 2},
         {"morloc_mlc_concat", (DL_FUNC) &morloc_mlc_concat, 2},

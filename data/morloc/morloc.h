@@ -1487,6 +1487,13 @@ int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 // files via sendfile, exploiting the stream-packet concat invariant.
 // The dest file is created with a merged final footer.
 int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
+// @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
+// sole owner of fd 0/1/2; these register slots that route mlc_next /
+// mlc_write through the pool-nexus RPC socket. At most one open per
+// stdio kind per nexus (enforced by CAS in the shared registry).
+int64_t mlc_open_stdin (const char* schema_str, ERRMSG);
+int64_t mlc_open_stdout(const char* schema_str, ERRMSG);
+int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
 int32_t mlc_write(uint8_t level, int64_t handle,
                   const void* payload_voidstar, ERRMSG);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);

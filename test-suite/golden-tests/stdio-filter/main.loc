@@ -1,0 +1,56 @@
+-- The canonical Unix filter shape: read `[Int]` sub-packets from
+-- `@stdin`, transform each element, write the transformed sub-packet
+-- to `@stdout`, in one program run. Exercises both stdio kinds
+-- concurrently on the same slot registry and the same nexus RPC
+-- socket, without the two channels serialising against each other.
+--
+-- `producer` writes a fixed sequence to `@stdout` and closes.
+-- `doubler` reads three sub-packets from `@stdin`, doubles each
+-- element, writes each transformed sub-packet to `@stdout`, closes.
+-- `checkSum` reads three sub-packets from `@stdin` and returns the
+-- sum of all elements.
+--
+-- Harness: `producer | doubler | checkSum` should yield
+--   (1+2+3+4+5+6+7+8+9+10) * 2  =  110.
+
+module main (producer, doubler, checkSum)
+
+import root-py
+
+sumList :: [Int] -> Int
+sumList xs = fold (+) 0 xs
+
+doubleList :: [Int] -> [Int]
+doubleList xs = map (\x -> x * 2) xs
+
+producer :: <IO> ()
+producer = do
+  o <- @stdout :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @flush o
+  @write 0 [4, 5, 6] o
+  @flush o
+  @write 0 [7, 8, 9, 10] o
+  @close o
+
+doubler :: <IO> ()
+doubler = do
+  s <- @stdin  :: <IO> IStream Int
+  o <- @stdout :: <IO> OStream Int
+  xs1 <- @next s
+  @write 0 (doubleList xs1) o
+  @flush o
+  xs2 <- @next s
+  @write 0 (doubleList xs2) o
+  @flush o
+  xs3 <- @next s
+  @write 0 (doubleList xs3) o
+  @close o
+
+checkSum :: <IO> Int
+checkSum = do
+  s <- @stdin :: <IO> IStream Int
+  xs1 <- @next s
+  xs2 <- @next s
+  xs3 <- @next s
+  sumList xs1 + sumList xs2 + sumList xs3

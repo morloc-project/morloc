@@ -1,0 +1,22 @@
+-- Concurrent @stdout and @stderr use. Independent SHM claim slots
+-- per stdio kind and independent nexus-side mutexes mean the two
+-- channels don't serialize against each other.
+--
+-- morloc does NOT silently redirect fd 0 / 1 / 2 in pool children.
+-- Pool `sys.stdin.read()` / `std::cout` / `print(...)` reach the
+-- user's terminal byte-for-byte, sharing the fd with any @stdin /
+-- @stdout / @stderr the program opens. Corruption is the user's
+-- problem.
+
+module main (dataAndLog)
+
+import root-py
+
+dataAndLog :: <IO> ()
+dataAndLog = do
+  o <- @stdout :: <IO> OStream Int
+  e <- @stderr :: <IO> OStream Str
+  @write 0 [100, 200, 300] o
+  @close o
+  @write 0 ["started", "midpoint", "done"] e
+  @close e

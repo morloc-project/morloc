@@ -1307,6 +1307,20 @@ intrinsicTypeG g IntrStream [argT] =
 intrinsicTypeG g IntrAppend _ =
   let (g', appendType) = newvar "append_" g
   in (g', EffectU ioEffectSet appendType)
+-- @stdin / @stdout / @stderr: nullary intrinsics that produce a
+-- typed stream handle. Element type is fixed by the user's ascription
+-- (e.g. `@stdin :: <IO> IStream Int`); we mint the handle head here
+-- and leave the element type as a fresh existential the ascription
+-- unifies against.
+intrinsicTypeG g IntrStdin _ =
+  let (g', a) = newvar "stdin_a" g in
+  (g', EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
+intrinsicTypeG g IntrStdout _ =
+  let (g', a) = newvar "stdout_a" g in
+  (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+intrinsicTypeG g IntrStderr _ =
+  let (g', a) = newvar "stderr_a" g in
+  (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 intrinsicTypeG g intr _ = (g, intrinsicType intr)
 
 -- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
@@ -1352,6 +1366,14 @@ intrinsicType IntrFlush = EffectU ioEffectSet BT.unitU
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
+-- IntrStdin/Stdout/Stderr flow through intrinsicTypeG (fresh existential
+-- element type resolved by the user's inline ascription).
+intrinsicType IntrStdin =
+  error "intrinsicType: IntrStdin must be typed via intrinsicTypeG (polymorphic element type)"
+intrinsicType IntrStdout =
+  error "intrinsicType: IntrStdout must be typed via intrinsicTypeG (polymorphic element type)"
+intrinsicType IntrStderr =
+  error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
 -- it never appears as a user-facing intrinsic so no type rule is needed.
 intrinsicType IntrIFileWalk =

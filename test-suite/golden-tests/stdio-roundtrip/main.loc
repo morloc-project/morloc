@@ -1,0 +1,35 @@
+-- End-to-end stdio smoke test. `produce` writes three sub-packets of
+-- `Int` to `@stdout`; `consume` reads sub-packets off `@stdin` and
+-- sums their elements. Piping produce -> consume validates the whole
+-- RPC path: nexus emits a STREAM_PACKET header + sub-packets on fd 1,
+-- reader nexus consumes the same wire format on fd 0.
+--
+-- We do NOT check byte-for-byte equality of two produce runs because
+-- StreamDiag carries per-write timestamps and pid in the temp footer;
+-- those differ between runs by design. Structural equality (element
+-- sums) is the invariant that matters.
+
+module main (produce, consume)
+
+import root-py
+
+sumList :: [Int] -> Int
+sumList xs = fold (+) 0 xs
+
+produce :: <IO> ()
+produce = do
+  o <- @stdout :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @flush o
+  @write 0 [4, 5] o
+  @flush o
+  @write 0 [6, 7, 8, 9, 10] o
+  @close o
+
+consume :: <IO> Int
+consume = do
+  s <- @stdin :: <IO> IStream Int
+  xs1 <- @next s
+  xs2 <- @next s
+  xs3 <- @next s
+  sumList xs1 + sumList xs2 + sumList xs3

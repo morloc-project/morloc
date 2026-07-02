@@ -720,10 +720,16 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
 
 /// Fork and exec a language pool daemon. Returns child PID.
 ///
-/// The child inherits the nexus's stdin/stdout/stderr unchanged: anything a
-/// sourced function prints must reach the terminal byte-for-byte without
-/// morloc interposing. Runtime errors raised inside the pool are caught by
-/// the pool's own dispatch wrapper and returned as morloc error packets.
+/// The child inherits the nexus's fd 0 / 1 / 2 unchanged. Pool
+/// `sys.stdin.read()`, `std::cout << ...`, `print(...)`, `cat(...)`
+/// etc. reach the user's terminal byte-for-byte. Morloc does not
+/// silently redirect any of the three standard streams.
+///
+/// A program that opens `@stdin` / `@stdout` / `@stderr` and also
+/// touches fd 0 / 1 / 2 from sourced code shares those fds with the
+/// nexus's RPC handler. The resulting stream on the wire may be
+/// corrupted -- the runtime cannot police fd sharing across pools
+/// and the nexus. Documented, not enforced.
 fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
     let pid = unsafe { libc::fork() };
 

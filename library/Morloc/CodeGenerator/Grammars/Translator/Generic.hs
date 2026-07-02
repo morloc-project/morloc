@@ -949,6 +949,15 @@ genericPrintExpr desc = go
     go (IIntrinsicFlush handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_flush(" <> go handle <> ")"
+    go (IIntrinsicStdin sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_stdin(" <> schemaRef sid <> ")"
+    go (IIntrinsicStdout sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_stdout(" <> schemaRef sid <> ")"
+    go (IIntrinsicStderr sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_stderr(" <> schemaRef sid <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R

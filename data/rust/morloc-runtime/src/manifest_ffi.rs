@@ -72,6 +72,9 @@ pub enum MorlocExpressionType {
     Append = 21,      // schema_str + path -> OStream handle (append mode).
     Concat = 22,      // [paths] + dest -> (). Byte-level stream concat.
     Flush = 23,       // handle -> (). Force buffered writes out as a sub-packet.
+    Stdin = 24,       // schema_str -> IStream handle bound to fd 0 (nexus-owned).
+    Stdout = 25,      // schema_str -> OStream handle bound to fd 1 (nexus-owned).
+    Stderr = 26,      // schema_str -> OStream handle bound to fd 2 (nexus-owned).
 }
 
 #[repr(C)]
@@ -1185,6 +1188,25 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::Concat;
             (*expr).schema = schema;
             (*expr).expr.ifile_walk_expr = w;
+            Ok(expr)
+        }
+
+        "stdin" | "stdout" | "stderr" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = match tag {
+                "stdin" => MorlocExpressionType::Stdin,
+                "stdout" => MorlocExpressionType::Stdout,
+                _ => MorlocExpressionType::Stderr,
+            };
+            (*expr).schema = schema;
             Ok(expr)
         }
 

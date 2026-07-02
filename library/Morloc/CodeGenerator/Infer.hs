@@ -155,17 +155,40 @@ inferConcreteTypeUniversal :: Lang -> Type -> MorlocMonad TypeF
 inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
   concreteType <- inferConcreteTypeUUniversal lang generalType
-  case weave gscopeUni generalType concreteType of
-    (Right tf) -> return tf
-    (Left _) -> do
-      -- Evaluate the general type one level and recurse. This is the
-      -- same pattern as inferConcreteType: if a parameterized alias
-      -- resolves only via its body (e.g. `type FixedPair (n :: Nat) a = (a, a)`
-      -- where the concrete-scope mapping lives on Tuple2, not FixedPair),
-      -- we step the alias and retry inference on the body.
-      case T.evaluateStep gscopeUni generalType of
+  inferConcreteTypeUniversalStructural lang gscopeUni t generalType concreteType
+
+-- | Structural walk over (general, concrete) in universal scope. Mirrors
+-- 'inferConcreteTypeStructural' but recurses via 'inferConcreteTypeUniversal'
+-- so nested type parameters resolve against the universal typedef scope,
+-- not the per-language one. Needed for parameterised newtypes like
+-- @OStream (IFile [Int])@ where the general side is @AppU@ and the
+-- concrete side collapses to a bare @VarU UInt64@ -- the pure @weave@
+-- can't bridge that mismatch and its @evaluateStep@ fallback treats the
+-- newtype as opaque.
+inferConcreteTypeUniversalStructural
+  :: Lang -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
+inferConcreteTypeUniversalStructural lang gscopeUni t g c = case (g, c) of
+  (EffectU effs g', EffectU _ c') ->
+    mkEffectF (resolveEffectSet effs)
+      <$> inferConcreteTypeUniversalStructural lang gscopeUni t g' c'
+  (OptionalU g', OptionalU c') ->
+    OptionalF <$> inferConcreteTypeUniversalStructural lang gscopeUni t g' c'
+  (AppU (VarU vG) ts, VarU (TV vC)) -> do
+    argTfs <- mapM (inferConcreteTypeUniversal lang . typeOf) ts
+    return $ AppF (VarF (FV vG (CV vC))) argTfs
+  (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
+    | length ts1 == length ts2
+    , length (fst (partitionKindArgsU ts1))
+        == length (fst (partitionKindArgsU ts2)) -> do
+        argTfs <- zipWithM
+          (inferConcreteTypeUniversalStructural lang gscopeUni t) ts1 ts2
+        return $ AppF (VarF (FV vG (CV vC))) argTfs
+  _ ->
+    case weave gscopeUni g c of
+      (Right tf) -> return tf
+      (Left _) -> case T.evaluateStep gscopeUni g of
         (Just reducedGType)
-          | reducedGType /= generalType ->
+          | reducedGType /= g ->
               inferConcreteTypeUniversal lang (typeOf reducedGType)
         _ ->
           MM.throwSystemError $
