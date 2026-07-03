@@ -2279,7 +2279,7 @@ pub fn shared_close_handle_with_status(
                     &diag, &shared_index, status,
                 );
                 pwrite_all_fd(local.fd, &footer, cursor)?;
-                let rc = unsafe { libc::fdatasync(local.fd) };
+                let rc = unsafe { fdatasync_fd(local.fd) };
                 if rc != 0 {
                     return Err(MorlocError::Io(std::io::Error::last_os_error()));
                 }
@@ -2399,7 +2399,7 @@ pub fn shared_finalize_ostream_locked(
             &diag, &shared_index, status,
         );
         pwrite_all_fd(local.fd, &footer, cursor)?;
-        let rc = unsafe { libc::fdatasync(local.fd) };
+        let rc = unsafe { fdatasync_fd(local.fd) };
         if rc != 0 {
             return Err(MorlocError::Io(std::io::Error::last_os_error()));
         }
@@ -5478,7 +5478,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         }
         return Err(e);
     }
-    let rc = unsafe { libc::fdatasync(dest_fd) };
+    let rc = unsafe { fdatasync_fd(dest_fd) };
     if rc != 0 {
         let e = std::io::Error::last_os_error();
         unsafe { libc::close(dest_fd); }
@@ -7188,6 +7188,19 @@ fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<(), MorlocE
     Ok(())
 }
 
+/// Portable equivalent of Linux `fdatasync()`. Falls back to `fsync()`
+/// on platforms without `fdatasync` (e.g. macOS/BSD). `fdatasync` is
+/// strictly an optimisation: it skips flushing metadata that isn't
+/// needed to recover the file contents, so `fsync` is a correct,
+/// slightly more conservative substitute.
+#[inline]
+unsafe fn fdatasync_fd(fd: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    { libc::fdatasync(fd) }
+    #[cfg(not(target_os = "linux"))]
+    { libc::fsync(fd) }
+}
+
 /// Copy `count` bytes from `src_fd[src_off..src_off+count]` to
 /// `dest_fd[dest_off..]` using `sendfile()` for zero-copy via the
 /// kernel pagecache. Loops past EINTR + partial transfers; advances
@@ -7195,6 +7208,11 @@ fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<(), MorlocE
 ///
 /// Used by `@concat` to glue stream files together without crossing
 /// the data through userspace.
+///
+/// The non-Linux path falls back to a userspace `pread`/`write` loop:
+/// BSD `sendfile` is socket-oriented and can't do file-to-file, and
+/// `fcopyfile` doesn't accept a subrange. Correctness is preserved;
+/// only the zero-copy fast path is lost off Linux.
 fn sendfile_range(
     dest_fd: i32, src_fd: i32,
     src_off: u64, count: u64, dest_off: u64,
@@ -7209,25 +7227,62 @@ fn sendfile_range(
     if s < 0 {
         return Err(MorlocError::Io(std::io::Error::last_os_error()));
     }
-    let mut offset = src_off as libc::off_t;
-    let mut remaining = count;
-    while remaining > 0 {
-        let n = unsafe {
-            libc::sendfile(dest_fd, src_fd, &mut offset, remaining as libc::size_t)
-        };
-        if n < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::Interrupted { continue; }
-            return Err(MorlocError::Io(e));
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut offset = src_off as libc::off_t;
+        let mut remaining = count;
+        while remaining > 0 {
+            let n = unsafe {
+                libc::sendfile(dest_fd, src_fd, &mut offset, remaining as libc::size_t)
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+                return Err(MorlocError::Io(e));
+            }
+            if n == 0 {
+                return Err(MorlocError::Other(
+                    "sendfile_range: zero-byte transfer (source truncated?)".into(),
+                ));
+            }
+            remaining = remaining.saturating_sub(n as u64);
         }
-        if n == 0 {
-            return Err(MorlocError::Other(
-                "sendfile_range: zero-byte transfer (source truncated?)".into(),
-            ));
-        }
-        remaining = remaining.saturating_sub(n as u64);
+        Ok(())
     }
-    Ok(())
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut buf = [0u8; 64 * 1024];
+        let mut src_pos = src_off;
+        let mut remaining = count;
+        while remaining > 0 {
+            let want = std::cmp::min(remaining as usize, buf.len());
+            let n = unsafe {
+                libc::pread(
+                    src_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    want,
+                    src_pos as libc::off_t,
+                )
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+                return Err(MorlocError::Io(e));
+            }
+            if n == 0 {
+                return Err(MorlocError::Other(
+                    "sendfile_range: zero-byte transfer (source truncated?)".into(),
+                ));
+            }
+            let got = n as usize;
+            write_all_fd(dest_fd, &buf[..got])?;
+            src_pos += got as u64;
+            remaining = remaining.saturating_sub(got as u64);
+        }
+        Ok(())
+    }
 }
 
 /// Dispatch entry point used by the FFI shim in `intrinsics.rs`.
