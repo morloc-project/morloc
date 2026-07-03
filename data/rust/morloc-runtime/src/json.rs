@@ -12,9 +12,9 @@ use crate::error::MorlocError;
 use crate::recur::{self, RecurEnv};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RelPtr, RELNULL};
-use indexmap::IndexMap;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::str::FromStr;
 
 // ── Safe SHM abstractions ────────────────────────────────────────────────────
@@ -482,215 +482,172 @@ fn parse_object_children(text: &str) -> Result<HashMap<String, Box<RawValue>>, M
 
 // ── Voidstar -> JSON ───────────────────────────────────────────────────────
 
-pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, MorlocError> {
-    let mut buf = String::new();
-    // SAFETY: ptr from shmalloc/rel2abs — valid SHM
+/// 64 KiB matches the default Linux pipe buffer; sized so writes fill a
+/// downstream `read` in one syscall.
+const BUFWRITER_CAPACITY: usize = 64 * 1024;
+
+/// `None` = flat, `Some(depth)` = pretty at that indent depth. Threaded
+/// through the walker so containers know whether to emit newlines +
+/// indentation; scalars ignore it.
+type Pretty = Option<usize>;
+
+/// Streaming JSON writer. Emits directly into `w` -- peak memory is the
+/// caller's buffer (typically 64 KiB), not the size of the output.
+pub fn write_json(ptr: AbsPtr, schema: &Schema, w: &mut dyn Write) -> Result<(), MorlocError> {
     let r = unsafe { ShmReader::new(ptr) };
     let mut env: RecurEnv = Vec::new();
-    to_json(&r, schema, &mut buf, &mut env)?;
-    Ok(buf)
+    to_json(&r, schema, w, &mut env, None)
+}
+
+/// Buffered variant for callers that need an owned String (daemon
+/// discovery JSON, cli logging, intrinsics, tests). The walker only ever
+/// emits valid UTF-8, so from_utf8 is defensive.
+pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, MorlocError> {
+    let mut buf: Vec<u8> = Vec::new();
+    write_json(ptr, schema, &mut buf)?;
+    String::from_utf8(buf).map_err(|e| err(&format!("json utf8: {}", e)))
 }
 
 /// True when the top-level wire value is "null-ish": either Unit (Nil) or
-/// an Optional whose relptr is RELNULL (absent). Nested null inside a
-/// container is not detected here; that would lose structural information.
+/// an Optional whose relptr is RELNULL. Nested null inside a container
+/// is not detected -- that would lose structural information.
 pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
     match schema.serial_type {
         SerialType::Nil => true,
         SerialType::Optional => {
-            // SAFETY: ptr from shmalloc/rel2abs - same provenance as the
-            // reader path used elsewhere in this module.
             let r = unsafe { ShmReader::new(ptr) };
-            let relptr: RelPtr = r.read_val(0);
-            relptr == RELNULL
+            r.read_val::<RelPtr>(0) == RELNULL
         }
         _ => false,
     }
 }
 
 pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
-    if !keep_null && is_top_null(ptr, schema) {
-        return Ok(());
-    }
-    println!("{}", voidstar_to_json_string(ptr, schema)?);
-    Ok(())
+    write_to_stdout(ptr, schema, keep_null, None)
 }
 
 pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
-    if !keep_null && is_top_null(ptr, schema) {
-        return Ok(());
-    }
-    let json = voidstar_to_json_string(ptr, schema)?;
-    let rv: Box<RawValue> = serde_json::from_str(&json).map_err(|e| err(&e.to_string()))?;
-    let t = rv.get().trim_start();
-    // Top-level scalars: render without surrounding quotes (for strings) and
-    // without re-parsing numbers (preserving BigInt precision).
-    if let Some(first) = t.chars().next() {
-        match first {
-            '"' => {
-                // JSON string - unescape and print without quotes.
-                let s: String = serde_json::from_str(rv.get())
-                    .map_err(|e| err(&format!("string decode: {}", e)))?;
-                println!("{}", s);
-                return Ok(());
-            }
-            '{' | '[' => {
-                let mut buf = String::new();
-                pretty_indent(&rv, 0, &mut buf);
-                println!("{}", buf);
-                return Ok(());
-            }
-            _ => {
-                // Number, bool, or null - emit raw text. Numbers keep full
-                // precision because we never round-trip through Value::Number.
-                println!("{}", rv.get().trim());
-                return Ok(());
-            }
+    // Top-level String renders as the unescaped body (terminal convenience
+    // for `--print`). Other single-scalar returns fall through to the
+    // streaming walker.
+    if let SerialType::String = schema.serial_type {
+        if !keep_null && is_top_null(ptr, schema) { return Ok(()); }
+        let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+        let r = unsafe { ShmReader::new(ptr) };
+        let arr = r.read_array(0);
+        if arr.size > 0 && arr.data != RELNULL {
+            let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
+            map_io(w.write_all(dr.read_str(0, arr.size).as_bytes()))?;
         }
+        map_io(w.write_all(b"\n"))?;
+        return map_io(w.flush());
     }
-    // Empty input shouldn't occur (to_json always emits something), but be safe.
-    println!("{}", rv.get());
-    Ok(())
+    write_to_stdout(ptr, schema, keep_null, Some(0))
 }
 
-/// Recursively pretty-print a RawValue tree with two-space indentation.
-/// Scalars (numbers, strings, bools, null) are emitted verbatim from the
-/// raw text; only containers (arrays/objects) introduce whitespace.
-fn pretty_indent(rv: &RawValue, depth: usize, buf: &mut String) {
-    let text = rv.get().trim();
-    let first = text.chars().next();
-    match first {
-        Some('[') => {
-            // Try to parse as array of children. Fall back to raw text on parse error.
-            match serde_json::from_str::<Vec<Box<RawValue>>>(text) {
-                Ok(children) if !children.is_empty() => {
-                    buf.push('[');
-                    for (i, child) in children.iter().enumerate() {
-                        if i > 0 { buf.push(','); }
-                        buf.push('\n');
-                        push_indent(buf, depth + 1);
-                        pretty_indent(child, depth + 1, buf);
-                    }
-                    buf.push('\n');
-                    push_indent(buf, depth);
-                    buf.push(']');
-                }
-                _ => buf.push_str(text), // empty array, or parse error: emit verbatim
-            }
-        }
-        Some('{') => {
-            // IndexMap preserves source key order so the pretty-printed
-            // object matches the JSON that to_json emitted (which is
-            // schema-ordered). serde_json::Map is locked to Value, so we
-            // can't use it for Box<RawValue>.
-            match serde_json::from_str::<IndexMap<String, Box<RawValue>>>(text) {
-                Ok(map) if !map.is_empty() => {
-                    buf.push('{');
-                    let n = map.len();
-                    for (i, (key, child)) in map.iter().enumerate() {
-                        buf.push('\n');
-                        push_indent(buf, depth + 1);
-                        // Re-escape the key via serde_json::to_string (returns "key" with surrounding quotes).
-                        match serde_json::to_string(key) {
-                            Ok(quoted) => buf.push_str(&quoted),
-                            Err(_) => { buf.push('"'); buf.push_str(key); buf.push('"'); }
-                        }
-                        buf.push_str(": ");
-                        pretty_indent(child, depth + 1, buf);
-                        if i + 1 < n { buf.push(','); }
-                    }
-                    buf.push('\n');
-                    push_indent(buf, depth);
-                    buf.push('}');
-                }
-                _ => buf.push_str(text),
-            }
-        }
-        // Scalars: emit raw text. Numbers (including BigInts) survive intact.
-        _ => buf.push_str(text),
-    }
+fn write_to_stdout(ptr: AbsPtr, schema: &Schema, keep_null: bool, pretty: Pretty)
+    -> Result<(), MorlocError>
+{
+    if !keep_null && is_top_null(ptr, schema) { return Ok(()); }
+    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+    let r = unsafe { ShmReader::new(ptr) };
+    let mut env: RecurEnv = Vec::new();
+    to_json(&r, schema, &mut w, &mut env, pretty)?;
+    map_io(w.write_all(b"\n"))?;
+    map_io(w.flush())
 }
 
-fn push_indent(buf: &mut String, depth: usize) {
-    for _ in 0..depth { buf.push_str("  "); }
+/// Distinguishes "downstream closed the pipe" (fast-exit with 141 at
+/// the FFI boundary) from a genuine serialization error. Other io kinds
+/// are downgraded to Serialization since the walker has no way to
+/// communicate transient io problems.
+#[inline]
+fn map_io<T>(r: io::Result<T>) -> Result<T, MorlocError> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(MorlocError::PipeClosed),
+        Err(e) => Err(MorlocError::Serialization(e.to_string())),
+    }
 }
 
 fn to_json(
     r: &ShmReader,
     schema: &Schema,
-    buf: &mut String,
+    w: &mut dyn Write,
     env: &mut RecurEnv,
+    pretty: Pretty,
 ) -> Result<(), MorlocError> {
-    recur::with_scope(env, schema, |env| to_json_inner(r, schema, buf, env))
+    recur::with_scope(env, schema, |env| to_json_inner(r, schema, w, env, pretty))
 }
 
 fn to_json_inner(
     r: &ShmReader,
     schema: &Schema,
-    buf: &mut String,
+    w: &mut dyn Write,
     env: &mut RecurEnv,
+    pretty: Pretty,
 ) -> Result<(), MorlocError> {
     match schema.serial_type {
-        SerialType::Nil    => buf.push_str("null"),
-        SerialType::Bool   => buf.push_str(if r.read_u8(0) != 0 { "true" } else { "false" }),
-        SerialType::Sint8  => buf.push_str(&(r.read_val::<i8>(0)).to_string()),
-        SerialType::Sint16 => buf.push_str(&(r.read_val::<i16>(0)).to_string()),
-        SerialType::Sint32 => buf.push_str(&(r.read_val::<i32>(0)).to_string()),
-        SerialType::Sint64 => buf.push_str(&(r.read_val::<i64>(0)).to_string()),
-        SerialType::Uint8  => buf.push_str(&r.read_u8(0).to_string()),
-        SerialType::Uint16 => buf.push_str(&(r.read_val::<u16>(0)).to_string()),
-        SerialType::Uint32 => buf.push_str(&(r.read_val::<u32>(0)).to_string()),
-        SerialType::Uint64 => buf.push_str(&(r.read_val::<u64>(0)).to_string()),
-        SerialType::Float32 => write_float(buf, r.read_val::<f32>(0) as f64, b"%.7g\0"),
-        SerialType::Float64 => write_float(buf, r.read_val::<f64>(0), b"%.15g\0"),
+        SerialType::Nil    => map_io(w.write_all(b"null"))?,
+        SerialType::Bool   => map_io(w.write_all(
+            if r.read_u8(0) != 0 { b"true" } else { b"false" }
+        ))?,
+        SerialType::Sint8  => map_io(write!(w, "{}", r.read_val::<i8>(0)))?,
+        SerialType::Sint16 => map_io(write!(w, "{}", r.read_val::<i16>(0)))?,
+        SerialType::Sint32 => map_io(write!(w, "{}", r.read_val::<i32>(0)))?,
+        SerialType::Sint64 => map_io(write!(w, "{}", r.read_val::<i64>(0)))?,
+        SerialType::Uint8  => map_io(write!(w, "{}", r.read_u8(0)))?,
+        SerialType::Uint16 => map_io(write!(w, "{}", r.read_val::<u16>(0)))?,
+        SerialType::Uint32 => map_io(write!(w, "{}", r.read_val::<u32>(0)))?,
+        SerialType::Uint64 => map_io(write!(w, "{}", r.read_val::<u64>(0)))?,
+        SerialType::Float32 => write_float(w, r.read_val::<f32>(0) as f64, b"%.7g\0")?,
+        SerialType::Float64 => write_float(w, r.read_val::<f64>(0), b"%.15g\0")?,
 
         SerialType::Int => {
             // Inline layout: [size:i64, value_or_relptr:i64]
             let size = r.read_val::<usize>(0);
             if size == 0 {
-                buf.push('0');
+                map_io(w.write_all(b"0"))?;
             } else if size == 1 {
-                // Inline: second field is the value directly
-                let val = r.read_val::<i64>(8);
-                buf.push_str(&val.to_string());
+                map_io(write!(w, "{}", r.read_val::<i64>(8)))?;
             } else {
-                // Overflow: second field is relptr to limb array
+                // Overflow: relptr to limb array. Per-value bounded alloc
+                // (~19 chars per limb), not O(output).
                 let relptr = r.read_val::<shm::RelPtr>(8);
                 let data_ptr = shm::rel2abs(relptr)?;
                 let limbs: Vec<u64> = (0..size)
                     .map(|i| unsafe { *((data_ptr as *const u64).add(i)) })
                     .collect();
-                buf.push_str(&crate::eval_ffi::limbs_to_decimal(&limbs));
+                let s = crate::eval_ffi::limbs_to_decimal(&limbs);
+                map_io(w.write_all(s.as_bytes()))?;
             }
         }
 
         SerialType::String => {
             let arr = r.read_array(0);
             if arr.size == 0 || arr.data == RELNULL {
-                buf.push_str("\"\"");
+                map_io(w.write_all(b"\"\""))?;
             } else {
-                // SAFETY: arr.data resolved to valid SHM string bytes
                 let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
-                json_escape(dr.read_str(0, arr.size), buf);
+                json_escape(dr.read_str(0, arr.size), w)?;
             }
         }
         SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-            // Tagged stream-handle field: TAG_PATH renders the file path
-            // straight into JSON; TAG_HANDLE looks up the path via the
-            // local SHM registry so the on-disk JSON always carries a
-            // path string.
+            // TAG_PATH renders the file path straight into JSON; TAG_HANDLE
+            // looks up the path via the local SHM registry so the on-disk
+            // JSON always carries a path string.
             use morloc_runtime_types::stream_handle as sh;
             let field_ptr = r.as_ptr();
             let tag = unsafe { sh::read_tag(field_ptr) };
             let payload = unsafe { sh::read_payload(field_ptr) };
             if tag == sh::TAG_PATH {
                 if payload == RELNULL as u64 {
-                    buf.push_str("\"\"");
+                    map_io(w.write_all(b"\"\""))?;
                 } else {
                     let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
                     let path_len = unsafe { sh::read_path_size(suballoc) } as usize;
                     if path_len == 0 {
-                        buf.push_str("\"\"");
+                        map_io(w.write_all(b"\"\""))?;
                     } else {
                         let bytes = unsafe {
                             std::slice::from_raw_parts(suballoc.add(8), path_len)
@@ -700,12 +657,12 @@ fn to_json_inner(
                                 "json stream-handle: path is not valid UTF-8".into(),
                             )
                         })?;
-                        json_escape(s, buf);
+                        json_escape(s, w)?;
                     }
                 }
             } else if tag == sh::TAG_HANDLE {
                 let path = crate::stream::handle_path(payload as i64)?;
-                json_escape(&path, buf);
+                json_escape(&path, w)?;
             } else {
                 return Err(MorlocError::Serialization(format!(
                     "json stream-handle: unsupported tag {}", tag,
@@ -715,91 +672,166 @@ fn to_json_inner(
         SerialType::Array => {
             let arr = r.read_array(0);
             let es = &schema.parameters[0];
-            buf.push('[');
-            if arr.size > 0 && arr.data != RELNULL {
+            let empty = arr.size == 0 || arr.data == RELNULL;
+            write_container(w, b'[', b']', pretty, empty, |w, child_pretty| {
                 let data = shm::rel2abs(arr.data)?;
                 for i in 0..arr.size {
-                    if i > 0 { buf.push(','); }
-                    // SAFETY: data + i * es.width within array data block
+                    write_sep(w, i, pretty)?;
                     let er = unsafe { ShmReader::new(data.add(i * es.width)) };
-                    to_json(&er, es, buf, env)?;
+                    to_json(&er, es, w, env, child_pretty)?;
                 }
-            }
-            buf.push(']');
+                Ok(())
+            })?;
         }
         SerialType::Tuple => {
-            buf.push('[');
-            for (i, fs) in schema.parameters.iter().enumerate() {
-                if i > 0 { buf.push(','); }
-                to_json(&r.at(schema.offsets[i]), fs, buf, env)?;
-            }
-            buf.push(']');
+            let n = schema.parameters.len();
+            write_container(w, b'[', b']', pretty, n == 0, |w, child_pretty| {
+                for (i, fs) in schema.parameters.iter().enumerate() {
+                    write_sep(w, i, pretty)?;
+                    to_json(&r.at(schema.offsets[i]), fs, w, env, child_pretty)?;
+                }
+                Ok(())
+            })?;
         }
         SerialType::Map => {
-            buf.push('{');
-            for (i, fs) in schema.parameters.iter().enumerate() {
-                if i > 0 { buf.push(','); }
-                if i < schema.keys.len() { buf.push('"'); buf.push_str(&schema.keys[i]); buf.push_str("\":"); }
-                to_json(&r.at(schema.offsets[i]), fs, buf, env)?;
-            }
-            buf.push('}');
+            let n = schema.parameters.len();
+            write_container(w, b'{', b'}', pretty, n == 0, |w, child_pretty| {
+                for (i, fs) in schema.parameters.iter().enumerate() {
+                    write_sep(w, i, pretty)?;
+                    if i < schema.keys.len() {
+                        // Keys are morloc identifiers -- ASCII, no escaping needed.
+                        map_io(w.write_all(b"\""))?;
+                        map_io(w.write_all(schema.keys[i].as_bytes()))?;
+                        map_io(w.write_all(if pretty.is_some() { b"\": " } else { b"\":" }))?;
+                    }
+                    to_json(&r.at(schema.offsets[i]), fs, w, env, child_pretty)?;
+                }
+                Ok(())
+            })?;
         }
         SerialType::Optional => {
-            // The Optional slot is a relptr to the inner T (RELNULL =
-            // absent). Resolve and recurse into T's body when present.
             let relptr: RelPtr = r.read_val(0);
             if relptr == RELNULL {
-                buf.push_str("null");
+                map_io(w.write_all(b"null"))?;
             } else {
                 let inner = &schema.parameters[0];
-                let inner_abs = shm::rel2abs(relptr)?;
-                // SAFETY: inner_abs is the SHM address of the inner T's data.
-                let inner_reader = unsafe { ShmReader::new(inner_abs) };
-                to_json(&inner_reader, inner, buf, env)?;
+                let inner_reader = unsafe { ShmReader::new(shm::rel2abs(relptr)?) };
+                to_json(&inner_reader, inner, w, env, pretty)?;
             }
         }
         SerialType::Table => {
-            // Reverse of the json_to_voidstar Table branch: rendering a
-            // Table to JSON requires walking the Arrow buffer's records,
-            // which lives in a dedicated path (arrow-to-json), not the
-            // generic JSON serialiser. Surface a clear error rather than
-            // emit malformed JSON.
             return Err(err("Cannot render a Table to generic JSON; use the Arrow-to-JSON path"));
         }
         SerialType::Recur => {
-            // Back-reference: resolve via the env stack to the schema
-            // declared at an ancestor &Name binding site, then continue
-            // the walk under that schema with the SAME reader (the wire
-            // layout at this position IS the resolved schema's layout).
-            // Mirrors mpack.rs's Recur arm; the only difference is we
-            // emit JSON rather than write to a voidstar buffer.
+            // Back-reference: resolve via env stack to the ancestor &Name
+            // binding, then continue with the same reader (the wire layout
+            // at this position IS the resolved schema's layout). See
+            // recur.rs for lifetime rationale.
             let name = schema.name.as_deref().unwrap_or("");
             let target_ptr = recur::lookup(env, name)?;
-            // SAFETY: target_ptr came from a recur::with_scope push of a
-            // live &Schema reference whose lifetime spans the entire
-            // top-level walk (the caller's owned Schema tree), so it
-            // remains valid here. See recur.rs's module-level note.
             let target = unsafe { &*target_ptr };
-            to_json(r, target, buf, env)?;
+            to_json(r, target, w, env, pretty)?;
         }
+    }
+    Ok(())
+}
+
+/// Emit the container's open/close bytes + newlines/indent as required.
+/// `body` writes the interior elements (children already know their
+/// depth via `child_pretty`).
+fn write_container<F>(
+    w: &mut dyn Write,
+    open: u8,
+    close: u8,
+    pretty: Pretty,
+    empty: bool,
+    body: F,
+) -> Result<(), MorlocError>
+where
+    F: FnOnce(&mut dyn Write, Pretty) -> Result<(), MorlocError>,
+{
+    if empty {
+        return map_io(w.write_all(&[open, close]));
+    }
+    match pretty {
+        None => {
+            map_io(w.write_all(&[open]))?;
+            body(w, None)?;
+            map_io(w.write_all(&[close]))
+        }
+        Some(depth) => {
+            map_io(w.write_all(&[open, b'\n']))?;
+            body(w, Some(depth + 1))?;
+            map_io(w.write_all(b"\n"))?;
+            write_indent(w, depth)?;
+            map_io(w.write_all(&[close]))
+        }
+    }
+}
+
+/// Between-element separator. Flat: `,`. Pretty: `,\n` after every element
+/// except the last, plus `<indent>` before every element.
+fn write_sep(w: &mut dyn Write, i: usize, pretty: Pretty) -> Result<(), MorlocError> {
+    match pretty {
+        None => if i > 0 { map_io(w.write_all(b","))?; },
+        Some(depth) => {
+            if i > 0 { map_io(w.write_all(b",\n"))?; }
+            write_indent(w, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_indent(w: &mut dyn Write, depth: usize) -> Result<(), MorlocError> {
+    // Preallocated slice so a deep indent is one write, not `depth` writes.
+    const SPACES: &[u8; 128] = &[b' '; 128];
+    let mut remaining = depth * 2;
+    while remaining > 0 {
+        let n = remaining.min(SPACES.len());
+        map_io(w.write_all(&SPACES[..n]))?;
+        remaining -= n;
     }
     Ok(())
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn json_escape(s: &str, buf: &mut String) {
-    buf.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => buf.push_str("\\\""), '\\' => buf.push_str("\\\\"), '/' => buf.push_str("\\/"),
-            '\x08' => buf.push_str("\\b"), '\x0c' => buf.push_str("\\f"),
-            '\n' => buf.push_str("\\n"), '\r' => buf.push_str("\\r"), '\t' => buf.push_str("\\t"),
-            c if c < '\x20' => buf.push_str(&format!("\\u{:04x}", c as u32)),
-            c => buf.push(c),
+fn json_escape(s: &str, w: &mut dyn Write) -> Result<(), MorlocError> {
+    // Batch consecutive "safe" characters into a single write to keep the
+    // per-scalar overhead close to the C printf version. Only escape the
+    // JSON-reserved / control-range codepoints.
+    map_io(w.write_all(b"\""))?;
+    let bytes = s.as_bytes();
+    let mut safe_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let escape: Option<&[u8]> = match b {
+            b'"'  => Some(b"\\\""),
+            b'\\' => Some(b"\\\\"),
+            b'/'  => Some(b"\\/"),
+            0x08  => Some(b"\\b"),
+            0x0c  => Some(b"\\f"),
+            b'\n' => Some(b"\\n"),
+            b'\r' => Some(b"\\r"),
+            b'\t' => Some(b"\\t"),
+            c if c < 0x20 => None, // handled below with formatted \u
+            _ => { i += 1; continue; }
+        };
+        if i > safe_start {
+            map_io(w.write_all(&bytes[safe_start..i]))?;
         }
+        match escape {
+            Some(seq) => { map_io(w.write_all(seq))?; }
+            None => { map_io(write!(w, "\\u{:04x}", b as u32))?; }
+        }
+        i += 1;
+        safe_start = i;
     }
-    buf.push('"');
+    if safe_start < bytes.len() {
+        map_io(w.write_all(&bytes[safe_start..]))?;
+    }
+    map_io(w.write_all(b"\""))
 }
 
 fn err(msg: &str) -> MorlocError { MorlocError::Serialization(msg.into()) }
@@ -940,22 +972,21 @@ fn parse_nonfinite(s: &str) -> Option<f64> {
     }
 }
 
-fn write_float(buf: &mut String, f: f64, fmt: &[u8]) {
+fn write_float(w: &mut dyn Write, f: f64, fmt: &[u8]) -> Result<(), MorlocError> {
     if f.is_nan() {
-        buf.push_str("\"nan\"");
-        return;
+        return map_io(w.write_all(b"\"nan\""));
     }
     if f.is_infinite() {
-        buf.push_str(if f > 0.0 { "\"inf\"" } else { "\"-inf\"" });
-        return;
+        return map_io(w.write_all(if f > 0.0 { b"\"inf\"" } else { b"\"-inf\"" }));
     }
     let mut cbuf = [0u8; 64];
     // SAFETY: snprintf writes to stack-local buffer with explicit size limit
     let n = unsafe { libc::snprintf(cbuf.as_mut_ptr() as *mut libc::c_char, cbuf.len(), fmt.as_ptr() as *const libc::c_char, f) };
     if n > 0 && (n as usize) < cbuf.len() {
-        buf.push_str(std::str::from_utf8(&cbuf[..n as usize]).unwrap_or("0"));
+        // snprintf produces ASCII digits/sign/exponent -- no UTF-8 check needed.
+        map_io(w.write_all(&cbuf[..n as usize]))
     } else {
-        buf.push_str("0");
+        map_io(w.write_all(b"0"))
     }
 }
 
@@ -1040,5 +1071,87 @@ mod tests {
         let s = parse_schema("i4").unwrap();
         let r = load_record_fields_from_json("42", &s);
         assert!(r.is_err());
+    }
+
+    // A Write impl that returns BrokenPipe after `n` successful bytes.
+    // Used to verify the walker propagates MorlocError::PipeClosed
+    // rather than a generic Io error, and that no output is buffered
+    // beyond the point of failure.
+    struct PipeAfter {
+        remaining: usize,
+        written: Vec<u8>,
+    }
+    impl std::io::Write for PipeAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test: pipe closed",
+                ));
+            }
+            let n = buf.len().min(self.remaining);
+            self.written.extend_from_slice(&buf[..n]);
+            self.remaining -= n;
+            if self.remaining == 0 && n < buf.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test: pipe closed mid-write",
+                ));
+            }
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn test_write_json_streams_without_buffering() {
+        setup();
+        // A 100-element array: write_json should feed the sink one chunk
+        // at a time. We just care that the produced bytes match the
+        // buffered voidstar_to_json_string form -- if it does, the
+        // streaming walker is emitting the same JSON as the batched one.
+        let s = parse_schema("ai4").unwrap();
+        let raw = "[".to_string() + &(0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(",") + "]";
+        let p = read_json_with_schema(&raw, &s).unwrap();
+        let expected = voidstar_to_json_string(p, &s).unwrap();
+
+        let mut sink: Vec<u8> = Vec::new();
+        write_json(p, &s, &mut sink).unwrap();
+        assert_eq!(String::from_utf8(sink).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_write_json_maps_broken_pipe_to_pipe_closed() {
+        setup();
+        // Fail on the very first write to prove the walker doesn't
+        // silently swallow the error.
+        let s = parse_schema("ai4").unwrap();
+        let p = read_json_with_schema("[1,2,3,4,5]", &s).unwrap();
+        let mut sink = PipeAfter { remaining: 0, written: Vec::new() };
+        let r = write_json(p, &s, &mut sink);
+        assert!(
+            matches!(r, Err(MorlocError::PipeClosed)),
+            "expected PipeClosed, got {:?}", r,
+        );
+    }
+
+    #[test]
+    fn test_write_json_pipe_closed_partway() {
+        setup();
+        // Accept a few bytes, then fail. The walker must still surface
+        // PipeClosed (not Io / Serialization) -- upstream policy relies
+        // on this distinction to pick exit code 141 vs 1.
+        let s = parse_schema("ai4").unwrap();
+        let p = read_json_with_schema("[100,200,300,400,500,600]", &s).unwrap();
+        let mut sink = PipeAfter { remaining: 4, written: Vec::new() };
+        let r = write_json(p, &s, &mut sink);
+        assert!(
+            matches!(r, Err(MorlocError::PipeClosed)),
+            "expected PipeClosed after partial write, got {:?}", r,
+        );
+        // And we did emit at least the bytes the sink accepted before
+        // failing -- the walker isn't buffering the whole JSON in memory
+        // before writing the first byte.
+        assert!(!sink.written.is_empty(), "walker held back all output before first failure");
     }
 }

@@ -123,6 +123,35 @@ fn collapse_duplicate_lines(msg: &str) -> String {
     out.concat()
 }
 
+const STDOUT_BUF_CAPACITY: usize = 64 * 1024;
+
+/// Hex dump: 16 lowercase 2-digit bytes per row, single space between bytes.
+fn write_hex_dump(bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::with_capacity(STDOUT_BUF_CAPACITY, std::io::stdout().lock());
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && i % 16 == 0 { w.write_all(b"\n")?; }
+        write!(w, "{:02x} ", b)?;
+    }
+    if !bytes.is_empty() { w.write_all(b"\n")?; }
+    w.flush()
+}
+
+/// Grouped hex dump: 2-digit uppercase, 4-byte groups joined by single
+/// space, six groups per line.
+fn write_hex_dump_grouped(bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::with_capacity(STDOUT_BUF_CAPACITY, std::io::stdout().lock());
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            w.write_all(if i % 24 == 0 { b"\n" } else { b" " })?;
+        }
+        write!(w, "{:02X}", b)?;
+    }
+    if !bytes.is_empty() { w.write_all(b"\n")?; }
+    w.flush()
+}
+
 /// Emit a uniform error when pool communication fails, then exit.
 ///
 /// The pool's stderr was inherited by the nexus, so any traceback the pool
@@ -803,7 +832,7 @@ fn run_remote_command(
     // packet conversion -- but the original v1 dispatch path still
     // ran flags through parse_cli_data_argument with the flag's bool
     // schema, so we mirror that to keep the wire format consistent.
-    let mut arg_packets: Vec<Vec<u8>> = Vec::new();
+    let mut arg_packets: Vec<(*mut u8, usize)> = Vec::new();
     for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
         let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
@@ -925,36 +954,36 @@ fn run_remote_command(
             crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
-        // Get packet size and copy to Vec
         let pkt_size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
-        let data_pkt = unsafe { std::slice::from_raw_parts(c_pkt, pkt_size).to_vec() };
-        unsafe { libc::free(c_pkt as *mut std::ffi::c_void) };
-        arg_packets.push(data_pkt);
+        arg_packets.push((c_pkt, pkt_size));
     }
 
     // Build call packet via C library
-    let arg_ptrs: Vec<*const u8> = arg_packets.iter().map(|p| p.as_ptr()).collect();
+    let arg_ptrs: Vec<*const u8> = arg_packets.iter().map(|(p, _)| *p as *const u8).collect();
     let mut errmsg_call: *mut std::ffi::c_char = std::ptr::null_mut();
     let c_call = unsafe {
         make_morloc_local_call_packet(cmd.mid, arg_ptrs.as_ptr(), arg_packets.len(), &mut errmsg_call)
     };
+    for (p, _) in &arg_packets {
+        unsafe { libc::free(*p as *mut std::ffi::c_void) };
+    }
+    arg_packets.clear();
     if c_call.is_null() {
         eprintln!("Error: failed to create call packet");
         process::clean_exit(1);
     }
 
-    // Get call packet size
     let call_size = unsafe {
         let mut e: *mut std::ffi::c_char = std::ptr::null_mut();
         morloc_packet_size(c_call, &mut e)
     };
-    let call_packet = unsafe { std::slice::from_raw_parts(c_call, call_size).to_vec() };
-    unsafe { libc::free(c_call as *mut std::ffi::c_void) };
+    let call_slice: &[u8] = unsafe { std::slice::from_raw_parts(c_call, call_size) };
 
     // Send to pool and receive response
     let mut stream = match UnixStream::connect(&socket.socket_path) {
         Ok(s) => s,
         Err(e) => {
+            unsafe { libc::free(c_call as *mut std::ffi::c_void) };
             die_with_pool_error(
                 socket,
                 cmd.pool_index,
@@ -964,7 +993,8 @@ fn run_remote_command(
         }
     };
 
-    if let Err(e) = stream.write_all(&call_packet) {
+    if let Err(e) = stream.write_all(call_slice) {
+        unsafe { libc::free(c_call as *mut std::ffi::c_void) };
         die_with_pool_error(
             socket,
             cmd.pool_index,
@@ -972,10 +1002,11 @@ fn run_remote_command(
             &e,
         );
     }
+    unsafe { libc::free(c_call as *mut std::ffi::c_void) };
 
-    // Read response header
-    let mut resp_header_bytes = [0u8; 32];
-    if let Err(e) = stream.read_exact(&mut resp_header_bytes) {
+    // Read response header, then the rest directly into the final buffer.
+    let mut hdr = [0u8; 32];
+    if let Err(e) = stream.read_exact(&mut hdr) {
         die_with_pool_error(
             socket,
             cmd.pool_index,
@@ -984,7 +1015,7 @@ fn run_remote_command(
         );
     }
 
-    let resp_header = match packet::PacketHeader::from_bytes(&resp_header_bytes) {
+    let resp_header = match packet::PacketHeader::from_bytes(&hdr) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("Error: invalid response packet: {}", e);
@@ -992,13 +1023,13 @@ fn run_remote_command(
         }
     };
 
-    // Read full response (metadata + payload)
     let offset = { resp_header.offset } as usize;
     let length = { resp_header.length } as usize;
     let remaining = offset + length;
-    let mut resp_body = vec![0u8; remaining];
+    let mut full_packet = vec![0u8; 32 + remaining];
+    full_packet[..32].copy_from_slice(&hdr);
     if remaining > 0 {
-        if let Err(e) = stream.read_exact(&mut resp_body) {
+        if let Err(e) = stream.read_exact(&mut full_packet[32..]) {
             die_with_pool_error(
                 socket,
                 cmd.pool_index,
@@ -1007,11 +1038,6 @@ fn run_remote_command(
             );
         }
     }
-
-    // Reconstruct full packet (header + body)
-    let mut full_packet = Vec::with_capacity(32 + remaining);
-    full_packet.extend_from_slice(&resp_header_bytes);
-    full_packet.extend_from_slice(&resp_body);
 
     // Check for error
     match packet::get_error_message(&full_packet) {
@@ -1070,13 +1096,13 @@ pub(crate) fn print_result_c(
             schema: *const morloc_runtime_types::cschema::CSchema,
             keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
-        ) -> bool;
+        ) -> i32;
         fn pretty_print_voidstar(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
             keep_null: bool,
             errmsg: *mut *mut std::ffi::c_char,
-        ) -> bool;
+        ) -> i32;
         fn print_arrow_as_json(
             data: *const std::ffi::c_void,
             errmsg: *mut *mut std::ffi::c_char,
@@ -1094,26 +1120,44 @@ pub(crate) fn print_result_c(
         ) -> i32;
     }
 
+    use morloc_runtime_types::{PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
+
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
     match config.output_format {
         OutputFormat::Json => {
-            let ok = unsafe {
-                if is_arrow && config.print_flag {
-                    print_arrow_as_table(ptr as *const std::ffi::c_void, &mut errmsg)
-                } else if is_arrow {
-                    print_arrow_as_json(ptr as *const std::ffi::c_void, &mut errmsg)
-                } else if config.print_flag {
-                    pretty_print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
-                } else {
-                    print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
+            if is_arrow {
+                let ok = unsafe {
+                    if config.print_flag {
+                        print_arrow_as_table(ptr as *const std::ffi::c_void, &mut errmsg)
+                    } else {
+                        print_arrow_as_json(ptr as *const std::ffi::c_void, &mut errmsg)
+                    }
+                };
+                if !ok {
+                    let msg = process::take_c_errmsg(errmsg)
+                        .unwrap_or_else(|| "unknown error".into());
+                    eprintln!("Error: {}", msg);
+                    process::clean_exit(1);
                 }
-            };
-            if !ok {
-                let msg = process::take_c_errmsg(errmsg)
-                    .unwrap_or_else(|| "unknown error".into());
-                eprintln!("Error: {}", msg);
-                process::clean_exit(1);
+            } else {
+                let rc = unsafe {
+                    if config.print_flag {
+                        pretty_print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
+                    } else {
+                        print_voidstar(ptr as *const std::ffi::c_void, schema, config.keep_null, &mut errmsg)
+                    }
+                };
+                match rc {
+                    PRINT_RESULT_OK => {}
+                    PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                    _ => {
+                        let msg = process::take_c_errmsg(errmsg)
+                            .unwrap_or_else(|| "unknown error".into());
+                        eprintln!("Error: {}", msg);
+                        process::clean_exit(1);
+                    }
+                }
             }
         }
         OutputFormat::MessagePack => {
@@ -1134,15 +1178,32 @@ pub(crate) fn print_result_c(
             }
             if config.print_flag {
                 let bytes = unsafe { std::slice::from_raw_parts(mpk_ptr as *const u8, mpk_size) };
-                for (i, b) in bytes.iter().enumerate() {
-                    if i > 0 && i % 16 == 0 { println!(); }
-                    print!("{:02x} ", b);
+                if let Err(e) = write_hex_dump(bytes) {
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        if !mpk_ptr.is_null() {
+                            unsafe { libc::free(mpk_ptr as *mut std::ffi::c_void) };
+                        }
+                        process::exit_broken_pipe();
+                    }
+                    eprintln!("Error: msgpack hex dump failed: {}", e);
+                    process::clean_exit(1);
                 }
-                println!();
             } else {
                 use std::io::Write;
                 let bytes = unsafe { std::slice::from_raw_parts(mpk_ptr as *const u8, mpk_size) };
-                let _ = std::io::stdout().lock().write_all(bytes);
+                match std::io::stdout().lock().write_all(bytes) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                        if !mpk_ptr.is_null() {
+                            unsafe { libc::free(mpk_ptr as *mut std::ffi::c_void) };
+                        }
+                        process::exit_broken_pipe();
+                    }
+                    Err(e) => {
+                        eprintln!("Error: msgpack write failed: {}", e);
+                        process::clean_exit(1);
+                    }
+                }
             }
             if !mpk_ptr.is_null() {
                 unsafe { libc::free(mpk_ptr as *mut std::ffi::c_void) };
@@ -1157,14 +1218,13 @@ pub(crate) fn print_result_c(
                 ) -> i32;
             }
             if config.print_flag {
-                // Hex dump
-                for (i, b) in full_packet.iter().enumerate() {
-                    if i > 0 && i % 4 == 0 {
-                        if i % 24 == 0 { println!(); } else { print!(" "); }
+                if let Err(e) = write_hex_dump_grouped(&full_packet) {
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        process::exit_broken_pipe();
                     }
-                    print!("{:02X}", b);
+                    eprintln!("Error: voidstar hex dump failed: {}", e);
+                    process::clean_exit(1);
                 }
-                if !full_packet.is_empty() { println!(); }
             } else {
                 let mut errmsg2: *mut std::ffi::c_char = std::ptr::null_mut();
                 unsafe { print_morloc_data_packet(full_packet.as_ptr(), schema, &mut errmsg2) };

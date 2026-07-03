@@ -1119,8 +1119,11 @@ bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t se
 // ========================================================================
 
 char* quoted(const char* input);
-bool print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
-bool pretty_print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
+// Returns: 0 = ok, 1 = error (see errmsg), 2 = downstream pipe closed
+// (BrokenPipe on write). On 2, errmsg is NOT set; caller should exit with
+// 141 (128 + SIGPIPE) to match conventional CLI behavior.
+int32_t print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
+int32_t pretty_print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
 bool print_arrow_as_json(const void* data, ERRMSG);
 bool print_arrow_as_table(const void* data, ERRMSG);
 bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG);

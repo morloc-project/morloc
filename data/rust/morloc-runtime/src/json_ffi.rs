@@ -86,22 +86,16 @@ pub unsafe extern "C" fn voidstar_to_json_string(
 
 // ── print_voidstar ─────────────────────────────────────────────────────────
 
+use morloc_runtime_types::{PRINT_RESULT_OK, PRINT_RESULT_ERR, PRINT_RESULT_PIPE_CLOSED};
+
 #[no_mangle]
 pub unsafe extern "C" fn print_voidstar(
     data: *const c_void,
     schema: *const CSchema,
     keep_null: bool,
     errmsg: *mut *mut c_char,
-) -> bool {
-    clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-    match crate::json::print_voidstar(data as *mut u8, &rs, keep_null) {
-        Ok(_) => true,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            false
-        }
-    }
+) -> i32 {
+    print_dispatch(data, schema, keep_null, errmsg, crate::json::print_voidstar)
 }
 
 #[no_mangle]
@@ -110,15 +104,23 @@ pub unsafe extern "C" fn pretty_print_voidstar(
     schema: *const CSchema,
     keep_null: bool,
     errmsg: *mut *mut c_char,
-) -> bool {
+) -> i32 {
+    print_dispatch(data, schema, keep_null, errmsg, crate::json::pretty_print_voidstar)
+}
+
+unsafe fn print_dispatch(
+    data: *const c_void,
+    schema: *const CSchema,
+    keep_null: bool,
+    errmsg: *mut *mut c_char,
+    write: fn(*mut u8, &crate::schema::Schema, bool) -> Result<(), MorlocError>,
+) -> i32 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match crate::json::pretty_print_voidstar(data as *mut u8, &rs, keep_null) {
-        Ok(_) => true,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            false
-        }
+    match write(data as *mut u8, &rs, keep_null) {
+        Ok(()) => PRINT_RESULT_OK,
+        Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
+        Err(e) => { set_errmsg(errmsg, &e); PRINT_RESULT_ERR }
     }
 }
 

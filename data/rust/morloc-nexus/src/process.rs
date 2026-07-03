@@ -361,6 +361,11 @@ static POOL_SWEPT: [AtomicBool; MAX_DAEMONS] = {
 /// Re-entrancy guard for clean_exit.
 static CLEANING_UP: AtomicBool = AtomicBool::new(false);
 
+/// Set when we exit due to BrokenPipe on stdout. Read by `clean_exit` to
+/// skip the stdout flush -- fd 1 is known dead, and the flush would
+/// hit the same EPIPE again.
+static BROKEN_PIPE: AtomicBool = AtomicBool::new(false);
+
 /// Global tmpdir path (set once in main, read during cleanup).
 static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -420,12 +425,41 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
     unsafe { *libc::__error() = saved_errno };
 }
 
-/// SIGTERM/SIGINT handler: clean shutdown.
+/// SIGTERM/SIGINT handler: fast shutdown.
+///
+/// Async-signal-safe: no allocation, no Rust std APIs, no locks. If the
+/// main thread was inside a `println!` or a mutex when the signal fired,
+/// calling back into Rust std would deadlock or double-borrow (the
+/// original "RefCell already borrowed" panic under Ctrl-C). So we do the
+/// minimum here: SIGKILL every pool process group (kill(2) IS async-
+/// signal-safe) and `_exit`, which skips destructors and returns to the
+/// kernel immediately.
+///
+/// Trade-offs:
+/// - SHM segments named `morloc-<pid>-<gen>` leak on this path. The
+///   next nexus run picks a fresh basename, and the morloc-manager
+///   sweeper reaps orphaned segments. Same story as any external
+///   `kill -9` of the nexus, which was already the accepted behavior.
+/// - The run-log epilogue and `summary.json` are NOT written. Neither
+///   is signal-safe. Users who ctrl-C don't expect a summary; if they
+///   need one, use SIGTERM's graceful path (the daemon has one) or the
+///   BrokenPipe path which runs full clean_exit from normal control
+///   flow.
+///
+/// A second signal (impatient user hitting ctrl-C twice) bypasses even
+/// the pool-kill loop and hard-exits immediately -- matches expected
+/// tool behavior ("hitting ctrl-C twice always works").
 extern "C" fn signal_exit_handler(sig: libc::c_int) {
-    if CLEANING_UP.load(Ordering::Relaxed) {
+    if CLEANING_UP.swap(true, Ordering::SeqCst) {
         unsafe { libc::_exit(128 + sig) };
     }
-    clean_exit(128 + sig);
+    for i in 0..MAX_DAEMONS {
+        let pgid = PGIDS[i].load(Ordering::Relaxed);
+        if pgid > 0 {
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        }
+    }
+    unsafe { libc::_exit(128 + sig) };
 }
 
 /// Install signal handlers.
@@ -588,9 +622,15 @@ pub fn clean_exit(exit_code: i32) -> ! {
     // Flush stdout. Critical when -o redirected fd 1 to a file: Rust
     // and libc both buffer when stdout is not a TTY, and std::process::exit
     // skips destructors so any unflushed bytes would be lost.
-    use std::io::Write;
-    let _ = std::io::stdout().lock().flush();
-    unsafe { libc::fflush(std::ptr::null_mut()) };
+    //
+    // Skip when the pipe is already broken -- the flush would return
+    // EPIPE and (worse, in some libc configs) block trying to write
+    // buffered bytes into a dead pipe.
+    if !BROKEN_PIPE.load(Ordering::Relaxed) {
+        use std::io::Write;
+        let _ = std::io::stdout().lock().flush();
+        unsafe { libc::fflush(std::ptr::null_mut()) };
+    }
 
     // Flush nexus stderr so our error messages are visible even if
     // the process is killed by a parent (e.g., shell pipeline).
@@ -684,6 +724,19 @@ pub fn clean_exit(exit_code: i32) -> ! {
     unsafe { morloc_run_finalize(exit_code) };
 
     std::process::exit(exit_code);
+}
+
+/// Downstream pipe closed while we were emitting output (e.g., `mtrim
+/// | head -20`). Exit fast with the conventional SIGPIPE status (141)
+/// after tearing down pools and shared memory. Unlike a raw SIGPIPE,
+/// which would kill the nexus without any cleanup, this preserves the
+/// full teardown -- pool subprocesses, SHM segments, run log summary.
+///
+/// The BROKEN_PIPE flag it sets tells `clean_exit` to skip the stdout
+/// flush that would otherwise attempt to write into the dead pipe.
+pub fn exit_broken_pipe() -> ! {
+    BROKEN_PIPE.store(true, Ordering::SeqCst);
+    clean_exit(141);
 }
 
 // ── Pool daemon spawning ───────────────────────────────────────────────────

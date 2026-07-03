@@ -18,6 +18,12 @@ pub enum MorlocError {
     NullPointer,
     #[error("{0}")]
     Other(String),
+    /// Downstream reader closed the pipe. Not really an error to report to
+    /// the user -- the caller should stop emitting and exit with the
+    /// conventional SIGPIPE status (141). Kept as a distinct variant so
+    /// upstream policy can react without string-matching an Io error.
+    #[error("broken pipe")]
+    PipeClosed,
 }
 
 /// Write a MorlocError into the C ERRMSG convention.
