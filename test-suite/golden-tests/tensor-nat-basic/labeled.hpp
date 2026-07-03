@@ -1,7 +1,7 @@
 #ifndef __LABELED_HPP__
 #define __LABELED_HPP__
 
-#include "mlc_tensor.hpp"
+#include "tensor.hpp"
 #include <vector>
 #include <cstdint>
 

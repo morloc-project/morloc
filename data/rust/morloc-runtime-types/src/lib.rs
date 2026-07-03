@@ -19,4 +19,7 @@ pub mod schema;
 pub mod cschema;
 pub mod null_check;
 pub mod packet;
+pub mod compression;
 pub mod daemon_socket;
+pub mod stream_handle;
+pub mod stdio_proto;

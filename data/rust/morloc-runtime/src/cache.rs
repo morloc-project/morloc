@@ -21,9 +21,20 @@ extern "C" {
         size: usize,
         errmsg: *mut *mut c_char,
     ) -> i32;
+    fn read_binary_file(
+        filename: *const c_char,
+        file_size: *mut usize,
+        errmsg: *mut *mut c_char,
+    ) -> *mut u8;
+    fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
+    fn get_morloc_data_packet_value(
+        data: *const u8,
+        schema: *const CSchema,
+        errmsg: *mut *mut c_char,
+    ) -> *mut u8;
 }
 
-/// Resolve the on-disk path `<cache_dir>/<label>/<key:016x>.packet`,
+/// Resolve the on-disk path `<cache_dir>/<label>/<key:016x>.dat`,
 /// creating the label directory if needed. Returns a heap C-string the
 /// caller frees with `libc::free`, or null with `*errmsg` set on
 /// failure.
@@ -84,8 +95,7 @@ unsafe fn resolve_data_filename(
         return ptr::null_mut();
     }
     let mut err: *mut c_char = ptr::null_mut();
-    let dat_ext = CString::new(".dat").unwrap();
-    let filename = make_cache_filename_ext(data_hash, dir, dat_ext.as_ptr(), &mut err);
+    let filename = make_cache_filename(data_hash, dir, &mut err);
     libc::free(dir as *mut c_void);
     if filename.is_null() {
         if !err.is_null() { *errmsg = err; }
@@ -223,7 +233,7 @@ pub extern "C" fn morloc_cache_record_store() {
 }
 
 /// Read the (hits, misses, stores) counter triple. Consumed by the
-/// nexus at exit to print the run summary (Stage 4).
+/// nexus at exit to print the run summary.
 #[no_mangle]
 pub extern "C" fn morloc_cache_stats(
     hits_out: *mut u64,
@@ -327,6 +337,41 @@ pub unsafe extern "C" fn morloc_cache_key_compute(
     key
 }
 
+/// Shared read-side path for both `morloc_cache_lookup` and
+/// `get_cache_packet`: read `filename`, run `cache_entry_is_valid`,
+/// return the malloc'd bytes on success. Consumes and frees
+/// `filename`; on any failure frees the malloc'd bytes too and
+/// returns a null pointer with `*size_out = 0`.
+unsafe fn read_and_validate_cache_file(
+    filename: *mut c_char,
+    size_out: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut sb: libc::stat = std::mem::zeroed();
+    if libc::stat(filename, &mut sb) != 0 {
+        libc::free(filename as *mut c_void);
+        return ptr::null_mut(); // miss: not an error
+    }
+    let mut file_size: usize = 0;
+    let data = read_binary_file(filename, &mut file_size, &mut err);
+    if data.is_null() {
+        libc::free(filename as *mut c_void);
+        if !err.is_null() { *errmsg = err; }
+        return ptr::null_mut();
+    }
+    if !cache_entry_is_valid(filename, data, file_size) {
+        libc::free(data as *mut c_void);
+        libc::free(filename as *mut c_void);
+        return ptr::null_mut();
+    }
+    libc::free(filename as *mut c_void);
+    if !size_out.is_null() {
+        *size_out = file_size;
+    }
+    data
+}
+
 // ── Label-aware lookup / store wrappers ────────────────────────────────────
 
 /// Look up a cached result packet under @label/@ for the given key.
@@ -350,45 +395,122 @@ pub unsafe extern "C" fn morloc_cache_lookup(
     if filename.is_null() {
         return ptr::null_mut();
     }
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut sb: libc::stat = std::mem::zeroed();
-    if libc::stat(filename, &mut sb) != 0 {
-        libc::free(filename as *mut c_void);
-        return ptr::null_mut(); // miss: not an error
+    read_and_validate_cache_file(filename, size_out, errmsg)
+}
+
+/// Peek at a cache entry's on-disk packet header and decide whether it
+/// belongs to the current cache format. Returns false and unlinks the
+/// stale files if not.
+///
+/// Cases returning false (miss + side-effect unlink):
+/// - The bytes are shorter than a packet header (corrupt).
+/// - Header claims `source=FILE, format=MSGPACK` — a legacy entry
+///   from before the msgpack->voidstar migration; unlink both the
+///   indirection and its `.dat` sidecar.
+/// - Header claims `source=FILE, format=DATA` but the referenced
+///   content sidecar does not exist, or its size differs from what
+///   the indirection's length field claims (atomicity crash between
+///   writes); unlink the dangling indirection.
+///
+/// All other headers pass through (the caller trusts the packet
+/// framework to reject any leftover invalid combinations).
+unsafe fn cache_entry_is_valid(
+    indirection_filename: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> bool {
+    use morloc_runtime_types::packet::{
+        PACKET_FORMAT_DATA, PACKET_FORMAT_MSGPACK, PACKET_SOURCE_FILE,
+        PacketHeader,
+    };
+    if data_len < 32 {
+        libc::unlink(indirection_filename);
+        return false;
     }
-    extern "C" {
-        fn read_binary_file(
-            filename: *const c_char,
-            file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
+    let hdr_arr: [u8; 32] = match std::slice::from_raw_parts(data, 32).try_into() {
+        Ok(a) => a,
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+    let hdr = match PacketHeader::from_bytes(&hdr_arr) {
+        Ok(h) => h,
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+    if !hdr.is_data() {
+        return true; // Non-data (call/ping/stream) -- not our concern.
     }
-    let mut file_size: usize = 0;
-    let data = read_binary_file(filename, &mut file_size, &mut err);
-    libc::free(filename as *mut c_void);
-    if data.is_null() {
-        if !err.is_null() { *errmsg = err; }
-        return ptr::null_mut();
+    let cmd = hdr.command.data;
+    let src = cmd.source;
+    let fmt = cmd.format;
+    if src != PACKET_SOURCE_FILE {
+        return true; // Inline / RPTR entries need no sidecar checks.
     }
-    if !size_out.is_null() {
-        *size_out = file_size;
+
+    let payload_start = 32 + hdr.offset as usize;
+    let payload_len = hdr.length as usize;
+    if payload_start.saturating_add(payload_len) > data_len {
+        libc::unlink(indirection_filename);
+        return false;
     }
-    data
+    let filename_bytes = std::slice::from_raw_parts(
+        data.add(payload_start),
+        payload_len.min(4096),
+    );
+    let ref_filename_str = match std::str::from_utf8(filename_bytes) {
+        Ok(s) => s.trim_end_matches('\0').to_string(),
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+    let ref_cstring = match CString::new(ref_filename_str.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+
+    if fmt == PACKET_FORMAT_MSGPACK {
+        // Cold-flush: legacy pre-migration entry. Unlink both files.
+        libc::unlink(ref_cstring.as_ptr());
+        libc::unlink(indirection_filename);
+        return false;
+    }
+    if fmt == PACKET_FORMAT_DATA {
+        // Atomicity: the content sidecar must exist and be non-empty.
+        // A missing or empty file means the two-file write got
+        // interrupted between rename(2) calls. `unlink` on a missing
+        // sidecar is a no-op.
+        let mut sb: libc::stat = std::mem::zeroed();
+        let sidecar_ok =
+            libc::stat(ref_cstring.as_ptr(), &mut sb) == 0 && sb.st_size > 0;
+        if !sidecar_ok {
+            libc::unlink(ref_cstring.as_ptr());
+            libc::unlink(indirection_filename);
+            return false;
+        }
+        return true;
+    }
+    // Unknown FILE format under the new scheme (e.g. TEXT / JSON via
+    // an old test). Don't touch it -- let the reader surface its own
+    // error.
+    true
 }
 
 /// Store a cached value under two files:
 ///
-///   `<cache_base>/<label>/<call_key:016x>.packet`
-///       A `PACKET_TYPE_DATA` packet (source=FILE, format=MSGPACK) whose
-///       payload is the path to the dat file.
+///   `<cache_base>/<label>/<call_key:016x>.dat`
+///       A `PACKET_TYPE_DATA` indirection packet
+///       (source=FILE, format=DATA, compression=NONE) whose payload is
+///       the path to the content file.
 ///   `<cache_base>/data/<data_hash:016x>.dat`
-///       Raw msgpack bytes of the cached value, content-addressed.
+///       A full voidstar data packet (32-byte header + SCHEMA_STRING
+///       metadata + optional zstd payload), content-addressed.
 ///
-/// `data_hash = xxh64(materialized_msgpack_bytes)` so equal values
-/// from different call sites (any label, any pool language)
-/// collapse onto one dat file. The .packet pointer makes the call→data
-/// indirection explicit and lets the existing get_value pipeline read
-/// the value back via the standard FILE-source packet path.
+/// `data_hash = hash_voidstar(voidstar)` — the schema-directed
+/// structural hash — so equal values from different call sites (any
+/// label, any pool language) collapse onto one content file
+/// regardless of allocation history.
+///
+/// Content ordering: content file is written first (via rename), then
+/// the indirection. A crash between the two leaves an orphan content
+/// file that a later run silently overwrites via the same content
+/// hash. The reverse ordering would leave an indirection pointing at
+/// a missing content file, which the reader treats as a cache miss.
 #[no_mangle]
 pub unsafe extern "C" fn morloc_cache_store(
     key: u64,
@@ -398,21 +520,6 @@ pub unsafe extern "C" fn morloc_cache_store(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> bool {
-    extern "C" {
-        fn get_data_packet_as_mpk(
-            packet: *const u8,
-            schema: *const CSchema,
-            mpk_out: *mut *mut c_char,
-            mpk_size_out: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn make_mpk_data_packet(
-            filename: *const c_char,
-            schema: *const CSchema,
-        ) -> *mut u8;
-        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
-    }
-
     clear_errmsg(errmsg);
 
     if data.is_null() || size == 0 {
@@ -441,28 +548,35 @@ pub unsafe extern "C" fn morloc_cache_store(
         return false;
     }
 
-    // Materialize the packet's payload to msgpack so the on-disk dat
-    // file is the schema-agnostic content (no header, no relptr).
-    let mut mpk: *mut c_char = ptr::null_mut();
-    let mut mpk_size: usize = 0;
-    let ok = get_data_packet_as_mpk(data, schema, &mut mpk, &mut mpk_size, &mut err);
-    if ok == 0 || mpk.is_null() {
+    // Materialize the packet into SHM voidstar so we can hash and
+    // re-serialize it. This handles RPTR / FILE / MESG uniformly.
+    let voidstar = get_morloc_data_packet_value(data, schema, &mut err);
+    if voidstar.is_null() {
         free_schema(schema);
         if !err.is_null() { *errmsg = err; }
         else {
             set_errmsg(errmsg, &MorlocError::Other(
-                "cache_store: get_data_packet_as_mpk failed".into()
+                "cache_store: get_morloc_data_packet_value failed".into()
             ));
         }
         return false;
     }
 
-    let mpk_slice = std::slice::from_raw_parts(mpk as *const u8, mpk_size);
-    let data_hash = hash::xxh64_with_seed(mpk_slice, 0);
+    let rs = CSchema::to_rust(schema);
+    // Structural hash matches the caller-side lookup key semantics
+    // (see slurm_ffi::remote_call using `hash_voidstar`) so store and
+    // lookup agree. Seed 0 is the shared default across the runtime.
+    let data_hash = match hash_voidstar_inner(voidstar as *const u8, &rs, 0) {
+        Ok(h) => h,
+        Err(e) => {
+            free_schema(schema);
+            set_errmsg(errmsg, &e);
+            return false;
+        }
+    };
 
     let dat_filename = resolve_data_filename(data_hash, &mut err);
     if dat_filename.is_null() {
-        libc::free(mpk as *mut c_void);
         free_schema(schema);
         if !err.is_null() { *errmsg = err; }
         return false;
@@ -476,23 +590,37 @@ pub unsafe extern "C" fn morloc_cache_store(
         libc::stat(dat_filename, &mut sb) == 0
     };
     if !dat_already_exists {
-        let rc = write_atomic(dat_filename, mpk as *const u8, mpk_size, &mut err);
+        let packet_bytes = match build_persistence_data_packet(
+            voidstar as *const u8, schema, &mut err,
+        ) {
+            Some(b) => b,
+            None => {
+                libc::free(dat_filename as *mut c_void);
+                free_schema(schema);
+                if !err.is_null() { *errmsg = err; }
+                return false;
+            }
+        };
+        let rc = write_atomic(
+            dat_filename,
+            packet_bytes.as_ptr(),
+            packet_bytes.len(),
+            &mut err,
+        );
         if rc != 0 {
             libc::free(dat_filename as *mut c_void);
-            libc::free(mpk as *mut c_void);
             free_schema(schema);
             if !err.is_null() { *errmsg = err; }
             return false;
         }
     }
-    libc::free(mpk as *mut c_void);
 
-    let pkt = make_mpk_data_packet(dat_filename, schema);
+    let pkt = crate::packet_ffi::make_data_indirection_packet(dat_filename, schema);
     libc::free(dat_filename as *mut c_void);
     free_schema(schema);
     if pkt.is_null() {
         set_errmsg(errmsg, &MorlocError::Other(
-            "cache_store: make_mpk_data_packet failed".into()
+            "cache_store: make_data_indirection_packet failed".into()
         ));
         return false;
     }
@@ -564,6 +692,35 @@ fn hash_voidstar_inner(
                     Ok(hash::xxh64_with_seed(bytes, seed))
                 }
             }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Cache key is content-derived. Resolve TAG_HANDLE to its
+                // path via the local SHM registry so two handles to the
+                // same file produce the same hash. TAG_PATH reads the
+                // path straight out of the suballoc.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                let tag = sh::read_tag(field);
+                let payload = sh::read_payload(field);
+                let owned: Vec<u8>;
+                let borrowed: &[u8];
+                if tag == sh::TAG_PATH {
+                    if payload == sh::RELNULL_PAYLOAD {
+                        borrowed = &[];
+                    } else {
+                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                        let path_len = sh::read_path_size(suballoc) as usize;
+                        borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
+                    }
+                } else if tag == sh::TAG_HANDLE {
+                    owned = crate::stream::handle_path(payload as i64)?.into_bytes();
+                    borrowed = &owned;
+                } else {
+                    return Err(MorlocError::Other(format!(
+                        "cache hash: unsupported stream-handle tag {}", tag,
+                    )));
+                }
+                Ok(hash::xxh64_with_seed(borrowed, seed))
+            }
             SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const shm::Array);
                 let elem_width = if schema.parameters.is_empty() {
@@ -573,7 +730,9 @@ fn hash_voidstar_inner(
                 };
                 let elem_data = shm::rel2abs(arr.data)?;
 
-                if schema.is_fixed_width() || schema.serial_type == SerialType::String {
+                if schema.is_fixed_width()
+                    || matches!(schema.serial_type, SerialType::String)
+                {
                     let total = elem_width * arr.size;
                     let bytes = std::slice::from_raw_parts(elem_data, total);
                     Ok(hash::xxh64_with_seed(bytes, seed))
@@ -631,12 +790,6 @@ pub unsafe extern "C" fn hash_morloc_packet(
             msg: *const u8,
             errmsg: *mut *mut c_char,
         ) -> *const crate::packet::PacketHeader;
-        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
-        fn get_morloc_data_packet_value(
-            data: *const u8,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
     }
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -721,8 +874,104 @@ pub unsafe extern "C" fn make_cache_filename(
     cache_path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
-    let ext = CString::new(".packet").unwrap();
+    // `.dat` for every on-disk cache entry -- both the caller-key index
+    // and the content-hash blob. Reader tells them apart by inspecting
+    // the packet header bytes.
+    let ext = CString::new(".dat").unwrap();
     make_cache_filename_ext(key, cache_path, ext.as_ptr(), errmsg)
+}
+
+/// Compression level read from `MORLOC_CACHE_COMPRESSION_LEVEL`. Default
+/// is 0 (uncompressed) so `morloc dump` renders cache entries without
+/// paying decompression cost. Users opt into higher levels via env for
+/// large-payload workloads where disk footprint matters. Cached once on
+/// first read like `pool_hash` and `cache_base`.
+fn read_cache_compression_level() -> u8 {
+    static CACHED: OnceLock<u8> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL")
+            .ok()
+            .and_then(|s| s.trim().parse::<u8>().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Serialize an SHM voidstar as a self-contained MORLOC_DATA_PACKET
+/// suitable for on-disk persistence. Runs the persistence rewrite
+/// (TAG_HANDLE -> TAG_PATH, stdio rejection) then optionally zstd-
+/// compresses per `MORLOC_CACHE_COMPRESSION_LEVEL`. The returned bytes
+/// are the entire packet (32-byte header + SCHEMA_STRING metadata +
+/// payload); write them to disk as one atomic file.
+pub(crate) unsafe fn build_persistence_data_packet(
+    voidstar: *const u8,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> Option<Vec<u8>> {
+    use morloc_runtime_types::packet::{
+        append_metadata_entry, METADATA_TYPE_SCHEMA_STRING,
+        PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
+        PACKET_FORMAT_VOIDSTAR, PacketHeader,
+    };
+
+    let rs = CSchema::to_rust(schema);
+
+    let mut blob = match crate::voidstar::flatten_to_buffer(
+        voidstar as crate::shm::AbsPtr,
+        &rs,
+    ) {
+        Ok(b) => b,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+
+    // TAG_HANDLE -> TAG_PATH: slot ids don't survive across nexus
+    // lifetimes. Guards against stdio-bound handles (rejected with a
+    // typed error before any bytes reach disk).
+    let fields = match crate::handle_scan::collect_stream_fields(&blob, &rs) {
+        Ok(f) => f,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+    if let Err(e) = crate::handle_scan::rewrite_handles_to_paths(&mut blob, &fields) {
+        set_errmsg(errmsg, &e);
+        return None;
+    }
+
+    let clvl = match crate::compression::CompressionLevel::from_u8(
+        read_cache_compression_level(),
+    ) {
+        Ok(l) => l,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+    let payload = match crate::compression::compress_payload_zstd(&blob, clvl) {
+        Ok((bytes, _frames)) => bytes,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+    let compression_byte = if clvl.is_none() {
+        PACKET_COMPRESSION_NONE
+    } else {
+        PACKET_COMPRESSION_ZSTD
+    };
+    drop(blob);
+
+    let schema_str = crate::schema::schema_to_string(&rs);
+    let mut schema_body = schema_str.into_bytes();
+    schema_body.push(0); // NUL-terminator matches decode_schema_entry
+    let metadata = append_metadata_entry(
+        &[], METADATA_TYPE_SCHEMA_STRING, &schema_body,
+    );
+    let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload.len() as u64);
+    header.offset = metadata.len() as u32;
+    let hdr_bytes = header.to_bytes();
+    // Compression byte lives inside the 32-byte header at byte 15
+    // (see PacketHeader::data_mesg comment in packet.rs). Patch it
+    // in the serialized form.
+    let mut hdr_bytes = hdr_bytes;
+    hdr_bytes[15] = compression_byte;
+
+    let mut out = Vec::with_capacity(32 + metadata.len() + payload.len());
+    out.extend_from_slice(&hdr_bytes);
+    out.extend_from_slice(&metadata);
+    out.extend_from_slice(&payload);
+    Some(out)
 }
 
 // ── Cache operations ───────────────────────────────────────────────────────
@@ -737,82 +986,39 @@ pub unsafe extern "C" fn put_cache_packet(
 ) -> *mut c_char {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn make_mpk_data_packet(filename: *const c_char, schema: *const CSchema) -> *mut u8;
-        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
-        fn pack_with_schema(
-            mlc: *const c_void, schema: *const CSchema,
-            mpk: *mut *mut c_char, mpk_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
-
     let mut err: *mut c_char = ptr::null_mut();
 
-    // Generate filenames
     let pkt_filename = make_cache_filename(key, cache_path, &mut err);
     if pkt_filename.is_null() {
         *errmsg = err;
         return ptr::null_mut();
     }
 
-    let dat_ext = CString::new(".dat").unwrap();
-    let dat_filename = make_cache_filename_ext(key, cache_path, dat_ext.as_ptr(), &mut err);
-    if dat_filename.is_null() {
-        libc::free(pkt_filename as *mut c_void);
-        *errmsg = err;
-        return ptr::null_mut();
-    }
+    // One file per cache entry: the caller-supplied `key` here is
+    // already `hash_voidstar(arg_voidstars[i])`, so key == content
+    // hash and the "indirection" packet degenerates to the data
+    // packet itself.
+    let packet_bytes = match build_persistence_data_packet(voidstar, schema, &mut err) {
+        Some(b) => b,
+        None => {
+            libc::free(pkt_filename as *mut c_void);
+            if !err.is_null() { *errmsg = err; }
+            return ptr::null_mut();
+        }
+    };
 
-    // Create data packet pointing to the .dat file
-    let data_packet = make_mpk_data_packet(dat_filename, schema);
-    if data_packet.is_null() {
-        libc::free(pkt_filename as *mut c_void);
-        libc::free(dat_filename as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Other("Failed to create data packet".into()));
-        return ptr::null_mut();
-    }
-
-    let pkt_size = morloc_packet_size(data_packet, &mut err);
-
-    // Pack voidstar to msgpack
-    let mut mpk_data: *mut c_char = ptr::null_mut();
-    let mut mpk_size: usize = 0;
-    let rc = pack_with_schema(voidstar as *const c_void, schema, &mut mpk_data, &mut mpk_size, &mut err);
+    let rc = write_atomic(
+        pkt_filename,
+        packet_bytes.as_ptr(),
+        packet_bytes.len(),
+        &mut err,
+    );
     if rc != 0 {
-        libc::free(data_packet as *mut c_void);
         libc::free(pkt_filename as *mut c_void);
-        libc::free(dat_filename as *mut c_void);
-        *errmsg = err;
+        if !err.is_null() { *errmsg = err; }
         return ptr::null_mut();
     }
 
-    // Write packet file
-    write_atomic(pkt_filename, data_packet, pkt_size, &mut err);
-    libc::free(data_packet as *mut c_void);
-    if !err.is_null() {
-        libc::free(mpk_data as *mut c_void);
-        libc::free(pkt_filename as *mut c_void);
-        libc::free(dat_filename as *mut c_void);
-        *errmsg = err;
-        return ptr::null_mut();
-    }
-
-    // Write data file
-    write_atomic(dat_filename, mpk_data as *const u8, mpk_size, &mut err);
-    libc::free(mpk_data as *mut c_void);
-    libc::free(dat_filename as *mut c_void);
-    if !err.is_null() {
-        libc::free(pkt_filename as *mut c_void);
-        *errmsg = err;
-        return ptr::null_mut();
-    }
-
-    // Return the packet filename
     let result = libc::strdup(pkt_filename);
     libc::free(pkt_filename as *mut c_void);
     result
@@ -832,21 +1038,7 @@ pub unsafe extern "C" fn get_cache_packet(
         *errmsg = err;
         return ptr::null_mut();
     }
-
-    extern "C" {
-        fn read_binary_file(
-            filename: *const c_char, file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
-
-    let mut file_size: usize = 0;
-    let data = read_binary_file(filename, &mut file_size, &mut err);
-    libc::free(filename as *mut c_void);
-    if data.is_null() {
-        *errmsg = err;
-    }
-    data
+    read_and_validate_cache_file(filename, ptr::null_mut(), errmsg)
 }
 
 #[no_mangle]
@@ -895,12 +1087,29 @@ pub unsafe extern "C" fn check_cache_packet(
         return ptr::null_mut();
     }
 
-    let mut sb: libc::stat = std::mem::zeroed();
-    if libc::stat(filename, &mut sb) == 0 {
-        let result = libc::strdup(filename);
+    // Cache existence + format check on the hot SLURM dispatch path.
+    // Bounded peek: PacketHeader is 32 B, the filename payload rarely
+    // exceeds a few hundred bytes, so 4 KiB is a safe upper bound
+    // that covers the whole indirection while avoiding the full-file
+    // read a stale/oversized entry would trigger.
+    let fd = libc::open(filename, libc::O_RDONLY);
+    if fd < 0 {
         libc::free(filename as *mut c_void);
-        return result;
+        return ptr::null_mut(); // miss / unreadable
     }
+    let mut buf: [u8; 4096] = [0; 4096];
+    let n = libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len());
+    libc::close(fd);
+    if n < 32 {
+        libc::unlink(filename);
+        libc::free(filename as *mut c_void);
+        return ptr::null_mut();
+    }
+    if !cache_entry_is_valid(filename, buf.as_ptr(), n as usize) {
+        libc::free(filename as *mut c_void);
+        return ptr::null_mut();
+    }
+    let result = libc::strdup(filename);
     libc::free(filename as *mut c_void);
-    ptr::null_mut() // Not an error — cache miss
+    result
 }

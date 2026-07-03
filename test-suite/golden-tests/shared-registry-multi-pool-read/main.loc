@@ -1,0 +1,70 @@
+-- Multiple pools read from the same IStream handle via cross-pool
+-- arg passing. The slot's atomic cursor advances under the futex
+-- on each @next, so concurrent readers across pools each claim a
+-- DISTINCT sub-packet. Order across pools is non-deterministic;
+-- the union of consumed sub-packets equals the file's contents.
+--
+-- Producer side requires @flush BETWEEN @writes so distinct
+-- sub-packets exist for the readers to claim. Without flushes
+-- everything would coalesce into one sub-packet and only one
+-- reader would get data.
+--
+-- This test runs sequentially (not parMap) so the order of
+-- @next calls is deterministic, but the cross-pool handle
+-- passing still exercises the same shared-cursor path.
+
+module main
+  ( testCrossPoolReaders
+  , testCrossPoolReadersEof
+  )
+
+import root-py
+import root-cpp
+
+prepFile :: Str -> <IO> ()
+prepFile path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @flush o
+  @write 0 [4, 5] o
+  @flush o
+  @write 0 [6, 7] o
+  @close o
+
+-- The bound `xs` carries the @next result through the pool-pinning
+-- combinator. `idcpp (@next s)` would unify a polymorphic type
+-- variable with @next's effectful return, which the type checker
+-- rejects; binding @next first puts the forced value in scope.
+cppRead :: IStream Int -> <IO> [Int]
+cppRead s = do
+  xs <- @next s
+  idcpp xs
+
+pyRead :: IStream Int -> <IO> [Int]
+pyRead s = do
+  xs <- @next s
+  idpy xs
+
+-- Each pool's @next claims one sub-packet from the shared
+-- cursor. Sum of element counts = 7. The exact split depends
+-- on call order, which is deterministic here.
+testCrossPoolReaders :: Str -> <IO> UInt64
+testCrossPoolReaders path = do
+  prepFile path
+  s <- @open path :: <IO> IStream Int
+  a <- cppRead s        -- claims sub-packet 0 (3 elements)
+  b <- pyRead s         -- claims sub-packet 1 (2 elements)
+  c <- cppRead s        -- claims sub-packet 2 (2 elements)
+  size a + size b + size c
+
+-- After all 3 sub-packets drained, the 4th read (from any pool)
+-- returns []. This shows the EOF signal propagates cross-pool.
+testCrossPoolReadersEof :: Str -> <IO> UInt64
+testCrossPoolReadersEof path = do
+  prepFile path
+  s <- @open path :: <IO> IStream Int
+  cppRead s
+  pyRead s
+  cppRead s
+  d <- pyRead s
+  size d

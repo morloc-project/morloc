@@ -15,11 +15,17 @@ cid :: Str -> Str
 pid :: Str -> Str
 rid :: Str -> Str
 
-cfoo :: Str -> Str
+cfoo ::
+  --' source:file
+  Str -> Str
 cfoo = cid . pid . cid
 
-pfoo :: Str -> Str
+pfoo ::
+  --' source:file
+  Str -> Str
 pfoo = pid . cid . pid
 
-rfoo :: Str -> Str
+rfoo ::
+  --' source:file
+  Str -> Str
 rfoo = rid . pid . rid

@@ -1,2 +1,2 @@
 import sys
-print('"' + "x" * int(sys.argv[1]) + '"')
+print("x" * int(sys.argv[1]))

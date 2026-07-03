@@ -20,7 +20,7 @@
 
 use clap::{Arg as ClapArg, ArgAction, ArgMatches, Command as ClapCommand};
 
-use crate::dispatch::{quoted, ArgValue};
+use crate::dispatch::{apply_checks, quoted, substitute_stdio_dash, ArgValue};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
 
 /// Leak a string into a `&'static str` for clap's static-only
@@ -29,7 +29,7 @@ use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
 /// process lifetime are acceptable. Daemons reuse their built clap
 /// commands across requests instead of rebuilding, so the leak there
 /// is also bounded.
-fn leak(s: &str) -> &'static str {
+pub(crate) fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
@@ -127,17 +127,24 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 
     if single {
         let cmd = &manifest.commands[0];
-        return build_command_args(ClapCommand::new(leak(prog_name)), cmd)
+        // add_general_options runs first so the "General Options"
+        // section sorts before the command's positional/optional args
+        // (clap orders sections by first-arg-added).
+        let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
+        let root = build_command_args(root, cmd)
             .about(leak(first_desc(&cmd.desc)))
             .arg_required_else_help(false);
+        return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
 
     let mut root = ClapCommand::new(leak(prog_name))
         .subcommand_required(true)
         .arg_required_else_help(true);
+    root = crate::help::add_general_options(root);
     if let Some(first) = manifest.desc.first() {
         root = root.about(leak(first));
     }
+    root = crate::help::finalize(root, crate::help::usage_multi_root(prog_name));
 
     // Each CmdGroup becomes its own clap subcommand; its members
     // (commands carrying that group) become subcommands beneath it.
@@ -145,31 +152,46 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         let mut grp_cmd = ClapCommand::new(leak(&grp.name))
             .subcommand_required(true)
             .arg_required_else_help(true);
+        grp_cmd = crate::help::add_general_options(grp_cmd);
         if let Some(first) = grp.desc.first() {
             grp_cmd = grp_cmd.about(leak(first));
         }
+        grp_cmd = crate::help::finalize(
+            grp_cmd,
+            crate::help::usage_multi_group(prog_name, &grp.name),
+        );
         for cmd in &manifest.commands {
             if cmd.group.as_deref() == Some(grp.name.as_str()) {
-                grp_cmd = grp_cmd.subcommand(
-                    build_command_args(
-                        ClapCommand::new(leak(&cmd.name))
-                            .about(leak(first_desc(&cmd.desc))),
-                        cmd,
+                let sub = crate::help::add_general_options(
+                    ClapCommand::new(leak(&cmd.name))
+                        .about(leak(first_desc(&cmd.desc))),
+                );
+                let sub = build_command_args(sub, cmd);
+                let sub = crate::help::finalize(
+                    sub,
+                    crate::help::usage_multi_sub(
+                        prog_name,
+                        Some(&grp.name),
+                        &cmd.name,
                     ),
                 );
+                grp_cmd = grp_cmd.subcommand(sub);
             }
         }
         root = root.subcommand(grp_cmd);
     }
     for cmd in &manifest.commands {
         if cmd.group.is_none() {
-            root = root.subcommand(
-                build_command_args(
-                    ClapCommand::new(leak(&cmd.name))
-                        .about(leak(first_desc(&cmd.desc))),
-                    cmd,
-                ),
+            let sub = crate::help::add_general_options(
+                ClapCommand::new(leak(&cmd.name))
+                    .about(leak(first_desc(&cmd.desc))),
             );
+            let sub = build_command_args(sub, cmd);
+            let sub = crate::help::finalize(
+                sub,
+                crate::help::usage_multi_sub(prog_name, None, &cmd.name),
+            );
+            root = root.subcommand(sub);
         }
     }
     root
@@ -188,7 +210,13 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 /// short flag declarations in user docstrings, making this
 /// unambiguous.
 fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
-    cmd = cmd.allow_negative_numbers(true);
+    cmd = cmd
+        .allow_negative_numbers(true)
+        // User-declared flag-style args inherit this heading;
+        // positional args are hidden from clap's auto-render below
+        // and re-emitted by `render_positional_block` under a
+        // "Positional arguments:" header in `after_help`.
+        .next_help_heading("Optional arguments");
     // Long help: concatenate every desc line so clap renders the
     // full block under `<sub> --help`.
     if !mcmd.desc.is_empty() {
@@ -202,7 +230,14 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     // also lives here so it stays attached to the command (clap has
     // no first-class slot for return-type metadata).
     let mut after = String::new();
+    let pos_block = render_positional_block(mcmd);
+    if !pos_block.is_empty() {
+        after.push_str(&pos_block);
+    }
     if !mcmd.ret.type_desc.is_empty() {
+        if !after.is_empty() {
+            after.push_str("\n\n");
+        }
         after.push_str(&format!("Return: {}", mcmd.ret.type_desc));
         for line in &mcmd.ret.desc {
             after.push_str(&format!("\n  {}", line));
@@ -223,15 +258,21 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { metavar, type_desc, desc, .. } => {
+            ManifestArg::Positional { many, .. } => {
+                // Positionals are rendered by `render_positional_block`
+                // (above, via `after_help`) so clap's bracketed
+                // `<argN>` default doesn't appear in help. They still
+                // need `required`/`index` here for clap to parse them.
                 let mut a = ClapArg::new(id)
                     .required(true)
                     .index(pos_idx as usize)
-                    .help_heading("Positional arguments");
-                if let Some(m) = metavar {
-                    a = a.value_name(leak(m));
+                    .hide(true);
+                // Variadic positional: accept one or more tokens.
+                // The compiler guarantees a `many` positional is the
+                // last positional, which is clap's requirement too.
+                if *many {
+                    a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
                 cmd = cmd.arg(a);
                 pos_idx = pos_idx.saturating_add(1);
             }
@@ -242,6 +283,8 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                 default_val,
                 type_desc,
                 desc,
+                many,
+                format,
                 ..
             } => {
                 let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -259,7 +302,13 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                 if let Some(d) = default_val {
                     a = a.default_value(leak(d));
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
+                if *many {
+                    // Variadic option: collect every value supplied
+                    // across the option's occurrences AND every value
+                    // passed after a single occurrence (`--xs 1 2 3`).
+                    a = a.num_args(1..).action(ArgAction::Append);
+                }
+                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
                 cmd = cmd.arg(a);
             }
             ManifestArg::Flag {
@@ -290,6 +339,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                     desc,
                     Some("Bool"),
                     default_val.as_deref(),
+                    None,
                 )));
                 cmd = cmd.arg(fwd);
 
@@ -332,6 +382,7 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
                         desc,
                         type_desc.as_deref(),
                         None,
+                        None,
                     )));
                     cmd = cmd.arg(a);
                 }
@@ -357,6 +408,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             default_val,
             type_desc,
             desc,
+            format,
             ..
         } => {
             let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -374,7 +426,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             if let Some(d) = default_val {
                 a = a.default_value(leak(d));
             }
-            a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None)));
+            a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
             cmd = cmd.arg(a);
         }
         ManifestArg::Flag {
@@ -398,6 +450,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 desc,
                 Some("Bool"),
                 default_val.as_deref(),
+                None,
             )));
             cmd = cmd.arg(fwd);
             if let Some(rev) = long_rev {
@@ -431,18 +484,44 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, .. } => {
-                // Required positional: clap guaranteed a value.
-                let val = matches
-                    .get_one::<String>(&id)
-                    .cloned()
-                    .expect("clap-required positional must have a value");
-                let v = if *q { quoted(&val) } else { val };
-                out.push(ArgValue::Value(v));
+            ManifestArg::Positional { quoted: q, many, checks, .. } => {
+                if *many {
+                    // Variadic positional: clap collects 1..N tokens
+                    // via Append action; pull them all and forward as
+                    // ArgValue::Many for list-packet assembly in
+                    // dispatch. clap's `required(true)` guarantees at
+                    // least one token, so an empty vec here is a clap
+                    // bug.
+                    let toks: Vec<String> = matches
+                        .get_many::<String>(&id)
+                        .map(|it| it.cloned().collect())
+                        .unwrap_or_default();
+                    out.push(ArgValue::Many { tokens: toks, literal: *q });
+                } else {
+                    // Required positional: clap guaranteed a value.
+                    let val = matches
+                        .get_one::<String>(&id)
+                        .cloned()
+                        .expect("clap-required positional must have a value");
+                    // Unix `-` stdin/stdout shorthand: rewrite to the
+                    // `/dev/std{in,out}` path so the pool's fopen
+                    // works without any user-side dash handling.
+                    let val = substitute_stdio_dash(&val, checks).unwrap_or(val);
+                    // Run value-invariant checks on the (possibly
+                    // substituted) argv before any wrap.
+                    if let Err(e) = apply_checks(&val, checks) {
+                        crate::runlog::die_with_error(
+                            &format!("argument #{}: {}", i, e));
+                    }
+                    let v = if *q { quoted(&val) } else { val };
+                    out.push(ArgValue::Value(v));
+                }
             }
             ManifestArg::Optional {
                 quoted: q,
                 default_val,
+                many,
+                checks,
                 ..
             } => {
                 // Distinguish "user typed the flag" from "clap
@@ -457,11 +536,35 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 use clap::parser::ValueSource;
                 let from_cli = matches.value_source(&id)
                     == Some(ValueSource::CommandLine);
-                if from_cli {
+                if *many {
+                    // Variadic option: collect all CLI tokens (if any)
+                    // and forward as ArgValue::Many. If the user did
+                    // not pass the option at all, fall back to the
+                    // compiler-supplied default (typically `"[]"`).
+                    if from_cli {
+                        let toks: Vec<String> = matches
+                            .get_many::<String>(&id)
+                            .map(|it| it.cloned().collect())
+                            .unwrap_or_default();
+                        out.push(ArgValue::Many { tokens: toks, literal: *q });
+                    } else if let Some(def) = default_val {
+                        out.push(ArgValue::Value(def.clone()));
+                    } else {
+                        out.push(ArgValue::Null);
+                    }
+                } else if from_cli {
                     let v = matches
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
+                    // Unix `-` stdin/stdout shorthand: rewrite to the
+                    // `/dev/std{in,out}` path so the pool's fopen
+                    // works without any user-side dash handling.
+                    let v = substitute_stdio_dash(&v, checks).unwrap_or(v);
+                    if let Err(e) = apply_checks(&v, checks) {
+                        crate::runlog::die_with_error(
+                            &format!("argument #{}: {}", i, e));
+                    }
                     let v = if *q { quoted(&v) } else { v };
                     out.push(ArgValue::Value(v));
                 } else if let Some(def) = default_val {
@@ -570,41 +673,32 @@ fn first_desc(desc: &[String]) -> &str {
         .unwrap_or("")
 }
 
-/// Placeholder shown when a manifest arg has no docstring.
-/// Wrapped in ANSI italic SGR codes (`\x1b[3m...\x1b[0m`); clap's
-/// help renderer pipes output through `anstream`, which strips ANSI
-/// codes automatically when the output isn't a TTY, so pipes /
-/// redirects / file targets see plain text.
-const MISSING_DESCRIPTION: &str = "\x1b[3mmissing description\x1b[0m";
-
 /// Render the help block for a manifest arg: the user's docstring
-/// description (falling back to a rendered "missing description"
-/// placeholder when the docstring is empty), followed on indented
-/// continuation lines by the arg's morloc type and, for flags with
-/// a declared default, the default value. clap's renderer wraps
-/// continuation lines under the same column as the first
-/// description line, producing the legacy multi-line layout:
-///
-/// ```text
-///   ARG1  missing description
-///         type: Real
-/// ```
+/// description, followed on indented continuation lines by the arg's
+/// morloc type and, for flags with a declared default, the default
+/// value. When the docstring is empty the type/format/default lines
+/// move up to fill the first slot, so help reads as a compact list
+/// of facts rather than padded with a placeholder. clap's renderer
+/// wraps continuation lines under the same column as the first line.
 fn render_arg_help(
     desc: &[String],
     type_desc: Option<&str>,
     default_val: Option<&str>,
+    format_hint: Option<&str>,
 ) -> String {
     let mut lines: Vec<String> = desc
         .iter()
         .filter(|d| !d.trim().is_empty())
         .cloned()
         .collect();
-    if lines.is_empty() {
-        lines.push(MISSING_DESCRIPTION.to_string());
-    }
     if let Some(td) = type_desc {
         if !td.trim().is_empty() {
             lines.push(format!("type: {}", td));
+        }
+    }
+    if let Some(f) = format_hint {
+        if !f.trim().is_empty() {
+            lines.push(format!("format: {}", f));
         }
     }
     if let Some(d) = default_val {
@@ -613,6 +707,71 @@ fn render_arg_help(
         }
     }
     lines.join("\n")
+}
+
+/// Render the "Positional arguments:" block for a command's
+/// positional args, replacing clap's `<argN>` bracketed default with
+/// a numbered list (`1:`, `2:`, ...). Indices are right-aligned and
+/// the type line collapses up into the index line when no docstring
+/// is supplied, producing:
+///
+/// ```text
+/// Positional arguments:
+///   1:  the first thing
+///       type: UInt8
+///   2:  type: [UInt8]
+/// ```
+///
+/// Returns the empty string when the command has no positionals.
+fn render_positional_block(mcmd: &ManifestCommand) -> String {
+    let positionals: Vec<&ManifestArg> = mcmd
+        .args
+        .iter()
+        .filter(|a| matches!(a, ManifestArg::Positional { .. }))
+        .collect();
+    if positionals.is_empty() {
+        return String::new();
+    }
+    let idx_width = positionals.len().to_string().len();
+    let mut out = String::from("Positional arguments:");
+    for (i, marg) in positionals.iter().enumerate() {
+        let prefix = format!("  {:>width$}:  ", i + 1, width = idx_width);
+        let cont = " ".repeat(prefix.len());
+        let (type_desc, desc, format_hint) = match marg {
+            ManifestArg::Positional { type_desc, desc, format, .. } => (
+                type_desc.as_deref(),
+                desc.as_slice(),
+                format.as_deref(),
+            ),
+            _ => unreachable!("filtered to Positional only"),
+        };
+        let mut lines: Vec<String> = desc
+            .iter()
+            .filter(|d| !d.trim().is_empty())
+            .cloned()
+            .collect();
+        if let Some(td) = type_desc {
+            if !td.trim().is_empty() {
+                lines.push(format!("type: {}", td));
+            }
+        }
+        if let Some(f) = format_hint {
+            if !f.trim().is_empty() {
+                lines.push(format!("format: {}", f));
+            }
+        }
+        if lines.is_empty() {
+            // Nothing to say beyond the index marker; emit just that
+            // so the slot still appears in help.
+            out.push_str(&format!("\n{}", prefix.trim_end()));
+        } else {
+            for (li, line) in lines.iter().enumerate() {
+                let pad = if li == 0 { &prefix } else { &cont };
+                out.push_str(&format!("\n{}{}", pad, line));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -678,22 +837,22 @@ mod tests {
             &["Take the first integer".into()],
             Some("Int"),
             None,
+            None,
         );
         assert_eq!(h, "Take the first integer\ntype: Int");
 
-        // Empty description falls back to the "missing description"
-        // placeholder so users always see at least one line under
-        // each arg. The placeholder is wrapped in ANSI italic SGR
-        // codes; clap's anstream pipeline strips them when the
-        // output isn't a TTY.
-        let h = render_arg_help(&[], Some("Real"), None);
-        assert_eq!(h, format!("{}\ntype: Real", MISSING_DESCRIPTION));
+        // Empty description: the type line becomes the first line
+        // so help reads as a compact list of facts without a
+        // placeholder "missing description" line above the type.
+        let h = render_arg_help(&[], Some("Real"), None, None);
+        assert_eq!(h, "type: Real");
 
         // Multi-line description preserves every non-empty line in
         // order; the type line is appended after.
         let h = render_arg_help(
             &["first".into(), "second".into()],
             Some("Str"),
+            None,
             None,
         );
         assert_eq!(h, "first\nsecond\ntype: Str");
@@ -703,23 +862,40 @@ mod tests {
             &["Verbose output".into()],
             Some("Bool"),
             Some("false"),
+            None,
         );
         assert_eq!(h, "Verbose output\ntype: Bool\ndefault: false");
 
         // Empty type_desc / default are suppressed (no trailing
         // blank lines in the rendered help).
-        let h = render_arg_help(&["just a desc".into()], None, None);
+        let h = render_arg_help(&["just a desc".into()], None, None, None);
         assert_eq!(h, "just a desc");
+
+        // Format hint slots in between type and default.
+        let h = render_arg_help(
+            &["readable file path".into()],
+            Some("Str"),
+            None,
+            Some("must be the path of an existing readable file"),
+        );
+        assert_eq!(
+            h,
+            "readable file path\ntype: Str\nformat: must be the path of an existing readable file"
+        );
     }
 
     #[test]
-    fn missing_description_carries_italic_sgr() {
-        // The placeholder is a plain `&'static str` constant that
-        // wraps the phrase in italic SGR codes; clap's anstream
-        // pipeline strips them automatically on non-TTY output.
-        assert!(MISSING_DESCRIPTION.contains("missing description"));
-        assert!(MISSING_DESCRIPTION.starts_with("\x1b[3m"));
-        assert!(MISSING_DESCRIPTION.ends_with("\x1b[0m"));
+    fn positional_block_collapses_type_into_index_when_no_desc() {
+        // fixture_single_add's two positionals have empty `desc`, so
+        // the type line takes the first slot beside the index marker
+        // rather than sitting on a continuation line under a
+        // placeholder. Indices are 1-based.
+        let m = fixture_single_add();
+        let block = render_positional_block(&m.commands[0]);
+        assert_eq!(
+            block,
+            "Positional arguments:\n  1:  type: Int\n  2:  type: Int"
+        );
     }
 
     #[test]

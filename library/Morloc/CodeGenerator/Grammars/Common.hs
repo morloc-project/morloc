@@ -196,6 +196,15 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
            in case (lookup k ss) of
                 (Just s) -> setter dat' t s args
                 Nothing -> (args, dat')
+    -- Bracket selectors are not valid setter targets: bracket-index /
+    -- bracket-slice describe element access on arrays, not record-style
+    -- field assignment. The parser already rejects setters on accessor
+    -- chains containing brackets; reaching here means an upstream
+    -- invariant was violated.
+    setter _ _ (SelectorBracketIndex _) _ =
+      error "patternSetter: bracket-index step in a setter selector"
+    setter _ _ SelectorBracketSlice _ =
+      error "patternSetter: bracket-slice step in a setter selector"
     setter _ _ _ (arg : args2) = (args2, arg)
     setter _ _ _ [] = error "Illegal setter"
 

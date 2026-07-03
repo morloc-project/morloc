@@ -1,0 +1,105 @@
+-- Reading a stream file whose writer exited without `@close`.
+--
+-- v2 (post-buffering): @write now appends to an in-SHM buffer
+-- instead of immediately producing a sub-packet on disk. A writer
+-- that exits WITHOUT `@close` and WITHOUT `@flush` loses its buffer
+-- entirely -- the per-call sweep calls `discard_handle`, which
+-- releases the slot WITHOUT promoting the temp footer or flushing
+-- the buffer.
+--
+-- This is the design contract for "writer didn't finish": the
+-- on-disk file reflects only what the writer explicitly committed
+-- via `@flush` (or @close). Buffered-but-uncommitted data is the
+-- writer's tail, lost cleanly. Readers can recover what was
+-- committed.
+--
+-- The contract this test pins:
+--
+--   * `writeAndFlush` commits three sub-packets via @flush; the
+--     dispatch ends without @close. Sweeper calls discard_handle
+--     (no final footer). Readers via IStream see all three packets.
+--
+--   * `writeWithoutFlush` writes three batches without flushing or
+--     closing. Sweeper discards the buffer; on-disk file has only
+--     the stream header + temp footer. Reader's first @next sees
+--     EOF immediately.
+--
+--   * `@open IFile` on an unclosed file still errors (random access
+--     needs the full sub-packet index from a final footer).
+
+module main
+  ( writeAndFlush
+  , writeWithoutFlush
+  , countViaIStream
+  , drainFirstSubpacket
+  , drainSecondSubpacket
+  , drainThirdSubpacket
+  , drainPastEnd
+  , drainAfterNoFlush
+  )
+
+import root
+
+-- Three @writes, each followed by @flush so the data commits to
+-- disk. No @close: the surrounding dispatch's sweep will release
+-- the slot. Because each flush wrote a sub-packet already, the
+-- on-disk file has data the reader can recover.
+writeAndFlush :: Str -> <IO> ()
+writeAndFlush path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @flush o
+  @write 0 [4, 5] o
+  @flush o
+  @write 0 [6, 7, 8, 9] o
+  @flush o
+
+-- Three @writes without @flush. Without @close either. The
+-- buffered elements never make it to disk: discard_handle drops
+-- the SHM buffer. The on-disk file ends up with just the stream
+-- header + temp footer (zero sub-packets).
+writeWithoutFlush :: Str -> <IO> ()
+writeWithoutFlush path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @write 0 [4, 5] o
+  @write 0 [6, 7, 8, 9] o
+
+countViaIStream :: Str -> <IO> Int
+countViaIStream path = do
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+drainFirstSubpacket :: Str -> <IO> [Int]
+drainFirstSubpacket path = do
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+drainSecondSubpacket :: Str -> <IO> [Int]
+drainSecondSubpacket path = do
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+
+drainThirdSubpacket :: Str -> <IO> [Int]
+drainThirdSubpacket path = do
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+
+-- Fourth @next past the last sub-packet must return [].
+drainPastEnd :: Str -> <IO> [Int]
+drainPastEnd path = do
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+  @next s
+
+-- After writeWithoutFlush, the first @next must return [] -- the
+-- file has no sub-packets, only the stream header + temp footer.
+drainAfterNoFlush :: Str -> <IO> [Int]
+drainAfterNoFlush path = do
+  s <- @open path :: <IO> IStream Int
+  @next s

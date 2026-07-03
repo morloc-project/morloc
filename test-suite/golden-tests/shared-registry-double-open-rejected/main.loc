@@ -1,0 +1,26 @@
+-- The 2026-06-28 explicit-share contract: a second @open of an
+-- already-open OStream path errors. Sharing happens by passing
+-- the int handle cross-pool, NOT by reopening the path.
+--
+-- The first @open succeeds and acquires an exclusive flock.
+-- The second @open's O_CREAT|O_EXCL fails with EEXIST, which
+-- the runtime surfaces as an Io error. (For a more nuanced
+-- "in-nexus existing handle" message we'd need to walk the
+-- slot table at @open time -- v1 just lets the OS error
+-- propagate.)
+--
+-- Test asserts the second open fails. The exit status is
+-- non-zero and obs.err contains a diagnostic.
+
+module main
+  ( testDoubleOpen
+  )
+
+import root
+
+testDoubleOpen :: Str -> <IO> ()
+testDoubleOpen path = do
+  @open path :: <IO> OStream Int
+  -- This second open MUST error: file already exists + flocked.
+  @open path :: <IO> OStream Int
+  ()

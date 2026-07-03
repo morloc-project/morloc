@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- inline source is in the chain but no form in the form chain accepts it.
+foo ::
+  --' source: file|inline
+  --' form: list
+  [Int] ->
+  Int
+foo x = 0

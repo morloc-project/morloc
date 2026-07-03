@@ -28,7 +28,10 @@ echo "Building libmorloc.so, morloc-nexus, and morloc-manager with $ENGINE..."
 
 mkdir -p "$PROJECT_DIR/out"
 
-$ENGINE build \
+# BuildKit is required for the Dockerfile's cache mounts (cargo registry +
+# target dir persisted across builds). Podman uses buildah, which supports
+# cache mounts natively; docker needs DOCKER_BUILDKIT=1.
+DOCKER_BUILDKIT=1 $ENGINE build \
     -t morloc-rust-build \
     -f "$SCRIPT_DIR/Dockerfile" \
     "$PROJECT_DIR"

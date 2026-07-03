@@ -36,6 +36,17 @@ module Morloc.BaseTypes
   , tensor
   , table
   , record
+  , ifileVar
+  , istreamVar
+  , ostreamVar
+  , isIFileHead
+  , mlcKindIFile
+  , mlcKindIStream
+  , mlcKindOStream
+  , patternChainVar
+  , patternAccessibleClass
+  , extractPatternMethod
+  , patternChainGrammarVersion
   , unitU
   , realU
   , f32U
@@ -61,9 +72,10 @@ module Morloc.BaseTypes
   , isRealBaseType
   ) where
 
-import Morloc.Data.Text (pretty)
+import Data.Word (Word8)
+import Morloc.Data.Text (Text, pretty)
 import Morloc.Namespace.Prim (TVar (..))
-import Morloc.Namespace.Type (TypeU (..), emptyEffectSet)
+import Morloc.Namespace.Type (Type (..), TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
 
 unit :: TVar
@@ -134,6 +146,65 @@ table = TV "Table"
 
 record :: TVar
 record = TV "Record"
+
+-- | Handle-type sentinels for cross-pool stream handles. The morloc
+-- type system treats them as parameterised newtypes; codegen routes
+-- pattern access on these heads through the IFile walker (Express.hs)
+-- and the @open kind-byte dispatch (Imperative.hs / Nexus.hs). The
+-- 'mlcKind*' Word8 values must agree with morloc.h's MLC_KIND_*
+-- defines and 'morloc-runtime-types::packet::MLC_KIND_*'.
+ifileVar :: TVar
+ifileVar = TV "IFile"
+
+istreamVar :: TVar
+istreamVar = TV "IStream"
+
+ostreamVar :: TVar
+ostreamVar = TV "OStream"
+
+mlcKindIFile :: Word8
+mlcKindIFile = 0
+
+mlcKindIStream :: Word8
+mlcKindIStream = 1
+
+mlcKindOStream :: Word8
+mlcKindOStream = 2
+
+-- | Names for the PatternAccessible typeclass and its canonical string
+-- newtype. Instances of 'PatternAccessible w' provide
+-- '__extract_pattern__ :: PatternChain (w a) b -> [?Int64] -> w a -> b',
+-- which the compiler and runtime cooperate to dispatch pattern accessors
+-- (.foo, .[i], .[s:e:p], .0, .(a, b), and chains) through.
+patternChainVar :: TVar
+patternChainVar = TV "PatternChain"
+
+patternAccessibleClass :: TVar
+patternAccessibleClass = TV "PatternAccessible"
+
+extractPatternMethod :: Text
+extractPatternMethod = "__extract_pattern__"
+
+-- | Grammar version for the canonical PatternChain string form. Bumped
+-- for every backward-incompatible grammar change so out-of-tree
+-- instances can pin against a compatible compiler.
+patternChainGrammarVersion :: Int
+patternChainGrammarVersion = 1
+
+-- | True if @t@'s head (after peeling EffectT / AppT / OptionalT
+-- wrappers) is the IFile sentinel. Used by Express.hs to route
+-- pattern access on IFile-typed receivers through the runtime walker
+-- rather than the generic Sliceable/Indexable dispatch, and by
+-- Nexus.hs to detect IFile-returning intrinsics.
+isIFileHead :: Type -> Bool
+isIFileHead t = case peel t of
+    VarT v -> v == ifileVar
+    _      -> False
+  where
+    peel (EffectT _ inner) = peel inner
+    peel (OptionalT inner) = peel inner
+    peel (AppT h _)        = peel h
+    peel other             = other
 
 unitU :: TypeU
 unitU = VarU $ TV "Unit"

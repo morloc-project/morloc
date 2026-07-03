@@ -1,6 +1,6 @@
 #ifndef __SRC_HPP__
 #define __SRC_HPP__
-#include "mlc_tensor.hpp"
+#include "tensor.hpp"
 
 mlc::Tensor2<int> makeMatrix() {
     mlc::Tensor2<int> m({3, 4});

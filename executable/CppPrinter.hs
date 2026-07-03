@@ -96,10 +96,10 @@ printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
 printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash sid e) =
   [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicSave fmt sid e path)
-  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
-  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
-  | otherwise = [idoc|_mlc_save(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicSave fmt sid level e path)
+  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
+  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
+  | otherwise = [idoc|_mlc_save(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
 printExpr (IIntrinsicLoad sid (Just t) path) =
   [idoc|_mlc_load<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicLoad sid Nothing path) =
@@ -110,6 +110,42 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =
   [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicOpen kind path) =
+  [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
+printExpr (IIntrinsicClose h) =
+  [idoc|_mlc_close(#{printExpr h})|]
+printExpr (IIntrinsicFSchema path) =
+  [idoc|_mlc_fschema(#{printExpr path})|]
+printExpr (IIntrinsicFLength h) =
+  [idoc|_mlc_ifile_length(#{printExpr h})|]
+printExpr (IIntrinsicIFileWalk sid (Just t) pathExpr h runtimeArgs) =
+  let argList = "{" <> hcat (punctuate "," (map printExpr runtimeArgs)) <> "}"
+   in [idoc|_mlc_ifile_walk<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr pathExpr}, #{argList})|]
+printExpr (IIntrinsicIFileWalk sid Nothing pathExpr h runtimeArgs) =
+  let argList = "{" <> hcat (punctuate "," (map printExpr runtimeArgs)) <> "}"
+   in [idoc|_mlc_ifile_walk(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr pathExpr}, #{argList})|]
+printExpr (IIntrinsicNext sid (Just t) h) =
+  [idoc|_mlc_next<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicNext sid Nothing h) =
+  [idoc|_mlc_next(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicStream h) =
+  [idoc|_mlc_stream(#{printExpr h})|]
+printExpr (IIntrinsicOpenOStream sid path) =
+  [idoc|_mlc_open_ostream(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicWrite sid level value handle) =
+  [idoc|_mlc_write(mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr value}, #{printExpr handle})|]
+printExpr (IIntrinsicAppend sid path) =
+  [idoc|_mlc_append(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicConcat paths dest) =
+  [idoc|_mlc_concat(#{printExpr paths}, #{printExpr dest})|]
+printExpr (IIntrinsicFlush h) =
+  [idoc|_mlc_flush(#{printExpr h})|]
+printExpr (IIntrinsicStdin sid) =
+  [idoc|_mlc_open_stdin(mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicStdout sid) =
+  [idoc|_mlc_open_stdout(mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicStderr sid) =
+  [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
 -- float-typed per C99 but convert losslessly to double; non-default Real
@@ -276,9 +312,9 @@ printStructTypedef params rname fields = vsep [template, struct]
         (vsep [t <+> k <> ";" | (k, t) <- fields])
         <> ";"
 
--- | Render a C++ serializer (toAnything) for a struct.
+-- | Render a C++ serializer (to_voidstar) for a struct.
 --
--- Writes each field directly via per-field toAnything calls instead of
+-- Writes each field directly via per-field to_voidstar calls instead of
 -- wrapping the whole record in a `std::make_tuple` and re-dispatching to
 -- the tuple overload. The tuple form needed to copy/move every field
 -- into the temporary tuple, which fails to compile when a field is
@@ -293,7 +329,7 @@ printSerializer ::
 printSerializer params rtype fields =
   [idoc|
 #{printTemplateHeader params}
-void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
 #{block 4 "" (vsep (zipWith assignField [0 ..] (map fst fields)))}
     return dest;
@@ -302,9 +338,9 @@ void* toAnything(void* dest, void** cursor, const Schema* schema, const #{rtype}
   where
     assignField :: Int -> MDoc -> MDoc
     assignField idx key =
-      [idoc|toAnything((char*)dest + schema->offsets[#{pretty idx}], cursor, schema->parameters[#{pretty idx}], obj.#{key});|]
+      [idoc|to_voidstar((char*)dest + schema->offsets[#{pretty idx}], cursor, schema->parameters[#{pretty idx}], obj.#{key});|]
 
--- | Render a C++ deserializer (fromAnything + get_shm_size) for a struct.
+-- | Render a C++ deserializer (from_voidstar + get_shm_size) for a struct.
 printDeserializer ::
   Bool -> -- build object with constructor
   [MDoc] -> -- template parameters
@@ -321,7 +357,7 @@ printDeserializer _ params rtype fields =
 |]
   where
     header =
-      [idoc|#{rtype} fromAnything(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr, const void* base_ptr = nullptr)|]
+      [idoc|#{rtype} from_voidstar(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr, const void* base_ptr = nullptr)|]
     body =
       vsep $
         [[idoc|#{rtype} obj;|]]
@@ -332,7 +368,7 @@ printDeserializer _ params rtype fields =
     assignFields idx (keyName, keyType) =
       vsep
         [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
-        , [idoc|obj.#{keyName} = fromAnything(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName}, base_ptr);|]
+        , [idoc|obj.#{keyName} = from_voidstar(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName}, base_ptr);|]
         ]
 
     headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]

@@ -312,6 +312,16 @@ data SerialAST
   | SerialUInt64 FVar
   | SerialBool FVar
   | SerialString FVar
+  -- | Cross-pool stream handles. In-language native form is uint64_t
+  -- (the local slot id). The wire form is a 16-byte tagged union:
+  -- `TAG_PATH` carries the file path so the receiving pool can open a
+  -- fresh handle, `TAG_HANDLE` carries the raw slot id for the
+  -- intra-nexus shared-registry case. See SCHEMA_IFILE / SCHEMA_OSTREAM
+  -- / SCHEMA_ISTREAM in data/morloc/morloc.h and
+  -- morloc-runtime-types::stream_handle for the wire layout.
+  | SerialIFile FVar
+  | SerialOStream FVar
+  | SerialIStream FVar
   | SerialNull FVar
   | SerialOptional FVar SerialAST
   | -- | Back-reference to an ancestor 'SerialObject' with this FVar in
@@ -356,6 +366,9 @@ instance Pretty SerialAST where
   pretty (SerialUInt64 v) = parens ("SerialUInt64" <+> pretty v)
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
+  pretty (SerialIFile v) = parens ("SerialIFile" <+> pretty v)
+  pretty (SerialOStream v) = parens ("SerialOStream" <+> pretty v)
+  pretty (SerialIStream v) = parens ("SerialIStream" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
@@ -1670,10 +1683,19 @@ data ArgOptDocSet = ArgOptDocSet
   , -- if Just True, require an argument be literal rather than from a file
     -- if Just False, require an argument be from a file
     -- if Nothing, infer as usual
+    argOptDocMany :: Bool
+  , -- if True, the option accepts many tokens that are assembled into a List;
+    -- only legal when the argument type is List a
     argOptDocArg :: CliOpt
   , -- the option
     argOptDocDefault :: Text
     -- the required default vale for an argument
+  , argOptDocSource :: Maybe SourceAtom
+  , argOptDocForm :: Maybe FormAtom
+  , argOptDocChecks :: [Check]
+  , argOptDocListSource :: Maybe SourceAtom
+  , argOptDocListForm :: Maybe FormAtom
+  , argOptDocListChecks :: [Check]
   }
   deriving (Show, Ord, Eq)
 
@@ -1696,8 +1718,18 @@ data ArgPosDocSet = ArgPosDocSet
     argPosDocMetavar :: Maybe Text
   , -- a variable used in the interface to refer to this argument term
     argPosDocLiteral :: Maybe Bool
-    -- if Just True, require an argument be literal rather than from a file
+  , -- if Just True, require an argument be literal rather than from a file
     -- if Just False, require an argument be from a file
     -- if Nothing, infer as usual
+    argPosDocMany :: Bool
+    -- if True, the positional accepts many tokens that are assembled into a
+    -- List; only legal when the argument type is List a and the positional
+    -- is the last in its subcommand signature.
+  , argPosDocSource :: Maybe SourceAtom
+  , argPosDocForm :: Maybe FormAtom
+  , argPosDocChecks :: [Check]
+  , argPosDocListSource :: Maybe SourceAtom
+  , argPosDocListForm :: Maybe FormAtom
+  , argPosDocListChecks :: [Check]
   }
   deriving (Show, Ord, Eq)

@@ -1,0 +1,13 @@
+42
+43
+44
+45
+[1,2,3,4,5,6,7,8,9,10]
+[1,2,3,4,5,6,7,8,9,10]
+=== compression bytes (offset 15: data-command compression slot) ===
+int-lvl0: 00
+int-lvl1: 01
+int-lvl5: 01
+int-lvl9: 01
+list-lvl0: 00
+list-lvl5: 01

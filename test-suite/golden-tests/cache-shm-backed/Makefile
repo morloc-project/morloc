@@ -20,7 +20,7 @@ all:
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooR $(INPUT) >> obs.txt 2>> obs.run.R1.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooC $(INPUT) >> obs.txt 2> obs.run.C1.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooC $(INPUT) >> obs.txt 2>> obs.run.C1.err
-	@echo "a_packets: $$(ls cache/a/*.packet 2>/dev/null | wc -l)" >> obs.txt
+	@echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l)" >> obs.txt
 	@echo "dats:      $$(ls cache/data/*.dat 2>/dev/null | wc -l)" >> obs.txt
 	cat obs.run.*.err > obs.err
 

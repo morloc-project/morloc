@@ -19,23 +19,32 @@ module Morloc.CodeGenerator.Nexus
 
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AesonKey
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as BSL
 import Data.Int (Int64)
+import Data.Word (Word8)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
+import qualified Data.Text.Encoding as TE
 import qualified Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as Time
 import qualified Data.Time.Format
+import qualified Data.Vector as V
 import qualified Morloc.BaseTypes as MBT
+import qualified Morloc.CodeGenerator.Docstrings as Docstrings
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
-import Morloc.Data.Doc (pretty, render, (<+>))
+import Morloc.Data.Doc (concatWith, hardline, pretty, render, (<+>))
 import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
@@ -84,7 +93,11 @@ data NexusExpr
   | ShowX Text NexusExpr  -- schema (return type = Str), child expression
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
-  | SaveX Text Text NexusExpr NexusExpr  -- format + schema + value + path -> ()
+  | SaveX Text Text NexusExpr NexusExpr NexusExpr
+  -- ^ format + schema + level + value + path -> (). For "voidstar" the
+  -- level is a 0-9 zstd-preset expression evaluated at runtime; for
+  -- "msgpack"/"json" the level is currently always a zero literal
+  -- because those formats are not packets and don't carry compression.
   | LoadX Text NexusExpr  -- schema + path -> ?a
   | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
                           -- (Just-coerce: at runtime sets tag=1 and writes
@@ -98,6 +111,29 @@ data NexusExpr
                                    -- element. Only the desugar's bracket-accessor
                                    -- lowering generates this; there is no
                                    -- user-facing @map syntax.
+  -- ── IFile/IStream/OStream handle intrinsics ─────────────────────────
+  -- The schema in each variant is the result type's msgpack schema. For
+  -- handle-returning intrinsics the schema is the IFile a type (which
+  -- newtypes to UInt64 = "u8" at the wire level). For bracket/struct
+  -- access the schema is the materialised result type.
+  | OpenX     Text Word8 NexusExpr  -- schema, kind byte, path expr -> handle
+  | CloseX    NexusExpr             -- handle expr -> () (no schema needed)
+  | FSchemaX  Text NexusExpr        -- schema (Str), path expr -> schema string
+  | FLengthX  Text NexusExpr        -- schema (Int), handle expr -> total element count
+  | IFileWalkX Text NexusExpr Text [NexusExpr]
+      -- ^ Unified IFile pattern walker: result schema, handle, path
+      -- string (e.g. ".1.[]"), runtime args in DFS order. Each bracket
+      -- step in the path consumes args (1 for `.[]`, 3 for `.[:]`).
+  | NextX     Text NexusExpr        -- result schema ([a]), IStream handle expr
+  | StreamX   Text NexusExpr        -- result schema (IStream a), IFile handle expr
+  | OpenOStreamX Text NexusExpr     -- element schema, path expr (typed OStream open)
+  | WriteX    Text NexusExpr NexusExpr NexusExpr -- value [a] schema, level, value, handle
+  | AppendX   Text NexusExpr        -- element schema, path expr
+  | ConcatX   NexusExpr NexusExpr   -- paths [Str], dest Str
+  | FlushX    NexusExpr             -- handle expr -> () (force buffer flush)
+  | StdinX    Text                  -- element schema (a) -- @stdin :: <IO> IStream a
+  | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
+  | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -137,7 +173,13 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
   mayName <- MM.metaName i
-  (argSchemas, returnSchema) <- makeSchemas i lang t
+  (argAsts, returnAst) <- makeSerialASTs i lang t
+  let argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
+      returnSchema  = render (Serial.serialAstToMsgpackSchema returnAst)
+  -- Validate wire-shape constraints and default values now that the
+  -- SerialASTs are in hand. The rendered schema texts are reused
+  -- here so the validator never re-renders.
+  validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
 
   case mayName of
     (Just name') -> do
@@ -151,8 +193,8 @@ getFData (t, i, lang, doc, sockets) = do
           , fdataMid = i
           , fdataType = t
           , fdataSubSockets = sockets
-          , fdataArgSchemas = map render argSchemas
-          , fdataReturnSchema = render returnSchema
+          , fdataArgSchemas = argSchemas
+          , fdataReturnSchema = returnSchema
           , fdataCmdDocSet = doc
           }
     Nothing -> MM.throwSourcedError i $ "No name in FData"
@@ -161,24 +203,28 @@ getFData (t, i, lang, doc, sockets) = do
 -- Schema building
 -- ======================================================================
 
-makeSchemas :: Int -> Lang -> Type -> MorlocMonad ([MDoc], MDoc)
-makeSchemas mid lang (FunT ts t) = do
-  ss <- mapM (makeSchema mid lang) ts
-  s <- makeSchema mid lang t
+-- | Build SerialASTs for a function's argument list (or a single
+-- non-function type). The rendered msgpack schema text is derived from
+-- the same AST at the call sites, so 'validateArgSpecs' (operating on
+-- the AST) and the manifest emitter (operating on the rendered text)
+-- never go out of sync.
+makeSerialASTs :: Int -> Lang -> Type -> MorlocMonad ([SerialAST], SerialAST)
+makeSerialASTs mid lang (FunT ts t) = do
+  ss <- mapM (makeSerialAST mid lang) ts
+  s <- makeSerialAST mid lang t
   return (ss, s)
-makeSchemas mid lang t = do
-  s <- makeSchema mid lang t
+makeSerialASTs mid lang t = do
+  s <- makeSerialAST mid lang t
   return ([], s)
 
-makeSchema :: Int -> Lang -> Type -> MorlocMonad MDoc
-makeSchema mid lang t = do
+makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
+makeSerialAST mid lang t = do
   ft <- Infer.inferConcreteTypeUniversal lang t
   ast <- Serial.makeSerialAST mid lang ft
   -- Apply nat dimension constraints from the original type to the SerialAST.
   -- The TypeF may have lost nat params during alias expansion, but the
   -- original Type still has them.
-  let ast' = applyNatDimsFromType t ast
-  return $ Serial.serialAstToMsgpackSchema ast'
+  return $ applyNatDimsFromType t ast
 
 -- | Extract nat dimension constraints from a Type and apply them to a SerialAST.
 -- For example, Matrix 2 3 Int has NatLitT args [2, 3]. After alias expansion,
@@ -193,14 +239,19 @@ applyNatDimsFromType (AppT _ args) ast =
     applyDims _ s = s
 applyNatDimsFromType _ ast = ast
 
-makeGastSchemas :: Type -> MorlocMonad (MDoc, [MDoc])
-makeGastSchemas (FunT ts t) = do
-  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM generalTypeToSerialAST (t : ts)
-  case map Serial.serialAstToMsgpackSchema serialAsts of
+-- | SerialASTs for a pure (gast) function's return + argument types.
+-- The 'FunT' input puts the return type first, then arguments. The
+-- source index `i` is the export's manifold id; threaded into
+-- 'generalTypeToSerialAST' so any "cannot serialize" error carets at
+-- the export rather than surfacing as an unlocalized SystemError.
+makeGastSerialASTs :: Int -> Type -> MorlocMonad (SerialAST, [SerialAST])
+makeGastSerialASTs i (FunT ts t) = do
+  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM (generalTypeToSerialAST i) (t : ts)
+  case serialAsts of
     (s : ss) -> return (s, ss)
-    [] -> error "makeGastSchemas: FunT produced empty serial AST list"
-makeGastSchemas t = do
-  s <- Serial.serialAstToMsgpackSchema . applyNatDimsFromType t <$> generalTypeToSerialAST t
+    [] -> error "makeGastSerialASTs: FunT produced empty serial AST list"
+makeGastSerialASTs i t = do
+  s <- applyNatDimsFromType t <$> generalTypeToSerialAST i t
   return (s, [])
 
 -- | Build a SerialAST for a general (nexus-side) type. The Set
@@ -211,11 +262,11 @@ makeGastSchemas t = do
 -- on the pool side -- the nexus needs the same protection because
 -- top-level constant bindings whose RHS is a recursive-type literal
 -- route through @annotateGasts@ here rather than through a pool.
-generalTypeToSerialAST :: Type -> MorlocMonad SerialAST
-generalTypeToSerialAST = generalTypeToSerialAST' Set.empty
+generalTypeToSerialAST :: Int -> Type -> MorlocMonad SerialAST
+generalTypeToSerialAST i = generalTypeToSerialAST' i Set.empty
 
-generalTypeToSerialAST' :: Set TVar -> Type -> MorlocMonad SerialAST
-generalTypeToSerialAST' anc (VarT v)
+generalTypeToSerialAST' :: Int -> Set TVar -> Type -> MorlocMonad SerialAST
+generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
   -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
   -- not SerialReal. checkRealBounds (and any future bound check) keys off
@@ -248,17 +299,27 @@ generalTypeToSerialAST' anc (VarT v)
           -- @type Pat = [Pat]@), but the @&Pat@/@^Pat@ pair must agree
           -- on the alias's own name. Retag the outer SerialAST node
           -- with @v@ after recursing.
-          inner <- generalTypeToSerialAST' (Set.insert v anc) (typeOf t')
+          inner <- generalTypeToSerialAST' i (Set.insert v anc) (typeOf t')
           return $ retagOuterName v inner
-        (Just [_]) -> error $ "Cannot currently handle parameterized pure morloc types"
-        Nothing -> error $ "Failed to interpret type variable: " <> show (unTVar v)
-        x -> error $ "Unexpected scope: " <> show x
-generalTypeToSerialAST' anc (AppT (VarT v) [t])
-  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' anc t
-  | otherwise = resolveAliasApp anc v [t]
-generalTypeToSerialAST' anc (AppT (VarT v) ts)
+        (Just [_]) -> MM.throwSourcedError i $
+          "cannot serialize parameterised pure morloc type:" <+> pretty v
+        Nothing -> MM.throwSourcedError i $
+          "cannot serialize unknown type variable:" <+> pretty v
+        x -> MM.throwSourcedError i $
+          "cannot serialize type" <+> pretty v
+            <+> "-- unexpected scope shape" <+> pretty (show x)
+generalTypeToSerialAST' i anc (AppT (VarT v) [t])
+  | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
+  -- Stream-handle types share the 16-byte tagged-union wire form. The
+  -- schema code (F/O/I) picks the receiver's open kind; the per-instance
+  -- tag byte picks the encoding (path or intra-nexus handle).
+  | v == MBT.ifileVar   = return $ SerialIFile   (FV v (CV ""))
+  | v == MBT.ostreamVar = return $ SerialOStream (FV v (CV ""))
+  | v == MBT.istreamVar = return $ SerialIStream (FV v (CV ""))
+  | otherwise = resolveAliasApp i anc v [t]
+generalTypeToSerialAST' i anc (AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) =
-      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' anc) ts
+      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
   -- @T@ wire token (or @T:K<entries>@ when the row is concrete);
   -- 'Serial.hasArrowHint' identifies these structurally for the
@@ -269,13 +330,13 @@ generalTypeToSerialAST' anc (AppT (VarT v) ts)
             [_, NamT _ _ _ rs] -> rs
             _                  -> []
       in SerialObject NamTable (FV MBT.table (CV "")) []
-           <$> mapM (secondM (generalTypeToSerialAST' anc)) cols
-  | otherwise = resolveAliasApp anc v ts
-generalTypeToSerialAST' anc (EffectT _ t) = generalTypeToSerialAST' anc t
-generalTypeToSerialAST' anc (OptionalT t) = do
-  inner <- generalTypeToSerialAST' anc t
+           <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
+  | otherwise = resolveAliasApp i anc v ts
+generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
+generalTypeToSerialAST' i anc (OptionalT t) = do
+  inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
-generalTypeToSerialAST' anc (NamT o v _ rs) =
+generalTypeToSerialAST' i anc (NamT o v _ rs) =
   -- Add @v@ to the ancestor set before recursing into the record's
   -- fields: a recursive record (e.g. @record Tree where children :: [Tree]@)
   -- has a field whose type mentions @Tree@ again, which would otherwise
@@ -284,8 +345,9 @@ generalTypeToSerialAST' anc (NamT o v _ rs) =
   -- they do not need to appear in the resulting SerialAST.
   let anc' = Set.insert v anc
   in SerialObject o (FV v (CV "")) []
-       <$> mapM (secondM (generalTypeToSerialAST' anc')) rs
-generalTypeToSerialAST' _ t = MM.throwSystemError $ "cannot serialize this type: " <> pretty (show t)
+       <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
+generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
+  "cannot serialize type:" <+> pretty t
 
 -- | Check whether a type contains a function type anywhere in its structure.
 -- Used to detect higher-order functions appearing as arguments or in
@@ -306,8 +368,8 @@ exportHasHigherOrder :: Type -> Bool
 exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
 exportHasHigherOrder t = containsFunT t
 
-resolveAliasApp :: Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
-resolveAliasApp anc v ts
+resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp i anc v ts
   -- The same self-recursion cutoff as in the @VarT@ clause above:
   -- if we encounter an alias we are already expanding, emit a
   -- @SerialRec@ back-reference instead of recursing into its body.
@@ -321,7 +383,7 @@ resolveAliasApp anc v ts
           let tvars = [tv | Left (tv, _) <- params]
               resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
               anc' = Set.insert v anc
-          inner <- generalTypeToSerialAST' anc' resolved
+          inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's
           -- underlying shape (e.g. @Tuple2@ for @type Pair a = (a, ?(Pair a))@).
           -- We must retag the outer SerialAST node with the alias's own
@@ -332,7 +394,11 @@ resolveAliasApp anc v ts
           -- produces no @&Pair@ on the wire and the @^Pair@ inside
           -- becomes a dangling back-reference.
           return $ retagOuterName v inner
-        _ -> MM.throwSystemError $ "Cannot serialize type: " <> pretty (show (AppT (VarT v) ts))
+        _ -> MM.throwSourcedError i $
+          "cannot serialize type" <+> pretty (AppT (VarT v) ts)
+            <+> "-- no per-language alias resolution for" <+> pretty v
+            <> ". If" <+> pretty v <+> "is a newtype handle, add"
+            <+> "`newtype" <+> pretty v <+> "<params> = <wire-type>` in stdlib/internal."
 
 -- | Replace the outermost FVar's general name with the alias's name.
 -- Used after expanding an alias body to keep the alias's identity on
@@ -362,7 +428,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   CM.when (exportHasHigherOrder gtype) $
     MM.throwSourcedError i "cannot export higher-order functions through the CLI"
 
-  (retSchemaDoc, argSchemaDocs) <- makeGastSchemas gtype
+  (retAst, argAsts) <- makeGastSerialASTs i gtype
+  let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
+      argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
+  validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
   expr <- toNexusExpr x0
 
   return $
@@ -372,12 +441,29 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandType = gtype
       , commandDocs = docs
       , commandExpr = expr
-      , commandReturnSchema = render retSchemaDoc
-      , commandArgSchemas = map render argSchemaDocs
+      , commandReturnSchema = returnSchema
+      , commandArgSchemas = argSchemas
       }
   where
     type2schema :: Type -> MorlocMonad Text
-    type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST t
+    type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
+
+    -- Construct an IFileWalkX node for a unified IFile pattern walk.
+    -- Used by every IFile-routing case in toNexusExpr (BracketSlice,
+    -- BracketIndex, PatternStruct) so the path-encoding logic is in one
+    -- place.
+    emitIFileWalkX
+      :: Type
+      -> AnnoS (Indexed Type) One ()
+      -> [IFile.WalkStep]
+      -> [AnnoS (Indexed Type) One ()]
+      -> MorlocMonad NexusExpr
+    emitIFileWalkX resultT handleE steps runtimeArgs =
+      IFileWalkX
+        <$> type2schema resultT
+        <*> toNexusExpr handleE
+        <*> pure (IFile.walkStepsToPath steps)
+        <*> mapM toNexusExpr runtimeArgs
 
     toNexusExpr :: AnnoS (Indexed Type) One () -> MorlocMonad NexusExpr
     -- Pure-path bracket validation: each non-Null bound must resolve
@@ -387,20 +473,71 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- @(Null :: ?Int64)@ (from the desugar's empty-bound annotation),
     -- bare integer literals, and explicit @(_ :: Int*)@ annotations
     -- all pass.
+    -- IFile pattern detection at the nexus path: any PatCall on an
+    -- IFile-typed receiver routes to the unified IFile walker rather
+    -- than the generic Array/Tuple dispatch. The receiver is a u64
+    -- handle, not an in-memory structure; the standard apply_*
+    -- functions would cast garbage. Mirrors Express.hs's pool-path
+    -- IFile detection.
     toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) [sE, eE, pE, rE])) = do
       validateBracketBound "start" sE
       validateBracketBound "stop"  eE
       validateBracketBound "step"  pE
-      AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
+      if recvIsIFile rE
+        then emitIFileWalkX t rE IFile.bracketSliceSteps [sE, eE, pE]
+        else AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
     toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) [iE, rE])) = do
       validateBracketBound "index" iE
-      AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
+      if recvIsIFile rE
+        then emitIFileWalkX t rE IFile.bracketIndexSteps [iE]
+        else AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
+    -- PatternStruct app with brackets in the Selector. The first
+    -- bracketArity(sel) args are the bracket bounds (DFS order) and
+    -- the LAST arg is the receiver. IFile receivers route to the
+    -- walker; non-IFile receivers with bracket-in-Selector are
+    -- currently unsupported by the runtime (codegen for that case
+    -- isn't wired yet).
+    toNexusExpr (AnnoS (Idx midx t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) appArgs))
+      | bracketArity sel > 0 =
+          let n        = bracketArity sel
+              rE       = last appArgs
+              brackets = take n appArgs
+          in if length appArgs /= n + 1
+               then MM.throwSourcedError midx
+                      ("PatternStruct app with brackets: expected "
+                       <> pretty (n + 1)
+                       <> " args (bracket bounds + receiver), got "
+                       <> pretty (length appArgs))
+               else do
+                 mapM_ (validateBracketBound "bracket") brackets
+                 if recvIsIFile rE
+                   then do
+                     steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
+                     emitIFileWalkX t rE steps brackets
+                   else
+                     AppX <$> type2schema t
+                          <*> toNexusExpr funcE
+                          <*> mapM toNexusExpr appArgs
+    -- Pure-field PatternStruct getter on an IFile receiver (no
+    -- brackets, single receiver arg). Routes to the walker.
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) [rE]))
+      | recvIsIFile rE = do
+          steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
+          emitIFileWalkX t rE steps []
+      | otherwise =
+          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
     toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> type2schema t <*> mapM toNexusExpr es
-    toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) = TupX <$> type2schema t <*> mapM toNexusExpr es
+    -- TupS construction. Multi-field patterns are no longer fragmented
+    -- at desugar time (they emit a unified PatCall (PatternStruct ...)
+    -- instead), so any TupS reaching here is a user-written tuple
+    -- literal or the legacy fall-back form for mixed-kind groups that
+    -- can't be unified. Standard per-element rendering applies.
+    toNexusExpr (AnnoS (Idx _ t) _ (TupS es)) =
+      TupX <$> type2schema t <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
@@ -410,7 +547,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- the canonical wire string ("inf" / "-inf" / "nan"); the runtime JSON
     -- decoder accepts these on parse.
     toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) = do
-      s <- generalTypeToSerialAST t
+      s <- generalTypeToSerialAST litIx t
       checkRealBounds litIx v s
       let litCode = case s of
             (SerialFloat32 _) -> F32X
@@ -421,7 +558,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- which after term inlining is often the export reference, not the
     -- literal itself. See Treeify.collectExprS for where litIx is set.
     toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) = do
-      s <- generalTypeToSerialAST t
+      s <- generalTypeToSerialAST litIx t
       checkIntBounds litIx v s
       return $ case s of
         (SerialInt8 _) -> LitX I8X (MT.pack (show v))
@@ -478,14 +615,103 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ReadX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [valExpr, path])) =
-      SaveX "voidstar" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, valExpr, path])) =
+      SaveX "voidstar"
+        <$> type2schema t
+        <*> toNexusExpr levelExpr
+        <*> toNexusExpr valExpr
+        <*> toNexusExpr path
+    -- @savem/@savej carry no compression level; emit a zero literal so the
+    -- nexus dispatch (which always reads a level field from save_expr) has
+    -- a uniform shape. The runtime ignores the field for non-voidstar formats.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [valExpr, path])) =
-      SaveX "msgpack" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+      SaveX "msgpack"
+        <$> type2schema t
+        <*> pure (LitX IntX "0")
+        <*> toNexusExpr valExpr
+        <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [valExpr, path])) =
-      SaveX "json" <$> type2schema t <*> toNexusExpr valExpr <*> toNexusExpr path
+      SaveX "json"
+        <$> type2schema t
+        <*> pure (LitX IntX "0")
+        <*> toNexusExpr valExpr
+        <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
       LoadX <$> type2schema t <*> toNexusExpr path
+    -- @open: dispatch by result-type head. IFile/IStream go to OpenX
+    -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
+    -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
+    -- needs the element schema at open time.
+    toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) = do
+      let peelEffect (EffectT _ inner) = peelEffect inner
+          peelEffect ot = ot
+          unwrapped = peelEffect t
+          peelHead (AppT h _) = peelHead h
+          peelHead ot = ot
+          head_ = peelHead unwrapped
+          elemT = case unwrapped of
+            AppT _ (a : _) -> a
+            _ -> unwrapped
+      case head_ of
+        VarT v
+          | v == MBT.ifileVar   ->
+              OpenX <$> type2schema t <*> pure MBT.mlcKindIFile <*> toNexusExpr path
+          | v == MBT.istreamVar ->
+              OpenX <$> type2schema t <*> pure MBT.mlcKindIStream <*> toNexusExpr path
+          | v == MBT.ostreamVar ->
+              OpenOStreamX <$> type2schema elemT <*> toNexusExpr path
+          | otherwise ->
+              MM.throwSourcedError iOpen $
+                "@open: result type must be IFile/IStream/OStream, got " <> pretty v
+        _ ->
+          MM.throwSourcedError iOpen $
+            "@open: unsupported handle type" <+> pretty (show t)
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrClose [handle])) =
+      CloseX <$> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
+      FSchemaX <$> type2schema t <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
+      FLengthX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
+      NextX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
+      StreamX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, valE@(AnnoS (Idx _ valT) _ _), handleE])) =
+      WriteX
+        <$> type2schema valT
+        <*> toNexusExpr levelE
+        <*> toNexusExpr valE
+        <*> toNexusExpr handleE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
+      AppendX <$> type2schema (peelHandleElemT t) <*> toNexusExpr pathE
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
+      ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
+      FlushX <$> toNexusExpr handle
+    -- @stdin / @stdout / @stderr: nullary. Result type is
+    -- <IO> IStream a / <IO> OStream a; peel the effect and the head
+    -- to get the element type, then serialise its schema.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
+      StdinX <$> type2schema (peelHandleElemT t)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
+      StdoutX <$> type2schema (peelHandleElemT t)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
+      StderrX <$> type2schema (peelHandleElemT t)
+    -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
+    -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
+    -- path normally constructs IFileWalkX directly from PatCall +
+    -- IFile-receiver detection (see toNexusExpr cases above); this
+    -- handler exists to support any future site that synthesises the
+    -- IntrinsicS form directly.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrIFileWalk (pathExpr : handle : runtimeArgs))) = do
+      pathText <- case pathExpr of
+        AnnoS _ _ (StrS s) -> return s
+        _ -> error "IntrIFileWalk's first arg must be a string literal (compiler bug)"
+      IFileWalkX
+        <$> type2schema t
+        <*> toNexusExpr handle
+        <*> pure pathText
+        <*> mapM toNexusExpr runtimeArgs
     -- @lang in a language-independent context is always "morloc"; the
     -- nexus has no pool dispatch here.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLang _)) =
@@ -559,6 +785,13 @@ checkRealBounds i (RealFinite v) s = case s of
               <> " overflows Float64 (|x| > 1.8e308)"
 checkRealBounds _ _ _ = return ()
 
+-- | Strip a leading `<IO>` and one `AppT` head to reach the element
+-- type carried by an `IStream a` / `OStream a` / `IFile a` result.
+peelHandleElemT :: Type -> Type
+peelHandleElemT (EffectT _ inner) = peelHandleElemT inner
+peelHandleElemT (AppT _ (a : _)) = a
+peelHandleElemT other = other
+
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
 resolveCompileTimeIntrinsic IntrCompiled = do
@@ -586,6 +819,210 @@ resolveDatafilePath _ = return "<datafile: could not resolve path>"
 -- CLI argument serialization
 -- ======================================================================
 
+-- | Encode a single source atom as a JSON string.
+sourceAtomJson :: SourceAtom -> Text
+sourceAtomJson SourceInline = jsonStr "inline"
+sourceAtomJson SourceFile   = jsonStr "file"
+
+-- | Encode a single form atom as a JSON string.
+formAtomJson :: FormAtom -> Text
+formAtomJson FormPacket    = jsonStr "packet"
+formAtomJson FormBytes     = jsonStr "bytes"
+formAtomJson FormBytesOnly = jsonStr "bytes-only"
+formAtomJson FormList      = jsonStr "list"
+
+-- | Encode a single check as `{"kind": ..., "value": ...}`. Each future
+-- check kind adds a constructor and a matching JSON shape; the runtime
+-- decoder dispatches on the `kind` field.
+checkJson :: Check -> Text
+checkJson (CheckPath (PathPerm p)) =
+  jsonObj [("kind", jsonStr "path"), ("value", jsonStr p)]
+
+-- | Resolve the outer source field to emit. `auto` is the internal
+-- sentinel meaning "use the runtime classifier"; it is never written
+-- by users (the parser rejects `source: auto`) but the manifest uses
+-- it as the default for list / compound types where the classifier
+-- handles inline-or-file dispatch. `literal: true` is the deprecated
+-- alias for `source: inline`.
+resolvedSourceJson :: Maybe Bool -> Maybe SourceAtom -> Maybe Text -> Text
+resolvedSourceJson _ (Just a) _ = sourceAtomJson a
+resolvedSourceJson mLit Nothing mschema
+  | mLit == Just True = sourceAtomJson SourceInline
+  | otherwise = case fmap classifySchema mschema of
+      Just CatScalarPrim    -> sourceAtomJson SourceInline
+      Just CatStr           -> sourceAtomJson SourceInline
+      _                     -> jsonStr "auto"
+
+-- | Emit the outer form atom, or `"auto"` when none is set. `auto` is
+-- the runtime sentinel for "use the classifier"; it is never written
+-- by users.
+resolvedFormJson :: Maybe FormAtom -> Text
+resolvedFormJson Nothing  = jsonStr "auto"
+resolvedFormJson (Just a) = formAtomJson a
+
+-- | Emit the per-element source atom or `"inline"` (the default).
+resolvedListSourceJson :: Maybe SourceAtom -> Text
+resolvedListSourceJson Nothing  = sourceAtomJson SourceInline
+resolvedListSourceJson (Just a) = sourceAtomJson a
+
+-- | Emit the per-element form atom or `"auto"` (the classifier).
+resolvedListFormJson :: Maybe FormAtom -> Text
+resolvedListFormJson Nothing  = jsonStr "auto"
+resolvedListFormJson (Just a) = formAtomJson a
+
+-- | Emit a list of checks as a JSON array.
+checksJson :: [Check] -> Text
+checksJson cs = jsonArr (map checkJson cs)
+
+-- | The CLI-shape fields shared by positional and option args. The
+-- wire schema (when known) drives the default source: scalar
+-- primitives and Str default to `"inline"`, everything else defaults
+-- to the classifier sentinel `"auto"`.
+ioShapeFields :: Maybe Text
+              -> Bool
+              -> Maybe Bool
+              -> Maybe SourceAtom
+              -> Maybe FormAtom
+              -> [Check]
+              -> Maybe SourceAtom
+              -> Maybe FormAtom
+              -> [Check]
+              -> [(Text, Text)]
+ioShapeFields mschema many mLit mSrc mForm cks mLSrc mLForm lcks =
+  [ ("source",      resolvedSourceJson mLit mSrc mschema)
+  , ("form",        resolvedFormJson mForm)
+  , ("checks",      checksJson cks)
+  , ("list_source", resolvedListSourceJson mLSrc)
+  , ("list_form",   resolvedListFormJson mLForm)
+  , ("list_checks", checksJson lcks)
+  , ("format",      jsonMaybeStr
+                      (renderFormatHint mschema many mSrc mForm cks
+                         mLSrc mLForm lcks))
+  ]
+
+-- | One-line user-facing "Format:" hint describing how to type input
+-- for an argument that uses a non-default `source:` / `form:` /
+-- `check.*:` / `list.*:` configuration. Returns 'Nothing' when the
+-- default contract applies (the type line is then enough).
+renderFormatHint :: Maybe Text -> Bool
+                 -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+                 -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+                 -> Maybe Text
+renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
+  | many = Just "one or more argv tokens, each parsed as the element type"
+  | otherwise = case mschema of
+      Nothing -> Nothing
+      Just s -> case classifySchema s of
+        CatScalarPrim    -> Nothing
+        CatStr           -> strFormatHint mSrc cks
+        CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
+        CatOtherCompound -> Nothing
+
+-- | Format hint for `Str` arguments.
+strFormatHint :: Maybe SourceAtom -> [Check] -> Maybe Text
+strFormatHint mSrc cks
+  | mSrc == Just SourceFile =
+      Just "read the value from the file at this path"
+  | otherwise = case cks of
+      (CheckPath (PathPerm p) : _) -> Just (pathCheckHint p)
+      _                            -> Nothing
+
+-- | Map a path-permission subset to a user-facing phrase.
+pathCheckHint :: Text -> Text
+pathCheckHint p = case MT.unpack (MT.toLower p) of
+  "r"   -> "path to readable file"
+  "w"   -> "path to existing writable file"
+  "c"   -> "path to non-existing writable file"
+  "rw"  -> "path to existing readable+writable file"
+  "wr"  -> "path to existing readable+writable file"
+  "rc"  -> "path to readable or creatable file"
+  "wc"  -> "path to writable or creatable file"
+  "rwc" -> "path to readable+writable or creatable file"
+  _     -> "must satisfy path permissions `" <> p <> "`"
+
+-- | Format hint for a list argument. Considers the outer
+-- `form:` / `source:` / `check.*:` first, then per-element overrides.
+listFormatHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+               -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+               -> Maybe Text
+listFormatHint elemSchema mSrc mForm _cks mLSrc mLForm lcks =
+  case mForm of
+    Just FormList ->
+      Just (formListHint elemSchema mLSrc mLForm lcks)
+    Just FormBytes ->
+      Just (bytesHint elemSchema mSrc Hybrid)
+    Just FormBytesOnly ->
+      Just (bytesHint elemSchema mSrc Raw)
+    Just FormPacket ->
+      Just (bytesHint elemSchema mSrc Packet)
+    _ -> Nothing
+
+-- | Internal enum for the three bytes-family display variants.
+data BytesVariant = Hybrid | Raw | Packet
+
+-- | Format hint for `form: bytes` / `bytes-only` / `packet`.
+-- The inline-bytes shortcut (`source: inline + form: bytes/bytes-only`
+-- on `[UInt8]`) is its own case.
+bytesHint :: Text -> Maybe SourceAtom -> BytesVariant -> Text
+bytesHint elemSchema mSrc variant
+  | mSrc == Just SourceInline && elemSchema == "u1" =
+      "literal byte sequence with escapes allowed"
+  | otherwise = case variant of
+      Hybrid -> "path to readable file (morloc packet or " <> packedDescr elemSchema <> ")"
+      Raw    -> "path to readable " <> packedDescr elemSchema
+      Packet -> "path to morloc packet"
+
+
+-- | A short phrase describing the binary layout for a fixed-width
+-- scalar element schema.
+packedDescr :: Text -> Text
+packedDescr "u1" = "raw binary"
+packedDescr "i1" = "packed int8"
+packedDescr "u2" = "packed uint16"
+packedDescr "i2" = "packed int16"
+packedDescr "u4" = "packed uint32"
+packedDescr "i4" = "packed int32"
+packedDescr "u8" = "packed uint64"
+packedDescr "i8" = "packed int64"
+packedDescr "f4" = "packed f32"
+packedDescr "f8" = "packed f64"
+packedDescr "b"  = "packet booleans (0/1)"
+packedDescr _    = "packed bytes"
+
+-- | Format hint for `form: list`: file with newline-delimited
+-- elements, optionally with per-element overrides.
+formListHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check] -> Text
+formListHint elemSchema mLSrc mLForm lcks =
+  let base = baseLine elemSchema mLSrc mLForm
+      checkSuffix = case lcks of
+        (CheckPath (PathPerm p) : _) -> "; " <> pathCheckHint p
+        _                            -> ""
+  in base <> checkSuffix
+  where
+    baseLine es ms mf = case mf of
+      Just FormPacket ->
+        "path to text file; each line a morloc packet filename"
+      Just FormBytes ->
+        "path to text file; each line a " <> "morloc packet or " <> packedDescr (innerOrSelf es)
+      Just FormBytesOnly ->
+        "path to a text file; each line a path to " <> packedDescr (innerOrSelf es)
+      _ -> case ms of
+        Just SourceFile ->
+          "path to a text file; each line is one value"
+        _ -> defaultPerLine es
+
+    defaultPerLine es = case classifySchema es of
+      CatStr           -> "path to text file with one string per line"
+      CatScalarPrim    -> "path to text file with one value per line"
+      CatList _        -> "path to text file with one JSON array per line"
+      CatOtherCompound -> "path to file with one row entry line (JSON or table)"
+
+    -- For `[[UInt8]]` etc., the bytes-family description uses the
+    -- innermost element width.
+    innerOrSelf es = case classifySchema es of
+      CatList inner -> inner
+      _             -> es
+
 -- | Serialize a 'CmdArg' to its JSON manifest form. The optional
 -- 'Maybe Text' is the pre-rendered serialization schema for typed
 -- args (pos/opt/grp); flags pass 'Nothing' since they have no schema.
@@ -598,18 +1035,24 @@ argToJson mschema (CmdArgPos r) =
     ++ schemaField mschema
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-       , ("quoted", jsonBool (argPosDocLiteral r == Just True && isStrType (argPosDocType r)))
+       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mschema))
+       , ("many", jsonBool (argPosDocMany r))
        , ("desc", jsonStrArr (argPosDocDesc r))
        , ("constraints", constraintsJsonFor (argPosDocType r))
        , ("metadata", metadataEmpty)
        ]
+    ++ ioShapeFields mschema (argPosDocMany r)
+         (argPosDocLiteral r)
+         (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
+         (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
 argToJson mschema (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
     ++ schemaField mschema
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
-       , ("quoted", jsonBool (argOptDocLiteral r == Just True && isStrType (argOptDocType r)))
+       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mschema))
+       , ("many", jsonBool (argOptDocMany r))
        , ("short", cliOptShortJson (argOptDocArg r))
        , ("long", cliOptLongJson (argOptDocArg r))
        , ("default", jsonStr (argOptDocDefault r))
@@ -617,6 +1060,10 @@ argToJson mschema (CmdArgOpt r) =
        , ("constraints", constraintsJsonFor (argOptDocType r))
        , ("metadata", metadataEmpty)
        ]
+    ++ ioShapeFields mschema (argOptDocMany r)
+         (argOptDocLiteral r)
+         (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
+         (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
 argToJson _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
@@ -662,11 +1109,566 @@ schemaField :: Maybe Text -> [(Text, Text)]
 schemaField Nothing  = []
 schemaField (Just s) = [("schema", jsonStr s)]
 
--- Check if a type is Str or ?Str (for literal string handling)
+-- | Compute the `quoted` flag emitted for a typed CLI arg. The flag
+-- tells the nexus to JSON-wrap the argv string before handing it to
+-- the runtime, so a bare Str like `Joe Dirt` becomes `"Joe Dirt"` for
+-- the JSON parser. The flag fires only when the wire schema reduces
+-- to the Str primitive `s` AND the argv is going to be interpreted as
+-- an inline literal: with `source: file` the argv is a path and the
+-- runtime's File branch must see it unquoted.
+isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe Text -> Bool
+isQuotedArg _literal mSource many mschema =
+  case mschema of
+    Nothing -> False
+    Just s
+      | mSource == Just SourceFile -> False
+      | many -> isListOfStrWireSchema s
+      | otherwise -> isStrOrOptStrWireSchema s
+
+-- Check if a type is Str or ?Str (for literal string handling).
+-- NOTE: this is the surface-type check used for help-text rendering;
+-- the manifest's `quoted` field uses the schema-text check below
+-- ('isStrWireSchema') so that newtypes-over-Str (whose surface type
+-- is not 'Str' but whose wire format is the Str primitive 's') also
+-- get the JSON-quoting treatment.
 isStrType :: Type -> Bool
 isStrType (VarT v) = v == MBT.str
 isStrType (OptionalT t) = isStrType t
 isStrType _ = False
+
+-- | Strip a leading addHint decoration `<...>` if present. Hints
+-- carry the concrete-type tag for newtypes / aliases over a built-in
+-- primitive. The implementation drops the literal characters between
+-- the angle brackets; brackets without a closing `>` are left in place
+-- (defensive against malformed schemas).
+peelHint :: Text -> Text
+peelHint t = case MT.uncons t of
+  Just ('<', tt) -> case MT.span (/= '>') tt of
+    (_, post) -> case MT.uncons post of
+      Just ('>', after) -> peelHint after
+      _ -> t
+  _ -> t
+
+-- | Strip a leading `&<klen><name>` rec-decl prefix if present. The
+-- klen is a base64-encoded character count; for names of length < 64
+-- (the practical case), klen is a single character we can decode by
+-- table. Multi-character klens (encoding lengths >= 64, marked with
+-- a leading `=`) are left in place -- recursive records with
+-- 64+-character names never appear at the position the wire-shape
+-- helpers below probe (primitive scalar / top-level array), so the
+-- fallback is harmless.
+peelRecDecl :: Text -> Text
+peelRecDecl t = case MT.uncons t of
+  Just ('&', rest) -> case MT.uncons rest of
+    Just (c, body) | Just n <- decode1 c -> MT.drop n body
+    _ -> t
+  _ -> t
+  where
+    decode1 c
+      | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
+      | c >= 'a' && c <= 'z' = Just (fromEnum c - fromEnum 'a' + 10)
+      | c >= 'A' && c <= 'Z' = Just (fromEnum c - fromEnum 'A' + 36)
+      | c == '+'             = Just 62
+      | c == '/'             = Just 63
+      | otherwise            = Nothing
+
+-- | True iff the rendered wire schema reduces to the plain Str
+-- primitive 's'. Peels rec-decl and addHint decorations but NOT the
+-- optional `?` wrapper; 'isOptStrWireSchema' handles `?s` separately
+-- so the `many + literal` validator can reject optional-element
+-- lists (no token can express null in literal mode).
+isStrWireSchema :: Text -> Bool
+isStrWireSchema s0 = peelHint (peelRecDecl s0) == "s"
+
+-- | True iff the schema reduces to `?s` (Optional Str primitive),
+-- peeling the same outer decorations as 'isStrWireSchema' and a single
+-- `?` wrapper before the primitive token.
+isOptStrWireSchema :: Text -> Bool
+isOptStrWireSchema s0 = case MT.uncons (peelHint (peelRecDecl s0)) of
+  Just ('?', rest) -> peelHint rest == "s"
+  _ -> False
+
+-- | True iff the schema reduces to either Str or Optional Str. Used by
+-- 'isQuotedArg' (the scalar literal:true gate) and by validateArgSpecs
+-- when checking scalar literal:true.
+isStrOrOptStrWireSchema :: Text -> Bool
+isStrOrOptStrWireSchema s = isStrWireSchema s || isOptStrWireSchema s
+
+-- | True iff the schema is array-shaped at the top level. Peels
+-- rec-decl + addHint, expects `a`. Used by the `many: true` validator
+-- in lieu of the surface-type 'isListType' check, so newtypes / aliases
+-- whose wire form is `a<elem>` (but whose surface type isn't the
+-- built-in `List` constructor) are also accepted.
+isArrayWireSchema :: Text -> Bool
+isArrayWireSchema s0 = case MT.uncons (peelHint (peelRecDecl s0)) of
+  Just ('a', _) -> True
+  _ -> False
+
+-- | For a list-shape schema ('a' + optional dim + element schema),
+-- return the element schema text. Returns Nothing if the schema is
+-- not list-shaped at the top level.
+listElementSchema :: Text -> Maybe Text
+listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('a', rest) -> Just (skipDim rest)
+  _ -> Nothing
+  where
+    skipDim t = case MT.uncons t of
+      Just (':', tt) -> MT.dropWhile (\c -> c >= '0' && c <= '9') tt
+      _ -> t
+
+-- | True iff the schema is a list whose element wire schema is the
+-- plain Str primitive 's' (NOT `?s`). Optional-element lists are
+-- rejected so the `many + literal` validator can produce a focused
+-- diagnostic.
+isListOfStrWireSchema :: Text -> Bool
+isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
+
+-- ======================================================================
+-- Argument spec validation (compile-time)
+-- ======================================================================
+--
+-- 'validateArgSpecs' is invoked once per command (remote or pure)
+-- after the SerialASTs and rendered schema text are computed. It
+-- enforces the wire-shape constraints that depend on the schema
+-- (and therefore cannot be checked at the docstring-resolution
+-- stage), and type-checks each option's 'default:' value against
+-- its SerialAST.
+
+-- | Top-level validator. Walks each CmdArg in lockstep with its
+-- SerialAST and the already-rendered schema text. The caller renders
+-- the schemas once for the manifest; the validator reuses them rather
+-- than re-rendering.
+validateArgSpecs :: Int -> [CmdArg] -> [SerialAST] -> [Text] -> MorlocMonad ()
+validateArgSpecs i cmdargs asts schemas = do
+  loc <- Docstrings.argLocPrefix i
+  CM.zipWithM_ (validateOne loc) (zip3 [(1::Int) ..] cmdargs schemas) asts
+  where
+    validateOne :: MDoc -> (Int, CmdArg, Text) -> SerialAST -> MorlocMonad ()
+    validateOne loc (n, arg, schemaText) ast = do
+      let argLoc = loc <> "argument #" <> pretty n
+      case arg of
+        CmdArgPos r -> do
+          checkManyWire argLoc (argPosDocMany r) schemaText
+          checkArgShape argLoc schemaText arg
+        CmdArgOpt r -> do
+          checkManyWire argLoc (argOptDocMany r) schemaText
+          checkDefault  argLoc ast (argOptDocDefault r)
+          checkArgShape argLoc schemaText arg
+        CmdArgFlag _ -> return ()
+        CmdArgGrp r  -> validateGroup argLoc r ast
+
+    checkArgShape :: MDoc -> Text -> CmdArg -> MorlocMonad ()
+    checkArgShape argLoc schemaText arg =
+      case Docstrings.validateCmdArg schemaText arg of
+        Right _ -> return ()
+        Left e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
+
+-- | Wire-schema category. Drives the per-shape rules: each category
+-- has its own narrow vocabulary for `source:` / `form:` / `list.*:`.
+-- Lists carry their element schema so per-element validation can
+-- recurse into the element's category.
+data SchemaCat
+  = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
+  | CatStr              -- Str (`s`)
+  | CatList Text        -- `a<elem>` for any elem schema
+  | CatOtherCompound    -- tuples, records, maps, tables
+  deriving (Eq, Show)
+
+-- | Classify the wire schema. The hint/recursive-decl prefix and outer
+-- `?` are peeled before classification so optional and aliased forms
+-- inherit the underlying category.
+classifySchema :: Text -> SchemaCat
+classifySchema s0 =
+  let peeled = peelHint (peelRecDecl s0)
+      core = case MT.uncons peeled of
+        Just ('?', rest) -> peelHint rest
+        _ -> peeled
+  in if core == "s"
+       then CatStr
+       else if isScalarPrimCore core
+              then CatScalarPrim
+              else case MT.uncons core of
+                Just ('a', rest) -> CatList rest
+                _                -> CatOtherCompound
+
+isScalarPrimCore :: Text -> Bool
+isScalarPrimCore c = c `elem`
+  [ "b", "j", "z"
+  , "i1", "i2", "i4", "i8"
+  , "u1", "u2", "u4", "u8"
+  , "f4", "f8"
+  ]
+
+-- | `many: true` requires an array wire type.
+checkManyWire :: MDoc -> Bool -> Text -> MorlocMonad ()
+checkManyWire _   False _      = return ()
+checkManyWire loc True  schema
+  | isArrayWireSchema schema = return ()
+  | otherwise = MM.throwSystemError $
+      loc <> ": `many: true` requires a list-typed argument (wire schema"
+        <> " starting with `a`); got `" <> pretty schema <> "`. Remove"
+        <> " `many: true` or change the type to a list."
+
+-- | Parse the default text as JSON and structurally validate it
+-- against the SerialAST. Parser failures are surfaced verbatim --
+-- being explicit about the message's origin is preferable to
+-- rewriting the parser's framing, which varies between aeson
+-- versions.
+checkDefault :: MDoc -> SerialAST -> Text -> MorlocMonad ()
+checkDefault loc ast defaultText =
+  case Aeson.eitherDecodeStrict (TE.encodeUtf8 defaultText) of
+    Left e -> MM.throwSystemError $ formatBlock
+      [ loc <> ": default value is not valid JSON, parser message:"
+      , pretty (MT.pack e)
+      , "Default text:"
+      , pretty (truncateForMsg defaultText)
+      ]
+    Right value -> validateValueAgainstAST loc Map.empty rootPath ast value
+
+-- Recurse into the entries of an unrolled record group, matching them
+-- against the SerialObject's per-field parameters.
+validateGroup :: MDoc -> RecDocSet -> SerialAST -> MorlocMonad ()
+validateGroup loc r ast = case peelGroupAst ast of
+  Just (SerialObject _ _ _ pairs) -> do
+    let asts = [(k, sub) | (k, sub) <- pairs]
+        entries = recDocEntries r
+    CM.forM_ entries $ \(k, entry) -> do
+      let entryLoc = loc <> "/field " <> pretty (unKey k)
+      case lookup k asts of
+        Nothing -> MM.throwSystemError $
+          entryLoc <> ": no schema field for unrolled record entry"
+        Just subAst -> case entry of
+          Right opt -> do
+            let subSchema = render (Serial.serialAstToMsgpackSchema subAst)
+            checkManyWire entryLoc (argOptDocMany opt) subSchema
+            checkDefault entryLoc subAst (argOptDocDefault opt)
+            case Docstrings.validateCmdArg subSchema (CmdArgOpt opt) of
+              Right _ -> return ()
+              Left e  -> MM.throwSystemError $ entryLoc <> ": " <> pretty e
+          Left _flag -> return ()
+  _ -> return ()
+  where
+    -- A group's AST may be wrapped in a SerialPack (newtype-over-record).
+    peelGroupAst (SerialPack _ (_, inner)) = peelGroupAst inner
+    peelGroupAst a = Just a
+
+-- ----------------------------------------------------------------------
+-- Default-value validation
+-- ----------------------------------------------------------------------
+
+-- | Recursive-type env: each entry binds a TVar (the record's name) to
+-- the SerialAST that declared it, so SerialRec back-references can
+-- resolve. Bound at SerialObject; consulted at SerialRec.
+type RecEnv = Map.Map TVar SerialAST
+
+-- | The "JSON path" within the default value at which validation is
+-- currently happening, used to anchor mismatch diagnostics. Local to
+-- this module; do NOT confuse with 'Morloc.Namespace.Prim.Path' (the
+-- filesystem-path alias used elsewhere).
+type JsonPath = MDoc
+
+-- | Walk a JSON value against a SerialAST. Errors point at the path,
+-- the expected wire shape, and a (truncated) snippet of the offending
+-- value.
+validateValueAgainstAST :: MDoc -> RecEnv -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+validateValueAgainstAST loc env path ast value = case (ast, value) of
+  -- SerialPack: newtype/alias is transparent for default validation;
+  -- the user writes the JSON shape of the underlying packed type.
+  (SerialPack _ (_, inner), _) ->
+    validateValueAgainstAST loc env path inner value
+
+  -- Primitives.
+  (SerialNull _,    Aeson.Null)     -> return ()
+  (SerialBool _,    Aeson.Bool _)   -> return ()
+  (SerialString _,  Aeson.String _) -> return ()
+  -- Stream-handle types at the JSON CLI boundary appear as the path
+  -- string the receiving pool will re-open. Same wire shape as
+  -- SerialString.
+  (SerialIFile _,   Aeson.String _) -> return ()
+  (SerialOStream _, Aeson.String _) -> return ()
+  (SerialIStream _, Aeson.String _) -> return ()
+  (SerialReal _,    v)              -> checkRealLike   loc path ast v
+  (SerialFloat32 _, v)              -> checkRealLike   loc path ast v
+  (SerialFloat64 _, v)              -> checkRealLike   loc path ast v
+  (SerialInt _,     v)              -> checkInteger    loc path ast (Nothing, Nothing) v
+  (SerialInt8 _,    v)              -> checkBoundedInt loc path ast (-128, 127) v
+  (SerialInt16 _,   v)              -> checkBoundedInt loc path ast (-32768, 32767) v
+  (SerialInt32 _,   v)              -> checkBoundedInt loc path ast (-2147483648, 2147483647) v
+  (SerialInt64 _,   v)              -> checkBoundedInt loc path ast (-9223372036854775808, 9223372036854775807) v
+  -- UInt is bigint-capable, so the only constraint is "non-negative";
+  -- use checkInteger with min-only (Just 0, Nothing) instead of a
+  -- fictitious u64 upper bound.
+  (SerialUInt _,    v)              -> checkInteger    loc path ast (Just 0, Nothing) v
+  (SerialUInt8 _,   v)              -> checkBoundedInt loc path ast (0, 255) v
+  (SerialUInt16 _,  v)              -> checkBoundedInt loc path ast (0, 65535) v
+  (SerialUInt32 _,  v)              -> checkBoundedInt loc path ast (0, 4294967295) v
+  (SerialUInt64 _,  v)              -> checkBoundedInt loc path ast (0, 18446744073709551615) v
+
+  -- Optional: null OR the inner type's value.
+  (SerialOptional _ _,     Aeson.Null) -> return ()
+  (SerialOptional _ inner, v)          -> validateValueAgainstAST loc env path inner v
+
+  -- Lists: array, with an optional fixed-length constraint.
+  (SerialList _ dim elemAst, Aeson.Array arr) -> do
+    case dim of
+      Just (NatLitF n) | fromIntegral (V.length arr) /= n ->
+        MM.throwSystemError $ formatBlock
+          [ loc <> ": default" <> pathAt path <> " is an array of length "
+              <> pretty (V.length arr) <> ", expected length "
+              <> pretty n <> "."
+          , "Expected: " <> pretty (expectedJsonShape ast)
+          , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
+          ]
+      _ -> return ()
+    CM.zipWithM_
+      (\j v -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") elemAst v)
+      [(0::Int) ..]
+      (V.toList arr)
+
+  -- Tuples: array of exactly the right length.
+  (SerialTuple _ subs, Aeson.Array arr)
+    | length subs /= V.length arr ->
+        MM.throwSystemError $ formatBlock
+          [ loc <> ": default" <> pathAt path <> " is an array of length "
+              <> pretty (V.length arr) <> ", expected tuple of length "
+              <> pretty (length subs) <> "."
+          , "Expected: " <> pretty (expectedJsonShape ast)
+          , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
+          ]
+    | otherwise ->
+        CM.zipWithM_
+          (\j (subAst, v) -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") subAst v)
+          [(0::Int) ..]
+          (zip subs (V.toList arr))
+
+  -- Records: object form. Collect every missing required field up
+  -- front so the diagnostic lists all of them at once (for a large
+  -- record, a one-by-one report would force the user through many
+  -- recompiles to discover the full set).
+  (SerialObject _ (FV v _) _ fields, Aeson.Object obj) -> do
+    let env' = Map.insert v ast env
+        missing = [k | (k, _) <- fields
+                     , not (KM.member (AesonKey.fromText (unKey k)) obj)]
+    case missing of
+      []  -> CM.forM_ fields $ \(k, fieldAst) ->
+        case KM.lookup (AesonKey.fromText (unKey k)) obj of
+          Just fv -> validateValueAgainstAST loc env'
+                       (path <> "." <> pretty (unKey k)) fieldAst fv
+          Nothing -> return ()
+      ks  -> MM.throwSystemError $ formatBlock
+        [ loc <> ": default" <> pathAt path
+            <> (if length ks == 1
+                then " is missing required key "
+                else " is missing required keys ")
+            <> pretty (renderKeyList ks) <> "."
+        , "Expected: " <> pretty (expectedJsonShape ast)
+        , "Got " <> pretty (jsonKind value) <> ": "
+            <> pretty (truncateForMsg (jsonGotDisplay value))
+        ]
+
+  -- Recursive back-reference: look up the binding, recurse.
+  (SerialRec (FV v _), _) -> case Map.lookup v env of
+    Just bound -> validateValueAgainstAST loc env path bound value
+    Nothing -> MM.throwSystemError $
+      loc <> ": compiler bug: unbound SerialRec `" <> pretty (unTVar v)
+        <> "` reached default-value validator" <> pathAt path
+
+  -- SerialUnknown: opaque type, cannot validate; allow anything.
+  (SerialUnknown _, _) -> return ()
+
+  -- Anything else is a type mismatch.
+  _ -> typeMismatch loc path ast value
+
+-- | Mismatch reporter. Describes the offending JSON value's kind
+-- (Object / Array / String / Number / Bool / Null) AND the full
+-- expected JSON shape derived from the SerialAST so the diagnostic
+-- carries the same information whether the user wrote a primitive,
+-- a string, a list, or a nested record. Laid out in three blocks
+-- separated by blank lines so the terminal-wrap doesn't smear them.
+typeMismatch :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+typeMismatch loc path expectedAst value =
+  MM.throwSystemError $ formatBlock
+    [ loc <> ": default" <> pathAt path <> " has the wrong shape."
+    , "Expected: " <> pretty (expectedJsonShape expectedAst)
+    , "Got " <> pretty (jsonKind value) <> ": "
+        <> pretty (truncateForMsg (jsonGotDisplay value))
+    ]
+
+-- | Render the "at <path>" suffix for diagnostics. The root path is
+-- the empty MDoc ('rootPath'); descents prepend their own delimiter
+-- (`.` for record fields, `[i]` for list / tuple elements), so the
+-- suffix only appears once we've actually walked into a field or
+-- element.
+pathAt :: JsonPath -> MDoc
+pathAt p
+  | render p == "" = ""
+  | otherwise      = " at " <> p
+
+-- | The empty root JSON path. Centralised so the "no descent yet"
+-- sentinel is constructed in one place rather than as a stringly
+-- literal scattered across call sites.
+rootPath :: JsonPath
+rootPath = mempty
+
+-- | Lay out a validator diagnostic as one summary line followed by
+-- blank-separated detail blocks. Keeps Expected / Got on their own
+-- lines so terminal wrap doesn't muddle them.
+formatBlock :: [MDoc] -> MDoc
+formatBlock = concatWith (\a b -> a <> hardline <> hardline <> b)
+
+-- | Render a list of record keys in JSON-array shape, e.g.
+-- @["alpha", "beta"]@. Used in the missing-keys diagnostic to mirror
+-- the JSON formality.
+renderKeyList :: [Key] -> Text
+renderKeyList ks = "[" <> MT.intercalate ", " ["\"" <> unKey k <> "\"" | k <- ks] <> "]"
+
+-- | "Got" display for an Aeson value. For 'Aeson.String' we want the
+-- raw string content -- showing the JSON-encoded form would add an
+-- extra layer of quotes and backslash escapes that the user did NOT
+-- write and that obscures the actual value. For non-strings the
+-- canonical JSON encoding is the right thing.
+jsonGotDisplay :: Aeson.Value -> Text
+jsonGotDisplay (Aeson.String s) = s
+jsonGotDisplay v                = jsonSnippet v
+
+-- | Compact human-readable name for a JSON value's kind. Goes into
+-- the mismatch diagnostic so the user can immediately tell what they
+-- wrote at the top level (e.g. a JSON String containing JSON object
+-- text vs. a real JSON object).
+jsonKind :: Aeson.Value -> Text
+jsonKind (Aeson.Null)     = "null"
+jsonKind (Aeson.Bool _)   = "JSON Bool"
+jsonKind (Aeson.Number _) = "JSON Number"
+jsonKind (Aeson.String _) = "JSON String"
+jsonKind (Aeson.Array _)  = "JSON Array"
+jsonKind (Aeson.Object _) = "JSON Object"
+
+-- | Render a SerialAST as the expected JSON shape, in a JSON-Schema-ish
+-- syntax that names every field and element type. Primitives use their
+-- bare morloc type names (no range annotations) -- the range info is
+-- only relevant when the JSON value IS a number and its value falls
+-- out of bounds, which is reported separately by 'rangeMismatch' using
+-- 'expectedRange'.
+expectedJsonShape :: SerialAST -> Text
+expectedJsonShape = go
+  where
+    go (SerialPack _ (_, s))         = go s
+    go (SerialNull _)                = "null"
+    go (SerialBool _)                = "Bool"
+    go (SerialString _)              = "Str"
+    go (SerialIFile _)               = "IFile path (Str)"
+    go (SerialOStream _)             = "OStream path (Str)"
+    go (SerialIStream _)             = "IStream path (Str)"
+    go (SerialReal _)                = "Real"
+    go (SerialFloat32 _)             = "Float32"
+    go (SerialFloat64 _)             = "Float64"
+    go (SerialInt _)                 = "Int"
+    go (SerialInt8 _)                = "Int8"
+    go (SerialInt16 _)               = "Int16"
+    go (SerialInt32 _)               = "Int32"
+    go (SerialInt64 _)               = "Int64"
+    go (SerialUInt _)                = "UInt"
+    go (SerialUInt8 _)               = "UInt8"
+    go (SerialUInt16 _)              = "UInt16"
+    go (SerialUInt32 _)              = "UInt32"
+    go (SerialUInt64 _)              = "UInt64"
+    go (SerialOptional _ s)          = go s <> " | null"
+    go (SerialList _ Nothing s)      = "[" <> go s <> "]"
+    go (SerialList _ (Just (NatLitF n)) s) =
+      "[" <> go s <> "] of length " <> MT.pack (show n)
+    go (SerialList _ _ s)            = "[" <> go s <> "]"
+    go (SerialTuple _ ss)            =
+      "(" <> MT.intercalate ", " (map go ss) <> ")"
+    go (SerialObject _ _ _ fields)   =
+      "{ " <> MT.intercalate ", " [unKey k <> ": " <> go v | (k, v) <- fields] <> " }"
+    go (SerialRec (FV (TV name) _))  = name <> " (recursive)"
+    go (SerialUnknown _)             = "Unknown"
+
+-- | Numeric range description, used ONLY by 'rangeMismatch' to spell
+-- the legal bounds when the user's number falls outside the type's
+-- range. Only invoked from the integer arms of 'checkInteger', so
+-- non-numeric nodes here are a compiler bug, not a runtime case.
+expectedRange :: SerialAST -> Text
+expectedRange (SerialPack _ (_, s)) = expectedRange s
+expectedRange (SerialInt _)         = "any integer (BigInt)"
+expectedRange (SerialInt8 _)        = "Int8 in -128 .. 127"
+expectedRange (SerialInt16 _)       = "Int16 in -32768 .. 32767"
+expectedRange (SerialInt32 _)       = "Int32 in -2147483648 .. 2147483647"
+expectedRange (SerialInt64 _)       = "Int64 in -9223372036854775808 .. 9223372036854775807"
+expectedRange (SerialUInt _)        = "UInt >= 0 (BigInt)"
+expectedRange (SerialUInt8 _)       = "UInt8 in 0 .. 255"
+expectedRange (SerialUInt16 _)      = "UInt16 in 0 .. 65535"
+expectedRange (SerialUInt32 _)      = "UInt32 in 0 .. 4294967295"
+expectedRange (SerialUInt64 _)      = "UInt64 in 0 .. 18446744073709551615"
+expectedRange ast = error
+  $ "expectedRange: non-numeric SerialAST node reached the range reporter; "
+  <> "this indicates 'rangeMismatch' was called outside an integer arm. "
+  <> "Node shape: " <> MT.unpack (expectedJsonShape ast)
+
+-- | Accept a JSON Number OR one of the three special-string forms
+-- morloc uses on the wire for non-finite IEEE-754 values
+-- (`"inf"` / `"-inf"` / `"nan"`).
+checkRealLike :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+checkRealLike _   _    _   (Aeson.Number _) = return ()
+checkRealLike _   _    _   (Aeson.String s)
+  | s `elem` ["inf", "-inf", "nan"]         = return ()
+checkRealLike loc path ast v                = typeMismatch loc path ast v
+
+-- | Integer check with optional bounds. Bounds are 'Maybe' on each
+-- side independently so unbounded-low (e.g. SerialInt, no lower bound
+-- because bigint) or unbounded-high (SerialUInt, no upper bound: only
+-- non-negative) can be expressed without inventing a sentinel max.
+-- Out-of-range values report against the SerialAST's
+-- 'expectedJsonShape', which already spells the legal range.
+checkInteger
+  :: MDoc -> JsonPath -> SerialAST
+  -> (Maybe Integer, Maybe Integer)  -- (lo, hi)
+  -> Aeson.Value
+  -> MorlocMonad ()
+checkInteger loc path ast (mlo, mhi) (Aeson.Number n)
+  | DS.isInteger n = case toIntegerSafe n of
+      Just k
+        | maybe True (k >=) mlo && maybe True (k <=) mhi -> return ()
+        | otherwise -> rangeMismatch loc path ast (Aeson.Number n)
+      Nothing -> rangeMismatch loc path ast (Aeson.Number n)
+  | otherwise = typeMismatch loc path ast (Aeson.Number n)
+checkInteger loc path ast _ v = typeMismatch loc path ast v
+
+-- | Bounded-integer convenience for sized types. Both bounds required.
+checkBoundedInt
+  :: MDoc -> JsonPath -> SerialAST -> (Integer, Integer) -> Aeson.Value -> MorlocMonad ()
+checkBoundedInt loc path ast (lo, hi) v =
+  checkInteger loc path ast (Just lo, Just hi) v
+
+-- | Range mismatch: the JSON IS a number, but its value falls outside
+-- the type's allowed range. Distinguished from 'typeMismatch' so the
+-- diagnostic says "out of range" rather than "wrong shape" and uses
+-- 'expectedRange' (which spells the legal numeric bounds) instead of
+-- 'expectedJsonShape'.
+rangeMismatch :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
+rangeMismatch loc path ast value =
+  MM.throwSystemError $ formatBlock
+    [ loc <> ": default" <> pathAt path <> " is out of range."
+    , "Expected: " <> pretty (expectedRange ast)
+    , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
+    ]
+
+toIntegerSafe :: DS.Scientific -> Maybe Integer
+toIntegerSafe n
+  | DS.isInteger n = Just (DS.coefficient n * 10 ^ DS.base10Exponent n)
+  | otherwise = Nothing
+
+-- | Truncating display of a Text value (default text or JSON snippet)
+-- for inclusion in error messages. Keeps diagnostics readable when the
+-- user pastes a multi-KB JSON literal.
+truncateForMsg :: Text -> Text
+truncateForMsg t
+  | MT.length t <= 80 = t
+  | otherwise = MT.take 77 t <> "..."
+
+-- | Render a JSON Value as a single-line snippet for error messages.
+jsonSnippet :: Aeson.Value -> Text
+jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 
 typeDescStr :: Type -> Maybe Bool -> Text
 typeDescStr t isLiteral
@@ -700,6 +1702,17 @@ validateBracketBound role (AnnoS (Idx i t) _ _) =
       "Bracket" <+> pretty role <+> "bound must be an integer wire type"
       <+> "in pure morloc (one of Int, Int8/16/32/64, UInt8/16/32/64);"
       <+> "got" <+> pretty t
+
+-- | True if the receiver expression has an IFile-headed type. Used to
+-- route bracket and struct patterns through the IFile runtime walker
+-- rather than the generic Array/Tuple dispatch.
+recvIsIFile :: AnnoS (Indexed Type) One () -> Bool
+recvIsIFile (AnnoS (Idx _ t) _ _) = MBT.isIFileHead t
+
+-- | Manifold index of an AnnoS subtree (used to anchor sourced errors
+-- on the closest source span).
+annoIdx :: AnnoS (Indexed Type) One () -> Int
+annoIdx (AnnoS (Idx i _) _ _) = i
 
 -- | True if 't' is an integer wire type, possibly wrapped in a single
 -- 'OptionalT' (the @(Null :: ?Int64)@ shape from the desugar's empty
@@ -843,11 +1856,12 @@ exprToJson (HashX schema child) =
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
     ]
-exprToJson (SaveX fmt schema value path) =
+exprToJson (SaveX fmt schema level value path) =
   jsonObj
     [ ("tag", jsonStr "save")
     , ("format", jsonStr fmt)
     , ("schema", jsonStr schema)
+    , ("level", exprToJson level)
     , ("value", exprToJson value)
     , ("path", exprToJson path)
     ]
@@ -856,6 +1870,96 @@ exprToJson (LoadX schema child) =
     [ ("tag", jsonStr "load")
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
+    ]
+exprToJson (OpenX schema kind path) =
+  jsonObj
+    [ ("tag", jsonStr "open")
+    , ("schema", jsonStr schema)
+    , ("kind", jsonInt (fromIntegral kind))
+    , ("path", exprToJson path)
+    ]
+exprToJson (CloseX handle) =
+  jsonObj
+    [ ("tag", jsonStr "close")
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (FSchemaX schema path) =
+  jsonObj
+    [ ("tag", jsonStr "fschema")
+    , ("schema", jsonStr schema)
+    , ("path", exprToJson path)
+    ]
+exprToJson (FLengthX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "flen")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (IFileWalkX schema handle path runtimeArgs) =
+  jsonObj
+    [ ("tag", jsonStr "ifile_walk")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    , ("path", jsonStr path)
+    , ("args", jsonArr (map exprToJson runtimeArgs))
+    ]
+exprToJson (NextX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "next")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (StreamX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "stream")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (OpenOStreamX schema path) =
+  jsonObj
+    [ ("tag", jsonStr "open_ostream")
+    , ("schema", jsonStr schema)
+    , ("path", exprToJson path)
+    ]
+exprToJson (WriteX schema level value handle) =
+  jsonObj
+    [ ("tag", jsonStr "write")
+    , ("schema", jsonStr schema)
+    , ("level", exprToJson level)
+    , ("value", exprToJson value)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (AppendX schema path) =
+  jsonObj
+    [ ("tag", jsonStr "append")
+    , ("schema", jsonStr schema)
+    , ("path", exprToJson path)
+    ]
+exprToJson (ConcatX paths dest) =
+  jsonObj
+    [ ("tag", jsonStr "concat")
+    , ("paths", exprToJson paths)
+    , ("dest", exprToJson dest)
+    ]
+exprToJson (FlushX handle) =
+  jsonObj
+    [ ("tag", jsonStr "flush")
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (StdinX schema) =
+  jsonObj
+    [ ("tag", jsonStr "stdin")
+    , ("schema", jsonStr schema)
+    ]
+exprToJson (StdoutX schema) =
+  jsonObj
+    [ ("tag", jsonStr "stdout")
+    , ("schema", jsonStr schema)
+    ]
+exprToJson (StderrX schema) =
+  jsonObj
+    [ ("tag", jsonStr "stderr")
+    , ("schema", jsonStr schema)
     ]
 exprToJson (OptX schema child) =
   jsonObj
@@ -923,6 +2027,24 @@ selectorToJson (SelectorKey t ts) =
         [ ("key", jsonStr k)
         , ("sub", selectorToJson sub)
         ]
+-- Bracket steps inside a Selector chain: emitted as their own JSON
+-- nodes. The runtime's apply_getter walks into them, consumes one
+-- bracket runtime arg (index for bracket_index; three for
+-- bracket_slice), and continues with the bracket result.
+--
+-- 'bracket_index' carries a "sub" selector that runs on the indexed
+-- element. 'bracket_slice' is terminal (slice returns a list; any
+-- per-element walk is morloc's IntrMap territory, not a single
+-- selector walk).
+selectorToJson (SelectorBracketIndex sub) =
+  jsonObj
+    [ ("type", jsonStr "bracket_index")
+    , ("sub", selectorToJson sub)
+    ]
+selectorToJson SelectorBracketSlice =
+  jsonObj
+    [ ("type", jsonStr "bracket_slice")
+    ]
 
 litSchemaStr :: LitType -> Text
 litSchemaStr F32X = "f4"
@@ -1095,9 +2217,10 @@ buildManifest ManifestInputs{..} =
         , cmdGroupField (commandMid g)
         ]
 
-    -- Render the @args@ JSON array. 'makeSchemas' produces one schema
-    -- per arg position in the original function signature, INCLUDING
-    -- flags. So 'fdataArgSchemas' is index-aligned 1:1 with 'docArgs'.
+    -- Render the @args@ JSON array. 'makeSerialASTs' produces one
+    -- SerialAST per arg position in the original function signature,
+    -- INCLUDING flags; the rendered schemas in 'fdataArgSchemas' are
+    -- index-aligned 1:1 with 'docArgs'.
     -- For each arg we attach the corresponding schema; flags drop
     -- their schema in the JSON output (it's never used at dispatch
     -- time for boolean flags) but we still consume the schema slot to

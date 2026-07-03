@@ -80,15 +80,15 @@ all:
 	./nexus rcPerm >> obs.txt 2>> obs.err
 	echo "=== (4) File IO @save / @savej / @savem round-trip ===" >> obs.txt
 	echo "--- fileBin ---" >> obs.txt
-	./nexus --keep-null fileBin '"/tmp/vector-comprehensive-bin.dat"'  >> obs.txt 2>> obs.err
+	./nexus --keep-null fileBin "/tmp/vector-comprehensive-bin.dat"  >> obs.txt 2>> obs.err
 	echo "--- fileJson ---" >> obs.txt
-	./nexus --keep-null fileJson '"/tmp/vector-comprehensive-json.dat"' >> obs.txt 2>> obs.err
+	./nexus --keep-null fileJson "/tmp/vector-comprehensive-json.dat" >> obs.txt 2>> obs.err
 	echo "--- fileMsg ---" >> obs.txt
-	./nexus --keep-null fileMsg '"/tmp/vector-comprehensive-msg.dat"'  >> obs.txt 2>> obs.err
+	./nexus --keep-null fileMsg "/tmp/vector-comprehensive-msg.dat"  >> obs.txt 2>> obs.err
 	echo "--- fileSumBin ---" >> obs.txt
-	./nexus --keep-null fileSumBin '"/tmp/vector-comprehensive-sum-bin.dat"'  >> obs.txt 2>> obs.err
+	./nexus --keep-null fileSumBin "/tmp/vector-comprehensive-sum-bin.dat"  >> obs.txt 2>> obs.err
 	echo "--- fileSumJson ---" >> obs.txt
-	./nexus --keep-null fileSumJson '"/tmp/vector-comprehensive-sum-json.dat"' >> obs.txt 2>> obs.err
+	./nexus --keep-null fileSumJson "/tmp/vector-comprehensive-sum-json.dat" >> obs.txt 2>> obs.err
 	echo "=== (5) Zero-copy direct assertions (numpy OWNDATA) ===" >> obs.txt
 	echo "--- zcShmPyPy ---" >> obs.txt
 	./nexus zcShmPyPy >> obs.txt 2>> obs.err

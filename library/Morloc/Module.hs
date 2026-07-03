@@ -29,6 +29,9 @@ module Morloc.Module
   , extractMorlocDeps
   , extractModuleName
 
+    -- * Exposed-resource cleanup (for symmetric uninstall)
+  , wipeExposed
+
     -- * Dependency-pin resolver (exported for testing)
   , PinEntry (..)
   , PinMap
@@ -181,13 +184,17 @@ runSetupScript ::
   -> IO ()
 runSetupScript config name meta libpath targetDir setupPath = do
   baseEnv <- getEnvironment
-  let extraEnv =
+  let dirs = exposeDirsFor config name
+      extraEnv =
         [ ("MORLOC_HOME",            Config.configHome config)
         , ("MORLOC_MODULE_NAME",     MT.unpack name)
         , ("MORLOC_MODULE_VERSION",  MT.unpack (packageVersion meta))
         , ("MORLOC_MODULE_DIR",      targetDir)
         , ("MORLOC_PLANE",           Config.configPlane config)
         , ("MORLOC_PLANE_DIR",       libpath)
+        , ("MORLOC_EXPOSE_CPP_DIR",  exposeCppDir dirs)
+        , ("MORLOC_EXPOSE_PY_DIR",   exposePyDir dirs)
+        , ("MORLOC_EXPOSE_R_DIR",    exposeRDir dirs)
         ]
       -- Later entries shadow earlier ones, so the MORLOC_* additions win
       -- over any stray values in the inherited environment.
@@ -207,6 +214,87 @@ runSetupScript config name meta libpath targetDir setupPath = do
         <> MT.unpack name
         <> "' failed with exit code "
         <> show n
+
+-- | Per-module exposed-resource destinations under $MORLOC_HOME. Python's
+-- destination uses a hyphen-to-underscore transform so the module name
+-- becomes a legal Python identifier (e.g. `tensor-cpp` -> `tensor_cpp`).
+data ExposeDirs = ExposeDirs
+  { exposeCppDir :: !FilePath
+  , exposePyDir  :: !FilePath
+  , exposeRDir   :: !FilePath
+  }
+
+exposeDirsFor :: Config.Config -> Text -> ExposeDirs
+exposeDirsFor config name =
+  let home = Config.configHome config
+      modName = MT.unpack name
+  in ExposeDirs
+       { exposeCppDir = home </> "include" </> modName
+       , exposePyDir  = home </> "lib" </> "python" </> pythonizeName modName
+       , exposeRDir   = home </> "lib" </> "R" </> modName
+       }
+
+-- | Convert a module name to a Python-legal identifier: hyphens become
+-- underscores. Matches the documented downstream consumer pattern
+-- (e.g. `import tensor_cpp.helpers`).
+pythonizeName :: String -> String
+pythonizeName = map (\c -> if c == '-' then '_' else c)
+
+-- | Wipe all per-module exposed-resource subdirectories for a module.
+-- Symmetric counterpart to the copy step in 'runExpose': used both at
+-- install time (pre-copy, so stale files don't linger across reinstalls)
+-- and at uninstall time (so removed modules don't leave header / Python /
+-- R droppings on the system).
+wipeExposed :: Config.Config -> Text -> IO ()
+wipeExposed config name = do
+  let dirs = exposeDirsFor config name
+  mapM_ wipeIfExists [exposeCppDir dirs, exposePyDir dirs, exposeRDir dirs]
+  where
+    wipeIfExists d = do
+      e <- doesDirectoryExist d
+      when e $ removeDirectoryRecursive d
+
+-- | Copy files declared in `expose` into per-language well-known
+-- directories under $MORLOC_HOME, namespaced by module. Pre-wipes any
+-- prior per-module exposure so stale files from earlier installs do not
+-- linger. Patterns are routed through 'Install.resolveIncludePatterns',
+-- so glob syntax matches `packageInclude`.
+runExpose ::
+     Config.Config
+  -> Text          -- ^ module name
+  -> ExposeSet
+  -> FilePath      -- ^ module's installed dir (source of the copy)
+  -> IO ()
+runExpose config name es targetDir = do
+  let dirs = exposeDirsFor config name
+      modName = MT.unpack name
+  wipeExposed config name
+  unless (null (exposeCpp es)) $
+    copyExposed targetDir (exposeCppDir dirs) modName "cpp" (exposeCpp es)
+  unless (null (exposePy es)) $
+    copyExposed targetDir (exposePyDir dirs) modName "py" (exposePy es)
+  unless (null (exposeR es)) $
+    copyExposed targetDir (exposeRDir dirs) modName "r" (exposeR es)
+  where
+    -- Resolve each pattern individually so a literal-no-match can be
+    -- distinguished from a glob-no-match. Literal misses are typos and
+    -- should fail loudly; glob misses are silent (matches packageInclude).
+    copyExposed src dst modN lang pats = do
+      createDirectoryIfMissing True dst
+      forM_ pats $ \pat -> do
+        matched <- Install.resolveIncludePatterns src [pat]
+        let pStr = MT.unpack pat
+            isGlob = '*' `elem` pStr || "/" `MT.isSuffixOf` pat
+        case matched of
+          [] | not isGlob ->
+            ioError . userError $
+              "expose." <> lang <> " in module '" <> modN
+              <> "': listed path '" <> pStr <> "' matched no files"
+          _ -> forM_ matched $ \srcAbs -> do
+            let rel = MS.makeRelative src srcAbs
+                dstAbs = dst </> rel
+            createDirectoryIfMissing True (MS.takeDirectory dstAbs)
+            copyFile srcAbs dstAbs
 
 -- | Is this a local (.dot-prefixed) import?
 isLocalImport :: MVar -> Bool
@@ -575,6 +663,15 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
                 Nothing -> ioError $ userError "Registry URL not configured"
       liftIO $ ioAction `onException` runCleanup targetDir
 
+      -- Enforce: the install-target directory name must equal the
+      -- named `module <name>` declaration in the entry-point .loc file
+      -- (main.loc, or the unique .loc file). Otherwise downstream
+      -- `import <name>` will look in the wrong place. Runs before
+      -- package.yaml is parsed so a mismatched install is rejected as
+      -- early as possible, leaving runCleanup as the sole rollback.
+      liftIO $ validateModuleNameMatchesDir targetDir
+        `onException` runCleanup targetDir
+
       -- Read package.yaml for metadata and dependencies
       meta <- liftIO $ do
         let pkgYaml = targetDir </> "package.yaml"
@@ -646,6 +743,17 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
             (depth + 1)
             AutoDependency
             depModstr
+
+      -- Copy `expose`d files to per-language well-known dirs under
+      -- $MORLOC_HOME, namespaced by module. Runs before the setup script
+      -- so the script can rely on the exposed paths existing.
+      do
+        let es = packageExpose meta
+            allPats = exposeCpp es ++ exposePy es ++ exposeR es
+        liftIO $ Install.validateIncludeScope allPats
+          `onException` runCleanup targetDir
+        liftIO $ runExpose config' name es targetDir
+          `onException` runCleanup targetDir
 
       -- Run the optional setup script, if one is declared in package.yaml.
       -- Runs after morloc deps are on disk (a setup script may rely on
@@ -780,7 +888,7 @@ extractMorlocDeps :: FilePath -> IO [Text]
 extractMorlocDeps path = do
   content <- TIO.readFile path
   let ls = MT.lines content
-      imports = concatMap extractImport (removeComments ls)
+      imports = concatMap extractImport (stripLocComments ls)
   return (unique imports)
   where
     extractImport :: Text -> [Text]
@@ -798,17 +906,113 @@ extractMorlocDeps path = do
                              (topLevel : _) | not (MT.null topLevel) -> [topLevel]
                              _ -> []
 
-    removeComments :: [Text] -> [Text]
-    removeComments = go False
-      where
-        go _ [] = []
-        go True (l : ls)
-          | MT.isInfixOf "-}" l = go False ls
-          | otherwise = go True ls
-        go False (l : ls)
-          | MT.isPrefixOf "--" (MT.stripStart l) = go False ls
-          | MT.isPrefixOf "{-" (MT.stripStart l) = go True ls
-          | otherwise = l : go False ls
+-- | Line-based comment stripper for .loc files. Drops `-- to EOL` and
+-- `{- ... -}` block-comment lines. Lifted out of extractMorlocDeps so
+-- the module-header scanner can reuse it.
+stripLocComments :: [Text] -> [Text]
+stripLocComments = go False
+  where
+    go _ [] = []
+    go True (l : ls)
+      | MT.isInfixOf "-}" l = go False ls
+      | otherwise = go True ls
+    go False (l : ls)
+      | MT.isPrefixOf "--" (MT.stripStart l) = go False ls
+      | MT.isPrefixOf "{-" (MT.stripStart l) = go True ls
+      | otherwise = l : go False ls
+
+-- | Scan a .loc file for every named `module <name> (...)` declaration.
+-- Anonymous declarations (`module ( ... )`) are intentionally skipped --
+-- they mark auxiliary files used via relative `import .foo` and are not
+-- top-level installable modules. The scan is a lightweight line-based
+-- pass (matching extractMorlocDeps's precedent); it is not a full
+-- parser, so a multi-line `module` declaration would be missed --
+-- which is fine, because such files are not idiomatic.
+extractNamedModuleDecls :: FilePath -> IO [Text]
+extractNamedModuleDecls path = do
+  content <- TIO.readFile path
+  let ls = MT.lines content
+  return $ mapMaybe extractName (stripLocComments ls)
+  where
+    extractName :: Text -> Maybe Text
+    extractName ln =
+      let stripped = MT.stripStart ln
+       in case MT.stripPrefix "module" stripped of
+            Nothing -> Nothing
+            Just rest ->
+              -- The `module` token must be followed by whitespace,
+              -- else it is the prefix of some longer identifier.
+              case MT.uncons rest of
+                Just (c, after) | DC.isSpace c ->
+                  let nameStart = MT.stripStart after
+                   in if MT.isPrefixOf "(" nameStart
+                        then Nothing  -- anonymous: no name to harvest
+                        else
+                          let name = MT.takeWhile isModNameChar nameStart
+                           in if MT.null name then Nothing else Just name
+                _ -> Nothing
+    isModNameChar :: Char -> Bool
+    isModNameChar c = DC.isAlphaNum c || c == '-'
+
+-- | Find the canonical entry-point .loc file in a module directory.
+-- Either `main.loc` (preferred), or the unique .loc file in the dir.
+-- Multiple .loc files without a main.loc is ambiguous and rejected.
+findEntryPointLocFile :: FilePath -> IO (Either Text FilePath)
+findEntryPointLocFile dir = do
+  let mainLoc = dir </> "main.loc"
+  mainExists <- doesFileExist mainLoc
+  if mainExists
+    then return (Right mainLoc)
+    else do
+      dirExists <- doesDirectoryExist dir
+      if not dirExists
+        then return (Left $ "directory not found: " <> MT.pack dir)
+        else do
+          entries <- listDirectory dir
+          let locCandidates = [ dir </> e | e <- entries, MS.takeExtension e == ".loc" ]
+          locFiles <- filterM doesFileExist locCandidates
+          case locFiles of
+            [single] -> return (Right single)
+            []       -> return (Left $ "no .loc file found in " <> MT.pack dir)
+            multiple -> return . Left $
+              "multiple .loc files in " <> MT.pack dir <>
+              " and no main.loc to disambiguate: " <>
+              MT.intercalate ", " (map (MT.pack . MS.takeFileName) multiple)
+
+-- | Verify the installed module's directory basename matches the
+-- declared module name in its entry-point .loc file. Throws IOError on
+-- mismatch / missing entry / no-named-module / multiple-named-modules.
+-- Caller is responsible for cleanup-on-throw (use within onException).
+validateModuleNameMatchesDir :: FilePath -> IO ()
+validateModuleNameMatchesDir targetDir = do
+  entryResult <- findEntryPointLocFile targetDir
+  entryPath <- case entryResult of
+    Right p   -> return p
+    Left err  -> ioError . userError $ MT.unpack err
+  declared <- extractNamedModuleDecls entryPath
+  let dirName   = MT.pack (MS.takeFileName (MS.dropTrailingPathSeparator targetDir))
+      entryFile = MT.pack (MS.takeFileName entryPath)
+  case declared of
+    [name]
+      | name == dirName -> return ()
+      | otherwise ->
+          ioError . userError $
+            "declared module name '" <> MT.unpack name <>
+            "' in " <> MT.unpack entryFile <>
+            " does not match the install directory name '" <>
+            MT.unpack dirName <>
+            "'. Either rename the directory to match the module, or " <>
+            "edit the `module` header so the names agree."
+    [] ->
+      ioError . userError $
+        "no named morloc module found in " <> MT.unpack entryFile <>
+        ": all declarations are anonymous. Add a name to the top-level " <>
+        "`module` header (e.g. `module " <> MT.unpack dirName <> " (...)`)."
+    multiple ->
+      ioError . userError $
+        "multiple named morloc modules declared in " <> MT.unpack entryFile <>
+        " (" <> MT.unpack (MT.intercalate ", " multiple) <>
+        "). Exactly one named top-level module is required per file."
 
 -- {{{ parse module source
 

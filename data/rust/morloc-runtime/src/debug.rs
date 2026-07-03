@@ -42,22 +42,19 @@
 //! All thread-local state -- frames, dump counter, per-midx counters
 //! -- is per-dispatch. The pool's outer dispatcher calls
 //! [`morloc_debug_flush_dispatch`] at the start of each new top-level
-//! call (same site that calls `flush_shm_tracker`), so state never
+//! call (same site that calls `shm_tracker_flush`), so state never
 //! leaks between unrelated invocations of the same pool process.
 //!
-//! ## TODO (case 6 from the design review)
+//! ## Preserved-manifold limitation
 //!
 //! Inside a `Preserved` manifold the catch block references native
 //! bindings (`n0`, `n1`, ...). If `morloc.get_value` fails before
 //! the binding is created, the catch dumps a not-yet-bound name
 //! and the inner defensive try/except swallows the resulting
 //! NameError -- so the frame is recorded as "(serialize failed)"
-//! and the original exception still propagates. Revisit: either
-//! re-route Preserved-manifold debug wraps through the serialized
-//! arg form, or detect and skip the not-yet-bound arg explicitly.
+//! and the original exception still propagates.
 
 use crate::cschema::CSchema;
-use crate::hash;
 use libc::{c_char, c_void};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -165,8 +162,10 @@ fn ensure_inputs_dir() -> Option<PathBuf> {
     Some(inputs)
 }
 
-/// Serialize one packet to msgpack and hash the bytes. Always succeeds
-/// when the schema is valid -- no disk I/O here.
+/// Serialize one packet as a self-contained voidstar data packet
+/// and hash its content structurally. Returns `(content_hash, bytes)`
+/// where the bytes are ready to write to disk as `<hash>.pkt` and
+/// `morloc dump` can load directly. Never throws.
 unsafe fn serialize_and_hash(
     packet: *const u8,
     schema_cstr: *const c_char,
@@ -174,13 +173,17 @@ unsafe fn serialize_and_hash(
     extern "C" {
         fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
         fn free_schema(schema: *mut CSchema);
-        fn get_data_packet_as_mpk(
-            packet: *const u8,
+        fn get_morloc_data_packet_value(
+            data: *const u8,
             schema: *const CSchema,
-            mpk_out: *mut *mut c_char,
-            mpk_size_out: *mut usize,
             errmsg: *mut *mut c_char,
-        ) -> i32;
+        ) -> *mut u8;
+        fn hash_voidstar(
+            data: *const c_void,
+            schema: *const CSchema,
+            seed: u64,
+            errmsg: *mut *mut c_char,
+        ) -> u64;
     }
 
     if packet.is_null() || schema_cstr.is_null() {
@@ -189,25 +192,32 @@ unsafe fn serialize_and_hash(
     let mut err: *mut c_char = ptr::null_mut();
     let schema = parse_schema(schema_cstr, &mut err);
     if schema.is_null() {
-        if !err.is_null() {
-            libc::free(err as *mut c_void);
-        }
+        if !err.is_null() { libc::free(err as *mut c_void); }
         return None;
     }
-    let mut mpk: *mut c_char = ptr::null_mut();
-    let mut mpk_size: usize = 0;
-    let ok = get_data_packet_as_mpk(packet, schema, &mut mpk, &mut mpk_size, &mut err);
+    let voidstar = get_morloc_data_packet_value(packet, schema, &mut err);
+    if voidstar.is_null() {
+        if !err.is_null() { libc::free(err as *mut c_void); }
+        free_schema(schema);
+        return None;
+    }
+    let mut hash_err: *mut c_char = ptr::null_mut();
+    let content_hash = hash_voidstar(
+        voidstar as *const c_void, schema, 0, &mut hash_err,
+    );
+    if !hash_err.is_null() {
+        libc::free(hash_err as *mut c_void);
+        free_schema(schema);
+        return None;
+    }
+    let mut pkt_err: *mut c_char = ptr::null_mut();
+    let bytes = crate::cache::build_persistence_data_packet(
+        voidstar as *const u8, schema, &mut pkt_err,
+    );
     free_schema(schema);
-    if ok == 0 || mpk.is_null() {
-        if !err.is_null() {
-            libc::free(err as *mut c_void);
-        }
-        return None;
-    }
-    let bytes = std::slice::from_raw_parts(mpk as *const u8, mpk_size).to_vec();
-    libc::free(mpk as *mut c_void);
-    let data_hash = hash::xxh64_with_seed(&bytes, 0);
-    Some((data_hash, bytes))
+    if !pkt_err.is_null() { libc::free(pkt_err as *mut c_void); }
+    let bytes = bytes?;
+    Some((content_hash, bytes))
 }
 
 /// Try to write `bytes` to `<debug_dir>/inputs/<hash>.pkt`. Returns
@@ -299,7 +309,7 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
 
 /// Reset per-dispatch state. Called by the pool's outer dispatcher
 /// at the start of each top-level call (same site as
-/// `flush_shm_tracker`). Without this, recursion counters and the
+/// `shm_tracker_flush`). Without this, recursion counters and the
 /// disk-write counter would carry across unrelated invocations of
 /// the same pool process.
 #[no_mangle]

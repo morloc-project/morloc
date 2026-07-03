@@ -1,0 +1,46 @@
+-- Verify packet-format result output, RPTR/FILE -> MESG normalization,
+-- and zstd compression across the (PACKET_SOURCE x compression)
+-- matrix the nexus can emit when writing `-f packet -o file` artifacts.
+--
+-- For each scenario the Makefile probes the on-disk packet header at
+-- offsets 13/14/15 (source / format / compression bytes) and writes
+-- the result through verify.py:
+--
+--   scenario             pool result       normalized -> on disk
+--   small,  -z 0         MESG+VOIDSTAR     MESG VOIDSTAR  uncompressed
+--   small,  -z 3         MESG+VOIDSTAR     MESG VOIDSTAR  zstd
+--   big,    -z 0         RPTR+VOIDSTAR     MESG VOIDSTAR  uncompressed
+--   big,    -z 3         RPTR+VOIDSTAR     MESG VOIDSTAR  zstd
+--   big --no-shm, -z 0   FILE+MSGPACK      MESG MSGPACK   uncompressed
+--   big --no-shm, -z 3   FILE+MSGPACK      MESG MSGPACK   zstd
+--
+-- Without normalize_data_packet_for_output, the four big cases would
+-- write either an 8-byte SHM relptr or a tempfile path to disk --
+-- artifacts that go stale the moment the nexus exits. Without the
+-- -z wiring in the dispatch.rs Packet branch, every compressed
+-- scenario above would silently drop -z and end up with the
+-- compression byte cleared.
+--
+-- The big list is 20000 ints, well past MORLOC_INLINE_THRESHOLD
+-- (64 KiB of flat voidstar), so the pool routes it through RPTR
+-- when SHM is enabled and through FILE when MORLOC_NO_SHM=1.
+
+module main
+  ( smallList
+  , bigList
+  )
+
+import root-py
+
+effect IO
+
+source Py from "gen.py" ("gen_small", "gen_big")
+
+gen_small :: <IO> [Int]
+gen_big   :: <IO> [Int]
+
+smallList :: <IO> [Int]
+smallList = gen_small
+
+bigList :: <IO> [Int]
+bigList = gen_big

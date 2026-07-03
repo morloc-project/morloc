@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- form: list requires the source chain to NOT contain inline.
+foo ::
+  --' source: inline
+  --' form: list
+  [Int] ->
+  Int
+foo x = 0

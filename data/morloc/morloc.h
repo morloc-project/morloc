@@ -6,6 +6,24 @@
 #ifndef __MORLOC_H__
 #define __MORLOC_H__
 
+// Atomic includes must sit outside any `extern "C"` block because the
+// C++ <atomic> header pulls in <type_traits> et al., which use C++
+// templates. We define the platform-neutral macros here, then open
+// the extern "C" block once we are past the headers.
+#if defined(__cplusplus)
+#  include <atomic>
+#  define MORLOC_ATOMIC_PTR(T)   std::atomic<T*>
+#  define MORLOC_ATOMIC_SIZE     std::atomic<size_t>
+#  define MORLOC_ATOMIC_LOAD_ACQ(x)  ((x).load(std::memory_order_acquire))
+#  define MORLOC_ATOMIC_LOAD_RLX(x)  ((x).load(std::memory_order_relaxed))
+#else
+#  include <stdatomic.h>
+#  define MORLOC_ATOMIC_PTR(T)   _Atomic(T*)
+#  define MORLOC_ATOMIC_SIZE     _Atomic(size_t)
+#  define MORLOC_ATOMIC_LOAD_ACQ(x)  atomic_load_explicit(&(x), memory_order_acquire)
+#  define MORLOC_ATOMIC_LOAD_RLX(x)  atomic_load_explicit(&(x), memory_order_relaxed)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -68,7 +86,24 @@ typedef void*   absptr_t;
 #define SHM_MAGIC 0xFECA0DF0
 #define BLK_MAGIC 0x0CB10DF0
 
-#define MAX_VOLUME_NUMBER 32
+#define MAX_VOLUME_NUMBER 32768
+
+// Indexed relptr encoding: bit 63 = sentinel, bits 62..48 = 15-bit
+// volume index, bits 47..0 = 48-bit offset within the volume's data
+// region. Mirrors morloc-runtime-types::shm_types; kept here so the
+// C/C++ bridges can do per-relptr arithmetic without crossing FFI.
+#define RELPTR_VOL_IDX_SHIFT 48
+#define RELPTR_VOL_IDX_MASK  ((uint64_t)0x7FFF)
+#define RELPTR_OFFSET_MASK   ((uint64_t)0x0000FFFFFFFFFFFF)
+#define RELPTR_SENTINEL_MASK ((uint64_t)0x8000000000000000)
+
+static inline size_t relptr_vol_idx(relptr_t p) {
+    return (size_t)(((uint64_t)p >> RELPTR_VOL_IDX_SHIFT) & RELPTR_VOL_IDX_MASK);
+}
+
+static inline size_t relptr_offset_bits(relptr_t p) {
+    return (size_t)((uint64_t)p & RELPTR_OFFSET_MASK);
+}
 
 // Shared memory volume header (lives at the start of each mmap'd region).
 typedef struct shm_s {
@@ -125,11 +160,24 @@ typedef enum {
                           // binary layout is fully described by the Arrow
                           // buffer itself, not by the morloc Schema. Wire form
                           // is `T` (no declared columns) or `T:K<entries>`.
-    MORLOC_RECUR    = 20  // Back-reference to a named schema declared by
+    MORLOC_RECUR    = 20, // Back-reference to a named schema declared by
                           // `&<klen><name>` earlier on the path. Carries the
                           // referenced name in `Schema.name`; structurally
                           // terminates descent at the back-ref point. Wire form
                           // is `^<klen><name>`.
+    MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
+    MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
+    MORLOC_ISTREAM  = 23  // Sequential stream-file reader handle.
+    // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
+    // form. The schema code selects the morloc-level type; the tag byte
+    // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
+    // payload is a relptr to a path suballoc `{size: u64, bytes...}`,
+    // `TAG_HANDLE` (1) means the payload is a bare slot id valid only in
+    // the sender+receiver's shared SHM registry (intra-nexus). See
+    // `morloc_runtime_types::stream_handle` for the layout. The in-
+    // language native form is `uint64_t` (the local slot id) regardless
+    // of tag; sender and receiver each own independent fds, mmaps, and
+    // arena-tracked close lifetimes.
 } morloc_serial_type;
 
 // Single-character schema encoding tokens.
@@ -145,6 +193,9 @@ typedef enum {
 #define SCHEMA_OPTIONAL '?'
 #define SCHEMA_INT      'j'
 #define SCHEMA_TABLE    'T'
+#define SCHEMA_IFILE    'F'
+#define SCHEMA_OSTREAM  'O'
+#define SCHEMA_ISTREAM  'I'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //
@@ -179,9 +230,29 @@ typedef struct Array {
 
 // Packet type discriminator.
 typedef uint8_t command_type_t;
-#define PACKET_TYPE_DATA  ((command_type_t)0)
-#define PACKET_TYPE_CALL  ((command_type_t)1)
-#define PACKET_TYPE_PING  ((command_type_t)2)
+#define PACKET_TYPE_DATA   ((command_type_t)0)
+#define PACKET_TYPE_CALL   ((command_type_t)1)
+#define PACKET_TYPE_PING   ((command_type_t)2)
+#define PACKET_TYPE_STREAM ((command_type_t)3)
+#define PACKET_TYPE_FOOTER ((command_type_t)4)
+
+// Stream packet length-field sentinel. Streams are append-only and have
+// no global content length; the header's `length` field is always set
+// to (uint64_t)-1. Future versions may interpret a non-sentinel value
+// as a declared maximum stream length.
+#define STREAM_LENGTH_SENTINEL ((uint64_t)0xFFFFFFFFFFFFFFFFULL)
+
+// Stream EOF tail: 8 bytes at end-of-file when a stream has a footer.
+// Layout: [footer_length: u32 LE][footer_magic: 4 bytes].
+// STREAM_TAIL_MAGIC is MORLOC_PACKET_MAGIC (0x0707f86d) with its bytes
+// reversed: { 0x07, 0x07, 0xf8, 0x6d }. Since the same bytes in LE
+// (6d f8 07 07) are the start of every packet header, the reversed
+// form cannot collide with a packet-header start byte sequence.
+// A reader checks the last 8 bytes; magic match -> footer present at
+// (file_size - 8 - footer_length). The reader then re-validates the
+// candidate footer's own header (PACKET_MAGIC + PACKET_TYPE_FOOTER)
+// before trusting it.
+#define STREAM_TAIL_SIZE 8
 
 // Packed command sub-structs (all 8 bytes wide).
 typedef struct __attribute__((packed)) packet_command_type_s {
@@ -212,6 +283,7 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 #define PACKET_FORMAT_ARROW    0x05
 
 #define PACKET_COMPRESSION_NONE 0x00
+#define PACKET_COMPRESSION_ZSTD 0x01
 #define PACKET_ENCRYPTION_NONE  0x00
 
 #define PACKET_STATUS_PASS 0x00
@@ -341,15 +413,76 @@ void morloc_run_init(void);
 void morloc_run_finalize(int exit_code);
 
 // Metadata sub-header in packet metadata sections.
-#define MORLOC_METADATA_TYPE_SCHEMA_STRING 0x01
-#define MORLOC_METADATA_TYPE_XXHASH        0x02
-#define MORLOC_METADATA_HEADER_MAGIC       "mmh"
+#define MORLOC_METADATA_TYPE_SCHEMA_STRING   0x01
+#define MORLOC_METADATA_TYPE_XXHASH          0x02
+#define MORLOC_METADATA_TYPE_VOL_INDEX       0x03
+#define MORLOC_METADATA_TYPE_FRAME_INDEX     0x04
+#define MORLOC_METADATA_TYPE_SUBPACKET_INDEX 0x05
+#define MORLOC_METADATA_TYPE_STREAM_DIAG     0x06
+#define MORLOC_METADATA_TYPE_FOOTER_FINAL    0x07
+#define MORLOC_METADATA_HEADER_MAGIC         "mmh"
 
 typedef struct __attribute__((packed)) morloc_metadata_header_s {
     char magic[3];
     uint8_t type;
     uint32_t size;
 } morloc_metadata_header_t;
+
+// Handle-kind discriminants for mlc_open / mlc_close. Must agree with
+// morloc-runtime-types::packet::MLC_KIND_*.
+#define MLC_KIND_IFILE   0
+#define MLC_KIND_ISTREAM 1
+#define MLC_KIND_OSTREAM 2
+
+// Upper bound on the file-path payload carried by a single IFile
+// handle in voidstar wire form. POSIX PATH_MAX on Linux is 4096; we
+// use that here as the conservative ceiling for buffer sizing in the
+// per-language IFile wrappers and in nexus eval.
+#define MORLOC_IFILE_PATH_MAX 4096
+
+// Fixed-size diagnostic block carried inside every stream footer. The
+// temp footer's whole purpose is this block. Tooling like
+// `morloc-nexus file` reads this directly from a STREAM_PACKET file's
+// EOF to produce a writer status report. See morloc-runtime-types
+// (packet.rs) for the canonical definition and the byte-counter
+// semantics (PAYLOAD-only totals so the ratio is clean).
+#define MORLOC_STREAM_DIAG_VERSION       1
+#define MORLOC_STREAM_DIAG_TAIL_MAX      8
+#define MORLOC_STREAM_TEMP_FOOTER_BYTES 208  // 32 (hdr) + 8 (meta hdr) + 160 (diag) + 8 (tail)
+
+typedef struct __attribute__((packed)) morloc_stream_diag_s {
+    // Header lane: four u32s, two u64-aligned slots (16 B)
+    uint32_t diag_version;
+    uint32_t writer_pid;
+    uint32_t n_oversize_subpackets;
+    uint32_t tail_len;
+
+    // Reserved (8 B) for future-extensible fields
+    uint64_t _reserved;
+
+    // Identification + running totals (72 B = 9 * u64)
+    uint64_t writer_start_time;            // unix-epoch microseconds at @open
+    uint64_t subpacket_count;
+    uint64_t element_count;
+    uint64_t bytes_uncompressed_total;     // PAYLOAD-only
+    uint64_t bytes_compressed_total;       // PAYLOAD-only
+    uint64_t largest_packet_uncompressed;
+    uint64_t largest_packet_idx;
+    uint64_t first_flush_time;
+    uint64_t last_flush_time;
+
+    // Tail window (MORLOC_STREAM_DIAG_TAIL_MAX * 8 = 64 B). Only
+    // tail[0..tail_len] is meaningful.
+    uint64_t tail[MORLOC_STREAM_DIAG_TAIL_MAX];
+} morloc_stream_diag_t;
+
+#if !defined(__cplusplus)
+_Static_assert(sizeof(morloc_stream_diag_t) == 160,
+               "morloc_stream_diag_t must be 160 bytes; struct/wire mismatch");
+#else
+static_assert(sizeof(morloc_stream_diag_t) == 160,
+              "morloc_stream_diag_t must be 160 bytes; struct/wire mismatch");
+#endif
 
 // ========================================================================
 // Section 5: Expression / eval types
@@ -833,10 +966,59 @@ size_t total_shm_size(void);
 volptr_t rel2vol(relptr_t ptr, ERRMSG);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 
-// Convenience: resolve a relptr, using base_ptr if available (no SHM lookup needed).
+// ── Lock-free per-process volume base table ─────────────────────────────────
+//
+// libmorloc.so publishes a base+size entry for every SHM volume it has
+// mapped into this process. `resolve_relptr` below reads from the
+// table inline, replacing what used to be a mutex-guarded FFI call
+// (~100 ns) with an Acquire-load + branch + add (~5 ns). On a miss --
+// volume not yet mapped in this process -- it falls through to the
+// FFI `rel2abs` which lazily opens the segment and publishes the
+// entry. Publication and withdrawal happen inside libmorloc.so's
+// `shinit` / `shopen_diag` / `shclose`.
+//
+// Layout is part of the libmorloc.so ABI:
+struct morloc_vol_entry {
+    MORLOC_ATOMIC_PTR(void) data_base;   // 0 if slot empty in this process
+    MORLOC_ATOMIC_SIZE      data_size;   // valid when data_base != 0
+};
+extern struct morloc_vol_entry MORLOC_VOL_TABLE[MAX_VOLUME_NUMBER];
+
+#if !defined(__cplusplus)
+_Static_assert(sizeof(MORLOC_ATOMIC_PTR(void))   == sizeof(void*),
+               "atomic pointer layout mismatch");
+_Static_assert(sizeof(MORLOC_ATOMIC_SIZE)        == sizeof(size_t),
+               "atomic size_t layout mismatch");
+_Static_assert(sizeof(struct morloc_vol_entry)   == 2 * sizeof(void*),
+               "morloc_vol_entry layout mismatch");
+#endif
+
+// Resolve a relptr. Three paths, in priority order:
+//
+//   1. `base_ptr` is non-null  -- inline MESG+VOIDSTAR data: the relptr
+//      is a buffer-relative offset; strip the vol_idx bits (they are
+//      zero in practice for inline producers, but masking is harmless
+//      either way) and add to base_ptr.
+//
+//   2. Lock-free table hit     -- the volume the relptr targets is
+//      mapped in this process. Acquire-load the entry, bounds-check
+//      the offset, return data_base + offset. No FFI, no mutex.
+//
+//   3. Lock-free table miss    -- volume not yet mapped here. Fall
+//      through to the FFI `rel2abs`, which lazily opens the segment
+//      and publishes the entry. Subsequent calls hit path (2).
 static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG) {
     if (base_ptr) {
-        return (char*)base_ptr + relptr;
+        return (char*)base_ptr + relptr_offset_bits(relptr);
+    }
+    size_t vol = relptr_vol_idx(relptr);
+    void* data_base = MORLOC_ATOMIC_LOAD_ACQ(MORLOC_VOL_TABLE[vol].data_base);
+    if (data_base) {
+        size_t off = relptr_offset_bits(relptr);
+        size_t data_size = MORLOC_ATOMIC_LOAD_RLX(MORLOC_VOL_TABLE[vol].data_size);
+        if (off < data_size) {
+            return (char*)data_base + off;
+        }
     }
     return rel2abs(relptr, errmsg_);
 }
@@ -914,6 +1096,7 @@ uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
+uint8_t* make_data_indirection_packet(const char* dat_filename, const Schema* schema);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
 char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);
@@ -1122,6 +1305,16 @@ argument_t* initialize_positional(char* value);
 argument_t* initialize_unrolled(size_t size, char* default_value, char** fields, char** default_fields);
 void free_argument_t(argument_t* arg);
 uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, const Schema* schema, ERRMSG);
+// Variadic-list assembly entry point (matches `--' many: true` in the
+// nexus manifest). Parses N CLI argument_t's into a single packet
+// wrapping a morloc list whose element schema is the list schema's
+// inner type. Each element goes through the same source classifier
+// (inline JSON / file / stdin) as parse_cli_data_argument, so binary
+// payloads (mpack, morloc voidstar, arrow IPC) are accepted per
+// element without JSON conversion.
+uint8_t* parse_cli_data_argument_list(
+    uint8_t* dest, const argument_t* const* args, size_t n,
+    const Schema* list_schema, ERRMSG);
 uint8_t* make_call_packet_from_cli(
     uint8_t* dest, uint32_t mid,
     argument_t** args, char** arg_schema_strs, ERRMSG);
@@ -1153,14 +1346,163 @@ char* manifest_to_discovery_json(const manifest_t* manifest);
 // Section 25: Function declarations -- Intrinsics
 // ========================================================================
 
-int mlc_save(const absptr_t data, const Schema* schema, const char* path, ERRMSG);
-int mlc_save_json(const absptr_t data, const Schema* schema, const char* path, ERRMSG);
-int mlc_save_voidstar(const absptr_t data, const Schema* schema, const char* path, ERRMSG);
+int mlc_save(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
+int mlc_save_json(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
+// @save voidstar: produces a morloc data packet. When level > 0 the
+// packet's payload is zstd-compressed and the header carries
+// PACKET_COMPRESSION_ZSTD; level == 0 writes uncompressed (legacy shape).
+int mlc_save_voidstar(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
 void* mlc_load(const char* path, const Schema* schema, ERRMSG);
 char* mlc_hash(const absptr_t data, const Schema* schema, ERRMSG);
 char* mlc_show(const absptr_t data, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 relptr_t write_voidstar_binary(int fd, const void* data, const Schema* schema, ERRMSG);
+
+// ── Stream-handle intrinsics ─────────────────────────────────────────────
+// Open a STREAM_PACKET file as the given handle kind (MLC_KIND_*) and
+// return a 64-bit handle ID. Returns -1 on failure, with errmsg set.
+int64_t mlc_open(const char* path, uint8_t kind, ERRMSG);
+// Close any open handle, bumping its registry slot's generation.
+// Returns 0 on success, non-zero on failure.
+int32_t mlc_close(int64_t handle, ERRMSG);
+// Read a file's schema string without opening it as a typed handle.
+// Caller frees the returned C string.
+char* mlc_fschema(const char* path, ERRMSG);
+// One runtime arg to mlc_ifile_walk. `has` encodes presence (0 = absent /
+// use default, 1 = use `value`). `value` carries the i64 payload (an
+// index for `.[]` steps, one of start/stop/step for `.[:]` steps).
+// Field steps consume no args; bracket-index consumes 1; bracket-slice
+// consumes 3. Args appear in DFS order matching the path.
+typedef struct {
+    uint8_t has;
+    uint8_t _pad[7];
+    int64_t value;
+} mlc_ifile_walk_arg;
+// Unified IFile pattern walker. The `path` string encodes a walk-step
+// chain:
+//   .<int>   - tuple/record-index field step
+//   .<name>  - record-field-key step
+//   .[]      - bracket-index leaf  (consumes 1 arg)
+//   .[:]     - bracket-slice leaf  (consumes 3 args)
+// Returns a fresh SHM voidstar block holding the materialized value.
+// Caller frees via shfree. Errors propagate through errmsg.
+void* mlc_ifile_walk(int64_t handle,
+                     const char* path,
+                     const mlc_ifile_walk_arg* args,
+                     uint64_t n_args,
+                     ERRMSG);
+// Total element count of an IFile (`length f`). Returns -1 on error.
+// Errors cleanly when the IFile's value type is not a list.
+int64_t mlc_ifile_length(int64_t handle, ERRMSG);
+
+// ── Cross-pool handle wire codec ─────────────────────────────────────────
+//
+// Stream handles are slot ids in a process-local registry. To cross a
+// pool boundary the sender's bridge writes the handle's path (and kind)
+// on the wire; the receiver's bridge re-opens that path in its own
+// registry and binds a fresh local handle. Each pool owns its own fd +
+// mmap and is responsible for closing its own slot (typically via the
+// arena that recorded it).
+//
+// Owned strings: the path returned by mlc_handle_pack_path is a malloc'd
+// NUL-terminated C string. Caller frees with libc::free.
+char* mlc_handle_pack_path(int64_t handle, uint8_t* out_kind, ERRMSG);
+int64_t mlc_handle_unpack_path(const char* path, uint8_t kind, ERRMSG);
+
+// Length of the path string a handle would pack to, without allocating
+// the string itself. Used by per-language get_shm_size's IFile-array
+// sizing pass to size SHM exactly rather than reserve PATH_MAX per
+// element. Returns the byte length, or -1 on error.
+int64_t mlc_handle_path_len(int64_t handle, ERRMSG);
+
+// Voidstar wire-layout helpers. `dest` is the Array slot in the
+// voidstar buffer; `cursor` is the bridge's outer to_voidstar cursor
+// (advanced past the path bytes on success). Returns 0 on success.
+// On the read side, `base_ptr` is the relptr base: NULL means the
+// Array's `data` field is an SHM-relative relptr (the common
+// in-process case); non-NULL means it's a payload-relative offset
+// (used when reading from mmap'd file regions).
+int32_t mlc_write_handle_voidstar(int64_t handle, void* dest,
+                                  void** cursor, ERRMSG);
+int64_t mlc_read_handle_voidstar(const void* arr, const void* base_ptr,
+                                 uint8_t kind, ERRMSG);
+
+// Batched IFile-array helpers. Each acquires the stream registry mutex
+// once and walks N handles, instead of N short critical sections through
+// the singular helpers above. The bridges' std::vector / list / ndarray
+// overloads route IFile arrays through these.
+//
+// `mlc_handles_path_lens` returns the sum of all handles' path byte
+// lengths, or -1 on error. When `out_lens` is non-NULL, the per-handle
+// lengths are also written there; sum-only callers may pass NULL.
+//
+// `mlc_write_handles_voidstar` writes N consecutive Array slots starting
+// at `dest`, with `elem_stride` bytes between slots (= sizeof(Array)
+// for a packed array). `cursor` is advanced past the concatenated path
+// bytes. Returns 0 on success, nonzero on error.
+int64_t mlc_handles_path_lens(const int64_t* handles, size_t n,
+                              int64_t* out_lens, ERRMSG);
+int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
+                                   void* dest, size_t elem_stride,
+                                   void** cursor, ERRMSG);
+
+// IStream: forward-only file readers.
+//
+// `mlc_next(handle)` materialises the IStream's current sub-packet into
+// a fresh SHM block typed `[a]` (an Array struct, with element + sub-
+// allocation bytes following), advances the IStream cursor, and returns
+// the AbsPtr to the Array. At EOF the returned Array has `size == 0`
+// and `data == RELNULL`; the per-language wrapper surfaces this as the
+// language's empty list. On error returns NULL with errmsg set.
+//
+// `mlc_stream(ifile_handle)` opens a fresh IStream slot bound to the
+// same path as the source IFile (independent fd + mmap + cursor). The
+// new handle is auto-registered with the current `eval_arena`.
+void* mlc_next(int64_t handle, ERRMSG);
+int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
+
+// OStream: forward-only file writers.
+//
+// `mlc_open_ostream(schema_str, path)` is the typed-open path for
+// `@open path :: <IO> (OStream T)`. The codegen has the element schema
+// string for T in hand at compile time. The runtime creates the file
+// (O_CREAT|O_EXCL), flock'-acquires it, writes the stream header with
+// the schema metadata block, and returns a fresh OSTREAM slot handle.
+//
+// `mlc_write(level, handle, payload_voidstar)` writes one sub-packet
+// of element-list type [T]. `payload_voidstar` points to a SHM Array
+// struct (the user's `[T]` value materialised by the bridge's
+// `to_voidstar<vector<T>>`). `level` is the zstd compression level (0
+// = uncompressed); the first @write fixes the level for the file's
+// lifetime, subsequent writes must match.
+//
+// `mlc_append(schema_str, path)` opens an existing OStream file for
+// append: forward-scans to find the last complete sub-packet, truncates
+// any partial trailing bytes, re-opens with append semantics, and
+// returns a fresh OSTREAM handle whose cursor sits at the resume offset.
+// The schema must match the file's stored schema (mismatches error
+// before any bytes are written).
+//
+// `mlc_concat(paths, n_paths, dest)` concatenates a sequence of stream
+// files via sendfile, exploiting the stream-packet concat invariant.
+// The dest file is created with a merged final footer.
+int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
+// @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
+// sole owner of fd 0/1/2; these register slots that route mlc_next /
+// mlc_write through the pool-nexus RPC socket. At most one open per
+// stdio kind per nexus (enforced by CAS in the shared registry).
+int64_t mlc_open_stdin (const char* schema_str, ERRMSG);
+int64_t mlc_open_stdout(const char* schema_str, ERRMSG);
+int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
+int32_t mlc_write(uint8_t level, int64_t handle,
+                  const void* payload_voidstar, ERRMSG);
+int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);
+int32_t mlc_concat(const char* const* paths, size_t n_paths,
+                   const char* dest, ERRMSG);
+// `mlc_flush(handle)` forces any elements buffered for an OStream to
+// be written as a sub-packet now (instead of waiting for the buffer
+// to fill or for @close). No-op when the buffer is empty.
+int32_t mlc_flush(int64_t handle, ERRMSG);
 
 // ========================================================================
 // Section 26: Function declarations -- Slurm

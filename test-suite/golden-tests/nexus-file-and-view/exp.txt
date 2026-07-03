@@ -1,0 +1,33 @@
+data.json kind: json
+data.mpk kind: msgpack
+readme.txt kind: text encoding=ascii
+people.csv kind: csv columns=3 delimiter=","
+missing.path type: error
+missing.path msg: cannot open
+missing.path exit: 1
+truncated.packet type: error
+truncated.packet msg: truncated morloc data packet
+truncated.packet exit: 1
+no-file data.json: json
+type-only data.packet: data-packet
+type-only people.csv: csv
+verbose people.csv lines: 4
+  age:int
+  city:str
+  name:str
+json data.packet subkind: "subkind":"data"
+json data.packet schema: "schema":"as"
+json data.json kind: "kind":"json"
+validate data.packet: validated=yes
+validate data.packet.zst: validated=yes
+validate data.json: validated=structure-only
+validate data.mpk --schema as: validated=yes
+validate data.mpk --schema ai4: exit=1 validated=no
+view data.packet -f json: ["a","b","c"]
+view data.packet.zst -f json: ["a","b","c"]
+view data.json -f mpk --schema as hex: 93a161a162a163
+view data.mpk no-schema exit: 1
+view data.mpk no-schema msg: no schema available
+view truncated.packet exit: 1
+view truncated.packet msg: truncated morloc data packet
+-FD line count over corpus: 5

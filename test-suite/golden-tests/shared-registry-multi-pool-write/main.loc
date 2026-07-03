@@ -1,0 +1,69 @@
+-- Multiple pools write to the same OStream handle via cross-pool
+-- arg passing. The opener creates the slot; the receiving pools
+-- get the int handle as an arg and use it for their own @write
+-- calls. The slot's futex serialises the writes; the SHM-resident
+-- sub-packet index records every flush regardless of which pool
+-- emitted it, so the @close-time final footer is authoritative for
+-- IFile random access and IStream forward-scan alike.
+--
+-- This test uses IStream readback to demonstrate all writes
+-- landed correctly, and asserts @flen returns the total.
+
+module main
+  ( testMultiPoolElementCount
+  , testMultiPoolDrainAll
+  )
+
+import root-py
+import root-cpp
+
+-- The trailing `idpy ()` / `idcpp ()` pins the do-block to the
+-- corresponding pool. `idpy $ do { ... }` would force a polymorphic
+-- type variable to unify with the do-block's effectful type, which
+-- the type checker now rejects -- the in-block form keeps every
+-- effectful expression in a let-binding under explicit ordering.
+writePyContrib :: Int -> Int -> OStream Int -> <IO> ()
+writePyContrib offset count o = do
+  -- A tight loop isn't expressible without recursion; do a
+  -- small fixed batch instead.
+  @write 0 [offset, offset + 1, offset + 2] o
+  @flush o
+  idpy ()
+
+writeCppContrib :: Int -> OStream Int -> <IO> ()
+writeCppContrib offset o = do
+  @write 0 [offset, offset + 1, offset + 2] o
+  @flush o
+  idcpp ()
+
+-- Opener (default / nexus pool) opens the slot, then dispatches
+-- contributions to cpp and py pools. Each pool's @write goes
+-- through the same SHM slot.
+testMultiPoolElementCount :: Str -> <IO> Int
+testMultiPoolElementCount path = do
+  o <- @open path :: <IO> OStream Int
+  writeCppContrib 100 o
+  writePyContrib  200 3 o
+  writeCppContrib 300 o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+-- Drain ALL sub-packets via IStream (forward walk; sees every
+-- writer's flushed contributions regardless of pool). Sum.
+-- Use defensively-large @next chain.
+testMultiPoolDrainAll :: Str -> <IO> UInt64
+testMultiPoolDrainAll path = do
+  o <- @open path :: <IO> OStream Int
+  writeCppContrib 100 o
+  writePyContrib  200 3 o
+  writeCppContrib 300 o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  -- Drain up to 4 packets; sum element_count across all.
+  -- Each cpp/py contrib was 3 elements -> total 9.
+  a <- @next s
+  b <- @next s
+  c <- @next s
+  d <- @next s
+  size a + size b + size c + size d

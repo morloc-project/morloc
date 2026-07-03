@@ -6,6 +6,7 @@ import Test.Tasty
 
 import GoldenMakefileTests (goldenMakefileTest)
 import MorlocDepsTests (morlocDepsTests)
+import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import SizeParseTests (sizeParseTests)
 import UnitTypeTests
@@ -54,6 +55,7 @@ main = do
       , postArgPropagationTests
       , morlocDepsTests
       , sizeParseTests
+      , patternChainTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -65,6 +67,41 @@ main = do
       -- , golden "specialization-1-py - numpy" "specialization-1-py"
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
+
+      , golden "ifile-data-patterns" "ifile-data-patterns"
+      , golden "ostream-write-roundtrip" "ostream-write-roundtrip"
+      , golden "ostream-implicit-close" "ostream-implicit-close"
+      , golden "istream-multi-subpacket-roundtrip" "istream-multi-subpacket-roundtrip"
+      , golden "istream-compressed-subpacket" "istream-compressed-subpacket"
+
+      -- Write-buffer correctness tests (Part A of the buffering work).
+      -- These exercise @write's coalescing behaviour, @flush boundaries,
+      -- oversize-element handling, element-level split on overflow,
+      -- variable-width-type round-trip, and index-section growth.
+      , golden "write-buffer-coalesces" "write-buffer-coalesces"
+      , golden "write-buffer-flush-explicit" "write-buffer-flush-explicit"
+      , golden "write-buffer-flush-no-op-on-empty" "write-buffer-flush-no-op-on-empty"
+      , golden "write-buffer-oversize-element" "write-buffer-oversize-element"
+      , golden "write-buffer-multi-element-split" "write-buffer-multi-element-split"
+      , golden "write-buffer-variable-width-roundtrip" "write-buffer-variable-width-roundtrip"
+      , golden "write-buffer-index-grow" "write-buffer-index-grow"
+
+      -- Shared SHM registry contracts: cross-pool handle passing,
+      -- multi-writer / multi-reader semantics, forgotten-close sweep,
+      -- explicit-share-only enforcement. B5 (crash recovery) and B7
+      -- (cross-dispatch persistence) need additional harness work.
+      , golden "shared-registry-multi-pool-write" "shared-registry-multi-pool-write"
+      , golden "shared-registry-multi-pool-read" "shared-registry-multi-pool-read"
+      , golden "shared-registry-cross-pool-handle-passing" "shared-registry-cross-pool-handle-passing"
+      , golden "shared-registry-forgotten-close-swept" "shared-registry-forgotten-close-swept"
+      , golden "shared-registry-double-open-rejected" "shared-registry-double-open-rejected"
+      , golden "shared-registry-stress (wait ~10s)" "shared-registry-stress"
+
+      , golden "cli-docstring-negatives" "cli-docstring-negatives"
+      , golden "cli-docstring-shapes" "cli-docstring-shapes"
+
+      , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
+      , golden "nexus-packet-output-zstd" "nexus-packet-output-zstd"
 
       , golden "debug-trace" "debug-trace"
       , golden "debug-trace-dedup" "debug-trace-dedup"
@@ -87,6 +124,15 @@ main = do
 
       , golden "bracket-accessors" "bracket-accessors"
       , golden "bracket-accessors-pure" "bracket-accessors-pure"
+      , golden "bracket-accessors-ifile" "bracket-accessors-ifile"
+      , golden "pattern-accessible-coherence-error" "pattern-accessible-coherence-error"
+      , golden "ifile-array-cross-pool" "ifile-array-cross-pool"
+
+      , golden "stdio-roundtrip" "stdio-roundtrip"
+      , golden "stdio-single-open" "stdio-single-open"
+      , golden "stdio-both-writers" "stdio-both-writers"
+      , golden "stdio-filter" "stdio-filter"
+      , golden "remote-streaming-consolidated" "remote-streaming-consolidated"
 
       , golden "native-recursive-illegal" "native-recursive-illegal"
       , golden "native-recursive-mixed" "native-recursive-mixed"
@@ -183,6 +229,7 @@ main = do
       , golden "nexus-let-pure" "nexus-let-pure"
       , golden "nexus-let-lambda" "nexus-let-lambda"
       , golden "nexus-toplevel-null" "nexus-toplevel-null"
+      , golden "nexus-file-and-view" "nexus-file-and-view"
       , golden "demo-trimming" "demo-trimming"
       , golden "formatting" "formatting"
       , golden "record-docstrings" "record-docstrings"
@@ -227,9 +274,6 @@ main = do
       , golden "unicode-interpolation" "unicode-interpolation"
       , golden "unicode-interop" "unicode-interop"
       , golden "unicode-edge-cases" "unicode-edge-cases"
-      , golden "file-input-py" "file-input-py"
-      , golden "file-input-c" "file-input-c"
-      , golden "file-input-r" "file-input-r"
       , golden "no-shm-tmpdir-trilang" "no-shm-tmpdir-trilang"
       , golden "packer-definitions-1" "packer-definitions-1"
       , golden "packer-definitions-2" "packer-definitions-2"

@@ -27,6 +27,13 @@ RUN apt-get install -y r-base python3 python3-dev python3-pip python3-numpy libg
 
 RUN python3 -m pip install --break-system-packages --upgrade setuptools
 
+# bit64 provides the 'integer64' S3 class used by the R pool to carry
+# IFile handles (a 64-bit unsigned integer ID).  R's native 'integer'
+# is 32-bit, so the stdlib/root-r per-language declaration
+# 'type R => (IFile a) = "bit64"' depends on this package being
+# available at runtime.
+RUN Rscript -e 'install.packages("bit64", repos = "https://cloud.r-project.org")'
+
 # Setup the morloc home (uses pre-built Rust binaries, no cargo needed)
 RUN morloc init
 # Copy morloc-nexus to a system path so it remains on PATH even when

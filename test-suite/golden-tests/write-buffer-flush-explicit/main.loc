@@ -1,0 +1,56 @@
+-- @flush between @writes produces distinct sub-packets.
+-- Two @writes + @flush in between yields TWO sub-packets,
+-- not one coalesced one. The reader's first @next sees the
+-- first batch, the second @next sees the second batch.
+--
+-- This is the test that proves @flush actually flushes (rather
+-- than being a no-op that gets coalesced anyway).
+
+module main
+  ( testFlushFirst
+  , testFlushSecond
+  , testFlushThird
+  , testFlushEof
+  )
+
+import root
+
+writeWithFlushes :: Str -> <IO> ()
+writeWithFlushes path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [10, 20, 30] o
+  @flush o
+  @write 0 [40, 50] o
+  @flush o
+  @write 0 [60, 70, 80, 90] o
+  @close o
+
+testFlushFirst :: Str -> <IO> [Int]
+testFlushFirst path = do
+  writeWithFlushes path
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+testFlushSecond :: Str -> <IO> [Int]
+testFlushSecond path = do
+  writeWithFlushes path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+
+testFlushThird :: Str -> <IO> [Int]
+testFlushThird path = do
+  writeWithFlushes path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+
+testFlushEof :: Str -> <IO> [Int]
+testFlushEof path = do
+  writeWithFlushes path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+  @next s

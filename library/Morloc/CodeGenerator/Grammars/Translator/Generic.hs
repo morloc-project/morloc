@@ -630,7 +630,7 @@ genericDebugWrap desc cfg midx args bodyPool = do
       -- during the catch must NOT replace the original exception. If
       -- the inner block throws we silently drop the dump and re-raise
       -- the original.
-      block = case ldBlockStyle desc of
+      catchBlock = case ldBlockStyle desc of
         IndentBlock -> vsep
           -- Python
           [ "try:"
@@ -672,7 +672,7 @@ genericDebugWrap desc cfg midx args bodyPool = do
           ]
   return $ defaultValue
     { poolExpr = resultVar
-    , poolPriorLines = [block]
+    , poolPriorLines = [catchBlock]
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
@@ -888,14 +888,19 @@ genericPrintExpr desc = go
     go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_hash(" <> go e <> ", " <> schemaRef sid <> ")"
-    go (IIntrinsicSave fmt sid e path) =
+    go (IIntrinsicSave fmt sid level e path) =
       let prefix = ldIntrinsicPrefix desc
           saveFn :: Text
           saveFn = case fmt of
             "json"     -> "mlc_save_json"
             "voidstar" -> "mlc_save_voidstar"
             _          -> "mlc_save"
-       in pretty prefix <> pretty saveFn <> "(" <> go e <> ", " <> schemaRef sid <> ", " <> go path <> ")"
+       in pretty prefix <> pretty saveFn
+            <> "(" <> go e
+            <> ", " <> schemaRef sid
+            <> ", " <> go level
+            <> ", " <> go path
+            <> ")"
     go (IIntrinsicLoad sid _ path) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_load(" <> schemaRef sid <> ", " <> go path <> ")"
@@ -905,6 +910,73 @@ genericPrintExpr desc = go
     go (IIntrinsicRead sid _ e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_read(" <> schemaRef sid <> ", " <> go e <> ")"
+    go (IIntrinsicOpen kind path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open(" <> go path <> ", " <> pretty kind <> ")"
+    go (IIntrinsicClose h) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_close(" <> go h <> ")"
+    go (IIntrinsicFSchema path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_fschema(" <> go path <> ")"
+    go (IIntrinsicFLength handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_ifile_length(" <> go handle <> ")"
+    go (IIntrinsicNext sid _ handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_next("
+            <> schemaRef sid <> ", " <> go handle <> ")"
+    go (IIntrinsicStream handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_stream(" <> go handle <> ")"
+    go (IIntrinsicOpenOStream sid path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_ostream("
+            <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicWrite sid level value handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_write("
+            <> schemaRef sid <> ", " <> go level
+            <> ", " <> go value <> ", " <> go handle <> ")"
+    go (IIntrinsicAppend sid path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_append("
+            <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicConcat paths dest) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_concat("
+            <> go paths <> ", " <> go dest <> ")"
+    go (IIntrinsicFlush handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_flush(" <> go handle <> ")"
+    go (IIntrinsicStdin sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_stdin(" <> schemaRef sid <> ")"
+    go (IIntrinsicStdout sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_stdout(" <> schemaRef sid <> ")"
+    go (IIntrinsicStderr sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_stderr(" <> schemaRef sid <> ")"
+    -- Unified pattern walker. Path string + handle + variable runtime
+    -- args (bracket bounds) marshalled by the per-language wrapper into
+    -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R
+    -- lower the args as a list of (has_value, value) tuples; the
+    -- per-language wrapper unpacks them. Container syntax follows
+    -- ldListStyle: Python uses [..], R uses list(..). The args are
+    -- complex objects (Optional Int64), so for TypeDependentList we
+    -- always pick the generic container, not the atomic one.
+    go (IIntrinsicIFileWalk sid _ pathExpr handle runtimeArgs) =
+      let prefix = ldIntrinsicPrefix desc
+          elems = map go runtimeArgs
+          argList = case ldListStyle desc of
+            BracketList -> "[" <> hsep (punctuate "," elems) <> "]"
+            _ -> pretty (ldGenericListFn desc) <> tupled elems
+       in pretty prefix <> "mlc_ifile_walk("
+            <> schemaRef sid <> ", "
+            <> go handle <> ", "
+            <> go pathExpr <> ", "
+            <> argList <> ")"
 
     schemaRef = genericSchemaRef desc
 
@@ -1164,6 +1236,21 @@ genericEvalPattern desc _ (PatternStruct (ungroup -> sss)) [m] =
   case ldTupleConstructor desc of
     "" -> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
     name -> pretty name <> tupled [hcat (m : map (writeSelector desc) ss) | ss <- sss]
+-- PatternStruct with bracket steps inside the Selector. App args
+-- are [bracket_bounds..., receiver] (DFS order, last is receiver).
+-- Walks the Selector recursively, threading the bracket-args list
+-- through siblings, and emits per-step native code: field access for
+-- field steps, language-native bracket syntax (or morloc_at/slice
+-- helper) for bracket steps. Multi-sibling groups produce a tuple.
+genericEvalPattern desc _ (PatternStruct s) args
+  | selectorHasBracket s, length args == bracketArity s + 1 =
+      let n = bracketArity s
+          (bracketArgs, receivers) = splitAt n args
+          receiver = case receivers of
+            [r] -> r
+            _ -> error $ "genericEvalPattern: bracket-in-Selector expected 1 receiver, \
+                         \got " <> show (length receivers)
+      in fst (walkSelectorBrackets desc receiver bracketArgs s)
 -- setters
 genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
   patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
@@ -1216,3 +1303,57 @@ writeSelector desc (Left i) = case ldIndexStyle desc of
   ZeroBracket -> "[" <> pretty i <> "]"
   OneBracket -> "[" <> pretty (i + 1) <> "]"
   OneDoubleBracket -> "[[" <> pretty (i + 1) <> "]]"
+
+-- | Walk a 'Selector' that may contain bracket steps, emitting
+-- per-step native source code. Threads the @brackets@ list of runtime
+-- arg expressions through bracket steps in DFS order; each call
+-- returns the produced expression and the remaining (unconsumed)
+-- bracket args. Multi-sibling groups emit a tuple.
+walkSelectorBrackets
+  :: LangDescriptor
+  -> MDoc          -- accumulated receiver expression
+  -> [MDoc]        -- remaining bracket runtime args
+  -> Selector
+  -> (MDoc, [MDoc])
+walkSelectorBrackets _ rcv bracketArgs SelectorEnd = (rcv, bracketArgs)
+walkSelectorBrackets desc rcv bracketArgs (SelectorKey (k, sub) []) =
+  walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) bracketArgs sub
+walkSelectorBrackets desc rcv bracketArgs (SelectorIdx (i, sub) []) =
+  walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) bracketArgs sub
+walkSelectorBrackets desc rcv (idx : restBrackets) (SelectorBracketIndex sub) =
+  let accessed = case ldIndexStyle desc of
+        ZeroBracket -> rcv <> "[" <> idx <> "]"
+        OneBracket -> rcv <> "[(" <> idx <> ") + 1]"
+        OneDoubleBracket -> rcv <> "[[(" <> idx <> ") + 1]]"
+  in walkSelectorBrackets desc accessed restBrackets sub
+walkSelectorBrackets _ _ [] (SelectorBracketIndex _) =
+  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-index step"
+walkSelectorBrackets desc rcv (start : stop : step : restBrackets) SelectorBracketSlice =
+  let sliced = case ldIndexStyle desc of
+        ZeroBracket -> rcv <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
+        _ -> "morloc_slice" <> tupled [start, stop, step, rcv]
+  in (sliced, restBrackets)
+walkSelectorBrackets _ _ _ SelectorBracketSlice =
+  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
+walkSelectorBrackets desc rcv bracketArgs (SelectorKey hd@(_, _) others) =
+  let pairs = hd : others
+      (results, finalBrackets) = foldl
+        (\(acc, b) (k, sub) ->
+           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) b sub
+           in (acc ++ [out], b'))
+        ([], bracketArgs) pairs
+      tupleExpr = case ldTupleConstructor desc of
+        "" -> tupled results
+        name -> pretty name <> tupled results
+  in (tupleExpr, finalBrackets)
+walkSelectorBrackets desc rcv bracketArgs (SelectorIdx hd@(_, _) others) =
+  let pairs = hd : others
+      (results, finalBrackets) = foldl
+        (\(acc, b) (i, sub) ->
+           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) b sub
+           in (acc ++ [out], b'))
+        ([], bracketArgs) pairs
+      tupleExpr = case ldTupleConstructor desc of
+        "" -> tupled results
+        name -> pretty name <> tupled results
+  in (tupleExpr, finalBrackets)

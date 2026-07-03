@@ -54,13 +54,6 @@ Float literal 1.0e100 overflows Float32 (|x| > 3.4e38)
 "inf"
 "-inf"
 "nan"
-"inf"
-"-inf"
-"nan"
-"inf"
-
-=== S9: legacy null decode (best-effort recovery -> NaN) ===
-"nan"
 
 === S10: invalid Real strings reject ===
 PARSE_ERROR

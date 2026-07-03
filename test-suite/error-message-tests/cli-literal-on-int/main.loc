@@ -1,0 +1,11 @@
+-- `literal: true` only makes sense for a Str wire type. On an
+-- Int argument it used to be silently ignored; now it is a compile
+-- error so the user knows the directive did nothing.
+module main (f)
+
+f ::
+  --' arg: -i
+  --' default: 0
+  Int ->
+  Int
+f x = x

@@ -1,0 +1,15 @@
+-- two arguments declaring the same long-form name produce a
+-- clap "duplicate argument" error downstream. The Haskell-side check
+-- now catches this at compile time and names both declaration sites.
+-- Here `--verbose` is shared between a Bool flag's true: and an Int
+-- option's arg:.
+module main (f)
+
+f ::
+  --' true: -v/--verbose
+  Bool ->
+  --' arg: -V/--verbose
+  --' default: 0
+  Int ->
+  Int
+f b n = n

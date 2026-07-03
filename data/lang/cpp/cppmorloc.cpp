@@ -4,7 +4,7 @@
 
 #include "morloc.h"
 
-absptr_t cpp_rel2abs(relptr_t ptr){
+absptr_t rel2abs_cpp(relptr_t ptr){
     char* errmsg = NULL;
     absptr_t absptr = rel2abs(ptr, &errmsg);
     if(errmsg != NULL){

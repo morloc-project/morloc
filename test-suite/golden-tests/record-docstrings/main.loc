@@ -32,7 +32,6 @@ record SysConfig where
   --' arg: --tmp-dir
   --' metavar: FILE
   --' default: "/tmp"
-  --' literal: true
   tmpDir :: Str
 
   --' number of threads to use
@@ -93,7 +92,6 @@ barFun ::
     AlgConfig ->
     --' the lone parameters
     --' arg: -y/--yolo
-    --' literal: true
     --' default: "yolo"
     Str ->
     --' larger vector of integers
@@ -108,7 +106,6 @@ source Py from "foo.py" ("fooFun", "barFun", "travelTime", "bif")
 --' baz is the dope
 baz ::
   --' this is the
-  --' literal: true
   Str ->
   --' thing i like
   [Str]

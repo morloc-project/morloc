@@ -26,32 +26,32 @@ emptyMap :: Map Str (Map Str Int)
 emptyMap = pack ([],[])
 
 -- test interop
-foo size =
+foo s =
   ( addShitPy  "nextflow" 3
   . addShitCpp "earwigs" 2
   . addShitR   "tollroads" 1
   . addShitPy  "campers who play load music" 0
   ) { shitlists = emptyMap
     , things = ["spiders"]
-    , size = size
+    , size = s
     }
 
 -- test access
-bar size = (.shitlists fpy, .things fcpp, .size fr) where
+bar s = (.shitlists fpy, .things fcpp, .size fr) where
     fpy = addShitPy "aa" 42
       { shitlists = emptyMap
       , things = ["a"]
-      , size = size
+      , size = s
       }
 
     fcpp = addShitPy "bb" 42
       { shitlists = emptyMap
       , things = ["b"]
-      , size = size
+      , size = s
       }
 
     fr = addShitR "cc" 42
       { shitlists = emptyMap
       , things = ["c"]
-      , size = size
+      , size = s
       }

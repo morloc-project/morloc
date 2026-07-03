@@ -1,0 +1,87 @@
+module main (
+    sumInts
+  , passList
+  , countLits
+  , concatLists
+  , greet
+  , defaults
+  , nullKeyword
+  , recParam
+  )
+
+import root-py
+
+-- Python-backed: many on [Int], inline + JSON files + mixed.
+sumInts ::
+  --' many: true
+  [Int] ->
+  Int
+
+-- Pure morloc: round-trip a list of Ints. No imports beyond root-py
+-- for type mappings; the body is a bare identity, so the nexus runs
+-- this through morloc_eval rather than a pool.
+passList ::
+  --' many: true
+  [Int] ->
+  [Int]
+passList xs = xs
+
+-- Python-backed: many + literal on [Str]. Used to confirm that file
+-- shadowing is suppressed by the JSON-shape preempt AND by the
+-- literal-mode JSON-quoting (both paths). Returned value is the count
+-- of input tokens.
+countLits ::
+  --' many: true
+  [Str] ->
+  Int
+
+-- Pure morloc: option-form many with the compiler-supplied default of
+-- "[]". When -x is omitted, the list arrives empty.
+concatLists ::
+  --' arg: -x/--xs
+  --' many: true
+  [Int] ->
+  [Int]
+concatLists xs = xs
+
+-- Python-backed: scalar literal: true on Str. Argument is taken as a
+-- literal string regardless of whether a file by that name exists.
+greet ::
+  --' arg: -y/--yolo
+  --' default: "yolo"
+  Str ->
+  Int
+
+-- Python-backed: scalar Int default. Proves the default-value
+-- validator accepts a typed default at compile time AND the value
+-- arrives at the pool.
+defaults ::
+  --' arg: -i
+  --' default: 42
+  Int ->
+  Int
+
+-- Pure morloc: ?Int positional. The token `null` MUST classify as
+-- JSON Inline (parsing to JSON null) even when a file literally
+-- named `null` is on disk in the working directory.
+nullKeyword ::
+  ?Int ->
+  ?Int
+nullKeyword x = x
+
+-- Recursive record. The default value exercises the SerialRec env in
+-- the default validator: the inner `children` list elements are
+-- validated against the same Tree SerialAST that the validator just
+-- entered, via the back-reference table.
+record Tree where
+  val :: Int
+  children :: [Tree]
+
+recParam ::
+  --' arg: -t/--tree
+  --' default: {"val":1,"children":[{"val":2,"children":[]}]}
+  Tree ->
+  Int
+recParam t = .val t
+
+source Py from "helpers.py" ("sumInts", "countLits", "greet", "defaults")

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Portable build of libmorloc.so, morloc-nexus, and morloc-manager.
 #
 # Strategy:
@@ -6,13 +7,18 @@
 #   - morloc-manager: fully static binary (Alpine/musl, runs on any Linux)
 #
 # Build:
-#   docker build -t morloc-rust-build -f container/static-build/Dockerfile .
+#   DOCKER_BUILDKIT=1 docker build -t morloc-rust-build -f container/static-build/Dockerfile .
 #   docker run --rm -v $(pwd)/out:/out morloc-rust-build
 #
 # Output:
 #   ./out/libmorloc.so      (shared library, glibc >= 2.31)
 #   ./out/morloc-nexus      (binary, glibc >= 2.31, links libmorloc.so)
 #   ./out/morloc-manager    (static binary, runs on any Linux including NixOS)
+#
+# Caching:
+#   BuildKit cache mounts persist cargo's registry/git/target dirs across
+#   builds on the host. Subsequent builds do true incremental compilation.
+#   To wipe the cache: `docker buildx prune` or `podman system prune`.
 
 # ===========================================================================
 # Stage 1: Build libmorloc.so + morloc-nexus on Ubuntu (glibc)
@@ -34,54 +40,30 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
-# Copy Cargo manifests first for dependency caching. morloc-manifest is a
-# workspace path-dep of morloc-runtime; without its Cargo.toml here, cargo
-# fails to resolve the workspace and the prefetch step (which has `|| true`)
-# silently does nothing, leaving the real build at network-isolated time
-# to fetch all crates.
-COPY data/rust/Cargo.toml data/rust/Cargo.lock ./
-COPY data/rust/morloc-runtime/Cargo.toml ./morloc-runtime/
-COPY data/rust/morloc-nexus/Cargo.toml ./morloc-nexus/
-COPY data/rust/morloc-manager/Cargo.toml ./morloc-manager/
-COPY data/rust/morloc-manifest/Cargo.toml ./morloc-manifest/
-
-# Create dummy source files for dependency pre-build
-RUN mkdir -p morloc-runtime/src morloc-nexus/src morloc-manager/src morloc-manifest/src \
-    && echo "fn main() {}" > morloc-nexus/src/main.rs \
-    && echo "fn main() {}" > morloc-manager/src/main.rs \
-    && echo "" > morloc-runtime/src/lib.rs \
-    && echo "" > morloc-manifest/src/lib.rs
-
-RUN cargo build --release -p morloc-runtime 2>/dev/null || true
-
-# Copy actual source
 COPY data/rust/ ./
 
-# Force rebuild after copying real source over dummy stubs. morloc-manifest
-# must be touched too: Step 12 built it as an empty stub and cached the
-# result; without bumping its mtime cargo's fingerprint thinks the crate is
-# unchanged and reuses the empty artifact, which then fails to satisfy
-# morloc-runtime's `use morloc_manifest::...` references.
-RUN touch morloc-runtime/src/lib.rs morloc-nexus/src/main.rs morloc-manifest/src/lib.rs
-
-# Build libmorloc.so from staticlib via gcc --whole-archive to export ALL
-# symbols (internal Rust runtime state must be visible to language extensions)
-RUN cargo build --release -p morloc-runtime
-
-RUN mkdir -p /root/.local/share/morloc/lib \
-    && gcc -shared -o /root/.local/share/morloc/lib/libmorloc.so \
+# Single RUN: cache-mounted target/ is not visible to later layers, so we
+# build morloc-runtime, link libmorloc.so via --whole-archive (exports ALL
+# symbols so language extensions can see internal Rust runtime state),
+# build morloc-nexus, then stash the artifacts in /artifacts/ for the
+# final stage to pick up.
+RUN --mount=type=cache,id=morloc-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=morloc-cargo-git,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=morloc-target-glibc,target=/build/target,sharing=locked \
+    cargo build --release -p morloc-runtime && \
+    mkdir -p /root/.local/share/morloc/lib /artifacts && \
+    gcc -shared -o /root/.local/share/morloc/lib/libmorloc.so \
        -Wl,--whole-archive target/release/libmorloc_runtime.a -Wl,--no-whole-archive \
-       -lpthread -lrt -ldl -lm
-
-# Build morloc-nexus (dynamically links libmorloc.so)
-RUN cargo build --release -p morloc-nexus
-
-RUN strip /root/.local/share/morloc/lib/libmorloc.so target/release/morloc-nexus
+       -lpthread -lrt -ldl -lm && \
+    cargo build --release -p morloc-nexus && \
+    cp /root/.local/share/morloc/lib/libmorloc.so /artifacts/libmorloc.so && \
+    cp target/release/morloc-nexus /artifacts/morloc-nexus && \
+    strip /artifacts/libmorloc.so /artifacts/morloc-nexus
 
 # ===========================================================================
 # Stage 2: Build morloc-manager on Alpine (musl, fully static)
 #
-# morloc-manager has no native dependencies — pure Rust crates only.
+# morloc-manager has no native dependencies - pure Rust crates only.
 # Building on Alpine produces a fully static musl binary that runs on any
 # Linux, including NixOS and minimal containers.
 # ===========================================================================
@@ -95,29 +77,15 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
-# Copy Cargo manifests for dependency caching. See Stage 1 for why
-# morloc-manifest's Cargo.toml must be staged alongside the others.
-COPY data/rust/Cargo.toml data/rust/Cargo.lock ./
-COPY data/rust/morloc-runtime/Cargo.toml ./morloc-runtime/
-COPY data/rust/morloc-nexus/Cargo.toml ./morloc-nexus/
-COPY data/rust/morloc-manager/Cargo.toml ./morloc-manager/
-COPY data/rust/morloc-manifest/Cargo.toml ./morloc-manifest/
-
-RUN mkdir -p morloc-runtime/src morloc-nexus/src morloc-manager/src morloc-manifest/src \
-    && echo "fn main() {}" > morloc-nexus/src/main.rs \
-    && echo "fn main() {}" > morloc-manager/src/main.rs \
-    && echo "" > morloc-runtime/src/lib.rs \
-    && echo "" > morloc-manifest/src/lib.rs
-
-RUN cargo build --release -p morloc-manager 2>/dev/null || true
-
 COPY data/rust/ ./
 
-# Force rebuild: cargo may skip if it thinks the cached dummy binary is fresh
-RUN touch morloc-manager/src/main.rs \
-    && cargo build --release -p morloc-manager
-
-RUN strip target/release/morloc-manager
+RUN --mount=type=cache,id=morloc-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=morloc-cargo-git,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=morloc-target-musl,target=/build/target,sharing=locked \
+    cargo build --release -p morloc-manager && \
+    mkdir -p /artifacts && \
+    cp target/release/morloc-manager /artifacts/morloc-manager && \
+    strip /artifacts/morloc-manager
 
 # ===========================================================================
 # Stage 3: Verify and output
@@ -126,9 +94,9 @@ FROM docker.io/library/alpine:3.20
 
 RUN apk add --no-cache file
 
-COPY --from=glibc-builder /root/.local/share/morloc/lib/libmorloc.so /out-staging/libmorloc.so
-COPY --from=glibc-builder /build/target/release/morloc-nexus /out-staging/morloc-nexus
-COPY --from=musl-builder /build/target/release/morloc-manager /out-staging/morloc-manager
+COPY --from=glibc-builder /artifacts/libmorloc.so /out-staging/libmorloc.so
+COPY --from=glibc-builder /artifacts/morloc-nexus /out-staging/morloc-nexus
+COPY --from=musl-builder /artifacts/morloc-manager /out-staging/morloc-manager
 
 # Verify morloc-manager is static (no dynamic linker needed)
 RUN file /out-staging/morloc-manager \

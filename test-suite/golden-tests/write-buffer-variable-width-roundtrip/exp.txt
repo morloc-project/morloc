@@ -1,0 +1,2 @@
+["apple","banana","cherry","date","elderberry"]
+5

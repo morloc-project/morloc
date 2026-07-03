@@ -62,6 +62,57 @@ pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shclose().map(|_| true))
 }
 
+/// Initialise the shared stream registry for the current nexus
+/// invocation. Allocates (or attaches to) the registry's SHM volume
+/// and publishes the magic gate. Safe to call multiple times --
+/// subsequent calls observe the cached state and return immediately.
+///
+/// Pool processes that attach to an already-initialised session
+/// can also call this; the bootstrap CAS handles concurrent callers
+/// safely.
+///
+/// Returns the slot count in effect, or `usize::MAX` on error (with
+/// `errmsg` populated).
+#[no_mangle]
+pub unsafe extern "C" fn stream_registry_init(
+    errmsg: *mut *mut c_char,
+) -> usize {
+    ffi_try!(errmsg, usize::MAX, crate::stream::registry_init())
+}
+
+/// Enqueue a PID-sweep request to the dedicated sweeper thread.
+/// Used by the nexus when it detects a pool has died (clean exit or
+/// crash) so any slots that pool left open in the shared registry
+/// are released without waiting for the per-call sweep (which only
+/// fires when a dispatch ends normally).
+///
+/// `pid` and `start_time` together identify a unique process across
+/// PID reuse. The sweeper walks the registry and discards slots whose
+/// `(opener_pid, opener_pid_start_time)` matches both. Pass
+/// `start_time = 0` to skip the start-time check (accepts the rare
+/// PID-reuse false positive).
+///
+/// Non-blocking; the actual sweep runs on the sweeper thread.
+#[no_mangle]
+pub unsafe extern "C" fn stream_sweep_pid(
+    pid: u32,
+    start_time: u64,
+) {
+    crate::stream::sweeper_enqueue_pid(pid, start_time);
+}
+
+/// Read this process's start time from `/proc/PID/stat` (field 22,
+/// clock ticks since boot). Used by the nexus to capture the
+/// start_time of each spawned pool, which it then pairs with the
+/// PID when enqueueing a PID sweep. Returns 0 on read failure (the
+/// sweep will then accept a PID-only match).
+#[no_mangle]
+pub unsafe extern "C" fn stream_pid_start_time(
+    pid: u32,
+) -> u64 {
+    crate::stream::read_pid_start_time_for(pid)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn shm_set_fallback_dir(dir: *const c_char) {
     if !dir.is_null() {
@@ -335,17 +386,38 @@ pub fn calc_voidstar_size_inner(
     data: *const u8,
     schema: &crate::schema::Schema,
 ) -> Result<usize, MorlocError> {
+    calc_voidstar_size_bounded(data, schema, usize::MAX)
+}
+
+/// Compute the serialized size of the voidstar at `data` under `schema`,
+/// short-circuiting as soon as the accumulated total exceeds
+/// `upper_bound`. Pass `usize::MAX` (or call [`calc_voidstar_size_inner`])
+/// for the exact size; pass a real bound when the caller only needs
+/// "size > bound?" -- e.g. the inline-vs-RPTR or streaming-threshold
+/// routing decisions. Bounded mode visits O(bound) bytes of structure
+/// instead of O(payload), turning multi-GiB voidstars from ~17s walks
+/// into microseconds at the threshold.
+///
+/// On early-exit the return is the partial running total at the point
+/// the bound was exceeded, which is guaranteed `> upper_bound` and so
+/// preserves the `size > threshold` invariant the caller is testing.
+pub fn calc_voidstar_size_bounded(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    upper_bound: usize,
+) -> Result<usize, MorlocError> {
     let mut env: crate::recur::RecurEnv = Vec::new();
-    calc_voidstar_size_with_env(data, schema, &mut env)
+    calc_voidstar_size_with_env(data, schema, &mut env, upper_bound)
 }
 
 fn calc_voidstar_size_with_env(
     data: *const u8,
     schema: &crate::schema::Schema,
     env: &mut crate::recur::RecurEnv,
+    upper_bound: usize,
 ) -> Result<usize, MorlocError> {
     crate::recur::with_scope(env, schema, |env| {
-        calc_voidstar_size_inner_walk(data, schema, env)
+        calc_voidstar_size_inner_walk(data, schema, env, upper_bound)
     })
 }
 
@@ -353,6 +425,7 @@ fn calc_voidstar_size_inner_walk(
     data: *const u8,
     schema: &crate::schema::Schema,
     env: &mut crate::recur::RecurEnv,
+    upper_bound: usize,
 ) -> Result<usize, MorlocError> {
     use crate::schema::SerialType;
     use crate::shm::{self, Array};
@@ -375,6 +448,23 @@ fn calc_voidstar_size_inner_walk(
                 let arr = &*(data as *const Array);
                 Ok(std::mem::size_of::<Array>() + arr.size)
             }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Tagged stream-handle field: 16-byte inline + path
+                // suballoc (`8 + path_len`) for TAG_PATH; no suballoc for
+                // TAG_HANDLE.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = data as *const u8;
+                let mut total = sh::STREAM_HANDLE_FIELD_SIZE;
+                if sh::read_tag(field) == sh::TAG_PATH {
+                    let payload = sh::read_payload(field);
+                    if payload != shm::RELNULL as u64 {
+                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                        let path_len = sh::read_path_size(suballoc) as usize;
+                        total += sh::path_suballoc_size(path_len);
+                    }
+                }
+                Ok(total)
+            }
             SerialType::Array => {
                 let arr = &*(data as *const Array);
                 let mut size = std::mem::size_of::<Array>();
@@ -391,10 +481,15 @@ fn calc_voidstar_size_inner_walk(
                 } else {
                     let elem_data = shm::rel2abs(arr.data)?;
                     for i in 0..arr.size {
+                        if size > upper_bound {
+                            return Ok(size);
+                        }
+                        let child_bound = upper_bound.saturating_sub(size);
                         size += calc_voidstar_size_with_env(
                             elem_data.add(i * elem_width),
                             elem_schema,
                             env,
+                            child_bound,
                         )?;
                     }
                 }
@@ -415,12 +510,15 @@ fn calc_voidstar_size_inner_walk(
                     let inner_data = shm::rel2abs(relptr)?;
                     let inner_schema = &schema.parameters[0];
                     let inner_align = inner_schema.alignment().max(1);
+                    let prefix = schema.width.saturating_add(inner_align - 1);
+                    let child_bound = upper_bound.saturating_sub(prefix);
                     let inner_total = calc_voidstar_size_with_env(
                         inner_data,
                         inner_schema,
                         env,
+                        child_bound,
                     )?;
-                    Ok(schema.width + (inner_align - 1) + inner_total)
+                    Ok(prefix + inner_total)
                 }
             }
             SerialType::Tuple | SerialType::Map => {
@@ -429,13 +527,26 @@ fn calc_voidstar_size_inner_walk(
                 } else {
                     let mut size = schema.width;
                     for i in 0..schema.parameters.len() {
+                        if size > upper_bound {
+                            return Ok(size);
+                        }
+                        // The child returns its full subtree size (incl.
+                        // its own slot width, which is already counted
+                        // in our `size`); only the tail beyond the slot
+                        // adds to our running total. Child's safe bound
+                        // is therefore `(upper_bound - size) + slot`.
+                        let slot = schema.parameters[i].width;
+                        let child_bound = upper_bound
+                            .saturating_sub(size)
+                            .saturating_add(slot);
                         let elem_total = calc_voidstar_size_with_env(
                             data.add(schema.offsets[i]),
                             &schema.parameters[i],
                             env,
+                            child_bound,
                         )?;
-                        if elem_total > schema.parameters[i].width {
-                            size += elem_total - schema.parameters[i].width;
+                        if elem_total > slot {
+                            size += elem_total - slot;
                         }
                     }
                     Ok(size)
@@ -450,7 +561,7 @@ fn calc_voidstar_size_inner_walk(
                 let name = schema.name.as_deref().unwrap_or("");
                 let target_ptr = crate::recur::lookup(env, name)?;
                 let target = &*target_ptr;
-                calc_voidstar_size_with_env(data, target, env)
+                calc_voidstar_size_with_env(data, target, env, upper_bound)
             }
             _ => Ok(schema.width),
         }

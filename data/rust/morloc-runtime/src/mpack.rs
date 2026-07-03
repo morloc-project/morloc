@@ -112,6 +112,40 @@ fn pack_data_inner(
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
                 buf.extend_from_slice(bytes);
             }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // Persistence to msgpack uses path form regardless of the
+                // in-memory tag. TAG_HANDLE values look up the path via
+                // the local SHM registry so a file on disk always carries
+                // a path the next reader can `mlc_open` against.
+                use morloc_runtime_types::stream_handle as sh;
+                let field = ptr as *const u8;
+                let tag = sh::read_tag(field);
+                let payload = sh::read_payload(field);
+                let path: String = if tag == sh::TAG_PATH {
+                    if payload == sh::RELNULL_PAYLOAD {
+                        String::new()
+                    } else {
+                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                        let path_len = sh::read_path_size(suballoc) as usize;
+                        let bytes = std::slice::from_raw_parts(suballoc.add(8), path_len);
+                        std::str::from_utf8(bytes)
+                            .map_err(|_| MorlocError::Serialization(
+                                "msgpack stream-handle: path is not valid UTF-8".into(),
+                            ))?
+                            .to_string()
+                    }
+                } else if tag == sh::TAG_HANDLE {
+                    crate::stream::handle_path(payload as i64)?
+                } else {
+                    return Err(MorlocError::Serialization(format!(
+                        "msgpack stream-handle: unsupported tag {}", tag,
+                    )));
+                };
+                let bytes = path.as_bytes();
+                rmp::encode::write_str_len(buf, bytes.len() as u32)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
+                buf.extend_from_slice(bytes);
+            }
             SerialType::Array => {
                 let arr = &*(ptr as *const Array);
                 let elem_schema = &schema.parameters[0];
@@ -286,6 +320,30 @@ fn unpack_obj_inner(
                     *reader = &reader[len..];
                 }
                 *cursor = cursor.add(len);
+            }
+            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                // msgpack carries the path as a string; we lay it down in
+                // path form (TAG_PATH + `{size, bytes}` suballoc). The
+                // receiver's language bridge will see the schema's F/O/I
+                // code and re-open via `mlc_open` on first use.
+                use morloc_runtime_types::stream_handle as sh;
+                let len = decode::read_str_len(reader)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack str len: {}", e)))?
+                    as usize;
+                let field = ptr as *mut u8;
+                if len == 0 {
+                    sh::write_field(field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                } else {
+                    if reader.len() < len {
+                        return Err(MorlocError::Serialization("msgpack str truncated".into()));
+                    }
+                    let rel = shm::abs2rel(*cursor)?;
+                    let bytes = std::slice::from_raw_parts(reader.as_ptr(), len);
+                    sh::write_path_suballoc(*cursor, bytes);
+                    sh::write_field(field, sh::TAG_PATH, rel as u64);
+                    *reader = &reader[len..];
+                    *cursor = cursor.add(sh::path_suballoc_size(len));
+                }
             }
             SerialType::Array => {
                 let n = decode::read_array_len(reader)
@@ -546,6 +604,17 @@ fn calc_size_r_inner(
                 as usize;
             if reader.len() >= len { *reader = &reader[len..]; }
             Ok(std::mem::size_of::<Array>() + len)
+        }
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            // Tagged stream-handle field: 16-byte inline + path suballoc
+            // (`8 + path_len`). msgpack carries the path as a string.
+            use morloc_runtime_types::stream_handle as sh;
+            let len = rmp::decode::read_str_len(reader)
+                .map_err(|e| MorlocError::Serialization(format!("size calc str: {}", e)))?
+                as usize;
+            if reader.len() >= len { *reader = &reader[len..]; }
+            let suballoc = if len == 0 { 0 } else { sh::path_suballoc_size(len) };
+            Ok(sh::STREAM_HANDLE_FIELD_SIZE + suballoc)
         }
         SerialType::Array => {
             let n = rmp::decode::read_array_len(reader)

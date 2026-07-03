@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- check.path requires source: inline (the value must be the argv path).
+foo ::
+  --' source: file
+  --' check.path: r
+  Str ->
+  Int
+foo x = 0

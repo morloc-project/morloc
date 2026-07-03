@@ -1,6 +1,6 @@
 null
 42
-null
+"null"
 "hello"
 null
 [1,2,3]

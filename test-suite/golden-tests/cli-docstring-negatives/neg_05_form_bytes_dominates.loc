@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- bytes accepts any input, so the second atom in a chain is unreachable.
+foo ::
+  --' source: file
+  --' form: bytes|packet
+  [UInt8] ->
+  Int
+foo x = 0

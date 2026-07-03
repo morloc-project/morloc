@@ -1,0 +1,11 @@
+-- mirror: `false: -q` plus `default: false` is a no-op flag
+-- for the same reason as the `true:` mirror; the diagnostic walks the
+-- user toward swapping the directive or removing the default.
+module main (f)
+
+f ::
+  --' false: -q/--quiet
+  --' default: false
+  Bool ->
+  Int
+f b = 0

@@ -1,0 +1,68 @@
+--- testIFileRangeCpp ---
+true
+--- testIFileRangePy ---
+true
+--- testIFileRangeR ---
+true
+--- testIFileRecordCpp ---
+true
+--- testIFileRecordPy ---
+true
+--- testIFileRecordR ---
+true
+--- ifileIndexOne ---
+30
+--- ifileSliceClosed ---
+[20,30,40]
+--- ifileSliceOpenLeft ---
+[10,20,30]
+--- ifileSliceOpenRight ---
+[20,30,40,50]
+--- ifileSliceFull ---
+[10,20,30]
+--- ifileSliceReverse ---
+[5,4,3,2,1]
+--- ifileSliceEvery ---
+[1,3,5,7]
+--- ifileSliceNegEnd ---
+[30,40,50]
+--- ifileSliceWithStep ---
+[1,4,7,10]
+--- ifileChainedFieldThenSlice ---
+[20,30]
+--- ifileChainedIndexThenField ---
+4
+--- ifileSliceThenTupleField ---
+[2,3,4]
+--- ifileSliceThenRecordField ---
+[1,2,3]
+--- ifileSliceThenNestedSlice ---
+[[1,2,3],[6,7,8]]
+--- ifileSliceThenGroup ---
+[[1,10],[2,20]]
+--- ifileDeepChain ---
+[[11,101],[21,301]]
+--- ifileIndexFromForeignLength ---
+300
+--- ifileSliceFromOptionalStart ---
+[10,20,30]
+--- ifileIndexInt8 ---
+10
+--- ifileIndexInt16 ---
+20
+--- ifileIndexUInt32 ---
+30
+--- ifileSliceInt8Bound ---
+[20,30]
+--- ifileSliceMixedWidthBounds ---
+[20,30,40]
+--- ifileCrossPoolReceiverPyToCpp ---
+300
+--- ifileCrossPoolReceiverCppToR ---
+20
+--- ifileCrossPoolReceiverRToPy ---
+9
+--- ifileCrossPoolIdxForeign ---
+20
+--- ifileCrossPoolSliceNested ---
+[10,20,30]

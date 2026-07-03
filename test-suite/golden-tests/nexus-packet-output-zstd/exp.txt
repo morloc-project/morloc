@@ -1,0 +1,13 @@
+=== header bytes: source / format / compression ===
+small-z0:        source=PASS format=PASS compression=PASS magic=ok
+small-z3:        source=PASS format=PASS compression=PASS magic=ok
+big-shm-z0:      source=PASS format=PASS compression=PASS magic=ok
+big-shm-z3:      source=PASS format=PASS compression=PASS magic=ok
+big-noshm-z0:    source=PASS format=PASS compression=PASS magic=ok
+big-noshm-z3:    source=PASS format=PASS compression=PASS magic=ok
+=== big -z 0 payload is inlined, not an 8-byte pointer ===
+big-shm-z0: PASS
+big-noshm-z0: PASS
+=== big -z 3 file shrinks vs -z 0 (zstd actually fired) ===
+big-shm: PASS
+big-noshm: PASS

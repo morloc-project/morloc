@@ -28,8 +28,16 @@ pub enum MorlocError {
 /// or `libc::free`.
 pub unsafe fn set_errmsg(errmsg: *mut *mut c_char, err: &MorlocError) {
     if !errmsg.is_null() {
-        if let Ok(cstr) = CString::new(err.to_string()) {
-            *errmsg = cstr.into_raw();
+        let s = err.to_string();
+        match CString::new(s.clone()) {
+            Ok(cstr) => { *errmsg = cstr.into_raw(); }
+            Err(_) => {
+                // Interior NUL: substitute and still propagate.
+                let cleaned: String = s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+                if let Ok(cstr) = CString::new(cleaned) {
+                    *errmsg = cstr.into_raw();
+                }
+            }
         }
     }
 }

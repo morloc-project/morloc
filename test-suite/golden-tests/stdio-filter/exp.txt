@@ -1,0 +1,4 @@
+=== producer | doubler | checkSum ===
+110
+=== producer | checkSum ===
+55

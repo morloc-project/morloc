@@ -1,0 +1,16 @@
+module main (foo)
+
+import root
+
+record Person where
+  name :: Str
+  age :: Int
+
+-- form: list on a list-of-record does not take a list.source override.
+foo ::
+  --' source: file
+  --' form: list
+  --' list.source: file
+  [Person] ->
+  Int
+foo x = 0

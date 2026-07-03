@@ -1,0 +1,12 @@
+-- syntax: the default text fails to parse as JSON. Was
+-- silently accepted at compile time and surfaced as an opaque runtime
+-- parse error at first invocation; now caught upfront with the aeson
+-- error message attached.
+module main (f)
+
+f ::
+  --' arg: -i
+  --' default: not_json
+  Int ->
+  Int
+f x = x

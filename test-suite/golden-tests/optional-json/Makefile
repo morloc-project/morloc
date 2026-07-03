@@ -4,7 +4,7 @@ all:
 	./nexus --keep-null echoOptInt null > obs.txt 2> obs.err
 	./nexus --keep-null echoOptInt 42 >> obs.txt 2>> obs.err
 	./nexus --keep-null echoOptStr null >> obs.txt 2>> obs.err
-	./nexus --keep-null echoOptStr '"hello"' >> obs.txt 2>> obs.err
+	./nexus --keep-null echoOptStr "hello" >> obs.txt 2>> obs.err
 	./nexus --keep-null echoOptList null >> obs.txt 2>> obs.err
 	./nexus --keep-null echoOptList '[1,2,3]' >> obs.txt 2>> obs.err
 	./nexus --keep-null fromNullInt null >> obs.txt 2>> obs.err

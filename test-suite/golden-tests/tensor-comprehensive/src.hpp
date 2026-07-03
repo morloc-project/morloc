@@ -1,7 +1,7 @@
 #ifndef __TENSOR_COMPREHENSIVE_SRC_HPP__
 #define __TENSOR_COMPREHENSIVE_SRC_HPP__
 
-#include "mlc_tensor.hpp"
+#include "tensor.hpp"
 #include <cstdint>
 #include <vector>
 

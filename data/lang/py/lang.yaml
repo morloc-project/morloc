@@ -12,7 +12,7 @@ cost: 3
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
 preamble:
-  - 'sys.path = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")), os.path.expanduser("."), os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}")] + sys.path'
+  - 'sys.path = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")), os.path.expanduser("."), os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}"), os.path.expanduser("{{home}}/lib/python")] + sys.path'
   - "import importlib"
   - "import pymorloc as morloc"
 

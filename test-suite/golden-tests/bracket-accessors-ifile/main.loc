@@ -1,0 +1,439 @@
+-- IFile mirror of bracket-accessors.
+--
+-- Every data structure exercised in bracket-accessors is written to an
+-- uncompressed voidstar DATA_PACKET via '@save 0', opened as an
+-- 'IFile T' via '@open', and the same pattern accessor is applied to
+-- the IFile handle. Per-test expected output is byte-identical to
+-- bracket-accessors/exp.txt: this is the equivalence assertion.
+--
+-- Receiver paths exercised by this test suite:
+--
+--   * Per-pool langId application (testIFileRange*, testIFileRecord*):
+--     forces the boolean comparison block to evaluate in cpp / py / r,
+--     which means every pattern access on the IFile handle goes
+--     through that pool's '_mlc_ifile_walk' wrapper.
+--   * Standalone-pattern tests: each takes one path, executes one
+--     pattern, returns the materialised value. Most run pure-nexus and
+--     exercise the runtime's 'apply_getter' bracket extensions.
+--   * Cross-pool tests: pass the IFile handle (an i64) through one
+--     pool's identity function, then apply the pattern in another
+--     pool. Exercises per-language wrappers and handle marshalling.
+
+module main (
+  -- Per-pool range tests on a single saved [Int]
+    testIFileRangeCpp
+  , testIFileRangePy
+  , testIFileRangeR
+  -- Per-pool record tests against three saved data structures
+  , testIFileRecordCpp
+  , testIFileRecordPy
+  , testIFileRecordR
+  -- Standalone-pattern tests
+  , ifileIndexOne
+  , ifileSliceClosed
+  , ifileSliceOpenLeft
+  , ifileSliceOpenRight
+  , ifileSliceFull
+  , ifileSliceReverse
+  , ifileSliceEvery
+  , ifileSliceNegEnd
+  , ifileSliceWithStep
+  , ifileChainedFieldThenSlice
+  , ifileChainedIndexThenField
+  , ifileSliceThenTupleField
+  , ifileSliceThenRecordField
+  , ifileSliceThenNestedSlice
+  , ifileSliceThenGroup
+  , ifileDeepChain
+  , ifileIndexFromForeignLength
+  , ifileSliceFromOptionalStart
+  , ifileIndexInt8
+  , ifileIndexInt16
+  , ifileIndexUInt32
+  , ifileSliceInt8Bound
+  , ifileSliceMixedWidthBounds
+  -- Cross-pool tests
+  , ifileCrossPoolReceiverPyToCpp
+  , ifileCrossPoolReceiverCppToR
+  , ifileCrossPoolReceiverRToPy
+  , ifileCrossPoolIdxForeign
+  , ifileCrossPoolSliceNested
+  )
+
+import root-py
+import root-r
+import root-cpp
+
+record Pt where
+  x :: Int
+  y :: Int
+record Cpp => Pt = "pt_t"
+record Py => Pt = "dict"
+record R => Pt = "list"
+
+record Row where
+  a :: [(Int, Int)]
+  b :: [Pt]
+record Cpp => Row = "row_t"
+record Py => Row = "dict"
+record R => Row = "list"
+
+-- Anchor pt.hpp into the C++ pool so 'pt_t' / 'row_t' are defined when
+-- the codegen emits record literals against them. Mirrors the
+-- bracket-accessors anchor.
+ptIdCpp :: a -> a
+source Cpp from "pt.hpp" ("pt_passthrough" as ptIdCpp)
+
+-- ─── In-memory data used as @save inputs ─────────────────────────────────
+
+ten :: [Int]
+ten = [0,1,2,3,4,5,6,7,8,9]
+
+pts :: [Pt]
+pts =
+  [ {x = 0, y = 100}
+  , {x = 1, y = 101}
+  , {x = 2, y = 102}
+  , {x = 3, y = 103}
+  , {x = 4, y = 104}
+  , {x = 5, y = 105}
+  , {x = 6, y = 106}
+  ]
+
+pairs :: [(Int, Str)]
+pairs = [(0,"a"),(1,"b"),(2,"c"),(3,"d"),(4,"e"),(5,"f"),(6,"g")]
+
+rows :: [Row]
+rows =
+  [ { a = [(10, 20), (11, 21)], b = [{x = 100, y = 200}, {x = 110, y = 210}] }
+  , { a = [(30, 40), (31, 41)], b = [{x = 300, y = 400}, {x = 310, y = 410}] }
+  , { a = [(50, 60), (51, 61)], b = [{x = 500, y = 600}, {x = 510, y = 610}] }
+  ]
+
+chainedPts :: [Pt]
+chainedPts = [{x = 1, y = 2}, {x = 3, y = 4}, {x = 5, y = 6}]
+
+recordFieldPts :: [Pt]
+recordFieldPts = [{x = 1, y = 10}, {x = 2, y = 20}, {x = 3, y = 30}, {x = 4, y = 40}]
+
+groupPts :: [Pt]
+groupPts = [{x = 1, y = 10}, {x = 2, y = 20}, {x = 3, y = 30}]
+
+deepChainRows :: [Row]
+deepChainRows =
+  [ { a = [(11, 12), (13, 14)], b = [{x = 100, y = 101}, {x = 200, y = 201}] }
+  , { a = [(21, 22), (23, 24)], b = [{x = 300, y = 301}] }
+  ]
+
+crossPoolSlicePts :: [Pt]
+crossPoolSlicePts = ptIdCpp
+  [ {x = 10, y = 100}
+  , {x = 20, y = 200}
+  , {x = 30, y = 300}
+  , {x = 40, y = 400}
+  ]
+
+-- Top-level optional bound for sliceFromOptionalStart parity. Null at
+-- bind-time so the runtime sees has=0 for that slot.
+optStart :: ?Int32
+optStart = (Null :: ?Int32)
+
+-- ─── Per-pool range tests ───────────────────────────────────────────────
+-- Save 'ten' to a file, open as IFile [Int], and run every pattern from
+-- testLangRange against the handle. langId forces the surrounding
+-- boolean expression into the target pool so each '.[..] f' becomes a
+-- '_mlc_ifile_walk' call in that pool's wrapper.
+
+testIFileLangRange :: (Bool -> Bool) -> Str -> <IO> Bool
+testIFileLangRange langId path = do
+  @save 0 ten path
+  f <- @open path :: <IO> IFile [Int]
+  langId $
+    -- indexing
+    ( .[0] f == 0 ) &&
+    ( .[-1] f == 9 ) &&
+    ( .[-2] f == 8 ) &&
+    ( .[1+1] f == 2 ) &&
+    -- slicing
+    ( .[:] f == ten ) &&
+    ( .[0:0] f == [] ) &&
+    ( .[1:1] f == [] ) &&
+    ( .[1:0] f == [] ) &&
+    ( .[8:99] f == [8,9] ) &&
+    ( .[0:-1] f == [0,1,2,3,4,5,6,7,8] ) &&
+    ( .[0:-9] f == [0] ) &&
+    ( .[0:-10] f == [] ) &&
+    ( .[-1:0] f == [] ) &&
+    ( .[-1:] f == [9] ) &&
+    ( .[-2:-1] f == .[8:9] f ) &&
+    ( .[(1 :: Int):2] f == [1] ) &&
+    -- step
+    ( .[::] f == ten ) &&
+    ( .[::2] f == [0,2,4,6,8] ) &&
+    ( .[::-1] f == [9,8,7,6,5,4,3,2,1,0] ) &&
+    ( .[::-2] f == [9,7,5,3,1] ) &&
+    ( .[7::] f == [7,8,9] ) &&
+    ( .[:3:] f == [0,1,2] ) &&
+    ( .[0:3:] f == [0,1,2] ) &&
+    ( .[7::1] f == [7,8,9] ) &&
+    ( .[:3:1] f == [0,1,2] ) &&
+    ( .[0:3:1] f == [0,1,2] ) &&
+    ( .[2:7:2] f == [2,4,6] ) &&
+    ( .[7:2:-2] f == [7,5,3] )
+
+testIFileRangeCpp :: Str -> <IO> Bool
+testIFileRangeCpp = testIFileLangRange idcpp
+
+testIFileRangePy :: Str -> <IO> Bool
+testIFileRangePy = testIFileLangRange idpy
+
+testIFileRangeR :: Str -> <IO> Bool
+testIFileRangeR = testIFileLangRange idr
+
+-- ─── Per-pool record tests ──────────────────────────────────────────────
+-- Save pts, pairs, and rows to three separate files; open as IFile
+-- handles; exercise the same chained/grouped patterns testLangRecord
+-- runs in bracket-accessors.
+
+testIFileLangRecord :: (Bool -> Bool) -> Str -> Str -> Str -> <IO> Bool
+testIFileLangRecord langId pathPts pathPairs pathRows = do
+  @save 0 pts pathPts
+  @save 0 pairs pathPairs
+  @save 0 rows pathRows
+  fPts <- @open pathPts :: <IO> IFile [Pt]
+  fPairs <- @open pathPairs :: <IO> IFile [(Int, Str)]
+  fRows <- @open pathRows :: <IO> IFile [Row]
+  langId $
+    -- index + record field
+    ( .[0].x fPts == 0 ) &&
+    ( .[2].y fPts == 102 ) &&
+    ( .[-1].x fPts == 6 ) &&
+    ( .[-2].y fPts == 105 ) &&
+    -- slice + record field
+    ( .[:3].x fPts == [0,1,2] ) &&
+    ( .[2:5].y fPts == [102,103,104] ) &&
+    ( .[:].x fPts == [0,1,2,3,4,5,6] ) &&
+    ( .[:5:].x fPts == .[:5].x fPts ) &&
+    ( .[:5:].x fPts == [0,1,2,3,4] ) &&
+    -- strided slice + field
+    ( .[::2].x fPts == [0,2,4,6] ) &&
+    ( .[::-1].x fPts == [6,5,4,3,2,1,0] ) &&
+    ( .[1::2].y fPts == [101,103,105] ) &&
+    -- slice + grouped record tail
+    ( .[0:3].(.x, .y) fPts == [(0,100),(1,101),(2,102)] ) &&
+    ( .[::-1].(.x, .y) fPts ==
+        [(6,106),(5,105),(4,104),(3,103),(2,102),(1,101),(0,100)] ) &&
+    -- tuple-list slice + tuple selector
+    ( .[1:4].0 fPairs == [1,2,3] ) &&
+    ( .[:3].1 fPairs == ["a","b","c"] ) &&
+    ( .[::-1].0 fPairs == [6,5,4,3,2,1,0] ) &&
+    -- nested record access through a slice
+    ( .[0].a.[0].0 fRows == 10 ) &&
+    ( .[1].b.[1].y fRows == 410 ) &&
+    ( .[-1].b.[0].x fRows == 500 ) &&
+    -- deep chain: slice -> grouped tail mixing nested patterns
+    ( .[0:2].(.a.[0].0, .b.[0].y) fRows == [(10,200),(30,400)] ) &&
+    -- empty-slice tails over records
+    ( .[3:3].x fPts == ([] :: [Int]) ) &&
+    ( .[100:200].(.x, .y) fPts == ([] :: [(Int, Int)]) )
+
+testIFileRecordCpp :: Str -> Str -> Str -> <IO> Bool
+testIFileRecordCpp = testIFileLangRecord idcpp
+
+testIFileRecordPy :: Str -> Str -> Str -> <IO> Bool
+testIFileRecordPy = testIFileLangRecord idpy
+
+testIFileRecordR :: Str -> Str -> Str -> <IO> Bool
+testIFileRecordR = testIFileLangRecord idr
+
+-- ─── Standalone-pattern tests ───────────────────────────────────────────
+-- Each saves a small data structure and applies one pattern accessor.
+-- The expected output exactly matches the in-memory result from
+-- bracket-accessors.
+
+ifileIndexOne :: Str -> <IO> Int
+ifileIndexOne path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[2] f
+
+ifileSliceClosed :: Str -> <IO> [Int]
+ifileSliceClosed path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[1:4] f
+
+ifileSliceOpenLeft :: Str -> <IO> [Int]
+ifileSliceOpenLeft path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[:3] f
+
+ifileSliceOpenRight :: Str -> <IO> [Int]
+ifileSliceOpenRight path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[1:] f
+
+ifileSliceFull :: Str -> <IO> [Int]
+ifileSliceFull path = do
+  @save 0 [10, 20, 30] path
+  f <- @open path :: <IO> IFile [Int]
+  .[:] f
+
+ifileSliceReverse :: Str -> <IO> [Int]
+ifileSliceReverse path = do
+  @save 0 [1, 2, 3, 4, 5] path
+  f <- @open path :: <IO> IFile [Int]
+  .[::-1] f
+
+ifileSliceEvery :: Str -> <IO> [Int]
+ifileSliceEvery path = do
+  @save 0 [1, 2, 3, 4, 5, 6, 7, 8] path
+  f <- @open path :: <IO> IFile [Int]
+  .[::2] f
+
+ifileSliceNegEnd :: Str -> <IO> [Int]
+ifileSliceNegEnd path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[(0 - 3):] f
+
+ifileSliceWithStep :: Str -> <IO> [Int]
+ifileSliceWithStep path = do
+  @save 0 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] path
+  f <- @open path :: <IO> IFile [Int]
+  .[0:10:3] f
+
+-- Mirrors bracket-accessors' chainedFieldThenSlice (which is, despite
+-- its name, just a slice on a flat [Int] receiver).
+ifileChainedFieldThenSlice :: Str -> <IO> [Int]
+ifileChainedFieldThenSlice path = do
+  @save 0 [10, 20, 30, 40] path
+  f <- @open path :: <IO> IFile [Int]
+  .[1:3] f
+
+ifileChainedIndexThenField :: Str -> <IO> Int
+ifileChainedIndexThenField path = do
+  @save 0 chainedPts path
+  f <- @open path :: <IO> IFile [Pt]
+  .[1].y f
+
+ifileSliceThenTupleField :: Str -> <IO> [Int]
+ifileSliceThenTupleField path = do
+  @save 0 [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")] path
+  f <- @open path :: <IO> IFile [(Int, Str)]
+  .[1:4].0 f
+
+ifileSliceThenRecordField :: Str -> <IO> [Int]
+ifileSliceThenRecordField path = do
+  @save 0 recordFieldPts path
+  f <- @open path :: <IO> IFile [Pt]
+  .[0:3].x f
+
+ifileSliceThenNestedSlice :: Str -> <IO> [[Int]]
+ifileSliceThenNestedSlice path = do
+  @save 0 [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [99, 99]] path
+  f <- @open path :: <IO> IFile [[Int]]
+  .[0:2].[0:3] f
+
+ifileSliceThenGroup :: Str -> <IO> [(Int, Int)]
+ifileSliceThenGroup path = do
+  @save 0 groupPts path
+  f <- @open path :: <IO> IFile [Pt]
+  .[0:2].(.x, .y) f
+
+ifileDeepChain :: Str -> <IO> [(Int, Int)]
+ifileDeepChain path = do
+  @save 0 deepChainRows path
+  f <- @open path :: <IO> IFile [Row]
+  .[0:2].(.a.[0].0, .b.[0].y) f
+
+-- Foreign-call result as a bracket bound on an IFile receiver.
+-- `length` resolves to the per-language Foldable instance; here it
+-- runs on an in-memory [Int] literal to produce the bracket index.
+ifileIndexFromForeignLength :: Str -> <IO> Int
+ifileIndexFromForeignLength path = do
+  @save 0 [100, 200, 300, 400, 500] path
+  f <- @open path :: <IO> IFile [Int]
+  .[length [10, 20, 30] - 1] f
+
+-- Optional-typed bound (?Int32) on IFile slice. The Null bound flows
+-- through __to_index__ as has=0; the runtime walker treats it as
+-- "default start for positive step" (0).
+ifileSliceFromOptionalStart :: Str -> <IO> [Int]
+ifileSliceFromOptionalStart path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[optStart:3] f
+
+-- Each annotation pins the bound to a specific IndexLike instance.
+-- For IFile, the index value flows through the runtime as a raw i64
+-- regardless of source width.
+ifileIndexInt8 :: Str -> <IO> Int
+ifileIndexInt8 path = do
+  @save 0 [10, 20, 30] path
+  f <- @open path :: <IO> IFile [Int]
+  .[(0 :: Int8)] f
+
+ifileIndexInt16 :: Str -> <IO> Int
+ifileIndexInt16 path = do
+  @save 0 [10, 20, 30] path
+  f <- @open path :: <IO> IFile [Int]
+  .[(1 :: Int16)] f
+
+ifileIndexUInt32 :: Str -> <IO> Int
+ifileIndexUInt32 path = do
+  @save 0 [10, 20, 30] path
+  f <- @open path :: <IO> IFile [Int]
+  .[(2 :: UInt32)] f
+
+ifileSliceInt8Bound :: Str -> <IO> [Int]
+ifileSliceInt8Bound path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[(1 :: Int8):3] f
+
+ifileSliceMixedWidthBounds :: Str -> <IO> [Int]
+ifileSliceMixedWidthBounds path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  .[(1 :: Int8):(4 :: Int16)] f
+
+-- ─── Cross-pool tests ──────────────────────────────────────────────────
+-- The IFile handle (a u64) is passed through one pool's identity
+-- function, then the pattern is applied in another pool. The handle
+-- is opaque to the surrounding pool; the per-language _mlc_ifile_walk
+-- wrapper handles the value extraction. This exercises whether the
+-- pool-to-pool marshalling of IFile handles correctly preserves the
+-- ABI shape and whether each pool's wrapper is registered.
+
+ifileCrossPoolReceiverPyToCpp :: Str -> <IO> Int
+ifileCrossPoolReceiverPyToCpp path = do
+  @save 0 [100, 200, 300, 400, 500] path
+  f <- @open path :: <IO> IFile [Int]
+  idcpp (.[2] (idpy f))
+
+ifileCrossPoolReceiverCppToR :: Str -> <IO> Int
+ifileCrossPoolReceiverCppToR path = do
+  @save 0 [10, 20, 30] path
+  f <- @open path :: <IO> IFile [Int]
+  idr (.[1] (idcpp f))
+
+ifileCrossPoolReceiverRToPy :: Str -> <IO> Int
+ifileCrossPoolReceiverRToPy path = do
+  @save 0 [7, 8, 9] path
+  f <- @open path :: <IO> IFile [Int]
+  idpy (.[-1] (idr f))
+
+ifileCrossPoolIdxForeign :: Str -> <IO> Int
+ifileCrossPoolIdxForeign path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO> IFile [Int]
+  idr (.[idpy 1] (idcpp f))
+
+ifileCrossPoolSliceNested :: Str -> <IO> [Int]
+ifileCrossPoolSliceNested path = do
+  @save 0 crossPoolSlicePts path
+  f <- @open path :: <IO> IFile [Pt]
+  idr (.[0:3].x f)

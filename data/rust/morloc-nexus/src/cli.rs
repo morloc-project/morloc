@@ -48,7 +48,7 @@ pub struct Nexus {
     pub cmd: Mode,
 }
 
-/// The three explicit roles of the nexus.
+/// The explicit roles of the nexus.
 #[derive(Subcommand, Debug)]
 pub enum Mode {
     /// Run one subcommand of a compiled morloc program (one-shot CLI).
@@ -57,6 +57,10 @@ pub enum Mode {
     Daemon(DaemonArgs),
     /// Multi-program router across installed modules.
     Router(RouterArgs),
+    /// Classify morloc-compatible data files (UNIX file(1) style).
+    File(FileArgs),
+    /// Read a data file and re-emit it in a chosen output format.
+    View(ViewArgs),
 }
 
 /// Output-formatting + run-scope log options shared by `run` and
@@ -95,6 +99,17 @@ pub struct DispatchOptions {
     /// Override the summary.json location.
     #[arg(long, value_name = "PATH")]
     pub summary: Option<String>,
+
+    /// zstd compression preset for `-f packet` output. RPTR (shared
+    /// memory) and FILE (temp file) result packets are always
+    /// materialized to inline MESG form on disk regardless of this
+    /// flag, so the on-disk packet is self-contained. When N > 0 the
+    /// MESG payload is additionally zstd-compressed; the schema
+    /// metadata block stays in the clear. 0 = no compression
+    /// (default), 1 = fastest, 9 = maximum.
+    #[arg(short = 'z', long = "compression-level",
+          default_value_t = 0, value_name = "N")]
+    pub compression_level: u8,
 }
 
 /// One-shot CLI invocation of a compiled morloc program.
@@ -192,6 +207,101 @@ pub struct RouterArgs {
     pub eval_timeout: u32,
 }
 
+/// Classify morloc-compatible data files. Reads only header bytes
+/// (and per-arg metadata for CALL packets), seeking past payloads, so
+/// it is cheap even on multi-gigabyte files. Verifies the declared
+/// header size matches the on-disk size by default; pass `--validate`
+/// to additionally feed each file through the same loader `run` uses.
+///
+/// Default output is one line per file. Each line starts with the
+/// path (suppressible with `-F`), then the type, then space-separated
+/// `key=value` pairs (suppressible with `-D`). Combined `-FD` emits
+/// just the type, so `morloc-nexus file -FD *` is a clean stream for
+/// programmatic use.
+#[derive(Args, Debug)]
+pub struct FileArgs {
+    /// One or more files to classify.
+    #[arg(value_name = "FILE", num_args = 1..)]
+    pub targets: Vec<String>,
+
+    /// Suppress the leading `<path>:` prefix on each line.
+    #[arg(short = 'F', long = "no-file")]
+    pub no_file: bool,
+
+    /// Suppress the description fields, leaving just the type.
+    #[arg(short = 'D', long = "no-description")]
+    pub no_description: bool,
+
+    /// Emit one JSON object per file instead of plain text.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Break the one-line-per-file rule: emit one indented line per
+    /// argument of a CALL packet, and one indented line per column
+    /// of a CSV (with inferred type).
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Maximum bytes to read for content-based detection (msgpack /
+    /// JSON / CSV / text probes). Accepts a K/M/G suffix (1024-based).
+    /// Larger windows give CSV/text classifiers more rows to chew on
+    /// at the cost of I/O. Default: 1k.
+    #[arg(short = 'n', long = "bytes", value_name = "SIZE",
+          default_value = "1k")]
+    pub bytes: String,
+
+    /// After classifying, fully load the data through the same code
+    /// path `run` uses and report pass/fail. If `file --validate`
+    /// passes, `run` (or `view`) reading the same file will not fail
+    /// at the load stage.
+    #[arg(long)]
+    pub validate: bool,
+
+    /// Morloc schema string used by `--validate` for inputs that
+    /// don't embed one (raw .json/.mpk/.csv/.arrow/.parquet).
+    /// Ignored without `--validate`.
+    #[arg(long, value_name = "STRING")]
+    pub schema: Option<String>,
+}
+
+/// Read a data file and re-emit it in a chosen output format. Uses
+/// the same loader chain (`parse_cli_data_argument` ->
+/// `load_morloc_data_file`) and the same output emitter
+/// (`print_result_c`) as `run`, so format support and conversion
+/// behavior cannot drift away from a real morloc program run.
+#[derive(Args, Debug)]
+pub struct ViewArgs {
+    /// Input data file (morloc packet, .json, .mpk, .arrow, .parquet,
+    /// or .csv).
+    pub target: String,
+
+    /// Output format. Defaults to json.
+    #[arg(
+        short = 'f',
+        long = "output-form",
+        value_name = "FORM",
+        value_enum,
+        default_value_t = OutputForm::Json,
+    )]
+    pub output_form: OutputForm,
+
+    /// zstd compression preset for `-f packet` output (0..=9).
+    /// 0 = no compression.
+    #[arg(short = 'z', long = "compression-level",
+          default_value_t = 0, value_name = "N")]
+    pub compression_level: u8,
+
+    /// Write to FILE instead of stdout.
+    #[arg(short = 'o', long = "output-file", value_name = "FILE")]
+    pub output_path: Option<String>,
+
+    /// Morloc schema string (compact format, e.g. "as" for [String]).
+    /// Resolution order: --schema, then schema embedded in a
+    /// morloc-packet's metadata, else error.
+    #[arg(long, value_name = "STRING")]
+    pub schema: Option<String>,
+}
+
 /// Output format choices exposed via `-f / --output-form`. The
 /// mapping to the internal [`OutputFormat`] keeps the existing string
 /// surface (`mpk`, `ipc`/`arrow`, ...) so help text and tests stay
@@ -234,6 +344,7 @@ fn apply_dispatch_options(cfg: &mut NexusConfig, opts: &DispatchOptions) {
     cfg.quiet = opts.quiet;
     cfg.log_dir = opts.log_dir.clone();
     cfg.summary_path = opts.summary.clone();
+    cfg.compression_level = opts.compression_level;
 }
 
 // ============================================================
@@ -433,7 +544,7 @@ pub fn check_unsupported_capability_flags(
 }
 
 /// Parse a byte-count string with optional k/m/g suffix (1024-based).
-fn parse_byte_size(flag: &str, raw: &str) -> u64 {
+pub fn parse_byte_size(flag: &str, raw: &str) -> u64 {
     let (num_str, mult): (&str, u64) = match raw.chars().last() {
         Some('k') | Some('K') => (&raw[..raw.len() - 1], 1024),
         Some('m') | Some('M') => (&raw[..raw.len() - 1], 1024 * 1024),
@@ -582,7 +693,7 @@ pub fn resolve_daemon_target(target: &str) -> Result<String, String> {
 /// filtering happens later in [`augment_with_capability_flags`].
 fn value_taking_run_flags() -> ValueTakingFlags {
     use clap::CommandFactory;
-    let nexus_cmd = Nexus::command();
+    let nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
     let run_cmd = nexus_cmd
         .find_subcommand("run")
         .expect("Nexus declares a 'run' subcommand");
@@ -823,19 +934,25 @@ fn first_positional<'a>(
 /// 3. **Daemon mode.** Same as run minus the `@` split (daemon
 ///    mode has no user zone).
 pub fn parse_invocation() -> ParsedInvocation {
-    use clap::Parser;
     let argv: Vec<String> = std::env::args().collect();
     let mode_str = argv.get(1).map(|s| s.as_str());
     match mode_str {
         Some("run") => parse_run_or_daemon(&argv, true),
         Some("daemon") => parse_run_or_daemon(&argv, false),
-        _ => ParsedInvocation {
-            nexus: Nexus::parse(),
-            manifest: None,
-            manifest_path: String::new(),
-            user_zone: Vec::new(),
-            capability_values: CapabilityValues::default(),
-        },
+        _ => {
+            use clap::{CommandFactory, FromArgMatches};
+            let cmd = crate::help::strip_styles_recursively(Nexus::command());
+            let matches = cmd.get_matches();
+            let nexus = Nexus::from_arg_matches(&matches)
+                .unwrap_or_else(|e| e.exit());
+            ParsedInvocation {
+                nexus,
+                manifest: None,
+                manifest_path: String::new(),
+                user_zone: Vec::new(),
+                capability_values: CapabilityValues::default(),
+            }
+        }
     }
 }
 
@@ -905,7 +1022,7 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
     // Build the augmented Nexus command tree: take the static
     // clap-derive command and inject capability flags into the
     // chosen subcommand based on `caps_for_augment`.
-    let mut nexus_cmd = Nexus::command();
+    let mut nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
     {
         let sub = nexus_cmd
             .find_subcommand_mut(mode_token)

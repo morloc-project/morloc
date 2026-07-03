@@ -1,0 +1,11 @@
+-- typed sub-case: `arg:` on a typed argument used to silently
+-- demote the parameter to a positional when no `default:` was given,
+-- dropping the directive. Now `resolveOpt` errors with "must have
+-- default values".
+module main (f)
+
+f ::
+  --' arg: -n/--name
+  Str ->
+  Int
+f x = 0

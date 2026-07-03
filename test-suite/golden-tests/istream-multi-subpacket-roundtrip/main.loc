@@ -1,0 +1,72 @@
+-- IStream drained across multiple sub-packets.
+--
+-- The companion `istream-file-roundtrip` exercises @next on a single-
+-- sub-packet DATA_PACKET file. This test produces a STREAM_PACKET by
+-- making three OStream @write calls (each one immediately flushes its
+-- own sub-packet; the runtime does not coalesce). Then it opens the
+-- result as an IStream and pulls each sub-packet via successive @next
+-- calls. After draining, the next @next must return [].
+--
+-- Confirms:
+--   * Each @write produces one sub-packet (so three writes yield
+--     three sub-packets, not one coalesced sub-packet).
+--   * IStream cursor advances one sub-packet per @next, in write
+--     order.
+--   * Post-drain @next returns the empty list and is idempotent.
+
+module main
+  ( testFirstSubpacket
+  , testSecondSubpacket
+  , testThirdSubpacket
+  , testEofAfterDrain
+  )
+
+import root
+
+-- Each @write contributes to the OStream's internal buffer. The
+-- `@flush o` calls force the buffer to be emitted as a sub-packet
+-- before the next @write, producing three distinct sub-packets on
+-- disk (1: [1,2,3]; 2: [4,5]; 3: [6,7,8,9]). Without `@flush`, all
+-- three @writes would coalesce into a single sub-packet at @close.
+writeThree :: Str -> <IO> ()
+writeThree path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @flush o
+  @write 0 [4, 5] o
+  @flush o
+  @write 0 [6, 7, 8, 9] o
+  @close o
+
+testFirstSubpacket :: Str -> <IO> [Int]
+testFirstSubpacket path = do
+  writeThree path
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+testSecondSubpacket :: Str -> <IO> [Int]
+testSecondSubpacket path = do
+  writeThree path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+
+testThirdSubpacket :: Str -> <IO> [Int]
+testThirdSubpacket path = do
+  writeThree path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+
+-- After draining all three sub-packets, the next call returns [],
+-- and a fifth call (post-EOF) still returns [].
+testEofAfterDrain :: Str -> <IO> [Int]
+testEofAfterDrain path = do
+  writeThree path
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s
+  @next s
+  @next s

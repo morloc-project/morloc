@@ -64,6 +64,35 @@ fn quiet() -> bool {
     })
 }
 
+/// True when `MORLOC_TRACE` is set to any non-empty value. Enables the
+/// per-stage timing prints scattered through the ingest / size / emit
+/// paths (`[fastpath] ...`, `[make_data_packet_auto] ...`,
+/// `[estimate_payload_size] ...`, `[stream_packet_to_fd] ...`). Off by
+/// default so production runs pay no cost; flip on with
+/// `MORLOC_TRACE=1` when diagnosing where wall time is going.
+/// Cached on first read.
+pub fn trace_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var_os("MORLOC_TRACE")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Emit a trace line to stderr when `MORLOC_TRACE` is set. The format
+/// matches `eprintln!`. Resolves to a no-op (a single cached atomic
+/// read + branch) when tracing is off, so callers can pepper hot paths
+/// with these without compile-time gating.
+#[macro_export]
+macro_rules! morloc_trace {
+    ($($arg:tt)*) => {
+        if $crate::log::trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// Remove all ANSI escape sequences (CSI color codes, OSC, etc.)
 /// from a string. Delegates to [`anstream::adapter::strip_str`],
 /// which uses an ECMA-48-conformant parser; the function exists

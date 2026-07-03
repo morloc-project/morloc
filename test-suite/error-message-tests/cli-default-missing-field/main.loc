@@ -1,0 +1,16 @@
+-- record: the record default's JSON object omits the
+-- required `beta` field. The validator catches the missing field
+-- structurally against the SerialObject schema and reports the field
+-- name plus the JSON path.
+module main (f)
+
+record Config where
+  alpha :: Int
+  beta :: Int
+
+f ::
+  --' arg: -c/--config
+  --' default: {"alpha":1}
+  Config ->
+  Int
+f c = 0

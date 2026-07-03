@@ -6,7 +6,7 @@ import root-r (idr)
 
 langstr :: <IO> (?[Str],?[Str],?[Str],?[Str])
 langstr = do
-  @save  (idpy ["hi", @lang])  "z"
+  @save  0 (idpy ["hi", @lang]) "z"
   @savem (idpy ["hi", @lang]) "zp"
   @savej (idpy ["hi", @lang]) "zj"
   xs  <- @load "z"

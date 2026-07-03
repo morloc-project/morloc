@@ -402,6 +402,71 @@ pub struct Constraint {
     pub value: Option<serde_json::Value>,
 }
 
+// -- Argument-shape vocabulary -----------------------------------------------
+
+/// Where the bytes for an argument come from at dispatch time.
+///
+/// `Auto` is the runtime sentinel for "use the classifier"
+/// (stdin-marker / JSON-shape sniff / file-exists). It is never
+/// emitted by an explicit user-written `source:` field; the compiler
+/// emits it only as the default for list / compound types where the
+/// classifier handles inline-or-file dispatch. `Inline` takes the
+/// argv string verbatim. `File` reads the argv string as a path
+/// (with `-` / `/dev/stdin` honored as stdin).
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceAtom {
+    Auto,
+    Inline,
+    File,
+}
+
+/// How the resolved bytes are interpreted to produce the voidstar value.
+///
+/// `Auto` is the runtime sentinel for "use the structured-format
+/// classifier" (JSON / MsgPack / packet / Arrow / Parquet). `List`
+/// UTF-8-validates the bytes, splits on newlines, and runs each line
+/// through the per-element pipeline. `Bytes` sniffs packet magic and
+/// falls back to packed raw bytes; `BytesOnly` is raw bytes
+/// unconditionally (the user's "I know what these bytes are; do not
+/// sniff" guarantee); `Packet` accepts only a morloc packet.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FormAtom {
+    Auto,
+    Packet,
+    Bytes,
+    BytesOnly,
+    List,
+}
+
+/// A value-invariant check carried alongside the argument. The compiler
+/// guarantees the (`kind`, value-shape) pair is consistent.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value")]
+#[serde(rename_all = "lowercase")]
+pub enum Check {
+    /// Argv string must be a path satisfying the permission subset
+    /// (`r`/`w`/`c` or combinations).
+    Path(String),
+}
+
+fn default_source() -> SourceAtom {
+    SourceAtom::Auto
+}
+
+fn default_form() -> FormAtom {
+    FormAtom::Auto
+}
+
+fn default_list_source() -> SourceAtom {
+    SourceAtom::Inline
+}
+
+fn default_list_form() -> FormAtom {
+    FormAtom::Auto
+}
+
 // -- Arguments ----------------------------------------------------------------
 
 /// CLI argument variants. Each command's argument list is a sequence
@@ -439,6 +504,13 @@ pub enum Arg {
         /// declared with `--' literal: true`.
         #[serde(default)]
         quoted: bool,
+        /// If true, the positional is variadic (`--' many: true`):
+        /// it consumes ALL remaining CLI tokens and the nexus assembles
+        /// them into a single list value. Only legal as the last
+        /// positional in a subcommand. Implies a `[a]`-typed argument
+        /// in the morloc signature.
+        #[serde(default)]
+        many: bool,
         /// Description lines from `--' desc:` docstrings.
         #[serde(default)]
         desc: Vec<String>,
@@ -451,6 +523,31 @@ pub enum Arg {
         /// emitted as `{}` in v2; not yet read by any consumer.
         #[serde(default)]
         metadata: Metadata,
+        /// Where the bytes come from. Defaults to `Auto` (classifier).
+        #[serde(default = "default_source")]
+        source: SourceAtom,
+        /// How the bytes are interpreted. Defaults to `Auto`.
+        #[serde(default = "default_form")]
+        form: FormAtom,
+        /// Per-argument value-invariant checks. Empty by default.
+        #[serde(default)]
+        checks: Vec<Check>,
+        /// Per-element source (only consulted when `form == List`).
+        /// Defaults to `Inline`.
+        #[serde(default = "default_list_source")]
+        list_source: SourceAtom,
+        /// Per-element form (only consulted when `form == List`).
+        /// Defaults to `Auto`.
+        #[serde(default = "default_list_form")]
+        list_form: FormAtom,
+        /// Per-element value-invariant checks. Empty by default.
+        #[serde(default)]
+        list_checks: Vec<Check>,
+        /// User-facing one-line "Format:" hint, populated only when
+        /// the argument uses a non-default `source:` / `form:` /
+        /// `check.*:` / `list.*:` configuration.
+        #[serde(default)]
+        format: Option<String>,
     },
     /// An optional CLI argument with a long/short option name.
     #[serde(rename = "opt")]
@@ -467,6 +564,11 @@ pub enum Arg {
         /// JSON-wrap flag for `Str`-typed literal options.
         #[serde(default)]
         quoted: bool,
+        /// If true, the option is variadic (`--' many: true`): it
+        /// accepts multiple values that the nexus assembles into a
+        /// single list value. Implies a `[a]`-typed argument.
+        #[serde(default)]
+        many: bool,
         /// Single-character short option (e.g. `"f"` for `-f`).
         #[serde(default, rename = "short")]
         short_opt: Option<String>,
@@ -487,6 +589,29 @@ pub enum Arg {
         /// **Reserved.** Per-argument metadata. Not read in v2.
         #[serde(default)]
         metadata: Metadata,
+        /// Where the bytes come from. See the corresponding
+        /// [`Arg::Positional`] field.
+        #[serde(default = "default_source")]
+        source: SourceAtom,
+        /// How the bytes are interpreted. See the corresponding
+        /// [`Arg::Positional`] field.
+        #[serde(default = "default_form")]
+        form: FormAtom,
+        /// Value-invariant checks.
+        #[serde(default)]
+        checks: Vec<Check>,
+        /// Per-element source (consulted when `form == List`).
+        #[serde(default = "default_list_source")]
+        list_source: SourceAtom,
+        /// Per-element form (consulted when `form == List`).
+        #[serde(default = "default_list_form")]
+        list_form: FormAtom,
+        /// Per-element value-invariant checks.
+        #[serde(default)]
+        list_checks: Vec<Check>,
+        /// User-facing one-line "Format:" hint.
+        #[serde(default)]
+        format: Option<String>,
     },
     /// A pure boolean flag toggle. Carries no type, schema, or
     /// constraints because it has no payload -- flipping the flag
@@ -699,6 +824,16 @@ impl Arg {
     pub fn is_quoted(&self) -> bool {
         match self {
             Arg::Positional { quoted, .. } | Arg::Optional { quoted, .. } => *quoted,
+            _ => false,
+        }
+    }
+
+    /// True if this arg is variadic (`--' many: true`): it accepts
+    /// multiple CLI tokens that the nexus assembles into a single
+    /// list value at dispatch time. Always false for flags and groups.
+    pub fn is_many(&self) -> bool {
+        match self {
+            Arg::Positional { many, .. } | Arg::Optional { many, .. } => *many,
             _ => false,
         }
     }

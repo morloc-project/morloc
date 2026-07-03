@@ -1,0 +1,54 @@
+-- IStream @next on compressed sub-packets.
+--
+-- Sister test of `istream-multi-subpacket-roundtrip`. All three @write
+-- calls here use compression level 3, so the on-disk sub-packets are
+-- zstd-encoded. @next must decompress (via parallel_decompress_frames)
+-- and hand back the original elements identically.
+--
+-- The level is pinned on the first @write: subsequent writes must
+-- pass the same level or @write errors out. v1 chooses to error
+-- rather than silently re-encode, because mixing compression levels
+-- in one stream is almost always a bug.
+--
+-- Confirms:
+--   * Compressed sub-packet round-trip equals uncompressed.
+--   * Decoded payload reaches the morloc-level value unchanged
+--     (relptrs rebased correctly, schema parsed, elements counted).
+
+module main
+  ( testCompressedReadback
+  , testCompressedThreeBatch
+  )
+
+import root
+
+-- Single compressed sub-packet, drained in one @next.
+testCompressedReadback :: Str -> <IO> [Int]
+testCompressedReadback path = do
+  o <- @open path :: <IO> OStream Int
+  @write 3 [100, 200, 300, 400, 500] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @next s
+
+-- Three compressed sub-packets concatenated, drained back to back.
+-- Verifies that the cursor advances through compressed-payload
+-- bytes correctly (header.length is the on-disk byte count, not
+-- the uncompressed size).
+-- `@flush o` after each @write forces three distinct compressed
+-- sub-packets on disk. Without `@flush`, the three writes coalesce
+-- into one packet at @close and the test would see one big payload
+-- instead of three.
+testCompressedThreeBatch :: Str -> <IO> [Int]
+testCompressedThreeBatch path = do
+  o <- @open path :: <IO> OStream Int
+  @write 3 [1, 2, 3] o
+  @flush o
+  @write 3 [40, 50] o
+  @flush o
+  @write 3 [600, 700, 800, 900] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @next s
+  @next s
+  @next s

@@ -1,0 +1,13 @@
+-- Variadic positionals must occupy the LAST positional slot (clap's
+-- constraint, enforced at the Haskell side so the error points at
+-- the source rather than coming out of clap at runtime). Here the
+-- many-marked list appears before a second positional and is
+-- rejected.
+module main (f)
+
+f ::
+  --' many: true
+  [Int] ->
+  Str ->
+  Int
+f xs s = 0

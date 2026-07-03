@@ -81,6 +81,9 @@ serialAstToType (SerialUInt32 x) = VarF x
 serialAstToType (SerialUInt64 x) = VarF x
 serialAstToType (SerialBool x) = VarF x
 serialAstToType (SerialString x) = VarF x
+serialAstToType (SerialIFile x) = VarF x
+serialAstToType (SerialOStream x) = VarF x
+serialAstToType (SerialIStream x) = VarF x
 serialAstToType (SerialNull x) = VarF x
 serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
@@ -166,6 +169,16 @@ serialAstToMsgpackSchema ast = emit ast
     emit (SerialUInt64 v) = addHint v <> "u8"
     emit (SerialBool v) = addHint v <> "b"
     emit (SerialString v) = addHint v <> "s"
+    -- F/O/I share a 16-byte tagged-union wire form (see
+    -- morloc-runtime-types::stream_handle). The schema code selects the
+    -- morloc-level type (IFile / OStream / IStream); the per-instance
+    -- tag byte at the wire boundary picks the encoding (path or
+    -- handle). The hint preserves the user's per-language native
+    -- (uint64_t, int, bit64) so generated foreign code keeps its typed
+    -- surface.
+    emit (SerialIFile v) = addHint v <> "F"
+    emit (SerialOStream v) = addHint v <> "O"
+    emit (SerialIStream v) = addHint v <> "I"
     emit (SerialNull v) = addHint v <> "z"
     emit (SerialOptional v s) = addHint v <> "?" <> emit s
     emit (SerialUnknown v) = addHint v <> "*"
@@ -254,6 +267,9 @@ shallowType (SerialUInt32 x) = VarF x
 shallowType (SerialUInt64 x) = VarF x
 shallowType (SerialBool x) = VarF x
 shallowType (SerialString x) = VarF x
+shallowType (SerialIFile x) = VarF x
+shallowType (SerialOStream x) = VarF x
+shallowType (SerialIStream x) = VarF x
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- A back-reference re-uses the ancestor's NamF identity; downstream
@@ -530,6 +546,15 @@ makeSerialAST m lang t0 = do
 
         dispatchAppF anc
           | null runtimeTs = makeSerialAST' gscope typepackers (VarF fv)
+          -- Stream-handle types (IFile / OStream / IStream) share one
+          -- 16-byte tagged-union wire form. Intercepting all three here
+          -- keeps them from collapsing onto their underlying newtype's
+          -- bare UInt64 -- the codec primitives dispatch on the schema
+          -- code (F/O/I) plus the per-instance tag byte to pick the
+          -- right open kind (IFILE / OSTREAM / ISTREAM) on receive.
+          | generalTypeName == BT.ifileVar = return $ SerialIFile fv
+          | generalTypeName == BT.ostreamVar = return $ SerialOStream fv
+          | generalTypeName == BT.istreamVar = return $ SerialIStream fv
           -- Typed `Table n r`: when the Rec arg lowered to a ground record
           -- (NamF NamRecord ...), surface it as a SerialObject NamTable
           -- carrying the column schema. The wire encoder emits @T:K<entries>@
@@ -608,6 +633,12 @@ makeSerialAST m lang t0 = do
                 , h == BT.tuple (length bodyRT) ->
                     AliasIsTuple bodyRT
                 | otherwise -> AliasIsOther expanded
+              -- Newtype-to-primitive wire form (e.g. @newtype IFile a = UInt64@):
+              -- expandWireParent peels through the newtype to a bare VarU.
+              -- Route through the body's serializer so IFile handles marshal
+              -- as their wire type without needing a redundant Packable
+              -- instance for every newtype with phantom params.
+              Just expanded@(VarU _) -> AliasIsOther expanded
               _ -> AliasIsNone
 
         -- Look up a Packable instance for the outer type and emit a
@@ -1013,6 +1044,9 @@ isSerializable (SerialUInt32 _) = True
 isSerializable (SerialUInt64 _) = True
 isSerializable (SerialBool _) = True
 isSerializable (SerialString _) = True
+isSerializable (SerialIFile _) = True
+isSerializable (SerialOStream _) = True
+isSerializable (SerialIStream _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
 -- A back-reference is serializable iff its referenced object is.
@@ -1045,6 +1079,9 @@ prettySerialOne (SerialUInt32 _) = "SerialUInt32"
 prettySerialOne (SerialUInt64 _) = "SerialUInt64"
 prettySerialOne (SerialBool _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
+prettySerialOne (SerialIFile _) = "SerialIFile"
+prettySerialOne (SerialOStream _) = "SerialOStream"
+prettySerialOne (SerialIStream _) = "SerialIStream"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
 prettySerialOne (SerialRec v) = "SerialRec" <> angles (pretty v)

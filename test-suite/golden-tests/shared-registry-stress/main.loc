@@ -1,0 +1,104 @@
+-- Stress test for the shared SHM stream registry + write buffer.
+--
+-- Exercises:
+--   * Many sequential OStream open/write/flush/close cycles
+--     (slot allocation + release churn).
+--   * Mix of primitive (Int) and variable-width (Str) element types.
+--   * Mix of small @writes (coalesce via buffer) and a single
+--     oversize @write (bypass buffer, oversize sub-packet).
+--   * Cross-pool handle passing through idcpp / idpy.
+--   * @flush at irregular boundaries.
+--
+-- Asserts via element-count totals on the resulting files. The
+-- exact sub-packet layout is implementation-defined; @flen
+-- gives the same answer regardless.
+
+module main
+  ( stressIntCoalesce
+  , stressStrRoundtrip
+  , stressCrossPoolMixed
+  , stressOversizeMixed
+  , stressManySubpackets
+  )
+
+import root-py
+import root-cpp
+
+-- 50 small Int @writes coalesced into the buffer + close. The
+-- buffer flushes at @close as one sub-packet (or oversize-bypass
+-- behavior if the cumulative size exceeds the buffer).
+stressIntCoalesce :: Str -> <IO> Int
+stressIntCoalesce path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3, 4, 5] o
+  @write 0 [6, 7, 8, 9, 10] o
+  @write 0 [11, 12, 13, 14, 15] o
+  @write 0 [16, 17, 18, 19, 20] o
+  @write 0 [21, 22, 23, 24, 25] o
+  @flush o
+  @write 0 [26, 27, 28, 29, 30] o
+  @write 0 [31, 32, 33, 34, 35] o
+  @write 0 [36, 37, 38, 39, 40] o
+  @write 0 [41, 42, 43, 44, 45] o
+  @write 0 [46, 47, 48, 49, 50] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+-- Variable-width round-trip: many strings of different lengths,
+-- compressed, buffered. Asserts total element count.
+stressStrRoundtrip :: Str -> <IO> Int
+stressStrRoundtrip path = do
+  o <- @open path :: <IO> OStream Str
+  @write 1 ["alpha", "bravo", "charlie"] o
+  @write 1 ["delta", "echo"] o
+  @flush o
+  @write 1 ["foxtrot", "golf", "hotel", "india"] o
+  @write 1 ["juliet"] o
+  @flush o
+  @write 1 ["kilo", "lima", "mike", "november", "oscar"] o
+  @close o
+  s <- @open path :: <IO> IStream Str
+  @flen s
+
+-- Cross-pool: cpp opener + multi-pool writers + cpp close.
+stressCrossPoolMixed :: Str -> <IO> Int
+stressCrossPoolMixed path = do
+  o <- @open (idcpp path) :: <IO> OStream Int
+  @write 0 (idcpp [100, 101, 102, 103, 104]) o
+  @write 0 (idpy [200, 201, 202]) o
+  @flush o
+  @write 0 (idpy [300, 301]) o
+  @write 0 (idcpp [400]) o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+-- A 4 KiB buffer + a single large @write forces element-level
+-- split into multiple sub-packets. Followed by more @writes
+-- that go through the (now empty) buffer normally. @flen
+-- returns the total.
+stressOversizeMixed :: Str -> <IO> Int
+stressOversizeMixed path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 [1, 2, 3] o
+  @flush o
+  @write 0 (range 1 1001) o    -- 8000 B > 4096 B buffer; splits
+  @write 0 [9001, 9002] o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+-- A small write buffer + a 200-element write produces many sub-
+-- packets, forcing the SHM-resident shared sub-packet index to
+-- grow past its initial capacity of 16 (one or more doublings
+-- under the slot futex). Reading back via IStream traverses every
+-- sub-packet; @flen returns the total via the StreamDiag's
+-- element_count, which the index doubling must not perturb.
+stressManySubpackets :: Str -> <IO> Int
+stressManySubpackets path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 (range 1 201) o
+  @close o
+  s <- @open path :: <IO> IStream Int
+  @flen s

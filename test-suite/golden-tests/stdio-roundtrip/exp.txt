@@ -1,0 +1,6 @@
+=== file-roundtrip ===
+55
+=== pipe-roundtrip ===
+55
+=== empty-stdin ===
+0

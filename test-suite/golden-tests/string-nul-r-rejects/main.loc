@@ -13,5 +13,7 @@ type R => Str = "character"
 
 rId :: Str -> Str
 
-rEcho :: Str -> Str
+rEcho ::
+  --' source: file
+  Str -> Str
 rEcho s = rId s

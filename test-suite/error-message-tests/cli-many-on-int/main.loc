@@ -1,0 +1,10 @@
+-- `many: true` requires the wire schema to be array-shaped
+-- (`a...`). On an Int positional this is meaningless; the validator
+-- rejects it with the offending wire schema in the message.
+module main (f)
+
+f ::
+  --' many: true
+  Int ->
+  Int
+f x = x

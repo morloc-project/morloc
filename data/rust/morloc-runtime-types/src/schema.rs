@@ -30,6 +30,22 @@ pub enum SerialType {
                     // Schema's `name` field. Recursive records (e.g. Tree with a
                     // `[Tree]` field) terminate descent here; consumers resolve
                     // the cycle by walking up to the matching named declaration.
+    IFile = 21,     // Random-access stream-file handle (read-only).
+    OStream = 22,   // Sequential stream-file writer handle.
+    IStream = 23,   // Sequential stream-file reader handle.
+    // The three stream-handle variants share one wire layout: a 16-byte
+    // tagged union.
+    //   bytes 0..8  : tag in low byte; remaining bits reserved (zero).
+    //   bytes 8..16 : payload (u64).
+    // Tag values:
+    //   0 = path-form: payload is a relptr to an Array<u8> carrying the
+    //       file path. Receiver opens locally via `mlc_open(path, kind)`
+    //       and binds a fresh slot in its own registry.
+    //   1 = handle-form: payload is a bare `uint64_t` slot id meaningful
+    //       in the receiver's shared SHM registry (intra-nexus only).
+    //   2+ : reserved (future: content hash, URI, inline blob, ...).
+    // `kind` for the receiver's open call is determined by the schema
+    // code (`F` -> IFILE, `O` -> OSTREAM, `I` -> ISTREAM).
 }
 
 /// Schema character codes for parsing schema strings.
@@ -45,6 +61,9 @@ const SCHEMA_MAP: u8 = b'm';
 const SCHEMA_OPTIONAL: u8 = b'?';
 const SCHEMA_INT: u8 = b'j';
 const SCHEMA_TABLE: u8 = b'T';
+const SCHEMA_IFILE: u8 = b'F';
+const SCHEMA_OSTREAM: u8 = b'O';
+const SCHEMA_ISTREAM: u8 = b'I';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -86,7 +105,9 @@ impl Schema {
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
-            SerialType::String | SerialType::Int => std::mem::size_of::<shm::Array>(),
+            SerialType::String | SerialType::Int | SerialType::IFile
+            | SerialType::OStream | SerialType::IStream
+                => std::mem::size_of::<shm::Array>(),
             _ => 0,
         };
         Schema {
@@ -134,10 +155,13 @@ impl Schema {
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
             SerialType::String | SerialType::Array | SerialType::Map
-            | SerialType::Int | SerialType::Table => {
+            | SerialType::Int | SerialType::Table | SerialType::IFile
+            | SerialType::OStream | SerialType::IStream => {
                 // Table values live in SHM as a single relative pointer
                 // to an Arrow buffer; same pointer-sized alignment as
-                // other indirect types.
+                // other indirect types. F/O/I are wire-shaped as a 16-byte
+                // tagged union (tag + payload) sharing the same
+                // pointer-sized alignment.
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
             // A back-ref ultimately resolves to a Map, which is pointer-aligned.
@@ -283,6 +307,28 @@ fn parse_schema_r(
             // matching the C string_schema() constructor.
             Ok((Schema {
                 serial_type: SerialType::String,
+                size: 1,
+                width: std::mem::size_of::<crate::shm_types::Array>(),
+                offsets: Vec::new(),
+                hint: None,
+                parameters: vec![Schema::primitive(SerialType::Uint8)],
+                keys: Vec::new(),
+                name: None,
+            }, cur))
+        }
+        SCHEMA_IFILE | SCHEMA_OSTREAM | SCHEMA_ISTREAM => {
+            // F/O/I share one wire layout: a 16-byte tagged union (tag in
+            // low byte of the first 8 bytes, payload u64 in the second 8).
+            // `parameters[0]` carries `Uint8` so walkers that descend into
+            // String-shaped fields keep working without special-casing the
+            // outer schema.
+            let st = match c {
+                SCHEMA_IFILE => SerialType::IFile,
+                SCHEMA_OSTREAM => SerialType::OStream,
+                _ => SerialType::IStream,
+            };
+            Ok((Schema {
+                serial_type: st,
                 size: 1,
                 width: std::mem::size_of::<crate::shm_types::Array>(),
                 offsets: Vec::new(),
@@ -753,6 +799,9 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::Float32 => buf.push_str("f4"),
         SerialType::Float64 => buf.push_str("f8"),
         SerialType::String => buf.push('s'),
+        SerialType::IFile => buf.push('F'),
+        SerialType::OStream => buf.push('O'),
+        SerialType::IStream => buf.push('I'),
         SerialType::Array => {
             buf.push('a');
             let expected = schema.offsets.first().copied().unwrap_or(0);

@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Serialize
   ) where
 
 import Data.Text (Text)
+import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -328,8 +329,19 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- Runtime intrinsics with thunk return types (save/load): the C functions
     -- (mlc_save, mlc_load) are eager, so we wrap them in DoBlockN to produce a
     -- proper thunk that EvalN can call.
+    --
+    -- IntrIFileWalk is intentionally NOT in this list: its morloc-level
+    -- result type is the bare element type (Express.hs assigns @out@
+    -- without an <IO> wrapper), so wrapping it in DoBlockN produces a
+    -- thunk that no EvalN insertion site invokes. The walker is eager;
+    -- emit it as a plain inline call and let surrounding expressions
+    -- consume the value directly.
     nativeExpr m (MonoIntrinsic t intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad] = do
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad,
+                     IntrOpen, IntrClose, IntrFSchema,
+                     IntrFLength, IntrNext, IntrStream,
+                     IntrWrite, IntrAppend, IntrConcat, IntrFlush,
+                     IntrStdin, IntrStdout, IntrStderr] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
           es'' <- unpackDataArgIfNeeded m intr es'
@@ -368,16 +380,33 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- user-side struct it cannot serialize.
     unpackDataArgIfNeeded ::
       Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
+    -- @save's first argument is the compression level, not the data;
+    -- the data is the second positional arg. Apply the unpacker there.
+    unpackDataArgIfNeeded m IntrSave (levelArg : dataArg : rest) = do
+      rest' <- packDataArg m dataArg
+      return (levelArg : rest' ++ rest)
+    -- @write's args are [level, value, handle]; the value is at index 1.
+    unpackDataArgIfNeeded m IntrWrite (levelArg : dataArg : rest) = do
+      rest' <- packDataArg m dataArg
+      return (levelArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr (dataArg : rest)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
-          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-          case ast of
-            SerialPack _ (packer, _) -> do
-              let unpackerSrc = typePackerReverse packer
-                  unpackedType = typePackerUnpacked packer
-              return (AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg] : rest)
-            _ -> return (dataArg : rest)
+      | intr `elem` [IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
+          rest' <- packDataArg m dataArg
+          return (rest' ++ rest)
     unpackDataArgIfNeeded _ _ args = return args
+
+    -- Pack a single data arg through its language's unpacker if it has
+    -- a Packable instance. Returns either a single-element list with the
+    -- wrapped expression or the original arg unchanged.
+    packDataArg :: Int -> NativeExpr -> MorlocMonad [NativeExpr]
+    packDataArg m dataArg = do
+      ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+      case ast of
+        SerialPack _ (packer, _) -> do
+          let unpackerSrc = typePackerReverse packer
+              unpackedType = typePackerUnpacked packer
+          return [AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg]]
+        _ -> return [dataArg]
 
     -- Symmetric to unpackDataArgIfNeeded: @load and @read return optional
     -- values, and the runtime emits the wire form. When the user-facing
@@ -410,8 +439,12 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
+    -- @save's data is the second positional arg (after the level).
+    intrinsicSchema m IntrSave _ (_levelArg : dataArg : _) = do
+      ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrSave, IntrSaveM, IntrSaveJ, IntrShow, IntrSchema] = do
+      | intr `elem` [IntrHash, IntrSaveM, IntrSaveJ, IntrShow, IntrSchema] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =
@@ -434,7 +467,71 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrIFileWalk tf _ = do
+      -- The schema describes the result type the walker materializes
+      -- (the per-language wrapper deserializes the voidstar via
+      -- from_voidstar<T>). For bracket-index/struct chains the result
+      -- is a single element type; for bracket-slice it is a list type.
+      -- Either way, the post-EffectF type carries the right shape.
+      let unwrap (EffectF _ inner) = unwrap inner
+          unwrap other = other
+          dataType = unwrap tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrNext tf _ = do
+      -- @next returns the sub-packet as `[a]`. The wrapper drops the
+      -- EffectF wrap and serialises the list type so the per-language
+      -- from_voidstar call materialises it correctly.
+      let unwrap (EffectF _ inner) = unwrap inner
+          unwrap other = other
+          dataType = unwrap tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @write's data arg (at index 1, after the level Int) carries `[a]`;
+    -- schema describes that list type so to_voidstar produces the right
+    -- voidstar layout for the runtime's flatten_to_buffer.
+    intrinsicSchema m IntrWrite _ (_levelArg : dataArg : _) = do
+      ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @open :: <IO> (OStream a): the element schema for `a` flows into
+    -- the runtime so it can write the stream header at open time. For
+    -- IFile/IStream the runtime reads the schema off disk; we return
+    -- Nothing for those and the codegen routes through the generic
+    -- `_mlc_open(path, kind)` entry.
+    intrinsicSchema m IntrOpen tf _ = case unwrapOpenHead tf of
+      Just (v, a) | v == BT.ostreamVar -> do
+        ast <- Serial.makeSerialAST m lang a
+        return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      _ -> return Nothing
+    -- @append: schema is the element type so the C ABI's open path can
+    -- validate the existing file's schema before resuming.
+    intrinsicSchema m IntrAppend tf _ = do
+      let unwrap (EffectF _ inner) = unwrap inner
+          unwrap (AppF _ (a : _)) = a  -- OStream a -> a
+          unwrap other = other
+          dataType = unwrap tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @stdin / @stdout / @stderr: schema is the element type. The
+    -- result type is `<IO> (IStream a)` or `<IO> (OStream a)`; peel
+    -- the effect wrap and the handle head to get `a`.
+    intrinsicSchema m intr tf _
+      | intr `elem` [IntrStdin, IntrStdout, IntrStderr] = do
+          let peel (EffectF _ inner) = peel inner
+              peel (AppF _ (a : _)) = a
+              peel other = other
+              dataType = peel tf
+          ast <- Serial.makeSerialAST m lang dataType
+          return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ _ _ _ = return Nothing
+
+    -- Extract (Handle-tvar, element-tf) from the result type of `@open`.
+    -- The result is wrapped in <IO>; peel that, then accept either the
+    -- standalone bare `AppF` or a transparent newtype/optional pierce.
+    unwrapOpenHead :: TypeF -> Maybe (TVar, TypeF)
+    unwrapOpenHead (EffectF _ inner) = unwrapOpenHead inner
+    unwrapOpenHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
+    unwrapOpenHead _ = Nothing
 
     -- Render a TypeF as a user-facing Morloc type string (for @typeof).
     -- Uses the general type variable name (not the language-concrete one),

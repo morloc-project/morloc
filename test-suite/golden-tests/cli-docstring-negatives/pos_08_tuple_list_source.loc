@@ -1,0 +1,12 @@
+module main (foo)
+
+import root
+
+-- form: list on a list-of-tuple does not take a list.source override.
+foo ::
+  --' source: file
+  --' form: list
+  --' list.source: file
+  [(Int, Str)] ->
+  Int
+foo x = 0

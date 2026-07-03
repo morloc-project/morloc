@@ -1,0 +1,16 @@
+module main (result)
+
+-- The morloc-level import is what causes `morloc-test-expose-cpp` to be
+-- in the import graph; it has no source declarations of its own, so the
+-- legacy "directory of sourced file lands on -I" mechanism does not
+-- fire. The only way `src.hpp`'s `#include "morloc-test-expose-cpp/...`
+-- resolves is via the expose'd copy under $MORLOC_HOME/include/.
+import morloc-test-expose-cpp
+import root-cpp
+
+source Cpp from "src.hpp" ("compute")
+
+compute :: Int -> Int
+
+result :: Int -> Int
+result x = compute x

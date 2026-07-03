@@ -93,6 +93,8 @@ impl ShmReader {
     fn at(&self, offset: usize) -> ShmReader {
         unsafe { ShmReader::new(self.ptr.add(offset)) }
     }
+
+    fn as_ptr(&self) -> *const u8 { self.ptr }
 }
 
 // ── JSON -> Voidstar ───────────────────────────────────────────────────────
@@ -277,6 +279,43 @@ fn json_to_voidstar_inner(
                 (w, data_rel)
             };
             w.write_array_header(0, bytes.len(), data_rel);
+            Ok(w.as_ptr())
+        }
+
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            // JSON value is the file path. Lay it down as a tagged
+            // stream-handle field (TAG_PATH) so the codec primitives can
+            // pick it up uniformly.
+            use morloc_runtime_types::stream_handle as sh;
+            let s: String = serde_json::from_str(text)
+                .map_err(|e| err(&format!("expected string: {}", e)))?;
+            let bytes = s.as_bytes();
+
+            let (w, payload) = if dest.is_some() {
+                let w = alloc(dest, sh::STREAM_HANDLE_FIELD_SIZE)?;
+                let payload = if bytes.is_empty() {
+                    RELNULL as u64
+                } else {
+                    let block = shm::shmalloc(sh::path_suballoc_size(bytes.len()))?;
+                    unsafe { sh::write_path_suballoc(block, bytes); }
+                    shm::abs2rel(block)? as u64
+                };
+                (w, payload)
+            } else {
+                let suballoc = sh::path_suballoc_size(bytes.len());
+                let w = alloc(None, sh::STREAM_HANDLE_FIELD_SIZE + suballoc)?;
+                let payload = if bytes.is_empty() {
+                    RELNULL as u64
+                } else {
+                    let body_ptr = unsafe {
+                        w.as_ptr().add(sh::STREAM_HANDLE_FIELD_SIZE)
+                    };
+                    unsafe { sh::write_path_suballoc(body_ptr, bytes); }
+                    shm::abs2rel(body_ptr)? as u64
+                };
+                (w, payload)
+            };
+            unsafe { sh::write_field(w.as_ptr(), sh::TAG_PATH, payload); }
             Ok(w.as_ptr())
         }
 
@@ -635,6 +674,44 @@ fn to_json_inner(
                 json_escape(dr.read_str(0, arr.size), buf);
             }
         }
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            // Tagged stream-handle field: TAG_PATH renders the file path
+            // straight into JSON; TAG_HANDLE looks up the path via the
+            // local SHM registry so the on-disk JSON always carries a
+            // path string.
+            use morloc_runtime_types::stream_handle as sh;
+            let field_ptr = r.as_ptr();
+            let tag = unsafe { sh::read_tag(field_ptr) };
+            let payload = unsafe { sh::read_payload(field_ptr) };
+            if tag == sh::TAG_PATH {
+                if payload == RELNULL as u64 {
+                    buf.push_str("\"\"");
+                } else {
+                    let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                    let path_len = unsafe { sh::read_path_size(suballoc) } as usize;
+                    if path_len == 0 {
+                        buf.push_str("\"\"");
+                    } else {
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(suballoc.add(8), path_len)
+                        };
+                        let s = std::str::from_utf8(bytes).map_err(|_| {
+                            MorlocError::Serialization(
+                                "json stream-handle: path is not valid UTF-8".into(),
+                            )
+                        })?;
+                        json_escape(s, buf);
+                    }
+                }
+            } else if tag == sh::TAG_HANDLE {
+                let path = crate::stream::handle_path(payload as i64)?;
+                json_escape(&path, buf);
+            } else {
+                return Err(MorlocError::Serialization(format!(
+                    "json stream-handle: unsupported tag {}", tag,
+                )));
+            }
+        }
         SerialType::Array => {
             let arr = r.read_array(0);
             let es = &schema.parameters[0];
@@ -850,17 +927,15 @@ fn parse_float(text: &str, name: &str) -> Result<f64, MorlocError> {
     )))
 }
 
-// Recognise non-finite literal forms case-insensitively. Returns None if the
-// input is not a recognised non-finite spelling. Accepts: nan, +nan, -nan,
-// inf, +inf, -inf, infinity, +infinity, -infinity, and bareword null
-// (legacy recovery -> NaN).
+// Recognise the canonical non-finite wire tokens. Case-sensitive,
+// matching the writer (which emits exactly `"inf"` / `"-inf"` /
+// `"nan"`). Any other spelling is rejected so the caller surfaces a
+// clear parse error.
 fn parse_nonfinite(s: &str) -> Option<f64> {
-    let lower = s.to_ascii_lowercase();
-    match lower.as_str() {
-        "nan" | "+nan" | "-nan" => Some(f64::NAN),
-        "inf" | "+inf" | "infinity" | "+infinity" => Some(f64::INFINITY),
-        "-inf" | "-infinity" => Some(f64::NEG_INFINITY),
-        "null" => Some(f64::NAN),
+    match s {
+        "nan" => Some(f64::NAN),
+        "inf" => Some(f64::INFINITY),
+        "-inf" => Some(f64::NEG_INFINITY),
         _ => None,
     }
 }

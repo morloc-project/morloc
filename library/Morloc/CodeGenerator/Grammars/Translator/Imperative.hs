@@ -63,7 +63,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Word (Word8)
 import GHC.Generics (Generic)
+import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Grammars.Common
   ( DispatchEntry (..)
   , PoolDocs (..)
@@ -131,11 +133,51 @@ data IExpr
   | IRawExpr Text
   | IDoBlock IExpr -- effect: lambda wrapping expression
   | IEval IExpr -- eval: call effect with no args
-  | IIntrinsicSave Text Int IExpr IExpr -- format, schemaId, data, path
+  | IIntrinsicSave Text Int IExpr IExpr IExpr -- format, schemaId, level, data, path
   | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
   | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
+  | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
+  | IIntrinsicClose IExpr -- handle -> ()
+  | IIntrinsicFSchema IExpr -- path -> schema string
+  | IIntrinsicFLength IExpr
+      -- ^ handle -> Int element count (read from cached StreamDiag)
+  | IIntrinsicIFileWalk Int (Maybe IType) IExpr IExpr [IExpr]
+      -- ^ Unified IFile pattern walker.
+      --   schemaId of the result type, return type (for C++ template),
+      --   path string expression, handle expression, list of runtime
+      --   args (bracket bounds, in DFS order). The walker resolves
+      --   the path against the file's value schema; each bracket step
+      --   consumes args (1 for `.[]`, 3 for `.[:]`). Per-language
+      --   wrappers marshal the runtime args (each an
+      --   @Optional<Int64>@-shaped pair) into the C ABI.
+  | IIntrinsicNext Int (Maybe IType) IExpr
+      -- ^ @next on an IStream: schemaId of the [a] result, return type
+      --   (for C++ template), handle expression. Per-language wrappers
+      --   call mlc_next and deserialise via from_voidstar<List<T>>.
+  | IIntrinsicStream IExpr
+      -- ^ @stream :: IFile a -> <IO> IStream a: derive an IStream
+      --   handle from an open IFile handle (independent fd/mmap/cursor).
+  | IIntrinsicOpenOStream Int IExpr
+      -- ^ @open :: <IO> (OStream a): schemaId of the element type and
+      --   the path expression. The runtime creates the file and writes
+      --   the stream header with the schema metadata block.
+  | IIntrinsicWrite Int IExpr IExpr IExpr
+      -- ^ @write: schemaId of the [a] value type, level, value, handle.
+  | IIntrinsicAppend Int IExpr
+      -- ^ @append :: Str -> <IO> (OStream a): schemaId of `a`, path expr.
+  | IIntrinsicConcat IExpr IExpr
+      -- ^ @concat :: [Str] -> Str -> <IO> (): paths expr, dest expr.
+  | IIntrinsicFlush IExpr
+      -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
+      --   to be emitted as a sub-packet. Single-argument: handle expr.
+  | IIntrinsicStdin Int
+      -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `a`.
+  | IIntrinsicStdout Int
+      -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `a`.
+  | IIntrinsicStderr Int
+      -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `a`.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -648,18 +690,32 @@ lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [dataDocs, pathDocs]) = do
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "voidstar"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+      saveExpr = IIntrinsicSave fmt sid
+                   (IRawExpr (render (poolExpr levelDocs)))
+                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr pathDocs)))
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs, pathDocs]
+-- @savem/@savej are not packet formats; codegen always passes a zero
+-- level expression so the printed call shape is uniform with @save.
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "msgpack"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+      saveExpr = IIntrinsicSave fmt sid
+                   (IRawExpr "0")
+                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr pathDocs)))
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "json"
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSave fmt sid (IRawExpr (render (poolExpr dataDocs))) (IRawExpr (render (poolExpr pathDocs))))) [dataDocs, pathDocs]
+      saveExpr = IIntrinsicSave fmt sid
+                   (IRawExpr "0")
+                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr pathDocs)))
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   innerType <- case typeFof origExpr of
@@ -684,6 +740,152 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
+-- @open: dispatch on the resolved handle type. IFile/IStream go through
+-- the generic kind-byte runtime entry; OStream needs the element schema
+-- threaded so the runtime can write the stream header at open time.
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
+  let unwrapHead (EffectF _ inner) = unwrapHead inner
+      unwrapHead (AppF (VarF (FV v _)) _) = Just v
+      unwrapHead (VarF (FV v _)) = Just v
+      unwrapHead _ = Nothing
+  let headVar = unwrapHead (typeFof origExpr)
+  case headVar of
+    Just v | v == BT.ostreamVar -> do
+      schemaText <- case maySchema of
+        Just s  -> return s
+        Nothing -> error "@open :: OStream a -- schema not synthesized (Serialize.hs bug)"
+      sid <- lcRegisterSchema cfg schemaText
+      return $ pathDocs
+        { poolExpr = lcPrintExpr cfg
+            (IIntrinsicOpenOStream sid (IRawExpr (render (poolExpr pathDocs))))
+        }
+    Just v | v == BT.ifileVar || v == BT.istreamVar -> do
+      let kind | v == BT.ifileVar   = BT.mlcKindIFile
+               | v == BT.istreamVar = BT.mlcKindIStream
+               | otherwise          = BT.mlcKindIFile  -- unreachable
+      return $ pathDocs
+        { poolExpr = lcPrintExpr cfg
+            (IIntrinsicOpen kind (IRawExpr (render (poolExpr pathDocs))))
+        }
+    Just (TV t) ->
+      error $ "@open: result type must be IFile/IStream/OStream, got " <> T.unpack t
+    Nothing ->
+      error "@open: unsupported handle type"
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose _ [handleDocs]) =
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicClose (IRawExpr (render (poolExpr handleDocs))))
+    }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
+  return $ pathDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicFSchema (IRawExpr (render (poolExpr pathDocs))))
+    }
+-- @flen: handle -> Int element count. No schema needed; the runtime
+-- returns a raw integer.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFLength _ [handleDocs]) =
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicFLength (IRawExpr (render (poolExpr handleDocs))))
+    }
+-- @next: IStream handle -> <IO> [a]. The wrapper deserialises the
+-- materialised voidstar payload into a typed list of the result.
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  let resultTf = case typeFof origExpr of
+        EffectF _ inner -> inner
+        other -> other
+  resultType <- lcTypeOf cfg resultTf
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicNext sid resultType
+          (IRawExpr (render (poolExpr handleDocs))))
+    }
+-- @stream: derive an IStream handle from an IFile. The runtime opens
+-- a fresh slot bound to the same path.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicStream (IRawExpr (render (poolExpr handleDocs))))
+    }
+-- @write: emit one sub-packet of the [a] value to the OStream handle.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
+                                  [levelDocs, valueDocs, handleDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  let allDocs = [levelDocs, valueDocs, handleDocs]
+      raw d = IRawExpr (render (poolExpr d))
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicWrite sid (raw levelDocs) (raw valueDocs) (raw handleDocs))
+    , poolPriorExprs = concatMap poolPriorExprs allDocs
+    , poolPriorLines = concatMap poolPriorLines allDocs
+    , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
+    }
+-- @append: open an existing stream file for append, returning a fresh
+-- OStream handle.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrAppend (Just schema) [pathDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ pathDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicAppend sid (IRawExpr (render (poolExpr pathDocs))))
+    }
+-- @concat: byte-level concat of N stream files into one.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrConcat _ [pathsDocs, destDocs]) =
+  let allDocs = [pathsDocs, destDocs]
+      raw d = IRawExpr (render (poolExpr d))
+   in return $ pathsDocs
+        { poolExpr = lcPrintExpr cfg
+            (IIntrinsicConcat (raw pathsDocs) (raw destDocs))
+        , poolPriorExprs = concatMap poolPriorExprs allDocs
+        , poolPriorLines = concatMap poolPriorLines allDocs
+        , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
+        }
+-- @flush: force any buffered elements out as a sub-packet.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
+    }
+-- @stdin / @stdout / @stderr: nullary intrinsics. The runtime enforces
+-- singleton opens per stdio kind; codegen just emits the call with the
+-- element schema.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStdin (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg (IIntrinsicStdin sid) }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStdout (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg (IIntrinsicStdout sid) }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStderr (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue
+    { poolExpr = lcPrintExpr cfg (IIntrinsicStderr sid) }
+-- @ifile_walk: unified IFile pattern walker.
+-- Args: [pathDocs, handleDocs, runtimeArg0, runtimeArg1, ...].
+-- Express.hs assembles the path string and runtime args according to
+-- the walk-step chain; we forward them to the per-language wrapper.
+-- The schema slot from Serialize.hs carries the result type's msgpack
+-- schema so the wrapper can convert the returned voidstar via
+-- from_voidstar<T>.
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrIFileWalk (Just schema) (pathDocs : handleDocs : runtimeDocs)) = do
+  sid <- lcRegisterSchema cfg schema
+  let resultTf = case typeFof origExpr of
+        EffectF _ inner -> inner
+        other -> other
+  resultType <- lcTypeOf cfg resultTf
+  let allDocs = pathDocs : handleDocs : runtimeDocs
+      raw d = IRawExpr (render (poolExpr d))
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicIFileWalk sid resultType
+          (raw pathDocs)
+          (raw handleDocs)
+          (map raw runtimeDocs))
+    , poolPriorExprs = concatMap poolPriorExprs allDocs
+    , poolPriorLines = concatMap poolPriorLines allDocs
+    , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
+    }
 lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 -- Lift a source function through an Optional. Mirrors how

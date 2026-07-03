@@ -17,6 +17,7 @@ pub mod hash;
 // the `MorlocSocket` struct without re-defining it.
 pub use morloc_runtime_types::shm_types;
 pub use morloc_runtime_types::daemon_socket;
+pub use morloc_runtime_types::compression;
 pub mod ipc;
 pub mod json;
 pub mod mpack;
@@ -39,6 +40,8 @@ pub mod slurm_bridge;
 pub mod manifest_ffi;
 pub mod eval_arena;
 pub mod eval_ffi;
+pub mod stream;
+pub mod handle_scan;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;

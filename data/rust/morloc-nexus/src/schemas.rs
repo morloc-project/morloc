@@ -103,6 +103,12 @@ fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
         // help text shows e.g. `Tree` where the body would otherwise
         // recurse.
         Recur => s.name.clone().unwrap_or_else(|| "?".into()),
+        // Cross-pool stream handles: surface as their user-facing morloc
+        // type. The wire is a tagged union of path / handle; help text
+        // shows only the type layer.
+        IFile => "IFile a".into(),
+        OStream => "OStream a".into(),
+        IStream => "IStream a".into(),
     }
 }
 

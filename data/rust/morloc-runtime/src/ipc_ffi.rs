@@ -175,6 +175,18 @@ pub unsafe extern "C" fn start_daemon(
     }
     (*daemon).shm = shm;
 
+    // Attach the daemon to the shared stream registry. If the nexus
+    // already bootstrapped it, this is a fast no-op (the segment is
+    // mapped via shopen and the cached state is recorded). If the
+    // daemon is the first to call it (e.g. unit-test harness with no
+    // nexus), the bootstrap CAS handles allocation.
+    let slot_count = crate::ffi::stream_registry_init(&mut err);
+    if slot_count == usize::MAX {
+        close_daemon(&mut (daemon as *mut LanguageDaemon));
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+
     // Create server socket
     (*daemon).server_fd = new_server(socket_path, &mut err);
     if !err.is_null() {

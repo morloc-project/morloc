@@ -1,0 +1,11 @@
+module main (foo)
+
+import root
+
+-- form: list requires a list-typed argument.
+foo ::
+  --' source: file
+  --' form: list
+  Int ->
+  Int
+foo x = 0

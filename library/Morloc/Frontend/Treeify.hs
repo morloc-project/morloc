@@ -16,6 +16,7 @@ input to the typechecker and code generator.
 module Morloc.Frontend.Treeify (treeify) where
 
 import qualified Data.Set as Set
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -25,7 +26,7 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Link as MFL
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (collectEffLabels)
+import Morloc.Typecheck.Internal (collectEffLabels, unqualify)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.LanguageDescriptor
@@ -88,6 +89,13 @@ treeify d
             -- the name is emitted verbatim, so code in this position would
             -- be injected into the pool
             checkSourceNames d'
+
+            -- PatternAccessible dispatches the pattern-accessor syntax
+            -- (`.foo`, `.[i]`, `.[s:e:p]`) at codegen; Indexable /
+            -- Sliceable / SliceableDim dispatch the same syntax
+            -- structurally. Declaring both for the same head is
+            -- ambiguous.
+            checkPatternAccessibleCoherence
 
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
@@ -258,6 +266,72 @@ checkDeclaredEffects d = do
         uncurryFun (FunU ps r) =
           let (ps', r') = uncurryFun r in (ps ++ ps', r')
         uncurryFun t = ([], t)
+
+-- | Reject any receiver head that has both a @PatternAccessible@
+-- instance and a structural (@Indexable@ \/ @Sliceable@ \/
+-- @SliceableDim@) instance. Both class families dispatch the same
+-- pattern-accessor syntax (@.foo@, @.[i]@, @.[s:e:p]@); silently
+-- preferring one at codegen would be a footgun. Force an explicit
+-- choice at declaration time.
+checkPatternAccessibleCoherence :: MorlocMonad ()
+checkPatternAccessibleCoherence = do
+  paHeads <- collectReceiverHeads (EV BT.extractPatternMethod) 2
+  -- Fast path: most compiles declare no 'PatternAccessible' instance,
+  -- so skip the structural-class scan entirely.
+  if Map.null paHeads
+    then return ()
+    else do
+      ixHeads <- collectReceiverHeads (EV "__access_index__") 1
+      slHeads <- collectReceiverHeads (EV "__get_slice__") 3
+      sdHeads <- collectReceiverHeads (EV "__get_slice_dim__") 3
+      let structural = Map.unions [ixHeads, slHeads, sdHeads]
+          conflicts  = [ (h, paIdx)
+                       | (h, paIdx) <- Map.toList paHeads
+                       , Map.member h structural
+                       ]
+      case conflicts of
+        [] -> return ()
+        ((h, paIdx) : _) ->
+          MM.throwSourcedError paIdx $
+            "Type" <+> squotes (pretty h)
+              <+> "has a 'PatternAccessible' instance and also has an"
+              <+> "'Indexable', 'Sliceable', or 'SliceableDim' instance."
+              <+> "Both class families dispatch the pattern-accessor"
+              <+> "syntax (.foo, .[i], .[s:e:p]) on the same receiver,"
+              <+> "so silently preferring one would be ambiguous."
+              <+> "Choose one: keep 'PatternAccessible" <+> pretty h <> "'"
+              <+> "for a custom walker, or drop it and let"
+              <+> "'Indexable' / 'Sliceable' provide structural dispatch."
+
+-- | Collect the receiver's outermost 'TVar' from every 'TermTypes'
+-- entry of a class method's instance list, keyed on that TVar. The
+-- 'pos' parameter is the argument index the receiver occupies in the
+-- method's function type. The 'Int' value is one representative
+-- source index for the instance (used as the caret in error
+-- messages). Sourced instances (@source Py from ...@) carry the
+-- index in 'termConcrete'; body-declared instances (@__method__ =
+-- someExpr@) carry it in 'termDecl'.
+collectReceiverHeads :: EVar -> Int -> MorlocMonad (Map.Map TVar Int)
+collectReceiverHeads method pos = do
+  sigmap <- MM.gets stateTypeclasses
+  case Map.lookup method sigmap of
+    Nothing -> return Map.empty
+    Just inst -> return $ Map.fromList
+      [ (h, i)
+      | tt@(TermTypes (Just et) _ _) <- instanceTerms inst
+      , (h : _) <- [receiverHeads et]
+      , Just i <- [instanceIndex tt]
+      ]
+  where
+    receiverHeads :: EType -> [TVar]
+    receiverHeads et = case snd (unqualify (etype et)) of
+      FunU args _ | length args > pos -> [extractKey (args !! pos)]
+      _                               -> []
+
+    instanceIndex :: TermTypes -> Maybe Int
+    instanceIndex (TermTypes _ ((_, Idx ix _) : _) _) = Just ix
+    instanceIndex (TermTypes _ _ (ExprI ix _ : _))    = Just ix
+    instanceIndex _                                    = Nothing
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f

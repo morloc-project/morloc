@@ -34,7 +34,7 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     shm_tracker_count++;
 }
 
-static void flush_shm_tracker(void) {
+static void shm_tracker_flush(void) {
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
         // shm::shfree decrements the refcount and zeros the block on final
@@ -223,7 +223,7 @@ static int schema_to_npy_type(morloc_serial_type type) {
     }
 }
 
-PyObject* fromAnything(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
+PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
 
     PyObject* obj = NULL;
     // Push the schema's name (if it is a `&<name>X` declaration) onto
@@ -287,6 +287,20 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             break;
         }
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
+                         : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
+                         :                                    MLC_KIND_ISTREAM;
+            int64_t handle = PyTRY(mlc_read_handle_voidstar,
+                                   data, base_ptr, kind);
+            obj = PyLong_FromLongLong((long long)handle);
+            if (!obj) {
+                PyRAISE("Failed to wrap stream handle as PyLong");
+            }
+            break;
+        }
         case MORLOC_STRING: {
             Array* str_array = (Array*)data;
             void* tmp_ptr = NULL;
@@ -336,7 +350,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             // memcpy). For everything else (MORLOC_INT BigInt, MORLOC_STRING,
             // nested tuples/arrays/records, MORLOC_NIL, MORLOC_OPTIONAL) we
             // build an `np.empty(n, dtype=object)` and fill via recursive
-            // fromAnything per element. This preserves Functor's container
+            // from_voidstar per element. This preserves Functor's container
             // invariance: `map asString ([1,2,3] :: Vector 3 Int)` stays a
             // NumPy ndarray on both sides, the dtype just shifts from int64
             // to object.
@@ -361,7 +375,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             if (numpy_type_num == NPY_OBJECT) {
                 // Boxed path: build dtype=object array and fill via
-                // recursive fromAnything. Each slot stores a PyObject*
+                // recursive from_voidstar. Each slot stores a PyObject*
                 // pointer; SETITEM handles INCREF/DECREF correctly.
                 import_numpy();
                 npy_intp dims[] = {array->size};
@@ -375,7 +389,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
                         if (!item) {
                             PyRAISE("Failed to convert element for numpy object array");
                         }
@@ -436,7 +450,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             PyRAISE("Failed to access element in list")
                         }
@@ -470,7 +484,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = fromAnything(element_schema, start + width * i, base_ptr);
+                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
                         if (!item || PyList_SetItem(obj, i, item) < 0) {
                             PyRAISE("Failed to access element in list");
                         }
@@ -488,7 +502,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* item = fromAnything(schema->parameters[i], item_ptr, base_ptr);
+                PyObject* item = from_voidstar(schema->parameters[i], item_ptr, base_ptr);
                 if (!item || PyTuple_SetItem(obj, i, item) < 0) {
                     PyRAISE("Failed to access tuple element");
                 }
@@ -502,7 +516,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
             }
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* value = fromAnything(schema->parameters[i], item_ptr, base_ptr);
+                PyObject* value = from_voidstar(schema->parameters[i], item_ptr, base_ptr);
                 PyObject* key = PyUnicode_FromString(schema->keys[i]);
                 if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
                     Py_XDECREF(value);
@@ -536,7 +550,7 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                     goto error;
                 }
             }
-            obj = fromAnything(schema->parameters[0], inner_abs, base_ptr);
+            obj = from_voidstar(schema->parameters[0], inner_abs, base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize optional inner value");
             }
@@ -553,14 +567,14 @@ PyObject* fromAnything(const Schema* schema, const void* data, const void* base_
                 PyRAISE("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
-            obj = fromAnything(target, data, base_ptr);
+            obj = from_voidstar(target, data, base_ptr);
             if (!obj) {
                 PyRAISE("Failed to deserialize recursive value");
             }
             break;
         }
         default:
-            PyRAISE("Unsupported schema type %d in fromAnything", (int)schema->type);
+            PyRAISE("Unsupported schema type %d in from_voidstar", (int)schema->type);
     }
 
     recur_env_pop(_recur_pushed);
@@ -605,6 +619,23 @@ error:
 
 static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj);
 
+// Extract N IFile handles from a Python list of bit64 ints into `out`.
+// Sets PyErr and returns -1 if any element isn't a Python int. Used by
+// the [IFile a] sizing and write fast paths; both batched mlc_handles_*
+// calls take `const int64_t*`, so any Python sequence whose elements
+// are Python ints can feed them after one round of extraction.
+static int extract_ifile_handles_pylist(PyObject* list, int64_t* out, Py_ssize_t n) {
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PyList_GetItem(list, i);
+        long long h = PyLong_AsLongLong(item);
+        if (h == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        out[i] = (int64_t)h;
+    }
+    return 0;
+}
+
 // Wrap get_shm_size_inner so the recursive-env stack is maintained at
 // every entry. Inner code calls get_shm_size (this wrapper), which
 // pushes the schema's declaration name (if any) before delegating to
@@ -644,6 +675,28 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
             if (nlimbs <= 1) return 16;  // inline
             return 16 + _Alignof(uint64_t) - 1 + nlimbs * sizeof(uint64_t);
         }
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            // F/O/I share the tagged stream-handle field wire form; look
+            // up the exact suballoc cost via the registry (returns 8 +
+            // path_len for TAG_PATH, 0 for empty).
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for stream-handle, but got %s",
+                        Py_TYPE(obj)->tp_name);
+            }
+            long long handle_ll = PyLong_AsLongLong(obj);
+            if (handle_ll == -1 && PyErr_Occurred()) return -1;
+            char* err = NULL;
+            int64_t n = mlc_handle_path_len((int64_t)handle_ll, &err);
+            if (n < 0) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                err ? err : "mlc_handle_path_len failed");
+                free(err);
+                return -1;
+            }
+            return sizeof(Array) + (ssize_t)n;
+        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
@@ -681,12 +734,48 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                         case MORLOC_FLOAT64:
                             required_size += list_size * element_width;
                             break;
+                        case MORLOC_IFILE:
+                        case MORLOC_OSTREAM:
+                        case MORLOC_ISTREAM: {
+                            // Batched suballoc-size lookup for arrays of
+                            // stream handles: one registry lock for N
+                            // handles instead of N.
+                            int64_t* handles = (int64_t*)malloc(list_size * sizeof(int64_t));
+                            if (!handles) {
+                                PyRAISE("get_shm_size: out of memory sizing stream-handle array");
+                            }
+                            if (extract_ifile_handles_pylist(obj, handles, list_size) != 0) {
+                                free(handles);
+                                return -1;
+                            }
+                            char* err = NULL;
+                            int64_t paths_total = mlc_handles_path_lens(
+                                handles, (size_t)list_size, NULL, &err);
+                            free(handles);
+                            if (paths_total < 0) {
+                                PyErr_SetString(PyExc_RuntimeError,
+                                    err ? err : "mlc_handles_path_lens failed");
+                                free(err);
+                                return -1;
+                            }
+                            required_size += list_size * element_width
+                                           + (ssize_t)paths_total;
+                            break;
+                        }
                         case MORLOC_INT:
                         case MORLOC_STRING:
                         case MORLOC_ARRAY:
                         case MORLOC_TUPLE:
                         case MORLOC_MAP:
                         case MORLOC_OPTIONAL:
+                            for(size_t i = 0; i < (size_t)list_size; i++){
+                               required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
+                            }
+                            break;
+                        default:
+                            // Schema layer added a new variable-width element type;
+                            // walk per-element conservatively rather than silently
+                            // under-counting and corrupting the SHM allocation.
                             for(size_t i = 0; i < (size_t)list_size; i++){
                                required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
                             }
@@ -833,19 +922,19 @@ error:
 
 
 
-static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj);
+static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schema, PyObject* obj);
 
 // Public entry point: push the schema's declaration name (if any) and
 // delegate to the inner walker. The push/pop discipline lets Recur arms
 // inside the inner walker resolve via the env stack.
-int to_voidstar_r(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+int to_voidstar_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
     int pushed = recur_env_push(schema);
-    int r = to_voidstar_r_inner(dest, cursor, schema, obj);
+    int r = to_voidstar_inner_impl(dest, cursor, schema, obj);
     recur_env_pop(pushed);
     return r;
 }
 
-static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
+static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
     switch (schema->type) {
         case MORLOC_NIL:
             if (obj != Py_None) {
@@ -949,6 +1038,19 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
             break;
         }
 
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for stream-handle, but got %s",
+                        Py_TYPE(obj)->tp_name);
+            }
+            long long handle_ll = PyLong_AsLongLong(obj);
+            if (handle_ll == -1 && PyErr_Occurred()) { goto error; }
+            PyTRY(mlc_write_handle_voidstar,
+                  (int64_t)handle_ll, dest, cursor);
+            break;
+        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj)  || PyByteArray_Check(obj))) {
@@ -1051,6 +1153,32 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                     char* start = (char*) PyTRY(rel2abs, result->data);
                     Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
+                    // Batched stream-handle-array write: one registry lock for all N handles.
+                    if ((element_schema->type == MORLOC_IFILE
+                      || element_schema->type == MORLOC_OSTREAM
+                      || element_schema->type == MORLOC_ISTREAM) && !numpy_per_element) {
+                        int64_t* handles = (int64_t*)malloc(size * sizeof(int64_t));
+                        if (!handles) {
+                            PyErr_SetString(PyExc_MemoryError,
+                                "to_voidstar: out of memory packing IFile array");
+                            goto error;
+                        }
+                        if (extract_ifile_handles_pylist(obj, handles, size) != 0) {
+                            free(handles);
+                            goto error;
+                        }
+                        char* err = NULL;
+                        int rc = mlc_write_handles_voidstar(
+                            handles, (size_t)size, start, width, cursor, &err);
+                        free(handles);
+                        if (rc != 0) {
+                            PyErr_SetString(PyExc_RuntimeError,
+                                err ? err : "mlc_write_handles_voidstar failed");
+                            free(err);
+                            goto error;
+                        }
+                        break;
+                    }
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item;
                         if (numpy_per_element) {
@@ -1063,7 +1191,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                             // PyList_GetItem returns a BORROWED reference.
                             item = PyList_GetItem(obj, i);
                         }
-                        int rc = to_voidstar_r(start + width * i, cursor, element_schema, item);
+                        int rc = to_voidstar_inner(start + width * i, cursor, element_schema, item);
                         if (numpy_per_element) {
                             Py_DECREF(item);
                         }
@@ -1104,7 +1232,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
-                    if (to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item) != 0) {
+                    if (to_voidstar_inner((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item) != 0) {
                         goto error;
                     }
                 }
@@ -1122,7 +1250,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                     PyObject* value = PyDict_GetItem(obj, key);
                     Py_DECREF(key);
                     if (value) {
-                        if (to_voidstar_r((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value) != 0) {
+                        if (to_voidstar_inner((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value) != 0) {
                             goto error;
                         }
                     }
@@ -1150,7 +1278,7 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 }
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
-                if (to_voidstar_r(inner_dest, cursor, inner_schema, obj) != 0) {
+                if (to_voidstar_inner(inner_dest, cursor, inner_schema, obj) != 0) {
                     goto error;
                 }
             }
@@ -1166,14 +1294,14 @@ static int to_voidstar_r_inner(void* dest, void** cursor, const Schema* schema, 
                 PyRAISE("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
-            if (to_voidstar_r_inner(dest, cursor, target, obj) != 0) {
+            if (to_voidstar_inner_impl(dest, cursor, target, obj) != 0) {
                 goto error;
             }
             break;
         }
 
         default:
-            PyRAISE("Unsupported schema type %d in to_voidstar_r", (int)schema->type);
+            PyRAISE("Unsupported schema type %d in to_voidstar_inner", (int)schema->type);
     }
 
     return 0;
@@ -1198,7 +1326,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   void* cursor = (void*)((char*)dest + schema->width);
 
   // write the data to the block
-  int result = to_voidstar_r(dest, &cursor, schema, obj);
+  int result = to_voidstar_inner(dest, &cursor, schema, obj);
   if (result != 0) {
       goto error;
   }
@@ -1775,7 +1903,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // Fast path: inline voidstar -- read directly from packet, no SHM needed
     if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
-        obj = fromAnything(schema, (const void*)payload, (const void*)payload);
+        obj = from_voidstar(schema, (const void*)payload, (const void*)payload);
         PyTRACE(obj == NULL)
         free_schema(schema);
         return obj;
@@ -1797,7 +1925,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         tracked = true;
     }
 
-    obj = fromAnything(schema, voidstar, NULL);
+    obj = from_voidstar(schema, voidstar, NULL);
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -1816,9 +1944,9 @@ error:
 
 // Free tracked SHM allocations from put_value calls.
 // Called at dispatch start to free result SHM from previous dispatch.
-static PyObject* pybinding__flush_shm_tracker(PyObject* self, PyObject* args) {
+static PyObject* pybinding__shm_tracker_flush(PyObject* self, PyObject* args) {
     (void)self; (void)args;
-    flush_shm_tracker();
+    shm_tracker_flush();
     Py_RETURN_NONE;
 }
 
@@ -2240,7 +2368,7 @@ error:
 }
 
 
-static PyObject* pybinding__make_fail_packetg(PyObject* self, PyObject* args) { MAYFAIL
+static PyObject* pybinding__make_fail_packet(PyObject* self, PyObject* args) { MAYFAIL
     const char* packet_errmsg;
     uint8_t* packet = NULL;
 
@@ -2308,20 +2436,25 @@ error:
 static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
+    long long level_ll;
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+    // Args: (value, schema, level, path). The level is accepted here
+    // for ABI uniformity with mlc_save_voidstar; the runtime ignores it
+    // for the msgpack format (not a packet file).
+    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
         PyRAISE("Failed to parse arguments");
     }
+    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save, voidstar, schema, path);
+    PyTRY(mlc_save, voidstar, schema, level, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -2344,20 +2477,24 @@ error:
 static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
+    long long level_ll;
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+    // Args: (value, schema, level, path). level is the zstd preset
+    // (0 = uncompressed, 1-9 = increasing ratio).
+    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
         PyRAISE("Failed to parse arguments");
     }
+    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_voidstar, voidstar, schema, path);
+    PyTRY(mlc_save_voidstar, voidstar, schema, level, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -2380,20 +2517,23 @@ error:
 static PyObject* pybinding__mlc_save_json(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
+    long long level_ll;
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    if (!PyArg_ParseTuple(args, "Oss", &obj, &schema_str, &path)) {
+    // Args: (value, schema, level, path). level accepted for ABI uniformity.
+    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
         PyRAISE("Failed to parse arguments");
     }
+    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_json, voidstar, schema, path);
+    PyTRY(mlc_save_json, voidstar, schema, level, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -2481,12 +2621,12 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        // The numpy fast-path in fromAnything (base_ptr == NULL) returns a
+        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
         // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
         // backing memory must outlive the view. Defer the shfree via
         // shm_tracker so the dispatch's flush releases the block (and the
         // schema) once the view is no longer in scope.
-        PyObject* obj = fromAnything(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -2528,12 +2668,12 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     }
 
     {
-        // The numpy fast-path in fromAnything (base_ptr == NULL) returns a
+        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
         // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
         // backing memory must outlive the view. Defer the shfree via
         // shm_tracker so the dispatch's flush releases the block (and the
         // schema) once the view is no longer in scope.
-        PyObject* obj = fromAnything(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -2552,6 +2692,345 @@ error:
         free(shfree_errmsg);
     }
     free_schema(schema);
+    return NULL;
+}
+
+// ── Stream-handle bindings ──────────────────────────────────────────────
+
+static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
+    const char* path;
+    int kind_i;
+    if (!PyArg_ParseTuple(args, "si", &path, &kind_i)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t handle = PyTRY(mlc_open, path, (uint8_t)kind_i);
+    return PyLong_FromLongLong((long long)handle);
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    PyTRY(mlc_close, (int64_t)handle_ll);
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_fschema(PyObject* self, PyObject* args) { MAYFAIL
+    const char* path;
+    if (!PyArg_ParseTuple(args, "s", &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    char* s = PyTRY(mlc_fschema, path);
+    if (s == NULL) {
+        PyRAISE("mlc_fschema returned NULL");
+    }
+    PyObject* obj = PyUnicode_FromString(s);
+    free(s);
+    return obj;
+error:
+    return NULL;
+}
+
+// @ifile_walk: unified IFile pattern walker. Python signature:
+//   mlc_ifile_walk(schema_str, handle, path, args)
+// where `args` is a Python list of (None | int) values matching the
+// path's bracket steps. Field steps consume no args; bracket-index
+// consumes 1; bracket-slice consumes 3 (start, stop, step).
+static PyObject* pybinding__mlc_ifile_walk(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    const char* path;
+    PyObject* args_list;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    mlc_ifile_walk_arg* packed = NULL;
+
+    if (!PyArg_ParseTuple(args, "sLsO", &schema_str, &handle_ll, &path, &args_list)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    if (!PyList_Check(args_list)) {
+        PyRAISE("mlc_ifile_walk: args must be a list");
+    }
+    Py_ssize_t n = PyList_GET_SIZE(args_list);
+    if (n > 0) {
+        packed = (mlc_ifile_walk_arg*)calloc((size_t)n, sizeof(mlc_ifile_walk_arg));
+        if (packed == NULL) PyRAISE("mlc_ifile_walk: alloc failed");
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* a = PyList_GET_ITEM(args_list, i);
+            if (a == Py_None) {
+                packed[i].has = 0;
+                packed[i].value = 0;
+            } else {
+                long long v = PyLong_AsLongLong(a);
+                if (PyErr_Occurred()) {
+                    free(packed); packed = NULL;
+                    PyRAISE("mlc_ifile_walk: arg must be int or None");
+                }
+                packed[i].has = 1;
+                packed[i].value = (int64_t)v;
+            }
+        }
+    }
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = PyTRY(mlc_ifile_walk,
+                     (int64_t)handle_ll,
+                     path,
+                     packed,
+                     (uint64_t)n);
+    free(packed); packed = NULL;
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+    {
+        // Mirrors mlc_load's deferred-shfree pattern: from_voidstar may
+        // produce a numpy view backed by the SHM block, so defer freeing
+        // until the dispatch flushes.
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        return obj;
+    }
+error:
+    free(packed);
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_ifile_length(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t n = PyTRY(mlc_ifile_length, (int64_t)handle_ll);
+    return PyLong_FromLongLong((long long)n);
+error:
+    return NULL;
+}
+
+// _mlc_next(schema_str, handle) -> Python list of materialised elements.
+// Mirrors _mlc_ifile_walk's shfree-deferred pattern so from_voidstar
+// can produce numpy views that outlive this call.
+static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    if (!PyArg_ParseTuple(args, "sL", &schema_str, &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = PyTRY(mlc_next, (int64_t)handle_ll);
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+    {
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        return obj;
+    }
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_stream(PyObject* self, PyObject* args) { MAYFAIL
+    long long ifile_handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &ifile_handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_stream, (int64_t)ifile_handle_ll);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_open_ostream(schema_str, path) -> handle
+static PyObject* pybinding__mlc_open_ostream(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* path;
+    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_ostream, schema_str, path);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_open_stdin/stdout/stderr(schema_str) -> handle
+// Nullary intrinsics that bind stdio to a typed stream handle. The
+// nexus is the sole owner of fd 0/1/2; these register a slot in the
+// SHM registry and route @next / @write through the pool-nexus RPC.
+static PyObject* pybinding__mlc_open_stdin(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_stdin, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_open_stdout(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_stdout, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__mlc_open_stderr(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_open_stderr, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_write(schema_str, level, value_obj, handle) -> None
+// value_obj is serialised to voidstar via to_voidstar before being
+// passed to the runtime.
+static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long level_ll;
+    PyObject* value_obj;
+    long long handle_ll;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    if (!PyArg_ParseTuple(args, "sLOL",
+            &schema_str, &level_ll, &value_obj, &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    schema = PyTRY(parse_schema, schema_str);
+    ssize_t bytes = get_shm_size(schema, value_obj);
+    if (bytes < 0) { goto error; }
+    voidstar = PyTRY(shmalloc, (size_t)bytes);
+    void* cursor = (uint8_t*)voidstar + schema->width;
+    if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
+        goto error;
+    }
+    PyTRY(mlc_write, (uint8_t)level_ll, (int64_t)handle_ll, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+// _mlc_append(schema_str, path) -> handle
+static PyObject* pybinding__mlc_append(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* path;
+    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    int64_t h = PyTRY(mlc_append, schema_str, path);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// _mlc_concat(paths_list, dest) -> None
+static PyObject* pybinding__mlc_concat(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* paths_list;
+    const char* dest;
+    if (!PyArg_ParseTuple(args, "Os", &paths_list, &dest)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    if (!PyList_Check(paths_list)) {
+        PyRAISE("mlc_concat: paths must be a list");
+    }
+    Py_ssize_t n = PyList_GET_SIZE(paths_list);
+    const char** raw = NULL;
+    if (n > 0) {
+        raw = (const char**)malloc((size_t)n * sizeof(char*));
+        if (!raw) PyRAISE("mlc_concat: out of memory");
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* p = PyList_GET_ITEM(paths_list, i);
+            if (!PyUnicode_Check(p)) {
+                free(raw);
+                PyRAISE("mlc_concat: paths[%zd] is not a string", i);
+            }
+            raw[i] = PyUnicode_AsUTF8(p);
+        }
+    }
+    int rc;
+    {
+        char* child_errmsg_ = NULL;
+        rc = mlc_concat(raw, (size_t)n, dest, &child_errmsg_);
+        if (child_errmsg_ != NULL) {
+            free(raw);
+            PyErr_Format(PyExc_RuntimeError, "mlc_concat: %s", child_errmsg_);
+            free(child_errmsg_);
+            goto error;
+        }
+    }
+    free(raw);
+    if (rc != 0) {
+        PyRAISE("mlc_concat: failed with no errmsg");
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// _mlc_flush(handle) -> None. Force the OStream's SHM buffer to
+// flush as a sub-packet now (instead of waiting for full / @close).
+static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    PyTRY(mlc_flush, (int64_t)handle_ll);
+    Py_RETURN_NONE;
+error:
     return NULL;
 }
 
@@ -2575,7 +3054,7 @@ static PyMethodDef Methods[] = {
     {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
-    {"flush_shm_tracker", pybinding__flush_shm_tracker, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
+    {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
     {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
     {"debug_record_frame", pybinding__debug_record_frame, METH_VARARGS, "Append a manifold's args to the debug-trace stack"},
     {"debug_drain_frames", pybinding__debug_drain_frames, METH_NOARGS, "Drain the debug-trace stack and return as a string, or None"},
@@ -2587,7 +3066,7 @@ static PyMethodDef Methods[] = {
     {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
-    {"make_fail_packet", pybinding__make_fail_packetg, METH_VARARGS, "Create a fail packet from an error message"},
+    {"make_fail_packet", pybinding__make_fail_packet, METH_VARARGS, "Create a fail packet from an error message"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
     {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
@@ -2596,6 +3075,21 @@ static PyMethodDef Methods[] = {
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
+    {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
+    {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},
+    {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},
+    {"mlc_ifile_walk", pybinding__mlc_ifile_walk, METH_VARARGS, "Unified IFile pattern walker"},
+    {"mlc_ifile_length", pybinding__mlc_ifile_length, METH_VARARGS, "Total element count of an IFile handle"},
+    {"mlc_next", pybinding__mlc_next, METH_VARARGS, "Materialise an IStream's current sub-packet and advance the cursor"},
+    {"mlc_stream", pybinding__mlc_stream, METH_VARARGS, "Derive an IStream handle from an open IFile handle"},
+    {"mlc_open_ostream", pybinding__mlc_open_ostream, METH_VARARGS, "Open a fresh OStream handle for the given schema + path"},
+    {"mlc_open_stdin",  pybinding__mlc_open_stdin,  METH_VARARGS, "Open @stdin :: IStream a as a typed handle (nullary)"},
+    {"mlc_open_stdout", pybinding__mlc_open_stdout, METH_VARARGS, "Open @stdout :: OStream a as a typed handle (nullary)"},
+    {"mlc_open_stderr", pybinding__mlc_open_stderr, METH_VARARGS, "Open @stderr :: OStream a as a typed handle (nullary)"},
+    {"mlc_write", pybinding__mlc_write, METH_VARARGS, "Emit one sub-packet of [a] to an OStream handle"},
+    {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
+    {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
+    {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

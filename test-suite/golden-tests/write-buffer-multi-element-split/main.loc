@@ -1,0 +1,41 @@
+-- A single @write whose list spans more bytes than the buffer
+-- can hold triggers element-level splitting (option a): some
+-- prefix of the list fills the current buffer, the buffer
+-- flushes, then the remainder continues into a fresh buffer.
+-- @close flushes whatever's left.
+--
+-- Total element count must equal the input regardless of how
+-- many sub-packets the runtime chose to use. The first element
+-- of the first packet must be the input's first element
+-- (ordering preserved across splits).
+--
+-- Buffer = 4 KiB (env override). @write [1..600] = 4800 B
+-- inline > 4096 B, so the runtime MUST split mid-list. We
+-- assert via @flen (= 600) and via first @next's first elem
+-- (= 1), avoiding any dependency on the exact split point.
+
+module main
+  ( testTotalCount
+  , testFirstElement
+  )
+
+import root-py
+
+writeOneBigList :: Str -> <IO> ()
+writeOneBigList path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 (range 1 601) o
+  @close o
+
+testTotalCount :: Str -> <IO> Int
+testTotalCount path = do
+  writeOneBigList path
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+testFirstElement :: Str -> <IO> Int
+testFirstElement path = do
+  writeOneBigList path
+  s <- @open path :: <IO> IStream Int
+  xs <- @next s
+  .[0] xs

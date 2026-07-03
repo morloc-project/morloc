@@ -423,6 +423,20 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
                 libc::_exit(1);
             }
 
+            // Attach the worker to the shared stream registry. Idempotent
+            // if the parent nexus already bootstrapped it.
+            let slot_count = crate::ffi::stream_registry_init(&mut errmsg);
+            if slot_count == usize::MAX {
+                libc::fprintf(
+                    libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
+                    b"Worker %d stream_registry_init failed: %s\n\0".as_ptr() as *const c_char,
+                    i as i32,
+                    errmsg,
+                );
+                libc::free(errmsg as *mut c_void);
+                libc::_exit(1);
+            }
+
             // Worker loop: receive fds and process
             loop {
                 if SHUTTING_DOWN.load(Ordering::Relaxed) { break; }

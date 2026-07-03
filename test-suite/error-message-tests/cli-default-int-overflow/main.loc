@@ -1,0 +1,11 @@
+-- range: `999` is a valid JSON integer but does NOT fit in
+-- the signed 8-bit range [-128, 127]. The bounded-int arm of the
+-- validator rejects this with a "(out of range)" tag.
+module main (f)
+
+f ::
+  --' arg: -i
+  --' default: 999
+  Int8 ->
+  Int8
+f x = x

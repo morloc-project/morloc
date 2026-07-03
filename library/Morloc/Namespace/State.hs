@@ -34,6 +34,7 @@ module Morloc.Namespace.State
 
     -- * Package metadata
   , PackageMeta (..)
+  , ExposeSet (..)
 
     -- * Typechecking
   , Gamma (..)
@@ -275,6 +276,25 @@ data PackageMeta
   -- runs once during `morloc install`, after the source is on disk and
   -- after morloc deps are installed. Non-zero exit fails the install.
   , packageSetup :: !(Maybe FilePath)
+  -- | Per-language lists of paths (relative to module root, glob patterns
+  -- allowed) to copy on install into per-language well-known dirs under
+  -- $MORLOC_HOME so downstream foreign code can reference them by a
+  -- stable, module-namespaced path.
+  , packageExpose :: !ExposeSet
+  }
+  deriving (Show, Ord, Eq)
+
+-- | Per-language exposure lists. Each list holds paths or glob patterns
+-- relative to the module root. The install pipeline copies the matched
+-- files (preserving subtree under the module root) into
+-- $MORLOC_HOME/include/<module>/        (cpp)
+-- $MORLOC_HOME/lib/python/<py_module>/  (py, hyphens in module name -> _)
+-- $MORLOC_HOME/lib/R/<module>/          (r)
+data ExposeSet
+  = ExposeSet
+  { exposeCpp :: ![Text]
+  , exposePy  :: ![Text]
+  , exposeR   :: ![Text]
   }
   deriving (Show, Ord, Eq)
 
@@ -483,7 +503,11 @@ instance Defaultable PackageMeta where
       , packageInclude = Nothing
       , packageMorlocDependencies = []
       , packageSetup = Nothing
+      , packageExpose = defaultValue
       }
+
+instance Defaultable ExposeSet where
+  defaultValue = ExposeSet [] [] []
 
 instance FromJSON Config where
   parseJSON =
@@ -529,9 +553,17 @@ instance FromJSON PackageMeta where
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
       <*> o .:? "setup"
+      <*> o .:? "expose" .!= defaultValue
     where
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
         (,) <$> od Aeson..: "name" <*> od Aeson..: "git-hash"
+
+instance FromJSON ExposeSet where
+  parseJSON = Aeson.withObject "expose" $ \o ->
+    ExposeSet
+      <$> o .:? "cpp" .!= []
+      <*> o .:? "py"  .!= []
+      <*> o .:? "r"   .!= []
 
 ----- Pretty instances -------------------------------------------------------
 

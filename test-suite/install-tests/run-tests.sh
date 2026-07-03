@@ -226,8 +226,8 @@ if should_run "testpy1"; then
         assert_dir_exists  "testpy1: pools directory copied" "$EXE_DIR/testpy1/pools"
         assert_file_exists "testpy1: helpers.py included" "$EXE_DIR/testpy1/helpers.py"
 
-        ACTUAL=$("$BIN_DIR/testpy1" pygreet '"world"' 2>&1) || ACTUAL="ERROR: rc=$?"
-        assert_test "testpy1: output correct" '"hello world"' "$ACTUAL"
+        ACTUAL=$("$BIN_DIR/testpy1" pygreet "world" 2>&1) || ACTUAL="ERROR: rc=$?"
+        assert_test "testpy1: output correct" "hello world" "$ACTUAL"
 
         morloc uninstall --program testpy1 >/dev/null 2>&1 || true
         assert_not_exists "testpy1: cleaned up after uninstall" "$BIN_DIR/testpy1"
@@ -296,8 +296,8 @@ if should_run "testpy3"; then
         assert_file_exists "testpy3: formatter.py included" "$EXE_DIR/testpy3/formatter.py"
         assert_file_exists "testpy3: fmtlib.py included (indirect)" "$EXE_DIR/testpy3/fmtlib.py"
 
-        ACTUAL=$("$BIN_DIR/testpy3" pyformat '"x"' '5' 2>&1) || ACTUAL="ERROR: rc=$?"
-        assert_test "testpy3: output correct" '"x=5"' "$ACTUAL"
+        ACTUAL=$("$BIN_DIR/testpy3" pyformat "x" '5' 2>&1) || ACTUAL="ERROR: rc=$?"
+        assert_test "testpy3: output correct" "x=5" "$ACTUAL"
 
         morloc uninstall --program testpy3 >/dev/null 2>&1 || true
         assert_not_exists "testpy3: cleaned up after uninstall" "$BIN_DIR/testpy3"
@@ -514,8 +514,8 @@ if should_run "testr3"; then
         assert_file_exists "testr3: glue.R included" "$EXE_DIR/testr3/glue.R"
         assert_file_exists "testr3: rutil.R included (indirect)" "$EXE_DIR/testr3/rutil.R"
 
-        ACTUAL=$("$BIN_DIR/testr3" rpaste '"foo"' '"bar"' 2>&1) || ACTUAL="ERROR: rc=$?"
-        assert_test "testr3: output correct" '"foobar"' "$ACTUAL"
+        ACTUAL=$("$BIN_DIR/testr3" rpaste "foo" "bar" 2>&1) || ACTUAL="ERROR: rc=$?"
+        assert_test "testr3: output correct" "foobar" "$ACTUAL"
 
         morloc uninstall --program testr3 >/dev/null 2>&1 || true
         assert_not_exists "testr3: cleaned up after uninstall" "$BIN_DIR/testr3"

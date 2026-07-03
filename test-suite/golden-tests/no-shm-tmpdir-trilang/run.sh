@@ -12,14 +12,14 @@
 
 # === nexus-zero: every transfer to file ============================
 echo "--- nexus-zero output ---"
-./nexus-zero echoStr    '"HELLO_MARKER"'
+./nexus-zero echoStr    "HELLO_MARKER"
 ./nexus-zero echoList   '[1,2,3,4,5]'
 ./nexus-zero echoNested '[[1,2],[3,4]]'
 
 # === nexus-thresh: threshold-driven routing ========================
 echo "--- nexus-thresh output ---"
 # Small payload (well under 1 KiB serialized): should inline.
-./nexus-thresh echoStr '"TINY_MARKER"'
+./nexus-thresh echoStr "TINY_MARKER"
 
 # Large payload (>1 KiB serialized): should route to file. Construct
 # a ~1.5 KiB string with a unique marker so we can grep for it

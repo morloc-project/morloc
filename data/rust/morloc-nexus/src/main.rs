@@ -6,11 +6,17 @@
 
 mod cli;
 mod dispatch;
+mod file;
+mod help;
+mod loader;
 mod manifest;
 mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod stdio_bridge;
+mod stdio_server;
+mod view;
 
 use dispatch::NexusConfig;
 
@@ -50,6 +56,20 @@ fn main() {
     let user_zone: Vec<String>;
 
     let invocation = cli::parse_invocation();
+
+    // `file` and `view` need no manifest, no pool spawning, no signal
+    // handlers. Dispatch them before the manifest-mode plumbing below.
+    // `view` does need SHM because the loader may produce SHM-backed
+    // voidstar values.
+    match invocation.nexus.cmd {
+        cli::Mode::File(ref fargs) => file::run(fargs),
+        cli::Mode::View(ref vargs) => {
+            process::init_shm();
+            view::run(vargs);
+        }
+        _ => {}
+    }
+
     let mut manifest = match invocation.manifest {
         Some(m) => m,
         None => {
@@ -100,6 +120,9 @@ fn main() {
             manifest_path = invocation.manifest_path.clone();
             user_zone = Vec::new();
         }
+        cli::Mode::File(_) | cli::Mode::View(_) => unreachable!(
+            "File/View dispatched before manifest setup"
+        ),
     }
 
     let prog_name = std::path::Path::new(&manifest_path)
@@ -216,61 +239,19 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Setup tmpdir and SHM
-    let tmpdir = match process::make_tmpdir() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
-    process::set_tmpdir(tmpdir.clone());
-
-    // Reap orphaned SHM segments from previous runs (SIGKILLed nexus,
-    // crashed tests, etc.) before we create our own. Best-effort.
-    process::cleanup_stale_shm();
-
-    let job_hash = process::make_job_hash(42);
-    // PID is embedded in the basename so cleanup_stale_shm() can identify
-    // orphans without reading the SHM headers.
-    let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
-
     // Initialize shared memory. The nexus no longer statically links
-    // morloc-runtime as an rlib, so these `extern "C"` symbols resolve
-    // at load time via DT_NEEDED against the single process-shared
-    // copy in libmorloc.so. The dlsym workaround that used to live
-    // here is gone -- it existed only to bypass symbol shadowing by
-    // the rlib's static copy of shinit, which is now absent.
-    {
-        extern "C" {
-            fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
-            fn shinit(
-                shm_basename: *const std::ffi::c_char,
-                volume_index: usize,
-                shm_size: usize,
-                errmsg: *mut *mut std::ffi::c_char,
-            ) -> *mut std::ffi::c_void;
-        }
+    // morloc-runtime as an rlib, so the `shinit` FFI symbol resolves at
+    // load time via DT_NEEDED against the single process-shared copy in
+    // libmorloc.so. The dlsym workaround that used to live here is gone
+    // -- it existed only to bypass symbol shadowing by the rlib's static
+    // copy of shinit, which is now absent.
+    let (tmpdir, shm_basename) = process::init_shm();
 
-        let tmpdir_c = std::ffi::CString::new(tmpdir.as_str()).unwrap();
-        let basename_c = std::ffi::CString::new(shm_basename.as_str()).unwrap();
-        let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
-        unsafe {
-            shm_set_fallback_dir(tmpdir_c.as_ptr());
-            let shm = shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
-            if shm.is_null() {
-                let msg = if !errmsg.is_null() {
-                    let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
-                    libc::free(errmsg as *mut std::ffi::c_void);
-                    s
-                } else {
-                    "unknown error".into()
-                };
-                eprintln!("Error: failed to initialize shared memory: {}", msg);
-                process::clean_exit(1);
-            }
-        }
-    }
+    // Start the stdio RPC server. Pools reach @stdin / @stdout /
+    // @stderr through this dedicated socket; the fork-side child fd
+    // hygiene installed in start_language_server takes fd 0/1 away
+    // from the pool so the nexus keeps its bytes clean.
+    stdio_server::start(&tmpdir);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -307,36 +288,10 @@ fn main() {
 
     // Normal CLI mode
     if config.packet_path.is_none() {
-        // Redirect stdout to the file given via -o/--output-file. Done
-        // at the fd level so the redirect applies uniformly to every
-        // output path (Rust println! through json.rs, raw byte writes
-        // for mpk, C-side printf in the Arrow JSON path, etc.) without
-        // changing each print site. clean_exit flushes both Rust and
-        // libc stdout before std::process::exit.
-        //
         // Scoped to normal CLI dispatch only: call-packet mode already
         // honors output_path internally (writes a sibling .mpk file
         // via write_atomic) and must not have its stdout hijacked.
-        if let Some(ref path) = config.output_path {
-            use std::os::unix::io::AsRawFd;
-            match std::fs::File::create(path) {
-                Ok(f) => {
-                    let rc = unsafe { libc::dup2(f.as_raw_fd(), libc::STDOUT_FILENO) };
-                    if rc == -1 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!("Error: cannot redirect stdout to '{}': {}", path, err);
-                        process::clean_exit(1);
-                    }
-                    // Drop the File handle so the original fd is closed;
-                    // the dup2'd fd 1 keeps the file alive.
-                    drop(f);
-                }
-                Err(e) => {
-                    eprintln!("Error: cannot open output file '{}': {}", path, e);
-                    process::clean_exit(1);
-                }
-            }
-        }
+        process::redirect_stdout_to(config.output_path.as_deref());
 
         // Route through the manifest-driven parser. `user_zone`
         // holds the post-`@` (or post-target) slice that the
@@ -612,9 +567,10 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         fn get_morloc_data_packet_error_message(
             data: *const u8, errmsg: *mut *mut c_char,
         ) -> *mut c_char;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char,
-        ) -> i32;
+        fn normalize_data_packet_to_fd(
+            packet: *const u8, packet_size: usize, compression_level: u8,
+            fd: libc::c_int, errmsg: *mut *mut c_char,
+        ) -> i64;
     }
 
     let packet_path = config.packet_path.as_ref().unwrap();
@@ -633,8 +589,8 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
 
     // Read call packet from file
     let mut packet_size: usize = 0;
-    let call_packet = unsafe { read_binary_file(packet_c.as_ptr(), &mut packet_size, &mut errmsg) };
-    if call_packet.is_null() || !errmsg.is_null() {
+    let raw_packet = unsafe { read_binary_file(packet_c.as_ptr(), &mut packet_size, &mut errmsg) };
+    if raw_packet.is_null() || !errmsg.is_null() {
         let msg = if !errmsg.is_null() {
             let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
             unsafe { libc::free(errmsg as *mut c_void) };
@@ -645,6 +601,38 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         eprintln!("Error: failed to read call packet '{}': {}", packet_path, msg);
         process::clean_exit(1);
     }
+
+    // If the on-disk packet was written with -z, transparently
+    // decompress before validating + forwarding. decompress_packet_if_needed
+    // returns Cow::Borrowed for plain packets, so the common case keeps
+    // the original read_binary_file buffer with zero extra copies.
+    let (call_packet, packet_size): (*mut u8, usize) = {
+        let raw_slice = unsafe { std::slice::from_raw_parts(raw_packet, packet_size) };
+        match morloc_runtime_types::compression::decompress_packet_if_needed(raw_slice) {
+            Ok(std::borrow::Cow::Borrowed(_)) => (raw_packet, packet_size),
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                let buf = unsafe { libc::malloc(bytes.len()) as *mut u8 };
+                if buf.is_null() {
+                    unsafe { libc::free(raw_packet as *mut c_void) };
+                    eprintln!("Error: malloc failed for call packet");
+                    process::clean_exit(1);
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+                    libc::free(raw_packet as *mut c_void);
+                }
+                (buf, bytes.len())
+            }
+            Err(e) => {
+                eprintln!(
+                    "Error: failed to decompress call packet '{}': {}",
+                    packet_path, e
+                );
+                unsafe { libc::free(raw_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
+        }
+    };
 
     // Structural check on the bytes we just read from the shared FS. A
     // torn or corrupted call packet would otherwise propagate into the
@@ -662,7 +650,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     }
 
     // Send to pool and receive response
-    let result_packet = unsafe {
+    let mut result_packet = unsafe {
         send_and_receive_over_socket(socket_c.as_ptr(), call_packet, &mut errmsg)
     };
     unsafe { libc::free(call_packet as *mut c_void) };
@@ -687,12 +675,64 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         process::clean_exit(1);
     }
 
-    // Write the raw morloc packet to --output-file. The driver-side
+    // Cross-nexus return egress: rewrite any TAG_HANDLE stream-handle
+    // field in the pool's voidstar return payload to TAG_PATH so the
+    // parent nexus (which doesn't share our SHM registry) can open it
+    // locally. No-op for non-voidstar returns; a null out_ptr signals
+    // the packet was left unchanged and we keep our existing buffer.
+    {
+        extern "C" {
+            fn mlc_rewrite_packet_for_persistence(
+                packet: *const u8, packet_len: usize,
+                out_ptr: *mut *mut u8, out_len: *mut usize,
+                errmsg: *mut *mut c_char,
+            ) -> i32;
+        }
+        let packet_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
+        if errmsg.is_null() && packet_size > 0 {
+            let mut rewritten_ptr: *mut u8 = std::ptr::null_mut();
+            let mut rewritten_len: usize = 0;
+            let mut rerr: *mut c_char = std::ptr::null_mut();
+            let rc = unsafe {
+                mlc_rewrite_packet_for_persistence(
+                    result_packet,
+                    packet_size,
+                    &mut rewritten_ptr,
+                    &mut rewritten_len,
+                    &mut rerr,
+                )
+            };
+            if rc != 0 {
+                let msg = if !rerr.is_null() {
+                    let s = unsafe {
+                        std::ffi::CStr::from_ptr(rerr).to_string_lossy().into_owned()
+                    };
+                    unsafe { libc::free(rerr as *mut c_void) };
+                    s
+                } else {
+                    "unknown error".into()
+                };
+                eprintln!("Error: return-egress rewrite failed: {}", msg);
+                unsafe { libc::free(result_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
+            if !rewritten_ptr.is_null() {
+                unsafe { libc::free(result_packet as *mut c_void) };
+                result_packet = rewritten_ptr;
+            }
+        }
+        if !errmsg.is_null() {
+            unsafe { libc::free(errmsg as *mut c_void) };
+            errmsg = std::ptr::null_mut();
+        }
+    }
+
+    // Write the morloc result packet to --output-file. The driver-side
     // `slurm_ffi::remote_call` (libmorloc.so) reads exactly this file
     // via `read_binary_file` and feeds the bytes back up the call
-    // chain. The previous implementation called `print_morloc_data_packet`
-    // (which prints to stdout) and wrote a sibling `.mpk` -- neither
-    // matched what the driver actually reads.
+    // chain. The fd-based normalizer streams the payload straight to
+    // disk when the result is large enough; for atomicity we stream
+    // into a sibling temp file and rename on success.
     if config.output_format == dispatch::OutputFormat::Packet {
         if let Some(ref output_path) = config.output_path {
             let packet_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
@@ -704,17 +744,76 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
                 process::clean_exit(1);
             }
 
-            let output_c = CString::new(output_path.as_str()).unwrap();
-            let rc = unsafe { write_atomic(output_c.as_ptr(), result_packet, packet_size, &mut errmsg) };
-            if rc != 0 || !errmsg.is_null() {
-                let msg = if !errmsg.is_null() {
-                    let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
-                    unsafe { libc::free(errmsg as *mut c_void) };
+            let output_path_buf = std::path::PathBuf::from(output_path);
+            let parent = output_path_buf
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let basename = output_path_buf
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "out".to_string());
+            let tmp_path = parent.join(format!(
+                ".{}.tmp.{}",
+                basename,
+                std::process::id()
+            ));
+
+            let tmp_file = match std::fs::File::create(&tmp_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "Error: failed to open temp file '{}': {}",
+                        tmp_path.display(), e
+                    );
+                    unsafe { libc::free(result_packet as *mut c_void) };
+                    process::clean_exit(1);
+                }
+            };
+            let fd = {
+                use std::os::unix::io::AsRawFd;
+                tmp_file.as_raw_fd()
+            };
+
+            let mut nerr: *mut c_char = std::ptr::null_mut();
+            let n = unsafe {
+                normalize_data_packet_to_fd(
+                    result_packet,
+                    packet_size,
+                    config.compression_level,
+                    fd,
+                    &mut nerr,
+                )
+            };
+            // sync_all before rename so a crash between rename and
+            // fsync doesn't yield a zero-length result file the
+            // driver would treat as success.
+            let sync_result = tmp_file.sync_all();
+            drop(tmp_file);
+
+            if n < 0 || sync_result.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
+                let msg = if !nerr.is_null() {
+                    let s = unsafe { std::ffi::CStr::from_ptr(nerr) }.to_string_lossy().into_owned();
+                    unsafe { libc::free(nerr as *mut c_void) };
                     s
+                } else if let Err(e) = sync_result {
+                    format!("sync_all failed: {}", e)
                 } else {
-                    format!("write_atomic returned {}", rc)
+                    "unknown error".into()
                 };
-                eprintln!("Error: failed to write result packet to '{}': {}", output_path, msg);
+                eprintln!("Error: packet normalization failed: {}", msg);
+                unsafe { libc::free(result_packet as *mut c_void) };
+                process::clean_exit(1);
+            }
+
+            if let Err(e) = std::fs::rename(&tmp_path, &output_path_buf) {
+                let _ = std::fs::remove_file(&tmp_path);
+                eprintln!(
+                    "Error: failed to rename '{}' to '{}': {}",
+                    tmp_path.display(), output_path, e
+                );
                 unsafe { libc::free(result_packet as *mut c_void) };
                 process::clean_exit(1);
             }

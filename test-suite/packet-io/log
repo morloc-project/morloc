@@ -1,0 +1,191 @@
+
+############################################################
+## tier-b-roundtrip.sh
+############################################################
+=== packet-io tier B: single-process round-trip ===
+outer_count=200  str_len=16
+Compiling workload (morloc make main.loc)...
+  morloc make                                 1426 ms
+  gen -> raw.dat                               111 ms  rc=0  bytes=1132732
+  id  -> id.z0.dat                             108 ms  rc=0  bytes=1132732
+  id  -> id.z1.dat                             111 ms  rc=0  bytes=123513
+  id  -> id.z3.dat                             123 ms  rc=0  bytes=123813
+  id  -> id.z3.z1.dat                           87 ms  rc=1  bytes=0
+  sum raw                                       96 ms  rc=0  bytes=36
+  sum id.z0                                     99 ms  rc=0  bytes=36
+  sum id.z1                                     87 ms  rc=1  bytes=0
+  sum id.z3                                     87 ms  rc=1  bytes=0
+  sum id.z3.z1                                  86 ms  rc=1  bytes=0
+
+=== fingerprint diff ===
+  id.z0                           MATCH
+  id.z1                           DIFF (corruption)
+    expected:
+      [200,2400414,72006,119248064417535]
+    observed:
+  id.z3                           DIFF (corruption)
+    expected:
+      [200,2400414,72006,119248064417535]
+    observed:
+  id.z3.z1                        DIFF (corruption)
+    expected:
+      [200,2400414,72006,119248064417535]
+    observed:
+
+=== summary ===
+leaked /dev/shm segments:  0
+leaked /tmp/morloc.* dirs: 0
+FAIL
+
+############################################################
+## tier-c-crossvol.sh
+############################################################
+=== packet-io tier C: cross-volume relptr round-trip ===
+outer_count=8000  str_len=256
+Compiling workload (morloc make main.loc)...
+  morloc make                                 1236 ms
+  gen -> raw.dat                              1634 ms  rc=0  bytes=147145964
+  input packet size: 147145964 bytes
+  /dev/shm segments after gen: 0
+  id  -> id.z0.dat                            1609 ms  rc=0  bytes=147145964
+  id  -> id.z1.dat                            1581 ms  rc=0  bytes=5376230
+  sum raw                                      841 ms  rc=0  bytes=42
+  sum id.z0                                    892 ms  rc=0  bytes=42
+  sum id.z1                                     99 ms  rc=1  bytes=0
+
+=== fingerprint diff ===
+  id.z0                           MATCH
+  id.z1                           DIFF (cross-volume relptr corruption)
+    expected:
+      [8000,97566000,42586500,4895142865131075]
+    observed:
+
+=== summary ===
+leaked /dev/shm segments:  0
+leaked /tmp/morloc.* dirs: 0
+FAIL
+
+############################################################
+## tier-d-crosspool.sh
+############################################################
+=== packet-io tier D: cross-pool wire equivalence ===
+outer_count=400  str_len=32
+Compiling workload (morloc make main.loc)...
+  morloc make                                 1196 ms
+  gen -> raw.dat                               134 ms  rc=0  bytes=2631514
+  Py  -> py.z0.dat                             129 ms  rc=0  bytes=2631514
+  Cpp -> cpp.z0.dat                             48 ms  rc=0  bytes=2631514
+  Py  -> py.z1.dat                              92 ms  rc=0  bytes=227650
+  Cpp -> cpp.z1.dat                             50 ms  rc=0  bytes=227650
+
+=== byte-level pool agreement ===
+  py.z0 == cpp.z0                           DIFF (cross-pool wire format)
+/tmp/morloc-packet-io.GeeWDu/pkts/py.z0.dat /tmp/morloc-packet-io.GeeWDu/pkts/cpp.z0.dat differ: byte 41, line 1
+  py.z1 == cpp.z1                           MATCH
+  sum raw                                      104 ms  rc=0  bytes=37
+  sum py.z0                                    105 ms  rc=0  bytes=37
+  sum cpp.z0                                   105 ms  rc=0  bytes=37
+  sum py.z1                                     89 ms  rc=1  bytes=0
+  sum cpp.z1                                    87 ms  rc=1  bytes=0
+
+=== fingerprint diff ===
+  py.z0                           MATCH
+  cpp.z0                          MATCH
+  py.z1                           DIFF
+    expected:
+      [400,4826652,275618,240206577452475]
+  cpp.z1                          DIFF
+    expected:
+      [400,4826652,275618,240206577452475]
+
+=== summary ===
+leaked /dev/shm segments:  0
+leaked /tmp/morloc.* dirs: 0
+FAIL
+
+############################################################
+## tier-e-stress.sh
+############################################################
+=== packet-io tier E: size sweep + leak audit ===
+Compiling workload (morloc make main.loc)...
+  morloc make                                 1266 ms
+
+--- size: outer=2  str_len=0 ---
+  gen -> raw.dat                                87 ms  rc=0  bytes=6439
+  id  -> id.dat                                 87 ms  rc=0  bytes=6439
+  id  -> id.z1.dat                              88 ms  rc=0  bytes=1075
+  sum raw                                       88 ms  rc=0  bytes=26
+  sum id                                        88 ms  rc=0  bytes=26
+  sum id.z1                                     88 ms  rc=1  bytes=0
+  fingerprint id               MATCH
+  fingerprint id.z1            DIFF
+  leak probe shm=+0 tmp=+0
+
+--- size: outer=20  str_len=0 ---
+  gen -> raw.dat                                49 ms  rc=0  bytes=98319
+  id  -> id.dat                                 89 ms  rc=0  bytes=98319
+  id  -> id.z1.dat                              90 ms  rc=0  bytes=10863
+  sum raw                                       89 ms  rc=0  bytes=30
+  sum id                                        89 ms  rc=0  bytes=30
+  sum id.z1                                     87 ms  rc=1  bytes=0
+  fingerprint id               MATCH
+  fingerprint id.z1            DIFF
+  leak probe shm=+0 tmp=+0
+
+--- size: outer=40  str_len=32 ---
+  gen -> raw.dat                                93 ms  rc=0  bytes=286356
+  id  -> id.dat                                 93 ms  rc=0  bytes=286356
+  id  -> id.z1.dat                              94 ms  rc=0  bytes=24311
+  sum raw                                       91 ms  rc=0  bytes=33
+  sum id                                        50 ms  rc=0  bytes=33
+  sum id.z1                                     88 ms  rc=1  bytes=0
+  fingerprint id               MATCH
+  fingerprint id.z1            DIFF
+  leak probe shm=+0 tmp=+0
+
+--- size: outer=200  str_len=16 ---
+  gen -> raw.dat                               112 ms  rc=0  bytes=1132732
+  id  -> id.dat                                110 ms  rc=0  bytes=1132732
+  id  -> id.z1.dat                             112 ms  rc=0  bytes=123513
+  sum raw                                       97 ms  rc=0  bytes=36
+  sum id                                        98 ms  rc=0  bytes=36
+  sum id.z1                                     88 ms  rc=1  bytes=0
+  fingerprint id               MATCH
+  fingerprint id.z1            DIFF
+  leak probe shm=+0 tmp=+0
+
+--- size: outer=200  str_len=256 ---
+  gen -> raw.dat                               113 ms  rc=0  bytes=3604076
+  id  -> id.dat                                118 ms  rc=0  bytes=3604076
+  id  -> id.z1.dat                             116 ms  rc=0  bytes=133673
+  sum raw                                      104 ms  rc=0  bytes=38
+  sum id                                       102 ms  rc=0  bytes=38
+  sum id.z1                                     87 ms  rc=1  bytes=0
+  fingerprint id               MATCH
+  fingerprint id.z1            DIFF
+  leak probe shm=+0 tmp=+0
+
+--- size: outer=2000  str_len=256 ---
+  gen -> raw.dat                               434 ms  rc=0  bytes=36634458
+  id  -> id.dat                                442 ms  rc=0  bytes=36634458
+  id  -> id.z1.dat                             437 ms  rc=0  bytes=1345743
+  sum raw                                      248 ms  rc=0  bytes=42
+  sum id                                       246 ms  rc=0  bytes=42
+  sum id.z1                                     93 ms  rc=1  bytes=0
+  fingerprint id               MATCH
+  fingerprint id.z1            DIFF
+  leak probe shm=+0 tmp=+0
+
+=== summary ===
+leaked /dev/shm segments:  0
+leaked /tmp/morloc.* dirs: 0
+FAIL
+
+============================================================
+== packet-io run-all summary
+============================================================
+tier-b-roundtrip.sh                2613 ms  rc=1
+tier-c-crossvol.sh                 8115 ms  rc=1
+tier-d-crosspool.sh                2323 ms  rc=1
+tier-e-stress.sh                   7055 ms  rc=1
+FAIL (one or more tiers)

@@ -37,6 +37,8 @@ module Morloc.Namespace.Expr
   , Typeclass (..)
   , Selector (..)
   , ungroup
+  , bracketArity
+  , selectorHasBracket
   , Pattern (..)
   , Intrinsic (..)
   , intrinsicName
@@ -233,18 +235,82 @@ data Signature = Signature EVar (Maybe Label) EType
 data Typeclass a = Typeclass [Constraint] ClassName [TVar] [a]
   deriving (Show, Ord, Eq)
 
+-- | The unified pattern descriptor. A Selector encodes the full access
+-- chain a pattern performs on its subject: any mix of field-index /
+-- field-key navigation, bracket-index / bracket-slice access, and
+-- multi-sibling groups. Patterns are a first-class object end-to-end
+-- (desugar -> typecheck -> codegen -> runtime); the codegen lowers
+-- the Selector into the right runtime primitive for the receiver
+-- type (mlc_ifile_walk for IFile handles; nested apply_* calls for
+-- in-memory values).
+--
+-- Sibling semantics:
+--
+--   * @SelectorKey (h, s) []@ and @SelectorIdx (h, s) []@ are
+--     single-step chains (no group).
+--   * @SelectorKey (h, s) others@ and @SelectorIdx (h, s) others@
+--     express same-kind sibling groups (all keys, or all indices)
+--     branching at the current position. Each sibling has its own
+--     sub-Selector tail.
+--
+-- Bracket steps:
+--
+--   * @SelectorBracketIndex@ consumes one runtime arg (the index)
+--     and continues with the inner Selector applied to the
+--     materialised element.
+--   * @SelectorBracketSlice@ consumes three runtime args (start,
+--     stop, step) and is terminal: a slice returns a list, and any
+--     further per-element walk is morloc's @IntrMap@ territory, not
+--     a single pattern walk.
 data Selector
   = SelectorKey (Text, Selector) [(Text, Selector)]
   | SelectorIdx (Int, Selector) [(Int, Selector)]
+  | SelectorBracketIndex Selector
+  | SelectorBracketSlice
   | SelectorEnd
   deriving (Show, Ord, Eq)
 
+-- | Enumerate every distinct leaf-path through a Selector. Used for
+-- documentation, error messages, and the legacy non-bracketed value-
+-- check path. Brackets are represented opaquely (the path "passes
+-- through" a bracket step without expanding it -- a bracket has no
+-- left/right axis at this level), so 'ungroup' stays a pure field-
+-- chain enumerator.
 ungroup :: Selector -> [[Either Int Text]]
 ungroup SelectorEnd = [[]]
+ungroup (SelectorBracketIndex s) = ungroup s
+ungroup SelectorBracketSlice = [[]]
 ungroup (SelectorKey (k, SelectorEnd) []) = [[Right k]]
 ungroup (SelectorIdx (i, SelectorEnd) []) = [[Left i]]
 ungroup (SelectorKey x xs) = concat [map ((:) (Right k)) (ungroup s) | (k, s) <- (x : xs)]
 ungroup (SelectorIdx x xs) = concat [map ((:) (Left i)) (ungroup s) | (i, s) <- (x : xs)]
+
+-- | DFS-count of bracket steps in a Selector. Each
+-- 'SelectorBracketIndex' contributes 1 runtime arg (the index); each
+-- 'SelectorBracketSlice' contributes 3 (start, stop, step). Used by
+-- the typechecker to validate @App (PatCall (PatternStruct sel)) args@
+-- arity: @args@ must be @bracketArity sel + 1@ (the +1 is the
+-- receiver).
+bracketArity :: Selector -> Int
+bracketArity SelectorEnd = 0
+bracketArity (SelectorBracketIndex s) = 1 + bracketArity s
+bracketArity SelectorBracketSlice = 3
+bracketArity (SelectorKey (_, s) others) =
+  bracketArity s + sum [bracketArity sub | (_, sub) <- others]
+bracketArity (SelectorIdx (_, s) others) =
+  bracketArity s + sum [bracketArity sub | (_, sub) <- others]
+
+-- | True if the selector contains any bracket step. Used at codegen
+-- boundaries to decide whether the IFile walker (or the in-memory
+-- bracket-aware lowering) is required.
+selectorHasBracket :: Selector -> Bool
+selectorHasBracket SelectorEnd = False
+selectorHasBracket (SelectorBracketIndex _) = True
+selectorHasBracket SelectorBracketSlice = True
+selectorHasBracket (SelectorKey (_, s) others) =
+  selectorHasBracket s || any (selectorHasBracket . snd) others
+selectorHasBracket (SelectorIdx (_, s) others) =
+  selectorHasBracket s || any (selectorHasBracket . snd) others
 
 data Pattern
   = PatternText Text [Text]
@@ -269,10 +335,10 @@ data Pattern
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
-  = IntrSave      -- ^ @save   :: a -> Str -> {()}   -- voidstar format
-  | IntrSaveM     -- ^ @savem  :: a -> Str -> {()}   -- msgpack format
-  | IntrSaveJ     -- ^ @savej  :: a -> Str -> {()}   -- JSON format
-  | IntrLoad      -- ^ @load   :: Str -> {?a}        -- auto-detect format
+  = IntrSave      -- ^ @save  :: Int -> a -> Str -> <IO>() -- voidstar packet, with zstd level 0-9
+  | IntrSaveM     -- ^ @savem :: a -> Str -> <IO>()         -- raw msgpack file
+  | IntrSaveJ     -- ^ @savej :: a -> Str -> <IO>()         -- raw JSON file
+  | IntrLoad      -- ^ @load  :: Str -> <IO> ?a             -- auto-detect format, auto-decompress packets
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
@@ -282,6 +348,9 @@ data Intrinsic
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
   | IntrRead      -- ^ @read   :: Str -> ?a          -- deserialize from JSON string
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
+  | IntrOpen      -- ^ @open  :: Str -> <IO> a       -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream
+  | IntrClose     -- ^ @close :: a -> <IO> ()        -- close any stream/file handle
+  | IntrFSchema   -- ^ @fschema :: Str -> <IO> Str   -- read a file's element schema without typed open
   | IntrMap       -- ^ implicit @(a -> b) -> List a -> List b@ map; emitted by
                   -- the desugar's bracket-accessor lowering when a slice is
                   -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
@@ -289,6 +358,50 @@ data Intrinsic
                   -- The pure-runtime evaluator executes this as a direct
                   -- per-element loop over MORLOC_ARRAY; the pool path resolves
                   -- it to the language's @Functor.map@ instance.
+  | IntrFLength     -- ^ @flen :: IFile a -> <IO> Int@ -- file element count.
+                    -- Free from the footer's StreamDiag.element_count. Users
+                    -- typically alias as @length@ via stdlib shims.
+  | IntrNext        -- ^ @next :: IStream a -> <IO> [a]@ -- materialise the
+                    -- current sub-packet and advance the cursor. Returns an
+                    -- empty list at EOF (further calls keep returning empty).
+  | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
+                    -- forward-only IStream from an open IFile, bound to the
+                    -- same path with an independent fd, mmap, and cursor.
+  | IntrWrite       -- ^ @write :: Int -> [a] -> OStream a -> <IO> ()@ --
+                    -- emit one sub-packet of element-list type. The Int is
+                    -- the zstd compression level (0 = uncompressed); the
+                    -- first @write fixes the level for the file's lifetime.
+  | IntrAppend      -- ^ @append :: Str -> <IO> (OStream a)@ -- open an
+                    -- existing stream file for append. Forward-scan recovers
+                    -- the resume cursor; mismatched element schemas error
+                    -- before any bytes are written.
+  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO> ()@ -- concatenate
+                    -- a sequence of stream files via sendfile, exploiting
+                    -- the stream-packet concat invariant.
+  | IntrFlush       -- ^ @flush :: OStream a -> <IO> ()@ -- force buffered
+                    -- writes to be emitted as a sub-packet immediately,
+                    -- without closing the stream. No-op on an empty
+                    -- buffer. Useful for tests that need deterministic
+                    -- packet boundaries and for user code that wants to
+                    -- make progress visible to concurrent readers.
+  | IntrStdin       -- ^ @stdin :: <IO> IStream a@ -- nullary intrinsic
+                    -- that opens process stdin as an IStream. The nexus is
+                    -- the sole owner of fd 0; @next routes through the
+                    -- pool-nexus RPC socket. At most one @stdin per nexus.
+  | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
+                    -- process stdout as an OStream. @write routes through
+                    -- the nexus. At most one @stdout per nexus.
+  | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
+                    -- @stdout for stderr.
+  | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
+                    -- and Nexus.hs from any pattern application with an IFile
+                    -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
+                    -- chains). The selector chain is encoded as a path string
+                    -- (`.1.[]`, `.foo.[:]`, etc.); bracket steps consume
+                    -- runtime args in DFS order. Lowers to a single per-
+                    -- language @_mlc_ifile_walk@ call. NOT user-facing; arity
+                    -- is dynamic (path + handle + 0..n bracket bounds), so
+                    -- 'intrinsicArity' is intentionally undefined.
   deriving (Show, Ord, Eq)
 
 -- | Map intrinsic to its canonical name
@@ -306,7 +419,21 @@ intrinsicName IntrTypeof = "typeof"
 intrinsicName IntrShow = "show"
 intrinsicName IntrRead = "read"
 intrinsicName IntrDatafile = "datafile"
+intrinsicName IntrOpen = "open"
+intrinsicName IntrClose = "close"
+intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
+intrinsicName IntrFLength = "flen"
+intrinsicName IntrNext = "next"
+intrinsicName IntrStream = "stream"
+intrinsicName IntrWrite = "write"
+intrinsicName IntrAppend = "append"
+intrinsicName IntrConcat = "concat"
+intrinsicName IntrFlush = "flush"
+intrinsicName IntrStdin = "stdin"
+intrinsicName IntrStdout = "stdout"
+intrinsicName IntrStderr = "stderr"
+intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -323,11 +450,27 @@ parseIntrinsic "typeof" = Just IntrTypeof
 parseIntrinsic "show" = Just IntrShow
 parseIntrinsic "read" = Just IntrRead
 parseIntrinsic "datafile" = Just IntrDatafile
+parseIntrinsic "open" = Just IntrOpen
+parseIntrinsic "close" = Just IntrClose
+parseIntrinsic "fschema" = Just IntrFSchema
+-- @flen is user-facing so users can alias: `length = @flen` in stdlib.
+-- IntrIFileWalk is compiler-internal (synthesized from `.[i] f`, `.foo f`,
+-- etc. by Express.hs and Nexus.hs); no entry here.
+parseIntrinsic "flen" = Just IntrFLength
+parseIntrinsic "next" = Just IntrNext
+parseIntrinsic "stream" = Just IntrStream
+parseIntrinsic "write" = Just IntrWrite
+parseIntrinsic "append" = Just IntrAppend
+parseIntrinsic "concat" = Just IntrConcat
+parseIntrinsic "flush" = Just IntrFlush
+parseIntrinsic "stdin" = Just IntrStdin
+parseIntrinsic "stdout" = Just IntrStdout
+parseIntrinsic "stderr" = Just IntrStderr
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
 intrinsicArity :: Intrinsic -> Int
-intrinsicArity IntrSave = 2
+intrinsicArity IntrSave = 3
 intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
@@ -340,7 +483,22 @@ intrinsicArity IntrTypeof = 1
 intrinsicArity IntrShow = 1
 intrinsicArity IntrRead = 1
 intrinsicArity IntrDatafile = 1
+intrinsicArity IntrOpen = 1
+intrinsicArity IntrClose = 1
+intrinsicArity IntrFSchema = 1
 intrinsicArity IntrMap = 2
+intrinsicArity IntrFLength = 1
+intrinsicArity IntrNext = 1
+intrinsicArity IntrStream = 1
+intrinsicArity IntrWrite = 3
+intrinsicArity IntrAppend = 1
+intrinsicArity IntrConcat = 2
+intrinsicArity IntrFlush = 1
+intrinsicArity IntrStdin = 0
+intrinsicArity IntrStdout = 0
+intrinsicArity IntrStderr = 0
+intrinsicArity IntrIFileWalk =
+  error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
@@ -790,6 +948,8 @@ instance Pretty Selector where
   pretty (SelectorIdx (i, s) []) = "." <> pretty i <> pretty s
   pretty (SelectorKey r rs) = "." <> tupled ["." <> pretty k <> pretty s | (k, s) <- (r : rs)]
   pretty (SelectorIdx r rs) = "." <> tupled ["." <> pretty i <> pretty s | (i, s) <- (r : rs)]
+  pretty (SelectorBracketIndex s) = ".[i]" <> pretty s
+  pretty SelectorBracketSlice = ".[i:j:k]"
 
 instance Pretty Expr where
   pretty (PatE pat) = "pattern:" <+> pretty pat

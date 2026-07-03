@@ -391,7 +391,7 @@ rcPerm = cppAtIdx3 rMakePerm
 -- =========================================================================
 fileBin :: Str -> <IO> ?(Vector 10 Real)
 fileBin path = do
-  @save cppMakeReal10 path
+  @save 0 cppMakeReal10 path
   @load path
 
 fileJson :: Str -> <IO> ?(Vector 10 Real)
@@ -409,7 +409,7 @@ fileMsg path = do
 -- as a Vector (not just a structurally-equal list).
 fileSumBin :: Str -> <IO> ?Real
 fileSumBin path = do
-  @save cppMakeReal10 path
+  @save 0 cppMakeReal10 path
   v <- @load path
   mapMaybe pySumReal10 v
 

@@ -1,0 +1,51 @@
+-- The buffer's index section starts at WRITE_BUFFER_INDEX_INITIAL_CAP
+-- (1024 elements). When appending an element would exceed this
+-- capacity AND the buffer has enough room to double, the runtime
+-- doubles the index_cap, memmoves the data region right by the
+-- shift amount, and adjusts every existing inline relptr.
+--
+-- For primitive Int (no variable data), index grow is just the
+-- doubling itself -- no relptr fixup needed. We exercise it by
+-- writing 3000 ints in one call, which forces the index to
+-- grow from 1024 -> 2048 -> 4096 at least once.
+--
+-- The roundtrip must preserve all 3000 elements in order.
+
+module main
+  ( testIndexGrowTotalCount
+  , testIndexGrowFirstElement
+  , testIndexGrowAtBoundary
+  )
+
+import root-py -- python only needed for `range`
+
+writeBig :: Str -> <IO> ()
+writeBig path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 (range 1 3001) o
+  @close o
+
+testIndexGrowTotalCount :: Str -> <IO> Int
+testIndexGrowTotalCount path = do
+  writeBig path
+  s <- @open path :: <IO> IStream Int
+  @flen s
+
+testIndexGrowFirstElement :: Str -> <IO> Int
+testIndexGrowFirstElement path = do
+  writeBig path
+  s <- @open path :: <IO> IStream Int
+  xs <- @next s
+  .[0] xs
+
+-- The element AT the original 1024 -> 2048 grow boundary
+-- (zero-indexed: element at position 1024 has value 1025).
+-- This pins that the grow's data-region memmove + relptr
+-- adjustment didn't corrupt elements straddling the boundary.
+testIndexGrowAtBoundary :: Str -> <IO> Int
+testIndexGrowAtBoundary path = do
+  writeBig path
+  s <- @open path :: <IO> IStream Int
+  xs <- @next s
+  -- The 1025th element (1-indexed) is value 1025.
+  .[1024] xs

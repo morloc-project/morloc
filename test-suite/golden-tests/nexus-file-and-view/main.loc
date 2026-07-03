@@ -1,0 +1,17 @@
+-- Tiny morloc program used by the nexus-file-and-view golden test to
+-- materialize a real morloc data packet on disk. The exported
+-- `payload` function returns a fixed Vector of three strings; invoking
+-- it with `-f packet -o data.packet` writes a self-describing packet
+-- whose metadata embeds the schema "as".
+--
+-- The test also runs `morloc-nexus file` and `morloc-nexus view`
+-- directly against the produced packet (and against handwritten .json
+-- and .mpk files) to exercise the new utility subcommands without
+-- needing a manifest.
+
+module main (payload)
+
+import root-py
+
+payload :: [Str]
+payload = ["a", "b", "c"]

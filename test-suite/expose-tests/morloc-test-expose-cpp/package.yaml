@@ -1,0 +1,8 @@
+name: morloc-test-expose-cpp
+version: 0.1.0
+synopsis: Fixture for expose-tests; verifies C++ header exposure with relative includes.
+
+expose:
+  cpp:
+    - foo.hpp
+    - foo_helpers/
