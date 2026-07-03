@@ -7807,4 +7807,43 @@ mod tests {
         close_handle(handle).unwrap();
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Group pattern `.(.[];.[])` against `[i64]`: the walker
+    /// materialises a Tuple2 with (arr[i], arr[j]) in one call. This
+    /// is the tuple-returning mode required by
+    /// `PatternAccessible.__extract_pattern__` for group accessors.
+    #[test]
+    fn ifile_group_pattern_returns_tuple() {
+        crate::init_test_shm();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_stream_test_{}_group", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ints-group.idx");
+
+        let elem_schema = TSchema::primitive(TSerialType::Sint64);
+        let sub: &[i64] = &[10, 20, 30, 40, 50];
+        let bytes = build_stream_file(&elem_schema, &[sub]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let handle = open_ifile(path.to_str().unwrap()).unwrap();
+
+        let arg = |v: i64| crate::intrinsics::IFileWalkArg {
+            has: 1, _pad: [0u8; 7], value: v,
+        };
+        let args = [arg(1), arg(3)];
+        let ptr = shared_ifile_walk(handle, ".(.[];.[])", &args)
+            .expect("group walk failed");
+
+        // Result is a Tuple2 (Sint64, Sint64). Voidstar tuple layout
+        // packs the two 8-byte fields contiguously at offsets 0 and 8.
+        let slot0 = unsafe { *(ptr as *const i64) };
+        let slot1 = unsafe { *((ptr as *const u8).add(8) as *const i64) };
+        assert_eq!(slot0, 20, "tuple slot 0 should be arr[1] = 20");
+        assert_eq!(slot1, 40, "tuple slot 1 should be arr[3] = 40");
+
+        shm::shfree(ptr).unwrap();
+        close_handle(handle).unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -1,0 +1,19 @@
+-- Regression: declaring both a 'PatternAccessible' instance and a
+-- structural ('Indexable' / 'Sliceable' / 'SliceableDim') instance for
+-- the same receiver head is a coherence error. Both class families
+-- dispatch the same accessor syntax (.foo, .[i], .[s:e:p]); silently
+-- preferring one at codegen would be a footgun.
+--
+-- root-py already declares 'instance Indexable List'. Adding
+-- 'instance PatternAccessible List' below creates the conflict; the
+-- frontend must reject it before typecheck runs any further.
+
+module main (foo)
+
+import root-py
+
+instance PatternAccessible List where
+  source Py from "helpers.py" ("list_pattern_walker" as __extract_pattern__)
+
+foo :: Int
+foo = 0

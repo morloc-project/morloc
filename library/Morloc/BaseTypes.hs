@@ -43,6 +43,10 @@ module Morloc.BaseTypes
   , mlcKindIFile
   , mlcKindIStream
   , mlcKindOStream
+  , patternChainVar
+  , patternAccessibleClass
+  , extractPatternMethod
+  , patternChainGrammarVersion
   , unitU
   , realU
   , f32U
@@ -69,7 +73,7 @@ module Morloc.BaseTypes
   ) where
 
 import Data.Word (Word8)
-import Morloc.Data.Text (pretty)
+import Morloc.Data.Text (Text, pretty)
 import Morloc.Namespace.Prim (TVar (..))
 import Morloc.Namespace.Type (Type (..), TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
@@ -166,6 +170,26 @@ mlcKindIStream = 1
 
 mlcKindOStream :: Word8
 mlcKindOStream = 2
+
+-- | Names for the PatternAccessible typeclass and its canonical string
+-- newtype. Instances of 'PatternAccessible w' provide
+-- '__extract_pattern__ :: PatternChain (w a) b -> [?Int64] -> w a -> b',
+-- which the compiler and runtime cooperate to dispatch pattern accessors
+-- (.foo, .[i], .[s:e:p], .0, .(a, b), and chains) through.
+patternChainVar :: TVar
+patternChainVar = TV "PatternChain"
+
+patternAccessibleClass :: TVar
+patternAccessibleClass = TV "PatternAccessible"
+
+extractPatternMethod :: Text
+extractPatternMethod = "__extract_pattern__"
+
+-- | Grammar version for the canonical PatternChain string form. Bumped
+-- for every backward-incompatible grammar change so out-of-tree
+-- instances can pin against a compatible compiler.
+patternChainGrammarVersion :: Int
+patternChainGrammarVersion = 1
 
 -- | True if @t@'s head (after peeling EffectT / AppT / OptionalT
 -- wrappers) is the IFile sentinel. Used by Express.hs to route

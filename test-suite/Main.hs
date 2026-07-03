@@ -6,6 +6,7 @@ import Test.Tasty
 
 import GoldenMakefileTests (goldenMakefileTest)
 import MorlocDepsTests (morlocDepsTests)
+import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import SizeParseTests (sizeParseTests)
 import UnitTypeTests
@@ -54,6 +55,7 @@ main = do
       , postArgPropagationTests
       , morlocDepsTests
       , sizeParseTests
+      , patternChainTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -123,6 +125,7 @@ main = do
       , golden "bracket-accessors" "bracket-accessors"
       , golden "bracket-accessors-pure" "bracket-accessors-pure"
       , golden "bracket-accessors-ifile" "bracket-accessors-ifile"
+      , golden "pattern-accessible-coherence-error" "pattern-accessible-coherence-error"
       , golden "ifile-array-cross-pool" "ifile-array-cross-pool"
 
       , golden "stdio-roundtrip" "stdio-roundtrip"
