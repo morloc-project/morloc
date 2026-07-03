@@ -1,12 +1,68 @@
-0.90.0 [2026-07-xx]
+0.90.0 [2026-07-03]
 -------------------
+
+Packet compression, file random access, and streaming 
 
 Packet compression with zstd
  * `-z <level>` morloc-nexus argument with 0 being no compression and 9 max
- * add compression level to `@save` intrinsic as first argument
- * add dynamically decided multi-threading to zstd compression
+ * add compression level to `@write` intrinsic as first argument
+ * multi-threaded compression and decompression
 
-0.89.0 [2026-07-13]
+Add streaming support
+ * Add a new morloc streaming packet type
+ * No length is specified in the header
+ * The streaming type MUST be `[a]`
+ * Sub-packets of type `[a]` are written contiguously, a temp footer is updated at
+   each write
+ * When an output stream closes, a final footer is written with an index for
+   looking up sub-packets.
+ * New input stream type: `IStream a`
+   - open with the intrinsic `@open`, for example:
+        `open "path/to/file" :: <IO> IStream Str``
+   - type annotations are required (usually) at open time
+   - the `@next` intrinsic returns a list of type `[a]` representing all
+     elements in one subpacket; it returns an empty list when the end of the
+     stream is reached
+   - close the input with `@close`
+ * New output stream type: `OStream a`
+   - open with the intrinsic `@open`, for example:
+        `@open "path/to/file" :: <IO> OStream Str``
+   - write one or more results to the output stream with `@write c xs`, where
+     `c` is the compression level.
+   - the `OStream a` output is buffered
+   - force the buffer to be written to a subpacket (if non-empty) with `@flush`
+   - close the input with `@close`
+ * `@concat` intrinsic to concat stream files
+ * `@append` to open a stream packet and continue writing to it
+
+Add stdio streaming
+ * `@stdin` - open STDIN file and stream morloc packets 
+ * `@stdout`/`@stderr` - open STDOUT/STDERR files and write packets to them
+
+Add random-access file support
+ * New read-only random-access file type `IFile a`
+ * Randomly query data or stream packets via patterns
+
+Docstring shape directives
+ * JSON user input as CLI arguments is now exclusively for structured data
+   (JSON arrays and objects); strings are now primitives that do not need extra
+   JSON quoting.
+ * `literal` docstring field is deprecated
+ * introduce `source`, `form` and `check.*` fields to direct how data is read in
+   (see the new doc section)
+ * `@flen` to get the length of a file with type `[a]`
+ * `@fschema` to get the file type schema
+
+New utility functions in `morloc-nexus`
+ * `morloc-nexus file` - print information about a morloc packet
+ * `morloc-nexus view` - convert morloc packets into other forms
+
+Other changes
+ * Mostly deprecate MessagePack; compressed voidstar is better
+ * Thorough `morloc install` help message
+
+
+0.89.0 [2026-06-13]
 -------------------
 
 Observability
@@ -43,7 +99,7 @@ Argument source handling
   * clean handling of STDIN in arguments through `-`
   * better error messages
 
-0.88.0 [2026-07-07]
+0.88.0 [2026-06-07]
 -------------------
 
 Slurm support
