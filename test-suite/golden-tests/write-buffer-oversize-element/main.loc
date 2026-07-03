@@ -63,7 +63,7 @@ testTotalCount path = do
 -- split size is (buf_size - 16) / w = 255 for the 16-byte BigInt
 -- wire form. Pins the splitting formula so the test notices if
 -- buffer-fit math changes.
-testSplitSize :: Str -> <IO> Int
+testSplitSize :: Str -> <IO> UInt64
 testSplitSize path = do
   writeMixed path
   s <- @open path :: <IO> IStream Int

@@ -52,7 +52,7 @@ testMultiPoolElementCount path = do
 -- Drain ALL sub-packets via IStream (forward walk; sees every
 -- writer's flushed contributions regardless of pool). Sum.
 -- Use defensively-large @next chain.
-testMultiPoolDrainAll :: Str -> <IO> Int
+testMultiPoolDrainAll :: Str -> <IO> UInt64
 testMultiPoolDrainAll path = do
   o <- @open path :: <IO> OStream Int
   writeCppContrib 100 o

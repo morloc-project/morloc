@@ -48,7 +48,7 @@ pyRead s = do
 -- Each pool's @next claims one sub-packet from the shared
 -- cursor. Sum of element counts = 7. The exact split depends
 -- on call order, which is deterministic here.
-testCrossPoolReaders :: Str -> <IO> Int
+testCrossPoolReaders :: Str -> <IO> UInt64
 testCrossPoolReaders path = do
   prepFile path
   s <- @open path :: <IO> IStream Int
@@ -59,7 +59,7 @@ testCrossPoolReaders path = do
 
 -- After all 3 sub-packets drained, the 4th read (from any pool)
 -- returns []. This shows the EOF signal propagates cross-pool.
-testCrossPoolReadersEof :: Str -> <IO> Int
+testCrossPoolReadersEof :: Str -> <IO> UInt64
 testCrossPoolReadersEof path = do
   prepFile path
   s <- @open path :: <IO> IStream Int
