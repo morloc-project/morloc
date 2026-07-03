@@ -846,21 +846,6 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
         Just src -> Just <$>
           emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE
 
--- | Emit an IntrIFileWalk for `.field f` (and chains like `.foo.bar`)
--- when the receiver f is IFile-typed. The selector is validated to be
--- a single-field chain (no multi-field groups).
-expressPatternStructIFile
-  :: Lang
-  -> Int                       -- midx
-  -> Int                       -- cidxCall (unused; kept for call-site shape)
-  -> Selector
-  -> Type                      -- result type (the field's type)
-  -> PolyExpr                  -- IFile-typed receiver expression
-  -> MorlocMonad PolyExpr
-expressPatternStructIFile callLang midx _cidxCall sel out rcvE = do
-  steps <- selectorToWalkSteps midx sel
-  emitIFileWalk callLang midx out steps rcvE []
-
 -- | Unified PatternStruct dispatch. The App's args are
 -- @[bracket_bounds..., receiver]@ when the selector has bracket
 -- steps; otherwise just @[receiver]@.
@@ -1874,7 +1859,7 @@ tryFuseSliceSelectorChain
   -> MorlocMonad (Maybe PolyExpr)
 tryFuseSliceSelectorChain midx callLang funcE listE outT =
   case (matchSelectorLambda funcE, matchSliceOnIFile listE) of
-    (Just sel, Just (boundsExprs, rcvExpr, rcvT)) -> do
+    (Just sel, Just ((sE, eE, pE), rcvExpr, rcvT)) -> do
       isIFile <- typeHeadIs midx BT.ifileVar rcvT
       if not isIFile
         then return Nothing
@@ -1888,7 +1873,6 @@ tryFuseSliceSelectorChain midx callLang funcE listE outT =
             then return Nothing
             else do
               let steps = bracketSliceSteps ++ tailSteps
-                  [sE, eE, pE] = boundsExprs
               [sT, eT, pT] <- mapM (boundTypeAt midx listE) [0, 1, 2]
               -- Express each bound expression, then __to_index__ wrap
               -- it the same way the standalone slice path does.
@@ -1920,13 +1904,15 @@ matchSelectorLambda _ = Nothing
 
 matchSliceOnIFile
   :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
-  -> Maybe ( [AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])]
+  -> Maybe ( ( AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+             , AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
+             , AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) )
            , AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar])
            , Type )
 matchSliceOnIFile (AnnoS _ _ (AppS
                                  (AnnoS _ _ (ExeS (PatCall PatternBracketSlice)))
                                  [sE, eE, pE, rcvE@(AnnoS (Idx _ rcvT) _ _)])) =
-  Just ([sE, eE, pE], rcvE, rcvT)
+  Just ((sE, eE, pE), rcvE, rcvT)
 matchSliceOnIFile _ = Nothing
 
 boundTypeAt

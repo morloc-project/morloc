@@ -279,17 +279,6 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Left _ -> return ()
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
--- | Assert that a subtype check is accepted (dual of assertSubtypeBad).
--- Used for positive rules whose resulting gamma involves freshly
--- generated existentials (e.g. effect-row instantiation), where an
--- exact-context assertion would be brittle.
-assertSubtypeOk :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
-assertSubtypeOk msg gs a b = testCase msg $ do
-  let g0 = listToGamma gs
-  case MTI.subtype Map.empty a b g0 of
-    Left e -> assertFailure $ "Expected subtype acceptance for " <> show a <> " <: " <> show b <> " but got: " <> show e
-    Right _ -> return ()
-
 -- | Convert a list of GammaIndex (newest first) to a Gamma with IntMap.
 -- Uses slot spacing of 256 to match production code.
 listToGamma :: [GammaIndex] -> Gamma

@@ -642,7 +642,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
     -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
     -- needs the element schema at open time.
-    toNexusExpr (AnnoS (Idx i t) _ (IntrinsicS IntrOpen [path])) = do
+    toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) = do
       let peelEffect (EffectT _ inner) = peelEffect inner
           peelEffect ot = ot
           unwrapped = peelEffect t
@@ -661,10 +661,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           | v == MBT.ostreamVar ->
               OpenOStreamX <$> type2schema elemT <*> toNexusExpr path
           | otherwise ->
-              MM.throwSourcedError i $
+              MM.throwSourcedError iOpen $
                 "@open: result type must be IFile/IStream/OStream, got " <> pretty v
         _ ->
-          MM.throwSourcedError i $
+          MM.throwSourcedError iOpen $
             "@open: unsupported handle type" <+> pretty (show t)
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrClose [handle])) =
       CloseX <$> toNexusExpr handle

@@ -1245,12 +1245,12 @@ genericEvalPattern desc _ (PatternStruct (ungroup -> sss)) [m] =
 genericEvalPattern desc _ (PatternStruct s) args
   | selectorHasBracket s, length args == bracketArity s + 1 =
       let n = bracketArity s
-          (brackets, receivers) = splitAt n args
+          (bracketArgs, receivers) = splitAt n args
           receiver = case receivers of
             [r] -> r
             _ -> error $ "genericEvalPattern: bracket-in-Selector expected 1 receiver, \
                          \got " <> show (length receivers)
-      in fst (walkSelectorBrackets desc receiver brackets s)
+      in fst (walkSelectorBrackets desc receiver bracketArgs s)
 -- setters
 genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
   patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
@@ -1315,11 +1315,11 @@ walkSelectorBrackets
   -> [MDoc]        -- remaining bracket runtime args
   -> Selector
   -> (MDoc, [MDoc])
-walkSelectorBrackets _ rcv brackets SelectorEnd = (rcv, brackets)
-walkSelectorBrackets desc rcv brackets (SelectorKey (k, sub) []) =
-  walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) brackets sub
-walkSelectorBrackets desc rcv brackets (SelectorIdx (i, sub) []) =
-  walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) brackets sub
+walkSelectorBrackets _ rcv bracketArgs SelectorEnd = (rcv, bracketArgs)
+walkSelectorBrackets desc rcv bracketArgs (SelectorKey (k, sub) []) =
+  walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) bracketArgs sub
+walkSelectorBrackets desc rcv bracketArgs (SelectorIdx (i, sub) []) =
+  walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) bracketArgs sub
 walkSelectorBrackets desc rcv (idx : restBrackets) (SelectorBracketIndex sub) =
   let accessed = case ldIndexStyle desc of
         ZeroBracket -> rcv <> "[" <> idx <> "]"
@@ -1335,24 +1335,24 @@ walkSelectorBrackets desc rcv (start : stop : step : restBrackets) SelectorBrack
   in (sliced, restBrackets)
 walkSelectorBrackets _ _ _ SelectorBracketSlice =
   error "walkSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
-walkSelectorBrackets desc rcv brackets (SelectorKey hd@(_, _) others) =
+walkSelectorBrackets desc rcv bracketArgs (SelectorKey hd@(_, _) others) =
   let pairs = hd : others
       (results, finalBrackets) = foldl
         (\(acc, b) (k, sub) ->
            let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) b sub
            in (acc ++ [out], b'))
-        ([], brackets) pairs
+        ([], bracketArgs) pairs
       tupleExpr = case ldTupleConstructor desc of
         "" -> tupled results
         name -> pretty name <> tupled results
   in (tupleExpr, finalBrackets)
-walkSelectorBrackets desc rcv brackets (SelectorIdx hd@(_, _) others) =
+walkSelectorBrackets desc rcv bracketArgs (SelectorIdx hd@(_, _) others) =
   let pairs = hd : others
       (results, finalBrackets) = foldl
         (\(acc, b) (i, sub) ->
            let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) b sub
            in (acc ++ [out], b'))
-        ([], brackets) pairs
+        ([], bracketArgs) pairs
       tupleExpr = case ldTupleConstructor desc of
         "" -> tupled results
         name -> pretty name <> tupled results

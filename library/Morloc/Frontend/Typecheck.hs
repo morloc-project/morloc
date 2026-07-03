@@ -1440,13 +1440,13 @@ checkIntrinsicArgs i g intr argTypes = do
         -- enforces kind == ISTREAM.
         (IntrNext, [argT]) ->
           let (g'a, a) = newvar "next_a_" g
-              expected = AppU (VarU BT.istreamVar) [a]
-           in subtype' i argT expected g'a
+              expectedT = AppU (VarU BT.istreamVar) [a]
+           in subtype' i argT expectedT g'a
         -- @stream: IFile a -> <IO> IStream a. Same trick.
         (IntrStream, [argT]) ->
           let (g'a, a) = newvar "stream_a_" g
-              expected = AppU (VarU BT.ifileVar) [a]
-           in subtype' i argT expected g'a
+              expectedT = AppU (VarU BT.ifileVar) [a]
+           in subtype' i argT expectedT g'a
         -- @write is special-cased in synthE so the OStream's element
         -- type can pin the list literals' element type via check-mode
         -- propagation; see the synthE branch above.
@@ -1462,8 +1462,8 @@ checkIntrinsicArgs i g intr argTypes = do
         -- depth) but the static check is the user-facing diagnostic.
         (IntrFlush, [handleT]) ->
           let (g'a, a) = newvar "flush_a_" g
-              expected = AppU (VarU BT.ostreamVar) [a]
-           in subtype' i handleT expected g'a
+              expectedT = AppU (VarU BT.ostreamVar) [a]
+           in subtype' i handleT expectedT g'a
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g
