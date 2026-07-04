@@ -162,6 +162,7 @@ main = do
       , golden "thunk-guard-cross" "thunk-guard-cross"
       , golden "thunk-cross-force" "thunk-cross-force"
       , golden "thunk-callback-cpp" "thunk-callback-cpp"
+      , golden "thunk-callback-cross-py" "thunk-callback-cross-py"
       , golden "thunk-eval-forall" "thunk-eval-forall"
       , golden "thunk-eval-hk" "thunk-eval-hk"
       , golden "two-module" "two-module"

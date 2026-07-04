@@ -508,7 +508,10 @@ makeSerialAST m lang t0 = do
         selectPacker [x] = return x
         selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
     makeSerialAST' _ _ t@(FunF _ _) =
-      MM.throwSourcedError m $ "Cannot serialize functions at" <+> pretty m <> ":" <+> pretty t
+      MM.throwCompilerBugAt m $
+        "Function-type serialization reached codegen backstop -- the higher-order"
+        <+> "export guard at Nexus.hs (see 'checkExportedHigherOrder') should have"
+        <+> "caught this at the export boundary. Type dump:" <+> pretty t
     -- Wire-form construction for an applied type `Foo a b ...`.
     --
     -- Two pieces of information drive dispatch here:

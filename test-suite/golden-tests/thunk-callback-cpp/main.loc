@@ -14,11 +14,17 @@
 -- has an EffectT layer, the body is wrapped in PolyEval so the
 -- manifold returns the plain value with the effect already fired.
 
-module main (bareCallback, lambdaCallback)
+module main (bareCallback, lambdaCallback, bareMultiEffect, lambdaMultiEffect)
+
+effect Error
 
 import root-cpp
 
-source Cpp from "foo.hpp" ("forEach", "tap", "totalSoFar", "resetTally")
+source Cpp from "foo.hpp"
+  ( "forEach", "tap", "totalSoFar", "resetTally"
+  , "forEach" as forEachE
+  , "tap"     as tapE
+  )
 
 type Cpp => Int = "int"
 
@@ -26,6 +32,14 @@ forEach     :: [Int] -> (Int -> <IO> ()) -> <IO> ()
 tap         :: Int -> <IO> ()
 totalSoFar  :: <IO> Int
 resetTally  :: <IO> ()
+
+-- Same C++ template + function, re-declared with a multi-label
+-- effect. Exercises 'peelAllEffects' at the callback boundary: the
+-- receiver type has to strip every EffectT layer, otherwise the
+-- callback manifold returns a partially-forced thunk that the
+-- outer forEach template still can't consume.
+forEachE    :: [Int] -> (Int -> <IO, Error> ()) -> <IO, Error> ()
+tapE        :: Int -> <IO, Error> ()
 
 -- Bare sourced function passed as callback. No morloc-generated
 -- lambda wrapper on this path -- forEach invokes `tap` directly.
@@ -50,4 +64,25 @@ lambdaCallback :: <IO> Int
 lambdaCallback = do
   resetTally
   forEach [10, 20, 30] (\x -> tap (x + 1))
+  totalSoFar
+
+-- Multi-label effect variant of bareCallback. The callback's
+-- return type is <IO, Error>; both effect labels must be discharged
+-- at the callback boundary so foreign forEach receives a fully-
+-- forced Unit-returning callable. If the effect strip were single-
+-- layer only, one label would remain wrapped and the C++ compiler
+-- would reject the callback signature.
+-- Expected: 10 + 20 + 30 = 60.
+bareMultiEffect :: <IO, Error> Int
+bareMultiEffect = do
+  resetTally
+  forEachE [10, 20, 30] tapE
+  totalSoFar
+
+-- Multi-label effect variant of lambdaCallback.
+-- Expected: 11 + 21 + 31 = 63.
+lambdaMultiEffect :: <IO, Error> Int
+lambdaMultiEffect = do
+  resetTally
+  forEachE [10, 20, 30] (\x -> tapE (x + 1))
   totalSoFar

@@ -1248,7 +1248,19 @@ expressPolyExpr
                     innerWrap
                 )
                 boundVars
-        mkPolyManifold parentLang midx localForm (chain lets (PolyReturn remoteApp))
+            -- Cross-language callback: mirror the EvalS handler at
+            -- line 1754. 'pushForceIntoRemote' updates the
+            -- 'PolyRemoteInterface' type to the peeled 'lamOutType'
+            -- (so the receiver-side C++ variable / wire schema agree
+            -- on the concrete post-force type) and installs a
+            -- 'PolyEval' at the callee's source-call return position
+            -- (so the 'Common.hs' auto-suspend gets forced before
+            -- serialization). Without this, the eta-abstracted
+            -- callback manifold's declared return stays
+            -- 'std::function<T()>' while the wire ships plain T,
+            -- and the C++ compiler rejects the assignment.
+            forcedApp = pushForceIntoRemote (Idx cidxLam (peelAllEffects lamOutType)) remoteApp
+        mkPolyManifold parentLang midx localForm (chain lets (PolyReturn forcedApp))
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -1461,8 +1473,7 @@ expressPolyExpr
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
         retapp <- expressPolyApp callLang e callVals
-        let forcedRetapp = wrapEffectForces cidx poutput retapp
-        innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) forcedRetapp
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) retapp
         let remoteApp =
               PolyReturn $ PolyApp
                 ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
@@ -1471,7 +1482,10 @@ expressPolyExpr
                 ( fromJust
                   $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
                 )
-        mkPolyManifold parentLang midx (ManifoldPass lambdaTypedArgs) remoteApp
+            -- Cross-language eta-abstraction: same rationale as the
+            -- paired LamS+AppS case above. See that comment.
+            forcedApp = pushForceIntoRemote (Idx cidx (peelAllEffects poutput)) remoteApp
+        mkPolyManifold parentLang midx (ManifoldPass lambdaTypedArgs) forcedApp
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -1980,11 +1994,20 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
 
-{- | Handle cross-language force by stripping EffectT from the callee's function
-return type. The source function actually returns the unwrapped type; the
-EffectT wrapper is a type-system abstraction. By removing it, Common.hs won't
-auto-wrap in DoBlockN, so the raw value is serialized directly.
-If no PolyRemoteInterface is found, falls back to wrapping in PolyEval.
+{- | Handle cross-language force at a PolyRemoteInterface boundary. The
+callee runs in a foreign pool and must serialize a concrete value on the
+wire -- thunk-shaped `<IO> T` values have no wire form. The overall
+'PolyRemoteInterface' type is set to the target type @t@ (the caller's
+already-forced type), which drives both the wire schema and the
+receiver's expected type. On the callee side, the source-call in return
+position is wrapped in 'PolyEval' so the 'DoBlockN' suspend that
+Common.hs auto-emits for EffectF+SrcCallP gets forced before
+serialization. This preserves the language-agnostic void->Unit
+materialization the local case already relies on: C++'s @void
+forEach(...)@ still gets @[&](){forEach(...); return mlc::Unit{};}()@,
+now on the callee side of the RPC too. If no 'PolyRemoteInterface' is
+found (same-language chain), falls back to a single 'PolyEval' at the
+current position -- unchanged from the prior behavior.
 -}
 pushForceIntoRemote :: Indexed Type -> PolyExpr -> PolyExpr
 pushForceIntoRemote t = go
@@ -1993,22 +2016,42 @@ pushForceIntoRemote t = go
     go (PolyReturn e) = PolyReturn (go e)
     go (PolyLet i e1 e2) = PolyLet i e1 (go e2)
     go (PolyApp (PolyRemoteInterface lang _ args remote callee) xs) =
-      PolyApp (PolyRemoteInterface lang t args remote (stripThunkReturn callee)) xs
+      PolyApp (PolyRemoteInterface lang t args remote (forceCalleeReturn callee)) xs
     go e = PolyEval t e -- fallback for local expressions
 
-    -- Strip EffectT from the function's return type inside the callee manifold
-    stripThunkReturn (PolyManifold l m f k body) = PolyManifold l m f k (stripInBody body)
-    stripThunkReturn e = stripInBody e
+    -- Walk the callee manifold body to the return-position source call
+    -- and wrap it in PolyEval. Leaves the PolyExe's declared type
+    -- untouched so Common.hs's EffectF+SrcCallP auto-suspend still fires
+    -- and materializes the void->Unit lambda; PolyEval then forces that
+    -- lambda before the value is serialized to the wire.
+    forceCalleeReturn (PolyManifold l m f k body) = PolyManifold l m f k (forceInBody body)
+    forceCalleeReturn e = forceInBody e
 
-    stripInBody (PolyReturn e) = PolyReturn (stripInExe e)
-    stripInBody (PolyLet i e1 e2) = PolyLet i e1 (stripInBody e2)
-    stripInBody e = stripInExe e
+    forceInBody (PolyReturn e) = PolyReturn (forceInExe e)
+    forceInBody (PolyLet i e1 e2) = PolyLet i e1 (forceInBody e2)
+    forceInBody e = forceInExe e
 
-    stripInExe (PolyApp (PolyExe (Idx gidx (FunT inputs (EffectT _ out))) exe) xs) =
-      PolyApp (PolyExe (Idx gidx (FunT inputs out)) exe) xs
-    stripInExe (PolyApp (PolyExe (Idx gidx (EffectT _ out)) exe) xs) =
-      PolyApp (PolyExe (Idx gidx out) exe) xs
-    stripInExe e = e
+    -- Only wrap when the source call declares an EffectT return; a pure
+    -- source (e.g. `add :: Int -> Int -> Int`) has no thunk to force
+    -- and PolyEval on a plain value would emit `val()` and error.
+    -- Peels ALL nested EffectT layers -- one PolyEval per layer -- so a
+    -- source declared `<IO> <Error> T` (or the internal equivalent) is
+    -- fully forced before the value is serialized to the wire.
+    forceInExe orig@(PolyApp (PolyExe (Idx gidx (FunT _ ret)) _) _)
+      | hasEffect ret = wrapPeeledEffects gidx ret orig
+    forceInExe orig@(PolyApp (PolyExe (Idx gidx ret) _) _)
+      | hasEffect ret = wrapPeeledEffects gidx ret orig
+    forceInExe e = e
+
+    hasEffect (EffectT _ _) = True
+    hasEffect _ = False
+
+    -- One PolyEval per EffectT layer; the wire schema (via
+    -- `makeSerialAST`) already strips all layers, so we must force
+    -- them all to match.
+    wrapPeeledEffects gidx (EffectT _ inner) e =
+      wrapPeeledEffects gidx inner (PolyEval (Idx gidx inner) e)
+    wrapPeeledEffects _ _ e = e
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
@@ -2033,3 +2076,11 @@ bindVarIds [] [] = []
 bindVarIds (i : args) (t : types) = PolyBndVar t i : bindVarIds args types
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
 bindVarIds _ [] = error "bindVarIds: too few types"
+
+-- | Peel all EffectT layers off a type, revealing the fully-forced
+-- underlying type. Used at cross-language boundaries where the wire
+-- schema is derived from the fully-unwrapped type; the receiver's
+-- variable / manifold declaration must match.
+peelAllEffects :: Type -> Type
+peelAllEffects (EffectT _ inner) = peelAllEffects inner
+peelAllEffects other = other
