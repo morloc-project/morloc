@@ -385,10 +385,10 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     unpackDataArgIfNeeded m IntrSave (levelArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
       return (levelArg : rest' ++ rest)
-    -- @write's args are [level, value, handle]; the value is at index 1.
-    unpackDataArgIfNeeded m IntrWrite (levelArg : dataArg : rest) = do
+    -- @write's args are [level, handle, value]; the value is at index 2.
+    unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
-      return (levelArg : rest' ++ rest)
+      return (levelArg : handleArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr (dataArg : rest)
       | intr `elem` [IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
           rest' <- packDataArg m dataArg
@@ -487,10 +487,10 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @write's data arg (at index 1, after the level Int) carries `[a]`;
+    -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
     -- schema describes that list type so to_voidstar produces the right
     -- voidstar layout for the runtime's flatten_to_buffer.
-    intrinsicSchema m IntrWrite _ (_levelArg : dataArg : _) = do
+    intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @open :: <IO> (OStream a): the element schema for `a` flows into

@@ -709,7 +709,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       NextX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, valE@(AnnoS (Idx _ valT) _ _), handleE])) =
+    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
       WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE

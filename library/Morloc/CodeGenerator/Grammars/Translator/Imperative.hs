@@ -809,10 +809,14 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
         (IIntrinsicStream (IRawExpr (render (poolExpr handleDocs))))
     }
 -- @write: emit one sub-packet of the [a] value to the OStream handle.
+-- Source order is (level, handle, value); IIntrinsicWrite keeps
+-- (level, value, handle) to match the C ABI `mlc_write(level, handle,
+-- voidstar)` and the pool's `_mlc_write(schema, level, value, handle)`
+-- helper.
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
-                                  [levelDocs, valueDocs, handleDocs]) = do
+                                  [levelDocs, handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  let allDocs = [levelDocs, valueDocs, handleDocs]
+  let allDocs = [levelDocs, handleDocs, valueDocs]
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg

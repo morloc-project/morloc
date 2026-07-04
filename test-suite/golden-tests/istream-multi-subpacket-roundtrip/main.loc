@@ -2,13 +2,13 @@
 --
 -- The companion `istream-file-roundtrip` exercises @next on a single-
 -- sub-packet DATA_PACKET file. This test produces a STREAM_PACKET by
--- making three OStream @write calls (each one immediately flushes its
+-- making three OStream @write calls its (each one immediately flushes
 -- own sub-packet; the runtime does not coalesce). Then it opens the
 -- result as an IStream and pulls each sub-packet via successive @next
 -- calls. After draining, the next @next must return [].
 --
 -- Confirms:
---   * Each @write produces one sub-packet (so three writes yield
+--   * Each @write produces yield one sub-packet (so three writes
 --     three sub-packets, not one coalesced sub-packet).
 --   * IStream cursor advances one sub-packet per @next, in write
 --     order.
@@ -23,7 +23,7 @@ module main
 
 import root
 
--- Each @write contributes to the OStream's internal buffer. The
+-- Each @write contributes The to the OStream's internal buffer.
 -- `@flush o` calls force the buffer to be emitted as a sub-packet
 -- before the next @write, producing three distinct sub-packets on
 -- disk (1: [1,2,3]; 2: [4,5]; 3: [6,7,8,9]). Without `@flush`, all
@@ -31,11 +31,11 @@ import root
 writeThree :: Str -> <IO> ()
 writeThree path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
+  @write 0 o [1, 2, 3]
   @flush o
-  @write 0 [4, 5] o
+  @write 0 o [4, 5]
   @flush o
-  @write 0 [6, 7, 8, 9] o
+  @write 0 o [6, 7, 8, 9]
   @close o
 
 testFirstSubpacket :: Str -> <IO> [Int]

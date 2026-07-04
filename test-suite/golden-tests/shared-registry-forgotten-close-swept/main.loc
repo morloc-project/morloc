@@ -31,12 +31,12 @@ import root
 leakNoFlush :: Str -> <IO> ()
 leakNoFlush path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
+  @write 0 o [1, 2, 3]
 
 leakWithFlush :: Str -> <IO> ()
 leakWithFlush path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [10, 20, 30, 40] o
+  @write 0 o [10, 20, 30, 40]
   @flush o
 
 observeNoFlush :: Str -> <IO> Int

@@ -60,9 +60,9 @@ concatStrs xs = fold (<>) "" (map (\p -> .0 p) xs)
 prodTuples :: <IO> ()
 prodTuples = do
   o <- @stdout :: <IO> OStream (Str, Int)
-  @write 0 [("a", 1), ("bb", 2)] o
+  @write 0 o [("a", 1), ("bb", 2)]
   @flush o
-  @write 0 [("ccc", 3), ("dd", 4), ("e", 5)] o
+  @write 0 o [("ccc", 3), ("dd", 4), ("e", 5)]
   @close o
 
 consTuples :: <IO> Str
@@ -78,7 +78,7 @@ consTuples = do
 prodOpt :: <IO> ()
 prodOpt = do
   o <- @stdout :: <IO> OStream (?Int)
-  @write 0 [10, Null, 20, Null, 30] o
+  @write 0 o [10, Null, 20, Null, 30]
   @close o
 
 consOpt :: <IO> Int
@@ -107,7 +107,7 @@ consEmpty = do
 prodComp1 :: <IO> ()
 prodComp1 = do
   o <- @stdout :: <IO> OStream Int
-  @write 1 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] o
+  @write 1 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @close o
 
 consComp1 :: <IO> Int
@@ -119,7 +119,7 @@ consComp1 = do
 prodComp3 :: <IO> ()
 prodComp3 = do
   o <- @stdout :: <IO> OStream Int
-  @write 3 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] o
+  @write 3 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @close o
 
 consComp3 :: <IO> Int
@@ -131,7 +131,7 @@ consComp3 = do
 prodComp7 :: <IO> ()
 prodComp7 = do
   o <- @stdout :: <IO> OStream Int
-  @write 7 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] o
+  @write 7 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @close o
 
 consComp7 :: <IO> Int
@@ -159,7 +159,7 @@ prodHandles dest pa pb pc = do
   fb <- @open pb :: <IO> IFile [Int]
   fc <- @open pc :: <IO> IFile [Int]
   o <- @open dest :: <IO> OStream (IFile [Int])
-  @write 0 (idpy [fa, fb, fc]) o
+  @write 0 o (idpy [fa, fb, fc])
   @close o
 
 -- Read `.[0]` from each streamed handle and sum. Exercises pattern
@@ -182,11 +182,11 @@ consHandles dest = do
 prodOversize :: <IO> ()
 prodOversize = do
   o <- @stdout :: <IO> OStream Int
-  @write 0 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-            11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-            21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-            31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-            41, 42, 43, 44, 45, 46, 47, 48, 49, 50] o
+  @write 0 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+              11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+              31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+              41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
   @close o
 
 consOversize :: <IO> Int
@@ -202,11 +202,11 @@ consOversize = do
 fileWrite :: Str -> <IO> ()
 fileWrite path = do
   o <- @open path :: <IO> OStream Int
-  @write 3 [10, 20, 30] o
+  @write 3 o [10, 20, 30]
   @flush o
-  @write 3 [40, 50] o
+  @write 3 o [40, 50]
   @flush o
-  @write 3 [60, 70, 80, 90, 100] o
+  @write 3 o [60, 70, 80, 90, 100]
   @close o
 
 fileRead :: Str -> <IO> Int

@@ -367,7 +367,7 @@ data Intrinsic
   | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
-  | IntrWrite       -- ^ @write :: Int -> [a] -> OStream a -> <IO> ()@ --
+  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> ()@ --
                     -- emit one sub-packet of element-list type. The Int is
                     -- the zstd compression level (0 = uncompressed); the
                     -- first @write fixes the level for the file's lifetime.

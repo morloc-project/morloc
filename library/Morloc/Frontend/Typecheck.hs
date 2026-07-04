@@ -1236,16 +1236,18 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
--- IntrWrite: @Int -> [a] -> OStream a -> <IO> ()@. The handle is
+-- IntrWrite: @Int -> OStream a -> [a] -> <IO> ()@. Handle-before-list
+-- is the natural partial-application shape: @write 3 o@ is a
+-- reusable [a] -> <IO> () sink for callbacks. The handle is
 -- check-mode'd FIRST so the OStream's element type pins the fresh
 -- existential @a@; then the list is check-mode'd against @[a]@,
 -- which gives the integer literals inside it a chance to inhabit
 -- the OStream's type (e.g. UInt64) via the check-mode IntS rule.
 -- The generic synth path would synth the list first and freeze its
--- elements to @Int@ before @a@ is visible -- @write 0 [1] (o ::
--- OStream UInt64)@ would then fail with "Cannot compare types
+-- elements to @Int@ before @a@ is visible -- @write 0 (o ::
+-- OStream UInt64) [1]@ would then fail with "Cannot compare types
 -- UInt64 and Int" at the handle subtyping step.
-synthE _ g (IntrinsicS IntrWrite [levelE, listE, handleE]) = do
+synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
   let (g1, a) = newvar "write_a_" g
       listExpectedT   = AppU (VarU BT.list) [a]
       handleExpectedT = AppU (VarU BT.ostreamVar) [a]
@@ -1254,10 +1256,10 @@ synthE _ g (IntrinsicS IntrWrite [levelE, listE, handleE]) = do
   (g4, _, listE')   <- checkG g3 listE   listExpectedT
   return ( g4
          , EffectU ioEffectSet BT.unitU
-         , IntrinsicS IntrWrite [levelE', listE', handleE']
+         , IntrinsicS IntrWrite [levelE', handleE', listE']
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
-  error $ "IntrWrite expects 3 args (level, list, handle), got " <> show (length args)
+  error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes

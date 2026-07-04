@@ -26,13 +26,13 @@ writePyContrib :: Int -> Int -> OStream Int -> <IO> ()
 writePyContrib offset count o = do
   -- A tight loop isn't expressible without recursion; do a
   -- small fixed batch instead.
-  @write 0 [offset, offset + 1, offset + 2] o
+  @write 0 o [offset, offset + 1, offset + 2]
   @flush o
   idpy ()
 
 writeCppContrib :: Int -> OStream Int -> <IO> ()
 writeCppContrib offset o = do
-  @write 0 [offset, offset + 1, offset + 2] o
+  @write 0 o [offset, offset + 1, offset + 2]
   @flush o
   idcpp ()
 

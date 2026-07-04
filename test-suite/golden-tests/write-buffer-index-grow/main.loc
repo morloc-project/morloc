@@ -22,7 +22,7 @@ import root-py -- python only needed for `range`
 writeBig :: Str -> <IO> ()
 writeBig path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 (range 1 3001) o
+  @write 0 o (range 1 3001)
   @close o
 
 testIndexGrowTotalCount :: Str -> <IO> Int

@@ -19,12 +19,12 @@ import root
 import root-cpp
 
 -- The whole do-block runs inside a Cpp manifold thanks to the outer
--- `idcpp`. Every @open / @write / @close / @next fires through
+-- `idcpp`. Every @open / @write / through @close / @next fires
 -- `pool.cpp`'s `_mlc_*` bridge wrappers.
 testPoolWriteRoundtrip :: Str -> <IO> [Int]
 testPoolWriteRoundtrip path = idcpp (do
   s <- @open path :: <IO> OStream Int
-  @write 0 [10, 20, 30] s
+  @write 0 s [10, 20, 30]
   @close s
   r <- @open path :: <IO> IStream Int
   @next r)
@@ -37,9 +37,9 @@ testPoolWriteRoundtrip path = idcpp (do
 testPoolWriteMulti :: Str -> <IO> Int
 testPoolWriteMulti path = idcpp (do
   s <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] s
-  @write 0 [4, 5, 6, 7] s
-  @write 0 [8] s
+  @write 0 s [1, 2, 3]
+  @write 0 s [4, 5, 6, 7]
+  @write 0 s [8]
   @close s
   f <- @open path :: <IO> IFile Int
   @flen f)

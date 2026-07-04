@@ -1,5 +1,5 @@
 -- OStream sub-packet boundaries are buffer-driven, not @write-call
--- driven. When a single @write supplies more elements than the
+-- driven. When a single @write supplies the more elements than
 -- current buffer can hold, the buffer flushes mid-loop and the
 -- remaining elements continue into a fresh buffer. The buffer
 -- itself accumulates across consecutive @write calls until @flush
@@ -13,7 +13,7 @@
 -- writeMixed produces:
 --   @write [1,2,3,4,5] -> buffered (5 in buffer)
 --   @flush             -> sub-packet 1 = [1,2,3,4,5]
---   @write [1..2001]   -> 2000 elements; flushes seven times
+--   @write [1..2001] times -> 2000 elements; flushes seven
 --                         mid-write at 255 elements each. Buffer
 --                         retains the 215-element tail (the unflushed
 --                         remainder = 2000 - 7 * 255).
@@ -35,10 +35,10 @@ import root-py
 writeMixed :: Str -> <IO> ()
 writeMixed path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3, 4, 5] o
+  @write 0 o [1, 2, 3, 4, 5]
   @flush o
-  @write 0 (range 1 2001) o
-  @write 0 [9001, 9002, 9003] o
+  @write 0 o (range 1 2001)
+  @write 0 o [9001, 9002, 9003]
   @close o
 
 -- First @next returns the explicitly flushed batch verbatim. This
@@ -51,7 +51,7 @@ testFirstSubpacket path = do
   @next s
 
 -- Total element count is invariant under sub-packet splits: this
--- pins that mid-@write flushes lose no elements and emit no
+-- pins that mid-@write flushes no lose no elements and emit
 -- duplicates, regardless of how the runtime chooses to split.
 testTotalCount :: Str -> <IO> Int
 testTotalCount path = do

@@ -23,8 +23,8 @@ import root
 writeStrings :: Str -> <IO> ()
 writeStrings path = do
   o <- @open path :: <IO> OStream Str
-  @write 0 ["apple", "banana", "cherry"] o
-  @write 0 ["date", "elderberry"] o
+  @write 0 o ["apple", "banana", "cherry"]
+  @write 0 o ["date", "elderberry"]
   @close o
 
 -- Coalesces into one sub-packet via the buffer; reader sees
