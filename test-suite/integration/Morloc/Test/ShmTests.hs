@@ -54,6 +54,7 @@ shmTests env = withResource (compileStressProgram env) removeDirectoryRecursive 
       [ normalConcurrentCleanup getWorkDir
       , rapidFireCleanup getWorkDir
       , sigtermBehavior getWorkDir
+      , sigtermBehaviorWithGrowth getWorkDir
       , sigkillBehavior getWorkDir
       ]
 
@@ -223,6 +224,80 @@ sigtermBehavior getWorkDir = testCase "sigtermBehavior" $ do
         ]
 
   -- Clean up leaked segments so they don't affect other tests
+  cleanupMorlocResources
+
+-- ======================================================================
+-- Test 3b: SIGTERM cleans up dynamic-growth volumes, not just the two
+--          startup ones. Runs `bigstress 20000 5.0` which allocates a
+--          160 KB payload before sleeping -- forces the allocator past
+--          the initial 64 KB `_0` volume into `_1` (128 KB) and often
+--          `_2` (256 KB). The test snapshots the SHM count DURING the
+--          sleep to verify growth actually happened (otherwise this
+--          test would silently degrade to the same coverage as the
+--          plain `sigtermBehavior`).
+-- ======================================================================
+
+sigtermBehaviorWithGrowth :: IO FilePath -> TestTree
+sigtermBehaviorWithGrowth getWorkDir = testCase "sigtermBehaviorWithGrowth" $ do
+  workDir <- getWorkDir
+  cleanupMorlocResources
+  threadDelay 100000 -- 100ms settle
+  before <- countShm
+
+  devNull <- openFile "/dev/null" WriteMode
+  -- 4 MB > both the initial 64 KB `_0` volume AND the ~2.1 MB stream
+  -- registry `_32767` (which shmalloc's fallback scan can allocate
+  -- from). Forces the allocator to `shinit` a fresh growth volume.
+  let cp =
+        (proc (workDir </> "nexus") ["bigstress", "4096", "5.0"])
+          { P.cwd = Just workDir
+          , P.std_out = UseHandle devNull
+          , P.std_err = UseHandle devNull
+          }
+  (_, _, _, ph) <- createProcess cp
+
+  threadDelay 3000000
+
+  duringSleep <- countShm
+  when (duringSleep <= before + 2) $ do
+    terminateProcess ph
+    _ec <- waitForProcess ph
+    hClose devNull
+    cleanupMorlocResources
+    assertFailure $
+      unlines
+        [ "sigtermBehaviorWithGrowth: workload did not trigger allocator growth"
+        , "  before: " ++ show before ++ " segments"
+        , "  during: " ++ show duringSleep ++ " segments"
+        , "  expected: > " ++ show (before + 2)
+          ++ " (any dynamic-growth segment beyond the two startup ones)"
+        , "  bump the KB argument on `bigstress` or shrink `_0`'s initial size."
+        ]
+
+  terminateProcess ph
+  _ec <- waitForProcess ph
+  hClose devNull
+
+  threadDelay 1000000 -- 1s settle
+
+  after <- countShm
+  afterSegs <- listShmWithAge
+  let shmDelta = after - before
+
+  when (shmDelta > 0) $
+    assertFailure $
+      unlines $
+        [ "sigtermBehaviorWithGrowth: SHM leak after SIGTERM"
+        , "  workDir: " ++ workDir
+        , "  before: " ++ show before ++ " segments"
+        , "  during sleep: " ++ show duringSleep ++ " segments (growth confirmed)"
+        , "  after:  " ++ show after ++ " segments (after 1s settle)"
+        , "  leaked: "
+            ++ intercalate
+              "\n          "
+              [seg ++ " (" ++ show age ++ "s old)" | (seg, age) <- afterSegs]
+        ]
+
   cleanupMorlocResources
 
 -- ======================================================================

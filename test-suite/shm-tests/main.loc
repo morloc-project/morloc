@@ -1,8 +1,16 @@
-module main (stress)
+module main (stress, bigstress)
 
 import types (Int, Real, List)
 import pyfuncs (make_list)
-import cppfuncs (sum_list)
+import cppfuncs (sum_list, alloc_hold_and_sum)
 
 stress :: Int -> Real -> Int
 stress n delay = sum_list (make_list n delay)
+
+-- `alloc_hold_and_sum size_kb delay` directly calls libmorloc's
+-- `shmalloc(size_kb * 1024)` in C++, holds the block for `delay`
+-- seconds, then `shfree`s. Any size > 64 KB forces the allocator
+-- past the initial `_0` volume into a new dynamic-growth volume,
+-- which persists for the SIGTERM window.
+bigstress :: Int -> Real -> Int
+bigstress size_kb delay = alloc_hold_and_sum size_kb delay

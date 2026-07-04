@@ -7,6 +7,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 
+use morloc_runtime_types::shm_types::MAX_VOLUME_NUMBER;
+
 use crate::manifest::Pool;
 
 pub const MAX_DAEMONS: usize = 32;
@@ -283,6 +285,7 @@ extern "C" fn pool_check_and_recover(
                 "stream_registry_init after recovery failed: {}", msg
             ));
         }
+        record_shm_basename(&new_basename);
 
         // Spawn each pool fresh.
         let indices: Vec<usize> = (0..n_pools).collect();
@@ -369,6 +372,14 @@ static BROKEN_PIPE: AtomicBool = AtomicBool::new(false);
 /// Global tmpdir path (set once in main, read during cleanup).
 static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// Async-signal-safe view of the SHM basename prefix (`"<basename>_\0"`)
+/// so `signal_exit_handler` can build `<basename>_<idx>` names without
+/// allocating or locking. `Mutex`-guarded `COMMON_BASENAME` in shm.rs
+/// is unusable from a signal handler. Overwrites leak the previous
+/// `CString` -- recovery is rare and each string is ~64 B.
+static SHM_BASENAME_PREFIX: std::sync::atomic::AtomicPtr<std::os::raw::c_char> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
 /// Socket info for each pool.
 ///
 /// Pool stderr and stdout are intentionally NOT captured or intercepted by
@@ -425,30 +436,11 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
     unsafe { *libc::__error() = saved_errno };
 }
 
-/// SIGTERM/SIGINT handler: fast shutdown.
-///
-/// Async-signal-safe: no allocation, no Rust std APIs, no locks. If the
-/// main thread was inside a `println!` or a mutex when the signal fired,
-/// calling back into Rust std would deadlock or double-borrow (the
-/// original "RefCell already borrowed" panic under Ctrl-C). So we do the
-/// minimum here: SIGKILL every pool process group (kill(2) IS async-
-/// signal-safe) and `_exit`, which skips destructors and returns to the
-/// kernel immediately.
-///
-/// Trade-offs:
-/// - SHM segments named `morloc-<pid>-<gen>` leak on this path. The
-///   next nexus run picks a fresh basename, and the morloc-manager
-///   sweeper reaps orphaned segments. Same story as any external
-///   `kill -9` of the nexus, which was already the accepted behavior.
-/// - The run-log epilogue and `summary.json` are NOT written. Neither
-///   is signal-safe. Users who ctrl-C don't expect a summary; if they
-///   need one, use SIGTERM's graceful path (the daemon has one) or the
-///   BrokenPipe path which runs full clean_exit from normal control
-///   flow.
-///
-/// A second signal (impatient user hitting ctrl-C twice) bypasses even
-/// the pool-kill loop and hard-exits immediately -- matches expected
-/// tool behavior ("hitting ctrl-C twice always works").
+/// SIGTERM/SIGINT handler: fast, async-signal-safe shutdown. Any Rust
+/// std API would risk a re-entrant lock or a double-borrow if the main
+/// thread was mid-`println!` at signal time. The run-log epilogue /
+/// `summary.json` are the notable casualties; users who Ctrl-C don't
+/// expect them. A second signal skips even the pool-kill loop.
 extern "C" fn signal_exit_handler(sig: libc::c_int) {
     if CLEANING_UP.swap(true, Ordering::SeqCst) {
         unsafe { libc::_exit(128 + sig) };
@@ -459,7 +451,69 @@ extern "C" fn signal_exit_handler(sig: libc::c_int) {
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
     }
+    unsafe { sweep_shm_segments() };
     unsafe { libc::_exit(128 + sig) };
+}
+
+/// Sweep every `<basename>_<idx>` segment via `shm_unlink`. Called
+/// from `signal_exit_handler`; must stay async-signal-safe (no
+/// allocation, no locks). The full 0..MAX_VOLUME_NUMBER walk is
+/// required because `pick_free_slot` (shm.rs) places new volumes at
+/// random indices, so a smaller conservative bound would leak.
+///
+/// # Safety
+/// Concurrent mutation of `SHM_BASENAME_PREFIX` is impossible: the
+/// setter only runs from the main thread during startup and recovery,
+/// both strictly before the failing path that delivers a signal.
+unsafe fn sweep_shm_segments() {
+    let prefix_ptr = SHM_BASENAME_PREFIX.load(Ordering::Acquire);
+    if prefix_ptr.is_null() {
+        return;
+    }
+    // strlen is async-signal-safe.
+    let prefix_len = libc::strlen(prefix_ptr);
+
+    // 96 B holds any realistic basename (~50 B) + a full u32's 10
+    // decimal digits + NUL, with headroom.
+    const BUF_LEN: usize = 96;
+    let mut buf: [u8; BUF_LEN] = [0; BUF_LEN];
+    if prefix_len + 11 > BUF_LEN {
+        return;
+    }
+    std::ptr::copy_nonoverlapping(
+        prefix_ptr as *const u8,
+        buf.as_mut_ptr(),
+        prefix_len,
+    );
+
+    for idx in 0..MAX_VOLUME_NUMBER {
+        let digits_end = write_decimal(&mut buf, prefix_len, idx as u32);
+        buf[digits_end] = 0;
+        libc::shm_unlink(buf.as_ptr() as *const std::os::raw::c_char);
+    }
+}
+
+/// Signal-safe unsigned-decimal writer. Divmod-and-reverse.
+fn write_decimal(buf: &mut [u8], start: usize, mut val: u32) -> usize {
+    if val == 0 {
+        buf[start] = b'0';
+        return start + 1;
+    }
+    let digits_start = start;
+    let mut pos = start;
+    while val > 0 {
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+        pos += 1;
+    }
+    let mut lo = digits_start;
+    let mut hi = pos - 1;
+    while lo < hi {
+        buf.swap(lo, hi);
+        lo += 1;
+        hi -= 1;
+    }
+    pos
 }
 
 /// Install signal handlers.
@@ -485,6 +539,14 @@ pub fn install_signal_handlers() {
 /// Set the global tmpdir for cleanup.
 pub fn set_tmpdir(path: String) {
     let _ = TMPDIR.set(path);
+}
+
+/// Publish the current basename with its trailing `_` so the signal
+/// handler only has to append decimal digits and a NUL.
+fn record_shm_basename(basename: &str) {
+    let prefix = CString::new(format!("{}_", basename))
+        .expect("shm basename must not contain NUL");
+    SHM_BASENAME_PREFIX.store(prefix.into_raw(), Ordering::Release);
 }
 
 /// Initialize the per-process SHM segment: make the tmpdir, sweep
@@ -553,6 +615,7 @@ pub fn init_shm() -> (String, String) {
             clean_exit(1);
         }
     }
+    record_shm_basename(&shm_basename);
     (tmpdir, shm_basename)
 }
 
@@ -1163,5 +1226,44 @@ pub fn set_child_subreaper() {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digits(val: u32) -> String {
+        let mut buf = [0u8; 32];
+        let end = write_decimal(&mut buf, 0, val);
+        std::str::from_utf8(&buf[..end]).unwrap().to_string()
+    }
+
+    #[test]
+    fn write_decimal_zero() {
+        assert_eq!(digits(0), "0");
+    }
+
+    #[test]
+    fn write_decimal_single_digit() {
+        assert_eq!(digits(7), "7");
+    }
+
+    #[test]
+    fn write_decimal_multi_digit() {
+        assert_eq!(digits(42), "42");
+        assert_eq!(digits(1234), "1234");
+        // Locks the sweep's per-index name to fit in the 96-byte buffer.
+        assert_eq!(MAX_VOLUME_NUMBER, 32768);
+        assert_eq!(digits((MAX_VOLUME_NUMBER - 1) as u32), "32767");
+    }
+
+    #[test]
+    fn write_decimal_appends_after_prefix() {
+        let mut buf = [0u8; 64];
+        let prefix = b"morloc-1234_";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let end = write_decimal(&mut buf, prefix.len(), 42);
+        assert_eq!(&buf[..end], b"morloc-1234_42");
     }
 }
