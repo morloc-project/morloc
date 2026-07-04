@@ -2,3 +2,19 @@
 yes
 === log_nonempty ===
 yes
+=== data classification ===
+state: state=final
+status: status=closed
+subpackets: subpackets=2
+elements: elements=6
+has_schema: 1
+token: stream-packet
+validate: validated=structure-only
+=== log classification ===
+state: state=final
+status: status=closed
+subpackets: subpackets=3
+elements: elements=3
+has_schema: 1
+token: stream-packet
+validate: validated=structure-only

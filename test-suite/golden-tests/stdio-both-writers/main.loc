@@ -16,7 +16,14 @@ dataAndLog :: <IO> ()
 dataAndLog = do
   o <- @stdout :: <IO> OStream Int
   e <- @stderr :: <IO> OStream Str
+  @write 0 e ["started"]
+  @flush e
   @write 0 o [100, 200, 300]
+  @flush o
+  @write 0 e ["started"]
+  @flush e
+  @write 0 o [400, 500, 600]
+  @flush o
+  @write 0 e ["done"]
   @close o
-  @write 0 e ["started", "midpoint", "done"]
   @close e

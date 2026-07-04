@@ -1689,6 +1689,35 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         )));
     }
 
+    // Pre-parse schema so the pool and the nexus (which parses the same
+    // string in mlc_stdio_build_stream_header) agree on the stream
+    // header's byte length. That length seeds body_start / cursor so
+    // the subpacket_index we accumulate carries meaningful stream-
+    // position offsets (matches on-disk offsets for a naive `> file`
+    // redirect; still meaningful as a stream position on pipes).
+    let elem_schema_parsed = if schema_str.is_empty() {
+        morloc_runtime_types::schema::Schema::primitive(
+            morloc_runtime_types::schema::SerialType::Nil,
+        )
+    } else if kind == MLC_KIND_OSTREAM {
+        parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
+            "open_stdio: unparseable schema '{}': {}", schema_str, e,
+        )))?
+    } else {
+        parse_schema(schema_str).unwrap_or_else(|_| {
+            morloc_runtime_types::schema::Schema::primitive(
+                morloc_runtime_types::schema::SerialType::Nil,
+            )
+        })
+    };
+    let stdio_body_start: u64 = if kind == MLC_KIND_OSTREAM {
+        morloc_runtime_types::packet::make_stream_header_block(
+            &elem_schema_parsed,
+        ).len() as u64
+    } else {
+        0
+    };
+
     let (slot_idx, slot) = allocate_slot_cas()?;
     let _guard = SlotFutexGuard::lock(slot);
 
@@ -1713,6 +1742,19 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (shm_types_crate::RELNULL, 0)
         };
         let _ = buf_size;
+        // OStream stdio slots grow a shared subpacket_index just like
+        // file-backed OStreams, so `@close`'s final footer can carry a
+        // real index. Offsets are stream-position, not fd position;
+        // they're accurate whenever the consumer starts reading from
+        // the beginning of the emitted output (the `> file` case).
+        let (idx_rel, idx_cap) = if kind == MLC_KIND_OSTREAM {
+            let cap = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
+            let bytes = (cap as usize) * std::mem::size_of::<u64>();
+            let abs = crate::shm::shcalloc(1, bytes)?;
+            (crate::shm::abs2rel(abs)?, cap)
+        } else {
+            (shm_types_crate::RELNULL, 0)
+        };
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = kind;
@@ -1722,16 +1764,17 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).file_path_len = sentinel.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_index = shm_types_crate::RELNULL;
+            (*mp).subpacket_index = idx_rel;
             (*mp).subpacket_index_len = 0;
-            (*mp).subpacket_index_cap = 0;
-            (*mp).body_start = 0;
+            (*mp).subpacket_index_cap = idx_cap;
+            (*mp).body_start = stdio_body_start;
             (*mp).final_footer = 0;
-            (*mp).cursor = 0;
+            (*mp).cursor = stdio_body_start;
             (*mp).element_count = 0;
             (*mp).compression_level = 0;
             (*mp).opener_pid = std::process::id();
             (*mp).opener_pid_start_time = read_pid_start_time();
+            (*mp).diag = StreamDiag::new();
             (*mp).write_buffer = buf_rel;
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
@@ -1764,17 +1807,6 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     // Install a process-local slot so the buffered write path
     // (`with_process_local_slot` -> `append_one_element`) can flow
     // straight through the same machinery as file-backed OStreams.
-    let elem_schema_parsed = if schema_str.is_empty() {
-        morloc_runtime_types::schema::Schema::primitive(
-            morloc_runtime_types::schema::SerialType::Nil,
-        )
-    } else {
-        parse_schema(schema_str).unwrap_or_else(|_| {
-            morloc_runtime_types::schema::Schema::primitive(
-                morloc_runtime_types::schema::SerialType::Nil,
-            )
-        })
-    };
     let local = ProcessLocalSlot {
         cached_generation: new_gen,
         mmap_ptr: std::ptr::null_mut(),
@@ -2249,10 +2281,10 @@ pub fn shared_close_handle_with_status(
         // but cross-pool contention during close is rare; the
         // shared-buffer story trumps minimising hold time here.
         //
-        // Stdio-bound OStream slots take the same buffered-flush
-        // path but skip the on-disk footer (there's no seekable
-        // sink; the nexus wrote each sub-packet to fd 1/2 as it
-        // arrived).
+        // Stdio-bound OStream slots build the same final-footer
+        // packet locally and hand it to the nexus over the stdio
+        // RPC, so `program > out.packet` produces a complete
+        // stream-packet file.
         with_process_local_slot(handle, |local, slot| {
             let _guard = SlotFutexGuard::lock(slot);
             let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
@@ -2262,20 +2294,20 @@ pub fn shared_close_handle_with_status(
                 ));
             }
             flush_write_buffer(slot, local)?;
+            let diag = slot.diag;
+            let shared_index = read_shared_subpacket_index(slot)?;
+            let footer = morloc_runtime_types::packet::make_final_footer_packet(
+                &diag, &shared_index, status,
+            );
             if slot.is_stdio == 0 {
                 let cursor = slot.cursor;
-                let diag = slot.diag;
-                let shared_index = read_shared_subpacket_index(slot)?;
-                let footer = morloc_runtime_types::packet::make_final_footer_packet(
-                    &diag, &shared_index, status,
-                );
                 pwrite_all_fd(local.fd, &footer, cursor)?;
                 let rc = unsafe { fdatasync_fd(local.fd) };
                 if rc != 0 {
                     return Err(MorlocError::Io(std::io::Error::last_os_error()));
                 }
             } else {
-                let _ = status;
+                emit_footer_via_rpc(slot, &footer)?;
             }
             release_slot_locked(slot);
             drop(_guard);
@@ -2377,18 +2409,16 @@ pub fn shared_finalize_ostream_locked(
     let is_stdio = slot.is_stdio != 0;
     let result = (|| -> Result<(), MorlocError> {
         flush_write_buffer(slot, &mut local)?;
-        if is_stdio {
-            // Stdio has no on-disk footer; the flush pushed the buffered
-            // sub-packet through RPC to the nexus.
-            let _ = status;
-            return Ok(());
-        }
-        let cursor = slot.cursor;
         let diag = slot.diag;
         let shared_index = read_shared_subpacket_index(slot)?;
         let footer = morloc_runtime_types::packet::make_final_footer_packet(
             &diag, &shared_index, status,
         );
+        if is_stdio {
+            emit_footer_via_rpc(slot, &footer)?;
+            return Ok(());
+        }
+        let cursor = slot.cursor;
         pwrite_all_fd(local.fd, &footer, cursor)?;
         let rc = unsafe { fdatasync_fd(local.fd) };
         if rc != 0 {
@@ -2623,16 +2653,53 @@ fn emit_subpacket_via_rpc(
     }
     rc?;
 
+    // Cursor tracks stream position, not fd offset -- the pool doesn't
+    // own the nexus's fd 1/2, but header_len + sum(sub-packet lengths)
+    // is deterministic and matches the on-disk layout whenever the
+    // consumer reads from the start of the emitted output (which is
+    // the case for a `> file` redirect). `body_start` at open was
+    // seeded to the stream-header length so this cursor value is the
+    // sub-packet's start offset in the emitted stream.
+    let cursor = slot.cursor;
+    let subpacket_end = cursor + packet.len() as u64;
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).cursor = subpacket_end;
         record_subpacket_flush(
             std::ptr::addr_of_mut!((*mp).diag),
             rewritten.len() as u64,
             compressed_payload_len as u64,
-            None,
+            Some(cursor),
         );
     }
+    append_shared_subpacket_index(slot, cursor)?;
     Ok(())
+}
+
+/// Emit a pre-built final-footer packet to the nexus stdio RPC server
+/// so it is appended to fd 1 / fd 2 after the last sub-packet. Caller
+/// MUST hold the slot futex. Unlike sub-packet emission, the footer
+/// carries no user-visible fields and needs no handle-to-path rewrite.
+fn emit_footer_via_rpc(
+    slot: &RegistrySlot,
+    footer_bytes: &[u8],
+) -> Result<(), MorlocError> {
+    let total = footer_bytes.len() as u64;
+    let dst_abs = crate::shm::shmalloc(footer_bytes.len())?;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            footer_bytes.as_ptr(),
+            dst_abs as *mut u8,
+            footer_bytes.len(),
+        );
+    }
+    let relptr = crate::shm::abs2rel(dst_abs)? as i64;
+    let handle = slot_handle(slot);
+    let rc = stdio_rpc_send_write(handle, relptr, total);
+    if let Ok(abs) = crate::shm::rel2abs(relptr as crate::shm::RelPtr) {
+        let _ = crate::shm::shfree(abs);
+    }
+    rc
 }
 
 /// Read the current handle for a slot under its futex. Both fields are
