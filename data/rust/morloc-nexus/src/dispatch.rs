@@ -489,12 +489,13 @@ pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
 /// open it as a regular file). Returns `None` when no substitution
 /// applies; the caller should keep the original value.
 ///
-/// Mapping (based on the path permission flags):
-/// * `r` only  -> `/dev/stdin`
-/// * `w` only  -> `/dev/stdout`
-/// * `c` only  -> `/dev/stdout`
-/// * mixed (e.g. `rw`) -> `None` (ambiguous; the user wrote a
-///   contradictory shape, so don't guess).
+/// Mapping (based on the path mode):
+/// * `r`  -> `/dev/stdin`
+/// * `w`  -> `/dev/stdout`
+/// * `x`  -> `None` (exclusive-create against stdout is nonsensical --
+///   `/dev/stdout` already exists, so the check would fail after
+///   substitution. The user should use `w` for stdout output.)
+/// * `rw` -> `None` (ambiguous; stdin vs stdout can't both be it).
 pub fn substitute_stdio_dash(argv: &str, checks: &[Check]) -> Option<String> {
     if argv != "-" {
         return None;
@@ -502,13 +503,11 @@ pub fn substitute_stdio_dash(argv: &str, checks: &[Check]) -> Option<String> {
     for c in checks {
         match c {
             Check::Path(perm) => {
-                let has_r = perm.contains('r');
-                let has_w = perm.contains('w') || perm.contains('c');
-                match (has_r, has_w) {
-                    (true, false) => return Some("/dev/stdin".to_string()),
-                    (false, true) => return Some("/dev/stdout".to_string()),
-                    _ => return None,
-                }
+                return match perm.as_str() {
+                    "r" => Some("/dev/stdin".to_string()),
+                    "w" => Some("/dev/stdout".to_string()),
+                    _ => None,
+                };
             }
         }
     }
@@ -518,79 +517,122 @@ pub fn substitute_stdio_dash(argv: &str, checks: &[Check]) -> Option<String> {
 /// Apply value-invariant checks against the raw argv token. Returns
 /// `Err` on the first failing check; the error message identifies the
 /// check kind so the user can locate the docstring field.
+///
+/// Path modes follow the Python `open()` convention adapted to a
+/// pre-open filesystem predicate:
+///
+///   r  = exists and readable
+///   w  = (exists and writable) OR (does not exist and parent writable)
+///   x  = does not exist, parent writable  (exclusive create)
+///   rw = exists, readable, writable
 pub fn apply_checks(argv: &str, checks: &[Check]) -> Result<(), String> {
-    use std::ffi::CString;
-    use std::path::Path;
     for c in checks {
         match c {
-            Check::Path(perm) => {
-                let c_path = CString::new(argv).map_err(|_| {
-                    format!("check.path: argv '{}' contains an interior NUL byte", argv)
-                })?;
-                let path = Path::new(argv);
-                let mut required: Vec<char> = perm.chars().collect();
-                required.sort();
-                required.dedup();
-                for ch in &required {
-                    match ch {
-                        'r' => {
-                            let rc = unsafe { libc::access(c_path.as_ptr(), libc::R_OK) };
-                            if rc != 0 {
-                                return Err(format!(
-                                    "check.path: r requires path '{}' to exist and be readable",
-                                    argv
-                                ));
-                            }
-                        }
-                        'w' => {
-                            let rc = unsafe { libc::access(c_path.as_ptr(), libc::W_OK) };
-                            if rc != 0 {
-                                return Err(format!(
-                                    "check.path: w requires path '{}' to exist and be writable",
-                                    argv
-                                ));
-                            }
-                        }
-                        'c' => {
-                            // Creatable: the path itself must NOT exist,
-                            // and the parent directory must be writable.
-                            if path.exists() {
-                                return Err(format!(
-                                    "check.path: c requires path '{}' to be creatable, but it already exists",
-                                    argv
-                                ));
-                            }
-                            let parent = path.parent();
-                            let parent_dir = match parent {
-                                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-                                _ => std::path::PathBuf::from("."),
-                            };
-                            let parent_c = CString::new(
-                                parent_dir.to_string_lossy().as_ref(),
-                            )
-                            .map_err(|_| {
-                                "check.path: parent directory path contains a NUL byte".to_string()
-                            })?;
-                            let rc = unsafe { libc::access(parent_c.as_ptr(), libc::W_OK) };
-                            if rc != 0 {
-                                return Err(format!(
-                                    "check.path: c requires parent directory of '{}' to be writable",
-                                    argv
-                                ));
-                            }
-                        }
-                        other => {
-                            return Err(format!(
-                                "check.path: unknown permission '{}'; expected a subset of r, w, c",
-                                other
-                            ));
-                        }
-                    }
-                }
-            }
+            Check::Path(perm) => apply_path_check(argv, perm)?,
         }
     }
     Ok(())
+}
+
+fn apply_path_check(argv: &str, perm: &str) -> Result<(), String> {
+    match perm {
+        "r"  => check_r(argv),
+        "w"  => check_w(argv),
+        "x"  => check_x(argv),
+        "rw" => check_r(argv).and_then(|_| check_w_existing(argv)),
+        other => Err(format!(
+            "check.path: unknown mode '{}'; expected one of: r, w, x, rw",
+            other
+        )),
+    }
+}
+
+fn c_path_of(argv: &str) -> Result<std::ffi::CString, String> {
+    std::ffi::CString::new(argv).map_err(|_| {
+        format!("check.path: argv '{}' contains an interior NUL byte", argv)
+    })
+}
+
+fn check_r(argv: &str) -> Result<(), String> {
+    let cp = c_path_of(argv)?;
+    let rc = unsafe { libc::access(cp.as_ptr(), libc::R_OK) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "check.path: r requires path '{}' to exist and be readable",
+            argv
+        ))
+    }
+}
+
+fn check_w_existing(argv: &str) -> Result<(), String> {
+    let cp = c_path_of(argv)?;
+    let rc = unsafe { libc::access(cp.as_ptr(), libc::W_OK) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "check.path: rw requires path '{}' to exist and be writable",
+            argv
+        ))
+    }
+}
+
+/// `w`: path is writable-or-creatable. Passes when the path exists and
+/// is writable, or when it does not exist and the parent directory is
+/// writable. Matches Python `open(_, 'w')` semantics.
+fn check_w(argv: &str) -> Result<(), String> {
+    let cp = c_path_of(argv)?;
+    let rc = unsafe { libc::access(cp.as_ptr(), libc::W_OK) };
+    if rc == 0 {
+        return Ok(());
+    }
+    // Fall through to the create case only for the "does not exist"
+    // errno. If the file exists but is unwritable, report that;
+    // don't mask a permission error as a creatable-path check.
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ENOENT) {
+        return Err(format!(
+            "check.path: w requires path '{}' to be writable ({})",
+            argv, err
+        ));
+    }
+    check_parent_writable(argv, "w")
+}
+
+/// `x`: exclusive create. Path must not exist and the parent directory
+/// must be writable. Matches Python `open(_, 'x')` and
+/// `open(O_CREAT|O_EXCL)` semantics.
+fn check_x(argv: &str) -> Result<(), String> {
+    if std::path::Path::new(argv).exists() {
+        return Err(format!(
+            "check.path: x requires path '{}' to not yet exist",
+            argv
+        ));
+    }
+    check_parent_writable(argv, "x")
+}
+
+fn check_parent_writable(argv: &str, mode: &str) -> Result<(), String> {
+    let parent = std::path::Path::new(argv).parent();
+    let parent_dir = match parent {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let parent_c = std::ffi::CString::new(parent_dir.to_string_lossy().as_ref())
+        .map_err(|_| {
+            "check.path: parent directory path contains a NUL byte".to_string()
+        })?;
+    let rc = unsafe { libc::access(parent_c.as_ptr(), libc::W_OK) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "check.path: {} requires parent directory of '{}' to be writable",
+            mode, argv
+        ))
+    }
 }
 
 /// Apply the shape directives to a raw argv token: run any nexus-side
@@ -1635,7 +1677,7 @@ mod tests {
 
     #[test]
     fn substitute_stdio_dash_maps_to_dev_stdio() {
-        // r -> /dev/stdin, w/c -> /dev/stdout; the substitution lets
+        // r -> /dev/stdin, w -> /dev/stdout; the substitution lets
         // the callee `fopen` the standard stream as a regular file.
         let r = vec![Check::Path("r".into())];
         assert_eq!(
@@ -1647,11 +1689,15 @@ mod tests {
             substitute_stdio_dash("-", &w).as_deref(),
             Some("/dev/stdout"),
         );
-        let c = vec![Check::Path("c".into())];
-        assert_eq!(
-            substitute_stdio_dash("-", &c).as_deref(),
-            Some("/dev/stdout"),
-        );
+    }
+
+    #[test]
+    fn substitute_stdio_dash_skips_exclusive_create() {
+        // `x` requires the path to not exist; /dev/stdout does exist,
+        // so substitution would immediately fail the check. Better to
+        // leave `-` alone and let the check report the real problem.
+        let x = vec![Check::Path("x".into())];
+        assert!(substitute_stdio_dash("-", &x).is_none());
     }
 
     #[test]
@@ -1665,11 +1711,53 @@ mod tests {
 
     #[test]
     fn substitute_stdio_dash_skips_mixed_and_unchecked() {
-        // Mixed `rw` is ambiguous (which stream?); no substitution.
+        // `rw` is ambiguous (stdin or stdout?); no substitution.
         // No check.path at all also means no substitution.
         let rw = vec![Check::Path("rw".into())];
         assert!(substitute_stdio_dash("-", &rw).is_none());
         let none: Vec<Check> = vec![];
         assert!(substitute_stdio_dash("-", &none).is_none());
+    }
+
+    #[test]
+    fn apply_checks_w_accepts_creatable_path() {
+        // Python-style `w`: (exists AND writable) OR
+        // (does not exist AND parent writable). A fresh path under
+        // /tmp should pass because /tmp is writable, even though the
+        // path itself does not exist yet.
+        let unique = format!(
+            "/tmp/morloc_apply_checks_w_{}_{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        // Guard: the path must not exist for the test to be meaningful.
+        let _ = std::fs::remove_file(&unique);
+        let checks = vec![Check::Path("w".into())];
+        let res = apply_checks(&unique, &checks);
+        assert!(res.is_ok(), "expected w to accept creatable path, got {:?}", res);
+    }
+
+    #[test]
+    fn apply_checks_x_rejects_existing_path() {
+        // `x` demands non-existence. A path that clearly exists
+        // (this very source file's parent) must fail.
+        let checks = vec![Check::Path("x".into())];
+        assert!(apply_checks("/tmp", &checks).is_err());
+    }
+
+    #[test]
+    fn apply_checks_rejects_unknown_mode() {
+        // The old `c` letter was renamed to `x`; ensure the runtime
+        // rejects the retired name with a clear error instead of
+        // silently no-oping.
+        let checks = vec![Check::Path("c".into())];
+        let res = apply_checks("/tmp/anything", &checks);
+        assert!(res.is_err());
+        // And any unsatisfiable combo from the old grammar must also fail.
+        let checks = vec![Check::Path("rwc".into())];
+        assert!(apply_checks("/tmp/anything", &checks).is_err());
     }
 }

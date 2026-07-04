@@ -297,18 +297,26 @@ parseFormAtom raw = case T.strip raw of
             <> "'; expected one of: list, bytes, bytes-only, packet."
 
 -- | Parse a check kind + value. Only `path` is recognized in v1.
+--
+-- Path modes follow the Python `open()` convention adapted to a
+-- pre-open filesystem predicate:
+--
+--   r  = exists and readable       (input file)
+--   w  = writable or creatable     (output file; create-or-overwrite)
+--   x  = does not exist yet, parent writable (exclusive create)
+--   rw = exists, readable, writable (in-place update)
 parseCheck :: Text -> Text -> Either Text Check
 parseCheck kind raw = case kind of
   "path" -> let v = T.strip raw in
-            if T.null v
-              then Left "path check value is empty; expected a non-empty subset of {r, w, c}"
-              else if T.all isPermChar v
-                then Right (CheckPath (PathPerm v))
-                else Left $ "invalid path permissions '" <> v
-                            <> "': expected a subset of {r, w, c}"
+            case v of
+              "r"  -> Right (CheckPath (PathPerm "r"))
+              "w"  -> Right (CheckPath (PathPerm "w"))
+              "x"  -> Right (CheckPath (PathPerm "x"))
+              "rw" -> Right (CheckPath (PathPerm "rw"))
+              ""   -> Left "path check value is empty; expected one of: r, w, x, rw"
+              _    -> Left $ "invalid path mode '" <> v
+                          <> "': expected one of: r, w, x, rw"
   k -> Left $ "unknown check kind '" <> k <> "'; v1 supports: path"
-  where
-    isPermChar c = c == 'r' || c == 'w' || c == 'c'
 
 -- Known directive keys recognized on `source` declarations.
 sourceDocDirectiveKeys :: [Text]

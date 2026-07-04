@@ -927,18 +927,16 @@ strFormatHint mSrc cks
       (CheckPath (PathPerm p) : _) -> Just (pathCheckHint p)
       _                            -> Nothing
 
--- | Map a path-permission subset to a user-facing phrase.
+-- | Map a path-permission mode to a user-facing phrase. The four
+-- accepted modes are r / w / x / rw; see 'parseCheck' for the
+-- pre-open predicates each mode names.
 pathCheckHint :: Text -> Text
-pathCheckHint p = case MT.unpack (MT.toLower p) of
-  "r"   -> "path to readable file"
-  "w"   -> "path to existing writable file"
-  "c"   -> "path to non-existing writable file"
-  "rw"  -> "path to existing readable+writable file"
-  "wr"  -> "path to existing readable+writable file"
-  "rc"  -> "path to readable or creatable file"
-  "wc"  -> "path to writable or creatable file"
-  "rwc" -> "path to readable+writable or creatable file"
-  _     -> "must satisfy path permissions `" <> p <> "`"
+pathCheckHint p = case MT.unpack p of
+  "r"  -> "path to a readable file"
+  "w"  -> "path to a writable file (created if it does not exist)"
+  "x"  -> "path to a file that does not yet exist (parent must be writable)"
+  "rw" -> "path to a readable and writable existing file"
+  _    -> "must satisfy path mode `" <> p <> "`"
 
 -- | Format hint for a list argument. Considers the outer
 -- `form:` / `source:` / `check.*:` first, then per-element overrides.
@@ -1033,7 +1031,7 @@ argToJson mschema (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
     ++ schemaField mschema
-    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
+    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mschema))
        , ("many", jsonBool (argPosDocMany r))
@@ -1049,7 +1047,7 @@ argToJson mschema (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
     ++ schemaField mschema
-    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
+    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r) (argOptDocSource r) (argOptDocChecks r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mschema))
        , ("many", jsonBool (argOptDocMany r))
@@ -1670,10 +1668,20 @@ truncateForMsg t
 jsonSnippet :: Aeson.Value -> Text
 jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 
-typeDescStr :: Type -> Maybe Bool -> Text
-typeDescStr t isLiteral
-  | isStrType t && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
+-- | The user-facing "type:" line for a CLI arg. For a Str argument
+-- that isn't declared literal, the parenthetical clarifies whether
+-- argv is treated as a filesystem path only (when `source: file` or a
+-- `check.path:*` forces path semantics) or as the default
+-- filename-or-quoted-JSON.
+typeDescStr :: Type -> Maybe Bool -> Maybe SourceAtom -> [Check] -> Text
+typeDescStr t isLiteral mSrc checks
+  | isStrType t && isLiteral /= Just True =
+      if pathOnly then "Str    (a filename)"
+                  else "Str    (a filename or quoted JSON string)"
   | otherwise = render (pretty t)
+  where
+    pathOnly = mSrc == Just SourceFile || any isPathCheck checks
+    isPathCheck (CheckPath _) = True
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity
 -- (Optional and Effect wrappers are transparent for record/object/table

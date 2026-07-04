@@ -1,0 +1,12 @@
+module main (foo)
+
+import root
+
+-- The old `c` (creatable) letter was renamed to `x` (exclusive create)
+-- to align with Python `open()` and C11 fopen modes. The parser must
+-- reject the retired letter with a clear error.
+foo ::
+  --' check.path: c
+  Str ->
+  Int
+foo _ = 0

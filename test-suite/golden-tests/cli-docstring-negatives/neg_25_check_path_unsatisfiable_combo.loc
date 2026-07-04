@@ -1,0 +1,13 @@
+module main (foo)
+
+import root
+
+-- The old grammar accepted any subset of {r, w, c}. Combos like `rwc`
+-- were unsatisfiable at runtime (r/w require exists; c requires not).
+-- The new grammar accepts only {r, w, x, rw}, so `rwc` must be
+-- rejected at parse time.
+foo ::
+  --' check.path: rwc
+  Str ->
+  Int
+foo _ = 0

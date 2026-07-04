@@ -994,72 +994,93 @@ fn format_field_as_json(field: &str, st: crate::schema::SerialType) -> String {
 
 /// Apply a per-element check against a raw line. Currently only the
 /// `path:<perm>` check is supported; the line is interpreted as a
-/// filesystem path and the requested access permissions are probed.
+/// filesystem path.
+///
+/// Path modes follow the Python `open()` convention adapted to a
+/// pre-open filesystem predicate:
+///
+///   r  = exists and readable
+///   w  = (exists and writable) OR (does not exist and parent writable)
+///   x  = does not exist, parent writable  (exclusive create)
+///   rw = exists, readable, writable
 unsafe fn apply_list_check(line: &str, check: &ListElemCheck) -> Result<(), String> {
     match check {
-        ListElemCheck::Path(perm) => {
-            let c_path = std::ffi::CString::new(line)
-                .map_err(|_| "path check: line contains NUL byte".to_string())?;
-            let mut required: Vec<char> = perm.chars().collect();
-            required.sort();
-            required.dedup();
-            for ch in &required {
-                match ch {
-                    'r' => {
-                        let rc = libc::access(c_path.as_ptr(), libc::R_OK);
-                        if rc != 0 {
-                            return Err(format!(
-                                "path check :r: '{}' is not readable",
-                                line
-                            ));
-                        }
-                    }
-                    'w' => {
-                        let rc = libc::access(c_path.as_ptr(), libc::W_OK);
-                        if rc != 0 {
-                            return Err(format!(
-                                "path check :w: '{}' is not writable",
-                                line
-                            ));
-                        }
-                    }
-                    'c' => {
-                        let path = std::path::Path::new(line);
-                        if path.exists() {
-                            return Err(format!(
-                                "path check :c: '{}' already exists",
-                                line
-                            ));
-                        }
-                        let parent = path.parent();
-                        let parent_dir = match parent {
-                            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-                            _ => std::path::PathBuf::from("."),
-                        };
-                        let parent_c = std::ffi::CString::new(
-                            parent_dir.to_string_lossy().as_ref(),
-                        )
-                        .map_err(|_| {
-                            "path check: parent directory path contains NUL byte".to_string()
-                        })?;
-                        let rc = libc::access(parent_c.as_ptr(), libc::W_OK);
-                        if rc != 0 {
-                            return Err(format!(
-                                "path check :c: parent of '{}' is not writable",
-                                line
-                            ));
-                        }
-                    }
-                    other => {
-                        return Err(format!(
-                            "path check: unknown permission '{}'; expected a subset of r, w, c",
-                            other
-                        ));
-                    }
-                }
-            }
-            Ok(())
-        }
+        ListElemCheck::Path(perm) => match perm.as_str() {
+            "r"  => list_check_r(line),
+            "w"  => list_check_w(line),
+            "x"  => list_check_x(line),
+            "rw" => list_check_r(line).and_then(|_| list_check_w_existing(line)),
+            other => Err(format!(
+                "path check: unknown mode '{}'; expected one of: r, w, x, rw",
+                other
+            )),
+        },
+    }
+}
+
+unsafe fn list_c_path(line: &str) -> Result<std::ffi::CString, String> {
+    std::ffi::CString::new(line)
+        .map_err(|_| "path check: line contains NUL byte".to_string())
+}
+
+unsafe fn list_check_r(line: &str) -> Result<(), String> {
+    let cp = list_c_path(line)?;
+    if libc::access(cp.as_ptr(), libc::R_OK) == 0 {
+        Ok(())
+    } else {
+        Err(format!("path check :r: '{}' is not readable", line))
+    }
+}
+
+unsafe fn list_check_w_existing(line: &str) -> Result<(), String> {
+    let cp = list_c_path(line)?;
+    if libc::access(cp.as_ptr(), libc::W_OK) == 0 {
+        Ok(())
+    } else {
+        Err(format!("path check :rw: '{}' is not writable", line))
+    }
+}
+
+unsafe fn list_check_w(line: &str) -> Result<(), String> {
+    let cp = list_c_path(line)?;
+    if libc::access(cp.as_ptr(), libc::W_OK) == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ENOENT) {
+        return Err(format!(
+            "path check :w: '{}' is not writable ({})",
+            line, err
+        ));
+    }
+    list_check_parent_writable(line, "w")
+}
+
+unsafe fn list_check_x(line: &str) -> Result<(), String> {
+    if std::path::Path::new(line).exists() {
+        return Err(format!(
+            "path check :x: '{}' already exists",
+            line
+        ));
+    }
+    list_check_parent_writable(line, "x")
+}
+
+unsafe fn list_check_parent_writable(line: &str, mode: &str) -> Result<(), String> {
+    let parent = std::path::Path::new(line).parent();
+    let parent_dir = match parent {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let parent_c = std::ffi::CString::new(parent_dir.to_string_lossy().as_ref())
+        .map_err(|_| "path check: parent directory path contains NUL byte".to_string())?;
+    if libc::access(parent_c.as_ptr(), libc::W_OK) == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "path check :{}: parent of '{}' is not writable",
+            mode, line
+        ))
     }
 }
 

@@ -17,6 +17,8 @@ neg_19_bytes_form_chain_source.loc 1
 neg_21_bytes_on_int_list.loc 1
 neg_22_nested_list_form.loc 1
 neg_23_list_form_packet_needs_file.loc 1
+neg_24_check_path_retired_letters.loc 1
+neg_25_check_path_unsatisfiable_combo.loc 1
 pos_01_defaults.loc 0
 pos_02_source_file_str.loc 0
 pos_04_bytes_inline.loc 0
