@@ -993,9 +993,13 @@ fn diag_with(sub: u64, elem: u64, uncompressed: u64, compressed: u64) -> StreamD
 }
 
 #[test]
-fn stream_packet_no_footer_classifies_as_missing() {
+fn stream_packet_no_footer_walks_sub_packets() {
     // A stream file whose EOF tail does NOT carry the STREAM_TAIL_MAGIC:
     // stream header + a couple of subpackets + no footer + no tail.
+    // The classifier state stays `missing` (file is unchanged on disk);
+    // a diagnostic walk populates `walk` with the sub-packet count.
+    // The msgpack sub-packet shape here is not voidstar so element_count
+    // stays 0 and the walker records them under compressed_uncounted.
     let mut file = build_stream_header("u4");
     file.extend_from_slice(&build_stream_subpacket(64));
     file.extend_from_slice(&build_stream_subpacket(64));
@@ -1003,7 +1007,19 @@ fn stream_packet_no_footer_classifies_as_missing() {
     match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
         Classification::MorlocStreamPacket { schema, footer } => {
             assert_eq!(schema.as_deref(), Some("u4"));
-            assert!(matches!(footer, FooterInfo::Missing));
+            match footer {
+                FooterInfo::Missing { walk: Some(w) } => {
+                    assert_eq!(w.subpacket_count, 2);
+                    assert_eq!(w.element_count, 0);
+                    assert!(!w.partial);
+                    assert_eq!(w.compressed_uncounted, 2);
+                    assert!(!w.scan_capped);
+                }
+                other => panic!(
+                    "expected FooterInfo::Missing with walk data, got {:?}",
+                    other
+                ),
+            }
         }
         other => panic!("expected stream packet, got {:?}", other),
     }
@@ -1103,7 +1119,7 @@ fn stream_footer_body_length_mismatch_is_error() {
 fn stream_packet_default_plain_render_missing() {
     let cls = Classification::MorlocStreamPacket {
         schema: Some("u4".into()),
-        footer: FooterInfo::Missing,
+        footer: FooterInfo::Missing { walk: None },
     };
     let s = format_plain(&cls, "s.packet", &DEFAULT_OPTS, None);
     assert_eq!(s.lines().count(), 1);
@@ -1201,7 +1217,7 @@ fn stream_packet_json_render_final() {
 fn stream_packet_json_render_missing() {
     let cls = Classification::MorlocStreamPacket {
         schema: None,
-        footer: FooterInfo::Missing,
+        footer: FooterInfo::Missing { walk: None },
     };
     let s = format_json(&cls, "s.packet", None);
     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -1244,7 +1260,7 @@ fn stream_truncated_past_header_reports_missing_with_schema() {
     match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
         Classification::MorlocStreamPacket { schema, footer } => {
             assert_eq!(schema.as_deref(), Some("j"));
-            assert!(matches!(footer, FooterInfo::Missing));
+            assert!(matches!(footer, FooterInfo::Missing { .. }));
         }
         other => panic!("expected stream packet, got {:?}", other),
     }

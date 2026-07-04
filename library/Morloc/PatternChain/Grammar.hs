@@ -291,14 +291,38 @@ walkPathType :: TypeU -> Path -> Either WalkError TypeU
 walkPathType t (LinearPath steps) = walkSteps t steps
 walkPathType t (GroupPath prefix children) = do
     t' <- walkSteps t prefix
-    childTys <- mapM (walkPathType t') children
-    return (mkTuple childTys)
+    -- Post-slice group broadcast: `.[:].(.a;.b)` on `[T]` builds a
+    -- Tuple(T.a, T.b) inside the list.
+    case (endsWithSlice prefix, t') of
+      (True, AppU h@(VarU (TV "List")) [a]) -> do
+          childTys <- mapM (walkPathType a) children
+          return (AppU h [mkTuple childTys])
+      (True, AppU h@(VarU (TV "Vector")) [n, a]) -> do
+          childTys <- mapM (walkPathType a) children
+          return (AppU h [n, mkTuple childTys])
+      _ -> do
+          childTys <- mapM (walkPathType t') children
+          return (mkTuple childTys)
+  where
+    endsWithSlice steps = case reverse steps of
+      (StepBracketSlice : _) -> True
+      _                      -> False
 
 walkSteps :: TypeU -> [LinearStep] -> Either WalkError TypeU
 walkSteps t [] = Right t
 walkSteps t (s : rest) = do
     t' <- walkStep t s
-    walkSteps t' rest
+    -- Post-slice broadcast: `.[:]` followed by a field/tuple-idx tail
+    -- walks the tail on the element type and wraps the result in a
+    -- list, mirroring the IntrMap desugar.
+    case (s, t', rest) of
+      (StepBracketSlice, AppU h@(VarU (TV "List")) [a], _:_) -> do
+          r <- walkSteps a rest
+          return (AppU h [r])
+      (StepBracketSlice, AppU h@(VarU (TV "Vector")) [n, a], _:_) -> do
+          r <- walkSteps a rest
+          return (AppU h [n, r])
+      _ -> walkSteps t' rest
 
 walkStep :: TypeU -> LinearStep -> Either WalkError TypeU
 walkStep t (StepField k) = case t of

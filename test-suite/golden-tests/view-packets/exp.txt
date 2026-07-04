@@ -1,0 +1,14 @@
+d2d byte-identity: ok
+d2s file kind: stream-packet
+d2s state: state=final
+d2s jsonl lines: 10
+d2s jsonl sum via awk: 55
+s2s file kind: stream-packet
+s2s state: state=final
+s2s jsonl lines: 10
+s2s jsonl sum: 55
+s2d file kind: data-packet
+s2d jsonl lines: 10
+s2d jsonl sum: 55
+pd file kind: data-packet
+ps file kind: stream-packet

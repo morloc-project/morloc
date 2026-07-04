@@ -22,7 +22,7 @@
 //! `morloc-nexus`, and only the manifest knows the user's exported
 //! command surface.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::dispatch::{NexusConfig, OutputFormat};
 
@@ -269,21 +269,28 @@ pub struct FileArgs {
 /// `load_morloc_data_file`) and the same output emitter
 /// (`print_result_c`) as `run`, so format support and conversion
 /// behavior cannot drift away from a real morloc program run.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
+#[command(group(
+    ArgGroup::new("packet_out")
+        .args(["stream_packet", "data_packet", "preserve_packet"])
+        .multiple(false)
+        .required(false)
+))]
 pub struct ViewArgs {
     /// Input data file (morloc packet, .json, .mpk, .arrow, .parquet,
-    /// or .csv).
+    /// or .csv). Pass `-` to read from stdin.
     pub target: String,
 
-    /// Output format. Defaults to json.
+    /// Output format. Left unset, defaults to json when no
+    /// packet-type flag (`-s`/`-d`/`-p`) is present, or to packet
+    /// when one is.
     #[arg(
         short = 'f',
         long = "output-form",
         value_name = "FORM",
         value_enum,
-        default_value_t = OutputForm::Json,
     )]
-    pub output_form: OutputForm,
+    pub output_form: Option<OutputForm>,
 
     /// zstd compression preset for `-f packet` output (0..=9).
     /// 0 = no compression.
@@ -300,6 +307,39 @@ pub struct ViewArgs {
     /// morloc-packet's metadata, else error.
     #[arg(long, value_name = "STRING")]
     pub schema: Option<String>,
+
+    /// Emit the output as a MORLOC_STREAM_PACKET. Requires the value
+    /// (or the pattern result, if `--pattern` is set) to be a list.
+    /// Implies `-f packet`; mutually exclusive with `-d`/`-p` and
+    /// with `-f <not packet>`.
+    #[arg(short = 's', long = "stream-packet", group = "packet_out")]
+    pub stream_packet: bool,
+
+    /// Emit the output as a MORLOC_DATA_PACKET. Implies `-f packet`.
+    /// Mutually exclusive with `-s`/`-p` and with `-f <not packet>`.
+    #[arg(short = 'd', long = "data-packet", group = "packet_out")]
+    pub data_packet: bool,
+
+    /// Mirror the input's packet type on output (stream input ->
+    /// stream output; data input -> data output). Implies `-f
+    /// packet`. Errors when the input is not a morloc packet.
+    /// Mutually exclusive with `-s`/`-d`.
+    #[arg(short = 'p', long = "preserve-packet", group = "packet_out")]
+    pub preserve_packet: bool,
+
+    /// Bypass the safety guardrails: allow buffered output beyond
+    /// the size threshold, and allow binary output to a tty. Use
+    /// only when you know what you're doing.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Apply a morloc pattern chain (e.g. `.[101:200]`,
+    /// `.foo.[i:j].(.a,.b)`) to the input before emission. The
+    /// pattern is parsed and type-checked against the input's
+    /// schema; the resulting value is emitted per `-f` /
+    /// `-s`/`-d`/`-p`.
+    #[arg(long, value_name = "STR")]
+    pub pattern: Option<String>,
 }
 
 /// Output format choices exposed via `-f / --output-form`. The
@@ -309,6 +349,10 @@ pub struct ViewArgs {
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputForm {
     Json,
+    /// JSON-lines: one element per line. Only meaningful for
+    /// list-shaped inputs (or the list result of `--pattern`); on
+    /// scalar values a single line is emitted.
+    Jsonl,
     Mpk,
     Voidstar,
     Packet,
@@ -321,6 +365,7 @@ impl OutputForm {
     pub fn to_internal(self) -> OutputFormat {
         match self {
             OutputForm::Json => OutputFormat::Json,
+            OutputForm::Jsonl => OutputFormat::Jsonl,
             OutputForm::Mpk => OutputFormat::MessagePack,
             OutputForm::Voidstar => OutputFormat::VoidStar,
             OutputForm::Packet => OutputFormat::Packet,

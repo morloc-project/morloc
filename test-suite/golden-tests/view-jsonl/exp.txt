@@ -1,0 +1,9 @@
+list-int line count: 5
+list-int first line: 10
+list-int last line: 50
+list-record line count: 3
+list-record first name: "name":"Alice"
+list-record all rows have name+age: 3
+scalar line count: 1
+scalar value: 42
+empty line count: 0

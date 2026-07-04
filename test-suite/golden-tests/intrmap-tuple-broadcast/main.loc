@@ -1,0 +1,32 @@
+-- Regression test for an unsolved IntrMap type-inference bug.
+--
+-- The desugar-inserted IntrMap ($intrmap) is used for bracket-accessor
+-- broadcast such as `.[0:2].0 xs`. Its synth-mode typing in
+-- Frontend/Typecheck.hs assigns fresh existentials `map_elem_`,
+-- `map_result_`, `map_container_` and checks the function and receiver
+-- against `a -> b` and `f a` respectively.
+--
+-- When the broadcast tail is a tuple index selector (`.0`, `.1`, ...)
+-- and the receiver is `[(T, U, ...)]`, the check of the lambda body
+-- against the fresh `b` fails to solve `b` from the tuple field's
+-- inferred type. `b` leaks to serialization codegen, which emits
+--
+--     cannot serialize type: map_result_<N>
+--
+-- Broadcasting a *record field* accessor (`.name`, `.age`) resolves
+-- correctly because the record's row-polymorphic check pins the field
+-- type. Broadcasting `.0` over a tuple does not.
+--
+-- This test is a PIN: the build is expected to fail with the
+-- `map_result_` diagnostic. When the underlying inference bug is
+-- fixed, this test will start passing the build and the grep will
+-- come up empty -- delete the test and move the pattern into
+-- pattern-corpus / pattern-getters as a positive case.
+
+module main (foo)
+
+foo :: Str -> <IO> [(Int, Int)]
+foo path = do
+  let xs = [(1, 2), (3, 4), (5, 6)]
+  @savem (.[0:2].0 xs) path
+  xs

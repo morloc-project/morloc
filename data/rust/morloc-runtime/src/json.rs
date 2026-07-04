@@ -526,6 +526,42 @@ pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(
     write_to_stdout(ptr, schema, keep_null, None)
 }
 
+/// JSON-lines: one element per line. Streams element-by-element so
+/// peak memory is one element's JSON body, not the whole list.
+///
+/// * `Array<T>` schema: iterate elements and emit each as JSON + `\n`.
+/// * Non-list schemas: emit the whole value on one line (equivalent
+///   to `-f json` with a trailing newline). `-f jsonl` on a scalar
+///   still parses as valid JSON-lines (one line, one value).
+pub fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+    match schema.serial_type {
+        SerialType::Array => {
+            let r = unsafe { ShmReader::new(ptr) };
+            let arr = r.read_array(0);
+            if arr.size == 0 || arr.data == RELNULL {
+                return map_io(w.flush());
+            }
+            let es = &schema.parameters[0];
+            let data = shm::rel2abs(arr.data)?;
+            let mut env: RecurEnv = Vec::new();
+            for i in 0..arr.size {
+                let er = unsafe { ShmReader::new(data.add(i * es.width)) };
+                to_json(&er, es, &mut w, &mut env, None)?;
+                map_io(w.write_all(b"\n"))?;
+            }
+            map_io(w.flush())
+        }
+        _ => {
+            let r = unsafe { ShmReader::new(ptr) };
+            let mut env: RecurEnv = Vec::new();
+            to_json(&r, schema, &mut w, &mut env, None)?;
+            map_io(w.write_all(b"\n"))?;
+            map_io(w.flush())
+        }
+    }
+}
+
 pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
     // Top-level String renders as the unescaped body (terminal convenience
     // for `--print`). Other single-scalar returns fall through to the

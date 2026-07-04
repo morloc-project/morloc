@@ -7,6 +7,43 @@ use std::ptr;
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
+// ── FFI wrapper helpers ────────────────────────────────────────────────────
+
+/// Decode a `*const c_char` FFI argument as a `&str`. Returns a typed
+/// error carrying the function and argument name so `wrap_c_call` can
+/// surface a uniform "fn: null <arg>" / "fn: <arg> not UTF-8" message.
+#[inline]
+unsafe fn cstr_arg<'a>(
+    p: *const c_char,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<&'a str, MorlocError> {
+    if p.is_null() {
+        return Err(MorlocError::Other(format!("{}: null {}", fn_name, arg_name)));
+    }
+    CStr::from_ptr(p)
+        .to_str()
+        .map_err(|_| MorlocError::Other(format!("{}: {} not UTF-8", fn_name, arg_name)))
+}
+
+/// Bracket an FFI body with `clear_errmsg` on entry, `set_errmsg` on
+/// error, and a caller-supplied error sentinel as the return value.
+/// The body uses `?` to short-circuit any `MorlocError`.
+#[inline]
+unsafe fn wrap_c_call<T, F>(errmsg: *mut *mut c_char, sentinel: T, f: F) -> T
+where
+    F: FnOnce() -> Result<T, MorlocError>,
+{
+    clear_errmsg(errmsg);
+    match f() {
+        Ok(v) => v,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            sentinel
+        }
+    }
+}
+
 // ── mlc_save: serialize to msgpack file ────────────────────────────────────
 
 // `level` is accepted for ABI uniformity with mlc_save_voidstar but is
@@ -1528,4 +1565,143 @@ pub unsafe extern "C" fn mlc_stdio_slot_schema(
     *dst.add(n) = 0;
     *out_buf = dst;
     0
+}
+
+// ── `morloc-nexus view` conversion helpers ────────────────────────────────
+
+/// Convert a MORLOC_STREAM_PACKET file to another MORLOC_STREAM_PACKET
+/// file. Backs `morloc-nexus view -s` on stream input. `schema_override`
+/// may be null (use the input's stored element schema) or point to a
+/// UTF-8 schema string. `compression_level` in [0, 22] selects the
+/// output's per-sub-packet zstd level (0 = uncompressed).
+///
+/// Writes the sub-packet count to `*out_subpackets` on success.
+/// Returns 0 on success, non-zero on failure with `errmsg` set.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_view_stream_to_stream(
+    in_path: *const c_char,
+    out_path: *const c_char,
+    compression_level: u8,
+    schema_override: *const c_char,
+    out_subpackets: *mut u64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    const FN: &str = "mlc_view_stream_to_stream";
+    wrap_c_call(errmsg, 1, || {
+        let in_str = cstr_arg(in_path, FN, "in_path")?;
+        let out_str = cstr_arg(out_path, FN, "out_path")?;
+        let schema_opt = if schema_override.is_null() {
+            None
+        } else {
+            Some(cstr_arg(schema_override, FN, "schema")?)
+        };
+        let n = crate::stream::shared_view_stream_to_stream(
+            in_str, out_str, compression_level, schema_opt,
+        )?;
+        if !out_subpackets.is_null() {
+            *out_subpackets = n;
+        }
+        Ok(0)
+    })
+}
+
+/// Convert a MORLOC_DATA_PACKET file to a MORLOC_STREAM_PACKET file.
+/// Backs `morloc-nexus view -s` on data-packet input. Opens the input
+/// as an IFile (refuses compressed DATA -- matches the runtime's own
+/// IFile-open invariant), chunks the array via bracket-slice, and
+/// writes each chunk to a fresh OStream.
+///
+/// Writes the sub-packet count to `*out_subpackets` on success.
+/// Returns 0 on success, non-zero on failure with `errmsg` set.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_view_data_to_stream(
+    in_path: *const c_char,
+    out_path: *const c_char,
+    compression_level: u8,
+    out_subpackets: *mut u64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    const FN: &str = "mlc_view_data_to_stream";
+    wrap_c_call(errmsg, 1, || {
+        let in_str = cstr_arg(in_path, FN, "in_path")?;
+        let out_str = cstr_arg(out_path, FN, "out_path")?;
+        let n = crate::stream::shared_view_data_to_stream(
+            in_str, out_str, compression_level,
+        )?;
+        if !out_subpackets.is_null() {
+            *out_subpackets = n;
+        }
+        Ok(0)
+    })
+}
+
+/// Open a footer-less MORLOC_STREAM_PACKET file as an IFile, trusting
+/// caller-supplied forward-scan output. Backs `morloc-nexus view
+/// --pattern` on a truncated stream: the caller runs a forward scan
+/// (either via `morloc_runtime_types::packet::forward_scan_subpackets`
+/// or the nexus-side seek+read walker) and hands the offsets +
+/// element_count here.
+///
+/// If the file has a clean final footer, this function delegates to
+/// `mlc_open_ifile` and ignores the caller's offsets -- the on-disk
+/// footer is authoritative.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_ifile_recovered(
+    path: *const c_char,
+    subpacket_offsets: *const u64,
+    n_offsets: u64,
+    element_count: u64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    const FN: &str = "mlc_open_ifile_recovered";
+    wrap_c_call(errmsg, -1, || {
+        let path_str = cstr_arg(path, FN, "path")?;
+        let offsets_slice: &[u64] = if n_offsets == 0 || subpacket_offsets.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(subpacket_offsets, n_offsets as usize)
+        };
+        crate::stream::shared_open_ifile_recovered(
+            path_str, offsets_slice, element_count,
+        )
+    })
+}
+
+/// Materialise a stream sub-packet from a caller-supplied byte buffer
+/// into a fresh SHM voidstar `Array<T>`. Given the sub-packet's full
+/// bytes (32-byte header + metadata + payload) and its element
+/// schema, returns the SHM AbsPtr to the newly-allocated array. The
+/// caller owns the block and is responsible for freeing via
+/// `mlc_shfree` (or the active `eval_arena` will reclaim it on scope
+/// drop).
+///
+/// Used by `morloc-nexus view -` when the input is a
+/// MORLOC_STREAM_PACKET on stdin: nexus reads one sub-packet at a
+/// time from fd 0, calls this to materialise each into a voidstar,
+/// and hands the voidstar to the appropriate emitter
+/// (`print_voidstar_jsonl`, `mlc_write`, `mlc_save_voidstar`).
+///
+/// Handles the same compression byte cases as
+/// `materialize_subpacket_at_offset`'s mmap-based path
+/// (`PACKET_COMPRESSION_NONE` and `PACKET_COMPRESSION_ZSTD`).
+#[no_mangle]
+pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(
+    bytes: *const u8,
+    n: u64,
+    elem_schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    const FN: &str = "mlc_materialize_subpacket_from_bytes";
+    wrap_c_call(errmsg, ptr::null_mut(), || {
+        if bytes.is_null() {
+            return Err(MorlocError::Other(format!("{}: null bytes", FN)));
+        }
+        if elem_schema.is_null() {
+            return Err(MorlocError::Other(format!("{}: null schema", FN)));
+        }
+        let slice = std::slice::from_raw_parts(bytes, n as usize);
+        let rs = CSchema::to_rust(elem_schema);
+        let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs)?;
+        Ok(p as *mut c_void)
+    })
 }

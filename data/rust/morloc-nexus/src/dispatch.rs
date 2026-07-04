@@ -19,6 +19,10 @@ use crate::process::{self, PoolSocket};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
     Json,
+    /// JSON-lines: one element per line. For list-shaped inputs the
+    /// list is streamed element-by-element; on scalars a single line
+    /// is emitted. Reachable from `morloc-nexus view -f jsonl`.
+    Jsonl,
     MessagePack,
     VoidStar,
     Packet,
@@ -1308,6 +1312,36 @@ pub(crate) fn print_result_c(
                     .unwrap_or_else(|| "unknown error".into());
                 eprintln!("Error: packet normalization failed: {}", msg);
                 process::clean_exit(1);
+            }
+        }
+        OutputFormat::Jsonl => {
+            // JSON-lines: one element per line for list schemas, one
+            // line total for scalars. Streams element-by-element via
+            // the runtime's `print_voidstar_jsonl` -- peak memory is
+            // one element's JSON body, not the whole list.
+            extern "C" {
+                fn print_voidstar_jsonl(
+                    data: *const std::ffi::c_void,
+                    schema: *const morloc_runtime_types::cschema::CSchema,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
+            }
+            let rc = unsafe {
+                print_voidstar_jsonl(
+                    ptr as *const std::ffi::c_void,
+                    schema,
+                    &mut errmsg,
+                )
+            };
+            match rc {
+                PRINT_RESULT_OK => {}
+                PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                _ => {
+                    let msg = process::take_c_errmsg(errmsg)
+                        .unwrap_or_else(|| "unknown error".into());
+                    eprintln!("Error: {}", msg);
+                    process::clean_exit(1);
+                }
             }
         }
         OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {

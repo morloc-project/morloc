@@ -1,0 +1,14 @@
+size gate -f json exit: 1
+size gate -f json msg: pass --force
+size gate -f json --force exit: 0
+size gate -d exit: 1
+size gate -d msg: STREAM -> DATA
+size gate -d --force exit: 0
+tty -f voidstar exit: 1
+tty -f voidstar msg: refusing to write binary
+tty -f voidstar --force exit: 0
+mutex -s -d exit: 2
+mutex -s -f json exit: 1
+mutex -s -f json msg: packet-type flag requires
+mutex -p raw json exit: 1
+mutex -p raw json msg: preserve-packet requires

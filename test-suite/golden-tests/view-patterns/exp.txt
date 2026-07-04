@@ -1,0 +1,25 @@
+flat DATA .[2]: 30
+flat STREAM .[2]: 30
+flat DATA .[-1]: 100
+flat STREAM .[-1]: 100
+flat DATA .[3:7]: [40,50,60,70]
+flat STREAM .[3:7]: [40,50,60,70]
+records DATA .[0].name: "Alice"
+records STREAM .[0].name: "Alice"
+records DATA .[1].age: 25
+records STREAM .[1].age: 25
+records DATA .[2].tags.[0]: "d"
+records STREAM .[2].tags.[0]: "d"
+records DATA .[0].(.name;.age): ["Alice",30]
+records STREAM .[0].(.name;.age): ["Alice",30]
+records DATA .[0:2] jsonl lines: 2
+records STREAM .[0:2] jsonl lines: 2
+nested .label: "team-a"
+nested .members.[0].name: "Alice"
+nested .members.[1].tags.[0]: "c"
+flat .foo exit: 1
+flat .foo msg: expected record
+records .missing exit: 1
+records .missing msg: field "missing" not found
+parse .[bad exit: 1
+parse .[bad msg: pattern parse

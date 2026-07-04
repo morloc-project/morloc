@@ -1397,6 +1397,144 @@ pub fn read_schema_from_meta(packet: &[u8]) -> Result<Option<String>, MorlocErro
     Ok(None)
 }
 
+// ── Forward-scan recovery ─────────────────────────────────────────────────
+
+/// Result of forward-scanning a footer-less MORLOC_STREAM_PACKET file
+/// to recover its sub-packet index and element count.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardScan {
+    /// Byte offsets (from file start) of each intact sub-packet header.
+    pub subpacket_offsets: Vec<u64>,
+    /// Total element count across all *uncounted-eligible* sub-packets.
+    /// Uncompressed sub-packets contribute their array size prefix
+    /// (`u64` at the start of the payload). Compressed sub-packets
+    /// are skipped for count (would require decompression) -- see
+    /// `compressed_uncounted` and the compression-aware companion in
+    /// `crate::compression::forward_scan_subpackets_with_counts`.
+    pub element_count: u64,
+    /// Bytes consumed from `body_start` through the last intact
+    /// sub-packet (exclusive of any partial trailing sub-packet).
+    pub bytes_scanned: u64,
+    /// True iff the scan stopped at a truncated last sub-packet whose
+    /// bytes were incomplete on disk. That sub-packet is not in
+    /// `subpacket_offsets`; upstream tools can report "partial".
+    pub partial: bool,
+    /// Count of sub-packets whose compressed payload was skipped for
+    /// element counting. When nonzero, `element_count` covers only
+    /// the uncompressed sub-packets; use the compression-aware
+    /// walker for an exact total.
+    pub compressed_uncounted: u64,
+    /// True iff the scan stopped early because it hit its sub-packet
+    /// count cap. Callers with real read budgets (`morloc-nexus file`)
+    /// use this to keep the classification tool fast on pathological
+    /// inputs; callers who need the full walk (runtime IStream open)
+    /// pass `u64::MAX` and never see this set.
+    pub scan_capped: bool,
+}
+
+/// Walk sub-packet headers starting at `body_start` and stop at the
+/// first non-data packet (the footer, if any), a corrupt header, or
+/// EOF. Used for footer-less recovery of MORLOC_STREAM_PACKET files.
+/// Equivalent to `forward_scan_subpackets_capped(mmap, body_start,
+/// u64::MAX)` -- unbounded, for callers who need the full walk
+/// (runtime IStream / IFile open).
+///
+/// Element counts are taken from the array size prefix at the start
+/// of each uncompressed sub-packet's payload. Compressed sub-packets
+/// are recorded in the offsets list but their element count is
+/// deferred: they contribute to `compressed_uncounted` and the caller
+/// can use the compression-aware companion walker to fill in the count.
+pub fn forward_scan_subpackets(
+    mmap: &[u8],
+    body_start: u64,
+) -> Result<ForwardScan, MorlocError> {
+    forward_scan_subpackets_capped(mmap, body_start, u64::MAX)
+}
+
+/// Same as `forward_scan_subpackets` but stops after `cap` sub-packets
+/// and sets `scan_capped=true` on the result. Callers with a read
+/// budget (`morloc-nexus file` for its fast-classification contract)
+/// use this to avoid unbounded work on inputs that flush after every
+/// element.
+pub fn forward_scan_subpackets_capped(
+    mmap: &[u8],
+    body_start: u64,
+    cap: u64,
+) -> Result<ForwardScan, MorlocError> {
+    let size = mmap.len() as u64;
+    if body_start > size {
+        return Err(MorlocError::Packet(format!(
+            "forward_scan: body_start {} exceeds file size {}",
+            body_start, size,
+        )));
+    }
+    let mut out = ForwardScan::default();
+    let mut cur = body_start;
+
+    while cur + 32 <= size {
+        if out.subpacket_offsets.len() as u64 >= cap {
+            out.scan_capped = true;
+            break;
+        }
+        let hdr_start = cur as usize;
+        let hdr_bytes: &[u8; 32] = mmap[hdr_start..hdr_start + 32]
+            .try_into()
+            .expect("32-byte slice");
+        let header = match PacketHeader::from_bytes(hdr_bytes) {
+            Ok(h) => h,
+            Err(_) => break, // corrupt header: stop cleanly
+        };
+        if header.is_footer() {
+            break;
+        }
+        if !header.is_data() {
+            break;
+        }
+        let offset = header.offset as u64;
+        let length = header.length as u64;
+        let total = 32u64
+            .checked_add(offset)
+            .and_then(|x| x.checked_add(length))
+            .ok_or_else(|| MorlocError::Packet(
+                "forward_scan: sub-packet total-size overflow".into(),
+            ))?;
+        if cur + total > size {
+            // Trailing partial sub-packet (crashed mid-write).
+            out.partial = true;
+            break;
+        }
+
+        // Count elements from the array size prefix when uncompressed
+        // AND voidstar. Msgpack sub-packets (per the current design,
+        // rejected at IFile open time) do not have the array-length
+        // prefix; skip them for count.
+        let data = unsafe { header.command.data };
+        let is_voidstar = data.format == PACKET_FORMAT_VOIDSTAR;
+        let is_uncompressed = data.compression == PACKET_COMPRESSION_NONE;
+        if is_voidstar && is_uncompressed {
+            let payload_start = (cur + 32 + offset) as usize;
+            if payload_start + 8 <= mmap.len() {
+                let size_bytes: [u8; 8] = mmap
+                    [payload_start..payload_start + 8]
+                    .try_into()
+                    .expect("8-byte size prefix");
+                let elem_count = u64::from_le_bytes(size_bytes);
+                out.element_count = out.element_count.saturating_add(elem_count);
+            } else {
+                out.partial = true;
+                break;
+            }
+        } else {
+            out.compressed_uncounted = out.compressed_uncounted.saturating_add(1);
+        }
+
+        out.subpacket_offsets.push(cur);
+        cur += total;
+    }
+    out.bytes_scanned = cur.saturating_sub(body_start);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2026,5 +2164,87 @@ mod tests {
         let body = 0u64.to_le_bytes();
         let recovered = decode_subpacket_index(&body).unwrap();
         assert!(recovered.is_empty());
+    }
+
+    /// Build a synthetic uncompressed sub-packet header + payload with a
+    /// given array-size prefix, for exercising forward_scan_subpackets.
+    fn build_uncompressed_subpacket(elem_count: u64, payload_extra: usize) -> Vec<u8> {
+        // Payload is: [u64 size prefix] + [zero-filled tail]
+        let payload_len = 8 + payload_extra;
+        let mut hdr = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
+        hdr.offset = 0; // no metadata between header and payload
+        let mut out = Vec::with_capacity(32 + payload_len);
+        out.extend_from_slice(&hdr.to_bytes());
+        out.extend_from_slice(&elem_count.to_le_bytes());
+        out.resize(32 + payload_len, 0);
+        out
+    }
+
+    #[test]
+    fn forward_scan_empty_body() {
+        // body_start == size: nothing to scan.
+        let mmap = vec![0u8; 32]; // any 32-byte prelude
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert!(scan.subpacket_offsets.is_empty());
+        assert_eq!(scan.element_count, 0);
+        assert_eq!(scan.bytes_scanned, 0);
+        assert!(!scan.partial);
+        assert_eq!(scan.compressed_uncounted, 0);
+    }
+
+    #[test]
+    fn forward_scan_two_uncompressed_subpackets() {
+        // Stream file skeleton: 32-byte fake "stream header" + N sub-
+        // packets. forward_scan_subpackets does not care what precedes
+        // body_start; it just walks from body_start onward.
+        let mut mmap = vec![0u8; 32];
+        mmap.extend_from_slice(&build_uncompressed_subpacket(100, 0));
+        let off1 = mmap.len() as u64;
+        let expected_off0: u64 = 32;
+        mmap.extend_from_slice(&build_uncompressed_subpacket(250, 0));
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert_eq!(scan.subpacket_offsets, vec![expected_off0, off1]);
+        assert_eq!(scan.element_count, 350);
+        assert!(!scan.partial);
+        assert_eq!(scan.compressed_uncounted, 0);
+    }
+
+    #[test]
+    fn forward_scan_stops_at_footer() {
+        // Two data sub-packets + a footer packet -> only the two data
+        // sub-packets are recovered; footer terminates the walk.
+        let mut mmap = vec![0u8; 32];
+        mmap.extend_from_slice(&build_uncompressed_subpacket(10, 0));
+        mmap.extend_from_slice(&build_uncompressed_subpacket(20, 0));
+        let footer_hdr = PacketHeader::footer(0);
+        mmap.extend_from_slice(&footer_hdr.to_bytes());
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert_eq!(scan.subpacket_offsets.len(), 2);
+        assert_eq!(scan.element_count, 30);
+        assert!(!scan.partial);
+    }
+
+    #[test]
+    fn forward_scan_marks_partial_on_truncation() {
+        // Two intact sub-packets + a truncated third header.
+        let mut mmap = vec![0u8; 32];
+        mmap.extend_from_slice(&build_uncompressed_subpacket(3, 0));
+        mmap.extend_from_slice(&build_uncompressed_subpacket(4, 0));
+        // Truncated third packet: full header claiming a large payload,
+        // but the file ends before the payload does.
+        let mut trunc = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 4096);
+        trunc.offset = 0;
+        mmap.extend_from_slice(&trunc.to_bytes());
+        // No payload bytes for the third packet.
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert_eq!(scan.subpacket_offsets.len(), 2);
+        assert_eq!(scan.element_count, 7);
+        assert!(scan.partial);
+    }
+
+    #[test]
+    fn forward_scan_rejects_out_of_range_body_start() {
+        let mmap = vec![0u8; 32];
+        assert!(forward_scan_subpackets(&mmap, 64).is_err());
     }
 }

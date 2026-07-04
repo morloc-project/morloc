@@ -2962,7 +2962,18 @@ fn append_one_element(
     //   blob[0..w]: inline (with buffer-relative relptrs into blob[w..])
     //   blob[w..]:  variable bytes (sub-allocations)
     let elem_blob = crate::voidstar::flatten_to_buffer(elem_src, &local.elem_schema)?;
-    let variable_size = elem_blob.len().saturating_sub(w);
+    // Round the variable region up to 8-byte alignment. Successive
+    // elements' variable regions concatenate in the write buffer at
+    // `data_region_start + write_buffer_data_used`; if any element's
+    // variable_size isn't a multiple of 8, the next element's
+    // variable data lands at a misaligned offset and its Array
+    // headers can't be dereferenced without violating alignment
+    // requirements (fatal in a debug-checked runtime; silent UB in
+    // release). Padding here fills the trailing bytes with zero
+    // (the buffer is zero-initialised via shcalloc); no relptr ever
+    // targets the padding.
+    let raw_variable_size = elem_blob.len().saturating_sub(w);
+    let variable_size = (raw_variable_size + 7) & !7;
 
     // Initialise the index cap on first write into this slot. Clamp
     // to what the buffer can actually hold: with a small env-overridden
@@ -3066,11 +3077,14 @@ fn append_one_element(
         std::ptr::copy_nonoverlapping(
             elem_blob.as_ptr(), buf_abs.add(index_offset), w,
         );
-        if variable_size > 0 {
+        // Copy only the raw variable bytes; the trailing pad bytes
+        // (up to the 8-byte alignment) are already zero from
+        // shcalloc-init and no relptr references them.
+        if raw_variable_size > 0 {
             std::ptr::copy_nonoverlapping(
                 elem_blob.as_ptr().add(w),
                 buf_abs.add(data_offset),
-                variable_size,
+                raw_variable_size,
             );
         }
     }
@@ -3557,12 +3571,16 @@ pub fn shared_ifile_walk(
         }
         return shared_ifile_bracket_index(handle, args[0].value);
     }
-    // Root-only `.[:]` (slice) with optional field/key tail.
+    // Root-only `.[:]` (slice) with optional field/key tail. The
+    // fast path only fires when the tail is pure Field/Key steps
+    // (parse_field_only_tail) AND the total arg count matches
+    // exactly what the slice-with-field-tail path expects (3 for the
+    // slice, none for the field tail). Any other shape (tail with
+    // brackets, groups, or extra runtime args) falls through to the
+    // general walker.
     if let Some(rest) = path.strip_prefix(".[:]") {
         if args.len() != 3 {
-            return Err(MorlocError::Other(format!(
-                "ifile_walk: \".[:]\" expects 3 runtime args, got {}", args.len()
-            )));
+            return shared_ifile_general(handle, path, args);
         }
         let opt = |a: &crate::intrinsics::IFileWalkArg| {
             if a.has != 0 { Some(a.value) } else { None }
@@ -4297,7 +4315,7 @@ fn parse_stream_file(
                     // headers to recover counts; IFile open will refuse
                     // this kind of file too.
                     let scanned = forward_scan_subpackets(mmap_ptr, mmap_size, body_start)?;
-                    (scanned.subpacket_index, scanned.element_count, None, false)
+                    (scanned.subpacket_offsets, scanned.element_count, None, false)
                 }
             };
         (schema_str, subpacket_index, element_count, diag, final_footer, body_start)
@@ -4767,75 +4785,23 @@ fn try_read_footer(
 }
 
 // ── Forward-scan recovery ─────────────────────────────────────────────────
+//
+// The pure walker lives in `morloc-runtime-types::packet::forward_scan_subpackets`.
+// This wrapper adapts the mmap raw-pointer + size interface used by
+// the runtime to the byte-slice interface the shared walker expects.
 
-#[derive(Debug)]
-struct ForwardScan {
-    subpacket_index: Vec<u64>,
-    element_count: u64,
-}
-
-/// Walk every sub-packet header from `body_start` to EOF (or the first
-/// non-DATA packet — typically the footer, if any). Used when the
-/// footer is absent or unusable.
 fn forward_scan_subpackets(
     mmap_ptr: AbsPtr,
     size: u64,
     body_start: u64,
-) -> Result<ForwardScan, MorlocError> {
-    let mut subpacket_index = Vec::new();
-    let element_count: u64 = 0;
-    let mut cur = body_start;
-
-    while cur + 32 <= size {
-        // SAFETY: cur + 32 <= size.
-        let hdr_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (mmap_ptr as *const u8).add(cur as usize),
-                32,
-            )
-        };
-        let header = match PacketHeader::from_bytes(
-            hdr_bytes.try_into().unwrap(),
-        ) {
-            Ok(h) => h,
-            Err(_) => break,  // corrupt header: stop here
-        };
-        if header.is_footer() {
-            break;
-        }
-        if !header.is_data() {
-            // Unknown or stale data; stop scanning.
-            break;
-        }
-        let offset = header.offset as u64;
-        let length = header.length as u64;
-        let total = 32u64
-            .checked_add(offset)
-            .and_then(|x| x.checked_add(length))
-            .ok_or_else(|| MorlocError::Packet(
-                "sub-packet length overflow during scan".into(),
-            ))?;
-        if cur + total > size {
-            // Partial last sub-packet (crashed mid-write). Stop cleanly.
-            break;
-        }
-        subpacket_index.push(cur);
-        // Count elements in this sub-packet if its metadata carries it
-        // (currently we don't write per-sub-packet counts; element_count
-        // remains 0 for files without a final footer and the user must
-        // walk).
-        let _ = (offset, length, &header);
-
-        // Track element-count if a per-sub-packet ELEMENT_COUNT metadata
-        // block is present. Today the writer does NOT emit this; reserved
-        // for future evolution. The simpler path is to leave this 0 when
-        // the final footer is absent and document `length f` as
-        // expensive in that case.
-        let _ = element_count;
-
-        cur += total;
-    }
-    Ok(ForwardScan { subpacket_index, element_count })
+) -> Result<morloc_runtime_types::packet::ForwardScan, MorlocError> {
+    // SAFETY: caller guarantees mmap_ptr..mmap_ptr+size is a valid,
+    // read-only mapping for the file's full length. The slice is only
+    // consumed within this call; no external references escape.
+    let mmap = unsafe {
+        std::slice::from_raw_parts(mmap_ptr as *const u8, size as usize)
+    };
+    morloc_runtime_types::packet::forward_scan_subpackets(mmap, body_start)
 }
 
 // ── Validation helpers used by other modules ──────────────────────────────
@@ -6326,11 +6292,11 @@ fn slice_bulk_pack_str(
     Ok(())
 }
 
-/// Parse a `.<step>.<step>...` suffix consisting purely of
-/// Field/Key steps. Returns `None` if the suffix contains any
-/// bracket, group, or other non-field step -- the caller falls back
-/// to the general walker in that case. Used to detect chain-fusable
-/// tails after a root-level `.[:]`.
+/// Parse a `.<step>.<step>...` suffix consisting purely of Field/Key
+/// steps. Returns `None` if any bracket, group, or other non-field
+/// step is present -- the caller falls back to the general walker
+/// (which handles slice+group via broadcast_slice_tail). Used to
+/// detect chain-fusable tails after a root-level `.[:]`.
 fn parse_field_only_tail(suffix: &str) -> Result<Option<Vec<WalkStep>>, MorlocError> {
     let bytes = suffix.as_bytes();
     let mut out = Vec::new();
@@ -6348,8 +6314,6 @@ fn parse_field_only_tail(suffix: &str) -> Result<Option<Vec<WalkStep>>, MorlocEr
                 "tail walk: trailing '.' with no step".into(),
             ));
         }
-        // Anything that isn't a digit or an identifier byte means a
-        // structural step (group / bracket) -- signal fall-through.
         match bytes[pos] {
             b'0'..=b'9' => {
                 let start = pos;
@@ -6602,20 +6566,17 @@ fn parse_walk_seq(
     }
     let mut out: Vec<WalkStep> = Vec::new();
     while pos < bytes.len() && bytes[pos] != b';' && bytes[pos] != b')' {
-        // Terminal-step enforcement: nothing may follow a Group or a
-        // BracketSlice within the same chain. (BracketIndex is NOT
-        // terminal -- a chain may continue navigating into the
-        // materialised element.)
-        if let Some(last) = out.last() {
-            match last {
-                WalkStep::Group(_) => return Err(MorlocError::Other(
-                    "walk path: groups are terminal -- nothing may follow `.(.x;.y)`".into()
-                )),
-                WalkStep::BracketSlice => return Err(MorlocError::Other(
-                    "walk path: bracket slices are terminal -- nothing may follow `.[:]`".into()
-                )),
-                _ => {}
-            }
+        // Terminal-step enforcement: nothing may follow a Group in
+        // the same chain (a group already materialises a fresh value
+        // that isn't necessarily well-defined for further walking).
+        // `BracketSlice` is NOT terminal: `.[:]<tail>` broadcasts
+        // <tail> over each element of the slice, matching the
+        // compiler's IntrMap desugar. `BracketIndex` is also not
+        // terminal.
+        if let Some(WalkStep::Group(_)) = out.last() {
+            return Err(MorlocError::Other(
+                "walk path: groups are terminal -- nothing may follow `.(.x;.y)`".into()
+            ));
         }
         if bytes[pos] != b'.' {
             return Err(MorlocError::Other(format!(
@@ -6861,9 +6822,10 @@ fn walk_into(
                 tail = nt;
             }
             Some(WalkStep::BracketSlice) => {
-                // BracketSlice is terminal by parse-time check; any
-                // tail after it would have been rejected. The result
-                // here writes directly into `out`.
+                // Slice consumes 3 runtime args (start, stop, step).
+                // Terminal slice deep-copies; slice-with-tail
+                // broadcasts the tail over each element (matches the
+                // compiler's IntrMap desugar).
                 let (s, e, p) = args.next_three()?;
                 if cur_schema_ref.serial_type != SerialType::Array {
                     return Err(MorlocError::Other(format!(
@@ -6871,8 +6833,16 @@ fn walk_into(
                         cur_schema_ref.serial_type
                     )));
                 }
-                debug_assert_eq!(tail.len(), 1, "BracketSlice should be terminal");
-                return inline_bracket_slice(src, cur_ptr, cur_schema_ref, s, e, p, out);
+                let remaining = &tail[1..];
+                if remaining.is_empty() {
+                    return inline_bracket_slice(
+                        src, cur_ptr, cur_schema_ref, s, e, p, out,
+                    );
+                }
+                return broadcast_slice_tail(
+                    src, cur_ptr, cur_schema_ref, s, e, p,
+                    remaining, args, out, out_schema,
+                );
             }
             Some(WalkStep::Group(chains)) => {
                 // Group is terminal by parse-time check; result writes
@@ -7043,6 +7013,147 @@ fn inline_bracket_slice(
     Ok(())
 }
 
+/// Slice with a tail chain: for each element of the sliced source,
+/// walk `tail` on that element, and collect the results into a fresh
+/// `Array<tail_result>` written to `out`. Mirrors the compiler's
+/// IntrMap desugar (`.[:].tail` lowers to `map (\e -> e.tail) slice`).
+///
+/// `arr_schema` describes the input Array; `out_schema` describes the
+/// output Array (`Array<tail_result_from_elem>`, produced by
+/// `infer_chain_schema`).
+///
+/// Args semantics: the tail is walked once per output element; any
+/// arg-consuming step in the tail (BracketIndex, nested BracketSlice)
+/// consumes fresh args on each iteration, so the caller must supply
+/// enough. In practice broadcast tails are field/tuple-idx / groups
+/// with field-only children -- no runtime args -- but this
+/// implementation doesn't restrict that.
+fn broadcast_slice_tail(
+    src: &SubpacketSrc,
+    arr_ptr: AbsPtr,
+    arr_schema: &Schema,
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
+    tail: &[WalkStep],
+    args: &mut ArgsCursor<'_>,
+    out: AbsPtr,
+    out_schema: &Schema,
+) -> Result<(), MorlocError> {
+    debug_assert_eq!(arr_schema.serial_type, SerialType::Array);
+    debug_assert_eq!(out_schema.serial_type, SerialType::Array);
+    if arr_schema.parameters.is_empty() {
+        return Err(MorlocError::Other(
+            "walk: Array schema missing element type at slice broadcast".into(),
+        ));
+    }
+    if out_schema.parameters.is_empty() {
+        return Err(MorlocError::Other(
+            "walk: output Array schema missing element type at slice broadcast".into(),
+        ));
+    }
+    let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
+    let n = arr.size as i64;
+    let elem_schema = &arr_schema.parameters[0];
+    let elem_w = elem_schema.width;
+    let out_elem_schema = &out_schema.parameters[0];
+    let out_elem_w = out_elem_schema.width;
+    let indices = python_slice_indices(n, start, stop, step)?;
+    let n_out = indices.len();
+    let buf_ptr = if n_out == 0 {
+        std::ptr::null::<u8>() as AbsPtr
+    } else {
+        shm::shcalloc(n_out, out_elem_w)?
+    };
+    let data_abs = match src {
+        SubpacketSrc::File { payload_base, payload_len, .. } => {
+            let resolver = make_file_resolver(*payload_base, *payload_len);
+            resolver(arr.data)?
+        }
+        SubpacketSrc::Shm { .. } => shm::rel2abs(arr.data)?,
+    };
+    // The tail's runtime args (any BracketIndex/BracketSlice in the
+    // tail) apply uniformly to every element of the slice, matching
+    // `map (\e -> e.[i]) slice`. Snapshot the arg cursor, rewind
+    // before each element, then advance once after the loop so the
+    // outer caller sees a single consumption of the tail's args.
+    let snapshot_pos = args.pos;
+    let mut per_iter_consumed: Option<usize> = None;
+    for (k, &i) in indices.iter().enumerate() {
+        let elem_src_ptr = unsafe {
+            (data_abs as *const u8).add(i as usize * elem_w) as AbsPtr
+        };
+        let elem_dst_ptr = unsafe {
+            (buf_ptr as *mut u8).add(k * out_elem_w) as AbsPtr
+        };
+        args.pos = snapshot_pos;
+        if let Err(e) = walk_into(
+            src, elem_src_ptr, elem_schema,
+            tail, args, elem_dst_ptr, out_elem_schema,
+        ) {
+            if !buf_ptr.is_null() { let _ = shm::shfree(buf_ptr); }
+            return Err(e);
+        }
+        let consumed = args.pos - snapshot_pos;
+        match per_iter_consumed {
+            None => per_iter_consumed = Some(consumed),
+            Some(prev) if prev != consumed => {
+                if !buf_ptr.is_null() { let _ = shm::shfree(buf_ptr); }
+                return Err(MorlocError::Other(format!(
+                    "walk: broadcast tail consumed different arg counts \
+                     across iterations ({} vs {}); pattern is malformed",
+                    prev, consumed,
+                )));
+            }
+            _ => {}
+        }
+    }
+    // Advance the outer cursor once past the tail's arg budget.
+    // For empty slices no iteration ran, so we compute the count
+    // statically from the tail's step shapes instead of observing it.
+    let per_iter = match per_iter_consumed {
+        Some(c) => c,
+        None => count_walk_args(tail),
+    };
+    args.pos = snapshot_pos + per_iter;
+    let data_rel = if buf_ptr.is_null() {
+        shm::RELNULL
+    } else {
+        shm::abs2rel(buf_ptr)?
+    };
+    let header = shm_types_crate::Array { size: n_out, data: data_rel };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &header as *const shm_types_crate::Array as *const u8,
+            out as *mut u8,
+            std::mem::size_of::<shm_types_crate::Array>(),
+        );
+    }
+    Ok(())
+}
+
+/// Count the number of runtime args a chain of WalkSteps would
+/// consume. Each BracketIndex uses 1, each BracketSlice uses 3, Field
+/// uses 0. Groups accumulate the counts of every child chain.
+/// Used by `broadcast_slice_tail` to skip the tail's arg budget when
+/// the slice is empty (no iteration to observe consumption).
+fn count_walk_args(steps: &[WalkStep]) -> usize {
+    let mut n = 0;
+    for s in steps {
+        match s {
+            WalkStep::Field(_) => {}
+            WalkStep::BracketIndex => n += 1,
+            WalkStep::BracketSlice => n += 3,
+            WalkStep::Group(children) => {
+                for c in children {
+                    n += count_walk_args(c);
+                }
+            }
+        }
+    }
+    n
+}
+
 /// Python slice index expansion: produces the actual list of source
 /// indices for a (start, stop, step) triple against length n.
 /// Mirrors the semantics used by `ifile_bracket_slice` so element
@@ -7165,9 +7276,21 @@ fn infer_chain_schema(
                         step_i, cur.serial_type
                     )));
                 }
-                // Slice preserves the Array shape; the length is a
-                // runtime fact carried by the result's Array header.
-                // cur stays unchanged.
+                // Terminal slice: shape unchanged. Slice with a tail:
+                // broadcast the tail over each element, so the result
+                // becomes `Array<tail_result_from_elem>`.
+                let remaining = &chain[step_i + 1..];
+                if !remaining.is_empty() {
+                    if cur.parameters.is_empty() {
+                        return Err(MorlocError::Other(
+                            "Array schema missing element type at slice broadcast".into(),
+                        ));
+                    }
+                    let elem = cur.parameters[0].clone();
+                    let tail_result = infer_chain_schema(&elem, remaining)?;
+                    return Ok(array_schema(&tail_result));
+                }
+                // Else: cur stays unchanged (terminal slice).
             }
             WalkStep::Group(inner_chains) => {
                 if inner_chains.is_empty() {
@@ -7395,6 +7518,406 @@ pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
             kind, handle_kind_name(kind),
         ))),
     }
+}
+
+// ── `morloc-nexus view` conversion helpers ────────────────────────────────
+//
+// These three functions back the runtime FFI entries used by
+// `morloc-nexus view` for packet-type conversion and pattern-walker
+// dispatch on footer-less streams. They compose existing shared_*
+// primitives (open, next/slice, write, close) so the authoritative
+// footer writer stays in one place.
+
+/// Materialise a sub-packet (already read into a byte buffer) into a
+/// fresh SHM voidstar `Array<T>`. Given the sub-packet's full bytes
+/// (32-byte header + metadata + payload; decompressed by the caller
+/// or done here for zstd) and the element schema, returns the AbsPtr
+/// of the newly-allocated SHM block. Caller is responsible for
+/// freeing via `shm::shfree` (or letting the `eval_arena` sweep on
+/// scope drop).
+///
+/// Used by `morloc-nexus view -` when streaming stdin: nexus reads a
+/// sub-packet at a time off fd 0, calls this to materialise it, then
+/// hands the voidstar to the appropriate emitter (`print_voidstar_jsonl`,
+/// `mlc_write` for OStream output, or `mlc_save_voidstar` for the
+/// buffered `-d` arm). Mirrors the compressed-path branch of
+/// `materialize_subpacket_at_offset`, but works from a byte slice
+/// instead of a mmap region so it can back a pipe/fd-based reader.
+pub fn shared_materialize_subpacket_from_bytes(
+    subpacket_bytes: &[u8],
+    elem_schema: &morloc_runtime_types::schema::Schema,
+) -> Result<AbsPtr, MorlocError> {
+    if subpacket_bytes.len() < 32 {
+        return Err(MorlocError::Packet(format!(
+            "materialise sub-packet: {} bytes < 32-byte header",
+            subpacket_bytes.len(),
+        )));
+    }
+    let hdr_arr: [u8; 32] = subpacket_bytes[..32].try_into().unwrap();
+    let header = PacketHeader::from_bytes(&hdr_arr)?;
+    if !header.is_data() {
+        return Err(MorlocError::Packet(format!(
+            "materialise sub-packet: header cmd_type = {}; expected DATA",
+            unsafe { header.command.cmd_type.cmd_type },
+        )));
+    }
+    let data = unsafe { header.command.data };
+    if data.format != PACKET_FORMAT_VOIDSTAR {
+        return Err(MorlocError::Packet(format!(
+            "materialise sub-packet: format = {}; expected voidstar",
+            packet_format_name(data.format),
+        )));
+    }
+    let meta_len = header.offset as usize;
+    let payload_len = header.length as usize;
+    let total = 32 + meta_len + payload_len;
+    if subpacket_bytes.len() < total {
+        return Err(MorlocError::Packet(format!(
+            "materialise sub-packet: buffer holds {} bytes but header \
+             declares {}+{}+{}={}",
+            subpacket_bytes.len(), 32, meta_len, payload_len, total,
+        )));
+    }
+
+    // Decompress once (if needed) and copy the payload straight into
+    // SHM. Uncompressed branch reads from the caller's slice; ZSTD
+    // branch reads from the decompressed Vec. Either way, one memcpy
+    // into shmalloc'd memory -- no intermediate owned Vec.
+    fn copy_into_shm(src: &[u8]) -> Result<AbsPtr, MorlocError> {
+        let base = shm::shmalloc(src.len())?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), base, src.len());
+        }
+        Ok(base)
+    }
+    let base = match data.compression {
+        PACKET_COMPRESSION_NONE => {
+            copy_into_shm(&subpacket_bytes[32 + meta_len..total])?
+        }
+        PACKET_COMPRESSION_ZSTD => {
+            let decompressed =
+                morloc_runtime_types::compression::decompress_packet(
+                    &subpacket_bytes[..total],
+                )?;
+            let dec_hdr = PacketHeader::from_bytes(
+                decompressed[..32].try_into().unwrap(),
+            )?;
+            let dec_start = 32 + dec_hdr.offset as usize;
+            let dec_end = dec_start + dec_hdr.length as usize;
+            copy_into_shm(&decompressed[dec_start..dec_end])?
+        }
+        other => {
+            return Err(MorlocError::Packet(format!(
+                "materialise sub-packet: unknown compression byte {}",
+                other,
+            )));
+        }
+    };
+    let base_rel = match shm::abs2rel(base) {
+        Ok(r) => r,
+        Err(e) => { let _ = shm::shfree(base); return Err(e); }
+    };
+    let arr_schema = array_schema(elem_schema);
+    if let Err(e) = voidstar::adjust_relptrs(base, &arr_schema, base_rel) {
+        let _ = shm::shfree(base);
+        return Err(e);
+    }
+    Ok(base)
+}
+
+/// Convert a MORLOC_STREAM_PACKET file to another MORLOC_STREAM_PACKET
+/// file. Drains the input via IStream `@next` and rewrites each
+/// element batch via OStream `@write`, so recompression, schema
+/// override, and footer normalisation all happen through the same
+/// authoritative writers used by `@write` / `@close`.
+///
+/// Handles footer-less input as a first-class case (IStream forward-
+/// walks regardless of footer state).
+///
+/// Returns the number of sub-packets emitted to the output. The size
+/// guardrail check (`--force` gate) is applied by the caller before
+/// invoking this function; the runtime does not have a policy on
+/// output size.
+pub fn shared_view_stream_to_stream(
+    in_path: &str,
+    out_path: &str,
+    compression_level: u8,
+    schema_override: Option<&str>,
+) -> Result<u64, MorlocError> {
+    // Determine the OStream's element schema. Prefer the caller's
+    // override; otherwise pull the stored element schema from the
+    // input file's stream header.
+    let schema_str = if let Some(s) = schema_override {
+        s.to_string()
+    } else {
+        read_schema_from_file(in_path)?
+    };
+
+    let in_handle = shared_open_istream(in_path)?;
+    let close_in_on_err = |e: MorlocError| -> MorlocError {
+        let _ = shared_discard_handle(in_handle);
+        e
+    };
+
+    let out_handle = shared_open_ostream_with_schema(out_path, &schema_str)
+        .map_err(close_in_on_err)?;
+
+    let cleanup = |e: MorlocError| -> MorlocError {
+        let _ = shared_discard_handle(out_handle);
+        let _ = shared_discard_handle(in_handle);
+        e
+    };
+
+    // Drain: pull one sub-packet from the IStream and hand it to
+    // the OStream. `@next` returns an empty Array on EOF; that signals
+    // us to stop.
+    let mut n_written: u64 = 0;
+    loop {
+        let sub_ptr = shared_next_subpacket(in_handle).map_err(cleanup)?;
+        // Empty Array (size == 0) => EOF.
+        let size = unsafe { *(sub_ptr as *const u64) };
+        if size == 0 {
+            let _ = crate::shm::shfree(sub_ptr);
+            break;
+        }
+        if let Err(e) = shared_write_subpacket(out_handle, compression_level, sub_ptr) {
+            let _ = crate::shm::shfree(sub_ptr);
+            return Err(cleanup(e));
+        }
+        let _ = crate::shm::shfree(sub_ptr);
+        n_written += 1;
+    }
+
+    shared_close_handle(out_handle).map_err(|e| {
+        let _ = shared_discard_handle(in_handle);
+        e
+    })?;
+    shared_close_handle(in_handle)?;
+    Ok(n_written)
+}
+
+/// Convert a MORLOC_DATA_PACKET file to a MORLOC_STREAM_PACKET file.
+/// Opens the input as an IFile so element access uses the existing
+/// mmap + bracket-slice discipline, iterates in chunks sized by a
+/// per-file heuristic (~1/10 of one OStream frame per chunk), and
+/// writes each chunk to a fresh OStream. The OStream's own buffering
+/// coalesces chunks into full-size sub-packets.
+///
+/// Chunk size heuristic (per plan): target ~`FRAME_CHUNK_SIZE / 10`
+/// bytes per read range, computed from the input's average element
+/// size. Clamped to `[1, 1 << 20]`. Tiny-element degenerate cases
+/// (`[Bool]`, `[Unit]`) get the upper clamp so a billion-element
+/// chunk doesn't overflow the bracket-slice i64.
+///
+/// Returns the number of sub-packets emitted. Refuses compressed
+/// DATA inputs (matches `open_data_packet`).
+pub fn shared_view_data_to_stream(
+    in_path: &str,
+    out_path: &str,
+    compression_level: u8,
+) -> Result<u64, MorlocError> {
+    use morloc_runtime_types::schema::schema_to_string;
+
+    let in_handle = shared_open_ifile(in_path)?;
+
+    // Pull the element schema from the process-local slot. IFile is
+    // required by the schema-check contract to be list-valued; for
+    // DATA_PACKET the elem_schema is the array's element type.
+    let elem_schema_str = with_process_local_slot(in_handle, |local, _slot| {
+        Ok(schema_to_string(&local.elem_schema))
+    })?;
+
+    // Element count for the loop bound.
+    let elem_count = shared_handle_length(in_handle)?;
+    // File size for the average-element heuristic.
+    let file_size = std::fs::metadata(in_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let chunk_elems = compute_view_chunk_elems(elem_count, file_size);
+
+    let out_handle = shared_open_ostream_with_schema(out_path, &elem_schema_str)
+        .map_err(|e| {
+            let _ = shared_discard_handle(in_handle);
+            e
+        })?;
+
+    let cleanup_on_err = |e: MorlocError| -> MorlocError {
+        let _ = shared_discard_handle(out_handle);
+        let _ = shared_discard_handle(in_handle);
+        e
+    };
+
+    let mut n_written: u64 = 0;
+    let mut i: u64 = 0;
+    while i < elem_count {
+        let stop = std::cmp::min(i + chunk_elems, elem_count);
+        let slice_ptr = shared_ifile_bracket_slice_with_tail(
+            in_handle,
+            Some(i as i64),
+            Some(stop as i64),
+            None,
+            &[],
+        ).map_err(cleanup_on_err)?;
+        if let Err(e) = shared_write_subpacket(out_handle, compression_level, slice_ptr) {
+            let _ = crate::shm::shfree(slice_ptr);
+            return Err(cleanup_on_err(e));
+        }
+        let _ = crate::shm::shfree(slice_ptr);
+        n_written += 1;
+        i = stop;
+    }
+
+    shared_close_handle(out_handle).map_err(|e| {
+        let _ = shared_discard_handle(in_handle);
+        e
+    })?;
+    shared_close_handle(in_handle)?;
+    Ok(n_written)
+}
+
+/// Chunk-size heuristic for `shared_view_data_to_stream`. Aims for
+/// ~1/10 of an OStream frame per read range so the OStream buffer
+/// coalesces about 10 chunks into a full-size sub-packet. Clamped to
+/// `[1, 1 << 20]` -- the upper bound prevents tiny-element degenerate
+/// cases (`[Bool]`, `[Unit]`) from overflowing the bracket-slice i64
+/// or putting a billion elements into one chunk.
+fn compute_view_chunk_elems(elem_count: u64, file_size: u64) -> u64 {
+    const TARGET_CHUNK_BYTES: u64 = (16u64 << 20) / 10;
+    const MIN_CHUNK: u64 = 1;
+    const MAX_CHUNK: u64 = 1 << 20;
+    if elem_count == 0 {
+        return MIN_CHUNK;
+    }
+    let per_elem = (file_size / elem_count).max(1);
+    let raw = TARGET_CHUNK_BYTES / per_elem;
+    raw.clamp(MIN_CHUNK, MAX_CHUNK)
+}
+
+/// Open a footer-less MORLOC_STREAM_PACKET file as an IFile, trusting
+/// caller-supplied forward-scan output (sub-packet offsets and
+/// element count) in place of the missing final footer. On a
+/// file WITH a final footer this delegates to `shared_open_ifile`
+/// so the caller's offsets are ignored -- the on-disk footer is
+/// authoritative when present.
+///
+/// The caller (`morloc-nexus view --pattern` on a truncated stream)
+/// runs `forward_scan_subpackets` first, then hands the offsets +
+/// element count here.
+pub fn shared_open_ifile_recovered(
+    path: &str,
+    caller_offsets: &[u64],
+    caller_element_count: u64,
+) -> Result<i64, MorlocError> {
+    use std::sync::atomic::Ordering;
+
+    reject_dev_stdio_path(path)?;
+
+    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
+        Ok(p) => p,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+
+    // If the file has a clean final footer, honour it and dispose of
+    // the caller-supplied offsets. This keeps the "cleanly closed
+    // file is authoritative" invariant.
+    if parsed.is_data_packet || parsed.final_footer {
+        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        return shared_open_ifile(path);
+    }
+
+    // Choose the offsets to publish. Prefer caller's if non-empty
+    // (nexus's forward-scan may have counted better than the runtime's).
+    let (subpacket_index, element_count) = if !caller_offsets.is_empty() {
+        (caller_offsets.to_vec(), caller_element_count)
+    } else {
+        (parsed.subpacket_index.clone(), parsed.element_count)
+    };
+
+    // Allocate a slot and publish (mirrors shared_open_ifile).
+    let (_slot_idx, slot) = match allocate_slot_cas() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+    let _guard = SlotFutexGuard::lock(slot);
+
+    let publish_result = (|| -> Result<u64, MorlocError> {
+        let path_rel = shm_copy_bytes(path.as_bytes())?;
+        let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
+        let idx_rel = if !subpacket_index.is_empty() {
+            shm_copy_u64_slice(&subpacket_index)?
+        } else {
+            shm_types_crate::RELNULL
+        };
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).kind = MLC_KIND_IFILE;
+            (*mp).file_path = path_rel;
+            (*mp).file_path_len = path.len() as u32;
+            (*mp).schema_str = schema_rel;
+            (*mp).schema_str_len = parsed.schema_str.len() as u32;
+            (*mp).subpacket_index = idx_rel;
+            (*mp).subpacket_index_len = subpacket_index.len() as u64;
+            (*mp).subpacket_index_cap = 0;
+            (*mp).body_start = parsed.body_start;
+            // Mark as clean so downstream bracket walkers don't refuse
+            // the handle. The trust boundary is at this function: if
+            // the caller's forward-scan lied, the walker's mmap
+            // bounds check catches it at access time.
+            (*mp).final_footer = 1;
+            (*mp).cursor = 0;
+            (*mp).element_count = element_count;
+            (*mp).compression_level = 0;
+            (*mp).opener_pid = std::process::id();
+            (*mp).opener_pid_start_time = read_pid_start_time();
+            (*mp).write_buffer = shm_types_crate::RELNULL;
+            (*mp).write_buffer_index_cap = 0;
+            (*mp).write_buffer_index_count = 0;
+            (*mp).write_buffer_data_used = 0;
+            if let Some(d) = parsed.diag.as_ref() {
+                (*mp).diag = *d;
+            }
+        }
+        slot.call_id.store(current_call_id(), Ordering::Release);
+        let bump = registry_gen_salt() | 1;
+        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump)
+            & GENERATION_MASK;
+        Ok(new_gen)
+    })();
+    let new_gen = match publish_result {
+        Ok(g) => g,
+        Err(e) => {
+            release_slot_locked(slot);
+            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+            return Err(e);
+        }
+    };
+
+    // Install the process-local slot mirroring shared_open_ifile's
+    // final block so future access reuses the mmap without re-parsing.
+    let cap_bytes = read_cache_cap_env();
+    let local = ProcessLocalSlot {
+        cached_generation: new_gen,
+        mmap_ptr,
+        mmap_size,
+        fd: -1,
+        cache: Box::new(StreamCache::new(cap_bytes)),
+        value_schema: parsed.value_schema.clone(),
+        elem_schema: parsed.elem_schema.clone(),
+        subpacket_index_local: subpacket_index,
+        subpacket_elem_cum: None,
+        is_data_packet: parsed.is_data_packet,
+    };
+    let handle = pack_handle(new_gen, _slot_idx);
+    install_process_local_slot(handle, local);
+    Ok(handle)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

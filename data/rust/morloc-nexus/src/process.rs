@@ -661,6 +661,18 @@ pub fn take_c_errmsg(p: *mut std::ffi::c_char) -> Option<String> {
     Some(owned)
 }
 
+/// Convert a filesystem path to a `CString` for FFI. Distinguishes the
+/// non-UTF-8 case (rare on Linux, but legal) from the NUL-embedded case
+/// so callers can produce meaningful error messages instead of the
+/// current `unwrap_or("")` sink that surfaces as "cannot open ''".
+pub fn path_to_cstring(p: &Path) -> Result<CString, String> {
+    let s = p
+        .as_os_str()
+        .to_str()
+        .ok_or_else(|| format!("path '{}' is not valid UTF-8", p.display()))?;
+    CString::new(s).map_err(|_| format!("path '{}' contains NUL", p.display()))
+}
+
 /// Get the tmpdir path.
 pub fn get_tmpdir() -> Option<&'static str> {
     TMPDIR.get().map(|s| s.as_str())

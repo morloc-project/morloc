@@ -1,0 +1,23 @@
+-- Exercises `morloc-nexus view -` on a MORLOC_STREAM_PACKET piped in
+-- via stdin. The exported function opens `@stdout` as an OStream of
+-- Int, writes multiple sub-packets with explicit `@flush` between
+-- them so the on-the-wire stream has known sub-packet boundaries,
+-- then `@close`s. The Makefile pipes this into `morloc-nexus view`
+-- with several output forms and checks that the sub-packets stream
+-- through end-to-end.
+
+module main (emit)
+
+import root
+
+emit :: <IO> ()
+emit = do
+  o <- @stdout :: <IO> OStream Int
+  @write 0 o [1, 2, 3]
+  @flush o
+  @write 0 o [4, 5, 6, 7]
+  @flush o
+  @write 0 o [8, 9]
+  @flush o
+  @write 0 o [10]
+  @close o
