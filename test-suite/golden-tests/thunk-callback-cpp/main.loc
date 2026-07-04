@@ -1,0 +1,53 @@
+-- Regression: an effectful lambda passed as a foreign-code callback
+-- must fire its effect on invocation, not return an unforced thunk.
+--
+-- The compiler represents an <IO> T value as std::function<T()> --
+-- a captured, deferred computation forced with (). Morloc-to-morloc
+-- code cooperates through forceExportThunks and do-block statement
+-- forcing. Foreign C++ code (any template `Sink sink; sink(x);`)
+-- does not: it invokes the callback as f(x) and discards the return
+-- value. If the callback's manifold returns a thunk, the effect
+-- never runs.
+--
+-- The fix is wrapEffectForces at the LamS boundary in
+-- CodeGenerator/Express.hs: whenever a lambda manifold's return type
+-- has an EffectT layer, the body is wrapped in PolyEval so the
+-- manifold returns the plain value with the effect already fired.
+
+module main (bareCallback, lambdaCallback)
+
+import root-cpp
+
+source Cpp from "foo.hpp" ("forEach", "tap", "totalSoFar", "resetTally")
+
+type Cpp => Int = "int"
+
+forEach     :: [Int] -> (Int -> <IO> ()) -> <IO> ()
+tap         :: Int -> <IO> ()
+totalSoFar  :: <IO> Int
+resetTally  :: <IO> ()
+
+-- Bare sourced function passed as callback. No morloc-generated
+-- lambda wrapper on this path -- forEach invokes `tap` directly.
+-- Control: covers the "no manifold at all" case so a regression
+-- that breaks only this shape is distinguishable from one that
+-- breaks the lambda-manifold shape.
+-- Expected: 10 + 20 + 30 = 60.
+bareCallback :: <IO> Int
+bareCallback = do
+  resetTally
+  forEach [10, 20, 30] tap
+  totalSoFar
+
+-- User-written lambda with a computation in the body. The compiler
+-- cannot eta-reduce this to a bare `tap`; a lambda manifold is
+-- generated. Before the fix, that manifold's return type was
+-- std::function<mlc::Unit()> and forEach dropped the thunk each
+-- iteration, leaving the tally at 0. After the fix, the manifold
+-- returns mlc::Unit with the effect already fired.
+-- Expected: 11 + 21 + 31 = 63.
+lambdaCallback :: <IO> Int
+lambdaCallback = do
+  resetTally
+  forEach [10, 20, 30] (\x -> tap (x + 1))
+  totalSoFar

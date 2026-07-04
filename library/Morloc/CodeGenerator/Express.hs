@@ -346,13 +346,22 @@ forceExportThunks cidx t (PolyHead lang midx args body) =
       PolyDoBlock (Idx ci (EffectT effs inner)) (wrapSuspends ci inner i)
     wrapSuspends ci inner i = PolyBndVar (C (Idx ci inner)) i
 
-    forceAtReturn c rt (PolyReturn e) = PolyReturn (wrapForces c rt e)
+    forceAtReturn c rt (PolyReturn e) = PolyReturn (wrapEffectForces c rt e)
     forceAtReturn c rt (PolyManifold l m f k e) = PolyManifold l m f k (forceAtReturn c rt e)
     forceAtReturn c rt (PolyLet i e1 e2) = PolyLet i e1 (forceAtReturn c rt e2)
-    forceAtReturn c rt e = wrapForces c rt e
+    forceAtReturn c rt e = wrapEffectForces c rt e
 
-    wrapForces c (EffectT _ inner) e = wrapForces c inner (PolyEval (Idx c inner) e)
-    wrapForces _ _ e = e
+-- | Peel EffectT layers off the type, inserting one 'PolyEval' per
+-- layer so the expression's return value has its suspended effects
+-- forced. Used at boundaries where the value will be consumed as a
+-- plain value rather than a thunk: 'forceExportThunks' at the export
+-- boundary, and 'expressPolyExpr' at internal-lambda boundaries so
+-- foreign callback callers (which invoke @f(x)@ and drop the result)
+-- see the effect fire on invocation rather than a thunk they don't
+-- know to force.
+wrapEffectForces :: Int -> Type -> PolyExpr -> PolyExpr
+wrapEffectForces c (EffectT _ inner) e = wrapEffectForces c inner (PolyEval (Idx c inner) e)
+wrapEffectForces _ _ e = e
 
 expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
@@ -1199,7 +1208,12 @@ expressPolyExpr
 
         call <- expressPolyApp parentLang funExpr xs'
 
-        mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) call
+        -- Force effects in the lambda's return position; see the
+        -- LamS-not-AppS case below for the rationale (foreign
+        -- callback callers don't force thunks). Same as the
+        -- boundary handled by forceExportThunks at exports.
+        let forcedCall = wrapEffectForces cidxLam lamOutType call
+        mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) forcedCall
     | not isLocal = do
         propagateScope gidxCall midx
 
@@ -1265,7 +1279,7 @@ expressPolyExpr
 
             let x' = PolyLetVar (Idx cidx t) idx
             return ([idx], Just (idx, letVal), x')
-expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArguments) (LamS vs body)) = do
+expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx cidx lang, manifoldArguments) (LamS vs body)) = do
   body' <- expressPolyExprWrap lang lambdaType body
 
   inputTypes <- case val lambdaType of
@@ -1275,8 +1289,17 @@ expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArgume
   let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
       boundArguments = map unvalue $ drop (length contextArguments) manifoldArguments
       typeBoundArguments = fromJust $ safeZipWith (\t (Arg i _) -> Arg i (Just t)) inputTypes boundArguments
+      -- Force effects in return position so foreign callback callers
+      -- (which invoke f(x) and drop the result) see the effect fire
+      -- on invocation. Without this the manifold's return type is
+      -- std::function<T()> and the produced thunk is silently
+      -- discarded. Mirrors forceExportThunks' return-boundary force.
+      returnT = case val lambdaType of
+        FunT _ ret -> ret
+        t -> t
+      forcedBody = wrapEffectForces cidx returnT body'
 
-  mkPolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments) (PolyReturn body')
+  mkPolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments) (PolyReturn forcedBody)
 -- Inline source call: emit directly as a subexpression, unless the call
 -- site is user-labeled. A labeled call must be a manifold for the label
 -- to attach to; using the AppS' outer index gives each call site its own
@@ -1426,14 +1449,20 @@ expressPolyExpr
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
         retapp <- expressPolyApp parentLang e lambdaVals
-        mkPolyManifold callLang midx (ManifoldPass lambdaTypedArgs) retapp
+        -- Implicit eta-abstraction of a function value. Same effect-
+        -- boundary rule as the LamS cases: if the eta-abstracted
+        -- lambda's return has EffectT, force it here so foreign
+        -- callback callers observe the effect on invocation.
+        let forcedRetapp = wrapEffectForces cidx poutput retapp
+        mkPolyManifold callLang midx (ManifoldPass lambdaTypedArgs) forcedRetapp
     | otherwise = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
         retapp <- expressPolyApp callLang e callVals
-        innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) retapp
+        let forcedRetapp = wrapEffectForces cidx poutput retapp
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) forcedRetapp
         let remoteApp =
               PolyReturn $ PolyApp
                 ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
