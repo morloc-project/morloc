@@ -534,8 +534,11 @@ pub unsafe extern "C" fn mlc_open(
 
 /// `@open path :: <IO> (OStream T)` -- typed open. The codegen has the
 /// element schema string for T in hand at compile time and threads it
-/// through. The file is created (`O_CREAT | O_EXCL`), flock-acquired,
-/// and the stream header is written with the schema metadata block.
+/// through. The file is created or silently overwritten (`O_CREAT`,
+/// UNIX convention -- use `@append` for append semantics), a
+/// non-blocking exclusive flock is acquired to reject live concurrent
+/// writers, and the stream header is written with the schema metadata
+/// block.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_open_ostream(
     schema_str: *const c_char,

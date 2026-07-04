@@ -1,0 +1,30 @@
+-- Exercises `morloc-nexus file` on STREAM packets. Three states are
+-- covered: `final` (writer closed cleanly), `temp` (writer wrote and
+-- flushed but exited without @close), and `missing` (footer stripped
+-- from disk by a hostile actor -- simulated with `truncate`).
+
+module main
+  ( writeClosed
+  , writeTempFooter
+  )
+
+import root
+
+-- Emits a stream file whose writer @closes it -- so the on-disk shape
+-- is [stream header, N sub-packets, final footer, tail].
+writeClosed :: Str -> <IO> ()
+writeClosed path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 o [10, 20, 30]
+  @flush o
+  @write 0 o [40, 50]
+  @close o
+
+-- Emits a stream file whose writer flushes but never @closes -- the
+-- per-dispatch sweep leaves the file at [stream header, sub-packets,
+-- temp footer, tail]. No SUBPACKET_INDEX, no FOOTER_FINAL flag.
+writeTempFooter :: Str -> <IO> ()
+writeTempFooter path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 o [1, 2, 3]
+  @flush o

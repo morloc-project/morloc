@@ -1517,9 +1517,9 @@ unsafe fn morloc_eval_r(
             // Dispatch on handle kind. IFile's wire form is the path
             // laid into a tagged stream-handle field (TAG_PATH); the
             // receiving pool reopens locally. IStream needs a stable
-            // cursor and OStream cannot be reopened (O_EXCL), so for
-            // those the nexus opens once and stores the real i64
-            // handle in dest.
+            // cursor and OStream's flock rejects mid-session re-open,
+            // so for those the nexus opens once and stores the real
+            // i64 handle in dest.
             let open = (*expr).expr.open_expr;
             let kind = (*open).kind;
             let path_expr = (*open).path;

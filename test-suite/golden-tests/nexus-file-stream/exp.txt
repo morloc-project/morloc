@@ -1,0 +1,21 @@
+final state: state=final
+final status: status=closed
+final subpackets: subpackets=2
+final has schema field: 1
+final token: stream-packet
+temp state: state=temp
+temp subpackets: subpackets=1
+missing state: state=missing
+missing note: no footer at EOF
+missing token: stream-packet
+final exit: 0
+temp exit: 0
+missing exit: 0
+json final subkind: "subkind":"stream"
+json final state: "state":"final"
+json final status: "status":"closed"
+json missing state: "state":"missing"
+verbose final has writer_pid: 1
+verbose final has largest_packet: 1
+verbose missing has no writer_pid: 0
+validate final: validated=structure-only

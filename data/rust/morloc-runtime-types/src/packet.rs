@@ -1048,6 +1048,51 @@ impl Default for StreamDiag {
     }
 }
 
+/// Aligned, owned mirror of `StreamDiag`. Consumers that just want to
+/// read the fields (renderers, JSON encoders) work through this instead
+/// of poking at the packed struct directly. `tail` holds only the
+/// populated slice (`tail[0..tail_len]`); slots beyond that in the raw
+/// struct are uninitialised and are dropped here.
+#[derive(Debug, Clone)]
+pub struct StreamDiagView {
+    pub diag_version: u32,
+    pub writer_pid: u32,
+    pub n_oversize_subpackets: u32,
+    pub writer_start_time: u64,
+    pub subpacket_count: u64,
+    pub element_count: u64,
+    pub bytes_uncompressed_total: u64,
+    pub bytes_compressed_total: u64,
+    pub largest_packet_uncompressed: u64,
+    pub largest_packet_idx: u64,
+    pub first_flush_time: u64,
+    pub last_flush_time: u64,
+    pub tail: Vec<u64>,
+}
+
+impl StreamDiag {
+    pub fn snapshot(&self) -> StreamDiagView {
+        let tail_len = { self.tail_len } as usize;
+        let capped = tail_len.min(STREAM_DIAG_TAIL_MAX);
+        let tail_copy: [u64; STREAM_DIAG_TAIL_MAX] = { self.tail };
+        StreamDiagView {
+            diag_version: { self.diag_version },
+            writer_pid: { self.writer_pid },
+            n_oversize_subpackets: { self.n_oversize_subpackets },
+            writer_start_time: { self.writer_start_time },
+            subpacket_count: { self.subpacket_count },
+            element_count: { self.element_count },
+            bytes_uncompressed_total: { self.bytes_uncompressed_total },
+            bytes_compressed_total: { self.bytes_compressed_total },
+            largest_packet_uncompressed: { self.largest_packet_uncompressed },
+            largest_packet_idx: { self.largest_packet_idx },
+            first_flush_time: { self.first_flush_time },
+            last_flush_time: { self.last_flush_time },
+            tail: tail_copy[..capped].to_vec(),
+        }
+    }
+}
+
 /// Total bytes a temp footer occupies on disk: footer packet header
 /// (32 B) + one metadata block header (8 B) + StreamDiag payload
 /// (160 B) + EOF tail (8 B). This number is exposed so OStream writers

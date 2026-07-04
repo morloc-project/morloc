@@ -2041,13 +2041,10 @@ fn reject_dev_stdio_path(path: &str) -> Result<(), MorlocError> {
 }
 
 /// Open a file as `OStream` with the element schema known up front.
-/// Creates the file (`O_CREAT | O_EXCL`), acquires an exclusive
-/// flock, writes the stream header, and allocates a slot.
-///
-/// Rejects a second `@open` of the same path with EEXIST: the
-/// 2026-06-28 design contract requires explicit handle-passing
-/// across pools for multi-writer sharing, not transparent
-/// path-based dedup.
+/// Creates or silently overwrites the file (`@append` handles append
+/// semantics); a non-blocking exclusive flock guards against a live
+/// concurrent writer. `ftruncate` runs after the flock so a rejected
+/// open leaves the other writer's bytes intact.
 pub fn shared_open_ostream_with_schema(
     path: &str,
     schema_str: &str,
@@ -2062,21 +2059,27 @@ pub fn shared_open_ostream_with_schema(
     let c_path = CString::new(path.as_bytes()).map_err(|e| {
         MorlocError::Other(format!("OStream open: path contains NUL: {}", e))
     })?;
+
+    // Parse schema first so a malformed spec never destroys prior
+    // content. Empty is a placeholder for the bridge.
+    let parsed_schema = if schema_str.is_empty() {
+        morloc_runtime_types::schema::Schema::primitive(SerialType::Nil)
+    } else {
+        parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
+            "OStream open: unparseable schema '{}': {}", schema_str, e,
+        )))?
+    };
+    let header_bytes = make_stream_header_block(&parsed_schema);
+
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
             0o644,
         )
     };
     if fd < 0 {
-        let e = std::io::Error::last_os_error();
-        // EEXIST is the multi-writer case. We can't tell whether
-        // it's an in-nexus existing slot (which the planfile says
-        // should error with the existing handle in the message) or
-        // an external writer; we surface the OS error and let the
-        // caller's diagnostic carry the path.
-        return Err(MorlocError::Io(e));
+        return Err(MorlocError::Io(std::io::Error::last_os_error()));
     }
     let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if lock_rc != 0 {
@@ -2087,26 +2090,14 @@ pub fn shared_open_ostream_with_schema(
             path, e,
         )));
     }
+    if unsafe { libc::ftruncate(fd, 0) } != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd); }
+        return Err(MorlocError::Io(e));
+    }
 
-    // Parse the schema (we need it to write the stream header). An
-    // empty schema string is accepted as a placeholder, falling
-    // back to Nil; the bridge always supplies a real schema.
-    let parsed_schema = if schema_str.is_empty() {
-        morloc_runtime_types::schema::Schema::primitive(SerialType::Nil)
-    } else {
-        match parse_schema(schema_str) {
-            Ok(s) => s,
-            Err(e) => {
-                unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
-                return Err(MorlocError::Schema(format!(
-                    "OStream open: unparseable schema '{}': {}", schema_str, e,
-                )));
-            }
-        }
-    };
-    let header_bytes = make_stream_header_block(&parsed_schema);
     if let Err(e) = write_all_fd(fd, &header_bytes) {
-        unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+        unsafe { libc::close(fd); }
         return Err(e);
     }
     let body_start = header_bytes.len() as u64;
@@ -2114,7 +2105,7 @@ pub fn shared_open_ostream_with_schema(
     let (slot_idx, slot) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
-            unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+            unsafe { libc::close(fd); }
             return Err(e);
         }
     };
@@ -2172,7 +2163,7 @@ pub fn shared_open_ostream_with_schema(
         Ok(g) => g,
         Err(e) => {
             release_slot_locked(slot);
-            unsafe { libc::close(fd); libc::unlink(c_path.as_ptr()); }
+            unsafe { libc::close(fd); }
             return Err(e);
         }
     };
@@ -2493,6 +2484,36 @@ fn build_subpacket_bytes(
     Ok(SubpacketBytes { packet, compressed_payload_len })
 }
 
+/// Record a completed sub-packet flush into a slot's `StreamDiag`.
+/// Reads the packed struct into an aligned stack copy, updates every
+/// counter in one place, then writes it back -- one `read_unaligned`
+/// plus one `write_unaligned` per flush regardless of how many fields
+/// change. Pass `tail_offset` when the sub-packet has a stable on-disk
+/// position to record in the tail window (disk writers); pass `None`
+/// for transports without one (RPC).
+unsafe fn record_subpacket_flush(
+    diag_ptr: *mut StreamDiag,
+    uncompressed: u64,
+    compressed: u64,
+    tail_offset: Option<u64>,
+) {
+    let mut d = std::ptr::read_unaligned(diag_ptr);
+    d.subpacket_count += 1;
+    d.bytes_compressed_total += compressed;
+    d.bytes_uncompressed_total += uncompressed;
+    if uncompressed > d.largest_packet_uncompressed {
+        d.largest_packet_uncompressed = uncompressed;
+        d.largest_packet_idx = d.subpacket_count - 1;
+    }
+    let now_us = unix_micros_now();
+    if d.first_flush_time == 0 { d.first_flush_time = now_us; }
+    d.last_flush_time = now_us;
+    if let Some(off) = tail_offset {
+        push_tail_window(&mut d, off);
+    }
+    std::ptr::write_unaligned(diag_ptr, d);
+}
+
 /// Emit one sub-packet from a payload byte slice, write it at the slot's
 /// current cursor, and update slot bookkeeping (cursor, diag, temp footer,
 /// shared sub-packet index). Caller MUST hold the slot futex.
@@ -2541,13 +2562,12 @@ fn emit_subpacket_to_disk(
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
         (*mp).cursor = subpacket_end;
-        let d = &mut (*mp).diag;
-        d.subpacket_count += 1;
-        d.bytes_compressed_total += compressed_payload_len as u64;
-        let now_us = unix_micros_now();
-        if d.first_flush_time == 0 { d.first_flush_time = now_us; }
-        d.last_flush_time = now_us;
-        push_tail_window(d, cursor);
+        record_subpacket_flush(
+            std::ptr::addr_of_mut!((*mp).diag),
+            payload_bytes.len() as u64,
+            compressed_payload_len as u64,
+            Some(cursor),
+        );
     }
     // Publish the sub-packet boundary into the SHM-resident shared
     // index. Caller (shared_write_subpacket / shared_flush_buffer /
@@ -2605,12 +2625,12 @@ fn emit_subpacket_via_rpc(
 
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-        let d = &mut (*mp).diag;
-        d.subpacket_count += 1;
-        d.bytes_compressed_total += compressed_payload_len as u64;
-        let now_us = unix_micros_now();
-        if d.first_flush_time == 0 { d.first_flush_time = now_us; }
-        d.last_flush_time = now_us;
+        record_subpacket_flush(
+            std::ptr::addr_of_mut!((*mp).diag),
+            rewritten.len() as u64,
+            compressed_payload_len as u64,
+            None,
+        );
     }
     Ok(())
 }
@@ -5322,10 +5342,12 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
     let c_dest = CString::new(dest).map_err(|e| {
         MorlocError::Other(format!("@concat: dest path contains NUL: {}", e))
     })?;
+    // `@concat` overwrites `dest` silently. No flock guard here:
+    // this is a one-shot batch merge that lacks a shared lock layer.
     let dest_fd = unsafe {
         libc::open(
             c_dest.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
             0o644,
         )
     };
