@@ -44,7 +44,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
-import Morloc.Data.Doc (concatWith, hardline, pretty, render, (<+>))
+import Morloc.Data.Doc (concatWith, hardline, indent, line, pretty, render, squotes, vcat, (<+>))
 import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
@@ -173,6 +173,13 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
   mayName <- MM.metaName i
+  name' <- case mayName of
+    Just n -> return n
+    Nothing -> MM.throwSourcedError i "No name in FData"
+  -- Same guard as annotateGasts, applied to sourced exports. Without
+  -- it, higher-order arguments slip through and fall out of
+  -- Serial.makeSerialAST as an unlocalized raw-TypeF dump.
+  checkExportedHigherOrder i name' t
   (argAsts, returnAst) <- makeSerialASTs i lang t
   let argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
       returnSchema  = render (Serial.serialAstToMsgpackSchema returnAst)
@@ -180,24 +187,20 @@ getFData (t, i, lang, doc, sockets) = do
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
   validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
-
-  case mayName of
-    (Just name') -> do
-      config <- MM.ask
-      registry <- MM.gets stateLangRegistry
-      let socket = MC.setupServerAndSocket config registry lang
-      return $
-        FData
-          { fdataSocket = socket
-          , fdataSubcommand = maybe (unEVar name') id (cmdDocName doc)
-          , fdataMid = i
-          , fdataType = t
-          , fdataSubSockets = sockets
-          , fdataArgSchemas = argSchemas
-          , fdataReturnSchema = returnSchema
-          , fdataCmdDocSet = doc
-          }
-    Nothing -> MM.throwSourcedError i $ "No name in FData"
+  config <- MM.ask
+  registry <- MM.gets stateLangRegistry
+  let socket = MC.setupServerAndSocket config registry lang
+  return $
+    FData
+      { fdataSocket = socket
+      , fdataSubcommand = maybe (unEVar name') id (cmdDocName doc)
+      , fdataMid = i
+      , fdataType = t
+      , fdataSubSockets = sockets
+      , fdataArgSchemas = argSchemas
+      , fdataReturnSchema = returnSchema
+      , fdataCmdDocSet = doc
+      }
 
 -- ======================================================================
 -- Schema building
@@ -361,12 +364,43 @@ containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
 
--- | True if the export type carries a function type in argument or return
--- position. The top-level FunT of an exported function itself is fine; what
--- isn't fine is any nested FunT (HOF) embedded inside arguments or returns.
-exportHasHigherOrder :: Type -> Bool
-exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
-exportHasHigherOrder t = containsFunT t
+-- | Reject main-module exports whose type carries a function in argument or
+-- return position. The nexus turns each such export into a CLI subcommand
+-- and passes arguments as serialized data on the command line; closures
+-- have no wire form. Library modules can still export higher-order
+-- functions -- the restriction applies only to exports of the main module
+-- being compiled. Names the offending position (argument N or return
+-- type) and echoes the full signature so the user can locate the fix.
+checkExportedHigherOrder :: Int -> EVar -> Type -> MorlocMonad ()
+checkExportedHigherOrder i name t = case findOffender t of
+  Nothing -> return ()
+  Just (locDesc, offender) ->
+    MM.throwSourcedError i $
+      "Cannot generate a CLI subcommand for" <+> squotes (pretty name)
+        <+> "--" <+> locDesc <> ":"
+        <> line <> indent 2 (pretty offender)
+        <> line
+        <> line <> "Full signature:"
+        <> line <> indent 2 (pretty name <+> "::" <+> pretty t)
+        <> line
+        <> line <> vcat
+            [ "Exports from the top-level module become CLI subcommands in"
+            , "the compiled nexus. Subcommand arguments and results are"
+            , "passed as serialized data on the command line, so they"
+            , "cannot contain functions -- there is no wire form for a"
+            , "closure."
+            ]
+  where
+    findOffender :: Type -> Maybe (MDoc, Type)
+    findOffender (FunT ts ret) =
+      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, containsFunT a] of
+        ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
+        [] | containsFunT ret ->
+             Just ("return type contains a function", ret)
+           | otherwise -> Nothing
+    findOffender ty
+      | containsFunT ty = Just ("exported value is or contains a function", ty)
+      | otherwise = Nothing
 
 resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
 resolveAliasApp i anc v ts
@@ -425,8 +459,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     Nothing -> MM.throwSourcedError i $ "No name found for call-free function"
     (Just n') -> return n'
 
-  CM.when (exportHasHigherOrder gtype) $
-    MM.throwSourcedError i "cannot export higher-order functions through the CLI"
+  checkExportedHigherOrder i gname gtype
 
   (retAst, argAsts) <- makeGastSerialASTs i gtype
   let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
