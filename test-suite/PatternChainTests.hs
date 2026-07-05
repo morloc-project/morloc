@@ -249,39 +249,43 @@ assertWalkType recv p expected = case walkPathType recv p of
     Left err  -> assertFailure $ "expected " <> show expected
                  <> ", got walker error " <> show err
 
+-- | Parse a path or fail the test; used to keep case bodies flat.
+parsePathOrFail :: T.Text -> (Path -> Assertion) -> Assertion
+parsePathOrFail src k = case parsePath src of
+    Right p  -> k p
+    Left err -> assertFailure $ "parsePath " <> show src
+                <> " failed: " <> show err
+
 walkerBroadcastTests :: TestTree
 walkerBroadcastTests = testGroup "walkPathType broadcast rule"
   [ testCase ".[i:j].0 on [Tuple] broadcasts to [field0_type]" $
-      let recv = listT (tupleT [strT, intT])
-          Right p = parsePath ".[:].0"
-      in assertWalkType recv p (listT strT)
+      parsePathOrFail ".[:].0" $ \p ->
+        assertWalkType (listT (tupleT [strT, intT])) p (listT strT)
 
   , testCase ".[i:j].outer.inner broadcasts the whole tail chain" $
-      let recv = listT (recordT [("outer", recordT [("inner", intT)])])
-          Right p = parsePath ".[:].outer.inner"
-      in assertWalkType recv p (listT intT)
+      parsePathOrFail ".[:].outer.inner" $ \p ->
+        let recv = listT (recordT [("outer", recordT [("inner", intT)])])
+        in assertWalkType recv p (listT intT)
 
   , testCase "bare .field on [Record] still errors (runtime doesn't broadcast at root)" $
-      let recv = listT (recordT [("name", strT)])
-          Right p = parsePath ".name"
-      in case walkPathType recv p of
-           Left (WalkExpectedRecord _) -> return ()
-           other -> assertFailure $ "expected WalkExpectedRecord, got " <> show other
+      parsePathOrFail ".name" $ \p ->
+        let recv = listT (recordT [("name", strT)])
+        in case walkPathType recv p of
+             Left (WalkExpectedRecord _) -> return ()
+             other -> assertFailure $ "expected WalkExpectedRecord, got " <> show other
 
   , testCase ".field on bare scalar still errors" $
-      let recv = intT
-          Right p = parsePath ".foo"
-      in case walkPathType recv p of
-           Left (WalkExpectedRecord _) -> return ()
-           other -> assertFailure $ "expected WalkExpectedRecord, got " <> show other
+      parsePathOrFail ".foo" $ \p ->
+        case walkPathType intT p of
+          Left (WalkExpectedRecord _) -> return ()
+          other -> assertFailure $ "expected WalkExpectedRecord, got " <> show other
 
   , testCase ".[i] on [T] takes an element (no broadcast at bracket-index)" $
-      let recv = listT (tupleT [strT, intT])
-          Right p = parsePath ".[]"
-      in assertWalkType recv p (tupleT [strT, intT])
+      parsePathOrFail ".[]" $ \p ->
+        assertWalkType (listT (tupleT [strT, intT])) p (tupleT [strT, intT])
 
   , testCase ".[i:j] alone (no tail) preserves list shape" $
-      let recv = listT (recordT [("name", strT)])
-          Right p = parsePath ".[:]"
-      in assertWalkType recv p (listT (recordT [("name", strT)]))
+      parsePathOrFail ".[:]" $ \p ->
+        let recv = listT (recordT [("name", strT)])
+        in assertWalkType recv p (listT (recordT [("name", strT)]))
   ]

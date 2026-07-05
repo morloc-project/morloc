@@ -1,3 +1,17 @@
+0.91.0 [2026-07-03]
+-------------------
+
+Many bug fixes and morloc-nexus streaming and pattern support
+
+ * switch argument orders in savem, savej and write intrinsics
+ * fix several bugs
+ * add stream support to `morloc-nexus file`
+ * add stream support to `morloc-nexus view`
+   - rewrite flags (-s/-d/-p for stream, data, or auto output packets)
+   - allow getter patterns to be applied to the view
+   - support jsonl output for better streaming
+ * in check.path docstring field, replace r/w/c with python-style r/w/x/rw
+
 0.90.0 [2026-07-03]
 -------------------
 
