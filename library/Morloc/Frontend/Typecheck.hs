@@ -1423,9 +1423,10 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrSave, [levelT, _, pathT]) -> do
           g' <- subtype' i levelT BT.intU g
           subtype' i pathT BT.strU g'
-        -- @savem/@savej: a -> Str -> <IO>()
-        (IntrSaveM, [_, pathT]) -> subtype' i pathT BT.strU g
-        (IntrSaveJ, [_, pathT]) -> subtype' i pathT BT.strU g
+        -- @savem/@savej: Str -> a -> <IO>(). Path-first makes
+        -- @savem path a reusable one-arg sink for callbacks.
+        (IntrSaveM, [pathT, _]) -> subtype' i pathT BT.strU g
+        (IntrSaveJ, [pathT, _]) -> subtype' i pathT BT.strU g
         -- @load: Str -> {?a}
         (IntrLoad, [pathT]) -> subtype' i pathT BT.strU g
         -- @hash: a -> Str

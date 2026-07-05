@@ -370,12 +370,12 @@ matFileBin path = do
 
 matFileJson :: Str -> <IO> ?(Matrix 3 4 Real)
 matFileJson path = do
-  @savej cppMakeMat34 path
+  @savej path cppMakeMat34
   @load path
 
 matFileMsg :: Str -> <IO> ?(Matrix 3 4 Real)
 matFileMsg path = do
-  @savem cppMakeMat34 path
+  @savem path cppMakeMat34
   @load path
 
 matFileSumBin :: Str -> <IO> ?Real
@@ -386,7 +386,7 @@ matFileSumBin path = do
 
 matFileSumJson :: Str -> <IO> ?Real
 matFileSumJson path = do
-  @savej cppMakeMat34 path
+  @savej path cppMakeMat34
   m <- @load path
   mapMaybe pySumMat34 m
 

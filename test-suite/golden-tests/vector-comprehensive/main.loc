@@ -396,12 +396,12 @@ fileBin path = do
 
 fileJson :: Str -> <IO> ?(Vector 10 Real)
 fileJson path = do
-  @savej cppMakeReal10 path
+  @savej path cppMakeReal10
   @load path
 
 fileMsg :: Str -> <IO> ?(Vector 10 Real)
 fileMsg path = do
-  @savem cppMakeReal10 path
+  @savem path cppMakeReal10
   @load path
 
 -- File IO + computation: after the round-trip, sum the loaded vector
@@ -415,7 +415,7 @@ fileSumBin path = do
 
 fileSumJson :: Str -> <IO> ?Real
 fileSumJson path = do
-  @savej cppMakeReal10 path
+  @savej path cppMakeReal10
   v <- @load path
   mapMaybe pySumReal10 v
 

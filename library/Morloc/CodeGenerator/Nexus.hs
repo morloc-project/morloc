@@ -654,16 +654,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
-    -- @savem/@savej carry no compression level; emit a zero literal so the
-    -- nexus dispatch (which always reads a level field from save_expr) has
-    -- a uniform shape. The runtime ignores the field for non-voidstar formats.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [valExpr, path])) =
+    -- @savem/@savej take source args in (path, value) order for
+    -- partial-application ergonomics. They carry no compression level;
+    -- emit a zero literal so the nexus dispatch (which always reads a
+    -- level field from save_expr) has a uniform shape. The runtime
+    -- ignores the field for non-voidstar formats.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
       SaveX "msgpack"
         <$> type2schema t
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [valExpr, path])) =
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
       SaveX "json"
         <$> type2schema t
         <*> pure (LitX IntX "0")

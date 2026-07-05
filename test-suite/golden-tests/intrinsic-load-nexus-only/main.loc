@@ -48,12 +48,12 @@ binInt x path = do
 
 msgInt :: Int -> Str -> <IO> ?Int
 msgInt x path = do
-  @savem x path
+  @savem path x
   @load path
 
 jsonInt :: Int -> Str -> <IO> ?Int
 jsonInt x path = do
-  @savej x path
+  @savej path x
   @load path
 
 binReal :: Real -> Str -> <IO> ?Real
@@ -63,12 +63,12 @@ binReal x path = do
 
 msgReal :: Real -> Str -> <IO> ?Real
 msgReal x path = do
-  @savem x path
+  @savem path x
   @load path
 
 jsonReal :: Real -> Str -> <IO> ?Real
 jsonReal x path = do
-  @savej x path
+  @savej path x
   @load path
 
 binStr :: Str -> Str -> <IO> ?Str
@@ -78,12 +78,12 @@ binStr s path = do
 
 msgStr :: Str -> Str -> <IO> ?Str
 msgStr s path = do
-  @savem s path
+  @savem path s
   @load path
 
 jsonStr :: Str -> Str -> <IO> ?Str
 jsonStr s path = do
-  @savej s path
+  @savej path s
   @load path
 
 binList :: [Str] -> Str -> <IO> ?[Str]
@@ -93,12 +93,12 @@ binList xs path = do
 
 msgList :: [Str] -> Str -> <IO> ?[Str]
 msgList xs path = do
-  @savem xs path
+  @savem path xs
   @load path
 
 jsonList :: [Str] -> Str -> <IO> ?[Str]
 jsonList xs path = do
-  @savej xs path
+  @savej path xs
   @load path
 
 binTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
@@ -108,12 +108,12 @@ binTup t path = do
 
 msgTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
 msgTup t path = do
-  @savem t path
+  @savem path t
   @load path
 
 jsonTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
 jsonTup t path = do
-  @savej t path
+  @savej path t
   @load path
 
 binFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
@@ -123,12 +123,12 @@ binFixedTupList xs path = do
 
 msgFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
 msgFixedTupList xs path = do
-  @savem xs path
+  @savem path xs
   @load path
 
 jsonFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
 jsonFixedTupList xs path = do
-  @savej xs path
+  @savej path xs
   @load path
 
 -- Loading a missing file must return null, not crash.

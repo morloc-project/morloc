@@ -699,24 +699,27 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs
                    (IRawExpr (render (poolExpr dataDocs)))
                    (IRawExpr (render (poolExpr pathDocs)))
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs, pathDocs]
--- @savem/@savej are not packet formats; codegen always passes a zero
--- level expression so the printed call shape is uniform with @save.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) = do
+-- @savem/@savej take source args in (path, value) order for
+-- partial-application ergonomics (`@savem path` is a reusable sink).
+-- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
+-- They are not packet formats; codegen always passes a zero level
+-- expression so the printed call shape is uniform with @save.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "msgpack"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
                    (IRawExpr (render (poolExpr dataDocs)))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) = do
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "json"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
                    (IRawExpr (render (poolExpr dataDocs)))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   innerType <- case typeFof origExpr of

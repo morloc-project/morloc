@@ -336,8 +336,8 @@ data Pattern
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
   = IntrSave      -- ^ @save  :: Int -> a -> Str -> <IO>() -- voidstar packet, with zstd level 0-9
-  | IntrSaveM     -- ^ @savem :: a -> Str -> <IO>()         -- raw msgpack file
-  | IntrSaveJ     -- ^ @savej :: a -> Str -> <IO>()         -- raw JSON file
+  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO>()         -- raw msgpack file
+  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO>()         -- raw JSON file
   | IntrLoad      -- ^ @load  :: Str -> <IO> ?a             -- auto-detect format, auto-decompress packets
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
   | IntrVersion   -- ^ @version :: Str               -- compiler version

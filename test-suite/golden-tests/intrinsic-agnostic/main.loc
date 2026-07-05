@@ -16,5 +16,5 @@ test = do
           , @typeof "hello"
           , @schema "hello"
           )
-  @savej y "obs-saved.txt"
+  @savej "obs-saved.txt" y
   y

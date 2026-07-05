@@ -389,8 +389,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
       return (levelArg : handleArg : rest' ++ rest)
+    -- @savem/@savej's args are [path, value]; the value is at index 1.
+    unpackDataArgIfNeeded m intr (pathArg : dataArg : rest)
+      | intr `elem` [IntrSaveM, IntrSaveJ] = do
+          rest' <- packDataArg m dataArg
+          return (pathArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr (dataArg : rest)
-      | intr `elem` [IntrSaveM, IntrSaveJ, IntrShow, IntrHash] = do
+      | intr `elem` [IntrShow, IntrHash] = do
           rest' <- packDataArg m dataArg
           return (rest' ++ rest)
     unpackDataArgIfNeeded _ _ args = return args
@@ -443,8 +448,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSave _ (_levelArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @savem/@savej's data is the second positional arg (after the path).
+    intrinsicSchema m intr _ (_pathArg : dataArg : _)
+      | intr `elem` [IntrSaveM, IntrSaveJ] = do
+          ast <- Serial.makeSerialAST m lang (typeFof dataArg)
+          return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrSaveM, IntrSaveJ, IntrShow, IntrSchema] = do
+      | intr `elem` [IntrHash, IntrShow, IntrSchema] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =

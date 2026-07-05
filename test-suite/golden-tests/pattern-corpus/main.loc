@@ -73,39 +73,39 @@ record Py => Deep = "dict"
 flatIdx :: Str -> <IO> [Int]
 flatIdx ref = do
   let xs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-  @savem (.[2] xs) ref
+  @savem ref (.[2] xs)
   xs
 
 flatIdxNeg :: Str -> <IO> [Int]
 flatIdxNeg ref = do
   let xs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-  @savem (.[-1] xs) ref
+  @savem ref (.[-1] xs)
   xs
 
 flatSlice :: Str -> <IO> [Int]
 flatSlice ref = do
   let xs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-  @savem (.[3:7] xs) ref
+  @savem ref (.[3:7] xs)
   xs
 
 -- === List of tuples, non-broadcast paths ===
 pairsIdxField0 :: Str -> <IO> [(Int, Int)]
 pairsIdxField0 ref = do
   let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
-  @savem (.[2].0 xs) ref
+  @savem ref (.[2].0 xs)
   xs
 
 -- === List of tuples, broadcast paths ===
 pairsSliceIdx0 :: Str -> <IO> [(Int, Int)]
 pairsSliceIdx0 ref = do
   let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
-  @savem (.[0:2].0 xs) ref
+  @savem ref (.[0:2].0 xs)
   xs
 
 pairsSliceIdx1 :: Str -> <IO> [(Int, Int)]
 pairsSliceIdx1 ref = do
   let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
-  @savem (.[0:2].1 xs) ref
+  @savem ref (.[0:2].1 xs)
   xs
 
 -- === List of records (record broadcast works) ===
@@ -116,7 +116,7 @@ recSliceName ref = do
         , {name = "Bob",   age = 25}
         , {name = "Carol", age = 40}
         ]
-  @savem (.[0:2].name xs) ref
+  @savem ref (.[0:2].name xs)
   xs
 
 recSliceAge :: Str -> <IO> [Person]
@@ -126,7 +126,7 @@ recSliceAge ref = do
         , {name = "Bob",   age = 25}
         , {name = "Carol", age = 40}
         ]
-  @savem (.[0:3].age xs) ref
+  @savem ref (.[0:3].age xs)
   xs
 
 recIdxName :: Str -> <IO> [Person]
@@ -136,7 +136,7 @@ recIdxName ref = do
         , {name = "Bob",   age = 25}
         , {name = "Carol", age = 40}
         ]
-  @savem (.[1].name xs) ref
+  @savem ref (.[1].name xs)
   xs
 
 -- === Nested record (top-level not list-shaped) ===
@@ -149,7 +149,7 @@ nestedLabel ref = do
             , {name = "Bob",   age = 25}
             ]
         }
-  @savem (.label x) ref
+  @savem ref (.label x)
   x
 
 nestedMemberName :: Str -> <IO> NestedRow
@@ -161,7 +161,7 @@ nestedMemberName ref = do
             , {name = "Bob",   age = 25}
             ]
         }
-  @savem (.members.[0].name x) ref
+  @savem ref (.members.[0].name x)
   x
 
 -- === Chained field access broadcast over list of records ===
@@ -172,7 +172,7 @@ chainedFieldOnList ref = do
         , {inner = {name = "Bob",   age = 25}}
         , {inner = {name = "Carol", age = 40}}
         ]
-  @savem (.[0:3].inner.name xs) ref
+  @savem ref (.[0:3].inner.name xs)
   xs
 
 -- === Slice broadcast, then key access, then bracket-index ===
@@ -187,38 +187,38 @@ nestedSliceMemberFirst ref = do
         , {label = "team-b", members = [{name = "Bob",   age = 25}, {name = "Bea",  age = 31}]}
         , {label = "team-c", members = [{name = "Carol", age = 40}, {name = "Cody", age = 19}]}
         ]
-  @savem (.[0:2].members.[0] xs) ref
+  @savem ref (.[0:2].members.[0] xs)
   xs
 
 -- === Deep patterns on [[Int]] ===
 nestedSliceOuter :: Str -> <IO> [[Int]]
 nestedSliceOuter ref = do
   let xs = [[1,2,3],[4,5,6],[7,8,9]]
-  @savem (.[0:2] xs) ref
+  @savem ref (.[0:2] xs)
   xs
 
 nestedSliceBoth :: Str -> <IO> [[Int]]
 nestedSliceBoth ref = do
   let xs = [[1,2,3],[4,5,6],[7,8,9]]
-  @savem (.[:].[:] xs) ref
+  @savem ref (.[:].[:] xs)
   xs
 
 nestedSliceInner :: Str -> <IO> [[Int]]
 nestedSliceInner ref = do
   let xs = [[1,2,3],[4,5,6],[7,8,9]]
-  @savem (.[0:2].[1:3] xs) ref
+  @savem ref (.[0:2].[1:3] xs)
   xs
 
 sliceIndexInner :: Str -> <IO> [[Int]]
 sliceIndexInner ref = do
   let xs = [[1,2,3],[4,5,6],[7,8,9]]
-  @savem (.[:].[0] xs) ref
+  @savem ref (.[:].[0] xs)
   xs
 
 sliceIndexNeg :: Str -> <IO> [[Int]]
 sliceIndexNeg ref = do
   let xs = [[1,2,3],[4,5,6],[7,8,9]]
-  @savem (.[:].[-1] xs) ref
+  @savem ref (.[:].[-1] xs)
   xs
 
 -- === Slice + group multi-field projection (records) ===
@@ -229,7 +229,7 @@ recSliceGroupPair ref = do
         , {name = "Bob",   age = 25}
         , {name = "Carol", age = 40}
         ]
-  @savem (.[0:2].(.name,.age) xs) ref
+  @savem ref (.[0:2].(.name,.age) xs)
   xs
 
 -- === Triple-deep slice chain on [[[Int]]] ===
@@ -240,5 +240,5 @@ tripleSliceIndex ref = do
         , [[5,6],[7,8]]
         , [[9,10],[11,12]]
         ]
-  @savem (.[:].[:].[0] xs) ref
+  @savem ref (.[:].[:].[0] xs)
   xs
