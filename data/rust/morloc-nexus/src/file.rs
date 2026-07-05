@@ -30,8 +30,8 @@ use std::ptr;
 use morloc_runtime_types::packet::{
     decode_footer_status, decode_schema_entry, decode_stream_tail, decode_subpacket_index,
     iter_metadata, packet_compression_name, packet_entrypoint_name, packet_format_name,
-    packet_source_name, PacketHeader, StreamDiag, StreamDiagView, FOOTER_STATUS_CLOSED,
-    FOOTER_STATUS_FAILED, FOOTER_STATUS_PAUSED, FOOTER_STATUS_REPAIRED,
+    packet_source_name, PacketHeader, StreamDiag, StreamDiagView, SubpacketEntry,
+    FOOTER_STATUS_CLOSED, FOOTER_STATUS_FAILED, FOOTER_STATUS_PAUSED, FOOTER_STATUS_REPAIRED,
     METADATA_TYPE_FOOTER_FINAL, METADATA_TYPE_FOOTER_STATUS, METADATA_TYPE_SCHEMA_STRING,
     METADATA_TYPE_STREAM_DIAG, METADATA_TYPE_SUBPACKET_INDEX, PACKET_COMPRESSION_NONE,
     PACKET_MAGIC, PACKET_TYPE_CALL, PACKET_TYPE_DATA, PACKET_TYPE_PING, PACKET_TYPE_STREAM,
@@ -94,7 +94,14 @@ pub enum ArgEntry {
 pub enum FooterInfo {
     Missing { walk: Option<WalkSummary> },
     Temp { diag: StreamDiagView },
-    Final { diag: StreamDiagView, status: u8 },
+    Final {
+        diag: StreamDiagView,
+        status: u8,
+        /// Per-sub-packet `(offset, elem_count)` entries recovered from
+        /// the footer's SUBPACKET_INDEX block. Verbose renderers print
+        /// the head of this list; JSON emits it in full.
+        entries: Vec<SubpacketEntry>,
+    },
 }
 
 /// Result of a bounded forward walk of sub-packet headers on a
@@ -906,7 +913,7 @@ fn read_stream_footer<R: Read + Seek>(
     let mut diag: Option<StreamDiagView> = None;
     let mut is_final = false;
     let mut status: u8 = FOOTER_STATUS_CLOSED;
-    let mut indexed_subpackets: Option<u64> = None;
+    let mut entries: Vec<SubpacketEntry> = Vec::new();
     for (kind, data) in iter_metadata(&body) {
         match kind {
             METADATA_TYPE_STREAM_DIAG => {
@@ -917,9 +924,8 @@ fn read_stream_footer<R: Read + Seek>(
             METADATA_TYPE_FOOTER_FINAL => is_final = true,
             METADATA_TYPE_FOOTER_STATUS => status = decode_footer_status(data),
             METADATA_TYPE_SUBPACKET_INDEX => {
-                let index = decode_subpacket_index(data)
+                entries = decode_subpacket_index(data)
                     .map_err(|e| format!("stream footer subpacket index invalid: {}", e))?;
-                indexed_subpackets = Some(index.len() as u64);
             }
             _ => {}
         }
@@ -927,13 +933,14 @@ fn read_stream_footer<R: Read + Seek>(
     let Some(mut diag) = diag else {
         return Err("stream footer missing required STREAM_DIAG block".into());
     };
-    // Prefer the exact SUBPACKET_INDEX length when present; older
-    // footers may omit it, in which case diag's running total stands.
-    if let Some(n) = indexed_subpackets {
-        diag.subpacket_count = n;
+    // Prefer the exact SUBPACKET_INDEX length when present; the diag's
+    // running total is best-effort and may lag the true count if the
+    // writer crashed between the final flush and the diag update.
+    if !entries.is_empty() {
+        diag.subpacket_count = entries.len() as u64;
     }
     if is_final {
-        Ok(FooterInfo::Final { diag, status })
+        Ok(FooterInfo::Final { diag, status, entries })
     } else {
         Ok(FooterInfo::Temp { diag })
     }
@@ -1286,7 +1293,7 @@ fn stream_packet_fields(
             fields.push("state=temp".to_string());
             diag
         }
-        FooterInfo::Final { diag, status } => {
+        FooterInfo::Final { diag, status, .. } => {
             fields.push("state=final".to_string());
             fields.push(format!("status={}", footer_status_name(*status)));
             diag
@@ -1327,6 +1334,23 @@ fn stream_verbose_lines(footer: &FooterInfo) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(",");
         out.push(format!("  tail_window=[{}]", joined));
+    }
+    if let FooterInfo::Final { entries, .. } = footer {
+        if !entries.is_empty() {
+            const HEAD_LIMIT: usize = 8;
+            let shown = entries.len().min(HEAD_LIMIT);
+            for (k, entry) in entries[..shown].iter().enumerate() {
+                out.push(format!(
+                    "  subpacket[{}] offset={} elem_count={}",
+                    k, entry.offset, entry.elem_count,
+                ));
+            }
+            if entries.len() > HEAD_LIMIT {
+                out.push(format!(
+                    "  ... {} more sub-packets", entries.len() - HEAD_LIMIT,
+                ));
+            }
+        }
     }
     out
 }
@@ -1522,9 +1546,16 @@ fn stream_footer_json(footer: &FooterInfo) -> serde_json::Value {
             m.insert("state".into(), "temp".into());
             diag
         }
-        FooterInfo::Final { diag, status } => {
+        FooterInfo::Final { diag, status, entries } => {
             m.insert("state".into(), "final".into());
             m.insert("status".into(), footer_status_name(*status).into());
+            let entries_json: Vec<serde_json::Value> = entries.iter().map(|e|
+                serde_json::json!({
+                    "offset": e.offset,
+                    "elem_count": e.elem_count,
+                })
+            ).collect();
+            m.insert("subpacket_entries".into(), serde_json::Value::Array(entries_json));
             diag
         }
     };

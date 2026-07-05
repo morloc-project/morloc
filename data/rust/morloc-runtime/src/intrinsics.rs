@@ -1650,6 +1650,7 @@ pub unsafe extern "C" fn mlc_view_data_to_stream(
 pub unsafe extern "C" fn mlc_open_ifile_recovered(
     path: *const c_char,
     subpacket_offsets: *const u64,
+    subpacket_counts: *const u64,
     n_offsets: u64,
     element_count: u64,
     errmsg: *mut *mut c_char,
@@ -1662,8 +1663,13 @@ pub unsafe extern "C" fn mlc_open_ifile_recovered(
         } else {
             std::slice::from_raw_parts(subpacket_offsets, n_offsets as usize)
         };
+        let counts_slice: &[u64] = if n_offsets == 0 || subpacket_counts.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(subpacket_counts, n_offsets as usize)
+        };
         crate::stream::shared_open_ifile_recovered(
-            path_str, offsets_slice, element_count,
+            path_str, offsets_slice, counts_slice, element_count,
         )
     })
 }

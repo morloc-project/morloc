@@ -10,11 +10,11 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use super::*;
 use morloc_runtime_types::packet::{
     encode_stream_tail, make_final_footer_packet, make_temp_footer_packet, PacketHeader,
-    StreamDiag, FOOTER_STATUS_CLOSED, FOOTER_STATUS_FAILED, METADATA_HEADER_MAGIC,
-    METADATA_TYPE_SCHEMA_STRING, PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
-    PACKET_ENTRYPOINT_LOCAL, PACKET_ENTRYPOINT_REMOTE_SFS, PACKET_FORMAT_JSON,
-    PACKET_FORMAT_MSGPACK, PACKET_FORMAT_VOIDSTAR, PACKET_SOURCE_FILE,
-    PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR, PACKET_TYPE_STREAM,
+    StreamDiag, SubpacketEntry, FOOTER_STATUS_CLOSED, FOOTER_STATUS_FAILED,
+    METADATA_HEADER_MAGIC, METADATA_TYPE_SCHEMA_STRING, PACKET_COMPRESSION_NONE,
+    PACKET_COMPRESSION_ZSTD, PACKET_ENTRYPOINT_LOCAL, PACKET_ENTRYPOINT_REMOTE_SFS,
+    PACKET_FORMAT_JSON, PACKET_FORMAT_MSGPACK, PACKET_FORMAT_VOIDSTAR,
+    PACKET_SOURCE_FILE, PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR, PACKET_TYPE_STREAM,
 };
 
 // ---------------------------------------------------------------------------
@@ -1055,19 +1055,24 @@ fn stream_packet_final_footer_reports_index_count_and_status() {
         file.extend_from_slice(&build_stream_subpacket(32));
     }
     let diag = diag_with(3, 3, 96, 96);
-    let offsets = [0u64, 100, 200];
+    let entries = [
+        SubpacketEntry { offset: 0,   elem_count: 1 },
+        SubpacketEntry { offset: 100, elem_count: 1 },
+        SubpacketEntry { offset: 200, elem_count: 1 },
+    ];
     file.extend_from_slice(
-        &make_final_footer_packet(&diag, &offsets, FOOTER_STATUS_FAILED),
+        &make_final_footer_packet(&diag, &entries, FOOTER_STATUS_FAILED),
     );
     let total = file.len() as u64;
     match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
         Classification::MorlocStreamPacket { schema, footer, .. } => {
             assert_eq!(schema.as_deref(), Some("u4"));
             match footer {
-                FooterInfo::Final { diag: v, status } => {
-                    assert_eq!(v.subpacket_count, offsets.len() as u64);
+                FooterInfo::Final { diag: v, status, entries: e } => {
+                    assert_eq!(v.subpacket_count, entries.len() as u64);
                     assert_eq!(status, FOOTER_STATUS_FAILED);
                     assert_eq!(v.element_count, 3);
+                    assert_eq!(e, entries.to_vec());
                 }
                 other => panic!("expected final footer, got {:?}", other),
             }
@@ -1143,6 +1148,10 @@ fn stream_packet_default_plain_render_final() {
         footer: FooterInfo::Final {
             diag: d.snapshot(),
             status: FOOTER_STATUS_CLOSED,
+            entries: (0..5).map(|i| SubpacketEntry {
+                offset: 100 * i as u64,
+                elem_count: 1,
+            }).collect(),
         },
     };
     let s = format_plain(&cls, "s.packet", &DEFAULT_OPTS, None);
@@ -1192,11 +1201,17 @@ fn stream_packet_json_render_final() {
     d.subpacket_count = 3;
     d.element_count = 30;
     d.bytes_uncompressed_total = 900;
+    let entries = vec![
+        SubpacketEntry { offset: 0,   elem_count: 10 },
+        SubpacketEntry { offset: 128, elem_count: 10 },
+        SubpacketEntry { offset: 256, elem_count: 10 },
+    ];
     let cls = Classification::MorlocStreamPacket {
         schema: Some("u4".into()),
         footer: FooterInfo::Final {
             diag: d.snapshot(),
             status: FOOTER_STATUS_CLOSED,
+            entries: entries.clone(),
         },
     };
     let s = format_json(&cls, "s.packet", None);
@@ -1211,6 +1226,13 @@ fn stream_packet_json_render_final() {
     assert_eq!(v["footer"]["subpacket_count"], 3);
     assert_eq!(v["footer"]["diag"]["element_count"], 30);
     assert_eq!(v["footer"]["diag"]["bytes_uncompressed_total"], 900);
+    // subpacket_entries emitted per-subpacket for downstream tooling.
+    let arr = v["footer"]["subpacket_entries"].as_array().unwrap();
+    assert_eq!(arr.len(), entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        assert_eq!(arr[i]["offset"], e.offset);
+        assert_eq!(arr[i]["elem_count"], e.elem_count);
+    }
 }
 
 #[test]

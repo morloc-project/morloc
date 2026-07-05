@@ -236,8 +236,12 @@ pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 // Layout commitments:
 //   - `SUBPACKET_INDEX` (`0x05`) appears only in the *final* footer (the
 //     one written by `@close` / implicit-close-on-exit). Body is
-//     `u64 count` followed by `count * u64` byte-offsets (offset of each
-//     sub-packet header within the file, relative to file start).
+//     `u64 count` followed by `count * (u64 offset, u64 elem_count)`
+//     pairs (offset of each sub-packet header within the file, relative
+//     to file start; plus its element count). The element count lets a
+//     reader answer "which sub-packet holds global index i?" via a
+//     `partition_point` binary search over cumulative counts, with zero
+//     sub-packet decompression.
 //   - `STREAM_DIAG` (`0x06`) is a fixed-size `StreamDiag` struct (see
 //     below) carrying running counters + tail window. Appears in both
 //     temp and final footers. The temp footer's whole purpose is this
@@ -270,6 +274,29 @@ pub const FOOTER_STATUS_FAILED: u8 = 2;
 pub const FOOTER_STATUS_REPAIRED: u8 = 3;
 
 pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
+
+// ── Subpacket-index helpers ────────────────────────────────────────────────
+
+/// One entry in the SUBPACKET_INDEX (0x05) block: byte offset of a
+/// sub-packet's header in the stream file, plus that sub-packet's
+/// element count. Element count comes from the sub-packet's `Array`
+/// header (`arr.size`) and lets readers binary-search over cumulative
+/// counts to answer "which sub-packet holds global index i?" without
+/// decompressing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubpacketEntry {
+    pub offset: u64,
+    pub elem_count: u64,
+}
+
+/// Bytes per entry inside the SUBPACKET_INDEX block payload
+/// (`u64 offset` + `u64 elem_count`). Body size is
+/// `SUBPACKET_INDEX_HEADER_BYTES + n * SUBPACKET_ENTRY_BYTES`.
+pub const SUBPACKET_ENTRY_BYTES: usize = 16;
+
+/// Bytes before the per-entry array in the SUBPACKET_INDEX block
+/// payload (the `count: u64 LE` prefix).
+pub const SUBPACKET_INDEX_HEADER_BYTES: usize = 8;
 
 // ── Frame-index helpers ────────────────────────────────────────────────────
 
@@ -1130,14 +1157,18 @@ pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
 /// depends on the index length but is always written once, at `@close`.
 pub fn make_final_footer_packet(
     diag: &StreamDiag,
-    subpacket_index: &[u64],
+    subpacket_entries: &[SubpacketEntry],
     status: u8,
 ) -> Vec<u8> {
-    // Build the subpacket-index body: u64 count followed by u64 offsets.
-    let mut idx_body = Vec::with_capacity(8 + subpacket_index.len() * 8);
-    idx_body.extend_from_slice(&(subpacket_index.len() as u64).to_le_bytes());
-    for off in subpacket_index {
-        idx_body.extend_from_slice(&off.to_le_bytes());
+    // Build the subpacket-index body: u64 count followed by
+    // (u64 offset, u64 elem_count) pairs.
+    let mut idx_body = Vec::with_capacity(
+        SUBPACKET_INDEX_HEADER_BYTES + subpacket_entries.len() * SUBPACKET_ENTRY_BYTES,
+    );
+    idx_body.extend_from_slice(&(subpacket_entries.len() as u64).to_le_bytes());
+    for entry in subpacket_entries {
+        idx_body.extend_from_slice(&entry.offset.to_le_bytes());
+        idx_body.extend_from_slice(&entry.elem_count.to_le_bytes());
     }
 
     let diag_bytes = diag.as_bytes();
@@ -1167,15 +1198,16 @@ pub fn decode_footer_status(data: &[u8]) -> u8 {
 }
 
 /// Parse the SUBPACKET_INDEX entry payload (without the 8-byte mmh-
-/// type-size header). Body is `u64 count` followed by `count * u64`.
-pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<u64>, MorlocError> {
-    if data.len() < 8 {
+/// type-size header). Body is `u64 count` followed by
+/// `count * (u64 offset, u64 elem_count)` pairs.
+pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<SubpacketEntry>, MorlocError> {
+    if data.len() < SUBPACKET_INDEX_HEADER_BYTES {
         return Err(MorlocError::Packet(format!(
             "SUBPACKET_INDEX entry truncated: {} bytes", data.len()
         )));
     }
     let count = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
-    let needed = 8 + count * 8;
+    let needed = SUBPACKET_INDEX_HEADER_BYTES + count * SUBPACKET_ENTRY_BYTES;
     if data.len() < needed {
         return Err(MorlocError::Packet(format!(
             "SUBPACKET_INDEX claims {} entries but payload has {} bytes",
@@ -1183,10 +1215,12 @@ pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<u64>, MorlocError> {
         )));
     }
     let mut out = Vec::with_capacity(count);
-    let mut cur = 8;
+    let mut cur = SUBPACKET_INDEX_HEADER_BYTES;
     for _ in 0..count {
-        out.push(u64::from_le_bytes(data[cur..cur + 8].try_into().unwrap()));
-        cur += 8;
+        let offset = u64::from_le_bytes(data[cur..cur + 8].try_into().unwrap());
+        let elem_count = u64::from_le_bytes(data[cur + 8..cur + 16].try_into().unwrap());
+        out.push(SubpacketEntry { offset, elem_count });
+        cur += SUBPACKET_ENTRY_BYTES;
     }
     Ok(out)
 }
@@ -2110,8 +2144,13 @@ mod tests {
     #[test]
     fn final_footer_packet_carries_all_blocks_including_status() {
         let diag = StreamDiag::new();
-        let index: Vec<u64> = (0..5).map(|i| (i as u64) * (16 << 20)).collect();
-        let bytes = make_final_footer_packet(&diag, &index, FOOTER_STATUS_PAUSED);
+        let entries: Vec<SubpacketEntry> = (0..5)
+            .map(|i| SubpacketEntry {
+                offset: (i as u64) * (16 << 20),
+                elem_count: 1024 + (i as u64) * 7,
+            })
+            .collect();
+        let bytes = make_final_footer_packet(&diag, &entries, FOOTER_STATUS_PAUSED);
 
         let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
         let footer = &bytes[..footer_packet_len];
@@ -2120,7 +2159,7 @@ mod tests {
 
         let mut saw_diag = false;
         let mut saw_final = false;
-        let mut recovered_index: Option<Vec<u64>> = None;
+        let mut recovered_entries: Option<Vec<SubpacketEntry>> = None;
         let mut recovered_status: Option<u8> = None;
         for (kind, body) in iter_packet_metadata(footer).unwrap() {
             match kind {
@@ -2130,7 +2169,7 @@ mod tests {
                     assert_eq!(body.len(), 0);
                 }
                 METADATA_TYPE_SUBPACKET_INDEX => {
-                    recovered_index = Some(decode_subpacket_index(body).unwrap());
+                    recovered_entries = Some(decode_subpacket_index(body).unwrap());
                 }
                 METADATA_TYPE_FOOTER_STATUS => {
                     recovered_status = Some(decode_footer_status(body));
@@ -2140,7 +2179,7 @@ mod tests {
         }
         assert!(saw_diag);
         assert!(saw_final, "final footer must carry FOOTER_FINAL");
-        assert_eq!(recovered_index.as_deref(), Some(index.as_slice()));
+        assert_eq!(recovered_entries.as_deref(), Some(entries.as_slice()));
         assert_eq!(recovered_status, Some(FOOTER_STATUS_PAUSED));
     }
 
@@ -2156,7 +2195,8 @@ mod tests {
 
     #[test]
     fn subpacket_index_decode_rejects_truncated() {
-        // count claims 4 entries but only 2 offsets provided.
+        // count claims 4 entries (needs 8 + 4*16 = 72 bytes) but only
+        // one pair (16 bytes) provided after the count header.
         let mut bad = 4u64.to_le_bytes().to_vec();
         bad.extend_from_slice(&0u64.to_le_bytes());
         bad.extend_from_slice(&1u64.to_le_bytes());
@@ -2170,6 +2210,30 @@ mod tests {
         let body = 0u64.to_le_bytes();
         let recovered = decode_subpacket_index(&body).unwrap();
         assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn subpacket_index_pair_roundtrip() {
+        // Encode a few (offset, elem_count) pairs directly and confirm
+        // the decoder recovers both fields in order.
+        let mut body = 3u64.to_le_bytes().to_vec();
+        for &(off, n) in &[(0u64, 100u64), (1024, 250), (2048, 175)] {
+            body.extend_from_slice(&off.to_le_bytes());
+            body.extend_from_slice(&n.to_le_bytes());
+        }
+        let recovered = decode_subpacket_index(&body).unwrap();
+        assert_eq!(recovered, vec![
+            SubpacketEntry { offset: 0,    elem_count: 100 },
+            SubpacketEntry { offset: 1024, elem_count: 250 },
+            SubpacketEntry { offset: 2048, elem_count: 175 },
+        ]);
+    }
+
+    #[test]
+    fn subpacket_index_decode_rejects_short_header() {
+        // Body shorter than the 8-byte count prefix must fail.
+        let bad = [0u8; 4];
+        assert!(decode_subpacket_index(&bad).is_err());
     }
 
     /// Build a synthetic uncompressed sub-packet header + payload with a

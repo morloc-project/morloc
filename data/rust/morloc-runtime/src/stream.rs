@@ -24,7 +24,7 @@
 //! - `ProcessLocalSlot::cache` is the per-handle decompressed-sub-packet
 //!   LRU; consulted by `cache_get_or_materialize` and survives across
 //!   bracket accesses (refcount-shared with caller via `shincref`).
-//! - `subpacket_index_local` is built greedily at open time (cheap for
+//! - `subpacket_entries_local` is built greedily at open time (cheap for
 //!   small N, acceptable for the million-sub-packet case at ~8 MiB).
 
 use std::fs::OpenOptions;
@@ -434,7 +434,7 @@ pub(crate) fn registry_gen_salt() -> u64 {
 //
 // All concurrent access goes through the atomic fields. The publication
 // protocol for immutable-after-@open fields (file_path, schema_str,
-// kind, final_footer, subpacket_index, body_start) is:
+// kind, final_footer, subpacket_entries, body_start) is:
 //
 //   Writer (in @open): write fields with plain stores, then
 //                      generation.store(new_gen, Release).
@@ -478,7 +478,7 @@ pub use morloc_runtime_types::stdio_proto::{
 ///   - **Immutable after @open**: `kind`, `opener_pid`,
 ///     `opener_pid_start_time`, `file_path`, `file_path_len`,
 ///     `schema_str`, `schema_str_len`, `final_footer`,
-///     `compression_level`, `subpacket_index`, `subpacket_index_len`,
+///     `compression_level`, `subpacket_entries`, `subpacket_entries_len`,
 ///     `body_start`. Readers use the versioned-pointer pattern
 ///     described above.
 ///   - **Mutated under `futex`**: `cursor`, `element_count`, `diag`.
@@ -539,7 +539,7 @@ pub struct RegistrySlot {
 
     // ── Mutable state under `futex` ─────────────────────────────────
     /// IStream/OStream cursor (byte offset). IFile leaves at 0
-    /// (random access goes through `subpacket_index` instead).
+    /// (random access goes through `subpacket_entries` instead).
     pub cursor:               u64,                             // off 80..88
     pub element_count:        u64,                             // off 88..96
 
@@ -549,11 +549,12 @@ pub struct RegistrySlot {
     pub compression_level:    u8,                              // off 97
     _pad5:                    [u8; 6],                         // off 98..104
 
-    /// IFile only; SHM RelPtr to a `[u64]` array of sub-packet byte
-    /// offsets. Length in `subpacket_index_len`. Immutable after @open
-    /// publication; freed at @close.
-    pub subpacket_index:      RelPtr,                          // off 104..112
-    pub subpacket_index_len:  u64,                             // off 112..120
+    /// IFile only; SHM RelPtr to a `[SubpacketEntry]` array of
+    /// (offset, elem_count) pairs, one per sub-packet. Length in
+    /// `subpacket_entries_len`. Immutable after @open publication;
+    /// freed at @close.
+    pub subpacket_entries:    RelPtr,                          // off 104..112
+    pub subpacket_entries_len:u64,                             // off 112..120
 
     /// IStream initial cursor (right after stream header). Immutable
     /// after @open publication.
@@ -588,11 +589,11 @@ pub struct RegistrySlot {
     pub write_buffer_data_used: u64,                           // off 312..320
 
     /// OStream-only: capacity in entries of the SHM-resident sub-packet
-    /// index whose RelPtr lives in `subpacket_index`. Grown by doubling
-    /// under the slot futex when `subpacket_index_len` reaches it. For
-    /// IFile this field is 0 (the index is set once from the parsed
-    /// final footer and never grows).
-    pub subpacket_index_cap:  u64,                             // off 320..328
+    /// entry array whose RelPtr lives in `subpacket_entries`. Grown by
+    /// doubling under the slot futex when `subpacket_entries_len` reaches
+    /// it. For IFile this field is 0 (the array is set once from the
+    /// parsed final footer and never grows).
+    pub subpacket_entries_cap:u64,                             // off 320..328
 
     /// Non-zero when this slot is bound to stdin/stdout/stderr rather
     /// than a real file. Immutable after publication.
@@ -767,23 +768,23 @@ pub struct ProcessLocalSlot {
     /// one element). For non-list values this equals `value_schema`.
     pub elem_schema: Schema,
 
-    /// IFile only: copy of the SHM slot's sub-packet index. Resident
-    /// in process-local memory for fast random access without going
-    /// through `rel2abs` per query. Empty for IStream / OStream.
-    pub subpacket_index_local: Vec<u64>,
+    /// IFile only: copy of the SHM slot's sub-packet entry array.
+    /// Resident in process-local memory for fast random access without
+    /// going through `rel2abs` per query. Empty for IStream / OStream.
+    pub subpacket_entries_local: Vec<morloc_runtime_types::packet::SubpacketEntry>,
 
     /// IFile only: cumulative element-count per sub-packet, built
-    /// lazily on first random-access query. `cum[i]` is the total
-    /// element count of sub-packets `0..i`, so a global element index
-    /// `g` lands in the sub-packet `partition_point(g)`. Survives
-    /// across bracket accesses on the same handle -- rebuilding on
-    /// every access would be O(N sub-packet headers read) per call.
+    /// lazily on first random-access query from `subpacket_entries_local`.
+    /// `cum[i]` is the total element count of sub-packets `0..i`, so a
+    /// global element index `g` lands in the sub-packet
+    /// `partition_point(g)`. Survives across bracket accesses on the
+    /// same handle.
     pub subpacket_elem_cum: Option<Vec<u64>>,
 
     /// For DATA_PACKET files opened as IFile, the file is a single
-    /// "sub-packet" starting at offset 0 and the subpacket_index has
-    /// one entry [0]. The walker handles this flag to skip the
-    /// stream-header / footer parsing paths.
+    /// "sub-packet" starting at offset 0 and the entry array has one
+    /// entry (offset=0, elem_count=<Array size>). The walker handles
+    /// this flag to skip the stream-header / footer parsing paths.
     pub is_data_packet: bool,
 }
 
@@ -1071,18 +1072,21 @@ fn attach_process_local_slot(
         }
         s
     };
-    // Copy IFile sub-packet index from SHM into a process-local Vec.
-    // This is a one-time cost at attach; subsequent index lookups
+    // Copy IFile sub-packet entry array from SHM into a process-local
+    // Vec. This is a one-time cost at attach; subsequent index lookups
     // hit the local Vec without rel2abs.
-    let subpacket_index_local = {
-        let idx_rel = slot.subpacket_index;
-        let idx_len = slot.subpacket_index_len as usize;
+    let subpacket_entries_local: Vec<morloc_runtime_types::packet::SubpacketEntry> = {
+        let idx_rel = slot.subpacket_entries;
+        let idx_len = slot.subpacket_entries_len as usize;
         if idx_rel == shm_types_crate::RELNULL || idx_len == 0 {
             Vec::new()
         } else {
             let abs = crate::shm::rel2abs(idx_rel)?;
             let raw = unsafe {
-                std::slice::from_raw_parts(abs as *const u64, idx_len)
+                std::slice::from_raw_parts(
+                    abs as *const morloc_runtime_types::packet::SubpacketEntry,
+                    idx_len,
+                )
             };
             raw.to_vec()
         }
@@ -1090,9 +1094,11 @@ fn attach_process_local_slot(
 
     // Detect DATA_PACKET shape (single sub-packet at offset 0, no
     // stream header). Convention from `parse_stream_file`:
-    // is_data_packet => body_start == 0 AND subpacket_index == [0].
+    // is_data_packet => body_start == 0 AND the entry array is a
+    // single (offset=0, elem_count=<Array size>) pair.
     let is_data_packet = slot.body_start == 0
-        && subpacket_index_local == [0];
+        && subpacket_entries_local.len() == 1
+        && subpacket_entries_local[0].offset == 0;
 
     let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
 
@@ -1106,7 +1112,7 @@ fn attach_process_local_slot(
         cache,
         value_schema,
         elem_schema,
-        subpacket_index_local,
+        subpacket_entries_local,
         subpacket_elem_cum: None,
         is_data_packet,
     })
@@ -1198,9 +1204,9 @@ pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), Morl
 /// fails the generation check.
 ///
 /// Also frees the SHM-resident strings (path, schema) and
-/// subpacket_index that the slot referenced. The caller must already
-/// have done any kind-specific finalisation (e.g. write final footer
-/// for OStream).
+/// subpacket_entries array that the slot referenced. The caller must
+/// already have done any kind-specific finalisation (e.g. write final
+/// footer for OStream).
 fn release_slot_locked(slot: &RegistrySlot) {
     use std::sync::atomic::Ordering;
 
@@ -1214,7 +1220,7 @@ fn release_slot_locked(slot: &RegistrySlot) {
         }
     }
 
-    // Free path / schema / subpacket_index / write_buffer SHM blocks.
+    // Free path / schema / subpacket_entries / write_buffer SHM blocks.
     // Best-effort: a leaked block here is bounded by the registry's
     // lifetime (cleaned at nexus shclose), and erroring would obscure
     // the primary `state = FREE` transition.
@@ -1230,7 +1236,7 @@ fn release_slot_locked(slot: &RegistrySlot) {
             let _ = crate::shm::shfree(abs);
         }
     }
-    let idx = slot.subpacket_index;
+    let idx = slot.subpacket_entries;
     if idx != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(idx) {
             let _ = crate::shm::shfree(abs);
@@ -1258,9 +1264,9 @@ fn release_slot_locked(slot: &RegistrySlot) {
         (*mp).file_path_len = 0;
         (*mp).schema_str = shm_types_crate::RELNULL;
         (*mp).schema_str_len = 0;
-        (*mp).subpacket_index = shm_types_crate::RELNULL;
-        (*mp).subpacket_index_len = 0;
-        (*mp).subpacket_index_cap = 0;
+        (*mp).subpacket_entries = shm_types_crate::RELNULL;
+        (*mp).subpacket_entries_len = 0;
+        (*mp).subpacket_entries_cap = 0;
         (*mp).cursor = 0;
         (*mp).element_count = 0;
         (*mp).final_footer = 0;
@@ -1365,13 +1371,15 @@ fn shm_copy_bytes(bytes: &[u8]) -> Result<RelPtr, MorlocError> {
     crate::shm::abs2rel(abs)
 }
 
-/// Allocate an SHM-resident copy of a `[u64]` array (used for the
-/// IFile sub-packet index). Returns the RelPtr.
-fn shm_copy_u64_slice(slice: &[u64]) -> Result<RelPtr, MorlocError> {
+/// Allocate an SHM-resident copy of a `[SubpacketEntry]` array (used
+/// for the IFile sub-packet entry array). Returns the RelPtr.
+fn shm_copy_entries_slice(
+    slice: &[morloc_runtime_types::packet::SubpacketEntry],
+) -> Result<RelPtr, MorlocError> {
     let bytes = unsafe {
         std::slice::from_raw_parts(
             slice.as_ptr() as *const u8,
-            slice.len() * std::mem::size_of::<u64>(),
+            slice.len() * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>(),
         )
     };
     shm_copy_bytes(bytes)
@@ -1379,7 +1387,7 @@ fn shm_copy_u64_slice(slice: &[u64]) -> Result<RelPtr, MorlocError> {
 
 /// Open a file as `IFile` against the shared SHM registry. Allocates
 /// a slot, mmaps the file, parses its stream metadata, publishes the
-/// path + schema + subpacket_index into SHM, and returns the handle.
+/// path + schema + subpacket_entries into SHM, and returns the handle.
 ///
 /// Rejects STREAM files lacking a final footer (the 2026-06-28
 /// design contract: random access requires the full index, which
@@ -1420,14 +1428,14 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     };
     let _guard = SlotFutexGuard::lock(slot);
 
-    // Publish path + schema + subpacket_index. On any error, release
+    // Publish path + schema + subpacket_entries. On any error, release
     // the slot via `release_slot_locked` (which itself shfree's any
     // partials we may have already published).
     let publish_result = (|| -> Result<u64, MorlocError> {
         let path_rel = shm_copy_bytes(path.as_bytes())?;
         let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
-        let idx_rel = if !parsed.subpacket_index.is_empty() {
-            shm_copy_u64_slice(&parsed.subpacket_index)?
+        let idx_rel = if !parsed.subpacket_entries.is_empty() {
+            shm_copy_entries_slice(&parsed.subpacket_entries)?
         } else {
             shm_types_crate::RELNULL
         };
@@ -1442,13 +1450,13 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_index = idx_rel;
-            (*mp).subpacket_index_len = parsed.subpacket_index.len() as u64;
-            // IFile's sub-packet index is immutable -- set once from
-            // the parsed final footer and never grown. cap = 0 marks
-            // "not OStream-growable" so release_slot_locked treats
-            // subpacket_index_len, not _cap, as the freed extent.
-            (*mp).subpacket_index_cap = 0;
+            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries_len = parsed.subpacket_entries.len() as u64;
+            // IFile's sub-packet entry array is immutable -- set once
+            // from the parsed final footer and never grown. cap = 0
+            // marks "not OStream-growable" so release_slot_locked treats
+            // subpacket_entries_len, not _cap, as the freed extent.
+            (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = parsed.body_start;
             (*mp).final_footer = if parsed.final_footer { 1 } else { 0 };
             (*mp).cursor = 0;
@@ -1498,7 +1506,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
-        subpacket_index_local: parsed.subpacket_index.clone(),
+        subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
     };
@@ -1560,9 +1568,9 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_index = shm_types_crate::RELNULL;
-            (*mp).subpacket_index_len = 0;
-            (*mp).subpacket_index_cap = 0;
+            (*mp).subpacket_entries = shm_types_crate::RELNULL;
+            (*mp).subpacket_entries_len = 0;
+            (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = parsed.body_start;
             (*mp).final_footer = if parsed.final_footer { 1 } else { 0 };
             // IStream walks by cursor starting at body_start.
@@ -1602,7 +1610,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
-        subpacket_index_local: parsed.subpacket_index.clone(),
+        subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
     };
@@ -1654,7 +1662,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     // Pre-parse schema so the pool and the nexus (which parses the same
     // string in mlc_stdio_build_stream_header) agree on the stream
     // header's byte length. That length seeds body_start / cursor so
-    // the subpacket_index we accumulate carries meaningful stream-
+    // the subpacket_entries we accumulate carry meaningful stream-
     // position offsets (matches on-disk offsets for a naive `> file`
     // redirect; still meaningful as a stream position on pipes).
     // The schema string is the value schema `[a]` -- streams are
@@ -1711,14 +1719,16 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (shm_types_crate::RELNULL, 0)
         };
         let _ = buf_size;
-        // OStream stdio slots grow a shared subpacket_index just like
-        // file-backed OStreams, so `@close`'s final footer can carry a
-        // real index. Offsets are stream-position, not fd position;
-        // they're accurate whenever the consumer starts reading from
-        // the beginning of the emitted output (the `> file` case).
+        // OStream stdio slots grow a shared subpacket_entries array
+        // just like file-backed OStreams, so `@close`'s final footer
+        // can carry a real index. Offsets are stream-position, not fd
+        // position; they're accurate whenever the consumer starts
+        // reading from the beginning of the emitted output (the
+        // `> file` case).
         let (idx_rel, idx_cap) = if kind == MLC_KIND_OSTREAM {
             let cap = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
-            let bytes = (cap as usize) * std::mem::size_of::<u64>();
+            let bytes = (cap as usize)
+                * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
             let abs = crate::shm::shcalloc(1, bytes)?;
             (crate::shm::abs2rel(abs)?, cap)
         } else {
@@ -1733,9 +1743,9 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).file_path_len = sentinel.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_index = idx_rel;
-            (*mp).subpacket_index_len = 0;
-            (*mp).subpacket_index_cap = idx_cap;
+            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries_len = 0;
+            (*mp).subpacket_entries_cap = idx_cap;
             (*mp).body_start = stdio_body_start;
             (*mp).final_footer = 0;
             (*mp).cursor = stdio_body_start;
@@ -1796,7 +1806,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
-        subpacket_index_local: Vec::new(),
+        subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
     };
@@ -2136,12 +2146,14 @@ pub fn shared_open_ostream_with_schema(
         let buf_bytes = read_write_buffer_bytes_env();
         let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
         let buf_rel = crate::shm::abs2rel(buf_abs)?;
-        // SHM-resident sub-packet index, shared across all writer pools
-        // so the final footer at @close reflects every flush regardless
-        // of which pool emitted it. Initial cap is small and grows
-        // exponentially under the slot futex in emit_subpacket_to_disk.
+        // SHM-resident sub-packet entry array, shared across all writer
+        // pools so the final footer at @close reflects every flush
+        // regardless of which pool emitted it. Initial cap is small and
+        // grows exponentially under the slot futex in
+        // emit_subpacket_to_disk.
         let idx_cap_initial: u64 = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
-        let idx_buf_bytes = (idx_cap_initial as usize) * std::mem::size_of::<u64>();
+        let idx_buf_bytes = (idx_cap_initial as usize)
+            * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
         let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
         let idx_buf_rel = crate::shm::abs2rel(idx_buf_abs)?;
         unsafe {
@@ -2151,9 +2163,9 @@ pub fn shared_open_ostream_with_schema(
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_index = idx_buf_rel;
-            (*mp).subpacket_index_len = 0;
-            (*mp).subpacket_index_cap = idx_cap_initial;
+            (*mp).subpacket_entries = idx_buf_rel;
+            (*mp).subpacket_entries_len = 0;
+            (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = body_start;
             (*mp).final_footer = 0;
             (*mp).cursor = body_start;
@@ -2203,7 +2215,7 @@ pub fn shared_open_ostream_with_schema(
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
-        subpacket_index_local: Vec::new(),
+        subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
     };
@@ -2256,7 +2268,7 @@ pub fn shared_close_handle_with_status(
 
     if kind == MLC_KIND_OSTREAM {
         // OStream close uses with_process_local_slot so the buffer
-        // flush (which appends to local.subpacket_index_local) and
+        // flush (which appends to local.subpacket_entries_local) and
         // the subsequent final-footer write share one futex-held
         // critical section. The flush + footer write together can
         // be sizable (one buffered sub-packet + a final footer)
@@ -2277,9 +2289,9 @@ pub fn shared_close_handle_with_status(
             }
             flush_write_buffer(slot, local)?;
             let diag = slot.diag;
-            let shared_index = read_shared_subpacket_index(slot)?;
+            let shared_entries = read_shared_subpacket_entries(slot)?;
             let footer = morloc_runtime_types::packet::make_final_footer_packet(
-                &diag, &shared_index, status,
+                &diag, &shared_entries, status,
             );
             if slot.is_stdio == 0 {
                 let cursor = slot.cursor;
@@ -2392,9 +2404,9 @@ pub fn shared_finalize_ostream_locked(
     let result = (|| -> Result<(), MorlocError> {
         flush_write_buffer(slot, &mut local)?;
         let diag = slot.diag;
-        let shared_index = read_shared_subpacket_index(slot)?;
+        let shared_entries = read_shared_subpacket_entries(slot)?;
         let footer = morloc_runtime_types::packet::make_final_footer_packet(
-            &diag, &shared_index, status,
+            &diag, &shared_entries, status,
         );
         if is_stdio {
             emit_footer_via_rpc(slot, &footer)?;
@@ -2538,8 +2550,11 @@ fn emit_subpacket_to_disk(
     local: &mut ProcessLocalSlot,
     payload_bytes: &[u8],
     level: u8,
+    elem_count: u64,
 ) -> Result<(), MorlocError> {
     use morloc_runtime_types::packet::make_temp_footer_packet;
+
+    debug_assert_payload_elem_count(elem_count, payload_bytes, "emit_subpacket_to_disk");
 
     // Rewrite handle-carrying leaves from TAG_HANDLE (bare slot id,
     // valid only in the writer's SHM registry) to TAG_PATH so any
@@ -2581,13 +2596,11 @@ fn emit_subpacket_to_disk(
             Some(cursor),
         );
     }
-    // Publish the sub-packet boundary into the SHM-resident shared
-    // index. Caller (shared_write_subpacket / shared_flush_buffer /
-    // shared_close_handle) already holds the slot futex, so the
-    // append is serialised across every writer pool. The opener's
-    // @close then reads this single index to build the final footer
-    // -- every pool's flushes appear regardless of who emitted them.
-    append_shared_subpacket_index(slot, cursor)?;
+    // Every pool's flushes append here under the slot futex; the
+    // opener's @close reads this shared array to build the final footer.
+    append_shared_subpacket_index(slot, morloc_runtime_types::packet::SubpacketEntry {
+        offset: cursor, elem_count,
+    })?;
 
     let footer = make_temp_footer_packet(&slot.diag);
     pwrite_all_fd(local.fd, &footer, subpacket_end)?;
@@ -2608,7 +2621,9 @@ fn emit_subpacket_via_rpc(
     local: &mut ProcessLocalSlot,
     payload_bytes: &[u8],
     level: u8,
+    elem_count: u64,
 ) -> Result<(), MorlocError> {
+    debug_assert_payload_elem_count(elem_count, payload_bytes, "emit_subpacket_via_rpc");
     let mut rewritten = payload_bytes.to_vec();
     let fields = crate::handle_scan::collect_stream_fields(
         &rewritten, &local.value_schema,
@@ -2654,7 +2669,9 @@ fn emit_subpacket_via_rpc(
             Some(cursor),
         );
     }
-    append_shared_subpacket_index(slot, cursor)?;
+    append_shared_subpacket_index(slot, morloc_runtime_types::packet::SubpacketEntry {
+        offset: cursor, elem_count,
+    })?;
     Ok(())
 }
 
@@ -2734,23 +2751,45 @@ fn stdio_rpc_send_write(
     })
 }
 
-/// Snapshot the SHM-resident shared sub-packet index into a heap
-/// `Vec<u64>` suitable for `make_final_footer_packet`. Caller MUST
-/// hold the slot futex so the index can't grow underneath us. Returns
-/// an empty vec when the slot has no index allocated (IFile/IStream
-/// slots, or an OStream with no flushes yet).
-fn read_shared_subpacket_index(
+/// Debug-only guard: the writer's declared element count must equal
+/// the count already stamped into the payload's Array header
+/// (first 8 bytes = `Array.size`). Divergence would desync the
+/// footer's per-sub-packet counts from the on-disk sub-packet payloads.
+/// No-op in release builds.
+#[inline]
+fn debug_assert_payload_elem_count(elem_count: u64, payload: &[u8], site: &str) {
+    if cfg!(debug_assertions) {
+        let payload_count = if payload.len() < 8 {
+            0
+        } else {
+            u64::from_le_bytes(payload[..8].try_into().unwrap())
+        };
+        assert_eq!(
+            elem_count, payload_count,
+            "{}: caller elem_count = {} but payload Array.size = {}",
+            site, elem_count, payload_count,
+        );
+    }
+}
+
+/// Snapshot the SHM-resident shared sub-packet entry array into a heap
+/// `Vec<SubpacketEntry>` suitable for `make_final_footer_packet`.
+/// Caller MUST hold the slot futex so the array can't grow underneath
+/// us. Returns an empty vec when the slot has no entries allocated
+/// (IFile/IStream slots, or an OStream with no flushes yet).
+fn read_shared_subpacket_entries(
     slot: &RegistrySlot,
-) -> Result<Vec<u64>, MorlocError> {
-    let len = slot.subpacket_index_len as usize;
+) -> Result<Vec<morloc_runtime_types::packet::SubpacketEntry>, MorlocError> {
+    let len = slot.subpacket_entries_len as usize;
     if len == 0 {
         return Ok(Vec::new());
     }
-    let idx_rel = slot.subpacket_index;
+    let idx_rel = slot.subpacket_entries;
     if idx_rel == shm_types_crate::RELNULL {
         return Ok(Vec::new());
     }
-    let idx_abs = crate::shm::rel2abs(idx_rel)? as *const u64;
+    let idx_abs = crate::shm::rel2abs(idx_rel)?
+        as *const morloc_runtime_types::packet::SubpacketEntry;
     let mut out = Vec::with_capacity(len);
     unsafe {
         out.set_len(len);
@@ -2759,17 +2798,17 @@ fn read_shared_subpacket_index(
     Ok(out)
 }
 
-/// Append a sub-packet starting offset to the SHM-resident shared
-/// sub-packet index. Caller MUST hold the slot futex. Doubles the
-/// capacity (and reallocates the SHM block) when full. The relptr in
-/// `slot.subpacket_index` is updated to the new block before the old
-/// one is freed -- readers under the same futex see a single
-/// publication step.
+/// Append a sub-packet's `(offset, elem_count)` entry to the
+/// SHM-resident shared sub-packet entry array. Caller MUST hold the
+/// slot futex. Doubles the capacity (and reallocates the SHM block)
+/// when full. The relptr in `slot.subpacket_entries` is updated to the
+/// new block before the old one is freed -- readers under the same
+/// futex see a single publication step.
 fn append_shared_subpacket_index(
     slot: &RegistrySlot,
-    offset: u64,
+    entry: morloc_runtime_types::packet::SubpacketEntry,
 ) -> Result<(), MorlocError> {
-    let cap = slot.subpacket_index_cap;
+    let cap = slot.subpacket_entries_cap;
     if cap == 0 {
         // OStream slots seed this to >= OSTREAM_SUBPACKET_INDEX_INITIAL_CAP
         // at open. A zero cap here means this slot isn't OStream-shaped
@@ -2780,14 +2819,15 @@ fn append_shared_subpacket_index(
              (kind is not OStream or open path forgot to allocate)".into(),
         ));
     }
-    let len = slot.subpacket_index_len;
-    let idx_rel = slot.subpacket_index;
-    let idx_abs = crate::shm::rel2abs(idx_rel)? as *mut u64;
+    let len = slot.subpacket_entries_len;
+    let idx_rel = slot.subpacket_entries;
+    let idx_abs = crate::shm::rel2abs(idx_rel)?
+        as *mut morloc_runtime_types::packet::SubpacketEntry;
     if len < cap {
-        unsafe { *idx_abs.add(len as usize) = offset; }
+        unsafe { *idx_abs.add(len as usize) = entry; }
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-            (*mp).subpacket_index_len = len + 1;
+            (*mp).subpacket_entries_len = len + 1;
         }
         return Ok(());
     }
@@ -2795,18 +2835,20 @@ fn append_shared_subpacket_index(
     let new_cap = cap.checked_mul(2).ok_or_else(|| MorlocError::Other(
         "append_shared_subpacket_index: capacity overflow".into(),
     ))?;
-    let new_bytes = (new_cap as usize) * std::mem::size_of::<u64>();
-    let new_abs = crate::shm::shcalloc(1, new_bytes)? as *mut u64;
+    let new_bytes = (new_cap as usize)
+        * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
+    let new_abs = crate::shm::shcalloc(1, new_bytes)?
+        as *mut morloc_runtime_types::packet::SubpacketEntry;
     unsafe {
         std::ptr::copy_nonoverlapping(idx_abs, new_abs, len as usize);
-        *new_abs.add(len as usize) = offset;
+        *new_abs.add(len as usize) = entry;
     }
     let new_rel = crate::shm::abs2rel(new_abs as *mut u8)?;
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-        (*mp).subpacket_index = new_rel;
-        (*mp).subpacket_index_len = len + 1;
-        (*mp).subpacket_index_cap = new_cap;
+        (*mp).subpacket_entries = new_rel;
+        (*mp).subpacket_entries_len = len + 1;
+        (*mp).subpacket_entries_cap = new_cap;
     }
     // Free the old block AFTER the publication. Readers under the
     // futex see the new relptr; no one is holding a pointer to the
@@ -2913,9 +2955,9 @@ fn flush_write_buffer(
 
     let level = slot.compression_level;
     if slot.is_stdio != 0 {
-        emit_subpacket_via_rpc(slot, local, payload_slice, level)?;
+        emit_subpacket_via_rpc(slot, local, payload_slice, level, n)?;
     } else {
-        emit_subpacket_to_disk(slot, local, payload_slice, level)?;
+        emit_subpacket_to_disk(slot, local, payload_slice, level, n)?;
     }
 
     // Reset buffer counters. The buffer bytes don't need to be cleared;
@@ -3008,9 +3050,9 @@ fn append_one_element(
         }
         let level = slot.compression_level;
         if slot.is_stdio != 0 {
-            emit_subpacket_via_rpc(slot, local, &oversize_payload, level)?;
+            emit_subpacket_via_rpc(slot, local, &oversize_payload, level, 1)?;
         } else {
-            emit_subpacket_to_disk(slot, local, &oversize_payload, level)?;
+            emit_subpacket_to_disk(slot, local, &oversize_payload, level, 1)?;
         }
         return Ok(());
     }
@@ -3597,7 +3639,7 @@ fn shared_ifile_general(
                 handle_kind_name(slot.kind),
             )));
         }
-        if local.subpacket_index_local.is_empty() {
+        if local.subpacket_entries_local.is_empty() {
             return Err(MorlocError::Other(
                 "IFile has no sub-packets (empty file?)".into(),
             ));
@@ -3666,7 +3708,8 @@ pub fn shared_append_to_path(
             return Err(e);
         }
     };
-    let resume_off = if let Some(&last_off) = parsed.subpacket_index.last() {
+    let resume_off = if let Some(last_entry) = parsed.subpacket_entries.last() {
+        let last_off = last_entry.offset;
         match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
             Ok(sz) => last_off + sz,
             Err(e) => {
@@ -3680,7 +3723,8 @@ pub fn shared_append_to_path(
     let element_count_at_resume = parsed.element_count;
     let value_schema_clone = parsed.value_schema.clone();
     let elem_schema_clone = parsed.elem_schema.clone();
-    let subpacket_index_clone = parsed.subpacket_index.clone();
+    let subpacket_entries_clone: Vec<morloc_runtime_types::packet::SubpacketEntry> =
+        parsed.subpacket_entries.clone();
     let schema_str_clone = parsed.schema_str.clone();
     unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
 
@@ -3726,26 +3770,27 @@ pub fn shared_append_to_path(
         let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
         let buf_rel = crate::shm::abs2rel(buf_abs)?;
         let mut diag = StreamDiag::new();
-        diag.subpacket_count = subpacket_index_clone.len() as u64;
+        diag.subpacket_count = subpacket_entries_clone.len() as u64;
         diag.element_count = element_count_at_resume;
-        // SHM-resident sub-packet index pre-seeded with the on-disk
-        // offsets discovered during forward-scan recovery. Subsequent
-        // flushes from any pool append under the slot futex. Initial
-        // capacity is at least the current length so we don't grow
-        // during the first append.
-        let preseed_len = subpacket_index_clone.len();
+        // SHM-resident sub-packet entry array pre-seeded with the
+        // on-disk (offset, elem_count) pairs discovered during
+        // forward-scan recovery. Subsequent flushes from any pool append
+        // under the slot futex. Initial capacity is at least the current
+        // length so we don't grow during the first append.
+        let preseed_len = subpacket_entries_clone.len();
         let idx_cap_initial: u64 = std::cmp::max(
             OSTREAM_SUBPACKET_INDEX_INITIAL_CAP,
             (preseed_len as u64).next_power_of_two().max(1),
         );
-        let idx_buf_bytes = (idx_cap_initial as usize) * std::mem::size_of::<u64>();
+        let idx_buf_bytes = (idx_cap_initial as usize)
+            * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
         let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
         let idx_buf_rel = crate::shm::abs2rel(idx_buf_abs)?;
         if preseed_len > 0 {
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    subpacket_index_clone.as_ptr(),
-                    idx_buf_abs as *mut u64,
+                    subpacket_entries_clone.as_ptr(),
+                    idx_buf_abs as *mut morloc_runtime_types::packet::SubpacketEntry,
                     preseed_len,
                 );
             }
@@ -3757,9 +3802,9 @@ pub fn shared_append_to_path(
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = schema_str_clone.len() as u32;
-            (*mp).subpacket_index = idx_buf_rel;
-            (*mp).subpacket_index_len = preseed_len as u64;
-            (*mp).subpacket_index_cap = idx_cap_initial;
+            (*mp).subpacket_entries = idx_buf_rel;
+            (*mp).subpacket_entries_len = preseed_len as u64;
+            (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = stream_hdr.body_start;
             (*mp).final_footer = 0;
             (*mp).cursor = resume_off;
@@ -3799,7 +3844,7 @@ pub fn shared_append_to_path(
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_clone,
         elem_schema: elem_schema_clone,
-        subpacket_index_local: subpacket_index_clone,
+        subpacket_entries_local: subpacket_entries_clone,
         subpacket_elem_cum: None,
         is_data_packet: false,
     };
@@ -4233,7 +4278,7 @@ struct ParsedStreamFile {
     schema_str: String,
     value_schema: Schema,
     elem_schema: Schema,
-    subpacket_index: Vec<u64>,
+    subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
     element_count: u64,
     diag: Option<StreamDiag>,
     /// True iff the file is a STREAM_PACKET that carries a
@@ -4272,16 +4317,16 @@ fn parse_stream_file(
     let outer_header = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
 
     let is_data_packet = outer_header.is_data();
-    let (schema_str, subpacket_index, element_count, diag, final_footer, body_start):
-        (String, Vec<u64>, u64, Option<StreamDiag>, bool, u64) = if is_data_packet {
-        let (schema, index, count) = open_data_packet(path, mmap_ptr, mmap_size)?;
+    let (schema_str, subpacket_entries, element_count, diag, final_footer, body_start):
+        (String, Vec<morloc_runtime_types::packet::SubpacketEntry>, u64, Option<StreamDiag>, bool, u64) = if is_data_packet {
+        let (schema, entries, count) = open_data_packet(path, mmap_ptr, mmap_size)?;
         // DATA-packet files have no stream header; the whole file is a
         // single sub-packet that starts at offset 0. IStream's forward
         // walker reads this as one sub-packet, then sees EOF. There is
         // no StreamDiag and no footer of either kind, so diag = None
         // and final_footer = false; the IFile gate uses is_data_packet
         // separately to know this branch is still random-access safe.
-        (schema, index, count, None, false, 0u64)
+        (schema, entries, count, None, false, 0u64)
     } else if outer_header.is_stream() {
         let StreamHeader { schema: schema_str, body_start } =
             parse_stream_header(mmap_ptr, mmap_size)?;
@@ -4295,26 +4340,29 @@ fn parse_stream_file(
             }
         }
         // IStream walks forward from body_start without needing an
-        // index, so an empty subpacket_index on temp-footer files is
+        // index, so an empty subpacket_entries on temp-footer files is
         // fine here; IFile's open path enforces final_footer separately.
-        let (subpacket_index, element_count, diag, final_footer) =
+        let (subpacket_entries, element_count, diag, final_footer) =
             match try_read_footer(mmap_ptr, mmap_size) {
                 Ok(Some(parsed)) => (
-                    parsed.subpacket_index,
+                    parsed.subpacket_entries,
                     parsed.element_count,
                     parsed.diag,
                     parsed.final_footer,
                 ),
                 Ok(None) | Err(_) => {
-                    // No footer at all (writer crashed mid-write or
-                    // before the first temp-footer pwrite). Scan the
-                    // headers to recover counts; IFile open will refuse
-                    // this kind of file too.
+                    // Writer crashed before any footer. Forward-scan
+                    // recovers offsets only; the file will resolve as
+                    // IStream (IFile open refuses on !final_footer) so
+                    // per-entry counts are never read.
                     let scanned = forward_scan_subpackets(mmap_ptr, mmap_size, body_start)?;
-                    (scanned.subpacket_offsets, scanned.element_count, None, false)
+                    let entries = scanned.subpacket_offsets.into_iter().map(|offset|
+                        morloc_runtime_types::packet::SubpacketEntry { offset, elem_count: 0 }
+                    ).collect();
+                    (entries, scanned.element_count, None, false)
                 }
             };
-        (schema_str, subpacket_index, element_count, diag, final_footer, body_start)
+        (schema_str, subpacket_entries, element_count, diag, final_footer, body_start)
     } else {
         return Err(MorlocError::Packet(format!(
             "file '{}' is neither a STREAM_PACKET nor a DATA_PACKET (cmd_type = {})",
@@ -4339,7 +4387,7 @@ fn parse_stream_file(
         schema_str,
         value_schema,
         elem_schema,
-        subpacket_index,
+        subpacket_entries,
         element_count,
         diag,
         final_footer,
@@ -4485,8 +4533,10 @@ struct StreamHeader {
 }
 
 /// Open a single DATA_PACKET file as a one-sub-packet IFile.
-/// Returns `(value_schema_str, subpacket_index, element_count)`.
-/// `value_schema_str` is the file's full payload schema string.
+/// Returns `(value_schema_str, subpacket_entries, element_count)`
+/// where `subpacket_entries` is a single-element vec `[SubpacketEntry
+/// { offset: 0, elem_count: <Array size> }]`. `value_schema_str` is
+/// the file's full payload schema string.
 ///
 /// For files whose payload is `[a]` (a list), element_count is the
 /// array's length and bracket access on the IFile is valid. For
@@ -4501,7 +4551,7 @@ fn open_data_packet(
     path: &str,
     mmap_ptr: AbsPtr,
     mmap_size: u64,
-) -> Result<(String, Vec<u64>, u64), MorlocError> {
+) -> Result<(String, Vec<morloc_runtime_types::packet::SubpacketEntry>, u64), MorlocError> {
     if mmap_size < 32 {
         return Err(MorlocError::Packet("file too short for a packet header".into()));
     }
@@ -4590,9 +4640,18 @@ fn open_data_packet(
         } else {
             0
         };
-    // subpacket_index = [0]: the "sub-packet" is the whole file
-    // packet, whose header begins at byte 0.
-    Ok((value_schema_str, vec![0], element_count))
+    // subpacket_entries = [{ offset: 0, elem_count }]: the "sub-packet"
+    // is the whole file packet, whose header begins at byte 0. The
+    // element count is the Array header's size field when the value is
+    // list-shaped, 0 otherwise.
+    Ok((
+        value_schema_str,
+        vec![morloc_runtime_types::packet::SubpacketEntry {
+            offset: 0,
+            elem_count: element_count,
+        }],
+        element_count,
+    ))
 }
 
 fn parse_stream_header(mmap_ptr: AbsPtr, size: u64) -> Result<StreamHeader, MorlocError> {
@@ -4672,7 +4731,7 @@ fn read_subpacket_format(
 
 #[derive(Debug)]
 struct ParsedFooter {
-    subpacket_index: Vec<u64>,
+    subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
     element_count: u64,
     diag: Option<StreamDiag>,
     final_footer: bool,
@@ -4736,7 +4795,8 @@ fn try_read_footer(
         return Ok(None);
     }
 
-    let mut subpacket_index = Vec::new();
+    let mut subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry> =
+        Vec::new();
     let mut diag: Option<StreamDiag> = None;
     let mut final_footer = false;
     let mut footer_status =
@@ -4748,7 +4808,7 @@ fn try_read_footer(
                 diag = Some(StreamDiag::from_bytes(body)?);
             }
             METADATA_TYPE_SUBPACKET_INDEX => {
-                subpacket_index =
+                subpacket_entries =
                     morloc_runtime_types::packet::decode_subpacket_index(body)?;
             }
             METADATA_TYPE_FOOTER_STATUS => {
@@ -4766,7 +4826,7 @@ fn try_read_footer(
         .unwrap_or(0);
 
     Ok(Some(ParsedFooter {
-        subpacket_index,
+        subpacket_entries,
         element_count,
         diag,
         final_footer,
@@ -4952,127 +5012,24 @@ pub(crate) fn reject_non_list_stream_schema(
     }
 }
 
-/// Build the cumulative element-count index for this entry, if not
-/// already cached. Idempotent.
-fn ensure_elem_index(local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
+/// Build the cumulative element-count vector from the footer's
+/// per-sub-packet counts, if not already cached. Idempotent; built
+/// lazily on first bracket access. Bracket lookups use
+/// `partition_point` over the returned vec to locate a global index's
+/// sub-packet.
+fn ensure_elem_cum(local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
     if local.subpacket_elem_cum.is_some() {
         return Ok(());
     }
-    let n = local.subpacket_index_local.len();
+    let n = local.subpacket_entries_local.len();
     let mut cum = Vec::with_capacity(n + 1);
     cum.push(0u64);
-    for &subpacket_off in &local.subpacket_index_local {
-        let sz = read_subpacket_element_count(
-            local.mmap_ptr,
-            local.mmap_size,
-            subpacket_off,
-            &local.elem_schema,
-        )?;
+    for entry in &local.subpacket_entries_local {
         let last = *cum.last().unwrap();
-        cum.push(last.saturating_add(sz));
+        cum.push(last.saturating_add(entry.elem_count));
     }
     local.subpacket_elem_cum = Some(cum);
     Ok(())
-}
-
-/// Read the element count from a sub-packet's payload header. The
-/// payload of each sub-packet is a voidstar Array; the first 16 bytes
-/// are `{ size: usize, data: RelPtr }`. For compressed sub-packets we
-/// decompress the whole sub-packet just to read those 16 bytes — the
-/// element-count index is built once at open time so the per-sub-packet
-/// cost is amortised against many subsequent random-access reads.
-fn read_subpacket_element_count(
-    mmap_ptr: AbsPtr,
-    file_size: u64,
-    subpacket_off: u64,
-    elem_schema: &Schema,
-) -> Result<u64, MorlocError> {
-    if subpacket_off + 32 > file_size {
-        return Err(MorlocError::Packet(
-            "sub-packet header past file end during element-count scan".into(),
-        ));
-    }
-    // SAFETY: bounds checked.
-    let hdr_bytes = unsafe {
-        std::slice::from_raw_parts(
-            (mmap_ptr as *const u8).add(subpacket_off as usize),
-            32,
-        )
-    };
-    let header = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
-    // SAFETY: header.is_data() implies CommandData variant.
-    let data = unsafe { header.command.data };
-    if data.compression != PACKET_COMPRESSION_NONE
-        && data.compression != PACKET_COMPRESSION_ZSTD
-    {
-        return Err(MorlocError::Packet(format!(
-            "sub-packet at {} has unknown compression byte {}",
-            subpacket_off, data.compression,
-        )));
-    }
-    let payload_off = subpacket_off + 32 + header.offset as u64;
-    let payload_len = header.length as u64;
-    if payload_off + payload_len > file_size {
-        return Err(MorlocError::Packet(
-            "sub-packet payload past file end".into(),
-        ));
-    }
-    // SAFETY: payload region bounded.
-    let payload = unsafe {
-        std::slice::from_raw_parts(
-            (mmap_ptr as *const u8).add(payload_off as usize),
-            payload_len as usize,
-        )
-    };
-    let payload_bytes: std::borrow::Cow<'_, [u8]> =
-        if data.compression == PACKET_COMPRESSION_ZSTD {
-            // Decompress to read the 16-byte Array header.
-            // `decompress_packet` expects a full packet (header + meta +
-            // payload), not a payload-only slice, so reconstruct it.
-            let mut full = Vec::with_capacity(32 + header.offset as usize + payload_len as usize);
-            full.extend_from_slice(hdr_bytes);
-            // Include metadata block.
-            let meta_off = subpacket_off + 32;
-            if meta_off + header.offset as u64 > file_size {
-                return Err(MorlocError::Packet(
-                    "sub-packet metadata block past file end".into(),
-                ));
-            }
-            // SAFETY: bounds checked.
-            let meta = unsafe {
-                std::slice::from_raw_parts(
-                    (mmap_ptr as *const u8).add(meta_off as usize),
-                    header.offset as usize,
-                )
-            };
-            full.extend_from_slice(meta);
-            full.extend_from_slice(payload);
-            let decompressed =
-                morloc_runtime_types::compression::decompress_packet(&full)?;
-            // Find the payload region in the decompressed packet.
-            let dec_hdr = PacketHeader::from_bytes(
-                decompressed[..32].try_into().unwrap(),
-            )?;
-            let dec_payload_start = 32 + dec_hdr.offset as usize;
-            let dec_payload_end = dec_payload_start + dec_hdr.length as usize;
-            std::borrow::Cow::Owned(
-                decompressed[dec_payload_start..dec_payload_end].to_vec(),
-            )
-        } else {
-            std::borrow::Cow::Borrowed(payload)
-        };
-
-    // The payload starts with the Array struct: { size: usize, data: RelPtr }.
-    let _ = elem_schema; // unused here but documents the contract
-    if payload_bytes.len() < std::mem::size_of::<shm_types_crate::Array>() {
-        return Err(MorlocError::Packet(
-            "sub-packet payload too short for Array header".into(),
-        ));
-    }
-    // Read size (usize, little-endian on supported platforms).
-    let size_bytes: [u8; 8] = payload_bytes[..8].try_into().unwrap();
-    let size = u64::from_le_bytes(size_bytes);
-    Ok(size)
 }
 
 /// Parse a sub-packet's header at `subpacket_off` and return the
@@ -5136,13 +5093,13 @@ fn materialize_subpacket(
     local: &ProcessLocalSlot,
     sub_k: usize,
 ) -> Result<SubpacketSrc, MorlocError> {
-    if sub_k >= local.subpacket_index_local.len() {
+    if sub_k >= local.subpacket_entries_local.len() {
         return Err(MorlocError::Other(format!(
             "sub-packet index {} out of range (have {})",
-            sub_k, local.subpacket_index_local.len(),
+            sub_k, local.subpacket_entries_local.len(),
         )));
     }
-    let subpacket_off = local.subpacket_index_local[sub_k];
+    let subpacket_off = local.subpacket_entries_local[sub_k].offset;
     let (src, _on_disk_size) = materialize_subpacket_at_offset(local, subpacket_off)?;
     Ok(src)
 }
@@ -5269,11 +5226,11 @@ fn resolve_global_index(
     local: &mut ProcessLocalSlot,
     requested: i64,
 ) -> Result<(usize, u64), MorlocError> {
-    ensure_elem_index(local)?;
+    ensure_elem_cum(local)?;
     let cum = local
         .subpacket_elem_cum
         .as_ref()
-        .expect("ensure_elem_index just populated subpacket_elem_cum");
+        .expect("ensure_elem_cum just populated subpacket_elem_cum");
     let total = *cum.last().unwrap_or(&0u64) as i64;
     let idx = if requested < 0 { requested + total } else { requested };
     if idx < 0 || idx >= total {
@@ -5408,7 +5365,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         return Err(MorlocError::Io(std::io::Error::last_os_error()));
     }
     let mut dest_cursor: u64 = 0;
-    let mut merged_index: Vec<u64> = Vec::new();
+    let mut merged_entries: Vec<morloc_runtime_types::packet::SubpacketEntry> = Vec::new();
     let mut total_element_count: u64 = 0;
     let mut reference_schema: Option<String> = None;
 
@@ -5470,7 +5427,8 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         // Last sub-packet's end: take the largest start offset from the
         // index and read its size, OR if no index, body_start (empty
         // source contributes nothing).
-        let body_end = if let Some(&last_off) = parsed.subpacket_index.last() {
+        let body_end = if let Some(last_entry) = parsed.subpacket_entries.last() {
+            let last_off = last_entry.offset;
             match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
                 Ok(sz) => last_off + sz,
                 Err(e) => {
@@ -5520,10 +5478,13 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             dest_cursor += body_start;
         }
 
-        // Record sub-packet offsets remapped to the dest cursor space.
-        for &src_off in &parsed.subpacket_index {
-            let delta = src_off - body_start;
-            merged_index.push(dest_cursor + delta);
+        // Remap each source's entries into the dest cursor space.
+        for entry in &parsed.subpacket_entries {
+            let delta = entry.offset - body_start;
+            merged_entries.push(morloc_runtime_types::packet::SubpacketEntry {
+                offset: dest_cursor + delta,
+                elem_count: entry.elem_count,
+            });
         }
         if body_end > body_start {
             let body_len = body_end - body_start;
@@ -5539,11 +5500,11 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
 
     // Write the merged final footer (small, fine to pwrite from userspace).
     let mut diag = morloc_runtime_types::packet::StreamDiag::new();
-    diag.subpacket_count = merged_index.len() as u64;
+    diag.subpacket_count = merged_entries.len() as u64;
     diag.element_count = total_element_count;
     let footer = morloc_runtime_types::packet::make_final_footer_packet(
         &diag,
-        &merged_index,
+        &merged_entries,
         morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
     );
     if let Err(e) = pwrite_all_fd(dest_fd, &footer, dest_cursor) {
@@ -5800,11 +5761,11 @@ fn ifile_bracket_slice_against_slot(
                 handle_kind_name(slot.kind),
             )));
         }
-        ensure_elem_index(local)?;
+        ensure_elem_cum(local)?;
         let cum = local
             .subpacket_elem_cum
             .as_ref()
-            .expect("ensure_elem_index populates subpacket_elem_cum");
+            .expect("ensure_elem_cum populates subpacket_elem_cum");
         let n: i64 = *cum.last().unwrap_or(&0u64) as i64;
 
         // Normalise bounds Python-style.
@@ -7827,6 +7788,7 @@ fn compute_view_chunk_elems(elem_count: u64, file_size: u64) -> u64 {
 pub fn shared_open_ifile_recovered(
     path: &str,
     caller_offsets: &[u64],
+    caller_counts: &[u64],
     caller_element_count: u64,
 ) -> Result<i64, MorlocError> {
     use std::sync::atomic::Ordering;
@@ -7850,13 +7812,29 @@ pub fn shared_open_ifile_recovered(
         return shared_open_ifile(path);
     }
 
-    // Choose the offsets to publish. Prefer caller's if non-empty
+    // Choose the entries to publish. Prefer caller's if non-empty
     // (nexus's forward-scan may have counted better than the runtime's).
-    let (subpacket_index, element_count) = if !caller_offsets.is_empty() {
-        (caller_offsets.to_vec(), caller_element_count)
-    } else {
-        (parsed.subpacket_index.clone(), parsed.element_count)
-    };
+    // Caller must pass a counts slice of matching length (or empty for
+    // the delegated path).
+    if !caller_offsets.is_empty() && caller_offsets.len() != caller_counts.len() {
+        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        return Err(MorlocError::Other(format!(
+            "shared_open_ifile_recovered: caller_offsets has {} entries but \
+             caller_counts has {} entries; they must match",
+            caller_offsets.len(), caller_counts.len(),
+        )));
+    }
+    let (subpacket_entries, element_count): (Vec<morloc_runtime_types::packet::SubpacketEntry>, u64) =
+        if !caller_offsets.is_empty() {
+            (
+                caller_offsets.iter().zip(caller_counts.iter()).map(|(&offset, &elem_count)|
+                    morloc_runtime_types::packet::SubpacketEntry { offset, elem_count }
+                ).collect(),
+                caller_element_count,
+            )
+        } else {
+            (parsed.subpacket_entries.clone(), parsed.element_count)
+        };
 
     // Allocate a slot and publish (mirrors shared_open_ifile).
     let (_slot_idx, slot) = match allocate_slot_cas() {
@@ -7871,8 +7849,8 @@ pub fn shared_open_ifile_recovered(
     let publish_result = (|| -> Result<u64, MorlocError> {
         let path_rel = shm_copy_bytes(path.as_bytes())?;
         let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
-        let idx_rel = if !subpacket_index.is_empty() {
-            shm_copy_u64_slice(&subpacket_index)?
+        let idx_rel = if !subpacket_entries.is_empty() {
+            shm_copy_entries_slice(&subpacket_entries)?
         } else {
             shm_types_crate::RELNULL
         };
@@ -7883,9 +7861,9 @@ pub fn shared_open_ifile_recovered(
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = schema_rel;
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_index = idx_rel;
-            (*mp).subpacket_index_len = subpacket_index.len() as u64;
-            (*mp).subpacket_index_cap = 0;
+            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries_len = subpacket_entries.len() as u64;
+            (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = parsed.body_start;
             // Mark as clean so downstream bracket walkers don't refuse
             // the handle. The trust boundary is at this function: if
@@ -7931,7 +7909,7 @@ pub fn shared_open_ifile_recovered(
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
-        subpacket_index_local: subpacket_index,
+        subpacket_entries_local: subpacket_entries,
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
     };
@@ -8161,10 +8139,14 @@ mod tests {
         sub_values: &[&[i64]],
     ) -> Vec<u8> {
         let mut out = make_stream_header_block(elem_schema);
-        let mut subpacket_offsets: Vec<u64> = Vec::with_capacity(sub_values.len());
+        let mut subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry> =
+            Vec::with_capacity(sub_values.len());
         let mut element_count: u64 = 0;
         for values in sub_values {
-            subpacket_offsets.push(out.len() as u64);
+            subpacket_entries.push(morloc_runtime_types::packet::SubpacketEntry {
+                offset: out.len() as u64,
+                elem_count: values.len() as u64,
+            });
             let sub = build_int_voidstar_subpacket(values);
             out.extend_from_slice(&sub);
             element_count += values.len() as u64;
@@ -8175,7 +8157,7 @@ mod tests {
         diag.subpacket_count = sub_values.len() as u64;
         diag.element_count = element_count;
         let footer = make_final_footer_packet(
-            &diag, &subpacket_offsets,
+            &diag, &subpacket_entries,
             morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
         );
         out.extend_from_slice(&footer);
@@ -8451,14 +8433,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Same as the end-to-end test, but the file lacks a final footer
-    /// (writer crashed). Verifies forward-scan recovery rebuilds the
-    /// sub-packet index. `length f` returns 0 in this path today
-    /// (element-count only sourced from the StreamDiag); bracket_index
-    /// still works because we read each sub-packet's Array.size during
-    /// the lazy element-count build.
+    /// A footer-less stream file (writer crashed before writing the
+    /// final footer) cannot be opened as an IFile: random access
+    /// requires the per-sub-packet element counts, and those are only
+    /// recorded in the final footer's SUBPACKET_INDEX block. IStream
+    /// forward-drain remains available for such files.
     #[test]
-    fn ifile_recovery_without_footer() {
+    fn ifile_rejects_footerless_stream() {
         crate::init_test_shm();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_norec", std::process::id()
@@ -8476,22 +8457,13 @@ mod tests {
         // No footer, no EOF tail -- simulates a crashed writer.
         std::fs::write(&path, &bytes).unwrap();
 
-        let handle = open_ifile(path.to_str().unwrap()).unwrap();
-        // length f from StreamDiag is unavailable -> 0. The walker
-        // still works because ensure_elem_index reads each sub-packet
-        // payload's Array.size on first random-access query.
-        assert_eq!(handle_length(handle).unwrap(), 0);
-
-        let cases: &[(i64, i64)] = &[(0, 7), (2, 9), (3, 11)];
-        for &(idx, expected) in cases {
-            let ptr = ifile_bracket_index(handle, idx)
-                .expect(&format!("bracket_index({}) failed", idx));
-            let value = unsafe { *(ptr as *const i64) };
-            assert_eq!(value, expected);
-            shm::shfree(ptr).unwrap();
-        }
-
-        close_handle(handle).unwrap();
+        let err = open_ifile(path.to_str().unwrap()).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("no final footer"),
+            "expected rejection to mention missing footer, got: {}",
+            msg,
+        );
         let _ = std::fs::remove_file(&path);
     }
 
