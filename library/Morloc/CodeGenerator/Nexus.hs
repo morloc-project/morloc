@@ -692,7 +692,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           | v == MBT.istreamVar ->
               OpenX <$> type2schema t <*> pure MBT.mlcKindIStream <*> toNexusExpr path
           | v == MBT.ostreamVar ->
-              OpenOStreamX <$> type2schema elemT <*> toNexusExpr path
+              OpenOStreamX <$> type2schema (MBT.handleStorageType v elemT)
+                           <*> toNexusExpr path
           | otherwise ->
               MM.throwSourcedError iOpen $
                 "@open: result type must be IFile/IStream/OStream, got " <> pretty v
@@ -716,20 +717,17 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> toNexusExpr valE
         <*> toNexusExpr handleE
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
-      AppendX <$> type2schema (peelHandleElemT t) <*> toNexusExpr pathE
+      AppendX <$> type2schema (handleStorageOfResult t) <*> toNexusExpr pathE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
       ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
       FlushX <$> toNexusExpr handle
-    -- @stdin / @stdout / @stderr: nullary. Result type is
-    -- <IO> IStream a / <IO> OStream a; peel the effect and the head
-    -- to get the element type, then serialise its schema.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
-      StdinX <$> type2schema (peelHandleElemT t)
+      StdinX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
-      StdoutX <$> type2schema (peelHandleElemT t)
+      StdoutX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
-      StderrX <$> type2schema (peelHandleElemT t)
+      StderrX <$> type2schema (handleStorageOfResult t)
     -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
     -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
     -- path normally constructs IFileWalkX directly from PatCall +
@@ -818,12 +816,12 @@ checkRealBounds i (RealFinite v) s = case s of
               <> " overflows Float64 (|x| > 1.8e308)"
 checkRealBounds _ _ _ = return ()
 
--- | Strip a leading `<IO>` and one `AppT` head to reach the element
--- type carried by an `IStream a` / `OStream a` / `IFile a` result.
-peelHandleElemT :: Type -> Type
-peelHandleElemT (EffectT _ inner) = peelHandleElemT inner
-peelHandleElemT (AppT _ (a : _)) = a
-peelHandleElemT other = other
+-- | Storage type of an intrinsic's `<IO> (Handle a)` result. Peels the
+-- effect + handle head and delegates to 'MBT.handleStorageType'.
+handleStorageOfResult :: Type -> Type
+handleStorageOfResult t = case stripEffect t of
+  AppT (VarT v) (a : _) -> MBT.handleStorageType v a
+  other -> other
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr

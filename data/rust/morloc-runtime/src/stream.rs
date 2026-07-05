@@ -1056,12 +1056,20 @@ fn attach_process_local_slot(
     let parsed_schema = if schema_str.is_empty() {
         Schema::primitive(SerialType::Nil)
     } else {
-        parse_schema(&schema_str).map_err(|e| {
+        let s = parse_schema(&schema_str).map_err(|e| {
             MorlocError::Other(format!(
                 "stream handle {:#x}: unparseable schema '{}': {}",
                 handle, schema_str, e,
             ))
-        })?
+        })?;
+        // Streams (IStream / OStream) are list-shaped; IFile is a
+        // single-value container that may hold any shape (like a
+        // `Maybe a`). Only reject non-list on stream-kind attaches.
+        if kind == MLC_KIND_ISTREAM || kind == MLC_KIND_OSTREAM {
+            let target = format!("handle {:#x}", handle);
+            reject_non_list_stream_schema(&s, "stream slot attach", &target)?;
+        }
+        s
     };
     // Copy IFile sub-packet index from SHM into a process-local Vec.
     // This is a one-time cost at attach; subsequent index lookups
@@ -1086,33 +1094,7 @@ fn attach_process_local_slot(
     let is_data_packet = slot.body_start == 0
         && subpacket_index_local == [0];
 
-    // value_schema / elem_schema derivation must mirror
-    // `parse_stream_file`: STREAM files stash the ELEMENT schema in
-    // `schema_str` (so the value is `[element]`), whereas DATA_PACKET
-    // files stash the FULL value schema (so the element is
-    // `parameters[0]` when Array). Getting this wrong on a lazy
-    // attach makes the walker interpret record bytes with an
-    // inflated element schema and mis-resolve relptrs downstream.
-    let (value_schema, elem_schema) = match kind {
-        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
-            if is_data_packet {
-                let elem = if parsed_schema.serial_type == SerialType::Array
-                    && !parsed_schema.parameters.is_empty()
-                {
-                    parsed_schema.parameters[0].clone()
-                } else {
-                    parsed_schema.clone()
-                };
-                (parsed_schema.clone(), elem)
-            } else {
-                (array_schema(&parsed_schema), parsed_schema.clone())
-            }
-        }
-        x if x == MLC_KIND_OSTREAM => {
-            (array_schema(&parsed_schema), parsed_schema.clone())
-        }
-        _ => (parsed_schema.clone(), parsed_schema.clone()),
-    };
+    let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
 
     let cap_bytes = read_cache_cap_env();
     let cache = Box::new(StreamCache::new(cap_bytes));
@@ -1541,6 +1523,15 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             return Err(e);
         }
     };
+    // IStream reads element-by-element, so the file's value must be
+    // list-shaped. STREAM_PACKET files always are (writer invariant);
+    // a DATA_PACKET holding a scalar value cannot be read as IStream.
+    if let Err(e) = reject_non_list_stream_schema(
+        &parsed.value_schema, "IStream open", path,
+    ) {
+        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        return Err(e);
+    }
     // Forward-only access: kernel readahead is the right hint.
     unsafe {
         libc::madvise(
@@ -1666,7 +1657,9 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     // the subpacket_index we accumulate carries meaningful stream-
     // position offsets (matches on-disk offsets for a naive `> file`
     // redirect; still meaningful as a stream position on pipes).
-    let elem_schema_parsed = if schema_str.is_empty() {
+    // The schema string is the value schema `[a]` -- streams are
+    // list-shaped and the on-disk metadata must match the wire data.
+    let value_schema_parsed = if schema_str.is_empty() {
         morloc_runtime_types::schema::Schema::primitive(
             morloc_runtime_types::schema::SerialType::Nil,
         )
@@ -1681,9 +1674,14 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             )
         })
     };
+    if kind == MLC_KIND_OSTREAM && !schema_str.is_empty() {
+        reject_non_list_stream_schema(
+            &value_schema_parsed, "open_stdio", stdio_kind_name(stdio_kind),
+        )?;
+    }
     let stdio_body_start: u64 = if kind == MLC_KIND_OSTREAM {
         morloc_runtime_types::packet::make_stream_header_block(
-            &elem_schema_parsed,
+            &value_schema_parsed,
         ).len() as u64
     } else {
         0
@@ -1778,14 +1776,26 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     // Install a process-local slot so the buffered write path
     // (`with_process_local_slot` -> `append_one_element`) can flow
     // straight through the same machinery as file-backed OStreams.
+    // For OStream, value_schema is `[a]` and elem_schema is
+    // parameters[0]. For IStream, both fields hold the placeholder --
+    // IStream stdio reads discover the real element type from
+    // incoming packet headers.
+    let (value_schema_cached, elem_schema_cached) =
+        if kind == MLC_KIND_OSTREAM && !schema_str.is_empty() {
+            let elem = value_schema_parsed.parameters[0].clone();
+            (value_schema_parsed, elem)
+        } else {
+            let value = value_schema_parsed.clone();
+            (value, value_schema_parsed)
+        };
     let local = ProcessLocalSlot {
         cached_generation: new_gen,
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
         fd: -1,                    // stdio writes go through RPC, not fd
         cache: Box::new(StreamCache::new(0)),
-        value_schema: array_schema(&elem_schema_parsed),
-        elem_schema: elem_schema_parsed,
+        value_schema: value_schema_cached,
+        elem_schema: elem_schema_cached,
         subpacket_index_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
@@ -1976,10 +1986,9 @@ fn stdio_next_via_rpc(handle: i64, stdio_kind: u8)
 fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
     -> Result<crate::shm::AbsPtr, MorlocError>
 {
-    // Wrap the slot's element schema in an Array<...> so the reader
-    // materializes `[a]` (matching @next's return type).
-    let elem_schema_str = shared_handle_schema_str(handle)?;
-    let value_schema_str = format!("a{}", elem_schema_str);
+    // The slot's schema is the full value schema `[a]` -- streams are
+    // list-shaped -- so the reader materializes `[a]` directly.
+    let value_schema_str = shared_handle_schema_str(handle)?;
     let c_schema = std::ffi::CString::new(value_schema_str.as_bytes())
         .map_err(|_| MorlocError::Other(
             "@next: schema string contains NUL".into(),
@@ -2065,6 +2074,9 @@ pub fn shared_open_ostream_with_schema(
 
     // Parse schema first so a malformed spec never destroys prior
     // content. Empty is a placeholder for the bridge.
+    // The schema string is the value schema `[a]` -- streams are
+    // list-shaped and the on-disk metadata block must match the wire
+    // data type.
     let parsed_schema = if schema_str.is_empty() {
         morloc_runtime_types::schema::Schema::primitive(SerialType::Nil)
     } else {
@@ -2072,6 +2084,7 @@ pub fn shared_open_ostream_with_schema(
             "OStream open: unparseable schema '{}': {}", schema_str, e,
         )))?
     };
+    reject_non_list_stream_schema(&parsed_schema, "OStream open", path)?;
     let header_bytes = make_stream_header_block(&parsed_schema);
 
     let fd = unsafe {
@@ -2171,18 +2184,16 @@ pub fn shared_open_ostream_with_schema(
         }
     };
 
-    // OStream: parse the schema once for caching. `array_schema`
-    // wraps it as `[a]` so @write payloads of type `[a]` match.
-    let elem_schema_parsed = if schema_str.is_empty() {
-        morloc_runtime_types::schema::Schema::primitive(
+    // Value schema is `[a]`, element is parameters[0]. Empty schema is
+    // a placeholder for the bridge and produces Nil for both fields.
+    let (value_schema_cached, elem_schema_cached) = if schema_str.is_empty() {
+        let nil = morloc_runtime_types::schema::Schema::primitive(
             morloc_runtime_types::schema::SerialType::Nil,
-        )
+        );
+        (nil.clone(), nil)
     } else {
-        parse_schema(schema_str).unwrap_or_else(|_| {
-            morloc_runtime_types::schema::Schema::primitive(
-                morloc_runtime_types::schema::SerialType::Nil,
-            )
-        })
+        let elem = parsed_schema.parameters[0].clone();
+        (parsed_schema, elem)
     };
     let local = ProcessLocalSlot {
         cached_generation: new_gen,
@@ -2190,8 +2201,8 @@ pub fn shared_open_ostream_with_schema(
         mmap_size: 0,
         fd,                       // opener holds flock for slot lifetime
         cache: Box::new(StreamCache::new(0)),
-        value_schema: array_schema(&elem_schema_parsed),
-        elem_schema: elem_schema_parsed,
+        value_schema: value_schema_cached,
+        elem_schema: elem_schema_cached,
         subpacket_index_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
@@ -4317,18 +4328,12 @@ fn parse_stream_file(
             "file '{}' has unparseable schema '{}': {}", path, schema_str, e
         ))
     })?;
-    let (value_schema, elem_schema) = if is_data_packet {
-        let elem = if parsed_schema.serial_type == SerialType::Array
-            && !parsed_schema.parameters.is_empty()
-        {
-            parsed_schema.parameters[0].clone()
-        } else {
-            parsed_schema.clone()
-        };
-        (parsed_schema.clone(), elem)
-    } else {
-        (array_schema(&parsed_schema), parsed_schema.clone())
-    };
+    // STREAM_PACKET is always list-shaped; DATA_PACKET (IFile) may
+    // hold any single value.
+    if !is_data_packet {
+        reject_non_list_stream_schema(&parsed_schema, "STREAM_PACKET read", path)?;
+    }
+    let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
 
     Ok(ParsedStreamFile {
         schema_str,
@@ -4901,9 +4906,8 @@ pub fn ifile_walk(
 //      `elem_schema.width` bytes for one element, or
 //      `n_out * elem_width + sub_block_allocs` for a slice.
 
-/// Container schema = Array(elem_schema). Constructed at runtime since
-/// each sub-packet's payload is `[a]` even though the stream's header
-/// stores the bare `a` schema.
+/// Container schema = Array(elem_schema). Used to build per-subpacket
+/// payload schemas from a cached element schema (e.g. adjust_relptrs).
 fn array_schema(elem: &Schema) -> Schema {
     Schema {
         serial_type: SerialType::Array,
@@ -4914,6 +4918,37 @@ fn array_schema(elem: &Schema) -> Schema {
         parameters: vec![elem.clone()],
         keys: Vec::new(),
         name: None,
+    }
+}
+
+/// Split a parsed on-disk schema into (value, elem). Streams and IFile
+/// DATA_PACKETs both carry the full value schema on disk: for Array,
+/// elem is `parameters[0]`; for a single-value IFile (e.g. `IFile Int`),
+/// value and elem are the same.
+fn derive_stream_schemas(parsed: &Schema) -> (Schema, Schema) {
+    if parsed.serial_type == SerialType::Array && !parsed.parameters.is_empty() {
+        (parsed.clone(), parsed.parameters[0].clone())
+    } else {
+        (parsed.clone(), parsed.clone())
+    }
+}
+
+/// Enforce the "streams are list-shaped" invariant. Returns a
+/// MorlocError::Schema on non-Array schemas naming the operation and
+/// target so the user sees which stream failed. `op` is a short label
+/// (e.g. "OStream open", "open_stdio"); `target` is the path or stdio
+/// stream name.
+pub(crate) fn reject_non_list_stream_schema(
+    schema: &Schema, op: &str, target: &str,
+) -> Result<(), MorlocError> {
+    if schema.serial_type == SerialType::Array {
+        Ok(())
+    } else {
+        Err(MorlocError::Schema(format!(
+            "{}: streams are only supported for list-shaped data, but \
+             '{}' has schema type {:?}. Wrap the value in a list.",
+            op, target, schema.serial_type,
+        )))
     }
 }
 
@@ -7705,11 +7740,11 @@ pub fn shared_view_data_to_stream(
 
     let in_handle = shared_open_ifile(in_path)?;
 
-    // Pull the element schema from the process-local slot. IFile is
-    // required by the schema-check contract to be list-valued; for
-    // DATA_PACKET the elem_schema is the array's element type.
-    let elem_schema_str = with_process_local_slot(in_handle, |local, _slot| {
-        Ok(schema_to_string(&local.elem_schema))
+    // Pull the value schema `[a]` from the process-local slot. Streams
+    // are list-shaped so the OStream we open takes the same schema as
+    // the input's on-disk value schema.
+    let value_schema_str = with_process_local_slot(in_handle, |local, _slot| {
+        Ok(schema_to_string(&local.value_schema))
     })?;
 
     // Element count for the loop bound.
@@ -7721,7 +7756,7 @@ pub fn shared_view_data_to_stream(
 
     let chunk_elems = compute_view_chunk_elems(elem_count, file_size);
 
-    let out_handle = shared_open_ostream_with_schema(out_path, &elem_schema_str)
+    let out_handle = shared_open_ostream_with_schema(out_path, &value_schema_str)
         .map_err(|e| {
             let _ = shared_discard_handle(in_handle);
             e

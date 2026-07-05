@@ -493,45 +493,32 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @open :: <IO> (OStream a): the element schema for `a` flows into
-    -- the runtime so it can write the stream header at open time. For
-    -- IFile/IStream the runtime reads the schema off disk; we return
-    -- Nothing for those and the codegen routes through the generic
-    -- `_mlc_open(path, kind)` entry.
-    intrinsicSchema m IntrOpen tf _ = case unwrapOpenHead tf of
-      Just (v, a) | v == BT.ostreamVar -> do
-        ast <- Serial.makeSerialAST m lang a
-        return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @open on IFile/IStream reads its schema off disk; codegen routes
+    -- through the generic `_mlc_open(path, kind)` entry so we return
+    -- Nothing. @open on OStream needs the storage schema at open time.
+    intrinsicSchema m IntrOpen tf _ = case unwrapHandleHead tf of
+      Just (v, a) | v == BT.ostreamVar ->
+        Just <$> renderStorageSchema m v a
       _ -> return Nothing
-    -- @append: schema is the element type so the C ABI's open path can
-    -- validate the existing file's schema before resuming.
-    intrinsicSchema m IntrAppend tf _ = do
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap (AppF _ (a : _)) = a  -- OStream a -> a
-          unwrap other = other
-          dataType = unwrap tf
-      ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @stdin / @stdout / @stderr: schema is the element type. The
-    -- result type is `<IO> (IStream a)` or `<IO> (OStream a)`; peel
-    -- the effect wrap and the handle head to get `a`.
+    intrinsicSchema m IntrAppend tf _ = case unwrapHandleHead tf of
+      Just (v, a) -> Just <$> renderStorageSchema m v a
+      Nothing     -> return Nothing
     intrinsicSchema m intr tf _
-      | intr `elem` [IntrStdin, IntrStdout, IntrStderr] = do
-          let peel (EffectF _ inner) = peel inner
-              peel (AppF _ (a : _)) = a
-              peel other = other
-              dataType = peel tf
-          ast <- Serial.makeSerialAST m lang dataType
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      | intr `elem` [IntrStdin, IntrStdout, IntrStderr] =
+          case unwrapHandleHead tf of
+            Just (v, a) -> Just <$> renderStorageSchema m v a
+            Nothing     -> return Nothing
     intrinsicSchema _ _ _ _ = return Nothing
 
-    -- Extract (Handle-tvar, element-tf) from the result type of `@open`.
-    -- The result is wrapped in <IO>; peel that, then accept either the
-    -- standalone bare `AppF` or a transparent newtype/optional pierce.
-    unwrapOpenHead :: TypeF -> Maybe (TVar, TypeF)
-    unwrapOpenHead (EffectF _ inner) = unwrapOpenHead inner
-    unwrapOpenHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
-    unwrapOpenHead _ = Nothing
+    renderStorageSchema :: Int -> TVar -> TypeF -> MorlocMonad Text
+    renderStorageSchema m v a = do
+      ast <- Serial.makeSerialAST m lang (BT.handleStorageTypeF v a)
+      return . render $ Serial.serialAstToMsgpackSchema ast
+
+    unwrapHandleHead :: TypeF -> Maybe (TVar, TypeF)
+    unwrapHandleHead (EffectF _ inner) = unwrapHandleHead inner
+    unwrapHandleHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
+    unwrapHandleHead _ = Nothing
 
     -- Render a TypeF as a user-facing Morloc type string (for @typeof).
     -- Uses the general type variable name (not the language-concrete one),

@@ -160,24 +160,25 @@ data IExpr
       -- ^ @stream :: IFile a -> <IO> IStream a: derive an IStream
       --   handle from an open IFile handle (independent fd/mmap/cursor).
   | IIntrinsicOpenOStream Int IExpr
-      -- ^ @open :: <IO> (OStream a): schemaId of the element type and
-      --   the path expression. The runtime creates the file and writes
-      --   the stream header with the schema metadata block.
+      -- ^ @open :: <IO> (OStream a): schemaId of the list-of-element
+      --   `[a]` (streams are list-shaped) and the path expression. The
+      --   runtime creates the file and writes the stream header with
+      --   the schema metadata block.
   | IIntrinsicWrite Int IExpr IExpr IExpr
       -- ^ @write: schemaId of the [a] value type, level, value, handle.
   | IIntrinsicAppend Int IExpr
-      -- ^ @append :: Str -> <IO> (OStream a): schemaId of `a`, path expr.
+      -- ^ @append :: Str -> <IO> (OStream a): schemaId of `[a]`, path.
   | IIntrinsicConcat IExpr IExpr
       -- ^ @concat :: [Str] -> Str -> <IO> (): paths expr, dest expr.
   | IIntrinsicFlush IExpr
       -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
       --   to be emitted as a sub-packet. Single-argument: handle expr.
   | IIntrinsicStdin Int
-      -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `a`.
+      -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStdout Int
-      -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `a`.
+      -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStderr Int
-      -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `a`.
+      -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
 
 data IParam = IParam Text (Maybe IType)
 

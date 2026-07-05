@@ -264,10 +264,10 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
 
 /// Read the leading `PACKET_TYPE_STREAM` header off fd 0, parse the
 /// metadata block, and enforce that its SCHEMA_STRING matches the
-/// opener's declared element schema (`expected_schema`, from the
-/// slot). Returns `Ok(true)` on match, `Ok(false)` if EOF was hit
-/// before any header bytes arrived, or an error on parse failure or
-/// schema mismatch.
+/// opener's declared value schema (`expected_schema`, from the slot).
+/// Returns `Ok(true)` on match, `Ok(false)` if EOF was hit before any
+/// header bytes arrived, or an error on parse failure or schema
+/// mismatch.
 ///
 /// The mismatch case is the whole point: `@stdin :: IStream Int` in
 /// a program consuming an `IStream Str` stream file must fail loudly

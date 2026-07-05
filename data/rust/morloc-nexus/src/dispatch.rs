@@ -1121,9 +1121,11 @@ fn run_remote_command(
     let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
 
     // Print using the C library for correct output. Top-level null-ish
-    // suppression (Unit and Optional-None producing empty stdout) lives
-    // inside the JSON path; binary formats always emit a well-formed
-    // stream so downstream consumers see the expected bytes.
+    // suppression (Unit and Optional-None producing empty stdout) is
+    // applied uniformly: JSON drops the output; `-f packet` skips its
+    // trailing DATA_PACKET emission so a program that streams through
+    // `@stdout` and returns Unit doesn't get a phantom packet appended
+    // past its stream footer. `--keep-null` overrides in both cases.
     print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
     unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 }
@@ -1277,6 +1279,16 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Packet => {
+            // Top-level Unit/Optional-None suppression: a program that
+            // returns `<IO> ()` after streaming its output through
+            // `@stdout` would otherwise get a trailing Unit DATA_PACKET
+            // appended past the stream footer, clobbering the tail
+            // magic. `--keep-null` opts back in.
+            if !config.keep_null
+                && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
+            {
+                return;
+            }
             // Normalize RPTR/FILE-source packets to inline MESG, then
             // optionally zstd-compress. The fd variant streams the
             // payload directly to stdout when the destination is a

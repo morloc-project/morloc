@@ -341,33 +341,22 @@ fn stream_stdin_dispatch(
         eprintln!("Error: stdin stream header metadata read: {}", e);
         process::clean_exit(1);
     }
-    // Element schema string from the first SCHEMA_STRING entry.
-    let mut elem_schema_str: Option<String> = None;
+    // Value schema string from the first SCHEMA_STRING entry. Streams
+    // are list-shaped so this is the full `[T]` schema.
+    let mut value_schema_str: Option<String> = None;
     for (kind, data) in iter_metadata(&meta) {
         if kind == METADATA_TYPE_SCHEMA_STRING {
-            elem_schema_str = Some(decode_schema_entry(data));
+            value_schema_str = Some(decode_schema_entry(data));
             break;
         }
     }
-    let elem_schema_str = match elem_schema_str {
+    let value_schema_str = match value_schema_str {
         Some(s) => s,
         None => {
             eprintln!("Error: stdin stream missing SCHEMA_STRING metadata");
             process::clean_exit(1);
         }
     };
-    let elem_schema = match parse_schema(&elem_schema_str) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: stdin stream element schema '{}': {}",
-                     elem_schema_str, e);
-            process::clean_exit(1);
-        }
-    };
-    let elem_c_schema = CSchema::from_rust(&elem_schema);
-    // For jsonl emission, we need the value schema `[T]`, since the
-    // voidstar we hand to `print_voidstar_jsonl` IS an Array.
-    let value_schema_str = format!("a{}", elem_schema_str);
     let value_schema = match parse_schema(&value_schema_str) {
         Ok(s) => s,
         Err(e) => {
@@ -376,6 +365,21 @@ fn stream_stdin_dispatch(
             process::clean_exit(1);
         }
     };
+    // Enforce list-shape at the reader boundary: streams are only
+    // supported for list-shaped data.
+    if value_schema.serial_type
+        != morloc_runtime_types::schema::SerialType::Array
+        || value_schema.parameters.is_empty()
+    {
+        eprintln!(
+            "Error: streams are only supported for list-shaped data, \
+             but stdin stream has schema '{}' (type {:?}).",
+            value_schema_str, value_schema.serial_type,
+        );
+        process::clean_exit(1);
+    }
+    let elem_schema = value_schema.parameters[0].clone();
+    let elem_c_schema = CSchema::from_rust(&elem_schema);
     let value_c_schema = CSchema::from_rust(&value_schema);
 
     // For -s output, open the destination OStream. `-o FILE` is
@@ -401,7 +405,7 @@ fn stream_stdin_dispatch(
                 process::clean_exit(1);
             }
         };
-        let schema_c = std::ffi::CString::new(elem_schema_str.clone()).unwrap();
+        let schema_c = std::ffi::CString::new(value_schema_str.clone()).unwrap();
         let mut errmsg: *mut c_char = ptr::null_mut();
         let h = unsafe {
             mlc_open_ostream(schema_c.as_ptr(), out_c.as_ptr(), &mut errmsg)
@@ -1292,11 +1296,11 @@ fn resolve_schema_str(args: &ViewArgs, cls: &Classification) -> Result<String, S
     {
         return Ok(s.clone());
     }
-    // Stream packets store the ELEMENT schema in metadata. The value
-    // schema at the view/loader level is `[T]`, so wrap with the
-    // Array marker (`a`) that the schema parser understands.
+    // Stream packets store the full value schema `[T]` in metadata --
+    // streams are list-shaped so the on-disk schema matches the wire
+    // data type exactly.
     if let Classification::MorlocStreamPacket { schema: Some(s), .. } = cls {
-        return Ok(format!("a{}", s));
+        return Ok(s.clone());
     }
     Err(format!(
         "no schema available for '{}'. \

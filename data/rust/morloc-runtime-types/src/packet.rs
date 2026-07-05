@@ -838,17 +838,23 @@ pub fn make_local_call_packet(midx: u32, arg_packets: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Build a stream-file prefix: the 32-byte STREAM header plus a
-/// metadata block carrying the element schema.
+/// metadata block carrying the value schema `[a]`.
 ///
-/// The result is *not* a complete packet — it is the opening bytes of
+/// The result is *not* a complete packet -- it is the opening bytes of
 /// a stream file. A writer appends one or more full DATA sub-packets
 /// after this prefix, then optionally a FOOTER packet plus the
-/// `STREAM_TAIL_SIZE`-byte EOF tail.
+/// `STREAM_TAIL_SIZE`-byte EOF tail. The STREAM header's `length` field
+/// is `STREAM_LENGTH_SENTINEL` (writers never touch the header again),
+/// and `offset` is the byte size of the metadata block.
 ///
-/// The STREAM header's `length` field is `STREAM_LENGTH_SENTINEL`
-/// (writers never touch the header again), and `offset` is the byte
-/// size of the metadata block.
+/// Debug-assert: callers must pass an Array schema (streams are
+/// list-shaped). Enforced at every entry via `reject_non_list_stream_schema`.
 pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
+    debug_assert!(
+        schema.serial_type == crate::schema::SerialType::Array,
+        "make_stream_header_block: non-Array schema {:?} (compiler bug)",
+        schema.serial_type,
+    );
     let schema_str = crate::schema::schema_to_string(schema);
     let schema_bytes = schema_str.as_bytes();
     let schema_len = schema_bytes.len() + 1; // null terminator

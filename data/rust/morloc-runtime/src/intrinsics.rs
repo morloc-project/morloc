@@ -1533,10 +1533,11 @@ pub unsafe extern "C" fn mlc_stdio_build_stream_header(
     0
 }
 
-/// Return a stdio slot's cached element-schema string as a
-/// libc::malloc'd NUL-terminated buffer. Used by the nexus stdio
-/// server to validate that an incoming STREAM_PACKET on stdin
-/// commits to the same element type the opener declared.
+/// Return a stdio slot's cached value-schema string as a
+/// libc::malloc'd NUL-terminated buffer. Streams are list-shaped so
+/// this is the full `[a]` schema. Used by the nexus stdio server to
+/// validate that an incoming STREAM_PACKET on stdin commits to the
+/// same wire type the opener declared.
 ///
 /// Returns 0 on success; caller frees `*out_buf` via libc::free.
 /// Returns non-zero and sets errmsg on failure.
