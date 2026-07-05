@@ -1,0 +1,24 @@
+-- Produces a stream file with 5 sub-packets. The Makefile then
+-- truncates the file's 8-byte EOF tail (and, in a second pass, the
+-- last sub-packet's payload) to exercise the footer-less recovery
+-- path of `morloc-nexus file`.
+
+module main
+  ( mkStream
+  )
+
+import root
+
+mkStream :: Str -> <IO> ()
+mkStream path = do
+  s <- @open path :: <IO> OStream Int
+  @write 0 s [1, 2]
+  @flush s
+  @write 0 s [3, 4]
+  @flush s
+  @write 0 s [5, 6]
+  @flush s
+  @write 0 s [7, 8]
+  @flush s
+  @write 0 s [9, 10]
+  @close s

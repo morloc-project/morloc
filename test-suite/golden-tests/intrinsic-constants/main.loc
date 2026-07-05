@@ -7,8 +7,8 @@ import root-r (idr)
 langstr :: <IO> (?[Str],?[Str],?[Str],?[Str])
 langstr = do
   @save  0 (idpy ["hi", @lang]) "z"
-  @savem (idpy ["hi", @lang]) "zp"
-  @savej (idpy ["hi", @lang]) "zj"
+  @savem "zp" (idpy ["hi", @lang])
+  @savej "zj" (idpy ["hi", @lang])
   xs  <- @load "z"
   ys  <- @load "zp"
   zs  <- @load "zj"

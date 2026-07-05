@@ -7,6 +7,43 @@ use std::ptr;
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
+// ── FFI wrapper helpers ────────────────────────────────────────────────────
+
+/// Decode a `*const c_char` FFI argument as a `&str`. Returns a typed
+/// error carrying the function and argument name so `wrap_c_call` can
+/// surface a uniform "fn: null <arg>" / "fn: <arg> not UTF-8" message.
+#[inline]
+unsafe fn cstr_arg<'a>(
+    p: *const c_char,
+    fn_name: &str,
+    arg_name: &str,
+) -> Result<&'a str, MorlocError> {
+    if p.is_null() {
+        return Err(MorlocError::Other(format!("{}: null {}", fn_name, arg_name)));
+    }
+    CStr::from_ptr(p)
+        .to_str()
+        .map_err(|_| MorlocError::Other(format!("{}: {} not UTF-8", fn_name, arg_name)))
+}
+
+/// Bracket an FFI body with `clear_errmsg` on entry, `set_errmsg` on
+/// error, and a caller-supplied error sentinel as the return value.
+/// The body uses `?` to short-circuit any `MorlocError`.
+#[inline]
+unsafe fn wrap_c_call<T, F>(errmsg: *mut *mut c_char, sentinel: T, f: F) -> T
+where
+    F: FnOnce() -> Result<T, MorlocError>,
+{
+    clear_errmsg(errmsg);
+    match f() {
+        Ok(v) => v,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            sentinel
+        }
+    }
+}
+
 // ── mlc_save: serialize to msgpack file ────────────────────────────────────
 
 // `level` is accepted for ABI uniformity with mlc_save_voidstar but is
@@ -95,12 +132,155 @@ pub unsafe extern "C" fn mlc_save_json(
     0
 }
 
-// ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
+// ── Voidstar data-packet emit ─────────────────────────────────────────────
+//
+// `mlc_save_voidstar` and `mlc_write_voidstar_data_packet_to_fd` both
+// build a MORLOC_DATA_PACKET (header + SCHEMA_STRING + optional
+// FRAME_INDEX + payload) from a voidstar. `build_voidstar_data_packet_parts`
+// does the shared work: flatten voidstar, build metadata, optionally
+// zstd-compress, assemble the 32-byte header. Emit strategies differ:
+// `mlc_save_voidstar` writes to a temp file then renames for atomicity;
+// the fd variant writes linearly to a caller-supplied fd.
 
-// On disk: 32-byte morloc packet header + flattened voidstar payload. When
-// `level > 0` the payload region is zstd-compressed and the header's
-// compression byte is set to PACKET_COMPRESSION_ZSTD; level == 0 writes
-// the payload uncompressed.
+// RAII wrapper for a libc::malloc'd buffer. Kept alive alongside
+// VoidstarDataPacketParts so payload_ptr stays valid on the uncompressed
+// path.
+struct CBlob(*mut u8);
+impl Drop for CBlob {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { libc::free(self.0 as *mut c_void); }
+        }
+    }
+}
+
+// Emit-ready components of a voidstar DATA packet. Holds the flattened
+// blob and optional compressed bytes so payload_ptr() borrows remain
+// valid for the parts' lifetime.
+struct VoidstarDataPacketParts {
+    hdr_bytes: [u8; 32],
+    metadata: Vec<u8>,
+    payload_len: usize,
+    // Uncompressed payload lives in blob; compressed payload lives in
+    // comp_bytes. Exactly one of the two is the payload source.
+    #[allow(dead_code)]
+    blob: CBlob,
+    comp_bytes: Option<Vec<u8>>,
+}
+
+impl VoidstarDataPacketParts {
+    fn payload_ptr(&self) -> *const u8 {
+        match &self.comp_bytes {
+            Some(b) => b.as_ptr(),
+            None => self.blob.0 as *const u8,
+        }
+    }
+}
+
+// Build packet parts. Returns None on error with errmsg set.
+unsafe fn build_voidstar_data_packet_parts(
+    data: *const c_void,
+    schema: *const CSchema,
+    level: u8,
+    errmsg: *mut *mut c_char,
+) -> Option<VoidstarDataPacketParts> {
+    extern "C" {
+        fn flatten_voidstar_to_buffer(
+            data: *const c_void, schema: *const CSchema,
+            out_buf: *mut *mut u8, out_size: *mut usize,
+            errmsg: *mut *mut c_char,
+        ) -> i32;
+    }
+
+    // Resolve level first so a bad value aborts before we allocate.
+    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
+        Ok(lvl) => lvl,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+
+    let mut blob: *mut u8 = ptr::null_mut();
+    let mut blob_size: usize = 0;
+    let mut err: *mut c_char = ptr::null_mut();
+    if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
+        *errmsg = err;
+        return None;
+    }
+    let blob = CBlob(blob);
+
+    // Self-describing SCHEMA_STRING lets IFile / `morloc-nexus file`
+    // read the payload schema straight from the packet metadata.
+    let schema_rs = crate::cschema::CSchema::to_rust(schema);
+    let schema_str = morloc_runtime_types::schema::schema_to_string(&schema_rs);
+    let mut schema_body = schema_str.as_bytes().to_vec();
+    schema_body.push(0); // NUL-terminator expected by decode_schema_entry
+    let base_meta = crate::packet::append_metadata_entry(
+        &[],
+        crate::packet::METADATA_TYPE_SCHEMA_STRING,
+        &schema_body,
+    );
+
+    let (metadata, comp_bytes, compression_byte, payload_len) = if clvl.is_none() {
+        (base_meta, None, crate::packet::PACKET_COMPRESSION_NONE, blob_size)
+    } else {
+        let raw_slice = std::slice::from_raw_parts(blob.0 as *const u8, blob_size);
+        match crate::compression::compress_payload_zstd(raw_slice, clvl) {
+            Ok((bytes, frames)) => {
+                let body = crate::packet::encode_frame_index_entry(&frames);
+                let metadata = crate::packet::append_metadata_entry(
+                    &base_meta,
+                    crate::packet::METADATA_TYPE_FRAME_INDEX,
+                    &body,
+                );
+                let payload_len = bytes.len();
+                (metadata, Some(bytes), crate::packet::PACKET_COMPRESSION_ZSTD, payload_len)
+            }
+            Err(e) => { set_errmsg(errmsg, &e); return None; }
+        }
+    };
+
+    let mut header = crate::packet::PacketHeader::data_mesg(
+        crate::packet::PACKET_FORMAT_VOIDSTAR,
+        payload_len as u64,
+    );
+    header.offset = metadata.len() as u32;
+    let mut hdr_bytes = header.to_bytes();
+    // Byte 15 is the data-command compression slot: 4 magic + 2 plain +
+    // 2 version + 2 flavor + 2 mode + 1 cmd_type + 1 source + 1 format.
+    hdr_bytes[15] = compression_byte;
+
+    Some(VoidstarDataPacketParts { hdr_bytes, metadata, payload_len, blob, comp_bytes })
+}
+
+// Write parts sequentially to fd. On failure returns the C errmsg
+// pointer produced by write_binary_fd; caller owns cleanup.
+unsafe fn write_data_packet_parts_to_fd(
+    fd: libc::c_int,
+    parts: &VoidstarDataPacketParts,
+) -> Result<(), *mut c_char> {
+    extern "C" {
+        fn write_binary_fd(
+            fd: i32, buf: *const c_char, count: usize,
+            errmsg: *mut *mut c_char,
+        ) -> i32;
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    if write_binary_fd(fd, parts.hdr_bytes.as_ptr() as *const c_char, parts.hdr_bytes.len(), &mut err) != 0 {
+        return Err(err);
+    }
+    if !parts.metadata.is_empty()
+        && write_binary_fd(fd, parts.metadata.as_ptr() as *const c_char, parts.metadata.len(), &mut err) != 0
+    {
+        return Err(err);
+    }
+    if parts.payload_len > 0
+        && write_binary_fd(fd, parts.payload_ptr() as *const c_char, parts.payload_len, &mut err) != 0
+    {
+        return Err(err);
+    }
+    Ok(())
+}
+
+// ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_voidstar(
     data: *const c_void,
@@ -111,35 +291,18 @@ pub unsafe extern "C" fn mlc_save_voidstar(
 ) -> i32 {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn flatten_voidstar_to_buffer(
-            data: *const c_void, schema: *const CSchema,
-            out_buf: *mut *mut u8, out_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_binary_fd(
-            fd: i32, buf: *const c_char, count: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
-
-    let mut err: *mut c_char = ptr::null_mut();
-
-    // Resolve the compression level upfront so a bad level aborts before
-    // we touch the filesystem.
-    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
-        Ok(lvl) => lvl,
-        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+    let parts = match build_voidstar_data_packet_parts(data, schema, level, errmsg) {
+        Some(p) => p,
+        None => return 1,
     };
 
-    // Get directory for temp file
+    // Temp file in the target's parent dir for atomic rename on success.
     let path_str = CStr::from_ptr(path).to_string_lossy();
     let parent = std::path::Path::new(path_str.as_ref()).parent();
     let dir = match parent {
         Some(p) if !p.as_os_str().is_empty() => p.to_string_lossy().into_owned(),
         _ => ".".to_string(),
     };
-
     let tmp_template = format!("{}/morloc-tmp_XXXXXX\0", dir);
     let mut tmp_buf: Vec<u8> = tmp_template.into_bytes();
     let fd = libc::mkstemp(tmp_buf.as_mut_ptr() as *mut c_char);
@@ -148,149 +311,52 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
-    // Write packet header placeholder
-    let header_size = std::mem::size_of::<crate::packet::PacketHeader>();
-    let zeros = vec![0u8; header_size];
-    if write_binary_fd(fd, zeros.as_ptr() as *const c_char, header_size, &mut err) != 0 {
+    if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = err;
+        *errmsg = e;
         return 1;
     }
-
-    // Flatten voidstar
-    let mut blob: *mut u8 = ptr::null_mut();
-    let mut blob_size: usize = 0;
-    if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
-        libc::close(fd);
-        libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = err;
-        return 1;
-    }
-
-    // Build the SCHEMA_STRING metadata entry. Self-describing files
-    // let IFile (and tooling like `morloc-nexus file`) read the payload
-    // schema directly. We always emit this -- the size cost is tiny
-    // and makes saved files unambiguous to inspect after the fact.
-    let schema_rs = crate::cschema::CSchema::to_rust(schema);
-    let schema_str =
-        morloc_runtime_types::schema::schema_to_string(&schema_rs);
-    let mut schema_body = schema_str.as_bytes().to_vec();
-    schema_body.push(0); // NUL-terminator matches read_schema_from_meta's
-                        // decode_schema_entry expectation.
-    let base_meta = crate::packet::append_metadata_entry(
-        &[],
-        crate::packet::METADATA_TYPE_SCHEMA_STRING,
-        &schema_body,
-    );
-
-    // If a compression level is selected, swap the flattened buffer for
-    // its zstd multi-frame form before writing the payload region. The
-    // raw blob is freed either way; the compressed bytes live in `comp`
-    // for the rest of the function when level > 0. The frame index is
-    // appended to the metadata block (after SCHEMA_STRING) between the
-    // header and the payload. The block is padded to
-    // METADATA_BLOCK_ALIGNMENT so the payload starts on the same
-    // aligned offset other emit paths use (32-byte alignment).
-    struct CompressedOut {
-        bytes: Vec<u8>,
-        metadata_block: Vec<u8>,
-    }
-    let comp: Option<CompressedOut> = if clvl.is_none() {
-        None
-    } else {
-        let raw_slice = std::slice::from_raw_parts(blob as *const u8, blob_size);
-        match crate::compression::compress_payload_zstd(raw_slice, clvl) {
-            Ok((bytes, frames)) => {
-                let body = crate::packet::encode_frame_index_entry(&frames);
-                let metadata_block = crate::packet::append_metadata_entry(
-                    &base_meta,
-                    crate::packet::METADATA_TYPE_FRAME_INDEX,
-                    &body,
-                );
-                Some(CompressedOut { bytes, metadata_block })
-            }
-            Err(e) => {
-                libc::free(blob as *mut c_void);
-                libc::close(fd);
-                libc::unlink(tmp_buf.as_ptr() as *const c_char);
-                set_errmsg(errmsg, &e);
-                return 1;
-            }
-        }
-    };
-
-    let (payload_ptr, payload_len, compression_byte, metadata_block): (*const u8, usize, u8, &[u8]) =
-        match &comp {
-            Some(c) => (
-                c.bytes.as_ptr(),
-                c.bytes.len(),
-                crate::packet::PACKET_COMPRESSION_ZSTD,
-                c.metadata_block.as_slice(),
-            ),
-            None => (
-                blob as *const u8,
-                blob_size,
-                crate::packet::PACKET_COMPRESSION_NONE,
-                base_meta.as_slice(),
-            ),
-        };
-    let metadata_size = metadata_block.len();
-
-    // Metadata (SCHEMA_STRING + optional FRAME_INDEX + padding) sits
-    // between the header placeholder and the payload.
-    if !metadata_block.is_empty() {
-        if write_binary_fd(
-            fd,
-            metadata_block.as_ptr() as *const c_char,
-            metadata_block.len(),
-            &mut err,
-        ) != 0 {
-            libc::free(blob as *mut c_void);
-            libc::close(fd);
-            libc::unlink(tmp_buf.as_ptr() as *const c_char);
-            *errmsg = err;
-            return 1;
-        }
-    }
-
-    if write_binary_fd(fd, payload_ptr as *const c_char, payload_len, &mut err) != 0 {
-        libc::free(blob as *mut c_void);
-        drop(comp);
-        libc::close(fd);
-        libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = err;
-        return 1;
-    }
-    libc::free(blob as *mut c_void);
-    drop(comp);
-
-    // Seek back and write the real header. data_mesg fills in everything
-    // except the compression byte; patch byte 15 in the serialized header
-    // when level > 0 to record PACKET_COMPRESSION_ZSTD. (Byte 15 is the
-    // data-command compression slot: 4 magic + 2 plain + 2 version + 2
-    // flavor + 2 mode + 1 cmd_type + 1 source + 1 format = 15.)
-    libc::lseek(fd, 0, libc::SEEK_SET);
-    let mut header = crate::packet::PacketHeader::data_mesg(
-        crate::packet::PACKET_FORMAT_VOIDSTAR,
-        payload_len as u64,
-    );
-    header.offset = metadata_size as u32;
-    let mut hdr_bytes = header.to_bytes();
-    hdr_bytes[15] = compression_byte;
-    write_binary_fd(fd, hdr_bytes.as_ptr() as *const c_char, hdr_bytes.len(), &mut err);
 
     libc::fsync(fd);
     libc::close(fd);
 
-    // Atomic rename
     if libc::rename(tmp_buf.as_ptr() as *const c_char, path) != 0 {
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
         set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
         return 1;
     }
-
     0
+}
+
+// ── mlc_write_voidstar_data_packet_to_fd ──────────────────────────────────
+//
+// Companion to `mlc_save_voidstar` for cases where the destination is
+// stdout or an already-opened fd (e.g. `morloc-nexus view --pattern`
+// with data-packet output, which has no source packet to hand
+// `normalize_data_packet_to_fd`). Returns total bytes written, or -1
+// on error.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
+    data: *const c_void,
+    schema: *const CSchema,
+    level: u8,
+    fd: libc::c_int,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+
+    let parts = match build_voidstar_data_packet_parts(data, schema, level, errmsg) {
+        Some(p) => p,
+        None => return -1,
+    };
+
+    if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
+        *errmsg = e;
+        return -1;
+    }
+
+    (parts.hdr_bytes.len() + parts.metadata.len() + parts.payload_len) as i64
 }
 
 // ── mlc_load: load from file (auto-detect format) ─────────────────────────
@@ -534,8 +600,11 @@ pub unsafe extern "C" fn mlc_open(
 
 /// `@open path :: <IO> (OStream T)` -- typed open. The codegen has the
 /// element schema string for T in hand at compile time and threads it
-/// through. The file is created (`O_CREAT | O_EXCL`), flock-acquired,
-/// and the stream header is written with the schema metadata block.
+/// through. The file is created or silently overwritten (`O_CREAT`,
+/// UNIX convention -- use `@append` for append semantics), a
+/// non-blocking exclusive flock is acquired to reject live concurrent
+/// writers, and the stream header is written with the schema metadata
+/// block.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_open_ostream(
     schema_str: *const c_char,
@@ -1493,10 +1562,11 @@ pub unsafe extern "C" fn mlc_stdio_build_stream_header(
     0
 }
 
-/// Return a stdio slot's cached element-schema string as a
-/// libc::malloc'd NUL-terminated buffer. Used by the nexus stdio
-/// server to validate that an incoming STREAM_PACKET on stdin
-/// commits to the same element type the opener declared.
+/// Return a stdio slot's cached value-schema string as a
+/// libc::malloc'd NUL-terminated buffer. Streams are list-shaped so
+/// this is the full `[a]` schema. Used by the nexus stdio server to
+/// validate that an incoming STREAM_PACKET on stdin commits to the
+/// same wire type the opener declared.
 ///
 /// Returns 0 on success; caller frees `*out_buf` via libc::free.
 /// Returns non-zero and sets errmsg on failure.
@@ -1525,4 +1595,149 @@ pub unsafe extern "C" fn mlc_stdio_slot_schema(
     *dst.add(n) = 0;
     *out_buf = dst;
     0
+}
+
+// ── `morloc-nexus view` conversion helpers ────────────────────────────────
+
+/// Convert a MORLOC_STREAM_PACKET file to another MORLOC_STREAM_PACKET
+/// file. Backs `morloc-nexus view -s` on stream input. `schema_override`
+/// may be null (use the input's stored element schema) or point to a
+/// UTF-8 schema string. `compression_level` in [0, 22] selects the
+/// output's per-sub-packet zstd level (0 = uncompressed).
+///
+/// Writes the sub-packet count to `*out_subpackets` on success.
+/// Returns 0 on success, non-zero on failure with `errmsg` set.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_view_stream_to_stream(
+    in_path: *const c_char,
+    out_path: *const c_char,
+    compression_level: u8,
+    schema_override: *const c_char,
+    out_subpackets: *mut u64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    const FN: &str = "mlc_view_stream_to_stream";
+    wrap_c_call(errmsg, 1, || {
+        let in_str = cstr_arg(in_path, FN, "in_path")?;
+        let out_str = cstr_arg(out_path, FN, "out_path")?;
+        let schema_opt = if schema_override.is_null() {
+            None
+        } else {
+            Some(cstr_arg(schema_override, FN, "schema")?)
+        };
+        let n = crate::stream::shared_view_stream_to_stream(
+            in_str, out_str, compression_level, schema_opt,
+        )?;
+        if !out_subpackets.is_null() {
+            *out_subpackets = n;
+        }
+        Ok(0)
+    })
+}
+
+/// Convert a MORLOC_DATA_PACKET file to a MORLOC_STREAM_PACKET file.
+/// Backs `morloc-nexus view -s` on data-packet input. Opens the input
+/// as an IFile (refuses compressed DATA -- matches the runtime's own
+/// IFile-open invariant), chunks the array via bracket-slice, and
+/// writes each chunk to a fresh OStream.
+///
+/// Writes the sub-packet count to `*out_subpackets` on success.
+/// Returns 0 on success, non-zero on failure with `errmsg` set.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_view_data_to_stream(
+    in_path: *const c_char,
+    out_path: *const c_char,
+    compression_level: u8,
+    out_subpackets: *mut u64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    const FN: &str = "mlc_view_data_to_stream";
+    wrap_c_call(errmsg, 1, || {
+        let in_str = cstr_arg(in_path, FN, "in_path")?;
+        let out_str = cstr_arg(out_path, FN, "out_path")?;
+        let n = crate::stream::shared_view_data_to_stream(
+            in_str, out_str, compression_level,
+        )?;
+        if !out_subpackets.is_null() {
+            *out_subpackets = n;
+        }
+        Ok(0)
+    })
+}
+
+/// Open a footer-less MORLOC_STREAM_PACKET file as an IFile, trusting
+/// caller-supplied forward-scan output. Backs `morloc-nexus view
+/// --pattern` on a truncated stream: the caller runs a forward scan
+/// (either via `morloc_runtime_types::packet::forward_scan_subpackets`
+/// or the nexus-side seek+read walker) and hands the offsets +
+/// element_count here.
+///
+/// If the file has a clean final footer, this function delegates to
+/// `mlc_open_ifile` and ignores the caller's offsets -- the on-disk
+/// footer is authoritative.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_ifile_recovered(
+    path: *const c_char,
+    subpacket_offsets: *const u64,
+    subpacket_counts: *const u64,
+    n_offsets: u64,
+    element_count: u64,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    const FN: &str = "mlc_open_ifile_recovered";
+    wrap_c_call(errmsg, -1, || {
+        let path_str = cstr_arg(path, FN, "path")?;
+        let offsets_slice: &[u64] = if n_offsets == 0 || subpacket_offsets.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(subpacket_offsets, n_offsets as usize)
+        };
+        let counts_slice: &[u64] = if n_offsets == 0 || subpacket_counts.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(subpacket_counts, n_offsets as usize)
+        };
+        crate::stream::shared_open_ifile_recovered(
+            path_str, offsets_slice, counts_slice, element_count,
+        )
+    })
+}
+
+/// Materialise a stream sub-packet from a caller-supplied byte buffer
+/// into a fresh SHM voidstar `Array<T>`. Given the sub-packet's full
+/// bytes (32-byte header + metadata + payload) and its element
+/// schema, returns the SHM AbsPtr to the newly-allocated array. The
+/// caller owns the block and is responsible for freeing via
+/// `mlc_shfree` (or the active `eval_arena` will reclaim it on scope
+/// drop).
+///
+/// Used by `morloc-nexus view -` when the input is a
+/// MORLOC_STREAM_PACKET on stdin: nexus reads one sub-packet at a
+/// time from fd 0, calls this to materialise each into a voidstar,
+/// and hands the voidstar to the appropriate emitter
+/// (`print_voidstar_jsonl`, `mlc_write`, `mlc_save_voidstar`).
+///
+/// Handles the same compression byte cases as
+/// `materialize_subpacket_at_offset`'s mmap-based path
+/// (`PACKET_COMPRESSION_NONE` and `PACKET_COMPRESSION_ZSTD`).
+#[no_mangle]
+pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(
+    bytes: *const u8,
+    n: u64,
+    elem_schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    const FN: &str = "mlc_materialize_subpacket_from_bytes";
+    wrap_c_call(errmsg, ptr::null_mut(), || {
+        if bytes.is_null() {
+            return Err(MorlocError::Other(format!("{}: null bytes", FN)));
+        }
+        if elem_schema.is_null() {
+            return Err(MorlocError::Other(format!("{}: null schema", FN)));
+        }
+        let slice = std::slice::from_raw_parts(bytes, n as usize);
+        let rs = CSchema::to_rust(elem_schema);
+        let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs)?;
+        Ok(p as *mut c_void)
+    })
 }

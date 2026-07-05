@@ -1,6 +1,6 @@
 -- @flush on an empty buffer is a clean no-op: no spurious empty
 -- sub-packet appears on disk. Two consecutive @flush calls before
--- the first @write produce no sub-packets at all. A subsequent
+-- the first @write produce subsequent no sub-packets at all. A
 -- @write + @flush produces exactly ONE sub-packet.
 --
 -- Without this guarantee, careless user code that calls @flush
@@ -19,7 +19,7 @@ writeWithLeadingEmptyFlushes path = do
   o <- @open path :: <IO> OStream Int
   @flush o
   @flush o
-  @write 0 [100, 200, 300] o
+  @write 0 o [100, 200, 300]
   @flush o
   @close o
 

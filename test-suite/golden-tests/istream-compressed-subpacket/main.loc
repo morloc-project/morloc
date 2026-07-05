@@ -6,7 +6,7 @@
 -- and hand back the original elements identically.
 --
 -- The level is pinned on the first @write: subsequent writes must
--- pass the same level or @write errors out. v1 chooses to error
+-- pass the same level or @write errors error out. v1 chooses to
 -- rather than silently re-encode, because mixing compression levels
 -- in one stream is almost always a bug.
 --
@@ -26,7 +26,7 @@ import root
 testCompressedReadback :: Str -> <IO> [Int]
 testCompressedReadback path = do
   o <- @open path :: <IO> OStream Int
-  @write 3 [100, 200, 300, 400, 500] o
+  @write 3 o [100, 200, 300, 400, 500]
   @close o
   s <- @open path :: <IO> IStream Int
   @next s
@@ -35,18 +35,18 @@ testCompressedReadback path = do
 -- Verifies that the cursor advances through compressed-payload
 -- bytes correctly (header.length is the on-disk byte count, not
 -- the uncompressed size).
--- `@flush o` after each @write forces three distinct compressed
+-- `@flush o` after each @write forces compressed three distinct
 -- sub-packets on disk. Without `@flush`, the three writes coalesce
 -- into one packet at @close and the test would see one big payload
 -- instead of three.
 testCompressedThreeBatch :: Str -> <IO> [Int]
 testCompressedThreeBatch path = do
   o <- @open path :: <IO> OStream Int
-  @write 3 [1, 2, 3] o
+  @write 3 o [1, 2, 3]
   @flush o
-  @write 3 [40, 50] o
+  @write 3 o [40, 50]
   @flush o
-  @write 3 [600, 700, 800, 900] o
+  @write 3 o [600, 700, 800, 900]
   @close o
   s <- @open path :: <IO> IStream Int
   @next s

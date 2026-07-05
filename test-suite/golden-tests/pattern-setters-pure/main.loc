@@ -4,6 +4,9 @@ module main
   , setLastHet
   , setReorderArgs
   , setMixedNested
+  , setInt32Lit
+  , setUInt32Lit
+  , setMixedWidthTwo
   )
 
 -- Pure-morloc setter exports: each evaluates entirely in the nexus
@@ -30,3 +33,38 @@ setReorderArgs = .(.z = 99, .x = "first") { x = "old", y = 1.5, z = 0 }
 -- Heterogeneous record containing a tuple field, with one setter on a
 -- scalar key and another via a chained selector into the tuple.
 setMixedNested = .(.x = 42, .y.0 = "rewritten") { x = 0, y = ("orig", 1), z = 3.14 }
+
+-- Numeric-literal defaulting on a fixed-width integer field. The
+-- setter value `42` is an integer literal; the target slot is Int32
+-- via the record signature. Should compile (Int literals inhabit any
+-- integer-family type when checked against a concrete width) and set
+-- .n to 42. Regression for the setter-path analogue of the IntrMap
+-- literal-freezing bug: the setter synth clause synths set-values
+-- BEFORE checking the receiver, so `42` freezes to Int and the
+-- receiver check against `{n :: Int32}` explodes with
+-- "Cannot compare types Int32 and Int".
+setInt32Lit :: Row32
+setInt32Lit = .(.n = 42) { n = 0, s = "hi" }
+
+-- Same bug shape but on UInt32, ruling out any Int-specific fluke.
+setUInt32Lit :: RowU32
+setUInt32Lit = .(.n = 100) { n = 0, s = "hi" }
+
+-- Two literals of the same shape, one for each integer-family field
+-- with a different width. Exercises whether per-slot defaulting
+-- propagates independently through the group setter.
+setMixedWidthTwo :: MixedRow
+setMixedWidthTwo = .(.a = 7, .b = 1000) { a = 0, b = 0, tag = "x" }
+
+record Row32 where
+  n :: Int32
+  s :: Str
+
+record RowU32 where
+  n :: UInt32
+  s :: Str
+
+record MixedRow where
+  a :: Int8
+  b :: UInt32
+  tag :: Str

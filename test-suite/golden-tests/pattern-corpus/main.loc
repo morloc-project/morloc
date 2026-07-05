@@ -1,0 +1,244 @@
+-- Cross-language walker corpus. Every exported function pairs a
+-- morloc-native pattern application (recorded via @savem to a
+-- reference msgpack file) with a return value that the nexus emits
+-- as a data packet. The Makefile then pipes the packet through
+-- `morloc-nexus view --pattern <same pattern>` and diffs the two
+-- msgpack files byte-for-byte. Agreement on every case means the
+-- morloc compiler's pattern desugar and the nexus's pattern walker
+-- produce the same value on the same inputs.
+--
+-- Walker is fully general: every parseable pattern is executable.
+--
+-- KNOWN COMPILER LIMITATIONS (not walker limitations) that make some
+-- reference-value comparisons impossible; the walker still handles
+-- them but the compiler can't emit a comparison packet:
+--   * `.field.[i]` on a list-typed field (record-broadcast followed
+--     by bracket-index): type-inference mismatch on the desugared
+--     tree (`expected: a [] [(name, b)]` vs `inferred: [a [] [(name,
+--     Str), (age, Int)]]`). Walker OK.
+
+module main
+  ( -- flat list of ints
+    flatIdx
+  , flatIdxNeg
+  , flatSlice
+    -- list of tuples (non-broadcast paths)
+  , pairsIdxField0
+    -- list of tuples (broadcast paths)
+  , pairsSliceIdx0
+  , pairsSliceIdx1
+    -- list of records
+  , recSliceName
+  , recSliceAge
+  , recIdxName
+    -- nested record
+  , nestedLabel
+  , nestedMemberName
+    -- chained field access broadcast over list of records
+  , chainedFieldOnList
+    -- slice broadcast then key then bracket-index (two-map layers)
+  , nestedSliceMemberFirst
+    -- ---- deep patterns ----
+    -- nested slice on [[Int]]
+  , nestedSliceOuter
+  , nestedSliceBoth
+    -- slice-of-slice with different bounds
+  , nestedSliceInner
+    -- slice + bracket-index broadcast
+  , sliceIndexInner
+  , sliceIndexNeg
+    -- slice + group multi-field projection
+  , recSliceGroupPair
+    -- triple-deep slice chain
+  , tripleSliceIndex
+  )
+
+import root
+
+record Person where
+  name :: Str
+  age :: Int
+record Py => Person = "dict"
+
+record NestedRow where
+  label :: Str
+  members :: [Person]
+record Py => NestedRow = "dict"
+
+record Deep where
+  inner :: Person
+record Py => Deep = "dict"
+
+-- === Flat list of Int ===
+flatIdx :: Str -> <IO> [Int]
+flatIdx ref = do
+  let xs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+  @savem ref (.[2] xs)
+  xs
+
+flatIdxNeg :: Str -> <IO> [Int]
+flatIdxNeg ref = do
+  let xs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+  @savem ref (.[-1] xs)
+  xs
+
+flatSlice :: Str -> <IO> [Int]
+flatSlice ref = do
+  let xs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+  @savem ref (.[3:7] xs)
+  xs
+
+-- === List of tuples, non-broadcast paths ===
+pairsIdxField0 :: Str -> <IO> [(Int, Int)]
+pairsIdxField0 ref = do
+  let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+  @savem ref (.[2].0 xs)
+  xs
+
+-- === List of tuples, broadcast paths ===
+pairsSliceIdx0 :: Str -> <IO> [(Int, Int)]
+pairsSliceIdx0 ref = do
+  let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+  @savem ref (.[0:2].0 xs)
+  xs
+
+pairsSliceIdx1 :: Str -> <IO> [(Int, Int)]
+pairsSliceIdx1 ref = do
+  let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+  @savem ref (.[0:2].1 xs)
+  xs
+
+-- === List of records (record broadcast works) ===
+recSliceName :: Str -> <IO> [Person]
+recSliceName ref = do
+  let xs =
+        [ {name = "Alice", age = 30}
+        , {name = "Bob",   age = 25}
+        , {name = "Carol", age = 40}
+        ]
+  @savem ref (.[0:2].name xs)
+  xs
+
+recSliceAge :: Str -> <IO> [Person]
+recSliceAge ref = do
+  let xs =
+        [ {name = "Alice", age = 30}
+        , {name = "Bob",   age = 25}
+        , {name = "Carol", age = 40}
+        ]
+  @savem ref (.[0:3].age xs)
+  xs
+
+recIdxName :: Str -> <IO> [Person]
+recIdxName ref = do
+  let xs =
+        [ {name = "Alice", age = 30}
+        , {name = "Bob",   age = 25}
+        , {name = "Carol", age = 40}
+        ]
+  @savem ref (.[1].name xs)
+  xs
+
+-- === Nested record (top-level not list-shaped) ===
+nestedLabel :: Str -> <IO> NestedRow
+nestedLabel ref = do
+  let x =
+        { label = "team-a"
+        , members =
+            [ {name = "Alice", age = 30}
+            , {name = "Bob",   age = 25}
+            ]
+        }
+  @savem ref (.label x)
+  x
+
+nestedMemberName :: Str -> <IO> NestedRow
+nestedMemberName ref = do
+  let x =
+        { label = "team-a"
+        , members =
+            [ {name = "Alice", age = 30}
+            , {name = "Bob",   age = 25}
+            ]
+        }
+  @savem ref (.members.[0].name x)
+  x
+
+-- === Chained field access broadcast over list of records ===
+chainedFieldOnList :: Str -> <IO> [Deep]
+chainedFieldOnList ref = do
+  let xs =
+        [ {inner = {name = "Alice", age = 30}}
+        , {inner = {name = "Bob",   age = 25}}
+        , {inner = {name = "Carol", age = 40}}
+        ]
+  @savem ref (.[0:3].inner.name xs)
+  xs
+
+-- === Slice broadcast, then key access, then bracket-index ===
+-- Exercises two IntrMap-mediated layers plus a bracket step: the
+-- outer slice's IntrMap wraps the lambda body `.members.[0]`, which
+-- itself is a key access followed by a bracket-index into the
+-- list-typed field.
+nestedSliceMemberFirst :: Str -> <IO> [NestedRow]
+nestedSliceMemberFirst ref = do
+  let xs =
+        [ {label = "team-a", members = [{name = "Alice", age = 30}, {name = "Amy",  age = 22}]}
+        , {label = "team-b", members = [{name = "Bob",   age = 25}, {name = "Bea",  age = 31}]}
+        , {label = "team-c", members = [{name = "Carol", age = 40}, {name = "Cody", age = 19}]}
+        ]
+  @savem ref (.[0:2].members.[0] xs)
+  xs
+
+-- === Deep patterns on [[Int]] ===
+nestedSliceOuter :: Str -> <IO> [[Int]]
+nestedSliceOuter ref = do
+  let xs = [[1,2,3],[4,5,6],[7,8,9]]
+  @savem ref (.[0:2] xs)
+  xs
+
+nestedSliceBoth :: Str -> <IO> [[Int]]
+nestedSliceBoth ref = do
+  let xs = [[1,2,3],[4,5,6],[7,8,9]]
+  @savem ref (.[:].[:] xs)
+  xs
+
+nestedSliceInner :: Str -> <IO> [[Int]]
+nestedSliceInner ref = do
+  let xs = [[1,2,3],[4,5,6],[7,8,9]]
+  @savem ref (.[0:2].[1:3] xs)
+  xs
+
+sliceIndexInner :: Str -> <IO> [[Int]]
+sliceIndexInner ref = do
+  let xs = [[1,2,3],[4,5,6],[7,8,9]]
+  @savem ref (.[:].[0] xs)
+  xs
+
+sliceIndexNeg :: Str -> <IO> [[Int]]
+sliceIndexNeg ref = do
+  let xs = [[1,2,3],[4,5,6],[7,8,9]]
+  @savem ref (.[:].[-1] xs)
+  xs
+
+-- === Slice + group multi-field projection (records) ===
+recSliceGroupPair :: Str -> <IO> [Person]
+recSliceGroupPair ref = do
+  let xs =
+        [ {name = "Alice", age = 30}
+        , {name = "Bob",   age = 25}
+        , {name = "Carol", age = 40}
+        ]
+  @savem ref (.[0:2].(.name,.age) xs)
+  xs
+
+-- === Triple-deep slice chain on [[[Int]]] ===
+tripleSliceIndex :: Str -> <IO> [[[Int]]]
+tripleSliceIndex ref = do
+  let xs =
+        [ [[1,2],[3,4]]
+        , [[5,6],[7,8]]
+        , [[9,10],[11,12]]
+        ]
+  @savem ref (.[:].[:].[0] xs)
+  xs

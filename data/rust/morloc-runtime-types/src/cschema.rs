@@ -184,3 +184,26 @@ impl CSchema {
         if !cs.name.is_null() { let _ = CString::from_raw(cs.name); }
     }
 }
+
+/// True when the top-level wire value under `ptr` is "null-ish": either
+/// Unit (Nil) or an Optional whose leading RelPtr is RELNULL. Reads two
+/// values total (the schema discriminant and, for Optional, one RelPtr);
+/// no tree walk, no allocation. Nested null inside a container is not
+/// detected -- that would lose structural information.
+///
+/// # Safety
+/// `schema` must be a valid CSchema pointer. `ptr` must point at the
+/// voidstar wire form for that schema (only read for Optional).
+pub unsafe fn is_top_null(schema: *const CSchema, ptr: *const u8) -> bool {
+    if schema.is_null() {
+        return false;
+    }
+    match (*schema).serial_type {
+        x if x == SerialType::Nil as u32 => true,
+        x if x == SerialType::Optional as u32 => {
+            let relptr = *(ptr as *const crate::shm_types::RelPtr);
+            relptr == crate::shm_types::RELNULL
+        }
+        _ => false,
+    }
+}

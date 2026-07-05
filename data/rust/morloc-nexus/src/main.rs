@@ -5,6 +5,7 @@
 //! function calls to them over Unix sockets.
 
 mod cli;
+mod convert;
 mod dispatch;
 mod file;
 mod help;

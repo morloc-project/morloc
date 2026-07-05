@@ -28,10 +28,14 @@ use std::path::Path;
 use std::ptr;
 
 use morloc_runtime_types::packet::{
-    decode_schema_entry, iter_metadata, packet_compression_name, packet_entrypoint_name,
-    packet_format_name, packet_source_name, PacketHeader, METADATA_TYPE_SCHEMA_STRING,
-    PACKET_COMPRESSION_NONE, PACKET_MAGIC, PACKET_TYPE_CALL, PACKET_TYPE_DATA,
-    PACKET_TYPE_PING,
+    decode_footer_status, decode_schema_entry, decode_stream_tail, decode_subpacket_index,
+    iter_metadata, packet_compression_name, packet_entrypoint_name, packet_format_name,
+    packet_source_name, PacketHeader, StreamDiag, StreamDiagView, SubpacketEntry,
+    FOOTER_STATUS_CLOSED, FOOTER_STATUS_FAILED, FOOTER_STATUS_PAUSED, FOOTER_STATUS_REPAIRED,
+    METADATA_TYPE_FOOTER_FINAL, METADATA_TYPE_FOOTER_STATUS, METADATA_TYPE_SCHEMA_STRING,
+    METADATA_TYPE_STREAM_DIAG, METADATA_TYPE_SUBPACKET_INDEX, PACKET_COMPRESSION_NONE,
+    PACKET_MAGIC, PACKET_TYPE_CALL, PACKET_TYPE_DATA, PACKET_TYPE_PING, PACKET_TYPE_STREAM,
+    STREAM_TAIL_SIZE,
 };
 use rmp::Marker;
 
@@ -76,19 +80,77 @@ pub enum ArgEntry {
     Malformed(String),
 }
 
+/// Trailer state of a stream file. `Missing` means the 8-byte EOF tail
+/// did not carry the STREAM_TAIL_MAGIC, so no footer packet is present.
+/// `Temp` is a footer that carries only the diagnostic block (writer
+/// still in progress). `Final` also carries a status byte set by the
+/// writer at close time; the subpacket count lives on `diag`.
+/// `Missing` means the on-disk EOF tail is absent (writer crashed or
+/// stdout redirected without close); the `walk` field, when non-None,
+/// carries what a bounded forward walk of sub-packet headers found.
+/// The on-disk state is unchanged either way -- `file` never repairs
+/// the packet.
+#[derive(Debug, Clone)]
+pub enum FooterInfo {
+    Missing { walk: Option<WalkSummary> },
+    Temp { diag: StreamDiagView },
+    Final {
+        diag: StreamDiagView,
+        status: u8,
+        /// Per-sub-packet `(offset, elem_count)` entries recovered from
+        /// the footer's SUBPACKET_INDEX block. Verbose renderers print
+        /// the head of this list; JSON emits it in full.
+        entries: Vec<SubpacketEntry>,
+    },
+}
+
+/// Result of a bounded forward walk of sub-packet headers on a
+/// footer-less stream file. Purely diagnostic -- the walker only
+/// reads; nothing is written back to the file.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkSummary {
+    pub subpacket_count: u64,
+    pub element_count: u64,
+    /// True iff the walk stopped at a partial trailing sub-packet
+    /// (writer crashed mid-write).
+    pub partial: bool,
+    /// Number of sub-packets whose element count was not tallied
+    /// (compressed payload, count-decoding skipped for perf).
+    pub compressed_uncounted: u64,
+    /// True iff the walk hit the sub-packet count cap and stopped
+    /// early. When true, `subpacket_count` reflects the cap and
+    /// `element_count` covers only the sub-packets actually walked.
+    pub scan_capped: bool,
+}
+
+/// Default sub-packet-count cap for the footer-less forward scan.
+/// Overridable via `MORLOC_FILE_MAX_SCAN_SUBPACKETS`. Keeps `file`'s
+/// fast-classification contract intact even on pathological inputs
+/// (e.g. writer that flushes after every element).
+pub const DEFAULT_FILE_MAX_SCAN_SUBPACKETS: u64 = 10_000;
+
+fn file_max_scan_subpackets() -> u64 {
+    std::env::var("MORLOC_FILE_MAX_SCAN_SUBPACKETS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_FILE_MAX_SCAN_SUBPACKETS)
+}
+
 /// Result of classifying one file.
 #[derive(Debug, Clone)]
 pub enum Classification {
     MorlocDataPacket {
         arg: DataArg,
-        total_bytes: u64,
     },
     MorlocCallPacket {
         midx: u32,
         entrypoint: u8,
         args: Vec<ArgEntry>,
         payload_bytes: u64,
-        total_bytes: u64,
+    },
+    MorlocStreamPacket {
+        schema: Option<String>,
+        footer: FooterInfo,
     },
     MorlocPingPacket,
     Json,
@@ -568,34 +630,21 @@ fn classify_morloc_packet<R: Read + Seek>(
 
     let outer_offset = { hdr.offset } as u64;
     let outer_length = { hdr.length };
-    let declared_total = 32u64
-        .checked_add(outer_offset)
-        .and_then(|n| n.checked_add(outer_length))
-        .unwrap_or(u64::MAX);
-    if file_size != declared_total {
-        let kind = if file_size < declared_total {
-            "truncated"
-        } else {
-            "oversize"
-        };
-        return Classification::Error(format!(
-            "{} morloc data packet: header declares {} bytes, file is {} bytes",
-            kind, declared_total, file_size
-        ));
-    }
 
     match hdr.command_type() {
         PACKET_TYPE_DATA => {
-            let arg = match read_data_arg(f, &hdr, outer_offset, outer_length) {
-                Ok(a) => a,
-                Err(e) => return Classification::Error(e),
-            };
-            Classification::MorlocDataPacket {
-                arg,
-                total_bytes: declared_total,
+            if let Err(e) = check_declared_total(outer_offset, outer_length, file_size) {
+                return Classification::Error(e);
+            }
+            match read_data_arg(f, &hdr, outer_offset, outer_length) {
+                Ok(arg) => Classification::MorlocDataPacket { arg },
+                Err(e) => Classification::Error(e),
             }
         }
         PACKET_TYPE_CALL => {
+            if let Err(e) = check_declared_total(outer_offset, outer_length, file_size) {
+                return Classification::Error(e);
+            }
             let midx = unsafe { hdr.command.call.midx };
             let entrypoint = unsafe { hdr.command.call.entrypoint };
             let args = walk_call_args(f, outer_length);
@@ -604,14 +653,296 @@ fn classify_morloc_packet<R: Read + Seek>(
                 entrypoint,
                 args,
                 payload_bytes: outer_length,
-                total_bytes: declared_total,
             }
         }
-        PACKET_TYPE_PING => Classification::MorlocPingPacket,
+        PACKET_TYPE_PING => {
+            if let Err(e) = check_declared_total(outer_offset, outer_length, file_size) {
+                return Classification::Error(e);
+            }
+            Classification::MorlocPingPacket
+        }
+        PACKET_TYPE_STREAM => classify_stream_packet(f, file_size, outer_offset),
         other => Classification::Error(format!(
             "unknown morloc packet command type: 0x{:02x}",
             other
         )),
+    }
+}
+
+/// Confirm the on-disk file size matches the header-declared total
+/// (`32 + offset + length`). STREAM packets skip this: their length
+/// field is the sentinel `u64::MAX` and the wire shape is instead
+/// defined by an EOF tail.
+fn check_declared_total(
+    outer_offset: u64,
+    outer_length: u64,
+    file_size: u64,
+) -> Result<(), String> {
+    let declared_total = 32u64
+        .checked_add(outer_offset)
+        .and_then(|n| n.checked_add(outer_length))
+        .unwrap_or(u64::MAX);
+    if file_size == declared_total {
+        return Ok(());
+    }
+    let kind = if file_size < declared_total { "truncated" } else { "oversize" };
+    Err(format!(
+        "{} morloc data packet: header declares {} bytes, file is {} bytes",
+        kind, declared_total, file_size
+    ))
+}
+
+/// Inspect a STREAM packet: header metadata (schema) + the 8-byte EOF
+/// tail + (when present) the footer packet. Always O(1) in file size:
+/// three seeks and three small reads at worst. Never forward-walks the
+/// body sub-packets. Tolerant of truncation past the header: a stream
+/// whose writer died before it could finish the metadata block still
+/// classifies as `stream-packet state=missing` with whatever schema
+/// bytes made it to disk.
+fn classify_stream_packet<R: Read + Seek>(
+    f: &mut R,
+    file_size: u64,
+    metadata_offset: u64,
+) -> Classification {
+    // 1. Header metadata carries the element schema. Clamp the read to
+    //    the bytes that actually exist past the 32-byte header, so a
+    //    truncated file doesn't fault out here -- iter_metadata stops
+    //    at the first non-`mmh` byte, so a valid SCHEMA_STRING entry
+    //    at the start of the block is still recoverable.
+    let after_header = file_size.saturating_sub(32);
+    let want_meta = (metadata_offset.min(after_header)) as usize;
+    let schema = if want_meta == 0 {
+        None
+    } else {
+        let mut meta = vec![0u8; want_meta];
+        if let Err(e) = f.read_exact(&mut meta) {
+            // The read is clamped to bytes we know are on disk, so a
+            // failure here is a real I/O problem, not just truncation.
+            return Classification::Error(format!(
+                "stream header metadata read failed: {}", e
+            ));
+        }
+        extract_schema_from_metadata(&meta)
+    };
+
+    // 2. Test for the EOF tail. If the file is smaller than a stream
+    //    header + metadata + tail there is no meaningful footer to
+    //    look for.
+    let footer_result = if file_size < 32 + metadata_offset + STREAM_TAIL_SIZE as u64 {
+        FooterInfo::Missing { walk: None }
+    } else {
+        match read_stream_footer(f, file_size) {
+            Ok(info) => info,
+            Err(e) => return Classification::Error(e),
+        }
+    };
+
+    // 3. If the tail was absent, forward-walk sub-packet headers to
+    //    surface some diagnostics. The scan is capped at
+    //    `MORLOC_FILE_MAX_SCAN_SUBPACKETS` (default 10,000) so
+    //    pathologically flush-heavy inputs cannot make `file` hang;
+    //    hitting the cap sets `scan_capped=true` on the summary and
+    //    the on-disk state stays `missing` regardless.
+    let footer = if matches!(footer_result, FooterInfo::Missing { .. }) {
+        let body_start = 32 + metadata_offset;
+        let cap = file_max_scan_subpackets();
+        match forward_scan_stream_body(f, file_size, body_start, cap) {
+            Ok(scan) if !scan.subpacket_offsets.is_empty() || scan.partial || scan.scan_capped => {
+                FooterInfo::Missing {
+                    walk: Some(WalkSummary {
+                        subpacket_count: scan.subpacket_offsets.len() as u64,
+                        element_count: scan.element_count,
+                        partial: scan.partial,
+                        compressed_uncounted: scan.compressed_uncounted,
+                        scan_capped: scan.scan_capped,
+                    }),
+                }
+            }
+            _ => FooterInfo::Missing { walk: None },
+        }
+    } else {
+        footer_result
+    };
+
+    Classification::MorlocStreamPacket { schema, footer }
+}
+
+/// Forward-walk sub-packet headers via seek+read on a `Read + Seek`.
+/// Mirrors `morloc_runtime_types::packet::forward_scan_subpackets_capped`
+/// (the `&[u8]` canonical version); the two must produce identical
+/// results on identical bytes. `cap` bounds the number of sub-packet
+/// headers read so `file`'s fast-classification contract holds even
+/// on pathological flush-every-element inputs; on hit the scan sets
+/// `scan_capped=true` and stops.
+fn forward_scan_stream_body<R: Read + Seek>(
+    f: &mut R,
+    file_size: u64,
+    body_start: u64,
+    cap: u64,
+) -> Result<morloc_runtime_types::packet::ForwardScan, String> {
+    use morloc_runtime_types::packet::{
+        ForwardScan, PACKET_COMPRESSION_NONE,
+    };
+
+    if body_start > file_size {
+        return Err(format!(
+            "forward-scan body_start {} exceeds file size {}",
+            body_start, file_size
+        ));
+    }
+    let mut out = ForwardScan::default();
+    let mut cur = body_start;
+    let mut hdr_bytes = [0u8; 32];
+    let mut size_bytes = [0u8; 8];
+
+    while cur + 32 <= file_size {
+        if out.subpacket_offsets.len() as u64 >= cap {
+            out.scan_capped = true;
+            break;
+        }
+        f.seek(SeekFrom::Start(cur))
+            .map_err(|e| format!("forward-scan seek to {}: {}", cur, e))?;
+        f.read_exact(&mut hdr_bytes)
+            .map_err(|e| format!("forward-scan header read at {}: {}", cur, e))?;
+        let header = match PacketHeader::from_bytes(&hdr_bytes) {
+            Ok(h) => h,
+            Err(_) => break,
+        };
+        if header.is_footer() || !header.is_data() {
+            break;
+        }
+        let offset = header.offset as u64;
+        let length = header.length as u64;
+        let total = match 32u64
+            .checked_add(offset)
+            .and_then(|x| x.checked_add(length))
+        {
+            Some(t) => t,
+            None => return Err("forward-scan sub-packet size overflow".into()),
+        };
+        if cur + total > file_size {
+            out.partial = true;
+            break;
+        }
+        let data = unsafe { header.command.data };
+        let is_voidstar = data.format
+            == morloc_runtime_types::packet::PACKET_FORMAT_VOIDSTAR;
+        let is_uncompressed = data.compression == PACKET_COMPRESSION_NONE;
+        if is_voidstar && is_uncompressed {
+            let payload_start = cur + 32 + offset;
+            if payload_start + 8 > file_size {
+                out.partial = true;
+                break;
+            }
+            f.seek(SeekFrom::Start(payload_start))
+                .map_err(|e| format!("forward-scan payload seek: {}", e))?;
+            f.read_exact(&mut size_bytes)
+                .map_err(|e| format!("forward-scan array-size read: {}", e))?;
+            let elem_count = u64::from_le_bytes(size_bytes);
+            out.element_count = out.element_count.saturating_add(elem_count);
+        } else {
+            out.compressed_uncounted =
+                out.compressed_uncounted.saturating_add(1);
+        }
+        out.subpacket_offsets.push(cur);
+        cur += total;
+    }
+    out.bytes_scanned = cur.saturating_sub(body_start);
+    Ok(out)
+}
+
+/// Read the EOF tail and, if present, the footer packet. Returns
+/// `FooterInfo::Missing` when the tail magic is absent.
+fn read_stream_footer<R: Read + Seek>(
+    f: &mut R,
+    file_size: u64,
+) -> Result<FooterInfo, String> {
+    let tail_off = file_size - STREAM_TAIL_SIZE as u64;
+    f.seek(SeekFrom::Start(tail_off))
+        .map_err(|e| format!("seek to stream tail failed: {}", e))?;
+    let mut tail = [0u8; STREAM_TAIL_SIZE];
+    f.read_exact(&mut tail)
+        .map_err(|e| format!("stream tail read failed: {}", e))?;
+    let Some(footer_len) = decode_stream_tail(&tail) else {
+        return Ok(FooterInfo::Missing { walk: None });
+    };
+    let footer_len = footer_len as u64;
+
+    // Footer packet sits at `file_size - 8 - footer_len`. Sanity-check
+    // it fits inside the file before seeking.
+    let Some(footer_off) = tail_off.checked_sub(footer_len) else {
+        return Err(format!(
+            "stream tail declares footer_len={}, but only {} bytes precede the tail",
+            footer_len, tail_off
+        ));
+    };
+    if footer_len < 32 {
+        return Err(format!(
+            "stream footer too small: declared {} B (< 32 B header)",
+            footer_len
+        ));
+    }
+
+    f.seek(SeekFrom::Start(footer_off))
+        .map_err(|e| format!("seek to stream footer failed: {}", e))?;
+    let mut hdr_bytes = [0u8; 32];
+    f.read_exact(&mut hdr_bytes)
+        .map_err(|e| format!("stream footer header read failed: {}", e))?;
+    let footer_hdr = PacketHeader::from_bytes(&hdr_bytes)
+        .map_err(|e| format!("stream footer header invalid: {}", e))?;
+    if !footer_hdr.is_footer() {
+        return Err(format!(
+            "stream tail points to a non-FOOTER packet (cmd_type 0x{:02x})",
+            footer_hdr.command_type()
+        ));
+    }
+    let body_len = { footer_hdr.offset } as u64;
+    let expected_body = footer_len - 32;
+    if body_len != expected_body {
+        return Err(format!(
+            "stream footer body length mismatch: header offset={}, tail declares {}",
+            body_len, expected_body
+        ));
+    }
+    let mut body = vec![0u8; body_len as usize];
+    if body_len > 0 {
+        f.read_exact(&mut body)
+            .map_err(|e| format!("stream footer body read failed: {}", e))?;
+    }
+
+    let mut diag: Option<StreamDiagView> = None;
+    let mut is_final = false;
+    let mut status: u8 = FOOTER_STATUS_CLOSED;
+    let mut entries: Vec<SubpacketEntry> = Vec::new();
+    for (kind, data) in iter_metadata(&body) {
+        match kind {
+            METADATA_TYPE_STREAM_DIAG => {
+                let d = StreamDiag::from_bytes(data)
+                    .map_err(|e| format!("stream footer diag block invalid: {}", e))?;
+                diag = Some(d.snapshot());
+            }
+            METADATA_TYPE_FOOTER_FINAL => is_final = true,
+            METADATA_TYPE_FOOTER_STATUS => status = decode_footer_status(data),
+            METADATA_TYPE_SUBPACKET_INDEX => {
+                entries = decode_subpacket_index(data)
+                    .map_err(|e| format!("stream footer subpacket index invalid: {}", e))?;
+            }
+            _ => {}
+        }
+    }
+    let Some(mut diag) = diag else {
+        return Err("stream footer missing required STREAM_DIAG block".into());
+    };
+    // Prefer the exact SUBPACKET_INDEX length when present; the diag's
+    // running total is best-effort and may lag the true count if the
+    // writer crashed between the final flush and the diag update.
+    if !entries.is_empty() {
+        diag.subpacket_count = entries.len() as u64;
+    }
+    if is_final {
+        Ok(FooterInfo::Final { diag, status, entries })
+    } else {
+        Ok(FooterInfo::Temp { diag })
     }
 }
 
@@ -803,6 +1134,7 @@ fn type_token(cls: &Classification) -> &'static str {
     match cls {
         Classification::MorlocDataPacket { .. } => "data-packet",
         Classification::MorlocCallPacket { .. } => "call-packet",
+        Classification::MorlocStreamPacket { .. } => "stream-packet",
         Classification::MorlocPingPacket => "ping-packet",
         Classification::Json => "json",
         Classification::MessagePack => "msgpack",
@@ -817,6 +1149,18 @@ fn type_token(cls: &Classification) -> &'static str {
     }
 }
 
+/// String name for a `FOOTER_STATUS_*` byte. Falls through to a hex
+/// literal for unknown values so the plain output stays informative.
+fn footer_status_name(status: u8) -> String {
+    match status {
+        FOOTER_STATUS_CLOSED => "closed".to_string(),
+        FOOTER_STATUS_PAUSED => "paused".to_string(),
+        FOOTER_STATUS_FAILED => "failed".to_string(),
+        FOOTER_STATUS_REPAIRED => "repaired".to_string(),
+        other => format!("0x{:02x}", other),
+    }
+}
+
 /// Description fields rendered after the type token. Empty for kinds
 /// with no extra info (e.g. ping, arrow, parquet).
 fn description_fields(
@@ -824,18 +1168,18 @@ fn description_fields(
     validated: Option<&ValidationOutcome>,
 ) -> Vec<String> {
     let mut fields = match cls {
-        Classification::MorlocDataPacket { arg, total_bytes } => {
-            data_arg_fields(arg, Some(*total_bytes))
-        }
+        Classification::MorlocDataPacket { arg } => data_arg_fields(arg),
         Classification::MorlocCallPacket {
-            midx, entrypoint, args, payload_bytes, total_bytes,
+            midx, entrypoint, args, payload_bytes,
         } => vec![
             format!("midx={}", midx),
             format!("entrypoint={}", packet_entrypoint_name(*entrypoint)),
             format!("nargs={}", args.len()),
-            format!("payload={}", payload_bytes),
-            format!("total={}", total_bytes),
+            format!("payload_full_size={}", payload_bytes),
         ],
+        Classification::MorlocStreamPacket { schema, footer } => {
+            stream_packet_fields(schema.as_deref(), footer)
+        }
         Classification::Csv { delimiter, columns } => vec![
             format!("columns={}", columns.len()),
             format!("delimiter={}", quote_delimiter(*delimiter)),
@@ -854,7 +1198,8 @@ fn description_fields(
 }
 
 /// Extra indented lines emitted only in `--verbose` mode. One per
-/// CALL-packet arg, or one per CSV column.
+/// CALL-packet arg, or one per CSV column, plus per-field diag lines
+/// for stream footers.
 fn verbose_extra_lines(cls: &Classification) -> Vec<String> {
     match cls {
         Classification::MorlocCallPacket { args, .. } => args
@@ -862,7 +1207,7 @@ fn verbose_extra_lines(cls: &Classification) -> Vec<String> {
             .enumerate()
             .map(|(i, e)| match e {
                 ArgEntry::Data(d) => {
-                    let f = data_arg_fields(d, None);
+                    let f = data_arg_fields(d);
                     format!("  arg[{}]: data-packet {}", i, f.join(" "))
                 }
                 ArgEntry::Malformed(reason) => {
@@ -870,6 +1215,7 @@ fn verbose_extra_lines(cls: &Classification) -> Vec<String> {
                 }
             })
             .collect(),
+        Classification::MorlocStreamPacket { footer, .. } => stream_verbose_lines(footer),
         Classification::Csv { columns, .. } => columns
             .iter()
             .map(|c| format!("  {}:{}", c.name, c.type_category))
@@ -878,7 +1224,138 @@ fn verbose_extra_lines(cls: &Classification) -> Vec<String> {
     }
 }
 
-fn data_arg_fields(arg: &DataArg, total_bytes: Option<u64>) -> Vec<String> {
+/// Fields emitted on the single default line for a stream packet. The
+/// three footer states share a common preamble (schema=, state=)
+/// and diverge in the fields carried after that. Sizes come from the
+/// StreamDiag block; on-disk file size is deliberately omitted --
+/// `ls -s` / `wc -c` already report it.
+fn stream_packet_fields(
+    schema: Option<&str>,
+    footer: &FooterInfo,
+) -> Vec<String> {
+    let mut fields = Vec::new();
+    if let Some(s) = schema {
+        fields.push(format!("schema={}", json_quote(s)));
+    }
+    let diag = match footer {
+        FooterInfo::Missing { walk } => {
+            // On-disk state: the EOF tail is absent. `file` never
+            // repairs the file; the walk (when present) is purely
+            // diagnostic.
+            fields.push("state=missing".to_string());
+            if let Some(w) = walk {
+                fields.push(format!("subpackets={}{}",
+                    w.subpacket_count,
+                    if w.scan_capped { "+" } else { "" },
+                ));
+                if w.compressed_uncounted > 0 {
+                    fields.push(format!(
+                        "elements={}{} (excludes {} compressed sub-packet{})",
+                        w.element_count,
+                        if w.scan_capped { "+" } else { "" },
+                        w.compressed_uncounted,
+                        if w.compressed_uncounted == 1 { "" } else { "s" },
+                    ));
+                } else {
+                    fields.push(format!(
+                        "elements={}{}",
+                        w.element_count,
+                        if w.scan_capped { "+" } else { "" },
+                    ));
+                }
+                if w.partial {
+                    fields.push("partial=true".to_string());
+                }
+                if w.scan_capped {
+                    fields.push(format!(
+                        "footer_note={}",
+                        json_quote(
+                            "no footer at EOF; forward-scan hit sub-packet cap"
+                        )
+                    ));
+                } else {
+                    fields.push(format!(
+                        "footer_note={}",
+                        json_quote(
+                            "no footer at EOF; forward-scan walked sub-packet headers"
+                        )
+                    ));
+                }
+            } else {
+                fields.push(format!(
+                    "footer_note={}",
+                    json_quote("no footer at EOF (writer in progress, corrupt, or empty body)")
+                ));
+            }
+            return fields;
+        }
+        FooterInfo::Temp { diag } => {
+            fields.push("state=temp".to_string());
+            diag
+        }
+        FooterInfo::Final { diag, status, .. } => {
+            fields.push("state=final".to_string());
+            fields.push(format!("status={}", footer_status_name(*status)));
+            diag
+        }
+    };
+    fields.push(format!("subpackets={}", diag.subpacket_count));
+    fields.push(format!("elements={}", diag.element_count));
+    fields.push(format!("payload_full_size={}", diag.bytes_uncompressed_total));
+    fields.push(format!("payload_wire_size={}", diag.bytes_compressed_total));
+    fields
+}
+
+/// Verbose (`-v`) extra lines for a stream packet. The `Missing` state
+/// has nothing extra to show; `Temp`/`Final` dump the remaining
+/// `StreamDiag` fields plus the tail-window.
+fn stream_verbose_lines(footer: &FooterInfo) -> Vec<String> {
+    let diag = match footer {
+        FooterInfo::Missing { .. } => return Vec::new(),
+        FooterInfo::Temp { diag } | FooterInfo::Final { diag, .. } => diag,
+    };
+    let mut out = Vec::new();
+    out.push(format!("  diag_version={}", diag.diag_version));
+    out.push(format!("  writer_pid={}", diag.writer_pid));
+    out.push(format!(
+        "  n_oversize_subpackets={}", diag.n_oversize_subpackets
+    ));
+    out.push(format!("  writer_start_time={}", diag.writer_start_time));
+    out.push(format!("  first_flush_time={}", diag.first_flush_time));
+    out.push(format!("  last_flush_time={}", diag.last_flush_time));
+    out.push(format!(
+        "  largest_packet_uncompressed={}", diag.largest_packet_uncompressed
+    ));
+    out.push(format!("  largest_packet_idx={}", diag.largest_packet_idx));
+    if !diag.tail.is_empty() {
+        let joined = diag.tail
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push(format!("  tail_window=[{}]", joined));
+    }
+    if let FooterInfo::Final { entries, .. } = footer {
+        if !entries.is_empty() {
+            const HEAD_LIMIT: usize = 8;
+            let shown = entries.len().min(HEAD_LIMIT);
+            for (k, entry) in entries[..shown].iter().enumerate() {
+                out.push(format!(
+                    "  subpacket[{}] offset={} elem_count={}",
+                    k, entry.offset, entry.elem_count,
+                ));
+            }
+            if entries.len() > HEAD_LIMIT {
+                out.push(format!(
+                    "  ... {} more sub-packets", entries.len() - HEAD_LIMIT,
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn data_arg_fields(arg: &DataArg) -> Vec<String> {
     let mut fields = vec![
         format!("source={}", packet_source_name(arg.source)),
         format!("format={}", packet_format_name(arg.format)),
@@ -892,12 +1369,9 @@ fn data_arg_fields(arg: &DataArg, total_bytes: Option<u64>) -> Vec<String> {
     if let Some(s) = &arg.schema {
         fields.push(format!("schema={}", json_quote(s)));
     }
-    fields.push(format!("payload={}", arg.payload_bytes));
+    fields.push(format!("payload_full_size={}", arg.payload_bytes));
     if arg.metadata_bytes != 0 {
         fields.push(format!("metadata={}", arg.metadata_bytes));
-    }
-    if let Some(t) = total_bytes {
-        fields.push(format!("total={}", t));
     }
     fields
 }
@@ -932,26 +1406,23 @@ pub fn format_json(
     let mut v = serde_json::Map::new();
     v.insert("path".into(), serde_json::Value::String(path.into()));
     match cls {
-        Classification::MorlocDataPacket { arg, total_bytes } => {
+        Classification::MorlocDataPacket { arg } => {
             v.insert("kind".into(), "morloc-packet".into());
             v.insert("subkind".into(), "data".into());
             insert_data_arg_fields(&mut v, arg);
-            v.insert("total_bytes".into(), serde_json::json!(total_bytes));
         }
         Classification::MorlocCallPacket {
             midx,
             entrypoint,
             args,
             payload_bytes,
-            total_bytes,
         } => {
             v.insert("kind".into(), "morloc-packet".into());
             v.insert("subkind".into(), "call".into());
             v.insert("midx".into(), serde_json::json!(midx));
             v.insert("entrypoint".into(), packet_entrypoint_name(*entrypoint).into());
             v.insert("nargs".into(), serde_json::json!(args.len()));
-            v.insert("payload_bytes".into(), serde_json::json!(payload_bytes));
-            v.insert("total_bytes".into(), serde_json::json!(total_bytes));
+            v.insert("payload_full_size".into(), serde_json::json!(payload_bytes));
             let args_json: Vec<serde_json::Value> = args
                 .iter()
                 .map(|e| match e {
@@ -967,6 +1438,14 @@ pub fn format_json(
                 })
                 .collect();
             v.insert("args".into(), serde_json::Value::Array(args_json));
+        }
+        Classification::MorlocStreamPacket { schema, footer } => {
+            v.insert("kind".into(), "morloc-packet".into());
+            v.insert("subkind".into(), "stream".into());
+            if let Some(s) = schema {
+                v.insert("schema".into(), serde_json::Value::String(s.clone()));
+            }
+            v.insert("footer".into(), stream_footer_json(footer));
         }
         Classification::MorlocPingPacket => {
             v.insert("kind".into(), "morloc-packet".into());
@@ -1040,6 +1519,69 @@ pub fn format_json(
     serde_json::Value::Object(v).to_string()
 }
 
+/// JSON serialization of `FooterInfo` for the `--json` renderer. Mirror
+/// the plain fields but under a nested `"footer"` object, and expose the
+/// full `StreamDiag` under `"diag"` so JSON consumers can extract any
+/// field without needing `-v`.
+fn stream_footer_json(footer: &FooterInfo) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    let diag = match footer {
+        FooterInfo::Missing { walk } => {
+            m.insert("state".into(), "missing".into());
+            if let Some(w) = walk {
+                let mut wm = serde_json::Map::new();
+                wm.insert("subpacket_count".into(), serde_json::json!(w.subpacket_count));
+                wm.insert("element_count".into(), serde_json::json!(w.element_count));
+                wm.insert("partial".into(), serde_json::json!(w.partial));
+                wm.insert(
+                    "compressed_uncounted".into(),
+                    serde_json::json!(w.compressed_uncounted),
+                );
+                wm.insert("scan_capped".into(), serde_json::json!(w.scan_capped));
+                m.insert("walk".into(), serde_json::Value::Object(wm));
+            }
+            return serde_json::Value::Object(m);
+        }
+        FooterInfo::Temp { diag } => {
+            m.insert("state".into(), "temp".into());
+            diag
+        }
+        FooterInfo::Final { diag, status, entries } => {
+            m.insert("state".into(), "final".into());
+            m.insert("status".into(), footer_status_name(*status).into());
+            let entries_json: Vec<serde_json::Value> = entries.iter().map(|e|
+                serde_json::json!({
+                    "offset": e.offset,
+                    "elem_count": e.elem_count,
+                })
+            ).collect();
+            m.insert("subpacket_entries".into(), serde_json::Value::Array(entries_json));
+            diag
+        }
+    };
+    m.insert("subpacket_count".into(), serde_json::json!(diag.subpacket_count));
+    m.insert("diag".into(), stream_diag_json(diag));
+    serde_json::Value::Object(m)
+}
+
+fn stream_diag_json(d: &StreamDiagView) -> serde_json::Value {
+    serde_json::json!({
+        "diag_version": d.diag_version,
+        "writer_pid": d.writer_pid,
+        "n_oversize_subpackets": d.n_oversize_subpackets,
+        "writer_start_time": d.writer_start_time,
+        "subpacket_count": d.subpacket_count,
+        "element_count": d.element_count,
+        "bytes_uncompressed_total": d.bytes_uncompressed_total,
+        "bytes_compressed_total": d.bytes_compressed_total,
+        "largest_packet_uncompressed": d.largest_packet_uncompressed,
+        "largest_packet_idx": d.largest_packet_idx,
+        "first_flush_time": d.first_flush_time,
+        "last_flush_time": d.last_flush_time,
+        "tail": d.tail,
+    })
+}
+
 fn insert_data_arg_fields(m: &mut serde_json::Map<String, serde_json::Value>, arg: &DataArg) {
     m.insert("source".into(), packet_source_name(arg.source).into());
     m.insert("format".into(), packet_format_name(arg.format).into());
@@ -1047,7 +1589,7 @@ fn insert_data_arg_fields(m: &mut serde_json::Map<String, serde_json::Value>, ar
     if let Some(s) = &arg.schema {
         m.insert("schema".into(), serde_json::Value::String(s.clone()));
     }
-    m.insert("payload_bytes".into(), serde_json::json!(arg.payload_bytes));
+    m.insert("payload_full_size".into(), serde_json::json!(arg.payload_bytes));
     if arg.metadata_bytes != 0 {
         m.insert("metadata_bytes".into(), serde_json::json!(arg.metadata_bytes));
     }

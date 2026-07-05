@@ -1,0 +1,44 @@
+-- Produces test corpora for the `morloc-nexus view --pattern` golden.
+-- Each function takes a path and materialises a data packet via @save
+-- (or @open OStream / @write / @close for streams). The Makefile
+-- then exercises pattern chains against each shape and, for the two
+-- list-shaped exports, also against the STREAM-packet conversion.
+
+module main
+  ( mkFlatList
+  , mkRecords
+  , mkNested
+  )
+
+import root
+
+record Person where
+  name :: Str
+  age  :: Int
+  tags :: [Str]
+record Py => Person = "dict"
+
+record NestedRow where
+  label :: Str
+  members :: [Person]
+record Py => NestedRow = "dict"
+
+mkFlatList :: Str -> <IO> ()
+mkFlatList path = @save 0 [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] path
+
+mkRecords :: Str -> <IO> ()
+mkRecords path = @save 0
+  [ {name = "Alice", age = 30, tags = ["a", "b"]}
+  , {name = "Bob",   age = 25, tags = ["c"]}
+  , {name = "Carol", age = 40, tags = ["d", "e", "f"]}
+  ] path
+
+-- Not list-shaped at the top level -- only exercised as a DATA packet.
+mkNested :: Str -> <IO> ()
+mkNested path = @save 0
+  { label = "team-a"
+  , members =
+      [ {name = "Alice", age = 30, tags = ["a", "b"]}
+      , {name = "Bob",   age = 25, tags = ["c"]}
+      ]
+  } path

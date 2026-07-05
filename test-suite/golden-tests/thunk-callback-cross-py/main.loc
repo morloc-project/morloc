@@ -1,0 +1,93 @@
+-- Cross-language callback regression. A C++ driver invokes a
+-- callback whose implementation lives in Python. The callback's
+-- morloc type is `Int -> <IO> ()`.
+--
+-- The lambda / eta manifolds on the local (C++) side wrap a call
+-- into a PolyRemoteInterface. If the local wrap doesn't force the
+-- transported EffectT value, the C++ foreign driver invoking
+-- `sink(x)` drops the thunk exactly as it did in the single-language
+-- case fixed by thunk-callback-cpp. The single-language fix at
+-- Express.hs's local LamS/eta sites (wrapEffectForces) does NOT
+-- reach the cross-language sites at Express.hs:1251 (LamS+AppS
+-- not-isLocal) and Express.hs:1474 (implicit-eta not-isLocal). The
+-- established mechanism for that boundary is pushForceIntoRemote
+-- (see the EvalS handler for the pattern).
+--
+-- Two shapes exercise the same cross-language manifold-lowering:
+--   * bare foreign function passed as callback  (implicit-eta, 1474)
+--   * user lambda whose body is a foreign call  (LamS+AppS, 1251)
+
+module main (bareCross, lambdaCross, bareCrossMulti, lambdaCrossMulti)
+
+effect Error
+
+import root-cpp
+import root-py
+
+source Cpp from "driver.hpp"
+  ( "forEach"
+  , "forEach" as forEachE
+  )
+source Py from "ops.py"
+  ( "tap_py"   as tapPy
+  , "total_py" as totalPy
+  , "reset_py" as resetPy
+  , "tap_py"   as tapPyE
+  )
+
+type Cpp => Int = "int"
+
+forEach   :: [Int] -> (Int -> <IO> ()) -> <IO> ()
+tapPy     :: Int -> <IO> ()
+totalPy   :: <IO> Int
+resetPy   :: <IO> ()
+
+-- Multi-label effect variants. Exercises 'peelAllEffects' on the
+-- cross-language pushForceIntoRemote path -- every EffectT layer
+-- on the callback's return has to be stripped, otherwise the
+-- receiver-side C++ variable type and the wire schema disagree
+-- (schema is always fully unwrapped by makeSerialAST).
+forEachE  :: [Int] -> (Int -> <IO, Error> ()) -> <IO, Error> ()
+tapPyE    :: Int -> <IO, Error> ()
+
+-- Bare Python source function passed as callback. No morloc lambda
+-- appears in the source; the compiler eta-abstracts implicitly so
+-- the sink has the required (Int -> <IO> ()) shape. The eta wrap
+-- targets a C++ driver but its body dispatches to Python -- that's
+-- the not-isLocal branch at Express.hs:1474.
+-- Expected: 10 + 20 + 30 = 60.
+bareCross :: <IO> Int
+bareCross = do
+  resetPy
+  forEach [10, 20, 30] tapPy
+  totalPy
+
+-- Explicit lambda whose body is a Python call. The Python call is
+-- inside a LamS+AppS whose target language differs from the
+-- surrounding pool -- that's the not-isLocal branch at
+-- Express.hs:1251.
+-- Expected: 11 + 21 + 31 = 63.
+lambdaCross :: <IO> Int
+lambdaCross = do
+  resetPy
+  forEach [10, 20, 30] (\x -> tapPy (x + 1))
+  totalPy
+
+-- Multi-label effect variant of bareCross. The callback returns
+-- <IO, Error>; both labels have to be stripped at the callback
+-- boundary so the receiver-side C++ variable type matches the
+-- fully-unwrapped wire schema.
+-- Expected: 10 + 20 + 30 = 60.
+bareCrossMulti :: <IO, Error> Int
+bareCrossMulti = do
+  resetPy
+  forEachE [10, 20, 30] tapPyE
+  totalPy
+
+-- Multi-label effect variant of lambdaCross.
+-- Expected: 11 + 21 + 31 = 63.
+lambdaCrossMulti :: <IO, Error> Int
+lambdaCrossMulti = do
+  resetPy
+  forEachE [10, 20, 30] (\x -> tapPyE (x + 1))
+  totalPy

@@ -44,7 +44,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
-import Morloc.Data.Doc (concatWith, hardline, pretty, render, (<+>))
+import Morloc.Data.Doc (concatWith, hardline, indent, line, pretty, render, squotes, vcat, (<+>))
 import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
@@ -173,6 +173,13 @@ findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
   mayName <- MM.metaName i
+  name' <- case mayName of
+    Just n -> return n
+    Nothing -> MM.throwSourcedError i "No name in FData"
+  -- Same guard as annotateGasts, applied to sourced exports. Without
+  -- it, higher-order arguments slip through and fall out of
+  -- Serial.makeSerialAST as an unlocalized raw-TypeF dump.
+  checkExportedHigherOrder i name' t
   (argAsts, returnAst) <- makeSerialASTs i lang t
   let argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
       returnSchema  = render (Serial.serialAstToMsgpackSchema returnAst)
@@ -180,24 +187,20 @@ getFData (t, i, lang, doc, sockets) = do
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
   validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
-
-  case mayName of
-    (Just name') -> do
-      config <- MM.ask
-      registry <- MM.gets stateLangRegistry
-      let socket = MC.setupServerAndSocket config registry lang
-      return $
-        FData
-          { fdataSocket = socket
-          , fdataSubcommand = maybe (unEVar name') id (cmdDocName doc)
-          , fdataMid = i
-          , fdataType = t
-          , fdataSubSockets = sockets
-          , fdataArgSchemas = argSchemas
-          , fdataReturnSchema = returnSchema
-          , fdataCmdDocSet = doc
-          }
-    Nothing -> MM.throwSourcedError i $ "No name in FData"
+  config <- MM.ask
+  registry <- MM.gets stateLangRegistry
+  let socket = MC.setupServerAndSocket config registry lang
+  return $
+    FData
+      { fdataSocket = socket
+      , fdataSubcommand = maybe (unEVar name') id (cmdDocName doc)
+      , fdataMid = i
+      , fdataType = t
+      , fdataSubSockets = sockets
+      , fdataArgSchemas = argSchemas
+      , fdataReturnSchema = returnSchema
+      , fdataCmdDocSet = doc
+      }
 
 -- ======================================================================
 -- Schema building
@@ -361,12 +364,43 @@ containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
 
--- | True if the export type carries a function type in argument or return
--- position. The top-level FunT of an exported function itself is fine; what
--- isn't fine is any nested FunT (HOF) embedded inside arguments or returns.
-exportHasHigherOrder :: Type -> Bool
-exportHasHigherOrder (FunT ts ret) = any containsFunT ts || containsFunT ret
-exportHasHigherOrder t = containsFunT t
+-- | Reject main-module exports whose type carries a function in argument or
+-- return position. The nexus turns each such export into a CLI subcommand
+-- and passes arguments as serialized data on the command line; closures
+-- have no wire form. Library modules can still export higher-order
+-- functions -- the restriction applies only to exports of the main module
+-- being compiled. Names the offending position (argument N or return
+-- type) and echoes the full signature so the user can locate the fix.
+checkExportedHigherOrder :: Int -> EVar -> Type -> MorlocMonad ()
+checkExportedHigherOrder i name t = case findOffender t of
+  Nothing -> return ()
+  Just (locDesc, offender) ->
+    MM.throwSourcedError i $
+      "Cannot generate a CLI subcommand for" <+> squotes (pretty name)
+        <+> "--" <+> locDesc <> ":"
+        <> line <> indent 2 (pretty offender)
+        <> line
+        <> line <> "Full signature:"
+        <> line <> indent 2 (pretty name <+> "::" <+> pretty t)
+        <> line
+        <> line <> vcat
+            [ "Exports from the top-level module become CLI subcommands in"
+            , "the compiled nexus. Subcommand arguments and results are"
+            , "passed as serialized data on the command line, so they"
+            , "cannot contain functions -- there is no wire form for a"
+            , "closure."
+            ]
+  where
+    findOffender :: Type -> Maybe (MDoc, Type)
+    findOffender (FunT ts ret) =
+      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, containsFunT a] of
+        ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
+        [] | containsFunT ret ->
+             Just ("return type contains a function", ret)
+           | otherwise -> Nothing
+    findOffender ty
+      | containsFunT ty = Just ("exported value is or contains a function", ty)
+      | otherwise = Nothing
 
 resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
 resolveAliasApp i anc v ts
@@ -425,8 +459,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     Nothing -> MM.throwSourcedError i $ "No name found for call-free function"
     (Just n') -> return n'
 
-  CM.when (exportHasHigherOrder gtype) $
-    MM.throwSourcedError i "cannot export higher-order functions through the CLI"
+  checkExportedHigherOrder i gname gtype
 
   (retAst, argAsts) <- makeGastSerialASTs i gtype
   let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
@@ -621,16 +654,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
-    -- @savem/@savej carry no compression level; emit a zero literal so the
-    -- nexus dispatch (which always reads a level field from save_expr) has
-    -- a uniform shape. The runtime ignores the field for non-voidstar formats.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [valExpr, path])) =
+    -- @savem/@savej take source args in (path, value) order for
+    -- partial-application ergonomics. They carry no compression level;
+    -- emit a zero literal so the nexus dispatch (which always reads a
+    -- level field from save_expr) has a uniform shape. The runtime
+    -- ignores the field for non-voidstar formats.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
       SaveX "msgpack"
         <$> type2schema t
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [valExpr, path])) =
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
       SaveX "json"
         <$> type2schema t
         <*> pure (LitX IntX "0")
@@ -659,7 +694,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           | v == MBT.istreamVar ->
               OpenX <$> type2schema t <*> pure MBT.mlcKindIStream <*> toNexusExpr path
           | v == MBT.ostreamVar ->
-              OpenOStreamX <$> type2schema elemT <*> toNexusExpr path
+              OpenOStreamX <$> type2schema (MBT.handleStorageType v elemT)
+                           <*> toNexusExpr path
           | otherwise ->
               MM.throwSourcedError iOpen $
                 "@open: result type must be IFile/IStream/OStream, got " <> pretty v
@@ -676,27 +712,24 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       NextX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, valE@(AnnoS (Idx _ valT) _ _), handleE])) =
+    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
       WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE
         <*> toNexusExpr valE
         <*> toNexusExpr handleE
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
-      AppendX <$> type2schema (peelHandleElemT t) <*> toNexusExpr pathE
+      AppendX <$> type2schema (handleStorageOfResult t) <*> toNexusExpr pathE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
       ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
       FlushX <$> toNexusExpr handle
-    -- @stdin / @stdout / @stderr: nullary. Result type is
-    -- <IO> IStream a / <IO> OStream a; peel the effect and the head
-    -- to get the element type, then serialise its schema.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
-      StdinX <$> type2schema (peelHandleElemT t)
+      StdinX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
-      StdoutX <$> type2schema (peelHandleElemT t)
+      StdoutX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
-      StderrX <$> type2schema (peelHandleElemT t)
+      StderrX <$> type2schema (handleStorageOfResult t)
     -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
     -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
     -- path normally constructs IFileWalkX directly from PatCall +
@@ -785,12 +818,12 @@ checkRealBounds i (RealFinite v) s = case s of
               <> " overflows Float64 (|x| > 1.8e308)"
 checkRealBounds _ _ _ = return ()
 
--- | Strip a leading `<IO>` and one `AppT` head to reach the element
--- type carried by an `IStream a` / `OStream a` / `IFile a` result.
-peelHandleElemT :: Type -> Type
-peelHandleElemT (EffectT _ inner) = peelHandleElemT inner
-peelHandleElemT (AppT _ (a : _)) = a
-peelHandleElemT other = other
+-- | Storage type of an intrinsic's `<IO> (Handle a)` result. Peels the
+-- effect + handle head and delegates to 'MBT.handleStorageType'.
+handleStorageOfResult :: Type -> Type
+handleStorageOfResult t = case stripEffect t of
+  AppT (VarT v) (a : _) -> MBT.handleStorageType v a
+  other -> other
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
 resolveCompileTimeIntrinsic IntrVersion = return $ MT.pack Morloc.Version.versionStr
@@ -927,18 +960,16 @@ strFormatHint mSrc cks
       (CheckPath (PathPerm p) : _) -> Just (pathCheckHint p)
       _                            -> Nothing
 
--- | Map a path-permission subset to a user-facing phrase.
+-- | Map a path-permission mode to a user-facing phrase. The four
+-- accepted modes are r / w / x / rw; see 'parseCheck' for the
+-- pre-open predicates each mode names.
 pathCheckHint :: Text -> Text
-pathCheckHint p = case MT.unpack (MT.toLower p) of
-  "r"   -> "path to readable file"
-  "w"   -> "path to existing writable file"
-  "c"   -> "path to non-existing writable file"
-  "rw"  -> "path to existing readable+writable file"
-  "wr"  -> "path to existing readable+writable file"
-  "rc"  -> "path to readable or creatable file"
-  "wc"  -> "path to writable or creatable file"
-  "rwc" -> "path to readable+writable or creatable file"
-  _     -> "must satisfy path permissions `" <> p <> "`"
+pathCheckHint p = case MT.unpack p of
+  "r"  -> "path to a readable file"
+  "w"  -> "path to a writable file (created if it does not exist)"
+  "x"  -> "path to a file that does not yet exist (parent must be writable)"
+  "rw" -> "path to a readable and writable existing file"
+  _    -> "must satisfy path mode `" <> p <> "`"
 
 -- | Format hint for a list argument. Considers the outer
 -- `form:` / `source:` / `check.*:` first, then per-element overrides.
@@ -1033,7 +1064,7 @@ argToJson mschema (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
     ++ schemaField mschema
-    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r)))
+    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mschema))
        , ("many", jsonBool (argPosDocMany r))
@@ -1049,7 +1080,7 @@ argToJson mschema (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
     ++ schemaField mschema
-    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r)))
+    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r) (argOptDocSource r) (argOptDocChecks r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mschema))
        , ("many", jsonBool (argOptDocMany r))
@@ -1670,10 +1701,20 @@ truncateForMsg t
 jsonSnippet :: Aeson.Value -> Text
 jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 
-typeDescStr :: Type -> Maybe Bool -> Text
-typeDescStr t isLiteral
-  | isStrType t && isLiteral /= Just True = "Str    (a filename or quoted JSON string)"
+-- | The user-facing "type:" line for a CLI arg. For a Str argument
+-- that isn't declared literal, the parenthetical clarifies whether
+-- argv is treated as a filesystem path only (when `source: file` or a
+-- `check.path:*` forces path semantics) or as the default
+-- filename-or-quoted-JSON.
+typeDescStr :: Type -> Maybe Bool -> Maybe SourceAtom -> [Check] -> Text
+typeDescStr t isLiteral mSrc checks
+  | isStrType t && isLiteral /= Just True =
+      if pathOnly then "Str    (a filename)"
+                  else "Str    (a filename or quoted JSON string)"
   | otherwise = render (pretty t)
+  where
+    pathOnly = mSrc == Just SourceFile || any isPathCheck checks
+    isPathCheck (CheckPath _) = True
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity
 -- (Optional and Effect wrappers are transparent for record/object/table

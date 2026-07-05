@@ -17,10 +17,10 @@ import root-cpp
 testRoundTrip :: Str -> <IO> Int
 testRoundTrip path = do
   o <- @open (idcpp path) :: <IO> OStream Int
-  @write 0 (idpy [1,2,3]) o
-  @write 0 (idcpp [1,2,3]) o
-  @write 0 (idpy [4, 5]) o
-  @write 0 (idcpp [6,7,8]) o
+  @write 0 o (idpy [1,2,3])
+  @write 0 o (idcpp [1,2,3])
+  @write 0 o (idpy [4, 5])
+  @write 0 o (idcpp [6,7,8])
   @close o
   s <- @open path :: <IO> IStream Int
   @flen s

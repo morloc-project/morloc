@@ -43,6 +43,8 @@ module Morloc.BaseTypes
   , mlcKindIFile
   , mlcKindIStream
   , mlcKindOStream
+  , handleStorageType
+  , handleStorageTypeF
   , patternChainVar
   , patternAccessibleClass
   , extractPatternMethod
@@ -74,6 +76,7 @@ module Morloc.BaseTypes
 
 import Data.Word (Word8)
 import Morloc.Data.Text (Text, pretty)
+import Morloc.CodeGenerator.Namespace (TypeF (..), FVar (..), CVar (..))
 import Morloc.Namespace.Prim (TVar (..))
 import Morloc.Namespace.Type (Type (..), TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
@@ -170,6 +173,43 @@ mlcKindIStream = 1
 
 mlcKindOStream :: Word8
 mlcKindOStream = 2
+
+-- | The storage type of a handle target: the type that lives on the
+-- wire / on disk under the handle. IFile is a single-value container
+-- (like @Maybe a@ in Haskell); IStream and OStream are list-shaped
+-- (like @List a@ -- a stream is a sequence of a-values).
+--
+-- Given a handle constructor's 'TVar' and its element type @a@:
+--
+--   * @IFile a@   -> @a@       (single value)
+--   * @IStream a@ -> @[a]@     (list-shaped)
+--   * @OStream a@ -> @[a]@     (list-shaped)
+--   * anything else -> @a@     (identity fallback; unreachable at
+--                              typechecked call sites)
+--
+-- This is the single source of truth for the "streams are list-shaped"
+-- invariant. Every codegen path that emits an on-wire schema for a
+-- handle operation (@open, @append, @stdin/out/err) computes the
+-- storage type here and passes it to its type-to-SerialAST converter.
+--
+-- The runtime enforces the same invariant on the read side
+-- (@reject_non_list_stream_schema@ in @morloc-runtime/stream.rs@).
+handleStorageType :: TVar -> Type -> Type
+handleStorageType v a
+  | v == ostreamVar || v == istreamVar = AppT (VarT list) [a]
+  | v == ifileVar                      = a
+  | otherwise                          = a
+
+-- | 'TypeF' twin of 'handleStorageType'. Same rule, different type
+-- representation. The 'CVar' slot on the synthesised list 'FVar' is
+-- empty because the pool-side @makeSerialAST@ will resolve the
+-- concrete language binding via the alias chain.
+handleStorageTypeF :: TVar -> TypeF -> TypeF
+handleStorageTypeF v a
+  | v == ostreamVar || v == istreamVar =
+      AppF (VarF (FV list (CV ""))) [a]
+  | v == ifileVar = a
+  | otherwise     = a
 
 -- | Names for the PatternAccessible typeclass and its canonical string
 -- newtype. Instances of 'PatternAccessible w' provide

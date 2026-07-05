@@ -19,11 +19,15 @@ import Morloc.PatternChain.Grammar
   ( GrammarError (..)
   , LinearStep (..)
   , Path (..)
+  , WalkError (..)
   , parsePath
   , placeholderCount
   , renderPath
   , selectorToPath
+  , walkPathType
   )
+import Morloc.Namespace.Prim (Key (..), TVar (..))
+import Morloc.Namespace.Type (NamType (..), TypeU (..))
 
 patternChainTests :: TestTree
 patternChainTests = testGroup "PatternChain grammar"
@@ -31,6 +35,7 @@ patternChainTests = testGroup "PatternChain grammar"
   , placeholderCountTests
   , malformedInputTests
   , selectorAgreementTests
+  , walkerBroadcastTests
   ]
 
 --------------------------------------------------------------------------------
@@ -203,4 +208,84 @@ selectorAgreementTests = testGroup
           walkStepsToPath steps @?= expected
       ]
   | (name, sel, expected, steps) <- selectorAgreementCases
+  ]
+
+--------------------------------------------------------------------------------
+-- Walker broadcast rule
+--
+-- `.field` / `.N` steps applied to a list receiver broadcast per the
+-- compiler's IntrMap desugar (see Morloc.Frontend.Desugar), so
+-- `.[i:j].0` on `[Tuple]` types as `[Tuple.0]` instead of erroring.
+-- The Rust `check_pattern_against_schema` mirror is exercised by
+-- `runtime-types` unit tests; these cases keep both walkers aligned.
+--------------------------------------------------------------------------------
+
+-- | Trivial helpers for building TypeU shapes without the full parser.
+intT :: TypeU
+intT = VarU (TV "Int")
+
+strT :: TypeU
+strT = VarU (TV "Str")
+
+listT :: TypeU -> TypeU
+listT a = AppU (VarU (TV "List")) [a]
+
+tupleT :: [TypeU] -> TypeU
+tupleT tys =
+    let n = length tys
+        tName = "Tuple" <> T.pack (show n)
+    in AppU (VarU (TV tName)) tys
+
+recordT :: [(T.Text, TypeU)] -> TypeU
+recordT fields =
+    NamU NamRecord (TV "Anon") []
+      [ (Key k, v) | (k, v) <- fields ]
+
+-- | Assert the walker produces a specific result type; use `show` to
+-- compare since WalkError has no Eq instance.
+assertWalkType :: TypeU -> Path -> TypeU -> Assertion
+assertWalkType recv p expected = case walkPathType recv p of
+    Right got -> show got @?= show expected
+    Left err  -> assertFailure $ "expected " <> show expected
+                 <> ", got walker error " <> show err
+
+-- | Parse a path or fail the test; used to keep case bodies flat.
+parsePathOrFail :: T.Text -> (Path -> Assertion) -> Assertion
+parsePathOrFail src k = case parsePath src of
+    Right p  -> k p
+    Left err -> assertFailure $ "parsePath " <> show src
+                <> " failed: " <> show err
+
+walkerBroadcastTests :: TestTree
+walkerBroadcastTests = testGroup "walkPathType broadcast rule"
+  [ testCase ".[i:j].0 on [Tuple] broadcasts to [field0_type]" $
+      parsePathOrFail ".[:].0" $ \p ->
+        assertWalkType (listT (tupleT [strT, intT])) p (listT strT)
+
+  , testCase ".[i:j].outer.inner broadcasts the whole tail chain" $
+      parsePathOrFail ".[:].outer.inner" $ \p ->
+        let recv = listT (recordT [("outer", recordT [("inner", intT)])])
+        in assertWalkType recv p (listT intT)
+
+  , testCase "bare .field on [Record] still errors (runtime doesn't broadcast at root)" $
+      parsePathOrFail ".name" $ \p ->
+        let recv = listT (recordT [("name", strT)])
+        in case walkPathType recv p of
+             Left (WalkExpectedRecord _) -> return ()
+             other -> assertFailure $ "expected WalkExpectedRecord, got " <> show other
+
+  , testCase ".field on bare scalar still errors" $
+      parsePathOrFail ".foo" $ \p ->
+        case walkPathType intT p of
+          Left (WalkExpectedRecord _) -> return ()
+          other -> assertFailure $ "expected WalkExpectedRecord, got " <> show other
+
+  , testCase ".[i] on [T] takes an element (no broadcast at bracket-index)" $
+      parsePathOrFail ".[]" $ \p ->
+        assertWalkType (listT (tupleT [strT, intT])) p (tupleT [strT, intT])
+
+  , testCase ".[i:j] alone (no tail) preserves list shape" $
+      parsePathOrFail ".[:]" $ \p ->
+        let recv = listT (recordT [("name", strT)])
+        in assertWalkType recv p (listT (recordT [("name", strT)]))
   ]

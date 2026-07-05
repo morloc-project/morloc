@@ -1,0 +1,25 @@
+-- Produces one DATA packet and one STREAM packet with the same
+-- underlying list value. The Makefile exercises the four-quadrant
+-- packet-conversion matrix of `morloc-nexus view -s`/`-d`/`-p` and
+-- asserts the outputs are well-formed and round-trip correctly.
+
+module main
+  ( mkData
+  , mkStream
+  )
+
+import root
+
+payload :: [Int]
+payload = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+mkData :: Str -> <IO> ()
+mkData path = @save 0 payload path
+
+mkStream :: Str -> <IO> ()
+mkStream path = do
+  s <- @open path :: <IO> OStream Int
+  @write 0 s [1, 2, 3, 4, 5]
+  @flush s
+  @write 0 s [6, 7, 8, 9, 10]
+  @close s

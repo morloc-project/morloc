@@ -1,0 +1,25 @@
+-- Broadcasting a tuple-index selector (`.0`, `.1`, ...) across a
+-- list of tuples via a bracket-slice tail. Regression: the desugar-
+-- inserted IntrMap's fresh existential `map_result_` used to leak
+-- out of `.[i:j].N` on `[Tuple]` because the tuple-index selector
+-- wasn't pinning the lambda body's type. Record-field broadcast
+-- (`.[i:j].name` on `[Record]`) already worked; this test locks in
+-- the tuple-index parity.
+
+module main
+  ( sliceIdx0
+  , sliceIdx1
+  , fullSliceIdx0
+  )
+
+-- Slice a list of pairs then broadcast field 0.
+sliceIdx0 :: [Int]
+sliceIdx0 = .[0:2].0 [(1, 2), (3, 4), (5, 6)]
+
+-- Same shape, other field, exercising `.1`.
+sliceIdx1 :: [Int]
+sliceIdx1 = .[0:2].1 [(1, 2), (3, 4), (5, 6)]
+
+-- Full slice + tuple-index broadcast (`.[:].0`).
+fullSliceIdx0 :: [Int]
+fullSliceIdx0 = .[:].0 [(1, 2), (3, 4), (5, 6)]

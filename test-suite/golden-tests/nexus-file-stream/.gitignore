@@ -1,0 +1,7 @@
+build.err
+obs.err
+obs.txt
+prog
+stream-final.packet
+stream-missing.packet
+stream-temp.packet

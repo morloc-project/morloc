@@ -17,9 +17,9 @@ import root
 testCoalesceAll :: Str -> <IO> [Int]
 testCoalesceAll path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
-  @write 0 [4, 5] o
-  @write 0 [6, 7, 8, 9] o
+  @write 0 o [1, 2, 3]
+  @write 0 o [4, 5]
+  @write 0 o [6, 7, 8, 9]
   @close o
   s <- @open path :: <IO> IStream Int
   @next s
@@ -29,9 +29,9 @@ testCoalesceAll path = do
 testOneSubpacketOnly :: Str -> <IO> [Int]
 testOneSubpacketOnly path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
-  @write 0 [4, 5] o
-  @write 0 [6, 7, 8, 9] o
+  @write 0 o [1, 2, 3]
+  @write 0 o [4, 5]
+  @write 0 o [6, 7, 8, 9]
   @close o
   s <- @open path :: <IO> IStream Int
   @next s

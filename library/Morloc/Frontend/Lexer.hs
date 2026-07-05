@@ -40,8 +40,56 @@ lexMorloc :: String -> Text -> Either LexError ([Located], Map.Map Pos [Text], [
 lexMorloc filename input = do
   rawTokens <- lexRaw filename (T.unpack input) (startPos filename)
   let rawTokens' = distinguishGetterDots rawTokens
+  _ <- rejectChainAfterGroupAccessor rawTokens'
   let (docMap, groupToks, filtered) = extractDocstrings rawTokens'
   return (insertLayout filtered, docMap, groupToks)
+
+-- | Reject the sequence `.(...).<chain>` -- a group accessor with a
+-- trailing chained getter. The CST's @CABGroup@ intentionally has no
+-- tail slot: a group's siblings are complete accessor bodies, not
+-- steps that can be extended by an outer chain. Without this check
+-- @.(.a, .b).0 x@ silently reparses as a two-argument setter
+-- application (`AppE (.(.a,.b)) [.0, x]`), producing an inscrutable
+-- type error at codegen. Reject it up front with a clear syntactic
+-- error at the chain dot's position.
+rejectChainAfterGroupAccessor :: [Located] -> Either LexError ()
+rejectChainAfterGroupAccessor = go []
+  where
+    -- Stack tracks open parens. Each entry is True if the '(' opened
+    -- a group accessor (i.e. was preceded by a getter-dot -- either
+    -- TokGetterDot for a whitespace-preceded outer group, or
+    -- TokGetterDotChain for a group nested directly after another
+    -- accessor step, like the inner '.(' in '.(.(.a, .b), .c)').
+    -- Only group-closing ')' forbids a trailing chain-dot; ordinary
+    -- parens do not.
+    go :: [Bool] -> [Located] -> Either LexError ()
+    go _ [] = Right ()
+    -- Group opener: '.(' or chained '.(' -- consume both tokens, push True.
+    go stk (Located _ dotTok _
+              : Located _ TokLParen _
+              : rest)
+      | isGetterDot dotTok = go (True : stk) rest
+    -- Ordinary '(' with no preceding getter-dot.
+    go stk (Located _ TokLParen _ : rest) = go (False : stk) rest
+    -- ')' closes the innermost paren. If it closed a group and a
+    -- chained getter dot follows immediately, reject.
+    go (True : _) (Located _ TokRParen _
+                    : Located dotPos TokGetterDotChain _
+                    : _) =
+      Left (LexError dotPos
+        "chained getter is not allowed after a group accessor \
+        \'.(...)': the group has no tail slot, so patterns like \
+        \'.(.a,.b).0' are ambiguous. Reorder as '.(.a.0, .b.0)' \
+        \or bind the intermediate value with 'let'.")
+    go (_ : stk) (Located _ TokRParen _ : rest) = go stk rest
+    -- Stray ')' -- let the parser produce its own diagnostic.
+    go [] (Located _ TokRParen _ : rest) = go [] rest
+    go stk (_ : rest) = go stk rest
+
+    isGetterDot :: Token -> Bool
+    isGetterDot TokGetterDot      = True
+    isGetterDot TokGetterDotChain = True
+    isGetterDot _                 = False
 
 -- | Distinguish chained getter dots from standalone ones based on position.
 -- A TokGetterDot that immediately follows the previous token (no whitespace)

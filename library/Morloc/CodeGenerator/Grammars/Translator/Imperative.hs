@@ -160,24 +160,25 @@ data IExpr
       -- ^ @stream :: IFile a -> <IO> IStream a: derive an IStream
       --   handle from an open IFile handle (independent fd/mmap/cursor).
   | IIntrinsicOpenOStream Int IExpr
-      -- ^ @open :: <IO> (OStream a): schemaId of the element type and
-      --   the path expression. The runtime creates the file and writes
-      --   the stream header with the schema metadata block.
+      -- ^ @open :: <IO> (OStream a): schemaId of the list-of-element
+      --   `[a]` (streams are list-shaped) and the path expression. The
+      --   runtime creates the file and writes the stream header with
+      --   the schema metadata block.
   | IIntrinsicWrite Int IExpr IExpr IExpr
       -- ^ @write: schemaId of the [a] value type, level, value, handle.
   | IIntrinsicAppend Int IExpr
-      -- ^ @append :: Str -> <IO> (OStream a): schemaId of `a`, path expr.
+      -- ^ @append :: Str -> <IO> (OStream a): schemaId of `[a]`, path.
   | IIntrinsicConcat IExpr IExpr
       -- ^ @concat :: [Str] -> Str -> <IO> (): paths expr, dest expr.
   | IIntrinsicFlush IExpr
       -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
       --   to be emitted as a sub-packet. Single-argument: handle expr.
   | IIntrinsicStdin Int
-      -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `a`.
+      -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStdout Int
-      -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `a`.
+      -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStderr Int
-      -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `a`.
+      -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -698,24 +699,27 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs
                    (IRawExpr (render (poolExpr dataDocs)))
                    (IRawExpr (render (poolExpr pathDocs)))
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs, pathDocs]
--- @savem/@savej are not packet formats; codegen always passes a zero
--- level expression so the printed call shape is uniform with @save.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [dataDocs, pathDocs]) = do
+-- @savem/@savej take source args in (path, value) order for
+-- partial-application ergonomics (`@savem path` is a reusable sink).
+-- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
+-- They are not packet formats; codegen always passes a zero level
+-- expression so the printed call shape is uniform with @save.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "msgpack"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
                    (IRawExpr (render (poolExpr dataDocs)))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [dataDocs, pathDocs]) = do
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let fmt = "json"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
                    (IRawExpr (render (poolExpr dataDocs)))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [dataDocs, pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   innerType <- case typeFof origExpr of
@@ -809,10 +813,14 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
         (IIntrinsicStream (IRawExpr (render (poolExpr handleDocs))))
     }
 -- @write: emit one sub-packet of the [a] value to the OStream handle.
+-- Source order is (level, handle, value); IIntrinsicWrite keeps
+-- (level, value, handle) to match the C ABI `mlc_write(level, handle,
+-- voidstar)` and the pool's `_mlc_write(schema, level, value, handle)`
+-- helper.
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
-                                  [levelDocs, valueDocs, handleDocs]) = do
+                                  [levelDocs, handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  let allDocs = [levelDocs, valueDocs, handleDocs]
+  let allDocs = [levelDocs, handleDocs, valueDocs]
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg

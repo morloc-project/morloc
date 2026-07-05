@@ -1,0 +1,10 @@
+clean state: state=final
+clean elements: elements=10
+notail state: state=missing
+notail subpackets: subpackets=5
+notail elements: elements=10
+notail footer_note: footer_note="no footer at EOF; forward-scan walked sub-packet headers"
+capped subpackets: subpackets=2+
+capped footer_note: footer_note="no footer at EOF; forward-scan hit sub-packet cap"
+notail json scan_capped: "scan_capped":false
+capped json scan_capped: "scan_capped":true

@@ -9,11 +9,12 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use super::*;
 use morloc_runtime_types::packet::{
-    PacketHeader, METADATA_HEADER_MAGIC, METADATA_TYPE_SCHEMA_STRING,
-    PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD, PACKET_ENTRYPOINT_LOCAL,
-    PACKET_ENTRYPOINT_REMOTE_SFS, PACKET_FORMAT_JSON, PACKET_FORMAT_MSGPACK,
-    PACKET_FORMAT_VOIDSTAR, PACKET_SOURCE_FILE, PACKET_SOURCE_MESG,
-    PACKET_SOURCE_RPTR,
+    encode_stream_tail, make_final_footer_packet, make_temp_footer_packet, PacketHeader,
+    StreamDiag, SubpacketEntry, FOOTER_STATUS_CLOSED, FOOTER_STATUS_FAILED,
+    METADATA_HEADER_MAGIC, METADATA_TYPE_SCHEMA_STRING, PACKET_COMPRESSION_NONE,
+    PACKET_COMPRESSION_ZSTD, PACKET_ENTRYPOINT_LOCAL, PACKET_ENTRYPOINT_REMOTE_SFS,
+    PACKET_FORMAT_JSON, PACKET_FORMAT_MSGPACK, PACKET_FORMAT_VOIDSTAR,
+    PACKET_SOURCE_FILE, PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR, PACKET_TYPE_STREAM,
 };
 
 // ---------------------------------------------------------------------------
@@ -146,14 +147,13 @@ fn data_packet_mesg_msgpack_no_compression() {
         128,
     );
     match classify(&packet) {
-        Classification::MorlocDataPacket { arg, total_bytes } => {
+        Classification::MorlocDataPacket { arg } => {
             assert_eq!(arg.source, PACKET_SOURCE_MESG);
             assert_eq!(arg.format, PACKET_FORMAT_MSGPACK);
             assert_eq!(arg.compression, PACKET_COMPRESSION_NONE);
             assert_eq!(arg.schema.as_deref(), Some("as"));
             assert_eq!(arg.payload_bytes, 128);
             assert!(arg.metadata_bytes >= 8);
-            assert_eq!(total_bytes, packet.len() as u64);
         }
         other => panic!("expected DATA packet, got {:?}", other),
     }
@@ -574,15 +574,14 @@ fn msgpack_truncated_array_mid_value() {
 
 #[test]
 fn msgpack_complete_followed_by_garbage_rejected() {
-    // 0x90 = fixarray of 0 (one complete value, 1 byte). The probe
-    // contains more bytes after it -- typical for an ASCII file whose
-    // first byte parsed as a fixint. With the trailing-data rule we
-    // reject as MessagePack and fall through. With "Hello" as
-    // trailing the bytes are valid ASCII text.
-    let bytes = b"\x90Hello, world!\n";
+    // 0x41 = 'A' = positive fixint 65 (a complete 1-byte msgpack
+    // value) AND a valid ASCII byte. The probe has more bytes after
+    // it -- msgpack's trailing-data rule rejects, and the whole thing
+    // then classifies cleanly as ASCII text.
+    let bytes = b"Ahello world";
     match classify(bytes) {
-        Classification::Text { .. } => {}
-        other => panic!("expected Text, got {:?}", other),
+        Classification::Text { ascii_only: true } => {}
+        other => panic!("expected ASCII Text, got {:?}", other),
     }
 }
 
@@ -645,10 +644,11 @@ fn utf8_text_marks_non_ascii() {
 
 #[test]
 fn binary_with_embedded_nul_is_unknown() {
-    // A file with a NUL byte in the first kilobyte is not text. With
-    // bytes that also reject as msgpack (invalid UTF-8 continuation)
-    // and json (0xff not valid), the result is Unknown.
-    let bytes = &[0xde, 0xad, 0x00, 0xbe, 0xef, 0xff, 0xfe][..];
+    // A file with a NUL byte is not text. 0xff = FixNeg(-1), a
+    // one-byte complete msgpack value; the trailing bytes make
+    // msgpack reject too. 0xff is also invalid UTF-8, and the input
+    // has no comma/tab to fool the CSV inferrer. → Unknown.
+    let bytes = &[0xff, 0xff, 0x00, 0xff, 0xff, 0xff, 0xff][..];
     assert!(matches!(classify(bytes), Classification::Unknown));
 }
 
@@ -673,7 +673,6 @@ fn plain_format_data_packet() {
             payload_bytes: 1024,
             metadata_bytes: 64,
         },
-        total_bytes: 1120,
     };
     let s = format_plain(&cls, "foo.packet", &DEFAULT_OPTS, None);
     assert!(s.starts_with("foo.packet: data-packet "));
@@ -681,9 +680,10 @@ fn plain_format_data_packet() {
     assert!(s.contains("format=msgpack"));
     assert!(!s.contains("compression=")); // none suppressed
     assert!(s.contains("schema=\"as\""));
-    assert!(s.contains("payload=1024"));
+    assert!(s.contains("payload_full_size=1024"));
     assert!(s.contains("metadata=64"));
-    assert!(s.contains("total=1120"));
+    assert!(!s.contains("file_bytes")); // deliberately omitted
+    assert!(!s.contains("file_size"));
 }
 
 #[test]
@@ -742,7 +742,6 @@ fn default_call_packet_is_one_line() {
             }),
         ],
         payload_bytes: 144,
-        total_bytes: 176,
     };
     let s = format_plain(&cls, "foo.cp", &DEFAULT_OPTS, None);
     assert_eq!(s.lines().count(), 1);
@@ -776,7 +775,6 @@ fn verbose_call_packet_emits_arg_lines() {
             }),
         ],
         payload_bytes: 144,
-        total_bytes: 176,
     };
     let verbose = RenderOpts { verbose: true, ..DEFAULT_OPTS };
     let s = format_plain(&cls, "foo.cp", &verbose, None);
@@ -799,7 +797,6 @@ fn json_format_data_packet() {
             payload_bytes: 1024,
             metadata_bytes: 64,
         },
-        total_bytes: 1120,
     };
     let s = format_json(&cls, "foo.packet", None);
     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -810,9 +807,10 @@ fn json_format_data_packet() {
     assert_eq!(v["format"], "msgpack");
     assert_eq!(v["compression"], "none");
     assert_eq!(v["schema"], "as");
-    assert_eq!(v["payload_bytes"], 1024);
+    assert_eq!(v["payload_full_size"], 1024);
     assert_eq!(v["metadata_bytes"], 64);
-    assert_eq!(v["total_bytes"], 1120);
+    assert!(v.get("file_bytes").is_none());
+    assert!(v.get("file_size").is_none());
 }
 
 #[test]
@@ -829,7 +827,6 @@ fn json_format_call_packet_with_nested_args() {
             metadata_bytes: 0,
         })],
         payload_bytes: 48,
-        total_bytes: 80,
     };
     let s = format_json(&cls, "x", None);
     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -947,4 +944,353 @@ fn json_format_text_carries_encoding() {
     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["kind"], "text");
     assert_eq!(v["encoding"], "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Tests: STREAM packets
+// ---------------------------------------------------------------------------
+
+/// Build a stream header block by hand (independent of
+/// `make_stream_header_block`, which requires a parsed `Schema`).
+/// The schema string is embedded verbatim inside a SCHEMA_STRING
+/// metadata entry, padded to a 32-byte alignment boundary.
+fn build_stream_header(schema: &str) -> Vec<u8> {
+    let meta = build_metadata_with_schema(schema);
+    let mut hdr = PacketHeader::stream();
+    hdr.offset = meta.len() as u32;
+    let mut out = hdr.to_bytes().to_vec();
+    out.extend_from_slice(&meta);
+    out
+}
+
+/// A single DATA sub-packet with a msgpack payload of `payload_size`
+/// zero bytes and no metadata block. Sufficient shape for the
+/// stream-classification tests; the classifier never inspects a stream
+/// body.
+fn build_stream_subpacket(payload_size: usize) -> Vec<u8> {
+    build_data_packet(
+        PACKET_SOURCE_MESG,
+        PACKET_FORMAT_MSGPACK,
+        PACKET_COMPRESSION_NONE,
+        None,
+        payload_size,
+    )
+}
+
+fn diag_with(sub: u64, elem: u64, uncompressed: u64, compressed: u64) -> StreamDiag {
+    let mut d = StreamDiag::new();
+    d.writer_pid = 12345;
+    d.subpacket_count = sub;
+    d.element_count = elem;
+    d.bytes_uncompressed_total = uncompressed;
+    d.bytes_compressed_total = compressed;
+    d.first_flush_time = 1000;
+    d.last_flush_time = 2000;
+    d.largest_packet_uncompressed = uncompressed / sub.max(1);
+    d.largest_packet_idx = 0;
+    d.tail_len = 0;
+    d
+}
+
+#[test]
+fn stream_packet_no_footer_walks_sub_packets() {
+    // A stream file whose EOF tail does NOT carry the STREAM_TAIL_MAGIC:
+    // stream header + a couple of subpackets + no footer + no tail.
+    // The classifier state stays `missing` (file is unchanged on disk);
+    // a diagnostic walk populates `walk` with the sub-packet count.
+    // The msgpack sub-packet shape here is not voidstar so element_count
+    // stays 0 and the walker records them under compressed_uncounted.
+    let mut file = build_stream_header("u4");
+    file.extend_from_slice(&build_stream_subpacket(64));
+    file.extend_from_slice(&build_stream_subpacket(64));
+    let total = file.len() as u64;
+    match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
+        Classification::MorlocStreamPacket { schema, footer } => {
+            assert_eq!(schema.as_deref(), Some("u4"));
+            match footer {
+                FooterInfo::Missing { walk: Some(w) } => {
+                    assert_eq!(w.subpacket_count, 2);
+                    assert_eq!(w.element_count, 0);
+                    assert!(!w.partial);
+                    assert_eq!(w.compressed_uncounted, 2);
+                    assert!(!w.scan_capped);
+                }
+                other => panic!(
+                    "expected FooterInfo::Missing with walk data, got {:?}",
+                    other
+                ),
+            }
+        }
+        other => panic!("expected stream packet, got {:?}", other),
+    }
+}
+
+#[test]
+fn stream_packet_temp_footer_reports_diag() {
+    let mut file = build_stream_header("i8");
+    file.extend_from_slice(&build_stream_subpacket(128));
+    let diag = diag_with(1, 16, 128, 128);
+    file.extend_from_slice(&make_temp_footer_packet(&diag));
+    let total = file.len() as u64;
+    match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
+        Classification::MorlocStreamPacket { schema, footer, .. } => {
+            assert_eq!(schema.as_deref(), Some("i8"));
+            match footer {
+                FooterInfo::Temp { diag: v } => {
+                    assert_eq!(v.subpacket_count, 1);
+                    assert_eq!(v.element_count, 16);
+                    assert_eq!(v.bytes_uncompressed_total, 128);
+                }
+                other => panic!("expected temp footer, got {:?}", other),
+            }
+        }
+        other => panic!("expected stream packet, got {:?}", other),
+    }
+}
+
+#[test]
+fn stream_packet_final_footer_reports_index_count_and_status() {
+    let mut file = build_stream_header("u4");
+    for _ in 0..3 {
+        file.extend_from_slice(&build_stream_subpacket(32));
+    }
+    let diag = diag_with(3, 3, 96, 96);
+    let entries = [
+        SubpacketEntry { offset: 0,   elem_count: 1 },
+        SubpacketEntry { offset: 100, elem_count: 1 },
+        SubpacketEntry { offset: 200, elem_count: 1 },
+    ];
+    file.extend_from_slice(
+        &make_final_footer_packet(&diag, &entries, FOOTER_STATUS_FAILED),
+    );
+    let total = file.len() as u64;
+    match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
+        Classification::MorlocStreamPacket { schema, footer, .. } => {
+            assert_eq!(schema.as_deref(), Some("u4"));
+            match footer {
+                FooterInfo::Final { diag: v, status, entries: e } => {
+                    assert_eq!(v.subpacket_count, entries.len() as u64);
+                    assert_eq!(status, FOOTER_STATUS_FAILED);
+                    assert_eq!(v.element_count, 3);
+                    assert_eq!(e, entries.to_vec());
+                }
+                other => panic!("expected final footer, got {:?}", other),
+            }
+        }
+        other => panic!("expected stream packet, got {:?}", other),
+    }
+}
+
+#[test]
+fn stream_packet_giant_length_field_no_longer_errors() {
+    // The regression case: before this change the classifier ran
+    // 32 + offset + length against the file size on every packet. A
+    // stream header's length is u64::MAX (STREAM_LENGTH_SENTINEL),
+    // which the sum-check misread as "truncated by 18 exabytes".
+    let mut file = build_stream_header("u4");
+    file.extend_from_slice(&build_stream_subpacket(1024));
+    let total = file.len() as u64;
+    let cls = classify_reader(&mut Cursor::new(&file), total, None, 1024);
+    assert!(
+        matches!(cls, Classification::MorlocStreamPacket { .. }),
+        "stream should classify without triggering the size gate, got {:?}",
+        cls
+    );
+}
+
+#[test]
+fn stream_footer_body_length_mismatch_is_error() {
+    // Corrupt the EOF tail so its declared footer_len points to bytes
+    // that aren't a valid footer packet. The classifier should surface
+    // an error rather than silently returning `Missing`.
+    let mut file = build_stream_header("u4");
+    file.extend_from_slice(&build_stream_subpacket(64));
+    let diag = diag_with(1, 8, 64, 64);
+    let footer_pkt = make_temp_footer_packet(&diag);
+    let footer_body_len = footer_pkt.len() - 8; // strip embedded tail
+    file.extend_from_slice(&footer_pkt[..footer_body_len]);
+    // Write a bogus tail that says the footer is 12 bytes when it's
+    // actually a full temp-footer packet body.
+    file.extend_from_slice(&encode_stream_tail(12));
+    let total = file.len() as u64;
+    let cls = classify_reader(&mut Cursor::new(&file), total, None, 1024);
+    assert!(
+        matches!(cls, Classification::Error(_)),
+        "expected Error on corrupt tail, got {:?}", cls
+    );
+}
+
+#[test]
+fn stream_packet_default_plain_render_missing() {
+    let cls = Classification::MorlocStreamPacket {
+        schema: Some("u4".into()),
+        footer: FooterInfo::Missing { walk: None },
+    };
+    let s = format_plain(&cls, "s.packet", &DEFAULT_OPTS, None);
+    assert_eq!(s.lines().count(), 1);
+    assert!(s.starts_with("s.packet: stream-packet "));
+    assert!(s.contains("schema=\"u4\""));
+    assert!(s.contains("state=missing"));
+    assert!(s.contains("footer_note="));
+    assert!(!s.contains("file_bytes"));
+    assert!(!s.contains("file_size"));
+}
+
+#[test]
+fn stream_packet_default_plain_render_final() {
+    let mut d = StreamDiag::new();
+    d.subpacket_count = 5;
+    d.element_count = 5;
+    d.bytes_uncompressed_total = 500;
+    d.bytes_compressed_total = 250;
+    let cls = Classification::MorlocStreamPacket {
+        schema: Some("u4".into()),
+        footer: FooterInfo::Final {
+            diag: d.snapshot(),
+            status: FOOTER_STATUS_CLOSED,
+            entries: (0..5).map(|i| SubpacketEntry {
+                offset: 100 * i as u64,
+                elem_count: 1,
+            }).collect(),
+        },
+    };
+    let s = format_plain(&cls, "s.packet", &DEFAULT_OPTS, None);
+    assert_eq!(s.lines().count(), 1);
+    assert!(s.contains("state=final"));
+    assert!(s.contains("status=closed"));
+    assert!(s.contains("subpackets=5"));
+    assert!(s.contains("elements=5"));
+    assert!(s.contains("payload_full_size=500"));
+    assert!(s.contains("payload_wire_size=250"));
+    assert!(!s.contains("file_bytes"));
+    assert!(!s.contains("file_size"));
+}
+
+#[test]
+fn stream_packet_verbose_render_dumps_diag() {
+    let mut d = StreamDiag::new();
+    d.writer_pid = 4242;
+    d.subpacket_count = 2;
+    d.element_count = 2;
+    d.first_flush_time = 111;
+    d.last_flush_time = 222;
+    d.largest_packet_uncompressed = 100;
+    d.tail_len = 2;
+    d.tail[0] = 32;
+    d.tail[1] = 200;
+    let cls = Classification::MorlocStreamPacket {
+        schema: Some("u4".into()),
+        footer: FooterInfo::Temp { diag: d.snapshot() },
+    };
+    let verbose = RenderOpts { verbose: true, ..DEFAULT_OPTS };
+    let s = format_plain(&cls, "s.packet", &verbose, None);
+    let lines: Vec<&str> = s.lines().collect();
+    assert!(lines.len() >= 2);
+    assert!(lines[0].starts_with("s.packet: stream-packet "));
+    let body = lines[1..].join("\n");
+    assert!(body.contains("writer_pid=4242"));
+    assert!(body.contains("first_flush_time=111"));
+    assert!(body.contains("last_flush_time=222"));
+    assert!(body.contains("largest_packet_uncompressed=100"));
+    assert!(body.contains("tail_window=[32,200]"));
+}
+
+#[test]
+fn stream_packet_json_render_final() {
+    let mut d = StreamDiag::new();
+    d.subpacket_count = 3;
+    d.element_count = 30;
+    d.bytes_uncompressed_total = 900;
+    let entries = vec![
+        SubpacketEntry { offset: 0,   elem_count: 10 },
+        SubpacketEntry { offset: 128, elem_count: 10 },
+        SubpacketEntry { offset: 256, elem_count: 10 },
+    ];
+    let cls = Classification::MorlocStreamPacket {
+        schema: Some("u4".into()),
+        footer: FooterInfo::Final {
+            diag: d.snapshot(),
+            status: FOOTER_STATUS_CLOSED,
+            entries: entries.clone(),
+        },
+    };
+    let s = format_json(&cls, "s.packet", None);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["kind"], "morloc-packet");
+    assert_eq!(v["subkind"], "stream");
+    assert_eq!(v["schema"], "u4");
+    assert!(v.get("file_bytes").is_none());
+    assert!(v.get("file_size").is_none());
+    assert_eq!(v["footer"]["state"], "final");
+    assert_eq!(v["footer"]["status"], "closed");
+    assert_eq!(v["footer"]["subpacket_count"], 3);
+    assert_eq!(v["footer"]["diag"]["element_count"], 30);
+    assert_eq!(v["footer"]["diag"]["bytes_uncompressed_total"], 900);
+    // subpacket_entries emitted per-subpacket for downstream tooling.
+    let arr = v["footer"]["subpacket_entries"].as_array().unwrap();
+    assert_eq!(arr.len(), entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        assert_eq!(arr[i]["offset"], e.offset);
+        assert_eq!(arr[i]["elem_count"], e.elem_count);
+    }
+}
+
+#[test]
+fn stream_packet_json_render_missing() {
+    let cls = Classification::MorlocStreamPacket {
+        schema: None,
+        footer: FooterInfo::Missing { walk: None },
+    };
+    let s = format_json(&cls, "s.packet", None);
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["subkind"], "stream");
+    assert!(v.get("schema").is_none());
+    assert_eq!(v["footer"]["state"], "missing");
+    assert!(v["footer"].get("diag").is_none());
+}
+
+#[test]
+fn stream_truncated_past_header_reports_missing_with_schema() {
+    // Real-world case: the writer got its 32-byte header out, wrote
+    // the leading SCHEMA_STRING metadata entry, then crashed before
+    // finishing the padded metadata block, the subpackets, the footer,
+    // or the tail. The file is smaller than the header claims but the
+    // classifier should still surface the schema and report
+    // state=missing rather than erroring on the truncated metadata
+    // block.
+    //
+    // File shape (49 B, matching the user-observed bug):
+    //   [0..32]   stream header (offset=32, length=u64::MAX)
+    //   [32..42]  a 10-byte SCHEMA_STRING entry for "j"
+    //   [42..49]  seven trailing zero bytes
+    let hdr = {
+        let mut h = PacketHeader::stream();
+        h.offset = 32;
+        h
+    };
+    let mut file = hdr.to_bytes().to_vec();
+    // SCHEMA_STRING metadata entry: mmh + type=SCHEMA + size=2 + "j\0".
+    file.extend_from_slice(&METADATA_HEADER_MAGIC);
+    file.push(METADATA_TYPE_SCHEMA_STRING);
+    file.extend_from_slice(&2u32.to_le_bytes());
+    file.extend_from_slice(b"j\0");
+    // Pad to 49 B total (the size in the hex dump the user posted).
+    file.resize(49, 0);
+    assert_eq!(file.len(), 49);
+
+    let total = file.len() as u64;
+    match classify_reader(&mut Cursor::new(&file), total, None, 1024) {
+        Classification::MorlocStreamPacket { schema, footer } => {
+            assert_eq!(schema.as_deref(), Some("j"));
+            assert!(matches!(footer, FooterInfo::Missing { .. }));
+        }
+        other => panic!("expected stream packet, got {:?}", other),
+    }
+}
+
+#[test]
+fn stream_command_type_constant_present() {
+    // Guard: if PACKET_TYPE_STREAM ever moves values, the dispatch arm
+    // in `classify_morloc_packet` needs to be revisited.
+    assert_eq!(PACKET_TYPE_STREAM, 3);
 }

@@ -20,10 +20,10 @@ roundTripBin x path = do
 
 roundTripMsg :: Int -> Str -> <IO> ?Int
 roundTripMsg x path = do
-  @savem (identity x) path
+  @savem path (identity x)
   @load path
 
 roundTripJson :: Int -> Str -> <IO> ?Int
 roundTripJson x path = do
-  @savej (identity x) path
+  @savej path (identity x)
   @load path

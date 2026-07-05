@@ -19,10 +19,13 @@ pub mod schema;
 pub mod cschema;
 pub mod null_check;
 pub mod packet;
+pub mod pattern;
 pub mod compression;
 pub mod daemon_socket;
 pub mod stream_handle;
 pub mod stdio_proto;
+
+pub use cschema::is_top_null;
 
 /// FFI return codes for the print_voidstar / pretty_print_voidstar
 /// C ABI: 0 ok, 1 error (see errmsg), 2 downstream pipe closed. Shared

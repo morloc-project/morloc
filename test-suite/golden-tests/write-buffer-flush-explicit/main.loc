@@ -18,11 +18,11 @@ import root
 writeWithFlushes :: Str -> <IO> ()
 writeWithFlushes path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [10, 20, 30] o
+  @write 0 o [10, 20, 30]
   @flush o
-  @write 0 [40, 50] o
+  @write 0 o [40, 50]
   @flush o
-  @write 0 [60, 70, 80, 90] o
+  @write 0 o [60, 70, 80, 90]
   @close o
 
 testFlushFirst :: Str -> <IO> [Int]

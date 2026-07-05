@@ -46,9 +46,16 @@ buildProgram (nexus, pools) = do
       liftIO $ SD.createDirectoryIfMissing True dir
       origDir <- liftIO SD.getCurrentDirectory
       liftIO $ SD.setCurrentDirectory dir
-      mapM_ build (nexus : pools) `finally` liftIO (SD.setCurrentDirectory origDir)
+      buildAll (nexus : pools) `finally` liftIO (SD.setCurrentDirectory origDir)
     Nothing ->
-      mapM_ build (nexus : pools)
+      buildAll (nexus : pools)
+  where
+    -- Land every pool's source files on disk BEFORE running any make
+    -- commands. If one pool's compile fails, the other pools' sources
+    -- still exist on disk for inspection. Without this split, a make
+    -- failure in an earlier pool aborts the mapM_ before later pools'
+    -- files ever get written.
+    buildAll ss = mapM_ writeScript ss >> mapM_ runMakes ss
 
 -- | catch/finally for MorlocMonad
 finally :: MorlocMonad a -> MorlocMonad () -> MorlocMonad a
@@ -59,15 +66,17 @@ finally action cleanup = do
     Right a -> return a
     Left e -> throwError e
 
-build :: Script -> MorlocMonad ()
-build s = do
+writeScript :: Script -> MorlocMonad ()
+writeScript s = do
   (_ :/ tree) <- liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
   case failures tree of
     [] -> return ()
     errs -> do
       msgs <- liftIO (mapM describeWriteFailure errs)
       MM.throwSystemError (vsep msgs)
-  mapM_ runSysCommand (scriptMake s)
+
+runMakes :: Script -> MorlocMonad ()
+runMakes s = mapM_ runSysCommand (scriptMake s)
 
 -- | Turn a directory-tree write failure into an actionable message.
 -- A directory occupying the output path is the common, recoverable

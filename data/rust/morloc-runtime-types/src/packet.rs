@@ -236,8 +236,12 @@ pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 // Layout commitments:
 //   - `SUBPACKET_INDEX` (`0x05`) appears only in the *final* footer (the
 //     one written by `@close` / implicit-close-on-exit). Body is
-//     `u64 count` followed by `count * u64` byte-offsets (offset of each
-//     sub-packet header within the file, relative to file start).
+//     `u64 count` followed by `count * (u64 offset, u64 elem_count)`
+//     pairs (offset of each sub-packet header within the file, relative
+//     to file start; plus its element count). The element count lets a
+//     reader answer "which sub-packet holds global index i?" via a
+//     `partition_point` binary search over cumulative counts, with zero
+//     sub-packet decompression.
 //   - `STREAM_DIAG` (`0x06`) is a fixed-size `StreamDiag` struct (see
 //     below) carrying running counters + tail window. Appears in both
 //     temp and final footers. The temp footer's whole purpose is this
@@ -270,6 +274,29 @@ pub const FOOTER_STATUS_FAILED: u8 = 2;
 pub const FOOTER_STATUS_REPAIRED: u8 = 3;
 
 pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
+
+// ── Subpacket-index helpers ────────────────────────────────────────────────
+
+/// One entry in the SUBPACKET_INDEX (0x05) block: byte offset of a
+/// sub-packet's header in the stream file, plus that sub-packet's
+/// element count. Element count comes from the sub-packet's `Array`
+/// header (`arr.size`) and lets readers binary-search over cumulative
+/// counts to answer "which sub-packet holds global index i?" without
+/// decompressing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubpacketEntry {
+    pub offset: u64,
+    pub elem_count: u64,
+}
+
+/// Bytes per entry inside the SUBPACKET_INDEX block payload
+/// (`u64 offset` + `u64 elem_count`). Body size is
+/// `SUBPACKET_INDEX_HEADER_BYTES + n * SUBPACKET_ENTRY_BYTES`.
+pub const SUBPACKET_ENTRY_BYTES: usize = 16;
+
+/// Bytes before the per-entry array in the SUBPACKET_INDEX block
+/// payload (the `count: u64 LE` prefix).
+pub const SUBPACKET_INDEX_HEADER_BYTES: usize = 8;
 
 // ── Frame-index helpers ────────────────────────────────────────────────────
 
@@ -838,17 +865,23 @@ pub fn make_local_call_packet(midx: u32, arg_packets: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Build a stream-file prefix: the 32-byte STREAM header plus a
-/// metadata block carrying the element schema.
+/// metadata block carrying the value schema `[a]`.
 ///
-/// The result is *not* a complete packet — it is the opening bytes of
+/// The result is *not* a complete packet -- it is the opening bytes of
 /// a stream file. A writer appends one or more full DATA sub-packets
 /// after this prefix, then optionally a FOOTER packet plus the
-/// `STREAM_TAIL_SIZE`-byte EOF tail.
+/// `STREAM_TAIL_SIZE`-byte EOF tail. The STREAM header's `length` field
+/// is `STREAM_LENGTH_SENTINEL` (writers never touch the header again),
+/// and `offset` is the byte size of the metadata block.
 ///
-/// The STREAM header's `length` field is `STREAM_LENGTH_SENTINEL`
-/// (writers never touch the header again), and `offset` is the byte
-/// size of the metadata block.
+/// Debug-assert: callers must pass an Array schema (streams are
+/// list-shaped). Enforced at every entry via `reject_non_list_stream_schema`.
 pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
+    debug_assert!(
+        schema.serial_type == crate::schema::SerialType::Array,
+        "make_stream_header_block: non-Array schema {:?} (compiler bug)",
+        schema.serial_type,
+    );
     let schema_str = crate::schema::schema_to_string(schema);
     let schema_bytes = schema_str.as_bytes();
     let schema_len = schema_bytes.len() + 1; // null terminator
@@ -1048,6 +1081,51 @@ impl Default for StreamDiag {
     }
 }
 
+/// Aligned, owned mirror of `StreamDiag`. Consumers that just want to
+/// read the fields (renderers, JSON encoders) work through this instead
+/// of poking at the packed struct directly. `tail` holds only the
+/// populated slice (`tail[0..tail_len]`); slots beyond that in the raw
+/// struct are uninitialised and are dropped here.
+#[derive(Debug, Clone)]
+pub struct StreamDiagView {
+    pub diag_version: u32,
+    pub writer_pid: u32,
+    pub n_oversize_subpackets: u32,
+    pub writer_start_time: u64,
+    pub subpacket_count: u64,
+    pub element_count: u64,
+    pub bytes_uncompressed_total: u64,
+    pub bytes_compressed_total: u64,
+    pub largest_packet_uncompressed: u64,
+    pub largest_packet_idx: u64,
+    pub first_flush_time: u64,
+    pub last_flush_time: u64,
+    pub tail: Vec<u64>,
+}
+
+impl StreamDiag {
+    pub fn snapshot(&self) -> StreamDiagView {
+        let tail_len = { self.tail_len } as usize;
+        let capped = tail_len.min(STREAM_DIAG_TAIL_MAX);
+        let tail_copy: [u64; STREAM_DIAG_TAIL_MAX] = { self.tail };
+        StreamDiagView {
+            diag_version: { self.diag_version },
+            writer_pid: { self.writer_pid },
+            n_oversize_subpackets: { self.n_oversize_subpackets },
+            writer_start_time: { self.writer_start_time },
+            subpacket_count: { self.subpacket_count },
+            element_count: { self.element_count },
+            bytes_uncompressed_total: { self.bytes_uncompressed_total },
+            bytes_compressed_total: { self.bytes_compressed_total },
+            largest_packet_uncompressed: { self.largest_packet_uncompressed },
+            largest_packet_idx: { self.largest_packet_idx },
+            first_flush_time: { self.first_flush_time },
+            last_flush_time: { self.last_flush_time },
+            tail: tail_copy[..capped].to_vec(),
+        }
+    }
+}
+
 /// Total bytes a temp footer occupies on disk: footer packet header
 /// (32 B) + one metadata block header (8 B) + StreamDiag payload
 /// (160 B) + EOF tail (8 B). This number is exposed so OStream writers
@@ -1079,14 +1157,18 @@ pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
 /// depends on the index length but is always written once, at `@close`.
 pub fn make_final_footer_packet(
     diag: &StreamDiag,
-    subpacket_index: &[u64],
+    subpacket_entries: &[SubpacketEntry],
     status: u8,
 ) -> Vec<u8> {
-    // Build the subpacket-index body: u64 count followed by u64 offsets.
-    let mut idx_body = Vec::with_capacity(8 + subpacket_index.len() * 8);
-    idx_body.extend_from_slice(&(subpacket_index.len() as u64).to_le_bytes());
-    for off in subpacket_index {
-        idx_body.extend_from_slice(&off.to_le_bytes());
+    // Build the subpacket-index body: u64 count followed by
+    // (u64 offset, u64 elem_count) pairs.
+    let mut idx_body = Vec::with_capacity(
+        SUBPACKET_INDEX_HEADER_BYTES + subpacket_entries.len() * SUBPACKET_ENTRY_BYTES,
+    );
+    idx_body.extend_from_slice(&(subpacket_entries.len() as u64).to_le_bytes());
+    for entry in subpacket_entries {
+        idx_body.extend_from_slice(&entry.offset.to_le_bytes());
+        idx_body.extend_from_slice(&entry.elem_count.to_le_bytes());
     }
 
     let diag_bytes = diag.as_bytes();
@@ -1116,15 +1198,16 @@ pub fn decode_footer_status(data: &[u8]) -> u8 {
 }
 
 /// Parse the SUBPACKET_INDEX entry payload (without the 8-byte mmh-
-/// type-size header). Body is `u64 count` followed by `count * u64`.
-pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<u64>, MorlocError> {
-    if data.len() < 8 {
+/// type-size header). Body is `u64 count` followed by
+/// `count * (u64 offset, u64 elem_count)` pairs.
+pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<SubpacketEntry>, MorlocError> {
+    if data.len() < SUBPACKET_INDEX_HEADER_BYTES {
         return Err(MorlocError::Packet(format!(
             "SUBPACKET_INDEX entry truncated: {} bytes", data.len()
         )));
     }
     let count = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
-    let needed = 8 + count * 8;
+    let needed = SUBPACKET_INDEX_HEADER_BYTES + count * SUBPACKET_ENTRY_BYTES;
     if data.len() < needed {
         return Err(MorlocError::Packet(format!(
             "SUBPACKET_INDEX claims {} entries but payload has {} bytes",
@@ -1132,10 +1215,12 @@ pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<u64>, MorlocError> {
         )));
     }
     let mut out = Vec::with_capacity(count);
-    let mut cur = 8;
+    let mut cur = SUBPACKET_INDEX_HEADER_BYTES;
     for _ in 0..count {
-        out.push(u64::from_le_bytes(data[cur..cur + 8].try_into().unwrap()));
-        cur += 8;
+        let offset = u64::from_le_bytes(data[cur..cur + 8].try_into().unwrap());
+        let elem_count = u64::from_le_bytes(data[cur + 8..cur + 16].try_into().unwrap());
+        out.push(SubpacketEntry { offset, elem_count });
+        cur += SUBPACKET_ENTRY_BYTES;
     }
     Ok(out)
 }
@@ -1350,6 +1435,144 @@ pub fn read_schema_from_meta(packet: &[u8]) -> Result<Option<String>, MorlocErro
         }
     }
     Ok(None)
+}
+
+// ── Forward-scan recovery ─────────────────────────────────────────────────
+
+/// Result of forward-scanning a footer-less MORLOC_STREAM_PACKET file
+/// to recover its sub-packet index and element count.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardScan {
+    /// Byte offsets (from file start) of each intact sub-packet header.
+    pub subpacket_offsets: Vec<u64>,
+    /// Total element count across all *uncounted-eligible* sub-packets.
+    /// Uncompressed sub-packets contribute their array size prefix
+    /// (`u64` at the start of the payload). Compressed sub-packets
+    /// are skipped for count (would require decompression) -- see
+    /// `compressed_uncounted` and the compression-aware companion in
+    /// `crate::compression::forward_scan_subpackets_with_counts`.
+    pub element_count: u64,
+    /// Bytes consumed from `body_start` through the last intact
+    /// sub-packet (exclusive of any partial trailing sub-packet).
+    pub bytes_scanned: u64,
+    /// True iff the scan stopped at a truncated last sub-packet whose
+    /// bytes were incomplete on disk. That sub-packet is not in
+    /// `subpacket_offsets`; upstream tools can report "partial".
+    pub partial: bool,
+    /// Count of sub-packets whose compressed payload was skipped for
+    /// element counting. When nonzero, `element_count` covers only
+    /// the uncompressed sub-packets; use the compression-aware
+    /// walker for an exact total.
+    pub compressed_uncounted: u64,
+    /// True iff the scan stopped early because it hit its sub-packet
+    /// count cap. Callers with real read budgets (`morloc-nexus file`)
+    /// use this to keep the classification tool fast on pathological
+    /// inputs; callers who need the full walk (runtime IStream open)
+    /// pass `u64::MAX` and never see this set.
+    pub scan_capped: bool,
+}
+
+/// Walk sub-packet headers starting at `body_start` and stop at the
+/// first non-data packet (the footer, if any), a corrupt header, or
+/// EOF. Used for footer-less recovery of MORLOC_STREAM_PACKET files.
+/// Equivalent to `forward_scan_subpackets_capped(mmap, body_start,
+/// u64::MAX)` -- unbounded, for callers who need the full walk
+/// (runtime IStream / IFile open).
+///
+/// Element counts are taken from the array size prefix at the start
+/// of each uncompressed sub-packet's payload. Compressed sub-packets
+/// are recorded in the offsets list but their element count is
+/// deferred: they contribute to `compressed_uncounted` and the caller
+/// can use the compression-aware companion walker to fill in the count.
+pub fn forward_scan_subpackets(
+    mmap: &[u8],
+    body_start: u64,
+) -> Result<ForwardScan, MorlocError> {
+    forward_scan_subpackets_capped(mmap, body_start, u64::MAX)
+}
+
+/// Same as `forward_scan_subpackets` but stops after `cap` sub-packets
+/// and sets `scan_capped=true` on the result. Callers with a read
+/// budget (`morloc-nexus file` for its fast-classification contract)
+/// use this to avoid unbounded work on inputs that flush after every
+/// element.
+pub fn forward_scan_subpackets_capped(
+    mmap: &[u8],
+    body_start: u64,
+    cap: u64,
+) -> Result<ForwardScan, MorlocError> {
+    let size = mmap.len() as u64;
+    if body_start > size {
+        return Err(MorlocError::Packet(format!(
+            "forward_scan: body_start {} exceeds file size {}",
+            body_start, size,
+        )));
+    }
+    let mut out = ForwardScan::default();
+    let mut cur = body_start;
+
+    while cur + 32 <= size {
+        if out.subpacket_offsets.len() as u64 >= cap {
+            out.scan_capped = true;
+            break;
+        }
+        let hdr_start = cur as usize;
+        let hdr_bytes: &[u8; 32] = mmap[hdr_start..hdr_start + 32]
+            .try_into()
+            .expect("32-byte slice");
+        let header = match PacketHeader::from_bytes(hdr_bytes) {
+            Ok(h) => h,
+            Err(_) => break, // corrupt header: stop cleanly
+        };
+        if header.is_footer() {
+            break;
+        }
+        if !header.is_data() {
+            break;
+        }
+        let offset = header.offset as u64;
+        let length = header.length as u64;
+        let total = 32u64
+            .checked_add(offset)
+            .and_then(|x| x.checked_add(length))
+            .ok_or_else(|| MorlocError::Packet(
+                "forward_scan: sub-packet total-size overflow".into(),
+            ))?;
+        if cur + total > size {
+            // Trailing partial sub-packet (crashed mid-write).
+            out.partial = true;
+            break;
+        }
+
+        // Count elements from the array size prefix when uncompressed
+        // AND voidstar. Msgpack sub-packets (per the current design,
+        // rejected at IFile open time) do not have the array-length
+        // prefix; skip them for count.
+        let data = unsafe { header.command.data };
+        let is_voidstar = data.format == PACKET_FORMAT_VOIDSTAR;
+        let is_uncompressed = data.compression == PACKET_COMPRESSION_NONE;
+        if is_voidstar && is_uncompressed {
+            let payload_start = (cur + 32 + offset) as usize;
+            if payload_start + 8 <= mmap.len() {
+                let size_bytes: [u8; 8] = mmap
+                    [payload_start..payload_start + 8]
+                    .try_into()
+                    .expect("8-byte size prefix");
+                let elem_count = u64::from_le_bytes(size_bytes);
+                out.element_count = out.element_count.saturating_add(elem_count);
+            } else {
+                out.partial = true;
+                break;
+            }
+        } else {
+            out.compressed_uncounted = out.compressed_uncounted.saturating_add(1);
+        }
+
+        out.subpacket_offsets.push(cur);
+        cur += total;
+    }
+    out.bytes_scanned = cur.saturating_sub(body_start);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1921,8 +2144,13 @@ mod tests {
     #[test]
     fn final_footer_packet_carries_all_blocks_including_status() {
         let diag = StreamDiag::new();
-        let index: Vec<u64> = (0..5).map(|i| (i as u64) * (16 << 20)).collect();
-        let bytes = make_final_footer_packet(&diag, &index, FOOTER_STATUS_PAUSED);
+        let entries: Vec<SubpacketEntry> = (0..5)
+            .map(|i| SubpacketEntry {
+                offset: (i as u64) * (16 << 20),
+                elem_count: 1024 + (i as u64) * 7,
+            })
+            .collect();
+        let bytes = make_final_footer_packet(&diag, &entries, FOOTER_STATUS_PAUSED);
 
         let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
         let footer = &bytes[..footer_packet_len];
@@ -1931,7 +2159,7 @@ mod tests {
 
         let mut saw_diag = false;
         let mut saw_final = false;
-        let mut recovered_index: Option<Vec<u64>> = None;
+        let mut recovered_entries: Option<Vec<SubpacketEntry>> = None;
         let mut recovered_status: Option<u8> = None;
         for (kind, body) in iter_packet_metadata(footer).unwrap() {
             match kind {
@@ -1941,7 +2169,7 @@ mod tests {
                     assert_eq!(body.len(), 0);
                 }
                 METADATA_TYPE_SUBPACKET_INDEX => {
-                    recovered_index = Some(decode_subpacket_index(body).unwrap());
+                    recovered_entries = Some(decode_subpacket_index(body).unwrap());
                 }
                 METADATA_TYPE_FOOTER_STATUS => {
                     recovered_status = Some(decode_footer_status(body));
@@ -1951,7 +2179,7 @@ mod tests {
         }
         assert!(saw_diag);
         assert!(saw_final, "final footer must carry FOOTER_FINAL");
-        assert_eq!(recovered_index.as_deref(), Some(index.as_slice()));
+        assert_eq!(recovered_entries.as_deref(), Some(entries.as_slice()));
         assert_eq!(recovered_status, Some(FOOTER_STATUS_PAUSED));
     }
 
@@ -1967,7 +2195,8 @@ mod tests {
 
     #[test]
     fn subpacket_index_decode_rejects_truncated() {
-        // count claims 4 entries but only 2 offsets provided.
+        // count claims 4 entries (needs 8 + 4*16 = 72 bytes) but only
+        // one pair (16 bytes) provided after the count header.
         let mut bad = 4u64.to_le_bytes().to_vec();
         bad.extend_from_slice(&0u64.to_le_bytes());
         bad.extend_from_slice(&1u64.to_le_bytes());
@@ -1981,5 +2210,111 @@ mod tests {
         let body = 0u64.to_le_bytes();
         let recovered = decode_subpacket_index(&body).unwrap();
         assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn subpacket_index_pair_roundtrip() {
+        // Encode a few (offset, elem_count) pairs directly and confirm
+        // the decoder recovers both fields in order.
+        let mut body = 3u64.to_le_bytes().to_vec();
+        for &(off, n) in &[(0u64, 100u64), (1024, 250), (2048, 175)] {
+            body.extend_from_slice(&off.to_le_bytes());
+            body.extend_from_slice(&n.to_le_bytes());
+        }
+        let recovered = decode_subpacket_index(&body).unwrap();
+        assert_eq!(recovered, vec![
+            SubpacketEntry { offset: 0,    elem_count: 100 },
+            SubpacketEntry { offset: 1024, elem_count: 250 },
+            SubpacketEntry { offset: 2048, elem_count: 175 },
+        ]);
+    }
+
+    #[test]
+    fn subpacket_index_decode_rejects_short_header() {
+        // Body shorter than the 8-byte count prefix must fail.
+        let bad = [0u8; 4];
+        assert!(decode_subpacket_index(&bad).is_err());
+    }
+
+    /// Build a synthetic uncompressed sub-packet header + payload with a
+    /// given array-size prefix, for exercising forward_scan_subpackets.
+    fn build_uncompressed_subpacket(elem_count: u64, payload_extra: usize) -> Vec<u8> {
+        // Payload is: [u64 size prefix] + [zero-filled tail]
+        let payload_len = 8 + payload_extra;
+        let mut hdr = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
+        hdr.offset = 0; // no metadata between header and payload
+        let mut out = Vec::with_capacity(32 + payload_len);
+        out.extend_from_slice(&hdr.to_bytes());
+        out.extend_from_slice(&elem_count.to_le_bytes());
+        out.resize(32 + payload_len, 0);
+        out
+    }
+
+    #[test]
+    fn forward_scan_empty_body() {
+        // body_start == size: nothing to scan.
+        let mmap = vec![0u8; 32]; // any 32-byte prelude
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert!(scan.subpacket_offsets.is_empty());
+        assert_eq!(scan.element_count, 0);
+        assert_eq!(scan.bytes_scanned, 0);
+        assert!(!scan.partial);
+        assert_eq!(scan.compressed_uncounted, 0);
+    }
+
+    #[test]
+    fn forward_scan_two_uncompressed_subpackets() {
+        // Stream file skeleton: 32-byte fake "stream header" + N sub-
+        // packets. forward_scan_subpackets does not care what precedes
+        // body_start; it just walks from body_start onward.
+        let mut mmap = vec![0u8; 32];
+        mmap.extend_from_slice(&build_uncompressed_subpacket(100, 0));
+        let off1 = mmap.len() as u64;
+        let expected_off0: u64 = 32;
+        mmap.extend_from_slice(&build_uncompressed_subpacket(250, 0));
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert_eq!(scan.subpacket_offsets, vec![expected_off0, off1]);
+        assert_eq!(scan.element_count, 350);
+        assert!(!scan.partial);
+        assert_eq!(scan.compressed_uncounted, 0);
+    }
+
+    #[test]
+    fn forward_scan_stops_at_footer() {
+        // Two data sub-packets + a footer packet -> only the two data
+        // sub-packets are recovered; footer terminates the walk.
+        let mut mmap = vec![0u8; 32];
+        mmap.extend_from_slice(&build_uncompressed_subpacket(10, 0));
+        mmap.extend_from_slice(&build_uncompressed_subpacket(20, 0));
+        let footer_hdr = PacketHeader::footer(0);
+        mmap.extend_from_slice(&footer_hdr.to_bytes());
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert_eq!(scan.subpacket_offsets.len(), 2);
+        assert_eq!(scan.element_count, 30);
+        assert!(!scan.partial);
+    }
+
+    #[test]
+    fn forward_scan_marks_partial_on_truncation() {
+        // Two intact sub-packets + a truncated third header.
+        let mut mmap = vec![0u8; 32];
+        mmap.extend_from_slice(&build_uncompressed_subpacket(3, 0));
+        mmap.extend_from_slice(&build_uncompressed_subpacket(4, 0));
+        // Truncated third packet: full header claiming a large payload,
+        // but the file ends before the payload does.
+        let mut trunc = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 4096);
+        trunc.offset = 0;
+        mmap.extend_from_slice(&trunc.to_bytes());
+        // No payload bytes for the third packet.
+        let scan = forward_scan_subpackets(&mmap, 32).unwrap();
+        assert_eq!(scan.subpacket_offsets.len(), 2);
+        assert_eq!(scan.element_count, 7);
+        assert!(scan.partial);
+    }
+
+    #[test]
+    fn forward_scan_rejects_out_of_range_body_start() {
+        let mmap = vec![0u8; 32];
+        assert!(forward_scan_subpackets(&mmap, 64).is_err());
     }
 }

@@ -1,6 +1,6 @@
 -- Reading a stream file whose writer exited without `@close`.
 --
--- v2 (post-buffering): @write now appends to an in-SHM buffer
+-- v2 (post-buffering): @write now buffer appends to an in-SHM
 -- instead of immediately producing a sub-packet on disk. A writer
 -- that exits WITHOUT `@close` and WITHOUT `@flush` loses its buffer
 -- entirely -- the per-call sweep calls `discard_handle`, which
@@ -47,11 +47,11 @@ import root
 writeAndFlush :: Str -> <IO> ()
 writeAndFlush path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
+  @write 0 o [1, 2, 3]
   @flush o
-  @write 0 [4, 5] o
+  @write 0 o [4, 5]
   @flush o
-  @write 0 [6, 7, 8, 9] o
+  @write 0 o [6, 7, 8, 9]
   @flush o
 
 -- Three @writes without @flush. Without @close either. The
@@ -61,9 +61,9 @@ writeAndFlush path = do
 writeWithoutFlush :: Str -> <IO> ()
 writeWithoutFlush path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
-  @write 0 [4, 5] o
-  @write 0 [6, 7, 8, 9] o
+  @write 0 o [1, 2, 3]
+  @write 0 o [4, 5]
+  @write 0 o [6, 7, 8, 9]
 
 countViaIStream :: Str -> <IO> Int
 countViaIStream path = do

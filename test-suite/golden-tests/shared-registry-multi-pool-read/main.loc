@@ -24,11 +24,11 @@ import root-cpp
 prepFile :: Str -> <IO> ()
 prepFile path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
+  @write 0 o [1, 2, 3]
   @flush o
-  @write 0 [4, 5] o
+  @write 0 o [4, 5]
   @flush o
-  @write 0 [6, 7] o
+  @write 0 o [6, 7]
   @close o
 
 -- The bound `xs` carries the @next result through the pool-pinning

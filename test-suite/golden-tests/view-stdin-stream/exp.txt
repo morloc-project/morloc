@@ -1,0 +1,8 @@
+jsonl line count: 10
+jsonl first line: 1
+jsonl last line: 10
+jsonl sum: 55
+stream file kind: stream-packet
+stream state: state=final
+stream elements: elements=10
+stream jsonl round-trip sum: 55

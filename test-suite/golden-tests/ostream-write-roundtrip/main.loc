@@ -2,7 +2,7 @@
 --
 -- Stage 4 introduces:
 --   * @open path :: <IO> (OStream T) -- typed create + flock + header
---   * @write level value handle      -- emit one sub-packet
+--   * @write level handle value      -- emit one sub-packet
 --   * @close handle                  -- write final footer, fsync, close
 --   * @append schema path            -- resume an existing stream
 --   * @concat [src..] dest           -- byte-level merge
@@ -24,7 +24,7 @@ import root
 testWriteOne :: Str -> <IO> [Int]
 testWriteOne path = do
   s <- @open path :: <IO> OStream Int
-  @write 0 [10, 20, 30] s
+  @write 0 s [10, 20, 30]
   @close s
   r <- @open path :: <IO> IStream Int
   @next r
@@ -33,11 +33,11 @@ testWriteOne path = do
 testWriteMulti :: Str -> <IO> Int
 testWriteMulti path = do
   s <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] s
+  @write 0 s [1, 2, 3]
   @flush s
-  @write 0 [4, 5, 6, 7] s
+  @write 0 s [4, 5, 6, 7]
   @flush s
-  @write 0 [8] s
+  @write 0 s [8]
   @close s
   f <- @open path :: <IO> IFile Int
   @flen f
@@ -46,9 +46,9 @@ testWriteMulti path = do
 testWriteIStream :: Str -> <IO> [Int]
 testWriteIStream path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [100, 200] o
+  @write 0 o [100, 200]
   @flush o
-  @write 0 [300, 400, 500] o
+  @write 0 o [300, 400, 500]
   @close o
   s <- @open path :: <IO> IStream Int
   -- Take the first sub-packet; later @next would give [300,400,500],
@@ -59,10 +59,10 @@ testWriteIStream path = do
 testAppendThenLength :: Str -> <IO> Int
 testAppendThenLength path = do
   o <- @open path :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
+  @write 0 o [1, 2, 3]
   @close o
   o2 <- @append path :: <IO> OStream Int
-  @write 0 [4, 5] o2
+  @write 0 o2 [4, 5]
   @close o2
   f <- @open path :: <IO> IFile Int
   @flen f
@@ -71,10 +71,10 @@ testAppendThenLength path = do
 testConcatTwo :: Str -> Str -> Str -> <IO> Int
 testConcatTwo a b dest = do
   oa <- @open a :: <IO> OStream Int
-  @write 0 [11, 22, 33] oa
+  @write 0 oa [11, 22, 33]
   @close oa
   ob <- @open b :: <IO> OStream Int
-  @write 0 [44, 55] ob
+  @write 0 ob [44, 55]
   @close ob
   @concat [a, b] dest
   f <- @open dest :: <IO> IFile Int

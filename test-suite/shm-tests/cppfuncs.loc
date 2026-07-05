@@ -3,5 +3,6 @@ module cppfuncs (*)
 import types
 
 sum_list :: [Int] -> Int
+alloc_hold_and_sum :: Int -> Real -> Int
 
-source Cpp from "stress.hpp" ("sum_list")
+source Cpp from "stress.hpp" ("sum_list", "alloc_hold_and_sum")

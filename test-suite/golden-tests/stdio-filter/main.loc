@@ -26,11 +26,11 @@ doubleList xs = map (\x -> x * 2) xs
 producer :: <IO> ()
 producer = do
   o <- @stdout :: <IO> OStream Int
-  @write 0 [1, 2, 3] o
+  @write 0 o [1, 2, 3]
   @flush o
-  @write 0 [4, 5, 6] o
+  @write 0 o [4, 5, 6]
   @flush o
-  @write 0 [7, 8, 9, 10] o
+  @write 0 o [7, 8, 9, 10]
   @close o
 
 doubler :: <IO> ()
@@ -38,13 +38,13 @@ doubler = do
   s <- @stdin  :: <IO> IStream Int
   o <- @stdout :: <IO> OStream Int
   xs1 <- @next s
-  @write 0 (doubleList xs1) o
+  @write 0 o (doubleList xs1)
   @flush o
   xs2 <- @next s
-  @write 0 (doubleList xs2) o
+  @write 0 o (doubleList xs2)
   @flush o
   xs3 <- @next s
-  @write 0 (doubleList xs3) o
+  @write 0 o (doubleList xs3)
   @close o
 
 checkSum :: <IO> Int

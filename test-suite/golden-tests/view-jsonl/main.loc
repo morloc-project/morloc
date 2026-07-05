@@ -1,0 +1,34 @@
+-- Produces test corpora for the `morloc-nexus view -f jsonl` golden.
+-- Each function takes an output path and materialises a data packet
+-- via @save; the Makefile then runs `view -f jsonl` and checks the
+-- shape of the output.
+
+module main
+  ( mkListInt
+  , mkListRecord
+  , mkScalar
+  , mkEmpty
+  )
+
+import root
+
+record Person where
+  name :: Str
+  age :: Int
+record Py => Person = "dict"
+
+mkListInt :: Str -> <IO> ()
+mkListInt path = @save 0 [10, 20, 30, 40, 50] path
+
+mkListRecord :: Str -> <IO> ()
+mkListRecord path = @save 0
+  [ {name = "Alice", age = 30}
+  , {name = "Bob",   age = 25}
+  , {name = "Carol", age = 40}
+  ] path
+
+mkScalar :: Str -> <IO> ()
+mkScalar path = @save 0 42 path
+
+mkEmpty :: Str -> <IO> ()
+mkEmpty path = @save 0 ([] :: [Int]) path
