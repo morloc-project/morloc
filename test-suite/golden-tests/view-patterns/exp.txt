@@ -23,3 +23,18 @@ records .missing exit: 1
 records .missing msg: field "missing" not found
 parse .[bad exit: 1
 parse .[bad msg: pattern parse
+flat DATA .[3:7] -d file kind: data-packet
+flat DATA .[3:7] -d roundtrip jsonl lines: 4
+flat DATA .[3:7] -d roundtrip jsonl sum: 220
+flat STREAM .[3:7] -d file kind: data-packet
+flat STREAM .[3:7] -d roundtrip jsonl sum: 220
+flat STREAM .[3:7] -d > redir file kind: data-packet
+flat STREAM .[3:7] -d > redir jsonl sum: 220
+flat DATA .[3:7] -f packet file kind: data-packet
+flat DATA .[3:7] -f packet jsonl sum: 220
+flat DATA .[2] -d file kind: data-packet
+flat DATA .[2] -d roundtrip json: 30
+flat DATA .[3:7] -d -z file kind: data-packet
+flat DATA .[3:7] -d -z roundtrip jsonl sum: 220
+records DATA .[0:2] -d file kind: data-packet
+records DATA .[0:2] -d roundtrip jsonl lines: 2

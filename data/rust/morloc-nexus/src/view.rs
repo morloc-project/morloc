@@ -909,6 +909,9 @@ fn dispatch_pattern(
         output_path: args.output_path.clone(),
         ..NexusConfig::default()
     };
+    // Pattern walks produce only a voidstar; print_result_c's Packet
+    // arm detects the empty packet slice and builds a DATA_PACKET from
+    // the voidstar directly.
     print_result_c(
         loaded.voidstar,
         loaded.c_schema,

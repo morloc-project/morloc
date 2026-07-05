@@ -132,12 +132,155 @@ pub unsafe extern "C" fn mlc_save_json(
     0
 }
 
-// ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
+// ── Voidstar data-packet emit ─────────────────────────────────────────────
+//
+// `mlc_save_voidstar` and `mlc_write_voidstar_data_packet_to_fd` both
+// build a MORLOC_DATA_PACKET (header + SCHEMA_STRING + optional
+// FRAME_INDEX + payload) from a voidstar. `build_voidstar_data_packet_parts`
+// does the shared work: flatten voidstar, build metadata, optionally
+// zstd-compress, assemble the 32-byte header. Emit strategies differ:
+// `mlc_save_voidstar` writes to a temp file then renames for atomicity;
+// the fd variant writes linearly to a caller-supplied fd.
 
-// On disk: 32-byte morloc packet header + flattened voidstar payload. When
-// `level > 0` the payload region is zstd-compressed and the header's
-// compression byte is set to PACKET_COMPRESSION_ZSTD; level == 0 writes
-// the payload uncompressed.
+// RAII wrapper for a libc::malloc'd buffer. Kept alive alongside
+// VoidstarDataPacketParts so payload_ptr stays valid on the uncompressed
+// path.
+struct CBlob(*mut u8);
+impl Drop for CBlob {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { libc::free(self.0 as *mut c_void); }
+        }
+    }
+}
+
+// Emit-ready components of a voidstar DATA packet. Holds the flattened
+// blob and optional compressed bytes so payload_ptr() borrows remain
+// valid for the parts' lifetime.
+struct VoidstarDataPacketParts {
+    hdr_bytes: [u8; 32],
+    metadata: Vec<u8>,
+    payload_len: usize,
+    // Uncompressed payload lives in blob; compressed payload lives in
+    // comp_bytes. Exactly one of the two is the payload source.
+    #[allow(dead_code)]
+    blob: CBlob,
+    comp_bytes: Option<Vec<u8>>,
+}
+
+impl VoidstarDataPacketParts {
+    fn payload_ptr(&self) -> *const u8 {
+        match &self.comp_bytes {
+            Some(b) => b.as_ptr(),
+            None => self.blob.0 as *const u8,
+        }
+    }
+}
+
+// Build packet parts. Returns None on error with errmsg set.
+unsafe fn build_voidstar_data_packet_parts(
+    data: *const c_void,
+    schema: *const CSchema,
+    level: u8,
+    errmsg: *mut *mut c_char,
+) -> Option<VoidstarDataPacketParts> {
+    extern "C" {
+        fn flatten_voidstar_to_buffer(
+            data: *const c_void, schema: *const CSchema,
+            out_buf: *mut *mut u8, out_size: *mut usize,
+            errmsg: *mut *mut c_char,
+        ) -> i32;
+    }
+
+    // Resolve level first so a bad value aborts before we allocate.
+    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
+        Ok(lvl) => lvl,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+
+    let mut blob: *mut u8 = ptr::null_mut();
+    let mut blob_size: usize = 0;
+    let mut err: *mut c_char = ptr::null_mut();
+    if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
+        *errmsg = err;
+        return None;
+    }
+    let blob = CBlob(blob);
+
+    // Self-describing SCHEMA_STRING lets IFile / `morloc-nexus file`
+    // read the payload schema straight from the packet metadata.
+    let schema_rs = crate::cschema::CSchema::to_rust(schema);
+    let schema_str = morloc_runtime_types::schema::schema_to_string(&schema_rs);
+    let mut schema_body = schema_str.as_bytes().to_vec();
+    schema_body.push(0); // NUL-terminator expected by decode_schema_entry
+    let base_meta = crate::packet::append_metadata_entry(
+        &[],
+        crate::packet::METADATA_TYPE_SCHEMA_STRING,
+        &schema_body,
+    );
+
+    let (metadata, comp_bytes, compression_byte, payload_len) = if clvl.is_none() {
+        (base_meta, None, crate::packet::PACKET_COMPRESSION_NONE, blob_size)
+    } else {
+        let raw_slice = std::slice::from_raw_parts(blob.0 as *const u8, blob_size);
+        match crate::compression::compress_payload_zstd(raw_slice, clvl) {
+            Ok((bytes, frames)) => {
+                let body = crate::packet::encode_frame_index_entry(&frames);
+                let metadata = crate::packet::append_metadata_entry(
+                    &base_meta,
+                    crate::packet::METADATA_TYPE_FRAME_INDEX,
+                    &body,
+                );
+                let payload_len = bytes.len();
+                (metadata, Some(bytes), crate::packet::PACKET_COMPRESSION_ZSTD, payload_len)
+            }
+            Err(e) => { set_errmsg(errmsg, &e); return None; }
+        }
+    };
+
+    let mut header = crate::packet::PacketHeader::data_mesg(
+        crate::packet::PACKET_FORMAT_VOIDSTAR,
+        payload_len as u64,
+    );
+    header.offset = metadata.len() as u32;
+    let mut hdr_bytes = header.to_bytes();
+    // Byte 15 is the data-command compression slot: 4 magic + 2 plain +
+    // 2 version + 2 flavor + 2 mode + 1 cmd_type + 1 source + 1 format.
+    hdr_bytes[15] = compression_byte;
+
+    Some(VoidstarDataPacketParts { hdr_bytes, metadata, payload_len, blob, comp_bytes })
+}
+
+// Write parts sequentially to fd. On failure returns the C errmsg
+// pointer produced by write_binary_fd; caller owns cleanup.
+unsafe fn write_data_packet_parts_to_fd(
+    fd: libc::c_int,
+    parts: &VoidstarDataPacketParts,
+) -> Result<(), *mut c_char> {
+    extern "C" {
+        fn write_binary_fd(
+            fd: i32, buf: *const c_char, count: usize,
+            errmsg: *mut *mut c_char,
+        ) -> i32;
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    if write_binary_fd(fd, parts.hdr_bytes.as_ptr() as *const c_char, parts.hdr_bytes.len(), &mut err) != 0 {
+        return Err(err);
+    }
+    if !parts.metadata.is_empty()
+        && write_binary_fd(fd, parts.metadata.as_ptr() as *const c_char, parts.metadata.len(), &mut err) != 0
+    {
+        return Err(err);
+    }
+    if parts.payload_len > 0
+        && write_binary_fd(fd, parts.payload_ptr() as *const c_char, parts.payload_len, &mut err) != 0
+    {
+        return Err(err);
+    }
+    Ok(())
+}
+
+// ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_voidstar(
     data: *const c_void,
@@ -148,35 +291,18 @@ pub unsafe extern "C" fn mlc_save_voidstar(
 ) -> i32 {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn flatten_voidstar_to_buffer(
-            data: *const c_void, schema: *const CSchema,
-            out_buf: *mut *mut u8, out_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_binary_fd(
-            fd: i32, buf: *const c_char, count: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
-
-    let mut err: *mut c_char = ptr::null_mut();
-
-    // Resolve the compression level upfront so a bad level aborts before
-    // we touch the filesystem.
-    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
-        Ok(lvl) => lvl,
-        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+    let parts = match build_voidstar_data_packet_parts(data, schema, level, errmsg) {
+        Some(p) => p,
+        None => return 1,
     };
 
-    // Get directory for temp file
+    // Temp file in the target's parent dir for atomic rename on success.
     let path_str = CStr::from_ptr(path).to_string_lossy();
     let parent = std::path::Path::new(path_str.as_ref()).parent();
     let dir = match parent {
         Some(p) if !p.as_os_str().is_empty() => p.to_string_lossy().into_owned(),
         _ => ".".to_string(),
     };
-
     let tmp_template = format!("{}/morloc-tmp_XXXXXX\0", dir);
     let mut tmp_buf: Vec<u8> = tmp_template.into_bytes();
     let fd = libc::mkstemp(tmp_buf.as_mut_ptr() as *mut c_char);
@@ -185,149 +311,52 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
-    // Write packet header placeholder
-    let header_size = std::mem::size_of::<crate::packet::PacketHeader>();
-    let zeros = vec![0u8; header_size];
-    if write_binary_fd(fd, zeros.as_ptr() as *const c_char, header_size, &mut err) != 0 {
+    if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = err;
+        *errmsg = e;
         return 1;
     }
-
-    // Flatten voidstar
-    let mut blob: *mut u8 = ptr::null_mut();
-    let mut blob_size: usize = 0;
-    if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
-        libc::close(fd);
-        libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = err;
-        return 1;
-    }
-
-    // Build the SCHEMA_STRING metadata entry. Self-describing files
-    // let IFile (and tooling like `morloc-nexus file`) read the payload
-    // schema directly. We always emit this -- the size cost is tiny
-    // and makes saved files unambiguous to inspect after the fact.
-    let schema_rs = crate::cschema::CSchema::to_rust(schema);
-    let schema_str =
-        morloc_runtime_types::schema::schema_to_string(&schema_rs);
-    let mut schema_body = schema_str.as_bytes().to_vec();
-    schema_body.push(0); // NUL-terminator matches read_schema_from_meta's
-                        // decode_schema_entry expectation.
-    let base_meta = crate::packet::append_metadata_entry(
-        &[],
-        crate::packet::METADATA_TYPE_SCHEMA_STRING,
-        &schema_body,
-    );
-
-    // If a compression level is selected, swap the flattened buffer for
-    // its zstd multi-frame form before writing the payload region. The
-    // raw blob is freed either way; the compressed bytes live in `comp`
-    // for the rest of the function when level > 0. The frame index is
-    // appended to the metadata block (after SCHEMA_STRING) between the
-    // header and the payload. The block is padded to
-    // METADATA_BLOCK_ALIGNMENT so the payload starts on the same
-    // aligned offset other emit paths use (32-byte alignment).
-    struct CompressedOut {
-        bytes: Vec<u8>,
-        metadata_block: Vec<u8>,
-    }
-    let comp: Option<CompressedOut> = if clvl.is_none() {
-        None
-    } else {
-        let raw_slice = std::slice::from_raw_parts(blob as *const u8, blob_size);
-        match crate::compression::compress_payload_zstd(raw_slice, clvl) {
-            Ok((bytes, frames)) => {
-                let body = crate::packet::encode_frame_index_entry(&frames);
-                let metadata_block = crate::packet::append_metadata_entry(
-                    &base_meta,
-                    crate::packet::METADATA_TYPE_FRAME_INDEX,
-                    &body,
-                );
-                Some(CompressedOut { bytes, metadata_block })
-            }
-            Err(e) => {
-                libc::free(blob as *mut c_void);
-                libc::close(fd);
-                libc::unlink(tmp_buf.as_ptr() as *const c_char);
-                set_errmsg(errmsg, &e);
-                return 1;
-            }
-        }
-    };
-
-    let (payload_ptr, payload_len, compression_byte, metadata_block): (*const u8, usize, u8, &[u8]) =
-        match &comp {
-            Some(c) => (
-                c.bytes.as_ptr(),
-                c.bytes.len(),
-                crate::packet::PACKET_COMPRESSION_ZSTD,
-                c.metadata_block.as_slice(),
-            ),
-            None => (
-                blob as *const u8,
-                blob_size,
-                crate::packet::PACKET_COMPRESSION_NONE,
-                base_meta.as_slice(),
-            ),
-        };
-    let metadata_size = metadata_block.len();
-
-    // Metadata (SCHEMA_STRING + optional FRAME_INDEX + padding) sits
-    // between the header placeholder and the payload.
-    if !metadata_block.is_empty() {
-        if write_binary_fd(
-            fd,
-            metadata_block.as_ptr() as *const c_char,
-            metadata_block.len(),
-            &mut err,
-        ) != 0 {
-            libc::free(blob as *mut c_void);
-            libc::close(fd);
-            libc::unlink(tmp_buf.as_ptr() as *const c_char);
-            *errmsg = err;
-            return 1;
-        }
-    }
-
-    if write_binary_fd(fd, payload_ptr as *const c_char, payload_len, &mut err) != 0 {
-        libc::free(blob as *mut c_void);
-        drop(comp);
-        libc::close(fd);
-        libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = err;
-        return 1;
-    }
-    libc::free(blob as *mut c_void);
-    drop(comp);
-
-    // Seek back and write the real header. data_mesg fills in everything
-    // except the compression byte; patch byte 15 in the serialized header
-    // when level > 0 to record PACKET_COMPRESSION_ZSTD. (Byte 15 is the
-    // data-command compression slot: 4 magic + 2 plain + 2 version + 2
-    // flavor + 2 mode + 1 cmd_type + 1 source + 1 format = 15.)
-    libc::lseek(fd, 0, libc::SEEK_SET);
-    let mut header = crate::packet::PacketHeader::data_mesg(
-        crate::packet::PACKET_FORMAT_VOIDSTAR,
-        payload_len as u64,
-    );
-    header.offset = metadata_size as u32;
-    let mut hdr_bytes = header.to_bytes();
-    hdr_bytes[15] = compression_byte;
-    write_binary_fd(fd, hdr_bytes.as_ptr() as *const c_char, hdr_bytes.len(), &mut err);
 
     libc::fsync(fd);
     libc::close(fd);
 
-    // Atomic rename
     if libc::rename(tmp_buf.as_ptr() as *const c_char, path) != 0 {
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
         set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
         return 1;
     }
-
     0
+}
+
+// ── mlc_write_voidstar_data_packet_to_fd ──────────────────────────────────
+//
+// Companion to `mlc_save_voidstar` for cases where the destination is
+// stdout or an already-opened fd (e.g. `morloc-nexus view --pattern`
+// with data-packet output, which has no source packet to hand
+// `normalize_data_packet_to_fd`). Returns total bytes written, or -1
+// on error.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
+    data: *const c_void,
+    schema: *const CSchema,
+    level: u8,
+    fd: libc::c_int,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+
+    let parts = match build_voidstar_data_packet_parts(data, schema, level, errmsg) {
+        Some(p) => p,
+        None => return -1,
+    };
+
+    if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
+        *errmsg = e;
+        return -1;
+    }
+
+    (parts.hdr_bytes.len() + parts.metadata.len() + parts.payload_len) as i64
 }
 
 // ── mlc_load: load from file (auto-detect format) ─────────────────────────

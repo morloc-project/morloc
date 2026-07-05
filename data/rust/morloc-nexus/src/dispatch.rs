@@ -1289,40 +1289,59 @@ pub(crate) fn print_result_c(
             {
                 return;
             }
-            // Normalize RPTR/FILE-source packets to inline MESG, then
-            // optionally zstd-compress. The fd variant streams the
-            // payload directly to stdout when the destination is a
-            // regular file (i.e. `-o file` or a shell redirect) and
-            // the payload is large enough to amortize streaming
-            // overhead; otherwise it falls back to the buffered path.
             use std::os::unix::io::AsRawFd;
-            extern "C" {
-                fn normalize_data_packet_to_fd(
-                    packet: *const u8,
-                    packet_size: usize,
-                    compression_level: u8,
-                    fd: libc::c_int,
-                    errmsg: *mut *mut std::ffi::c_char,
-                ) -> i64;
-            }
             let stdout = std::io::stdout();
             let lock = stdout.lock();
             let fd = lock.as_raw_fd();
             let mut nerr: *mut std::ffi::c_char = std::ptr::null_mut();
-            let n = unsafe {
-                normalize_data_packet_to_fd(
-                    full_packet.as_ptr(),
-                    full_packet.len(),
-                    config.compression_level,
-                    fd,
-                    &mut nerr,
-                )
+            // Empty full_packet means the caller has only a voidstar
+            // (e.g. `view --pattern`, or a stream input walked via IFile);
+            // build a fresh DATA_PACKET from it. Passing `&[]` through
+            // `normalize_data_packet_to_fd` reads a dangling pointer.
+            let n = if full_packet.is_empty() {
+                extern "C" {
+                    fn mlc_write_voidstar_data_packet_to_fd(
+                        data: *const std::ffi::c_void,
+                        schema: *const morloc_runtime_types::cschema::CSchema,
+                        level: u8,
+                        fd: libc::c_int,
+                        errmsg: *mut *mut std::ffi::c_char,
+                    ) -> i64;
+                }
+                unsafe {
+                    mlc_write_voidstar_data_packet_to_fd(
+                        ptr as *const std::ffi::c_void,
+                        schema,
+                        config.compression_level,
+                        fd,
+                        &mut nerr,
+                    )
+                }
+            } else {
+                extern "C" {
+                    fn normalize_data_packet_to_fd(
+                        packet: *const u8,
+                        packet_size: usize,
+                        compression_level: u8,
+                        fd: libc::c_int,
+                        errmsg: *mut *mut std::ffi::c_char,
+                    ) -> i64;
+                }
+                unsafe {
+                    normalize_data_packet_to_fd(
+                        full_packet.as_ptr(),
+                        full_packet.len(),
+                        config.compression_level,
+                        fd,
+                        &mut nerr,
+                    )
+                }
             };
             drop(lock);
             if n < 0 {
                 let msg = process::take_c_errmsg(nerr)
                     .unwrap_or_else(|| "unknown error".into());
-                eprintln!("Error: packet normalization failed: {}", msg);
+                eprintln!("Error: packet emission failed: {}", msg);
                 process::clean_exit(1);
             }
         }
