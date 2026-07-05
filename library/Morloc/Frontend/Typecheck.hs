@@ -757,22 +757,29 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
       let f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall (PatternStruct s)))
       return (g2, apply g2 retType, AppS f1 [e'])
 
--- handle setter patterns
+-- Setter synth. Allocate fresh slot existentials, seat them in
+-- @outputType@ via @selectorSetter@, then check the receiver so its
+-- field types pin the placeholders. Only then are the set-values
+-- checked, so an unadorned integer literal like @.count = 42@ can
+-- inhabit a fixed-width @Int32@ slot via @checkE (IntS ...)@ instead
+-- of freezing to @Int@ under @synthG@. Same order-swap shape as the
+-- @IntrMap@ synth (see below).
 synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
-  (g1, (unzip -> (setTypes, es1))) <-
-    statefulMapM (\s' e -> synthG s' e |>> (\(a, b, c) -> (a, (b, c)))) g0 es0
-
-  -- generate an existential type that contains the pattern
-  (g2, outputType) <- selectorType g1 s |>> second (selectorSetter setTypes s)
-
+  let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
+  (g2, outputType) <- selectorType g1 s |>> second (selectorSetter slotVars s)
   (g3, datType, e1) <- checkG g2 e0 outputType
-
   rejectListSelectorTarget fgidx s (apply g3 datType)
-
-  let patternType = apply g3 $ FunU (datType : setTypes) outputType
+  (g4, es1) <-
+    statefulMapM
+      (\g (e, slotT) -> do
+         (g', _, e') <- checkG g e (apply g slotT)
+         return (g', e'))
+      g3
+      (zip es0 slotVars)
+  let setTypes = map (apply g4) slotVars
+      patternType = FunU (apply g4 datType : setTypes) (apply g4 outputType)
       f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
-
-  return (g3, apply g3 outputType, AppS f1 (e1 : es1))
+  return (g4, apply g4 outputType, AppS f1 (e1 : es1))
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
   return (g, t, ExeS (PatCall (PatternText s ss)))
@@ -1219,20 +1226,24 @@ synthE i g (EvalS e) = do
       <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
       <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
 -- IntrMap: the desugar-inserted implicit map for bracket-accessor
--- chains. Typed as @(a -> b) -> f a -> f b@: the container head @f@
--- is a fresh existential so the same intrinsic covers @List@,
--- @Vector m@, and any future Functor instance. @a@ and @b@ are
--- existentials solved by checking the function and the receiver
--- against their expected shapes.
+-- chains. Typed as @(a -> b) -> f a -> f b@ with @f@ a fresh
+-- existential so the same intrinsic covers @List@, @Vector m@, etc.
+-- The receiver is checked before the function so @a@ and @f@ are
+-- pinned from the concrete list type; the function-check then sees a
+-- concrete input and the pattern-selector synth can propagate a
+-- concrete result into @b@. Checking the function first leaves @a@
+-- open, which lets the selector synth grow independent structural
+-- existentials that never bind @b@ -- the tuple-broadcast leak that
+-- surfaced as @cannot serialize type: map_result_<N>@.
 synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   let (g1, a) = newvar "map_elem_"      g
       (g2, b) = newvar "map_result_"    g1
       (g3, f) = newvar "map_container_" g2
-      funcExpectedT = FunU [a] b
       listExpectedT = AppU f [a]
       resultT       = AppU f [b]
-  (g4, _, funcE') <- checkG g3 funcE funcExpectedT
-  (g5, _, listE') <- checkG g4 listE listExpectedT
+  (g4, _, listE') <- checkG g3 listE listExpectedT
+  let funcExpectedT = FunU [apply g4 a] (apply g4 b)
+  (g5, _, funcE') <- checkG g4 funcE funcExpectedT
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)

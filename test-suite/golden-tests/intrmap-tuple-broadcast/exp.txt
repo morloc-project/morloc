@@ -1,1 +1,6 @@
-cannot serialize type: map_result_<N>
+--- sliceIdx0 ---
+[1,3]
+--- sliceIdx1 ---
+[2,4]
+--- fullSliceIdx0 ---
+[1,3,5]

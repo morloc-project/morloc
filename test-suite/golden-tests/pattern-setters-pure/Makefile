@@ -6,6 +6,9 @@ all:
 	./nexus setLastHet      >> obs.txt 2>> obs.err
 	./nexus setReorderArgs  >> obs.txt 2>> obs.err
 	./nexus setMixedNested  >> obs.txt 2>> obs.err
+	./nexus setInt32Lit     >> obs.txt 2>> obs.err
+	./nexus setUInt32Lit    >> obs.txt 2>> obs.err
+	./nexus setMixedWidthTwo >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__

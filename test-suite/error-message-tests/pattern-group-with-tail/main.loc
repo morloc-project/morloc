@@ -1,0 +1,14 @@
+-- Grouped accessors cannot carry a trailing chain: the CST's CABGroup
+-- has no tail slot, so '.(.a, .b).0' would silently reparse as a
+-- setter application. The lexer rejects this at the offending
+-- chain-dot with a clear syntactic error.
+module main (foo)
+
+record P where
+  a :: Int
+  b :: Str
+
+foo :: Int
+foo =
+  let x = {a = 42, b = "hi"}
+  in .(.a, .b).0 x

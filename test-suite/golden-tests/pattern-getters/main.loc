@@ -12,6 +12,7 @@ module main
   , pureRecordHetGetter
   , pureRecordSingleField
   , pureRecordKeyChain
+  , pureFieldThenBracketOnListRec
   )
 
 import root
@@ -27,8 +28,8 @@ testr = idr
        "Jim"
   , (==) (.1.(.0,.2) (42, ("Jim", True, 69)))
        ("Jim", 69)
-  -- , (==) (map .1 [(1,2), (2,3)]) [2,3]
-  , True -- for now, I'm ignoring this case, there is an issue with list versus vector generation
+  -- `map .1 [(1,2), (2,3)] == [2,3]` -- skipped due to R weirdness
+  , True
   , (==) (.(.1, .0) (1, 2))
        (2,1)
   , (==) (.(.1) (1, 2))
@@ -120,3 +121,14 @@ pureRecordSingleField = .x { x = 7, y = "hi", z = 8 }
 -- Chained selector descending through a record key into a tuple.
 pureRecordKeyChain :: Int
 pureRecordKeyChain = .x.0 { x = (7, "hi"), y = 99 }
+
+-- Key-then-bracket on a single record whose field is list-typed:
+-- `.members` on a Team record gives [Person] (a list); the bracket
+-- step then applies directly to that list per the "bracket after
+-- extracted list applies directly" desugar rule; the final .name is
+-- a key on Person. All heads match their receiver's shape at each
+-- step -- no implicit broadcast is triggered.
+pureFieldThenBracketOnListRec :: Str
+pureFieldThenBracketOnListRec =
+  let t = {members = [{name = "Alice", age = 30}, {name = "Bob", age = 25}]}
+  in .members.[0].name t

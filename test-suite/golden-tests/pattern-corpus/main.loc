@@ -12,13 +12,10 @@
 -- KNOWN COMPILER LIMITATIONS (not walker limitations) that make some
 -- reference-value comparisons impossible; the walker still handles
 -- them but the compiler can't emit a comparison packet:
---   * `.[i:j].N` on `[Tuple]`: compiler fails with
---     `cannot serialize type: map_result_2`. Broadcasting `.field`
---     over a record compiles; broadcasting `.N` over a tuple does
---     not. The walker handles both -- this test just can't record a
---     morloc-native reference for the tuple case.
---   * `.field.[i]` (field first, bracket-index second): compiler
---     type-inference mismatch on the desugared tree. Walker OK.
+--   * `.field.[i]` on a list-typed field (record-broadcast followed
+--     by bracket-index): type-inference mismatch on the desugared
+--     tree (`expected: a [] [(name, b)]` vs `inferred: [a [] [(name,
+--     Str), (age, Int)]]`). Walker OK.
 
 module main
   ( -- flat list of ints
@@ -27,6 +24,9 @@ module main
   , flatSlice
     -- list of tuples (non-broadcast paths)
   , pairsIdxField0
+    -- list of tuples (broadcast paths)
+  , pairsSliceIdx0
+  , pairsSliceIdx1
     -- list of records
   , recSliceName
   , recSliceAge
@@ -36,6 +36,8 @@ module main
   , nestedMemberName
     -- chained field access broadcast over list of records
   , chainedFieldOnList
+    -- slice broadcast then key then bracket-index (two-map layers)
+  , nestedSliceMemberFirst
     -- ---- deep patterns ----
     -- nested slice on [[Int]]
   , nestedSliceOuter
@@ -91,6 +93,19 @@ pairsIdxField0 :: Str -> <IO> [(Int, Int)]
 pairsIdxField0 ref = do
   let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
   @savem (.[2].0 xs) ref
+  xs
+
+-- === List of tuples, broadcast paths ===
+pairsSliceIdx0 :: Str -> <IO> [(Int, Int)]
+pairsSliceIdx0 ref = do
+  let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+  @savem (.[0:2].0 xs) ref
+  xs
+
+pairsSliceIdx1 :: Str -> <IO> [(Int, Int)]
+pairsSliceIdx1 ref = do
+  let xs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+  @savem (.[0:2].1 xs) ref
   xs
 
 -- === List of records (record broadcast works) ===
@@ -158,6 +173,21 @@ chainedFieldOnList ref = do
         , {inner = {name = "Carol", age = 40}}
         ]
   @savem (.[0:3].inner.name xs) ref
+  xs
+
+-- === Slice broadcast, then key access, then bracket-index ===
+-- Exercises two IntrMap-mediated layers plus a bracket step: the
+-- outer slice's IntrMap wraps the lambda body `.members.[0]`, which
+-- itself is a key access followed by a bracket-index into the
+-- list-typed field.
+nestedSliceMemberFirst :: Str -> <IO> [NestedRow]
+nestedSliceMemberFirst ref = do
+  let xs =
+        [ {label = "team-a", members = [{name = "Alice", age = 30}, {name = "Amy",  age = 22}]}
+        , {label = "team-b", members = [{name = "Bob",   age = 25}, {name = "Bea",  age = 31}]}
+        , {label = "team-c", members = [{name = "Carol", age = 40}, {name = "Cody", age = 19}]}
+        ]
+  @savem (.[0:2].members.[0] xs) ref
   xs
 
 -- === Deep patterns on [[Int]] ===
