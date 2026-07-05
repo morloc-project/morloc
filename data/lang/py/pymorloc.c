@@ -2,6 +2,7 @@
 #include "morloc.h"
 #include "Python.h"
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -1907,6 +1908,74 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         PyTRACE(obj == NULL)
         free_schema(schema);
         return obj;
+    }
+
+    // Stream ingest: FILE+DATA pointing at a stream-packet file. Nexus
+    // emits this shape for `[a]` receivers; peek here to distinguish
+    // stream from ordinary data-indirection. Each chunk's SHM is
+    // shfree'd before the next @next, so peak SHM stays at one
+    // sub-packet.
+    if (source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_DATA) {
+        size_t payload_len = header->length;
+        char path[PATH_MAX];
+        if (payload_len >= sizeof(path)) {
+            free_schema(schema);
+            PyErr_SetString(PyExc_RuntimeError, "stream ingest: path exceeds PATH_MAX");
+            return NULL;
+        }
+        memcpy(path,
+               (const char*)packet + sizeof(morloc_packet_header_t) + header->offset,
+               payload_len);
+        path[payload_len] = '\0';
+        if (file_is_stream_packet(path)) {
+            char* stream_err = NULL;
+            PyObject* result = NULL;
+            int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &stream_err);
+            if (stream_err) goto stream_error;
+            result = PyList_New(0);
+            if (!result) goto stream_error;
+            while (1) {
+                void* chunk = mlc_next(handle, &stream_err);
+                if (stream_err) goto stream_error;
+                if (chunk == NULL) break;
+                Array* arr = (Array*)chunk;
+                if (arr->size == 0) {
+                    char* ferr = NULL; shfree(chunk, &ferr);
+                    if (ferr) free(ferr);
+                    break;
+                }
+                PyObject* chunk_py = from_voidstar(schema, chunk, NULL);
+                char* ferr = NULL; shfree(chunk, &ferr);
+                if (ferr) free(ferr);
+                if (chunk_py == NULL) goto stream_error;
+                int rc = PyList_SetSlice(result,
+                                         PyList_GET_SIZE(result),
+                                         PyList_GET_SIZE(result),
+                                         chunk_py);
+                Py_DECREF(chunk_py);
+                if (rc < 0) goto stream_error;
+            }
+            {
+                char* cerr = NULL; mlc_close(handle, &cerr);
+                if (cerr) free(cerr);
+            }
+            free_schema(schema);
+            return result;
+
+        stream_error:
+            {
+                char* cerr = NULL; mlc_close(handle, &cerr);
+                if (cerr) free(cerr);
+            }
+            Py_XDECREF(result);
+            if (stream_err) {
+                PyErr_SetString(PyExc_RuntimeError, stream_err);
+                free(stream_err);
+            }
+            free_schema(schema);
+            return NULL;
+        }
+        // Not a stream file -- fall through to legacy FILE+DATA handling.
     }
 
     // SHM paths (RPTR or MESG+MSGPACK)

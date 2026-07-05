@@ -68,6 +68,9 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "cli-stream-packet-list-receiver" "cli-stream-packet-list-receiver"
+      , golden "cli-stream-packet-istream-receiver" "cli-stream-packet-istream-receiver"
+
       , golden "view-stdin-stream" "view-stdin-stream"
       , golden "view-guardrails" "view-guardrails"
       , golden "view-jsonl" "view-jsonl"

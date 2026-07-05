@@ -1097,6 +1097,13 @@ uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
 uint8_t* make_data_indirection_packet(const char* dat_filename, const Schema* schema);
+// Returns 1 iff `path` names a file whose first 32 bytes parse as a
+// morloc packet header with `cmd_type = STREAM`. 0 otherwise. Used by
+// per-language pool `_get_value` implementations to detect stream
+// indirection targets (nexus emits FILE+DATA for stream files, and
+// the language runtime discriminates here whether to slurp via
+// get_morloc_data_packet_value or iterate via mlc_open/mlc_next).
+int32_t file_is_stream_packet(const char* path);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
 char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);

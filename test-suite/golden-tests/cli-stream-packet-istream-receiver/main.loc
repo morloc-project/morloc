@@ -1,0 +1,36 @@
+-- CLI ingest of a stream-packet file into an `IStream a` receiver.
+--
+-- Verifies that a stream-packet file on disk can be passed as a
+-- positional argument to a subcommand whose receiver type is
+-- `IStream Int`. The nexus opens the stream immediately, embeds
+-- the slot id as a TAG_HANDLE stream-handle field, and wraps as a
+-- MESG+VOIDSTAR data packet. The pool resolves the handle via the
+-- shared SHM registry; the subcommand's `@next` drains the stream.
+
+module main
+  ( writeStream
+  , sumStream
+  )
+
+import root-py
+
+writeStream :: Str -> <IO> ()
+writeStream path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  @flush o
+  @write 0 o [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+  @flush o
+  @write 0 o [21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+  @close o
+
+-- Sum three explicit sub-packets. Matches the writeStream layout
+-- and confirms the IStream slot the nexus opened is drainable by
+-- the pool. The producer wrote three sub-packets summing to
+-- 55 + 155 + 255 = 465.
+sumStream :: IStream Int -> <IO> Int
+sumStream s = do
+  xs <- @next s
+  ys <- @next s
+  zs <- @next s
+  sum xs + sum ys + sum zs
