@@ -10,6 +10,7 @@ pub mod schema;
 pub mod recur;
 pub mod packet;
 pub mod shm;
+pub mod shm_companion;
 pub mod hash;
 // Re-export the daemon_socket and shm_types modules from the types
 // crate at the same path so existing C-ABI signatures referencing

@@ -380,6 +380,15 @@ static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static SHM_BASENAME_PREFIX: std::sync::atomic::AtomicPtr<std::os::raw::c_char> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
+// Companion-segment SHM name list lives in `libmorloc.so`
+// (`morloc-runtime::shm_companion`) so the runtime code that opens
+// segments can register into it directly. The nexus reads it here
+// via `extern "C"` linkage and iterates it in `sweep_shm_segments`.
+extern "C" {
+    static MORLOC_COMPANION_NAMES:
+        [std::sync::atomic::AtomicPtr<std::os::raw::c_char>; 16];
+}
+
 /// Socket info for each pool.
 ///
 /// Pool stderr and stdout are intentionally NOT captured or intercepted by
@@ -491,6 +500,16 @@ unsafe fn sweep_shm_segments() {
         buf[digits_end] = 0;
         libc::shm_unlink(buf.as_ptr() as *const std::os::raw::c_char);
     }
+
+    // Companion segments (stream registry etc.) live outside the
+    // 0..MAX_VOLUME_NUMBER allocator namespace. `libmorloc.so`
+    // populates `MORLOC_COMPANION_NAMES` as each companion opens.
+    for slot in MORLOC_COMPANION_NAMES.iter() {
+        let p = slot.load(Ordering::Acquire);
+        if !p.is_null() {
+            libc::shm_unlink(p);
+        }
+    }
 }
 
 /// Signal-safe unsigned-decimal writer. Divmod-and-reverse.
@@ -598,10 +617,11 @@ pub fn init_shm() -> (String, String) {
             clean_exit(1);
         }
         // After the main SHM allocation pool is up, bootstrap the
-        // shared stream registry. This allocates a dedicated volume
-        // (`STREAM_REGISTRY_VOLUME`) holding the slot table all pools
-        // will share. Subsequent pool processes attach to the same
-        // segment via `stream_registry_init`, which is idempotent.
+        // shared stream registry. Since the registry lives in a
+        // CompanionSegment (`<basename>.registry`) it never collides
+        // with the allocator's `_<idx>` volumes. Subsequent pool
+        // processes attach to the same segment; `stream_registry_init`
+        // is idempotent.
         let slot_count = stream_registry_init(&mut errmsg);
         if slot_count == usize::MAX {
             let msg = if !errmsg.is_null() {

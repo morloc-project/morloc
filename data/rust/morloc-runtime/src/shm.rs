@@ -459,10 +459,60 @@ pub fn get_common_basename() -> String {
 /// Whether atexit handler has been registered (once per process).
 static ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
 
+/// Hooks fired by `shclose` (and `shclose_atexit`) before the volumes
+/// loop runs. Companion segments (stream registry, future trace
+/// buffers, ...) register their teardown here so a caller of
+/// `shclose` doesn't need to know which subsystems are alive.
+pub type ShcloseHook = fn();
+
+static SHCLOSE_HOOKS: Mutex<Vec<ShcloseHook>> = Mutex::new(Vec::new());
+
+/// Register a function to run when `shclose` is called. Hooks run in
+/// registration order, before the allocator volumes are unmapped.
+/// Deduped by function-pointer identity, so callers don't need their
+/// own "did I already register" guards.
+pub fn register_shclose_hook(hook: ShcloseHook) {
+    if let Ok(mut hs) = SHCLOSE_HOOKS.lock() {
+        let ptr = hook as usize;
+        if !hs.iter().any(|h| *h as usize == ptr) {
+            hs.push(hook);
+        }
+    }
+}
+
+/// Run all registered `shclose` hooks. Blocking `lock`: normal-exit
+/// callers must not silently skip a poisoned mutex.
+fn run_shclose_hooks() {
+    let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.lock() {
+        Ok(hs) => hs.iter().copied().collect(),
+        Err(_) => return,
+    };
+    for h in hooks {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
+    }
+}
+
+/// Best-effort variant for the atexit path: `try_lock` so a
+/// panic-poisoned or contended mutex doesn't wedge process shutdown.
+fn run_shclose_hooks_atexit() {
+    let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.try_lock() {
+        Ok(hs) => hs.iter().copied().collect(),
+        Err(_) => return,
+    };
+    for h in hooks {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
+    }
+}
+
 /// atexit callback: unlink SHM segments on process exit.
 /// Catches normal exit() calls that bypass explicit clean_exit().
 /// Uses try_lock to avoid panic if mutexes are poisoned (e.g., during panic unwind).
 extern "C" fn shclose_atexit() {
+    // Run companion / subsystem hooks first so their teardown sees a
+    // still-live allocator (safe ordering, and required by any hook
+    // that itself performs allocator ops on the way out).
+    run_shclose_hooks_atexit();
+
     // Best-effort: if locks are poisoned or held, skip cleanup
     // rather than panic inside atexit.
     let vols_guard = match VOLUMES.try_lock() {
@@ -513,6 +563,15 @@ pub fn shm_set_fallback_dir(dir: &str) {
     set_cstr(&mut *fb, dir);
 }
 
+/// Read the fallback directory previously set by `shm_set_fallback_dir`.
+/// Returns `None` if never set or empty. Used by companion-segment
+/// teardown to reach the file-backed path.
+pub fn get_fallback_dir() -> Option<String> {
+    let fb = FALLBACK_DIR.lock().unwrap();
+    let s = get_cstr_buf(&fb).to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 /// Initialize a new SHM volume.
 pub fn shinit(
     shm_basename: &str,
@@ -547,7 +606,7 @@ pub fn shinit(
     };
 
     let fd = opened.fd;
-    let shm = opened.ptr;
+    let shm = opened.ptr as *mut ShmHeader;
     let actual_full_size = opened.actual_size;
     let created = opened.created;
     let volume_label = opened.label;
@@ -737,8 +796,11 @@ pub fn shopen_diag(
     Ok(Ok(shm))
 }
 
-/// Close and unlink all SHM volumes.
+/// Close and unlink all SHM volumes. Runs registered `shclose` hooks
+/// first (companion segment teardowns) so callers of `shclose` don't
+/// have to know which subsystems are alive.
 pub fn shclose() -> Result<(), MorlocError> {
+    run_shclose_hooks();
     let _lock = ALLOC_MUTEX.lock().unwrap();
     let mut vols = VOLUMES.lock().unwrap();
     shclose_locked(&mut vols);
@@ -1149,17 +1211,19 @@ pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
 /// file's data section directly into VOLUMES without a memcpy.
 ///
 /// Returns the chosen slot index, or an error if every slot is taken.
-/// Total size of all SHM volumes.
+/// Bytes across every allocator volume plus every attached companion.
 pub fn total_shm_size() -> usize {
-    let vols = VOLUMES.lock().unwrap();
     let mut total = 0;
-    for &slot_idx in &vols.used {
-        let slot = vols.slots[slot_idx as usize];
-        if !slot.is_null() {
-            total += slot.data_size();
+    {
+        let vols = VOLUMES.lock().unwrap();
+        for &slot_idx in &vols.used {
+            let slot = vols.slots[slot_idx as usize];
+            if !slot.is_null() {
+                total += slot.data_size();
+            }
         }
     }
-    total
+    total + crate::shm_companion::total_companion_bytes()
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────────
@@ -1183,13 +1247,16 @@ fn human_bytes(n: usize) -> String {
 
 /// Volume successfully opened, sized, and (for newly-created volumes)
 /// page-reserved. `fd` is still open; caller is responsible for
-/// `libc::close(fd)` after recording the mapping in VOLUMES.
-struct OpenedVolume {
-    fd: libc::c_int,
-    ptr: *mut ShmHeader,
-    created: bool,
-    label: String,
-    actual_size: usize,
+/// `libc::close(fd)` after recording the mapping in VOLUMES (allocator
+/// callers) or immediately (companion callers). `ptr` is a raw byte
+/// pointer; the ShmHeader/BlockHeader prefix is only initialised by
+/// `shinit`, not by the underlying open helpers.
+pub struct OpenedVolume {
+    pub fd:          libc::c_int,
+    pub ptr:         *mut u8,
+    pub created:     bool,
+    pub label:       String,
+    pub actual_size: usize,
 }
 
 /// Try to open a tmpfs (POSIX SHM) volume. On Linux 5.14+ this uses
@@ -1203,7 +1270,9 @@ struct OpenedVolume {
 ///     to the file-backed path.
 /// Returns `Err` only for hard / unexpected failures (`fstat` failing,
 /// `mmap` failing) that the caller should propagate.
-fn try_open_tmpfs(
+///
+/// Public so `shm_companion` can reuse without duplicating the ~100 LoC.
+pub fn try_open_tmpfs(
     shm_name: &str,
     full_size: usize,
 ) -> Result<Option<OpenedVolume>, MorlocError> {
@@ -1285,7 +1354,7 @@ fn try_open_tmpfs(
 
     Ok(Some(OpenedVolume {
         fd,
-        ptr: ptr as *mut ShmHeader,
+        ptr: ptr as *mut u8,
         created,
         label: shm_name.to_string(),
         actual_size,
@@ -1296,7 +1365,9 @@ fn try_open_tmpfs(
 /// `preallocate_fd` (= `posix_fallocate` on Linux, `ftruncate` on
 /// macOS) -- this path is uncommon (only reached when `/dev/shm` is
 /// too small) and correctness matters more than speed.
-fn try_open_file_backed(
+///
+/// Public so `shm_companion` can reuse without duplicating the ~90 LoC.
+pub fn try_open_file_backed(
     shm_name: &str,
     full_size: usize,
 ) -> Result<OpenedVolume, MorlocError> {
@@ -1380,7 +1451,7 @@ fn try_open_file_backed(
 
     Ok(OpenedVolume {
         fd,
-        ptr: ptr as *mut ShmHeader,
+        ptr: ptr as *mut u8,
         created,
         label: file_path,
         actual_size,

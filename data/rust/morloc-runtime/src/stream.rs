@@ -113,9 +113,9 @@ const DEFAULT_IFILE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 // ── Shared SHM stream registry: bootstrap ────────────────────────────────
 //
-// The registry lives in a dedicated SHM volume (`STREAM_REGISTRY_VOLUME`)
-// allocated once per nexus invocation. Layout of the volume's data
-// region:
+// The registry is a `CompanionSegment` -- a dedicated shared mapping
+// named `<basename>.registry` that lives outside the general allocator's
+// `_<idx>` namespace. Layout:
 //
 //   offset 0:                 RegistryHeader (64 bytes)
 //   offset 64:                slot[0]
@@ -123,13 +123,12 @@ const DEFAULT_IFILE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 //
 // All slot fields are atomically accessed. The header holds the `magic`
 // gate that publishes "init is complete" to attaching processes plus the
-// slot count (so attaching processes know the volume bounds without
-// re-reading the env).
+// slot count.
 //
-// The volume is created by the FIRST process to call `registry_init()`
-// for a given nexus session. Other processes (typically pool daemons)
-// call `registry_attach()`, which uses the existing `shopen` machinery
-// and then spin-waits on the magic gate.
+// `registry_bootstrap()` opens (or attaches to) the segment; the CAS
+// bootstrap on the magic gate arbitrates first-writer vs. attacher.
+// `registry_teardown()` unmaps and unlinks; registered as a shclose hook
+// so it runs on every normal-exit path.
 
 /// Header at offset 0 of the registry volume's data region. Pinned at
 /// 64 bytes (one cache line) so it doesn't share a line with slot[0].
@@ -173,27 +172,14 @@ const _: () = {
     assert!(std::mem::size_of::<RegistryHeader>() == 64);
 };
 
-/// Compute the volume size required to hold the registry header + N
-/// slots. Result is page-aligned by `shinit`, so we just return the
-/// logical byte requirement.
+/// Compute the byte count of the registry companion segment.
 ///
-/// We add `sizeof(BlockHeader)` because `shinit` initialises a single
-/// allocator BlockHeader at the start of the data region (regular
-/// volumes are managed by the SHM allocator). The registry skips
-/// past that BlockHeader -- it doesn't go through shmalloc/shfree
-/// -- so we need to reserve that prefix in the volume size.
-///
-/// The header offset is rounded up to `align_of::<RegistryHeader>()`
-/// (= 64) so the header and the slot array following it are correctly
-/// aligned. The padding is added here so the volume is large enough
-/// to fit the aligned layout.
+/// The layout is `RegistryHeader` at offset 0 (`#[repr(C, align(64))]`
+/// so alignment is guaranteed) followed by `slot_count` slots of
+/// `STREAM_ENTRY_SIZE` each. `mmap` will page-round this up silently;
+/// the actual mapped size may be larger.
 const fn registry_volume_size(slot_count: usize) -> usize {
-    let raw_offset = std::mem::size_of::<shm_types_crate::BlockHeader>();
-    let align = std::mem::align_of::<RegistryHeader>();
-    let aligned_offset = (raw_offset + align - 1) & !(align - 1);
-    aligned_offset
-        + std::mem::size_of::<RegistryHeader>()
-        + slot_count * STREAM_ENTRY_SIZE
+    std::mem::size_of::<RegistryHeader>() + slot_count * STREAM_ENTRY_SIZE
 }
 
 /// Read the desired slot count from the `MORLOC_REGISTRY_SLOT_COUNT`
@@ -230,34 +216,32 @@ fn read_gen_salt() -> u64 {
     (now ^ 0xA5A5_A5A5_A5A5_A5A5) | 1
 }
 
-/// Process-local cache of the attached registry's base pointer + slot
-/// count. Set on first successful `registry_init` or `registry_attach`
-/// in this process; stays set for the process lifetime.
-///
-/// The pointer is into the registry SHM volume mapped at process attach
-/// time; subsequent `rel2abs` of slots in this volume goes through
-/// `MORLOC_VOL_TABLE` without needing this cache.
+/// Lock-free fast-path check + slot count, populated on successful
+/// bootstrap and cleared on teardown.
 static REGISTRY_BASE: std::sync::atomic::AtomicPtr<RegistryHeader> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 static REGISTRY_SLOT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Initialise the shared stream registry for this nexus invocation.
-/// Allocates (or attaches to, if already created by an earlier
-/// libmorloc.so caller in the same session) the `STREAM_REGISTRY_VOLUME`
-/// SHM segment, zero-fills the slot array, and writes the magic gate.
-///
-/// Called by the nexus startup path before any dispatch fires. Pool
-/// processes that join the session later call `registry_attach()`
-/// instead.
-///
-/// Safe to call more than once: subsequent calls observe the cached
-/// `REGISTRY_BASE` and short-circuit. Returns the slot count in effect
-/// so callers can sanity-check.
+/// The registry's backing companion segment. Owned for the process
+/// lifetime; teardown takes it and lets `Drop` run munmap + unlink +
+/// sweep-list deregister.
+static REGISTRY_SEGMENT:
+    Mutex<Option<crate::shm_companion::CompanionSegment>> = Mutex::new(None);
+
+/// Initialise the shared stream registry for this session. Wraps
+/// `registry_bootstrap`; kept as the public entry point for the FFI
+/// (`stream_registry_init` in ffi.rs).
 pub fn registry_init() -> Result<usize, MorlocError> {
+    registry_bootstrap()
+}
+
+/// Open (or attach to) the registry, run the CAS-arbitrated magic-gate
+/// bootstrap, and register `registry_teardown` as an `shclose` hook so
+/// normal-exit paths reach it automatically.
+pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     use std::sync::atomic::Ordering;
 
-    // Fast path: already initialised in this process.
     let cached = REGISTRY_BASE.load(Ordering::Acquire);
     if !cached.is_null() {
         return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
@@ -266,47 +250,21 @@ pub fn registry_init() -> Result<usize, MorlocError> {
     let slot_count = read_registry_slot_count();
     let volume_bytes = registry_volume_size(slot_count);
 
-    // `shinit` is idempotent on a given (basename, volume_index) pair:
-    // the first caller creates the segment and fills the header; later
-    // callers attach to the existing one. The `created` distinction is
-    // internal to `shinit`; we don't need it here because we use a
-    // separate publication gate (the registry's own `magic` word) to
-    // serialise initialisation across processes.
-    let shm = shm::shinit(
-        &shm::get_common_basename(),
-        shm_types_crate::STREAM_REGISTRY_VOLUME,
+    let seg = crate::shm_companion::CompanionSegment::open(
+        "registry",
         volume_bytes,
+        crate::shm_companion::SweepPolicy::SweepOnCrash,
     )?;
 
-    // The data region starts after the ShmHeader + BlockHeader prefix
-    // shinit lays down for regular allocator-managed volumes. We skip
-    // those because the registry owns a fixed, immutable region. The
-    // raw offset (sizeof(ShmHeader) + sizeof(BlockHeader)) is not
-    // a multiple of `align_of::<RegistryHeader>()` (= 64), so we
-    // round the offset up before reinterpreting as RegistryHeader.
-    // Without this rounding, every RegistrySlot following the header
-    // sits at the same sub-64-byte offset; codegen that assumes the
-    // struct's declared 64-byte alignment (e.g. vectorised batch
-    // stores in `release_slot_locked`'s field-reset block) issues
-    // aligned-vector instructions that fault on the misaligned slot.
-    let raw_offset = std::mem::size_of::<shm_types_crate::ShmHeader>()
-        + std::mem::size_of::<shm_types_crate::BlockHeader>();
-    let align = std::mem::align_of::<RegistryHeader>();
-    let aligned_offset = (raw_offset + align - 1) & !(align - 1);
-    let data_base = unsafe {
-        (shm as *mut u8).add(aligned_offset)
-    } as *mut RegistryHeader;
-    let header = unsafe { &*data_base };
+    // Own the segment via the static BEFORE running the CAS. If any
+    // step below bails, the segment stays live (its Drop won't run
+    // from an in-flight local) so a peer that already committed to
+    // attaching keeps a valid mapping.
+    let base = seg.base as *mut RegistryHeader;
+    *REGISTRY_SEGMENT.lock().unwrap() = Some(seg);
 
-    // CAS-arbitrated bootstrap. Exactly one process transitions
-    // `magic` from 0 to `STREAM_REGISTRY_MAGIC_INIT`, writes
-    // `slot_count` + `gen_salt`, then Release-stores `magic` to
-    // `STREAM_REGISTRY_MAGIC`. Other processes observe a non-zero
-    // magic and spin-wait until it reaches the final value.
-    //
-    // The freshly-mmap'd file is zero on first touch (kernel guarantees
-    // zero pages for sparse file mappings), so `magic.load() == 0` is
-    // the bootstrap-not-started signal.
+    let header = unsafe { &*base };
+
     let cas = header.magic.compare_exchange(
         0,
         shm_types_crate::STREAM_REGISTRY_MAGIC_INIT,
@@ -319,11 +277,11 @@ pub fn registry_init() -> Result<usize, MorlocError> {
             // because no other process can read these fields until we
             // Release-store the final magic below.
             unsafe {
-                (*data_base).slot_count = slot_count as u64;
-                (*data_base).gen_salt = read_gen_salt();
-                (*data_base).stdio_slot_stdin.store(STDIO_UNCLAIMED, Ordering::Relaxed);
-                (*data_base).stdio_slot_stdout.store(STDIO_UNCLAIMED, Ordering::Relaxed);
-                (*data_base).stdio_slot_stderr.store(STDIO_UNCLAIMED, Ordering::Relaxed);
+                (*base).slot_count = slot_count as u64;
+                (*base).gen_salt = read_gen_salt();
+                (*base).stdio_slot_stdin.store(STDIO_UNCLAIMED, Ordering::Relaxed);
+                (*base).stdio_slot_stdout.store(STDIO_UNCLAIMED, Ordering::Relaxed);
+                (*base).stdio_slot_stderr.store(STDIO_UNCLAIMED, Ordering::Relaxed);
             }
             header.magic.store(
                 shm_types_crate::STREAM_REGISTRY_MAGIC,
@@ -335,22 +293,18 @@ pub fn registry_init() -> Result<usize, MorlocError> {
                 && observed != shm_types_crate::STREAM_REGISTRY_MAGIC_INIT
         => {
             return Err(MorlocError::Other(format!(
-                "stream registry: unexpected magic {:#x} in volume {} \
-                 (expected {:#x} or init sentinel); concurrent libmorloc.so \
-                 version mismatch?",
+                "stream registry: unexpected magic {:#x} (expected {:#x} \
+                 or init sentinel); concurrent libmorloc.so version mismatch?",
                 observed,
-                shm_types_crate::STREAM_REGISTRY_VOLUME,
                 shm_types_crate::STREAM_REGISTRY_MAGIC,
             )));
         }
         Err(_) => {
             // Lost the race; another process is mid-bootstrap or done.
-            // Spin below.
         }
     }
 
-    // Spin until magic is the final value. Bounded so a stuck
-    // bootstrapper can't hang us indefinitely.
+    // Spin until magic is the final value.
     let mut spins: u32 = 0;
     loop {
         let m = header.magic.load(Ordering::Acquire);
@@ -359,25 +313,42 @@ pub fn registry_init() -> Result<usize, MorlocError> {
         }
         spins += 1;
         if spins > 1_000_000 {
-            return Err(MorlocError::Other(format!(
-                "stream registry: magic never published in volume {} \
-                 (spin-wait exhausted; bootstrapper stalled?)",
-                shm_types_crate::STREAM_REGISTRY_VOLUME,
-            )));
+            return Err(MorlocError::Other(
+                "stream registry: magic never published \
+                 (spin-wait exhausted; bootstrapper stalled?)"
+                    .into(),
+            ));
         }
         std::hint::spin_loop();
     }
 
-    REGISTRY_BASE.store(data_base, Ordering::Release);
+    REGISTRY_BASE.store(base, Ordering::Release);
     REGISTRY_SLOT_COUNT.store(slot_count, Ordering::Relaxed);
 
-    // Spawn the dedicated sweeper thread now that the registry is
-    // published. `sweeper_init` is itself idempotent so the second-
-    // and subsequent-attaching processes that pass through here
-    // (pool daemons, worker children) get a fast no-op.
+    // Register normal-exit teardown once per process. `register_shclose_hook`
+    // runs on both nexus (via `clean_exit -> shclose`) and pool (via
+    shm::register_shclose_hook(registry_teardown);
+
     sweeper_init();
 
     Ok(slot_count)
+}
+
+/// Reverse of `registry_bootstrap`. Ordering: stop sweeper (its reads
+/// depend on `REGISTRY_BASE`), invalidate the base, then drop the
+/// segment (its `Drop` runs `munmap` + `shm_unlink` + sweep-list
+/// deregister). Idempotent.
+pub fn registry_teardown() {
+    use std::sync::atomic::Ordering;
+
+    sweeper_shutdown();
+
+    if REGISTRY_BASE.swap(std::ptr::null_mut(), Ordering::AcqRel).is_null() {
+        return;
+    }
+    REGISTRY_SLOT_COUNT.store(0, Ordering::Relaxed);
+
+    drop(REGISTRY_SEGMENT.lock().unwrap().take());
 }
 
 /// Attach to an already-initialised stream registry (the path pool
@@ -3855,20 +3826,18 @@ pub enum SweepRequest {
 }
 
 /// Sender half of the sweeper queue. Cloned to every daemon worker
-/// that needs to enqueue a sweep. Initialised by `sweeper_init`.
+/// that needs to enqueue a sweep. Initialised by `sweeper_init`;
+/// dropped by `sweeper_shutdown` to wake the sweeper thread.
 static SWEEPER_TX: Mutex<Option<std::sync::mpsc::Sender<SweepRequest>>> =
+    Mutex::new(None);
+
+/// Sweeper thread handle, retained so `sweeper_shutdown` can join it.
+static SWEEPER_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> =
     Mutex::new(None);
 
 /// Spawn the dedicated sweeper thread and install its `Sender` in
 /// `SWEEPER_TX`. Idempotent: subsequent calls observe the existing
-/// sender and return immediately. Called from the daemon startup
-/// path (or any other place that wants per-call cleanup).
-///
-/// The thread is detached: it lives for the lifetime of the
-/// process. On process exit, the OS reclaims it. No clean-shutdown
-/// handshake is needed because the sweep is best-effort (the registry
-/// SHM volume is unlinked at shclose anyway, freeing any straggler
-/// slots).
+/// sender and return immediately.
 pub fn sweeper_init() {
     let mut guard = SWEEPER_TX.lock().unwrap();
     if guard.is_some() {
@@ -3877,10 +3846,26 @@ pub fn sweeper_init() {
     let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
     *guard = Some(tx);
     drop(guard);
-    std::thread::Builder::new()
+    let h = std::thread::Builder::new()
         .name("morloc-stream-sweeper".into())
         .spawn(move || sweeper_main(rx))
         .expect("morloc-stream-sweeper: thread spawn failed");
+    *SWEEPER_HANDLE.lock().unwrap() = Some(h);
+}
+
+/// Stop the sweeper thread. Called before `registry_teardown` unmaps
+/// the registry SHM so the sweeper can't race a null / freed base.
+///
+/// Drops the sender first: the sweeper's `rx.recv()` then returns
+/// `Err` at the NEXT call (after any in-flight work item finishes), so
+/// the loop exits cleanly. Then join. Idempotent: no-op if the sweeper
+/// was never started or was already shut down.
+pub fn sweeper_shutdown() {
+    // Drop the sender to unblock the sweeper's next recv().
+    { *SWEEPER_TX.lock().unwrap() = None; }
+    if let Some(h) = SWEEPER_HANDLE.lock().unwrap().take() {
+        let _ = h.join();
+    }
 }
 
 /// Enqueue a per-call sweep request. Non-blocking. Returns silently
