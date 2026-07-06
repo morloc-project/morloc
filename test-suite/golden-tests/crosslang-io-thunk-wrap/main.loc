@@ -1,0 +1,138 @@
+-- BUG: cross-language RPC receiver manifolds return the deserialized
+-- wire value at a `<IO> T` return position without wrapping it in the
+-- language's nullary-callable representation of a suspended effect.
+--
+-- Failure mode (v0.91.0), C++ example:
+--     pool.cpp: In function `std::function<int()> m<N>(const uint8_t*)':
+--     error: could not convert `_get_value<int>(((const uint8_t*)s6), ...)'
+--            from `int' to `std::function<int()>'
+--             return(_get_value<int>(s6, mlc_schema_table[0]));
+--                    ~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~
+--                                   |
+--                                   int
+--
+-- Each language represents `<IO> T` as a nullary callable holding the
+-- forced value:
+--
+--   * C++    : `std::function<T()>`   (CppTranslator.hs:225)
+--   * Python : `(lambda: expr)`       (lang.yaml -- ldDoBlockExpr)
+--   * R      : `(function() expr)`    (lang.yaml -- ldDoBlockExpr)
+--
+-- A cross-language RPC ships only the forced value T over the wire. The
+-- receiver-side proxy manifold must reconstruct the callable wrapper in
+-- its own language. The bug is that the codegen emits the raw
+-- deserialized value at the return position, skipping the wrap. Since
+-- Python and R share the generic imperative emission path with C++
+-- (aside from the type-rendering step), they likely exhibit the same
+-- issue in the mirror direction.
+--
+-- Trigger pattern: a manifold anchored to language A (via a source
+-- function unique to A used in the guard condition) whose guard
+-- branches each return the result of an `<IO> T` source call in a
+-- different language B. This forces a cross-language RPC whose
+-- receiver-side proxy in A holds the buggy return position.
+--
+-- Variants exercised by this test:
+--
+--   1. cppFromPy       : Cpp receiver of Python  <IO> Int     (original bug)
+--   2. pyFromCpp       : Py  receiver of Cpp     <IO> Int
+--   3. rFromCpp        : R   receiver of Cpp     <IO> Int
+--   4. cppFromPyMulti  : Cpp receiver of Python  Int -> Int -> <IO> Int
+--                        (probes whether the arity of the callee matters)
+--   5. cppFromPyEffErr : Cpp receiver of Python  <IO, Error> Int
+--                        (probes whether multiple stacked effects matter)
+--
+-- Expected fix: the RPC-receiver codegen for `<IO> T` returns must wrap
+-- the deserialized value in a nullary callable in every language --
+-- e.g. `[x=_get_value<int>(s, ...)]() { return x; };` in C++, and the
+-- corresponding `lambda: x` / `function() x` in Python and R.
+--
+-- Any compile-time failure or wrong output means the bug is still
+-- present in at least one direction.
+module main
+  ( cppFromPy
+  , pyFromCpp
+  , rFromCpp
+  , cppFromPyMulti
+  , cppFromPyEffErr
+  )
+
+import root-cpp
+import root-py
+import root-r
+
+effect Error
+
+source Cpp from "helpers.hpp"
+  ( "cpp_io"    as cppIO
+  , "cpp_gate"  as cppGate
+  )
+
+source Py from "helpers.py"
+  ( "py_io"        as pyIO
+  , "py_gate"      as pyGate
+  , "py_io2"       as pyIO2
+  , "py_io_error"  as pyIOError
+  )
+
+source R from "helpers.R"
+  ( "r_io"    as rIO
+  , "r_gate"  as rGate
+  )
+
+type Cpp => Int  = "int"
+type Cpp => Bool = "bool"
+type Py  => Int  = "int"
+type Py  => Bool = "bool"
+type R   => Int  = "integer"
+type R   => Bool = "logical"
+
+cppIO     :: Int -> <IO> Int
+cppGate   :: Int -> Bool
+pyIO      :: Int -> <IO> Int
+pyGate    :: Int -> Bool
+pyIO2     :: Int -> Int -> <IO> Int
+pyIOError :: Int -> <IO, Error> Int
+rIO       :: Int -> <IO> Int
+rGate     :: Int -> Bool
+
+-- (1) Cpp-anchored manifold whose guard branches each return a Python
+-- `<IO> Int`. The C++ manifold's declared return is
+-- `std::function<int()>` and the receiver proxy for pyIO must wrap the
+-- deserialized int in that lambda.
+cppFromPy :: Int -> <IO> Int
+cppFromPy n
+  ? cppGate n = pyIO n
+  : pyIO 0
+
+-- (2) Py-anchored manifold whose guard branches each return a Cpp
+-- `<IO> Int`. The Python receiver proxy must wrap in `(lambda: x)`.
+pyFromCpp :: Int -> <IO> Int
+pyFromCpp n
+  ? pyGate n = cppIO n
+  : cppIO 0
+
+-- (3) R-anchored manifold whose guard branches each return a Cpp
+-- `<IO> Int`. The R receiver proxy must wrap in `(function() x)`.
+rFromCpp :: Int -> <IO> Int
+rFromCpp n
+  ? rGate n = cppIO n
+  : cppIO 0
+
+-- (4) Multi-argument `<IO>` source called from the Cpp side. Probes
+-- whether the receiver-side thunk-wrap emission depends on the callee's
+-- argument count. If (1) fails but (4) succeeds (or vice versa) the fix
+-- has to cover both arity paths.
+cppFromPyMulti :: Int -> Int -> <IO> Int
+cppFromPyMulti a b
+  ? cppGate a = pyIO2 a b
+  : pyIO2 0 0
+
+-- (5) Multi-effect `<IO, Error>` source called from the Cpp side.
+-- `pushForceIntoRemote` in Express.hs peels ALL EffectT layers when it
+-- fires; if the receiver wrap is done per-layer or once total, the
+-- multi-layer path can diverge from (1)'s single-layer path.
+cppFromPyEffErr :: Int -> <IO, Error> Int
+cppFromPyEffErr n
+  ? cppGate n = pyIOError n
+  : pyIOError 0

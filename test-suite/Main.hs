@@ -68,6 +68,11 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"
+      , golden "recursive-where-capture-multi" "recursive-where-capture-multi"
+      , golden "recursive-where-capture-py" "recursive-where-capture-py"
+      , golden "recursive-where-capture-effect-py" "recursive-where-capture-effect-py"
+
       , golden "cli-stream-packet-list-receiver" "cli-stream-packet-list-receiver"
       , golden "cli-stream-packet-istream-receiver" "cli-stream-packet-istream-receiver"
 

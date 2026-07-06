@@ -2314,14 +2314,22 @@ buildManifest ManifestInputs{..} =
 generate ::
   [(AnnoS (Indexed Type) One (), CmdDocSet)] ->
   [(AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet)] ->
+  [AnnoS (Indexed Type) One (Indexed Lang)] ->
   MorlocMonad Script
-generate cs rASTs = do
+generate cs rASTs helperRASTs = do
   config <- MM.ask
   st <- CMS.get
 
-  -- Extract data for remote commands
+  -- 'findAllLangsSAnno' does not follow @CallS@ back-edges into hoisted
+  -- helper bodies, so it can't see cross-language calls that live only
+  -- inside them. Merge helper-reachable sockets into every command's
+  -- 'fdataSubSockets' as a safe upper bound; the runtime otherwise fails
+  -- to spin up pools referenced only by helpers.
+  helperSockets <- fmap concat (mapM findSockets helperRASTs)
+
   xs <- mapM makeFData rASTs
   fdata <- CM.mapM getFData xs
+      |>> map (\fd -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) helperSockets })
 
   -- Extract data for pure commands
   gasts <- mapM annotateGasts cs
@@ -2345,7 +2353,6 @@ generate cs rASTs = do
         return installDir
       else liftIO Dir.getCurrentDirectory
 
-  -- Build pool list (deduplicated by language)
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
       daemonSets = uniqueFst [(socketLang s, s) | s <- allSockets]
 
@@ -2449,3 +2456,7 @@ uniqueFst = f []
     f seen (x@(a, _) : xs)
       | a `elem` seen = f seen xs
       | otherwise = x : f (a : seen) xs
+
+-- | Concatenate two socket lists, keeping the first socket per language.
+mergeSockets :: [Socket] -> [Socket] -> [Socket]
+mergeSockets a b = map snd (uniqueFst [(socketLang s, s) | s <- a ++ b])

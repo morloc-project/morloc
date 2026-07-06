@@ -123,12 +123,16 @@ writeProgram translateFn path code = do
                 Nothing -> return ()
         mapM_ (warnSkip . fst) genericGASTs
         mapM_ (warnSkip . fst) genericRASTs
-        -- Only pass exported rASTs to the nexus (not recursive helpers)
+        -- Only exports become commands, but helper rASTs also flow to
+        -- 'Nexus.generate' so it can see their languages for pool
+        -- enumeration -- the export tree ends at a bare 'CallS' back-edge
+        -- after 'extractRecursiveHelpers' and hides them otherwise.
         exports <- MM.gets stateExports
         let exportSet = Set.fromList exports
             isExported (AnnoS (Idx midx _) _ _, _) = Set.member midx exportSet
             exportedRASTs = filter isExported concreteRASTs
-        nexus <- Nexus.generate concreteGASTs exportedRASTs
+            helperRASTs = map fst (filter (not . isExported) concreteRASTs)
+        nexus <- Nexus.generate concreteGASTs exportedRASTs helperRASTs
         MM.startCounter
         paramRASTs <- mapM parameterize (map fst concreteRASTs)
         let langMap = Map.fromList
