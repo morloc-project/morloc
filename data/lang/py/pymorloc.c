@@ -137,8 +137,13 @@ PyObject* numpy_module = NULL;
 
 
 // This function will be called to import numpy if, and only if, a numpy feature
-// is used. This avoids the agonizingly long numpy import time.
+// is used. This avoids the agonizingly long numpy import time. Idempotent:
+// PyImport_ImportModule + import_array() reinitialize the C-API pointer table
+// on every call, so guard with numpy_module and short-circuit after first init.
 void* import_numpy() {
+    if (numpy_module != NULL) {
+        return NULL;
+    }
     numpy_module = PyImport_ImportModule("numpy");
     if(numpy_module == NULL){
         PyRAISE("NumPy is not available");
@@ -345,6 +350,12 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
         }
         case MORLOC_ARRAY: {
             Array* array = (Array*)data;
+            // Producer writes RELNULL into array->data for empty arrays
+            // (see cppmorloc to_voidstar), so resolve only when non-empty.
+            void* absptr = NULL;
+            if (array->size != 0) {
+                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
+            }
             // The "numpy.ndarray" hint is authoritative: the user wants a
             // NumPy array, regardless of element type. For fixed-width
             // primitive elements we use the natural dtype (zero-copy / fast
@@ -385,7 +396,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                     PyRAISE("Failed to allocate numpy object array");
                 }
                 if (array->size > 0) {
-                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
+                    char* start = (char*)absptr;
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = (PyArrayObject*)obj;
@@ -407,13 +418,12 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
             } else if (numpy_type_num >= 0) {
                 import_numpy();
                 npy_intp dims[] = {array->size};
-                void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
-                if (base_ptr != NULL) {
-                    // Inline packet: `absptr` points into a libc-malloc'd
-                    // packet buffer that is freed shortly after get_value
-                    // returns. We must own the data, not view it -- otherwise
-                    // any later read (e.g. inside a Python comparator like
-                    // numpy.allclose) would see stale or recycled memory.
+                // Own the buffer when the source is inline (packet buffer is
+                // freed shortly after get_value returns; a view would see
+                // recycled memory) or empty (no data to view). Otherwise take
+                // a zero-copy view over SHM, which outlives this array via
+                // the deferred shm_tracker decref.
+                if (base_ptr != NULL || array->size == 0) {
                     obj = PyArray_SimpleNew(1, dims, numpy_type_num);
                     if (obj == NULL) {
                         PyRAISE("Failed to allocate numpy array");
@@ -424,10 +434,6 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                         memcpy(PyArray_DATA((PyArrayObject*)obj), absptr, nbytes);
                     }
                 } else {
-                    // SHM-backed packet: the caller has bumped the SHM refcount
-                    // and registered a deferred decref in shm_tracker. The
-                    // backing memory outlives this numpy array, so a view is
-                    // safe and avoids a copy of potentially-large arrays.
                     obj = PyArray_SimpleNewFromData(1, dims, numpy_type_num, absptr);
                     if(obj == NULL) {
                         PyRAISE("Failed to parse data");
@@ -447,7 +453,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                     PyRAISE("Failed to allocate list");
                 }
                 if(array->size > 0){
-                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
+                    char* start = (char*)absptr;
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
@@ -458,8 +464,6 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                     }
                 }
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
-                // Create a Python bytearray object
-                void* absptr = PyTRY(resolve_relptr, array->data, base_ptr);
                 obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
@@ -469,8 +473,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
             } else if (schema->parameters[0]->type == MORLOC_UINT8) {
                 // Default for UInt8 arrays when hint is "bytes" or absent.
-                void* tmp_ptr = PyTRY(resolve_relptr, array->data, base_ptr);
-                obj = PyBytes_FromStringAndSize((const char*)tmp_ptr, array->size);
+                obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
                 }
@@ -481,7 +484,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                     PyRAISE("Failed to allocate list");
                 }
                 if(array->size > 0){
-                    char* start = (char*) PyTRY(resolve_relptr, array->data, base_ptr);
+                    char* start = (char*)absptr;
                     size_t width = schema->parameters[0]->width;
                     Schema* element_schema = schema->parameters[0];
                     for (size_t i = 0; i < array->size; i++) {
