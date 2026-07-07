@@ -714,10 +714,10 @@ extractExpr exports (IntrinsicS intr es) = do
   return (IntrinsicS intr es', concat helperLists)
 extractExpr _ e = return (e, [])
 
--- | Free BndS occurrences in a tree, keyed by name, valued by the type
--- carried at the leaf. Respects LamS/LetS binders and recurses through
--- VarS so a captured variable reachable only via a non-recursive
--- where-bound value (dissolved later by 'removeVarS') is still visible.
+-- | Free BndS occurrences in a tree, keyed by name, valued by the type at
+-- the leaf. Respects LamS/LetS binders. Recurses through VarS so a captured
+-- variable reachable only via a non-recursive where-bound value (dissolved
+-- later by 'removeVarS') is still visible.
 collectFreeBnds ::
   Set.Set EVar ->
   AnnoS (Indexed Type) One (Indexed Lang) ->
@@ -727,39 +727,16 @@ collectFreeBnds = go
     go bs (AnnoS (Idx _ t) _ (BndS v))
       | Set.member v bs = Map.empty
       | otherwise       = Map.singleton v t
-    go bs (AnnoS _ _ (VarS _ (One x)))   = go bs x
-    go bs (AnnoS _ _ (AppS f xs))        = Map.unions (go bs f : map (go bs) xs)
-    go bs (AnnoS _ _ (LamS vs body))     = go (Set.union bs (Set.fromList vs)) body
-    go bs (AnnoS _ _ (LstS xs))          = Map.unions (map (go bs) xs)
-    go bs (AnnoS _ _ (TupS xs))          = Map.unions (map (go bs) xs)
-    go bs (AnnoS _ _ (NamS rs))          = Map.unions (map (go bs . snd) rs)
-    go bs (AnnoS _ _ (LetS v e1 e2))     = Map.union (go bs e1) (go (Set.insert v bs) e2)
-    go bs (AnnoS _ _ (IfS c1 t1 e1))     = Map.unions [go bs c1, go bs t1, go bs e1]
-    go bs (AnnoS _ _ (DoBlockS x))       = go bs x
-    go bs (AnnoS _ _ (EvalS x))          = go bs x
-    go bs (AnnoS _ _ (CoerceS _ x))      = go bs x
-    go bs (AnnoS _ _ (IntrinsicS _ xs))  = Map.unions (map (go bs) xs)
-    go _ _                                = Map.empty
+    go bs (AnnoS _ _ (LamS vs body)) = go (Set.union bs (Set.fromList vs)) body
+    go bs (AnnoS _ _ (LetS v e1 e2)) = Map.union (go bs e1) (go (Set.insert v bs) e2)
+    go bs (AnnoS _ _ e)              = foldExprS (go bs) e
 
--- | CallS names reachable from a tree. Only used to build the helper
--- call graph, so we always recurse through VarS.
+-- | CallS names reachable from a tree.
 callSitesIn :: AnnoS (Indexed Type) One (Indexed Lang) -> Set.Set EVar
-callSitesIn (AnnoS _ _ e) = go e
+callSitesIn = foldAnnoS extract
   where
-    go (CallS v)           = Set.singleton v
-    go (AppS f xs)         = Set.unions (callSitesIn f : map callSitesIn xs)
-    go (LamS _ x)          = callSitesIn x
-    go (VarS _ (One x))    = callSitesIn x
-    go (LstS xs)           = Set.unions (map callSitesIn xs)
-    go (TupS xs)           = Set.unions (map callSitesIn xs)
-    go (NamS rs)           = Set.unions (map (callSitesIn . snd) rs)
-    go (LetS _ e1 e2)      = Set.union (callSitesIn e1) (callSitesIn e2)
-    go (IfS c t e')        = Set.unions [callSitesIn c, callSitesIn t, callSitesIn e']
-    go (DoBlockS x)        = callSitesIn x
-    go (EvalS x)           = callSitesIn x
-    go (CoerceS _ x)       = callSitesIn x
-    go (IntrinsicS _ xs)   = Set.unions (map callSitesIn xs)
-    go _                   = Set.empty
+    extract (AnnoS _ _ (CallS v)) = Set.singleton v
+    extract _                     = Set.empty
 
 -- | Info for each helper, precomputed once so 'closeFreeVars' doesn't
 -- re-walk each body per lookup.
@@ -871,53 +848,12 @@ rewriteCalls captureMap tree
               headA = AnnoS (Idx fi widenedT) fc (CallS v)
           return $ AnnoS g c (AppS headA (injected ++ xs'))
 
-    walk (AnnoS g c (AppS f xs)) = do
-      f'  <- walk f
-      xs' <- mapM walk xs
-      return $ AnnoS g c (AppS f' xs')
-
     walk (AnnoS (Idx _ t) c (CallS v))
       | Just captured <- Map.lookup v captureMap
       , not (null captured) =
           etaExpandCallS t c v captured
 
-    walk (AnnoS g c (VarS w (One x))) = do
-      x' <- walk x
-      return $ AnnoS g c (VarS w (One x'))
-    walk (AnnoS g c (LamS vs body)) = do
-      body' <- walk body
-      return $ AnnoS g c (LamS vs body')
-    walk (AnnoS g c (LstS xs)) = do
-      xs' <- mapM walk xs
-      return $ AnnoS g c (LstS xs')
-    walk (AnnoS g c (TupS xs)) = do
-      xs' <- mapM walk xs
-      return $ AnnoS g c (TupS xs')
-    walk (AnnoS g c (NamS rs)) = do
-      rs' <- mapM (\(k, x) -> (,) k <$> walk x) rs
-      return $ AnnoS g c (NamS rs')
-    walk (AnnoS g c (LetS w e1 e2)) = do
-      e1' <- walk e1
-      e2' <- walk e2
-      return $ AnnoS g c (LetS w e1' e2')
-    walk (AnnoS g c (IfS cond thenE elseE)) = do
-      cond'  <- walk cond
-      thenE' <- walk thenE
-      elseE' <- walk elseE
-      return $ AnnoS g c (IfS cond' thenE' elseE')
-    walk (AnnoS g c (DoBlockS x)) = do
-      x' <- walk x
-      return $ AnnoS g c (DoBlockS x')
-    walk (AnnoS g c (EvalS x)) = do
-      x' <- walk x
-      return $ AnnoS g c (EvalS x')
-    walk (AnnoS g c (CoerceS co x)) = do
-      x' <- walk x
-      return $ AnnoS g c (CoerceS co x')
-    walk (AnnoS g c (IntrinsicS intr xs)) = do
-      xs' <- mapM walk xs
-      return $ AnnoS g c (IntrinsicS intr xs')
-    walk other = return other
+    walk (AnnoS g c e) = AnnoS g c <$> mapExprSM walk e
 
     mkCapturedBnd :: Indexed Lang -> (EVar, Type) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
     mkCapturedBnd c (name, t) = do
@@ -976,25 +912,12 @@ freshLamVar = do
   i <- MM.getCounter
   return (EV (MT.pack ("$eta_" <> show i)))
 
--- | Check if an AnnoS tree contains a CallS node targeting the given name.
-containsCallS :: EVar -> AnnoS g One c -> Bool
-containsCallS target (AnnoS _ _ e) = go e
+-- | Does the tree contain a @CallS target@ anywhere?
+containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
+containsCallS target = getAny . foldAnnoS check
   where
-    go (CallS v) = v == target
-    go (AppS f xs) = containsCallS target f || any (containsCallS target) xs
-    go (LamS _ x) = containsCallS target x
-    go (LstS xs) = any (containsCallS target) xs
-    go (TupS xs) = any (containsCallS target) xs
-    go (NamS rs) = any (containsCallS target . snd) rs
-    go (VarS _ (One x)) = containsCallS target x
-    go (LetS _ e1 e2) = containsCallS target e1 || containsCallS target e2
-    go (LetBndS _) = False
-    go (IfS c t e') = containsCallS target c || containsCallS target t || containsCallS target e'
-    go (DoBlockS x) = containsCallS target x
-    go (EvalS x) = containsCallS target x
-    go (CoerceS _ x) = containsCallS target x
-    go (IntrinsicS _ xs) = any (containsCallS target) xs
-    go _ = False
+    check (AnnoS _ _ (CallS v)) = Any (v == target)
+    check _                     = Any False
 
 -- | Rewrite every @CallS old@ target to @CallS new@.
 renameCallS ::
@@ -1003,22 +926,8 @@ renameCallS ::
   AnnoS (Indexed Type) One (Indexed Lang)
 renameCallS old new = go
   where
-    go (AnnoS g c e) = AnnoS g c (goE e)
-
-    goE (CallS v) | v == old = CallS new
-    goE (AppS f xs) = AppS (go f) (map go xs)
-    goE (VarS w (One x)) = VarS w (One (go x))
-    goE (LamS vs body) = LamS vs (go body)
-    goE (LstS xs) = LstS (map go xs)
-    goE (TupS xs) = TupS (map go xs)
-    goE (NamS rs) = NamS (map (fmap go) rs)
-    goE (LetS w e1 e2) = LetS w (go e1) (go e2)
-    goE (IfS c1 t e) = IfS (go c1) (go t) (go e)
-    goE (DoBlockS x) = DoBlockS (go x)
-    goE (EvalS x) = EvalS (go x)
-    goE (CoerceS co x) = CoerceS co (go x)
-    goE (IntrinsicS intr xs) = IntrinsicS intr (map go xs)
-    goE other = other
+    go (AnnoS g c (CallS v)) | v == old = AnnoS g c (CallS new)
+    go (AnnoS g c e)                    = AnnoS g c (mapExprS go e)
 
 -- Check if this expression is a data structure that contains
 -- a function. If so, then the data structure is must be in the

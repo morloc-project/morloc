@@ -77,6 +77,8 @@ module Morloc.Namespace.Expr
   , mapExprSCM
   , mapExprSG
   , mapExprSGM
+  , foldExprS
+  , foldAnnoS
 
     -- * JSON helpers
   , stripPrefixAndKebabCase
@@ -869,6 +871,26 @@ mapExprSG f = mapExprS (\(AnnoS gi ci e) -> AnnoS (f gi) ci (mapExprSG f e))
 
 mapExprSC :: (Traversable f) => (c -> c') -> ExprS g f c -> ExprS g f c'
 mapExprSC f = mapExprS (\(AnnoS gi ci e) -> AnnoS gi (f ci) (mapExprSC f e))
+
+-- | Fold a monoid over every immediate child 'AnnoS' of an 'ExprS'.
+foldExprS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> ExprS g f c -> m
+foldExprS f (VarS _ xs)       = foldMap f xs
+foldExprS f (AppS x xs)       = f x <> foldMap f xs
+foldExprS f (LamS _ x)        = f x
+foldExprS f (LstS xs)         = foldMap f xs
+foldExprS f (TupS xs)         = foldMap f xs
+foldExprS f (NamS rs)         = foldMap (f . snd) rs
+foldExprS f (LetS _ e1 e2)    = f e1 <> f e2
+foldExprS f (IfS c t e)       = f c <> f t <> f e
+foldExprS f (DoBlockS x)      = f x
+foldExprS f (EvalS x)         = f x
+foldExprS f (CoerceS _ x)     = f x
+foldExprS f (IntrinsicS _ xs) = foldMap f xs
+foldExprS _ _                 = mempty
+
+-- | Fold a monoid over every 'AnnoS' node in a tree (including the root).
+foldAnnoS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> AnnoS g f c -> m
+foldAnnoS f a@(AnnoS _ _ e) = f a <> foldExprS (foldAnnoS f) e
 
 ----- Pretty instances -------------------------------------------------------
 

@@ -154,21 +154,8 @@ findSockets rAST = do
   registry <- MM.gets stateLangRegistry
   return . map (MC.setupServerAndSocket config registry) . unique $ findAllLangsSAnno rAST
 
-findAllLangsSAnno :: AnnoS e One (Indexed Lang) -> [Lang]
-findAllLangsSAnno (AnnoS _ (Idx _ lang) e) = lang : findAllLangsExpr e
-  where
-    findAllLangsExpr (VarS _ (One x)) = findAllLangsSAnno x
-    findAllLangsExpr (AppS x xs) = concatMap findAllLangsSAnno (x : xs)
-    findAllLangsExpr (LamS _ x) = findAllLangsSAnno x
-    findAllLangsExpr (LstS xs) = concatMap findAllLangsSAnno xs
-    findAllLangsExpr (TupS xs) = concatMap findAllLangsSAnno xs
-    findAllLangsExpr (NamS rs) = concatMap (findAllLangsSAnno . snd) rs
-    findAllLangsExpr (LetS _ e1 e2) = findAllLangsSAnno e1 ++ findAllLangsSAnno e2
-    findAllLangsExpr (IfS c t e') = concatMap findAllLangsSAnno [c, t, e']
-    findAllLangsExpr (DoBlockS x) = findAllLangsSAnno x
-    findAllLangsExpr (EvalS x) = findAllLangsSAnno x
-    findAllLangsExpr (CoerceS _ x) = findAllLangsSAnno x
-    findAllLangsExpr _ = []
+findAllLangsSAnno :: (Foldable f) => AnnoS e f (Indexed Lang) -> [Lang]
+findAllLangsSAnno = foldAnnoS (\(AnnoS _ (Idx _ lang) _) -> [lang])
 
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
