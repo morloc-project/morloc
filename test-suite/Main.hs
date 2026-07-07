@@ -4,6 +4,7 @@
 import qualified System.Directory as SD
 import Test.Tasty
 
+import EffectBoundaryTests (effectBoundaryTests)
 import GoldenMakefileTests (goldenMakefileTest)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
@@ -56,6 +57,7 @@ main = do
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
+      , effectBoundaryTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -69,6 +71,10 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"
+      , golden "effect-boundary-py" "effect-boundary-py"
+      , golden "effect-boundary-cpp" "effect-boundary-cpp"
+      , golden "effect-boundary-cross" "effect-boundary-cross"
+      , golden "effect-interaction" "effect-interaction"
       , golden "recursive-where-capture-multi" "recursive-where-capture-multi"
       , golden "recursive-where-capture-py" "recursive-where-capture-py"
       , golden "recursive-where-capture-effect-py" "recursive-where-capture-effect-py"

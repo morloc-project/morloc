@@ -13,4 +13,4 @@ all:
 	@grep -c "^pyerr:5$$" v5.stderr >> obs.txt
 
 clean:
-	rm -rf nexus pools *.err obs.txt *.stderr
+	rm -rf nexus pools *.err *.stderr

@@ -29,6 +29,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
+import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
 import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
@@ -89,6 +90,15 @@ generatePools rASTs = do
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
   MM.modify (\s -> s { stateManifoldLang = langMap })
   mapM express paramRASTs
+    -- Boundary reconciliation + invariant check. Insertion installs
+    -- 'PolyEval' / 'PolyDoBlock' at every boundary whose declared type
+    -- disagrees with its calling convention; the checker asserts the
+    -- resulting tree satisfies the invariant. A checker failure means
+    -- 'EffectBoundary' is missing a table row.
+    >>= mapM (\ph -> do
+                 ph' <- insertEffectBoundaries ph
+                 checkEffectBoundaries ph'
+                 return ph')
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
@@ -145,6 +155,11 @@ writeProgram translateFn path code = do
             -- When 'stateDebugTrace' (--debug), wrap every foreign-call
             -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
             >>= mapM addDebugWraps
+            -- Boundary reconciliation + invariant check; see 'generatePools'.
+            >>= mapM (\ph -> do
+                         ph' <- insertEffectBoundaries ph
+                         checkEffectBoundaries ph'
+                         return ph')
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce

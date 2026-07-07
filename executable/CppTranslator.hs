@@ -622,7 +622,7 @@ PROPAGATE_ERROR(errmsg)|]
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        return $ makeLet namer letIndex typestr e1 e2
+        return $ makeLet namer letIndex typestr (isUnitTypeF mt) e1 e2
     , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
     , lcReturn = \e -> "return(" <> e <> ");"
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
@@ -656,10 +656,16 @@ PROPAGATE_ERROR(errmsg)|]
               VarF (FV tv _) -> tv == TV "Unit"
               _ -> False
         in return . (,) [] $ case (isUnit, stmts) of
-          (True, []) -> "[&](){" <> expr <> "; return mlc::Unit{};}"
-          (True, _) -> "[&](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
-          (False, []) -> "[&](){return " <> expr <> ";}"
-          (False, _) -> "[&](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
+          -- Capture by copy: cross-language RPC receiver-manifolds wrap
+          -- their deserialized result in a DoBlockN thunk that outlives
+          -- the manifold's stack frame. Reference captures ([&]) would
+          -- dangle by the time the outer caller invokes the thunk;
+          -- captures by value ([=]) copy the parameters (pointers, ints,
+          -- copyable structs) and remain valid.
+          (True, []) -> "[=](){" <> expr <> "; return mlc::Unit{};}"
+          (True, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
+          (False, []) -> "[=](){return " <> expr <> ";}"
+          (False, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
     , lcSerialize = \v s -> serialize v s
     , lcDeserialize = \t v s -> do
         typestr <- cppTypeOf t
@@ -761,9 +767,21 @@ PROPAGATE_ERROR(errmsg)|]
     escapeCxxStringLit :: Text -> Text
     escapeCxxStringLit = escapeQuotes "\"" "\\\"" . escapeStringLit
 
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr p1 p2 =
-      let letAssignment = [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
+    -- The 'isUnit' flag switches to a void-safe emission shape. C++ source
+    -- functions declared '<E> ()' return @void@ by convention, so a plain
+    -- @T ni = expr;@ assignment rejects with "void value not ignored as it
+    -- ought to be". Split into a statement plus a default-initialised
+    -- 'mlc::Unit{}' whenever the let-var's type is 'Unit' -- the effect
+    -- fires, the caller's 'Unit' variable is present, and any subsequent
+    -- reference to @ni@ still type-checks.
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer letIndex typestr isUnit p1 p2 =
+      let letAssignment
+            | isUnit =
+                [idoc|#{poolExpr p1};|]
+                  <+> [idoc|#{typestr} #{namer letIndex}{};|]
+            | otherwise =
+                [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
           rs = poolPriorLines p1 <> [letAssignment] <> poolPriorLines p2
        in PoolDocs
             { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
@@ -772,6 +790,13 @@ PROPAGATE_ERROR(errmsg)|]
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             }
+
+    -- Match only bare 'Unit' -- a thunk-of-Unit ('EffectF _ Unit') is
+    -- 'std::function<mlc::Unit()>', an assignable function value, not a
+    -- void-returning call site.
+    isUnitTypeF :: Maybe TypeF -> Bool
+    isUnitTypeF (Just (VarF (FV tv _))) = tv == BT.unit
+    isUnitTypeF _                       = False
 
     mnameExt :: Maybe HeadManifoldForm -> MDoc
     mnameExt (Just HeadManifoldFormRemoteWorker) = "_remote"

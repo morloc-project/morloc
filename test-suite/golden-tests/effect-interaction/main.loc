@@ -1,0 +1,263 @@
+-- Broad interaction test: effects × optionals × lists × mixed-effect
+-- branches × higher-order thunks × cross-language. Each export
+-- exercises one interaction shape the narrower coverage goldens do
+-- not; together they pin the intersection of 'EffectBoundary' with
+-- the rest of morloc's type system.
+--
+-- Language spread: 4 Py, 3 Cpp, 2 R, 1 cross (R -> Cpp). The R-side
+-- shapes are load-bearing because R's 'function() expr' thunk form
+-- has otherwise been under-exercised through this rewrite.
+module main
+  ( optIoPy
+  , optIoCpp
+  , optIoR
+  , optIoChain
+  , listOfThunksCpp
+  , guardSubsumePy
+  , guardMultiCpp
+  , nestedGuardR
+  , thunkForcedTwicePy
+  , crossOptRToCpp
+  -- Slot-level subsumption: plain values at positions declared '<E> T'.
+  -- Row subsumption type-checks these ('T <: <E> T' via '{} ⊆ E'),
+  -- but every target language's runtime shape is a nullary callable at
+  -- these positions; each pure sub-expression must be Suspend-wrapped.
+  , argPurePy
+  , argPureCpp
+  , argPureR
+  , listMixedPy
+  , listMixedCpp
+  , listMixedR
+  , tupleMixedPy
+  , tupleMixedCpp
+  )
+
+import root-py
+import root-cpp
+import root-r
+import maybe (default, liftMaybe2)
+import maybe-py
+import maybe-cpp
+import maybe-r
+
+effect Error
+
+------------------------------------------------------------
+-- Type mappings
+------------------------------------------------------------
+
+type Py  => Int = "int"
+type Cpp => Int = "int"
+type R   => Int = "integer"
+
+------------------------------------------------------------
+-- Source declarations
+------------------------------------------------------------
+
+source Py from "helpers.py"
+  ( "py_read_opt"        as pyReadOpt
+  , "py_add_one"         as pyAddOne
+  , "py_maybe_error"     as pyMaybeError
+  , "py_counter"         as pyCounter
+  , "py_reset"           as pyResetCounter
+  , "py_apply_thunk"     as pyApplyThunk
+  , "py_sum_thunks"      as pySumThunks
+  , "py_consume_tuple"   as pyConsumeTuple
+  )
+
+source Cpp from "helpers.hpp"
+  ( "cpp_read_opt"      as cppReadOpt
+  , "cpp_add_one"       as cppAddOne
+  , "cpp_maybe_error"   as cppMaybeError
+  , "cpp_pure_add"      as cppPureAdd
+  , "cpp_sum_thunks"    as cppSumThunks
+  , "cpp_from_null"     as cppFromNull
+  , "cpp_apply_thunk"   as cppApplyThunk
+  , "cpp_consume_tuple" as cppConsumeTuple
+  )
+
+source R from "helpers.R"
+  ( "r_read_opt"    as rReadOpt
+  , "r_add_one"     as rAddOne
+  , "r_apply_thunk" as rApplyThunk
+  , "r_sum_thunks"  as rSumThunks
+  )
+
+pyReadOpt        :: Int -> <IO> ?Int
+pyAddOne         :: Int -> <IO> Int
+pyMaybeError     :: Int -> <IO, Error> Int
+pyCounter        :: <IO> Int
+pyResetCounter   :: <IO> ()
+pyApplyThunk     :: <IO> Int -> <IO> Int
+pySumThunks      :: [<IO> Int] -> <IO> Int
+pyConsumeTuple   :: (<IO> Int, <IO> Int) -> <IO> Int
+
+cppReadOpt       :: Int -> <IO> ?Int
+cppAddOne        :: Int -> <IO> Int
+cppMaybeError    :: Int -> <IO, Error> Int
+cppPureAdd       :: Int -> Int -> Int
+cppSumThunks     :: [<IO> Int] -> <IO> Int
+cppFromNull      :: Int -> ?Int -> Int
+cppApplyThunk    :: <IO> Int -> <IO> Int
+cppConsumeTuple  :: (<IO> Int, <IO> Int) -> <IO> Int
+
+rReadOpt         :: Int -> <IO> ?Int
+rAddOne          :: Int -> <IO> Int
+rApplyThunk      :: <IO> Int -> <IO> Int
+rSumThunks       :: [<IO> Int] -> <IO> Int
+
+-- Records with effect-typed fields ('a :: <IO> Int, b :: <IO> Int')
+-- hit an "Cannot show EffectT" error in CppTranslator.showDefType at
+-- 'executable/CppTranslator.hs:1329'. That is a genuine compiler
+-- limitation, not a boundary-pass concern; the shape is
+-- unrepresentable at Cpp codegen today. Documented here so a future
+-- fix can re-enable the 'recordMixed*' exports and test the slot-
+-- suspend interaction with named-field records.
+
+------------------------------------------------------------
+-- Exports (10)
+------------------------------------------------------------
+
+-- (1) '<IO> ?Int' Py-side: force the outer thunk to get an optional,
+-- then use 'default' to unwrap with a default. Argument x < 0 => Null,
+-- else => Some x. Tests <IO> * ?T interaction on the Py wire path.
+optIoPy :: Int -> <IO> Int
+optIoPy x = do
+  m <- pyReadOpt x
+  default (-1) m
+
+-- (2) Same shape, Cpp source. Wire: 'std::optional<int>' inside
+-- 'std::function<std::optional<int>()>'. Uses the Cpp 'cppFromNull'
+-- source rather than the stdlib 'default' to exercise the Cpp
+-- 'std::optional' interop path.
+optIoCpp :: Int -> <IO> Int
+optIoCpp x = do
+  m <- cppReadOpt x
+  cppFromNull (-1) m
+
+-- (3) Same shape, R source. Wire: R 'NULL' inside 'function() expr'.
+optIoR :: Int -> <IO> Int
+optIoR x = do
+  m <- rReadOpt x
+  default (-1) m
+
+-- (4) Chain of '<-' binds on Py '<IO> ?Int' returns; combine the
+-- optionals purely via 'liftMaybe2 (+)', then unwrap. Two Null
+-- results -> outer Null -> default. Two Some -> sum.
+optIoChain :: Int -> <IO> Int
+optIoChain x = do
+  a <- pyReadOpt x
+  b <- pyReadOpt (x + 1)
+  default (-999) (liftMaybe2 (+) a b)
+
+-- (5) Explicit '[<IO> Int]' literal (three Cpp thunks) reduced via a
+-- foreign 'std::vector<std::function<int()>>' consumer. Verifies the
+-- list-of-thunks wire shape and the interaction between 'SourceCall'
+-- Suspend and list construction.
+listOfThunksCpp :: <IO> Int
+listOfThunksCpp = cppSumThunks [cppAddOne 1, cppAddOne 2, cppAddOne 3]
+
+-- (6) Guard whose branches have different effect signatures. The
+-- then-branch calls pyAddOne (<IO>), the else-branch calls pyMaybeError
+-- (<IO,Error>). Row subsumption places the whole guard at <IO,Error>.
+-- Tests 'polyOuterType (PolyIf …)' fold across mixed-effect branches.
+guardSubsumePy :: Int -> <IO, Error> Int
+guardSubsumePy x
+  ? x > 0 = pyAddOne x
+  : pyMaybeError x
+
+-- (7) Multi-clause guard, Cpp-anchored, with three effect strata and
+-- pure fall-throughs: '<IO,Error>' (top), '<IO>' (middle), pure
+-- (third clause), pure (default). Row subsumption places the whole
+-- guard at '<IO,Error>'. Exercises 'polyOuterType (PolyIf …)' folding
+-- across mixed pure/effectful branches at the same guard -- the pure
+-- branches must be Suspend-wrapped at the branch position to match
+-- the guard's '<IO,Error> Int' return type.
+guardMultiCpp :: Int -> <IO, Error> Int
+guardMultiCpp x
+  ? x > 100 = cppMaybeError x
+  ? x >  10 = cppAddOne x
+  ? x >   0 = cppPureAdd x 1000
+  :           cppPureAdd 0 0
+
+-- (8) R-side nested guard whose inner branches themselves contain
+-- effectful '<-' binds. R's 'function() expr' thunk shape is exercised
+-- through the same 'CallbackReturn'/'ExportRoot' rules as Py/Cpp; a
+-- regression in the R codegen surfaces here first.
+nestedGuardR :: Int -> <IO> Int
+nestedGuardR x
+  ? x > 0 = do
+      y <- rAddOne x
+      ? y > 100 = do
+          z <- rAddOne y
+          z + 5000
+      : y
+  : do 0
+
+-- (9) The same source called twice inside a do-block. Each '<-' binding
+-- fires the effect independently. Verifies: (a) the SourceCall Suspend
+-- rule is not memoising, and (b) subsequent forces of the same source
+-- do not share state across the wire.
+thunkForcedTwicePy :: <IO> Int
+thunkForcedTwicePy = do
+  pyResetCounter
+  a <- pyCounter
+  b <- pyCounter
+  a + b
+
+-- (10) Cross-language optional-of-thunk: R produces '<IO> ?Int', Cpp
+-- consumes the optional through 'cppFromNull'. Tests the wire schema's
+-- treatment of an OptionalF-inside-EffectF-inside-EffectF (well:
+-- EffectF stripped, so OptionalF direct) crossing two language
+-- boundaries, and the receiver-manifold's Suspend re-wrap.
+crossOptRToCpp :: Int -> <IO> Int
+crossOptRToCpp x = do
+  m <- rReadOpt x
+  cppFromNull (-42) m
+
+------------------------------------------------------------
+-- Slot-level subsumption exports (11-20)
+------------------------------------------------------------
+
+-- (11-13) Function-argument position was omitted from this file after
+-- attempting to write 'argPure* = pyApplyThunk 42' etc. The
+-- typechecker rejected the arg-slot subsumption with "Missing
+-- concrete": 'CoerceToEffect' was retired in the effect-system
+-- redesign, so 'Int' is NOT a subtype of '<IO> Int' at argument
+-- position. Pure->effect promotion is only implicit in the row-poly
+-- LUB at 'IfS' branches (which is what today's 'suspendMixedIfBranches'
+-- rule addresses); at every other position the user must lift
+-- explicitly through a source that constructs the thunk.
+argPurePy :: <IO> Int
+argPurePy = pyApplyThunk (pyAddOne 41)
+
+argPureCpp :: <IO> Int
+argPureCpp = cppApplyThunk (cppAddOne 41)
+
+argPureR :: <IO> Int
+argPureR = rApplyThunk (rAddOne 41)
+
+-- (14-16) Uniformly effectful lists. Mixed pure/effectful elements
+-- do not type-check at the list literal position (see argPure*
+-- comment). Uniform '[<IO> Int]' lists still exercise the list-of-
+-- thunks wire shape.
+listMixedPy :: <IO> Int
+listMixedPy = pySumThunks [pyAddOne 0, pyAddOne 10, pyAddOne 4]
+
+listMixedCpp :: <IO> Int
+listMixedCpp = cppSumThunks [cppAddOne 0, cppAddOne 10, cppAddOne 4]
+
+listMixedR :: <IO> Int
+listMixedR = rSumThunks [rAddOne 0, rAddOne 10, rAddOne 4]
+
+-- (17-20) Tuple and record slot positions. Mixed pure/effect
+-- initializers do not type-check for the same reason: no
+-- 'Int <: <IO> Int' at slot position. Uniformly effectful
+-- initializers exercise the wire shape; the "plain-value-at-effect-
+-- slot" bug is unreachable outside of 'IfS' branches under the
+-- current effect system.
+tupleMixedPy :: <IO> Int
+tupleMixedPy = pyConsumeTuple (pyAddOne 41, pyAddOne 10)
+
+tupleMixedCpp :: <IO> Int
+tupleMixedCpp = cppConsumeTuple (cppAddOne 41, cppAddOne 10)

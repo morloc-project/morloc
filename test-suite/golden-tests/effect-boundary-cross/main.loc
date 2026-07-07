@@ -1,0 +1,113 @@
+-- Boundary-coverage golden for cross-language shapes: 'ForeignCalleeReturn'
+-- and 'ForeignCallerReceive'. Each export forces a cross-language RPC
+-- returning an '<E> T' value; the wire format strips the effect layer,
+-- so the callee must Force before serialize and the caller must
+-- Suspend on receive (or peephole-cancel when the enclosing context
+-- immediately forces).
+--
+-- Language anchoring: each source function is unique to one pool so the
+-- pool of the enclosing manifold is forced to differ from where the
+-- source lives, guaranteeing the emitted call goes through a
+-- 'PolyRemoteInterface'.
+module main
+  ( cppFromPy
+  , pyFromCpp
+  , rpcInDoBlock
+  , rpcMultiEffect
+  , rpcCallbackAcross
+  , rpcNullary
+  )
+
+import root-py
+import root-cpp
+
+effect Error
+
+source Py from "helpers.py"
+  ( "py_add_one"     as pyAddOne
+  , "py_read"        as pyRead
+  , "py_reset_tally" as pyResetTally
+  , "py_total"       as pyTotal
+  , "py_gate"        as pyGate
+  , "py_multi_err"   as pyMultiErr
+  , "py_nullary"     as pyNullary
+  )
+
+source Cpp from "helpers.hpp"
+  ( "cpp_add_one"     as cppAddOne
+  , "cpp_read"        as cppRead
+  , "cpp_gate"        as cppGate
+  , "cpp_for_each"    as cppForEach
+  , "cpp_reset_tally" as cppResetTally
+  , "cpp_total"       as cppTotal
+  , "cpp_tap"         as cppTap
+  , "cpp_multi_err"   as cppMultiErr
+  , "cpp_nullary"     as cppNullary
+  )
+
+type Cpp => Int = "int"
+type Cpp => Bool = "bool"
+
+pyAddOne      :: Int -> <IO> Int
+pyRead        :: <IO> Int
+pyResetTally  :: <IO> ()
+pyTotal       :: <IO> Int
+pyGate        :: Int -> Bool
+pyMultiErr    :: Int -> <IO, Error> Int
+pyNullary     :: <IO> Int
+
+cppAddOne     :: Int -> <IO> Int
+cppRead       :: <IO> Int
+cppGate       :: Int -> Bool
+cppForEach    :: [Int] -> (Int -> <IO> ()) -> <IO> ()
+cppResetTally :: <IO> ()
+cppTotal      :: <IO> Int
+cppTap        :: Int -> <IO> ()
+cppMultiErr   :: Int -> <IO, Error> Int
+cppNullary    :: <IO> Int
+
+-- (1) Cpp-anchored manifold whose guard branches call Py '<IO> Int'.
+-- The C++ receiver-proxy for the RPC must wrap the deserialized wire
+-- value in a 'std::function<int()>' -- the original 'crosslang-io-
+-- thunk-wrap' regression, restated as a boundary-coverage assertion.
+cppFromPy :: Int -> <IO> Int
+cppFromPy n
+  ? cppGate n = pyAddOne n
+  : pyAddOne 0
+
+-- (2) Py-anchored manifold whose branches call Cpp '<IO> Int'. Mirror
+-- direction: 'lambda: X' wrap on the Python side.
+pyFromCpp :: Int -> <IO> Int
+pyFromCpp n
+  ? pyGate n = cppAddOne n
+  : cppAddOne 0
+
+-- (3) RPC inside a do-block: the received effect value is used as a
+-- '<-'-bound intermediate; 'ForeignCallerReceive' Suspend must fire so
+-- the manifold body's typemap agrees with its declared '<E> T' return.
+rpcInDoBlock :: <IO> Int
+rpcInDoBlock = do
+  cppResetTally
+  cppTap 5
+  cppTap 15
+  cppTotal
+
+-- (4) Multi-effect RPC: '<IO,Error> T' received across language
+-- boundary. The plan pins that collapse-to-single-defer holds; a
+-- successful call is enough.
+rpcMultiEffect :: <IO, Error> Int
+rpcMultiEffect = pyMultiErr 21
+
+-- (5) Cross-language callback: Cpp 'for_each' invokes a Py lambda.
+-- 'CallbackReturn' Force plus 'ForeignCalleeReturn' Force interact --
+-- the lambda's manifold on the callee side must ship a plain value.
+rpcCallbackAcross :: <IO> Int
+rpcCallbackAcross = do
+  cppResetTally
+  cppForEach [10, 20, 30] cppTap
+  cppTotal
+
+-- (6) Nullary cross-language source: nullary 'SourceCall' Suspend
+-- through 'PolyRemoteInterface'.
+rpcNullary :: <IO> Int
+rpcNullary = pyNullary

@@ -444,13 +444,7 @@ invertSerialManifold sm0 =
     invertNativeExprM (AppExeN_ t exe nativeArgs) = do
       let nativeArgs' = map unD nativeArgs
           deps = concatMap getDeps nativeArgs
-      case (t, exe) of
-        -- Source functions return the unwrapped type; the compiler wraps in suspend
-        (EffectF _ innerT, SrcCallP _) ->
-          return $ D (DoBlockN t (weave (D (AppExeN innerT exe nativeArgs') deps))) []
-        (OptionalF _, SrcCallP _) ->
-          atomize (AppExeN t exe nativeArgs') deps
-        _ -> atomize (AppExeN t exe nativeArgs') deps
+      atomize (AppExeN t exe nativeArgs') deps
     invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
     invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
     -- Eliminate trivial let-bindings where the RHS is just a variable
