@@ -315,6 +315,42 @@ pub struct Command {
     /// deserializer is needed.
     #[serde(default)]
     pub group: Option<String>,
+
+    /// True for compiler-synthesized entry points (e.g. `--' with:`
+    /// terminal-action wrappers). These are dispatchable by cmd_index
+    /// but must be filtered out of top-level command listings.
+    #[serde(default)]
+    pub internal: bool,
+
+    /// Terminal-action declarations attached to this command via
+    /// `--' with: -x/--long=<term>` docstring atoms. Each entry
+    /// registers a command-scoped short/long flag that dispatches to
+    /// the compiler-synthesized `entry` (an internal command whose
+    /// body composes the referenced term with this command's head
+    /// manifold). Empty for internal entries and for commands with no
+    /// `--' with:` atoms.
+    #[serde(default)]
+    pub terminals: Vec<Terminal>,
+}
+
+/// One terminal-action flag registered on a parent command.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Terminal {
+    /// Optional short-form flag character (e.g. `Some('l')` for `-l`).
+    #[serde(default)]
+    pub short: Option<char>,
+    /// Long-form flag name in lowercase-kebab (e.g. `"lines"` for
+    /// `--lines`). Always present.
+    pub long: String,
+    /// Compiler-mangled name of the synthesized internal command that
+    /// carries out this terminal action. Resolved to a cmd_index at
+    /// manifest-load time.
+    pub entry: String,
+    /// Help-text description for this flag. Sourced from the
+    /// referenced term's own docstring; empty when the term has no
+    /// docstring.
+    #[serde(default)]
+    pub description: String,
 }
 
 impl Command {

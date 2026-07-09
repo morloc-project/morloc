@@ -18,7 +18,7 @@
 //! The output is a `(cmd_index, Vec<ArgValue>)` tuple consumed by
 //! [`crate::dispatch::dispatch_command_parsed`].
 
-use clap::{Arg as ClapArg, ArgAction, ArgMatches, Command as ClapCommand};
+use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
 use crate::dispatch::{apply_checks, quoted, substitute_stdio_dash, ArgValue};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
@@ -41,6 +41,11 @@ pub struct ParsedCommand {
     pub values: Vec<ArgValue>,
 }
 
+/// Prefix used on clap arg-ids for terminal-action flags. Distinct
+/// from the numeric `arg{N}` ids so the two families never collide.
+const TERMINAL_ID_PREFIX: &str = "term_";
+const TERMINAL_GROUP_ID: &str = "terminal_actions";
+
 /// Parse the trailing `rest` from a `Run` mode invocation against the
 /// manifest. Builds a root `clap::Command` whose structure matches
 /// the manifest's command + group layout, runs clap on `rest`, then
@@ -56,7 +61,16 @@ pub fn parse_run(
     prog_name: &str,
 ) -> ParsedCommand {
     let root = build_root(manifest, prog_name);
-    let single = manifest.commands.len() == 1 && manifest.groups.is_empty();
+    // Internal (compiler-synthesized) commands never surface at the
+    // top level; they participate in dispatch only via terminal-flag
+    // redirect. Compute single vs multi mode from the visible slice.
+    let visible: Vec<(usize, &ManifestCommand)> = manifest
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.internal)
+        .collect();
+    let single = visible.len() == 1 && manifest.groups.is_empty();
 
     // In single-command mode the user may optionally include the
     // command name as a positional (so both `./prog 5 7` and
@@ -65,7 +79,7 @@ pub fn parse_run(
     // function arguments.
     let trimmed: Vec<String> = if single
         && !user_zone.is_empty()
-        && user_zone[0] == manifest.commands[0].name
+        && user_zone[0] == visible[0].1.name
     {
         user_zone[1..].to_vec()
     } else {
@@ -82,9 +96,10 @@ pub fn parse_run(
     };
 
     if single {
-        let cmd = &manifest.commands[0];
+        let (cmd_index0, cmd) = visible[0];
         let values = extract_values(cmd, &matches);
-        return ParsedCommand { cmd_index: 0, values };
+        let cmd_index = redirect_via_terminal(manifest, cmd_index0, cmd, &matches);
+        return ParsedCommand { cmd_index, values };
     }
 
     // Walk down through the optional group layer to reach the
@@ -109,7 +124,34 @@ pub fn parse_run(
         .expect("clap-chosen command must be in manifest");
     let cmd = &manifest.commands[cmd_index];
     let values = extract_values(cmd, chosen_matches);
+    let cmd_index = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
     ParsedCommand { cmd_index, values }
+}
+
+/// If any terminal-action flag matched, swap the dispatch target to
+/// the flag's synthesized `entry` command. Argv values (positional
+/// and optional) transfer verbatim: the internal command is
+/// guaranteed to have the same argument shape as its parent by the
+/// compiler's synthesis (see `Frontend/Desugar.hs`).
+fn redirect_via_terminal(
+    manifest: &Manifest,
+    default_index: usize,
+    cmd: &ManifestCommand,
+    matches: &ArgMatches,
+) -> usize {
+    for (i, t) in cmd.terminals.iter().enumerate() {
+        let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
+        if matches.get_flag(id) {
+            if let Some(idx) = manifest
+                .commands
+                .iter()
+                .position(|c| c.name == t.entry)
+            {
+                return idx;
+            }
+        }
+    }
+    default_index
 }
 
 /// Build the root `clap::Command` for a Run-mode invocation. In
@@ -123,10 +165,15 @@ pub fn parse_run(
 /// the same command tree to render help text without invoking
 /// parsing.
 pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
-    let single = manifest.commands.len() == 1 && manifest.groups.is_empty();
+    let visible_count = manifest.commands.iter().filter(|c| !c.internal).count();
+    let single = visible_count == 1 && manifest.groups.is_empty();
 
     if single {
-        let cmd = &manifest.commands[0];
+        let cmd = manifest
+            .commands
+            .iter()
+            .find(|c| !c.internal)
+            .expect("visible_count == 1 implies at least one non-internal command");
         // add_general_options runs first so the "General Options"
         // section sorts before the command's positional/optional args
         // (clap orders sections by first-arg-added).
@@ -161,6 +208,9 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
             crate::help::usage_multi_group(prog_name, &grp.name),
         );
         for cmd in &manifest.commands {
+            if cmd.internal {
+                continue;
+            }
             if cmd.group.as_deref() == Some(grp.name.as_str()) {
                 let sub = crate::help::add_general_options(
                     ClapCommand::new(leak(&cmd.name))
@@ -181,6 +231,9 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         root = root.subcommand(grp_cmd);
     }
     for cmd in &manifest.commands {
+        if cmd.internal {
+            continue;
+        }
         if cmd.group.is_none() {
             let sub = crate::help::add_general_options(
                 ClapCommand::new(leak(&cmd.name))
@@ -394,7 +447,40 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
             }
         }
     }
+    cmd = add_terminal_flags(cmd, mcmd);
     cmd
+}
+
+/// Register each `--' with:` terminal-action flag on `cmd` as a
+/// boolean flag under the "General Options" heading. All siblings
+/// are grouped into a single mutually-exclusive `ArgGroup`, so clap
+/// rejects two terminal flags in one invocation with its own
+/// diagnostic. Description comes verbatim from the referenced term's
+/// docstring (emitted by the Haskell manifest builder).
+fn add_terminal_flags(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
+    if mcmd.terminals.is_empty() {
+        return cmd;
+    }
+    let mut group_members: Vec<&'static str> = Vec::with_capacity(mcmd.terminals.len());
+    for (i, t) in mcmd.terminals.iter().enumerate() {
+        let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
+        let long: &'static str = leak(&t.long);
+        let mut a = ClapArg::new(id)
+            .long(long)
+            .action(ArgAction::SetTrue)
+            .help_heading("General Options")
+            .help(leak(&t.description));
+        if let Some(c) = t.short {
+            a = a.short(c);
+        }
+        cmd = cmd.arg(a);
+        group_members.push(id);
+    }
+    let mut grp = ArgGroup::new(TERMINAL_GROUP_ID).multiple(false);
+    for id in group_members {
+        grp = grp.arg(id);
+    }
+    cmd.group(grp)
 }
 
 /// Add a clap arg representing one group entry (which is itself an

@@ -54,6 +54,7 @@ main = do
       , recursiveRecordTests
       , bidirectionalAppCheckTests
       , postArgPropagationTests
+      , withDocstringTests
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
@@ -73,6 +74,8 @@ main = do
       , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"
       , golden "effect-boundary-py" "effect-boundary-py"
       , golden "effect-boundary-cpp" "effect-boundary-cpp"
+      , golden "terminal-actions-py" "terminal-actions-py"
+      , golden "terminal-polymorphic-py" "terminal-polymorphic-py"
       , golden "effect-boundary-cross" "effect-boundary-cross"
       , golden "effect-interaction" "effect-interaction"
       , golden "recursive-where-capture-multi" "recursive-where-capture-multi"

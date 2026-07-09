@@ -1692,12 +1692,12 @@ jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 -- that isn't declared literal, the parenthetical clarifies whether
 -- argv is treated as a filesystem path only (when `source: file` or a
 -- `check.path:*` forces path semantics) or as the default
--- filename-or-quoted-JSON.
+-- literal string.
 typeDescStr :: Type -> Maybe Bool -> Maybe SourceAtom -> [Check] -> Text
 typeDescStr t isLiteral mSrc checks
   | isStrType t && isLiteral /= Just True =
       if pathOnly then "Str    (a filename)"
-                  else "Str    (a filename or quoted JSON string)"
+                  else "Str    (literal string)"
   | otherwise = render (pretty t)
   where
     pathOnly = mSrc == Just SourceFile || any isPathCheck checks
@@ -2117,6 +2117,11 @@ data ManifestInputs = ManifestInputs
   , miTmpdir              :: !(Maybe Path)
   , miRunLog              :: !(Maybe RenderedRunLog)
   , miCapabilities        :: ![Text]
+  , miTermDocs            :: !(Map.Map EVar [Text])
+    -- ^ Term-level docstrings by term name. Used to look up the
+    -- description shown against a `--' with:` flag in `--help`
+    -- (the referenced term's own docstring becomes the flag's help
+    -- text).
   }
 
 buildManifest :: ManifestInputs -> Text
@@ -2227,6 +2232,8 @@ buildManifest ManifestInputs{..} =
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
         , ("constraints", jsonArr [])
+        , ("internal", jsonBool (isInternalTerminalName (fdataSubcommand fd)))
+        , ("terminals", terminalsJson (fdataSubcommand fd) (cmdDocTerminals (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
         ]
@@ -2241,9 +2248,34 @@ buildManifest ManifestInputs{..} =
         , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
+        , ("internal", jsonBool (isInternalTerminalName (commandName g)))
+        , ("terminals", terminalsJson (commandName g) (cmdDocTerminals (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
         ]
+
+    -- Emit the `terminals` array for one command. The description
+    -- comes from the referenced term's own top-level docstring; the
+    -- entry name is the compiler-mangled name that the nexus resolves
+    -- to a cmd_index at manifest-load time.
+    terminalsJson :: Text -> [WithSpec] -> Text
+    terminalsJson parentName specs =
+      jsonArr (map (oneTerminal parentName) specs)
+
+    oneTerminal :: Text -> WithSpec -> Text
+    oneTerminal parentName (WithSpec mShort long (EV tName)) =
+      let EV mangled = mangleTerminalName (EV parentName) long
+          desc = case Map.lookup (EV tName) miTermDocs of
+            Just (firstLine : _) -> firstLine
+            _ -> ""
+       in jsonObj
+            [ ("short", case mShort of
+                Just c -> jsonStr (MT.singleton c)
+                Nothing -> jsonNull)
+            , ("long", jsonStr long)
+            , ("entry", jsonStr mangled)
+            , ("description", jsonStr desc)
+            ]
 
     -- Render the @args@ JSON array. 'makeSerialASTs' produces one
     -- SerialAST per arg position in the original function signature,
@@ -2383,6 +2415,7 @@ generate cs rASTs helperRASTs = do
   -- --debug@ was used. Future strings (@slurm@, @sanitizer@,
   -- @profile@) accumulate the same way.
   let capabilities = "log" : ["debug_trace" | debugTrace]
+  termDocs <- MM.gets stateTermDocs
 
   let manifestJson =
         buildManifest
@@ -2406,6 +2439,7 @@ generate cs rASTs helperRASTs = do
             , miTmpdir              = tmpdir
             , miRunLog              = runLog
             , miCapabilities        = capabilities
+            , miTermDocs            = termDocs
             }
       wrapperScript = makeWrapperScript manifestJson
 

@@ -1,0 +1,48 @@
+--- fhead default ---
+["alpha","beta","gamma"]
+--- fhead -l ---
+alpha
+beta
+gamma
+--- fhead --lines ---
+alpha
+beta
+gamma
+--- fhead -c ---
+"alpha","beta","gamma"
+--- fhead -s (effectful reformatter, B=Str) ---
+"alpha;beta;gamma"
+--- fhead -p (pure reformatter, B=Str, no <IO> on terminal) ---
+"alpha;beta;gamma"
+--- fhead --plain (long form) ---
+"alpha;beta;gamma"
+--- -f json + -s (re-encode reformatter Str) ---
+"alpha;beta;gamma"
+--- -f jsonl + -p (pure reformatter through jsonl) ---
+"alpha;beta;gamma"
+--- -f json + -l (sink writes stdout; JSON of () harmless) ---
+alpha
+beta
+gamma
+--- describe default ---
+42
+--- describe --say ---
+int(42)
+--- fhead --help lines (grep terminal flags + descriptions) ---
+  -l, --lines
+          Print each string on its own line
+  -c, --csv
+          Print each string quoted, comma-separated on one line
+  -s, --sum
+          Join all strings into one semicolon-separated summary
+  -p, --plain
+          Pure semicolon join (no IO effect on the terminal)
+--- describe --help lines (grep --say) ---
+      --say
+          Human-readable form of an integer
+--- fhead -l -c (should error) ---
+OK: sibling terminals rejected
+--- ./nexus mlcp_fhead_lines (should error) ---
+OK: internal entry hidden
+--- top-level --help mlcp match count (expect 0) ---
+0

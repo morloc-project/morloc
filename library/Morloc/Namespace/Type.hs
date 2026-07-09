@@ -107,6 +107,9 @@ module Morloc.Namespace.Type
   , FormAtom (..)
   , PathPerm (..)
   , Check (..)
+  , WithSpec (..)
+  , mangleTerminalName
+  , isInternalTerminalName
   , ArgDoc (..)
   , ArgDocVars (..)
   , ExprTypeE (..)
@@ -578,6 +581,40 @@ data Check
   = CheckPath PathPerm
   deriving (Show, Ord, Eq)
 
+-- | One `--' with: <flag>=<term>` declaration on a signature preamble.
+-- Declares a command-scoped CLI flag that dispatches to a compile-time-
+-- synthesized entry composing the referenced term with the head manifold
+-- (see Frontend/Desugar.hs). The term's type discipline is enforced by
+-- the normal typechecker.
+data WithSpec = WithSpec
+  { wsShort :: Maybe Char
+  , wsLong  :: Text
+  , wsTerm  :: EVar
+  }
+  deriving (Show, Ord, Eq)
+
+-- | Compose a mangled entry-point name from an export's name and one
+-- of its `--' with:` long flags. Shared between the frontend (which
+-- synthesizes the AssE) and the nexus manifest emitter (which reads
+-- the same prefix to mark the emitted Command as `internal: true`).
+--
+-- The `mlcp_` prefix sits inside every pool language's identifier
+-- grammar and never contains `__`, which C++ reserves per lex.name.
+-- Hyphens in the long flag become underscores.
+mangleTerminalName :: EVar -> Text -> EVar
+mangleTerminalName (EV parent) long =
+  EV (DT.concat ["mlcp_", parent, "_", DT.map hyphenToUnder long])
+  where
+    hyphenToUnder '-' = '_'
+    hyphenToUnder c = c
+
+-- | Recognizes the compiler-internal name prefix produced by
+-- 'mangleTerminalName'. The nexus filters these out of the top-level
+-- command menu but keeps them dispatchable via each parent command's
+-- terminal flags.
+isInternalTerminalName :: Text -> Bool
+isInternalTerminalName = DT.isPrefixOf "mlcp_"
+
 data ArgDocVars = ArgDocVars
   { docLines :: [Text]
   , docName :: Maybe Text
@@ -596,6 +633,7 @@ data ArgDocVars = ArgDocVars
   , docListSource :: Maybe SourceAtom
   , docListForm :: Maybe FormAtom
   , docListChecks :: [Check]
+  , docWith :: [WithSpec]
   }
   deriving (Show, Ord, Eq)
 
@@ -656,6 +694,7 @@ instance Defaultable ArgDocVars where
       , docListSource = Nothing
       , docListForm = Nothing
       , docListChecks = []
+      , docWith = []
       }
 
 instance Typelike Type where
