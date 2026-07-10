@@ -162,6 +162,22 @@ freshExprFrom (ExprI refId _) e = do
       }
   return (ExprI i e)
 
+srcLocToSpan :: SrcLoc -> Span
+srcLocToSpan loc = Span (Pos l1 c1 f) (Pos l2 c2 f)
+  where
+    f  = maybe "" id (srcLocPath loc)
+    l1 = srcLocLine loc
+    c1 = srcLocCol loc
+    l2 = srcLocEndLine loc
+    c2 = srcLocEndCol loc
+
+-- | Look up the source span for a fresh-allocated ExprI id. Falls back
+-- to a zero-position span if the id is not in the source map.
+posOfExprI :: ExprI -> D Span
+posOfExprI (ExprI ident _) = do
+  sm <- State.gets dsSourceMap
+  return (srcLocToSpan (Map.findWithDefault noSrcLoc ident sm))
+
 --------------------------------------------------------------------
 -- Docstring helpers
 --------------------------------------------------------------------
@@ -176,10 +192,33 @@ lookupDocsAt pos = do
 -- does via docLines); key-value entries like metavar:, arg:, etc. are
 -- intentionally ignored at the declaration level since those describe
 -- type-signature interface details.
+-- | Register free description lines from a signature preamble under
+-- the term name so lookups by name (e.g., resolving a `--' with:`
+-- referenced term to its docstring) can find them. Preserves any
+-- existing declaration-level entry, since declaration docs take
+-- precedence over signature docs elsewhere in the pipeline.
+captureSigDescLines :: EVar -> [Text] -> D ()
+captureSigDescLines _ [] = return ()
+captureSigDescLines name descs = State.modify $ \s ->
+  s { dsTermDocs =
+        Map.insertWith
+          (\_new existing -> existing)  -- keep existing declaration doc
+          name
+          descs
+          (dsTermDocs s)
+    }
+
 captureDeclDocs :: Pos -> EVar -> D ()
 captureDeclDocs pos name = do
   docs <- lookupDocsAt pos
   vars <- processArgDocLinesD pos docs
+  case docWith vars of
+    (s : _) -> dfail pos . T.unpack $
+      "`with:` requires an explicit signature above the definition. "
+      <> "Add a `" <> unEVar name <> " :: <type>` line and move the "
+      <> "`--' with:` atoms to that signature's docstring. "
+      <> "Offending atom: `with: " <> renderWithSpec s <> "`."
+    [] -> return ()
   let descLines = docLines vars
   case descLines of
     [] -> return ()
@@ -257,6 +296,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
+  , "with"
   ]
 
 -- | Parse the value of a `source:` field. OR-chains (`a|b`) are
@@ -295,6 +335,65 @@ parseFormAtom raw = case T.strip raw of
     | otherwise ->
         Left $ "unknown form value '" <> s
             <> "'; expected one of: list, bytes, bytes-only, packet."
+
+-- | Parse a `with:` directive value: `<flag-spec>=<term-name>`.
+-- `<flag-spec>` is either `--long` or `-x/--long`; short-only (`-x`)
+-- is rejected because the long form is required for a stable descriptor
+-- in `--help`. `<term-name>` is a plain morloc identifier.
+parseWithSpec :: Text -> Either Text WithSpec
+parseWithSpec raw =
+  case T.breakOn "=" (T.strip raw) of
+    (_, "") ->
+      Left "expected `<flag-spec>=<term-name>` (missing `=`)."
+    (flagPart, eqRest) ->
+      let termPart = T.strip (T.drop 1 eqRest)
+      in if T.null termPart
+           then Left "term name is empty after `=`."
+           else case parseWithFlagSpec flagPart of
+             Left e -> Left e
+             Right (short, long) -> Right (WithSpec short long (EV termPart))
+
+parseWithFlagSpec :: Text -> Either Text (Maybe Char, Text)
+parseWithFlagSpec txt = case parseCliOpt txt of
+  CliOptOk (CliOptLong l)
+    | isLongFlagName (T.unpack l) -> Right (Nothing, l)
+    | otherwise -> Left (longFlagInvalidMsg (T.unpack l))
+  CliOptOk (CliOptBoth c l)
+    | isLongFlagName (T.unpack l) -> Right (Just c, l)
+    | otherwise -> Left (longFlagInvalidMsg (T.unpack l))
+  CliOptOk (CliOptShort _) -> Left
+    $ "short-only flag spec is not allowed on `with:`; every terminal "
+    <> "action must declare a long form (e.g. `-l/--lines=fmt_lines` "
+    <> "or `--lines=fmt_lines`). The long form is what `--help` shows "
+    <> "as a stable descriptor."
+  CliOptShortCharInvalid c -> Left (shortCharInvalidMsg c)
+  CliOptShapeUnknown -> Left
+    $ "unrecognized flag spec; expected `-x/--long` or `--long`, e.g. "
+    <> "`-l/--lines` or `--csv`."
+
+isLongFlagName :: String -> Bool
+isLongFlagName [] = False
+isLongFlagName (h : rest) =
+  isLongFlagFirst h && all isLongFlagRest rest
+  where
+    isLongFlagFirst c = c >= 'a' && c <= 'z'
+    isLongFlagRest c =
+         (c >= 'a' && c <= 'z')
+      || (c >= '0' && c <= '9')
+      || c == '-'
+
+shortCharInvalidMsg :: Char -> Text
+shortCharInvalidMsg c =
+  "invalid short option character '" <> T.singleton c
+  <> "' in `with:` spec. Short options must be a single ASCII letter "
+  <> "(a-z, A-Z); digits are forbidden because they collide with "
+  <> "negative-number argv values."
+
+longFlagInvalidMsg :: String -> Text
+longFlagInvalidMsg rest =
+  "invalid long flag name `--" <> T.pack rest
+  <> "` in `with:` spec. Long names must be lowercase-kebab: start "
+  <> "with a lowercase letter, then any of [a-z0-9-]."
 
 -- | Parse a check kind + value. Only `path` is recognized in v1.
 --
@@ -404,6 +503,9 @@ processArgDocLines = foldl step ([], [], defaultValue)
         ["list", "check", kind] -> case parseCheck kind v of
           Right c -> (errs, ws, d {docListChecks = docListChecks d <> [c]})
           Left e  -> (errs <> ["in `list.check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
+        ["with"] -> case parseWithSpec v of
+          Right ws' -> (errs, ws, d {docWith = docWith d <> [ws']})
+          Left e -> (errs <> ["in `with: " <> v <> "`: " <> e], ws, d)
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k
               desc = k <> ": " <> v
@@ -466,6 +568,94 @@ processArgDocLinesD pos ls = do
   case errs of
     [] -> return v
     (e : _) -> dfail pos (T.unpack e)
+
+-- | Validate signature-preamble `with:` specs: reject duplicate short/
+-- long names within one export, reject collisions with reserved
+-- command-scope flags (`-h`, `--help`), and reject collisions with the
+-- signature's own argument-declared CLI names. The last is important
+-- because the nexus registers `with:` flags on the same clap Command
+-- as the arg-declared ones; a collision would abort the clap builder.
+validateSigWith :: Pos -> [WithSpec] -> [ArgDocVars] -> D ()
+validateSigWith pos specs argDocs = do
+  let longs = [wsLong s | s <- specs]
+      shorts = [c | s <- specs, Just c <- [wsShort s]]
+      (argLongs, argShorts) = collectArgCliNames argDocs
+      argLongSet = Set.fromList argLongs
+      argShortSet = Set.fromList argShorts
+  reportIfJust pos (firstDuplicate longs) $ \l ->
+    "duplicate `with:` long name `--" <> l
+    <> "` in this signature. Each terminal action needs a unique long form."
+  reportIfJust pos (firstDuplicate shorts) $ \c ->
+    "duplicate `with:` short name `-" <> T.singleton c
+    <> "` in this signature. Each terminal action needs a unique short form."
+  reportIfAny pos [l | l <- longs, l == "help"] $ \l ->
+    "`with:` long name `--" <> l
+    <> "` collides with a reserved command-scope flag. `--help` is "
+    <> "always available; pick a different long name."
+  reportIfAny pos [c | c <- shorts, c == 'h'] $ \c ->
+    "`with:` short name `-" <> T.singleton c
+    <> "` collides with a reserved command-scope flag. `-h` is always "
+    <> "available; pick a different short letter."
+  reportIfAny pos [l | l <- longs, Set.member l argLongSet] $ \l ->
+    "`with:` long name `--" <> l
+    <> "` already appears on one of this signature's own argument "
+    <> "declarations (via `arg:` / `true:` / `false:`). Pick a different "
+    <> "long name for the terminal action."
+  reportIfAny pos [c | c <- shorts, Set.member c argShortSet] $ \c ->
+    "`with:` short name `-" <> T.singleton c
+    <> "` already appears on one of this signature's own argument "
+    <> "declarations (via `arg:` / `true:` / `false:`). Pick a different "
+    <> "short letter for the terminal action."
+
+reportIfAny :: Pos -> [a] -> (a -> Text) -> D ()
+reportIfAny _ [] _ = return ()
+reportIfAny pos (x : _) f = dfail pos (T.unpack (f x))
+
+reportIfJust :: Pos -> Maybe a -> (a -> Text) -> D ()
+reportIfJust _ Nothing _ = return ()
+reportIfJust pos (Just x) f = dfail pos (T.unpack (f x))
+
+-- | Extract every long/short CLI name declared by an argument's docstring.
+-- Handles the `arg:`, `true:`, `false:` fields (each of which can encode
+-- a short-only / long-only / both spec).
+collectArgCliNames :: [ArgDocVars] -> ([Text], [Char])
+collectArgCliNames vs =
+  ( concatMap longsOf slots, concatMap shortsOf slots )
+  where
+    slots = concatMap (\v -> [docArg v, docTrue v, docFalse v]) vs
+    longsOf (Just (CliOptLong l)) = [l]
+    longsOf (Just (CliOptBoth _ l)) = [l]
+    longsOf _ = []
+    shortsOf (Just (CliOptShort c)) = [c]
+    shortsOf (Just (CliOptBoth c _)) = [c]
+    shortsOf _ = []
+
+firstDuplicate :: Ord a => [a] -> Maybe a
+firstDuplicate = go Set.empty
+  where
+    go _ [] = Nothing
+    go seen (x : xs)
+      | Set.member x seen = Just x
+      | otherwise = go (Set.insert x seen) xs
+
+-- | Reject any `with:` atom that appears somewhere other than a
+-- signature preamble. Used for per-argument docstrings, record-field
+-- docstrings, type-alias docstrings, etc. `with:` is command-only.
+rejectWithHere :: Pos -> Text -> ArgDocVars -> D ()
+rejectWithHere pos ctx v =
+  case docWith v of
+    [] -> return ()
+    (s : _) -> dfail pos . T.unpack $
+      "`with:` is not allowed on " <> ctx
+      <> "; it may only appear in a signature preamble (the `--'` "
+      <> "lines directly above `name ::`). Offending atom: `with: "
+      <> renderWithSpec s <> "`."
+
+renderWithSpec :: WithSpec -> Text
+renderWithSpec (WithSpec (Just c) l (EV t)) =
+  "-" <> T.singleton c <> "/--" <> l <> "=" <> t
+renderWithSpec (WithSpec Nothing l (EV t)) =
+  "--" <> l <> "=" <> t
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
 applySourceDocsD :: [Text] -> Source -> D Source
@@ -1366,7 +1556,10 @@ desugarTopLevel (Loc sp (CImpE imp)) = do
 desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
   cmdDoc <- processArgDocLinesD (startPos sp) docs
+  captureSigDescLines name (docLines cmdDoc)
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
+  validateSigWith (startPos sp) (docWith cmdDoc) argDocs
+  mapM_ (rejectWithHere (startPos sp) "an argument-level docstring") argDocs
   let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
       (labels, t'') = extractLabels t'
@@ -1544,6 +1737,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
+  rejectWithHere (startPos sp) "a type alias" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
   return [e]
 desugarTypeDef sp (CstNewtype (v, vs) t) = do
@@ -1553,6 +1747,7 @@ desugarTypeDef sp (CstNewtype (v, vs) t) = do
       "' has a vacuous body: it reduces to a self-reference with no payload"
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
+  rejectWithHere (startPos sp) "a newtype declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
@@ -1564,6 +1759,7 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
+  rejectWithHere (startPos sp) "a primitive type declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
@@ -1577,12 +1773,15 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   -- still trip Invariant 1 if also given a per-language form.
   recDocs <- lookupDocsAt (startPos sp)
   recDocVars <- processArgDocLinesD (startPos sp) recDocs
+  rejectWithHere (startPos sp) "a record declaration" recDocVars
   fieldDocs <-
     mapM
       (\(loc, _, _) -> do
           let p = locPos loc
           dl <- lookupDocsAt p
-          processArgDocLinesD p dl)
+          fieldDoc <- processArgDocLinesD p dl
+          rejectWithHere p "a record field" fieldDoc
+          return fieldDoc)
       locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       doc = ArgDocRec recDocVars (zip (map fst entries) fieldDocs)
@@ -1637,6 +1836,7 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
 desugarSigItem :: CstSigItem -> D Signature
 desugarSigItem (CstSigItem name sigType) = do
   (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
+  mapM_ (rejectWithHere (Pos 0 0 "") "a class method signature") argDocs
   let wrappedT = quantifyType t
       (labels, wrappedT') = extractLabels wrappedT
       doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
@@ -1700,9 +1900,174 @@ Handles implicit main wrapping for bare declarations.
 desugarProgram :: Bool -> [Loc CstExpr] -> D [ExprI]
 desugarProgram isImplicitMain cstNodes = do
   exprIs <- concatMapM desugarTopLevel cstNodes
-  if isImplicitMain
-    then mkImplicitMain exprIs
-    else return exprIs
+  exprIs' <- if isImplicitMain
+               then mkImplicitMain exprIs
+               else return exprIs
+  mapM injectTerminalActions exprIs'
+
+--------------------------------------------------------------------
+-- Terminal-action synthesis (`--' with:` docstring atom)
+--
+-- For each Signature `foo :: ... -> <E>? T` whose docstring preamble
+-- carries `--' with: <flag>=<term>` atoms, synthesize an internal
+-- top-level binding `mlcp_foo_<long> = \x .. -> <term> (foo x ..)`
+-- (or a do-block if `foo` is effectful) and add it to the module's
+-- export list. Downstream typechecking, effect merging, and pool
+-- codegen handle the composed binding as an ordinary export.
+--------------------------------------------------------------------
+
+injectTerminalActions :: ExprI -> D ExprI
+injectTerminalActions (ExprI i (ModE mv body)) = do
+  body' <- expandWithBindings body
+  return (ExprI i (ModE mv body'))
+injectTerminalActions e = return e
+
+expandWithBindings :: [ExprI] -> D [ExprI]
+expandWithBindings body =
+  case collectWithSpecs body of
+    [] -> return body
+    specs -> do
+      let plan =
+            [ (parent, w, mangleTerminalName parent (wsLong w), sigExprI)
+            | (sigExprI, parent, _, ws) <- specs
+            , w <- ws
+            ]
+      checkMangledCollisions body plan
+      synthesized <- concat <$> mapM emitFor specs
+      let mangleds = [ m | (_, _, m, _) <- plan ]
+      body' <- mapM (addToExport mangleds) body
+      return (body' ++ synthesized)
+
+-- | Reject synthesized-name collisions before any AssE is emitted.
+-- Two conditions:
+--   1. Two `with:` declarations produce the same mangled name (e.g.
+--      `foo_bar` + `--baz` collides with `foo` + `--bar-baz` after
+--      hyphen -> underscore normalization).
+--   2. A synthesized name matches an existing top-level user
+--      identifier in the same module (any SigE or AssE binder).
+-- Either would corrupt the module scope; fail with a caret on the
+-- offending `--' with:` line's own signature so the user can locate it.
+checkMangledCollisions ::
+  [ExprI] ->
+  [(EVar, WithSpec, EVar, ExprI)] ->
+  D ()
+checkMangledCollisions body plan = do
+  case firstDuplicateBy (\(_, _, m, _) -> m) plan of
+    Just ((parentA, specA, mangled, _), (parentB, specB, _, sigB)) -> do
+      sp <- posOfExprI sigB
+      dfail (startPos sp) . T.unpack $
+        "two `--' with:` declarations produce the same synthesized "
+        <> "internal name `" <> unEVar mangled <> "`: "
+        <> unEVar parentA <> " " <> renderWithSpec specA
+        <> " and " <> unEVar parentB <> " " <> renderWithSpec specB
+        <> ". Rename one of the long flags so the mangled names differ."
+    Nothing -> return ()
+  let userNames = collectTopLevelBinders body
+  case find (\(_, _, m, _) -> Set.member m userNames) plan of
+    Just (parent, spec, mangled, sigI) -> do
+      sp <- posOfExprI sigI
+      dfail (startPos sp) . T.unpack $
+        "synthesized internal name `" <> unEVar mangled
+        <> "` (from " <> unEVar parent <> " " <> renderWithSpec spec
+        <> ") collides with an existing top-level identifier in this "
+        <> "module. Rename the long flag or the existing identifier."
+    Nothing -> return ()
+
+collectTopLevelBinders :: [ExprI] -> Set.Set EVar
+collectTopLevelBinders = foldr pick Set.empty
+  where
+    pick (ExprI _ (SigE (Signature n _ _))) acc = Set.insert n acc
+    pick (ExprI _ (AssE n _ _)) acc = Set.insert n acc
+    pick _ acc = acc
+
+-- | Return the first pair of entries that agree under the projection,
+-- or Nothing if all projected keys are unique.
+firstDuplicateBy :: Ord k => (a -> k) -> [a] -> Maybe (a, a)
+firstDuplicateBy proj = go Map.empty
+  where
+    go _ [] = Nothing
+    go seen (x : xs) =
+      let k = proj x
+       in case Map.lookup k seen of
+            Just prior -> Just (prior, x)
+            Nothing -> go (Map.insert k x seen) xs
+
+
+collectWithSpecs :: [ExprI] -> [(ExprI, EVar, EType, [WithSpec])]
+collectWithSpecs = foldr pick []
+  where
+    pick e@(ExprI _ (SigE (Signature name _ et))) rest =
+      case edocs et of
+        ArgDocSig cmdDoc _ _ ->
+          case docWith cmdDoc of
+            [] -> rest
+            ws -> (e, name, et, ws) : rest
+        _ -> rest
+    pick _ rest = rest
+
+emitFor :: (ExprI, EVar, EType, [WithSpec]) -> D [ExprI]
+emitFor (sigExprI, parentName, parentEt, specs) = do
+  sp <- posOfExprI sigExprI
+  let pt = etype parentEt
+      arity = sigArity pt
+      isEff = returnIsEffectful pt
+  mapM (synthWithBinding sp parentName arity isEff) specs
+
+synthWithBinding :: Span -> EVar -> Int -> Bool -> WithSpec -> D ExprI
+synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm) = do
+  let mangled = mangleTerminalName parentName long
+      lamVars = [EV ("mlcp_x_" <> T.pack (show idx)) | idx <- [1..arity]]
+  fooRef <- freshExprSpan sp (VarE defaultValue parentName)
+  argRefs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) lamVars
+  fooApp <-
+    if arity == 0
+      then return fooRef
+      else freshExprSpan sp (AppE fooRef argRefs)
+  tRef <- freshExprSpan sp (VarE defaultValue tTerm)
+  body <-
+    if isEff
+      then do
+        let z = EV "mlcp_z"
+        forceE <- freshExprSpan sp (EvalE fooApp)
+        zRef <- freshExprSpan sp (VarE defaultValue z)
+        tApp <- freshExprSpan sp (AppE tRef [zRef])
+        letE <- freshExprSpan sp (LetE [(z, forceE)] tApp)
+        freshExprSpan sp (DoBlockE letE)
+      else freshExprSpan sp (AppE tRef [fooApp])
+  wrapped <-
+    if arity == 0
+      then return body
+      else freshExprSpan sp (LamE lamVars body)
+  freshExprSpan sp (AssE mangled wrapped [])
+
+-- | Add the given mangled symbols to a module's ExportMany. Fresh IDs
+-- are allocated per symbol. ExportAll needs no update (it already
+-- covers every top-level definition).
+addToExport :: [EVar] -> ExprI -> D ExprI
+addToExport mangleds (ExprI i (ExpE (ExportMany syms groups))) = do
+  newItems <- mapM
+    (\ev -> do fid <- freshIdPos (Pos 0 0 ""); return (fid, TermSymbol ev))
+    mangleds
+  let syms' = Set.union syms (Set.fromList newItems)
+  return (ExprI i (ExpE (ExportMany syms' groups)))
+addToExport _ e = return e
+
+-- | Return position's effect: True iff the outermost result (after
+-- stripping ForallU quantifiers) is an EffectU or the function's
+-- return position is EffectU.
+returnIsEffectful :: TypeU -> Bool
+returnIsEffectful (ForallU _ t) = returnIsEffectful t
+returnIsEffectful (FunU _ ret) = isEffectU ret
+returnIsEffectful t = isEffectU t
+
+isEffectU :: TypeU -> Bool
+isEffectU (EffectU _ _) = True
+isEffectU _ = False
+
+sigArity :: TypeU -> Int
+sigArity (ForallU _ t) = sigArity t
+sigArity (FunU args _) = length args
+sigArity _ = 0
 
 --------------------------------------------------------------------
 -- Utility

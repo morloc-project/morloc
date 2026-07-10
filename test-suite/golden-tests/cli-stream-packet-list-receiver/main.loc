@@ -1,0 +1,35 @@
+-- CLI ingest of a stream-packet file into a `[a]` receiver.
+--
+-- Verifies that a stream-packet file on disk (produced via OStream
+-- @write+@flush across multiple sub-packets) can be passed as a
+-- positional argument to a subcommand whose receiver type is `[Int]`.
+-- The nexus emits a FILE+DATA indirection packet; the pool's
+-- language runtime `_get_value` peeks the file, sees a stream
+-- header, and iterates `@next` chunk-by-chunk into a native list.
+-- The receiver-side sum then confirms that all sub-packets were
+-- delivered in order.
+
+module main
+  ( writeStream
+  , sumList
+  )
+
+import root-py
+
+-- Produce a stream file with 3 sub-packets (10, 20, 30 elements):
+--   subpacket 1: [1..10]     sum = 55
+--   subpacket 2: [11..20]    sum = 155
+--   subpacket 3: [21..30]    sum = 255
+-- Expected total sum on drain: 465.
+writeStream :: Str -> <IO> ()
+writeStream path = do
+  o <- @open path :: <IO> OStream Int
+  @write 0 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  @flush o
+  @write 0 o [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+  @flush o
+  @write 0 o [21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+  @close o
+
+sumList :: [Int] -> Int
+sumList xs = sum xs

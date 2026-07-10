@@ -1,0 +1,22 @@
+-- Effect-typed recursive helper capturing a scalar. `go` returns
+-- <IO> Int and captures `k`. Widening must place the captured param
+-- INSIDE the EffectT layer so the EffectT return survives the closure
+-- conversion. The intermediate `step` helper (non-recursive, transitively
+-- captures via its call to go) exercises the shared-body inlining path
+-- of removeVarS with a widened callee.
+module main (effRec)
+
+import root-py
+
+source Py from "helpers.py" ("noisy_add" as noisyAdd)
+
+noisyAdd :: Int -> <IO> Int
+
+effRec :: Int -> Int -> <IO> Int
+effRec k n = go n where
+  go m ? m == 0 = noisyAdd k
+       : step m
+  step :: Int -> <IO> Int
+  step m = do
+    noisyAdd k
+    go (m - 1)

@@ -25,6 +25,9 @@ import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
+import qualified Data.Graph as Graph
+import qualified Data.List as List
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 
@@ -603,35 +606,46 @@ removeVarS (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (removeVarS e))
 removeVarS (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map removeVarS es))
 removeVarS x = x
 
--- | Extract non-exported recursive helpers from rASTs into their own top-level
--- rASTs. A recursive helper is a VarS node whose body contains a CallS
--- back-edge to its own name. These must become separate manifolds so the
--- generated code can call them recursively. This runs before removeVarS.
+-- | Lift each non-exported self-recursive @where@-bound helper into its own
+-- top-level rAST (Johnsson-style super-combinator conversion). Runs before
+-- 'removeVarS' so the free-variable walker can see through 'VarS' wrappers.
 extractRecursiveHelpers ::
   [AnnoS (Indexed Type) One (Indexed Lang)] ->
   MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
 extractRecursiveHelpers rASTs = do
   exports <- MM.gets stateExports
-  let exportSet = Set.fromList exports
-  results <- mapM (extractFromTree exportSet) rASTs
-  let (modified, helperLists) = unzip results
-      helpers = concat helperLists
-  -- Register extracted helpers in stateName if not already present (they
-  -- should be from the Link phase, but ensure it for safety).
-  nameMap <- MM.gets stateName
-  mapM_ (\(AnnoS (Idx midx _) _ _) ->
-    case Map.lookup midx nameMap of
-      Just _ -> return ()
-      Nothing -> MM.sayVVV $ "Warning: recursive helper manifold" <+> pretty midx <+> "not in stateName"
-    ) helpers
-  return (modified ++ helpers)
+  -- Each rAST is processed independently. Two exports may reuse the same
+  -- @where@-bound name for unrelated helpers with different captures; a
+  -- global capture map keyed by 'EVar' would conflate them.
+  perTree <- mapM (processTree (Set.fromList exports)) rASTs
+  let (modifiedList, helperListsPerTree) = unzip perTree
+  return (modifiedList ++ concat helperListsPerTree)
 
--- | Walk an rAST and extract recursive VarS nodes into separate rASTs.
--- Returns the modified tree and the list of extracted helper rASTs.
+processTree ::
+  Set.Set Int ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad
+    ( AnnoS (Indexed Type) One (Indexed Lang)
+    , [AnnoS (Indexed Type) One (Indexed Lang)]
+    )
+processTree exportSet tree = do
+  (modified0, helpers0) <- extractFromTree exportSet tree
+  let captureMap = closeFreeVars helpers0
+  modified1 <- rewriteCalls captureMap modified0
+  helpers1  <- mapM (\(v, t) -> (,) v <$> rewriteCalls captureMap t) helpers0
+  let helpers2 = map (uncurry (widenHelperLam captureMap)) helpers1
+  return (modified1, helpers2)
+
+-- | Walk an rAST, replacing every self-recursive @VarS v (One child)@ with
+-- a bare @CallS v@ back-edge and returning the extracted body separately.
+-- Extraction still recurses into 'child' so nested helpers are hoisted too.
 extractFromTree ::
   Set.Set Int ->
   AnnoS (Indexed Type) One (Indexed Lang) ->
-  MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang), [AnnoS (Indexed Type) One (Indexed Lang)])
+  MorlocMonad
+    ( AnnoS (Indexed Type) One (Indexed Lang)
+    , [(EVar, AnnoS (Indexed Type) One (Indexed Lang))]
+    )
 extractFromTree exports (AnnoS g c e) = do
   (e', helpers) <- extractExpr exports e
   return (AnnoS g c e', helpers)
@@ -639,14 +653,20 @@ extractFromTree exports (AnnoS g c e) = do
 extractExpr ::
   Set.Set Int ->
   ExprS (Indexed Type) One (Indexed Lang) ->
-  MorlocMonad (ExprS (Indexed Type) One (Indexed Lang), [AnnoS (Indexed Type) One (Indexed Lang)])
+  MorlocMonad
+    ( ExprS (Indexed Type) One (Indexed Lang)
+    , [(EVar, AnnoS (Indexed Type) One (Indexed Lang))]
+    )
 extractExpr exports (VarS v (One child@(AnnoS (Idx midx _) _ _)))
-  -- Only extract if the function is recursive AND not already an export
-  -- (exports already have their own manifolds)
   | not (Set.member midx exports) && containsCallS v child = do
-      -- Recursively extract from the child's body first
+      -- Rename to @v@midx@ so each hoisted helper is uniquely addressable
+      -- in Express.lookupRecursiveTarget's EVar-keyed reverse map, even
+      -- when two exports share the same source name for their helpers.
+      let newV = EV (unEVar v <> MT.pack ("@" <> show midx))
       (child', innerHelpers) <- extractFromTree exports child
-      return (CallS v, child' : innerHelpers)
+      let renamedChild = renameCallS v newV child'
+      MM.modify (\s -> s { stateName = Map.insert midx newV (stateName s) })
+      return (CallS newV, (newV, renamedChild) : innerHelpers)
 extractExpr exports (VarS v (One child)) = do
   (child', helpers) <- extractFromTree exports child
   return (VarS v (One child'), helpers)
@@ -694,25 +714,220 @@ extractExpr exports (IntrinsicS intr es) = do
   return (IntrinsicS intr es', concat helperLists)
 extractExpr _ e = return (e, [])
 
--- | Check if an AnnoS tree contains a CallS node targeting the given name
-containsCallS :: EVar -> AnnoS g One c -> Bool
-containsCallS target (AnnoS _ _ e) = go e
+-- | Free BndS occurrences in a tree, keyed by name, valued by the type at
+-- the leaf. Respects LamS/LetS binders. Recurses through VarS so a captured
+-- variable reachable only via a non-recursive where-bound value (dissolved
+-- later by 'removeVarS') is still visible.
+collectFreeBnds ::
+  Set.Set EVar ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  Map EVar Type
+collectFreeBnds = go
   where
-    go (CallS v) = v == target
-    go (AppS f xs) = containsCallS target f || any (containsCallS target) xs
-    go (LamS _ x) = containsCallS target x
-    go (LstS xs) = any (containsCallS target) xs
-    go (TupS xs) = any (containsCallS target) xs
-    go (NamS rs) = any (containsCallS target . snd) rs
-    go (VarS _ (One x)) = containsCallS target x
-    go (LetS _ e1 e2) = containsCallS target e1 || containsCallS target e2
-    go (LetBndS _) = False
-    go (IfS c t e') = containsCallS target c || containsCallS target t || containsCallS target e'
-    go (DoBlockS x) = containsCallS target x
-    go (EvalS x) = containsCallS target x
-    go (CoerceS _ x) = containsCallS target x
-    go (IntrinsicS _ xs) = any (containsCallS target) xs
-    go _ = False
+    go bs (AnnoS (Idx _ t) _ (BndS v))
+      | Set.member v bs = Map.empty
+      | otherwise       = Map.singleton v t
+    go bs (AnnoS _ _ (LamS vs body)) = go (Set.union bs (Set.fromList vs)) body
+    go bs (AnnoS _ _ (LetS v e1 e2)) = Map.union (go bs e1) (go (Set.insert v bs) e2)
+    go bs (AnnoS _ _ e)              = foldExprS (go bs) e
+
+-- | CallS names reachable from a tree.
+callSitesIn :: AnnoS (Indexed Type) One (Indexed Lang) -> Set.Set EVar
+callSitesIn = foldAnnoS extract
+  where
+    extract (AnnoS _ _ (CallS v)) = Set.singleton v
+    extract _                     = Set.empty
+
+-- | Info for each helper, precomputed once so 'closeFreeVars' doesn't
+-- re-walk each body per lookup.
+data HelperInfo = HelperInfo
+  { hiParams  :: Set.Set EVar     -- ^ outer LamS binders
+  , hiBodyFV  :: Map EVar Type    -- ^ FVs of the body (LamS/LetS-respecting)
+  , hiCallees :: Set.Set EVar     -- ^ helper names reachable via CallS
+  }
+
+helperInfo ::
+  Set.Set EVar ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  HelperInfo
+helperInfo helperNames tree = HelperInfo
+  { hiParams  = case tree of AnnoS _ _ (LamS vs _) -> Set.fromList vs; _ -> Set.empty
+  , hiBodyFV  = collectFreeBnds Set.empty tree
+  , hiCallees = callSitesIn tree `Set.intersection` helperNames
+  }
+
+-- | Least fixed point of the FV closure equation over the helper call
+-- graph. For each helper name, returns the stable-ordered list of
+-- captured @(name, type)@ pairs it must be lifted with.
+--
+-- >   FV∞(h) = FV(body(h)) ∪ ⋃ { FV∞(h') : h' ∈ helperCallees(h) }
+-- >          ∖ params(h)
+--
+-- Solved by walking @Data.Graph.stronglyConnComp@'s output in reverse
+-- topological order: every callee outside the current SCC has been
+-- closed already, so its FV∞ is in the accumulator. Members of a
+-- cyclic SCC share their combined FV.
+closeFreeVars ::
+  [(EVar, AnnoS (Indexed Type) One (Indexed Lang))] ->
+  Map EVar [(EVar, Type)]
+closeFreeVars helpers =
+  let helperNames = Set.fromList (map fst helpers)
+      infoMap     = Map.fromList
+        [ (v, helperInfo helperNames t) | (v, t) <- helpers ]
+      infoOf v    = Map.findWithDefault (HelperInfo Set.empty Map.empty Set.empty) v infoMap
+
+      sccs = Graph.stronglyConnComp
+        [ (v, v, Set.toList (hiCallees (infoOf v))) | (v, _) <- helpers ]
+
+      accumSCC :: Map EVar (Map EVar Type) -> Graph.SCC EVar -> Map EVar (Map EVar Type)
+      accumSCC acc scc =
+        let members = case scc of
+              Graph.AcyclicSCC v -> [v]
+              Graph.CyclicSCC vs -> vs
+            memberSet = Set.fromList members
+            fvBodies  = Map.unions [ hiBodyFV (infoOf v) | v <- members ]
+            outerCallees = Set.unions
+              [ Set.difference (hiCallees (infoOf v)) memberSet | v <- members ]
+            fvFromCallees = Map.unions
+              [ Map.findWithDefault Map.empty h acc | h <- Set.toList outerCallees ]
+            fvSCC = Map.union fvBodies fvFromCallees
+            entry v =
+              (v, Map.filterWithKey (\k _ -> Set.notMember k (hiParams (infoOf v))) fvSCC)
+        in Map.union (Map.fromList (map entry members)) acc
+
+      closed = List.foldl' accumSCC Map.empty sccs
+   in Map.map Map.toAscList closed
+
+-- | Widen a helper's outer LamS/FunT by prepending its captured parameters.
+-- The body was already rewritten by 'rewriteCalls'; injected LamS binders
+-- shadow any outer name collision via the source-language's lexical rules.
+widenHelperLam ::
+  Map EVar [(EVar, Type)] ->
+  EVar ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  AnnoS (Indexed Type) One (Indexed Lang)
+widenHelperLam captureMap v tree =
+  case Map.findWithDefault [] v captureMap of
+    []       -> tree
+    captured -> injectLam captured tree
+  where
+    injectLam captured (AnnoS (Idx gi t) c (LamS vs body)) =
+      let (names, types) = unzip captured
+      in AnnoS (Idx gi (widenFunType t types)) c (LamS (names ++ vs) body)
+    injectLam _ other = other
+
+-- | Prepend argument types to the FunT input list, recursing through any
+-- surrounding EffectT layers so nested @\<E1\> \<E2\> (T -> U)@ widens
+-- correctly.
+widenFunType :: Type -> [Type] -> Type
+widenFunType (FunT ins out) extra    = FunT (extra ++ ins) out
+widenFunType (EffectT effs inner) extra = EffectT effs (widenFunType inner extra)
+widenFunType t _ = t
+
+-- | Rewrite every application of a widened helper to supply its captured
+-- arguments, and eta-expand every bare CallS at a value position so
+-- downstream Express always sees a fully-applied call. No-op when
+-- @captureMap@ is empty (common case: no helpers extracted).
+rewriteCalls ::
+  Map EVar [(EVar, Type)] ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+rewriteCalls captureMap tree
+  | Map.null captureMap = return tree
+  | otherwise           = walk tree
+  where
+    -- Injected BndS references an outer-scope variable that lives in the
+    -- caller's language ('c'), not the callee's ('fc'); Express handles
+    -- any cross-language transition at the callee.
+    walk (AnnoS g c (AppS (AnnoS (Idx fi fT) fc (CallS v)) xs))
+      | Just captured <- Map.lookup v captureMap
+      , not (null captured) = do
+          xs' <- mapM walk xs
+          injected <- mapM (mkCapturedBnd c) captured
+          let widenedT = widenFunType fT (map snd captured)
+              headA = AnnoS (Idx fi widenedT) fc (CallS v)
+          return $ AnnoS g c (AppS headA (injected ++ xs'))
+
+    walk (AnnoS (Idx _ t) c (CallS v))
+      | Just captured <- Map.lookup v captureMap
+      , not (null captured) =
+          etaExpandCallS t c v captured
+
+    walk (AnnoS g c e) = AnnoS g c <$> mapExprSM walk e
+
+    mkCapturedBnd :: Indexed Lang -> (EVar, Type) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+    mkCapturedBnd c (name, t) = do
+      gi <- MM.getCounter
+      return $ AnnoS (Idx gi t) c (BndS name)
+
+-- | Turn a bare @CallS v@ at value position into
+--
+-- >   λy1..ym. v X_1 .. X_k y1 .. ym
+--
+-- The outer AnnoS holds the caller-visible type (pre-lift signature); only
+-- the inner @CallS@ carries the widened FunT for Express's arg-list sizing.
+-- The outer index must be freshly allocated: Treeify writes @AnnoS gi gi@
+-- at reference sites, so the CallS's own @gi@ is already claimed by the
+-- extracted helper's manifold.
+etaExpandCallS ::
+  Type ->
+  Indexed Lang ->
+  EVar ->
+  [(EVar, Type)] ->
+  MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+etaExpandCallS t c v captured = do
+  let (visibleIns, visibleOut, wrapEffect) = peelFunT t
+      arity = length visibleIns
+  freshNames  <- replicateM arity freshLamVar
+  freshBndGis <- replicateM arity MM.getCounter
+  capturedGis <- replicateM (length captured) MM.getCounter
+  callGi      <- MM.getCounter
+  appGi       <- MM.getCounter
+  lamGi       <- MM.getCounter
+  let widenedT = widenFunType t (map snd captured)
+      forwardBnds =
+        [ AnnoS (Idx bgi ty) c (BndS n)
+        | (bgi, n, ty) <- zip3 freshBndGis freshNames visibleIns
+        ]
+      capturedBnds =
+        [ AnnoS (Idx cgi ty) c (BndS n)
+        | (cgi, (n, ty)) <- zip capturedGis captured
+        ]
+      callHead = AnnoS (Idx callGi widenedT) c (CallS v)
+      appNode  = AnnoS (Idx appGi (wrapEffect visibleOut)) c
+                       (AppS callHead (capturedBnds ++ forwardBnds))
+  return $ AnnoS (Idx lamGi t) c (LamS freshNames appNode)
+  where
+    -- Peel every EffectT layer off @t@'s return, returning a reconstructor
+    -- that re-attaches them so the inner AppS's carried type still reports
+    -- the caller's effect stack.
+    peelFunT (FunT ins out) = (ins, out, id)
+    peelFunT (EffectT effs inner) =
+      let (ins, out, wrap) = peelFunT inner
+      in (ins, out, EffectT effs . wrap)
+    peelFunT other = ([], other, id)
+
+freshLamVar :: MorlocMonad EVar
+freshLamVar = do
+  i <- MM.getCounter
+  return (EV (MT.pack ("$eta_" <> show i)))
+
+-- | Does the tree contain a @CallS target@ anywhere?
+containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
+containsCallS target = getAny . foldAnnoS check
+  where
+    check (AnnoS _ _ (CallS v)) = Any (v == target)
+    check _                     = Any False
+
+-- | Rewrite every @CallS old@ target to @CallS new@.
+renameCallS ::
+  EVar -> EVar ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  AnnoS (Indexed Type) One (Indexed Lang)
+renameCallS old new = go
+  where
+    go (AnnoS g c (CallS v)) | v == old = AnnoS g c (CallS new)
+    go (AnnoS g c e)                    = AnnoS g c (mapExprS go e)
 
 -- Check if this expression is a data structure that contains
 -- a function. If so, then the data structure is must be in the

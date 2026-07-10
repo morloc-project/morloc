@@ -1,0 +1,66 @@
+-- Positive coverage for `--' with:` terminal-action declarations.
+--
+--   -l/--lines  formatter, B = () (sink -- prints then returns Null)
+--   -c/--csv    formatter, B = () (a second sibling flag)
+--   -s/--sum    reformatter, B = <IO> Str (effectful terminal)
+--   -p/--plain  reformatter, B = Str (pure terminal -- no `<IO>` needed
+--               on the terminal; the composed entry inherits `<IO>`
+--               from the parent's effect)
+--
+-- Makefile also verifies nexus-level `-f` composes with terminal flags
+-- rather than conflicting: `-f json` + `-s`/`-p` re-encodes the
+-- reformatter's Str return; `-f json` + `-l` is benign (sink already
+-- wrote to stdout).
+
+module main (fhead, describe)
+
+import root-py
+
+source Py from "helpers.py"
+  ( "readlines"     as readlines
+  , "print_each"    as printEach
+  , "print_csv"     as printCsv
+  , "join_semi"     as joinSemi
+  , "describe_int"  as describeInt
+  )
+
+readlines    :: Str -> <IO> [Str]
+printEach    :: [Str] -> <IO> ()
+printCsv     :: [Str] -> <IO> ()
+joinSemi     :: [Str] -> Str
+describeInt  :: Int -> Str
+
+--' Print each string on its own line
+formatLines :: [Str] -> <IO> ()
+formatLines xs = printEach xs
+
+--' Print each string quoted, comma-separated on one line
+formatCsv :: [Str] -> <IO> ()
+formatCsv xs = printCsv xs
+
+--' Join all strings into one semicolon-separated summary
+summarize :: [Str] -> <IO> Str
+summarize xs = joinSemi xs
+
+--' Pure semicolon join (no IO effect on the terminal)
+sumPure :: [Str] -> Str
+sumPure xs = joinSemi xs
+
+--' Read the head from a file
+--' with: -l/--lines=formatLines
+--' with: -c/--csv=formatCsv
+--' with: -s/--sum=summarize
+--' with: -p/--plain=sumPure
+fhead ::
+  --' check.path: r
+  Str ->
+  <IO> [Str]
+fhead path = readlines path
+
+--' Human-readable form of an integer
+sayInt :: Int -> <IO> ()
+sayInt n = printEach [describeInt n]
+
+--' with: --say=sayInt
+describe :: Int -> Int
+describe n = n

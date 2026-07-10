@@ -2402,6 +2402,94 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
         return obj_r;
     }
 
+    // Stream ingest: FILE+DATA pointing at a stream-packet file. Nexus
+    // emits this shape for `[a]` receivers; peek here to distinguish
+    // stream from ordinary data-indirection. Uses `mlc_ifile_length`
+    // to preallocate the result vector (element_count from the file's
+    // StreamDiag), so PROTECT depth stays at O(1) regardless of how
+    // many sub-packets the stream carries.
+    if (source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_DATA) {
+        size_t payload_len = header->length;
+        char path[PATH_MAX];
+        if (payload_len >= sizeof(path)) {
+            free_schema(schema);
+            MORLOC_ERROR("stream ingest: path exceeds PATH_MAX");
+        }
+        memcpy(path, packet + sizeof(morloc_packet_header_t) + header->offset,
+               payload_len);
+        path[payload_len] = '\0';
+        if (file_is_stream_packet(path)) {
+            char* open_err = NULL;
+            int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &open_err);
+            if (open_err) {
+                char msg[512];
+                snprintf(msg, sizeof(msg), "stream ingest: mlc_open failed: %s", open_err);
+                free(open_err);
+                free_schema(schema);
+                MORLOC_ERROR("%s", msg);
+            }
+            char* len_err = NULL;
+            int64_t total_i64 = mlc_ifile_length(handle, &len_err);
+            if (len_err || total_i64 < 0) {
+                char* cerr = NULL; mlc_close(handle, &cerr);
+                if (cerr) free(cerr);
+                free_schema(schema);
+                if (len_err) {
+                    char msg[512];
+                    snprintf(msg, sizeof(msg), "stream ingest: mlc_ifile_length failed: %s", len_err);
+                    free(len_err);
+                    MORLOC_ERROR("%s", msg);
+                }
+                MORLOC_ERROR("stream ingest: mlc_ifile_length returned %lld",
+                             (long long)total_i64);
+            }
+            SEXP result = PROTECT(allocVector(VECSXP, (R_xlen_t)total_i64));
+            R_xlen_t off = 0;
+            while (1) {
+                char* nerr = NULL;
+                void* chunk = mlc_next(handle, &nerr);
+                if (nerr) {
+                    UNPROTECT(1);
+                    char msg[512];
+                    snprintf(msg, sizeof(msg), "stream ingest: mlc_next failed: %s", nerr);
+                    free(nerr);
+                    char* cerr = NULL; mlc_close(handle, &cerr);
+                    if (cerr) free(cerr);
+                    free_schema(schema);
+                    MORLOC_ERROR("%s", msg);
+                }
+                if (chunk == NULL) break;
+                Array* arr = (Array*)chunk;
+                if (arr->size == 0) {
+                    char* ferr = NULL; shfree(chunk, &ferr);
+                    if (ferr) free(ferr);
+                    break;
+                }
+                SEXP chunk_r = PROTECT(from_voidstar(chunk, schema, NULL));
+                char* ferr = NULL; shfree(chunk, &ferr);
+                if (ferr) free(ferr);
+                if (chunk_r == NULL) {
+                    UNPROTECT(2);
+                    char* cerr = NULL; mlc_close(handle, &cerr);
+                    if (cerr) free(cerr);
+                    free_schema(schema);
+                    MORLOC_ERROR("stream ingest: from_voidstar failed on chunk");
+                }
+                R_xlen_t sz = XLENGTH(chunk_r);
+                for (R_xlen_t j = 0; j < sz && off < (R_xlen_t)total_i64; j++) {
+                    SET_VECTOR_ELT(result, off++, VECTOR_ELT(chunk_r, j));
+                }
+                UNPROTECT(1);
+            }
+            char* cerr = NULL; mlc_close(handle, &cerr);
+            if (cerr) free(cerr);
+            UNPROTECT(1);
+            free_schema(schema);
+            return result;
+        }
+        // Not a stream file -- fall through to legacy FILE+DATA handling.
+    }
+
     // SHM paths (RPTR source from upstream pool/daemon, or our own
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);

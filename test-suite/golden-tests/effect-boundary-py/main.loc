@@ -1,0 +1,124 @@
+-- Boundary-coverage golden: EXPORT + SOURCE-CALL + LOCAL-ROOT rows of
+-- the 'EffectBoundary' reconciliation table, exercised in one language
+-- (Python) so every failure is a same-language emit issue rather than
+-- an RPC interaction.
+--
+-- Each export names the smallest expression that hits one row:
+--
+--   * 'nullaryIo'        nullary '<IO> T' source (SourceCall Suspend on
+--                        an 'EffectT'-directly-typed 'PolyExe', no 'FunT'
+--                        wrapper).
+--   * 'unaryIo'          n-ary '<IO> T' source (SourceCall Suspend on
+--                        'FunT ins EffectT').
+--   * 'multiEffectIo'    '<IO,Error>' source (multi-label effect layer;
+--                        single 'PolyDoBlock' at Poly stage; the row of
+--                        the plan's "all effects collapse to one defer"
+--                        invariant).
+--   * 'pointFree'        point-free reference to an effectful source
+--                        ('smallList = gen_small' shape, no explicit
+--                        do-block).
+--   * 'doWithBind'       do-block with '<-' binding statements exercising
+--                        the intermediate 'LocalRoot' pass-through and
+--                        the final 'ExportRoot' Force.
+--   * 'doBareStmt'       do-block with a bare effectful statement
+--                        (typechecker wraps in 'EvalS'; walker cancels
+--                        the resulting 'PolyEval' against the
+--                        'PolyDoBlock' via the peephole).
+--   * 'callbackLambda'   lambda passed to a foreign consumer that
+--                        invokes 'f(x)' and discards; the lambda's
+--                        return has 'EffectT' and 'CallbackReturn' Force
+--                        must fire.
+--   * 'callbackBare'     bare source passed as callback; no 'ManifoldPart'
+--                        wrap, so the 'CallbackReturn' rule must
+--                        specifically NOT overreach.
+module main
+  ( nullaryIo
+  , unaryIo
+  , multiEffectIo
+  , pointFree
+  , doWithBind
+  , doBareStmt
+  , callbackLambda
+  , callbackBare
+  )
+
+import root-py
+
+effect Error
+
+source Py from "helpers.py"
+  ( "gen_small"     as smallSource
+  , "add_one"       as addOne
+  , "risky"         as risky
+  , "read_value"    as readValue
+  , "for_each"      as forEach
+  , "tap"           as tap
+  , "total_so_far"  as totalSoFar
+  , "reset_tally"   as resetTally
+  )
+
+smallSource :: <IO> Int
+addOne      :: Int -> <IO> Int
+risky       :: Int -> <IO, Error> Int
+readValue   :: <IO> Int
+forEach     :: [Int] -> (Int -> <IO> ()) -> <IO> ()
+tap         :: Int -> <IO> ()
+totalSoFar  :: <IO> Int
+resetTally  :: <IO> ()
+
+-- (1) Nullary '<IO> T' source. Poly-stage 'maybeSuspendSourceCall' hits
+-- the nullary branch ('EffectT effs ret' shape on 'PolyExe' with zero
+-- xs).
+nullaryIo :: <IO> Int
+nullaryIo = smallSource
+
+-- (2) N-ary '<IO> T' source. Poly-stage 'maybeSuspendSourceCall' hits
+-- the 'FunT ins ret' branch with @length xs == length ins@.
+unaryIo :: <IO> Int
+unaryIo = addOne 41
+
+-- (3) Multi-label effect. The plan pins that codegen treats one effect
+-- and many effects identically; this asserts a '<IO,Error>' export
+-- emits and runs like a single 'EffectT' layer.
+multiEffectIo :: <IO, Error> Int
+multiEffectIo = risky 21
+
+-- (4) Point-free effectful source binding. Bypasses do-block sugar.
+pointFree :: <IO> Int
+pointFree = smallSource
+
+-- (5) Do-block with '<-' binding intermediate results.
+doWithBind :: <IO> Int
+doWithBind = do
+  x <- readValue
+  y <- addOne x
+  addOne y
+
+-- (6) Do-block with a bare effectful statement. The typechecker wraps
+-- the statement in 'EvalS'; the 'cancelPolyEval' peephole cancels the
+-- resulting 'PolyEval' against the 'PolyDoBlock' from
+-- 'maybeSuspendSourceCall'.
+doBareStmt :: <IO> Int
+doBareStmt = do
+  resetTally
+  addOne 41
+
+-- (7) Higher-order callback: a morloc-generated lambda passed to a
+-- foreign consumer. 'CallbackReturn' Force must fire on the
+-- 'ManifoldPart' body so the '(Int -> ())' shape is delivered and
+-- @f(x)@ produces None (Python's Unit), not a lambda.
+callbackLambda :: <IO> Int
+callbackLambda = do
+  resetTally
+  forEach [10, 20, 30] (\x -> tap (x + 1))
+  totalSoFar
+
+-- (8) Bare source as callback. No 'ManifoldPart' wrap so
+-- 'CallbackReturn' must NOT install a spurious Force. The source's own
+-- 'SourceCall' Suspend gives it thunk shape at declaration, which
+-- 'forEach' then invokes normally.
+callbackBare :: <IO> Int
+callbackBare = do
+  resetTally
+  forEach [10, 20, 30] tap
+  totalSoFar

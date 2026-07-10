@@ -1,0 +1,27 @@
+-- Cross-language captured value. `x` is captured by `go`; each
+-- iteration calls a Python function and a C++ function on the same
+-- captured `x`. When extractRecursiveHelpers hoists `go`, the concrete
+-- language chosen for `go`'s manifold determines which leaf carries
+-- the "native" annotation; the injected BndS x at the opposite-language
+-- leaf must serialize correctly. If the fix stores captured info with
+-- a single Indexed Lang, the wrong-language leaf either crashes or
+-- corrupts.
+module main (crossLangRec)
+
+import root
+import root-py
+import root-cpp
+
+source Py  from "helpers.py"  ("add1" as addP)
+source Cpp from "helpers.hpp" ("add1" as addC)
+
+type Py  => Int = "int"
+type Cpp => Int = "int"
+
+addP :: Int -> Int
+addC :: Int -> Int
+
+crossLangRec :: Int -> Int -> Int
+crossLangRec x n = go n where
+  go m ? m == 0 = 0
+       : addP x + addC x + go (m - 1)

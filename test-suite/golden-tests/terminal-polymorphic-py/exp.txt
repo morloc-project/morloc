@@ -1,0 +1,20 @@
+--- getNames default ---
+["alpha","beta","gamma"]
+--- getNames -a ---
+str:alpha
+str:beta
+str:gamma
+--- getNames --all ---
+str:alpha
+str:beta
+str:gamma
+--- getPrimes default ---
+[2,3,5]
+--- getPrimes -a ---
+int:2
+int:3
+int:5
+--- getPrimes --all ---
+int:2
+int:3
+int:5

@@ -43,6 +43,7 @@ module UnitTypeTests
   , recursiveRecordTests
   , bidirectionalAppCheckTests
   , postArgPropagationTests
+  , withDocstringTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend)
@@ -6610,4 +6611,281 @@ postArgPropagationTests =
         x = g (f (make 9))
           |]
           (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
+      ]
+
+-- | Frontend validation of `--' with:` docstring atoms (terminal
+-- actions on CLI-exported commands). One positive sanity check plus
+-- coverage of the rejection paths in Frontend/Desugar.hs. Type-level
+-- shape is verified by the golden test-suite; here we only care that
+-- a legal shape passes and every illegal shape fails.
+withDocstringTests :: TestTree
+withDocstringTests =
+  localOption (mkTimeout 1000000) $ -- 1s
+    testGroup
+      "with: docstring validation"
+      [ -- Sanity: a legal single-atom `with:` composes cleanly.
+        expectPass
+          "single with: on effectful command with matching formatter"
+          [r|
+        module main (foo)
+        effect IO
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -l/--lines=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Multiple `with:` lines with distinct short/long are legal.
+      , expectPass
+          "two with: lines with distinct short and long"
+          [r|
+        module main (foo)
+        effect IO
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        alt :: Int -> <IO> ()
+        alt x = alt x
+        --' with: -l/--lines=fmt
+        --' with: -a/--alt=alt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- A pure terminal (no `<IO>`) on an effectful parent is legal.
+        -- The synthesized entry inherits the parent's effect via the
+        -- do-block; the terminal itself contributes no effect.
+      , expectPass
+          "pure terminal on effectful parent"
+          [r|
+        module main (foo)
+        effect IO
+        showInt :: Int -> Str
+        showInt x = showInt x
+        --' with: -s/--show=showInt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- A pure terminal on a pure parent is legal. Composed entry is
+        -- pure `Int -> Str`; no effect is invented.
+      , expectPass
+          "pure terminal on pure parent"
+          [r|
+        module main (foo)
+        showInt :: Int -> Str
+        showInt x = showInt x
+        --' with: -s/--show=showInt
+        foo :: Int -> Int
+        foo x = x
+          |]
+
+        -- Pure terminal returning () is fine too -- the "sink" shape
+        -- doesn't require `<IO>` in the signature; a pure `A -> ()` is
+        -- an unusual choice but should typecheck against any parent.
+      , expectPass
+          "pure terminal returning ()"
+          [r|
+        module main (foo)
+        drop :: Int -> ()
+        drop x = ()
+        --' with: -d/--drop=drop
+        foo :: Int -> Int
+        foo x = x
+          |]
+
+        -- Duplicate long -> reject.
+      , expectError
+          "duplicate with: long name"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -l/--lines=fmt
+        --' with: -a/--lines=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Duplicate short -> reject.
+      , expectError
+          "duplicate with: short name"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -l/--lines=fmt
+        --' with: -l/--alt=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Short-only spec (`-l` without `--long`) -> reject.
+      , expectError
+          "with: short-only spec is rejected"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -l=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Reserved long `--help` -> reject.
+      , expectError
+          "with: --help collides with reserved flag"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: --help=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Reserved short `-h` -> reject.
+      , expectError
+          "with: -h collides with reserved flag"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -h/--halt=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- `with:` on argument-level docstring -> reject (command-only).
+      , expectError
+          "with: on argument-level docstring is rejected"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        foo ::
+          --' with: -l/--lines=fmt
+          Int ->
+          <IO> Int
+        foo x = x
+          |]
+
+        -- `with:` on export without a signature -> reject.
+      , expectError
+          "with: on export without signature is rejected"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -l/--lines=fmt
+        foo = 42
+          |]
+
+        -- Malformed value (missing `=` between flag and term) -> reject.
+      , expectError
+          "with: missing = separator is rejected"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -l/--lines fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Empty term after `=` -> reject.
+      , expectError
+          "with: empty term name is rejected"
+          [r|
+        module main (foo)
+        --' with: -l/--lines=
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Long form must be lowercase-kebab. UPPER-cased long is rejected.
+      , expectError
+          "with: uppercased long name is rejected"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: --Lines=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Digit short is rejected (would collide with negative-number args).
+      , expectError
+          "with: digit short is rejected"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -1/--lines=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- `with:` long clashes with an argument-declared long. Both
+        -- would land on the same clap Command; clap panics at build
+        -- time. Frontend must reject first.
+      , expectError
+          "with: long collides with arg-declared long"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: --lines=fmt
+        foo ::
+          --' arg: --lines
+          Int ->
+          <IO> Int
+        foo x = x
+          |]
+
+        -- Same for short.
+      , expectError
+          "with: short collides with arg-declared short"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: -x/--lines=fmt
+        foo ::
+          --' arg: -x/--count
+          Int ->
+          <IO> Int
+        foo x = x
+          |]
+
+        -- Two `with:` long flags that mangle to the same internal name
+        -- (hyphen -> underscore collapse) must be caught, or the
+        -- synthesized bindings would clash silently.
+      , expectError
+          "with: two flags mangling to the same internal name"
+          [r|
+        module main (foo)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        --' with: --bar-baz=fmt
+        --' with: --bar_baz=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- Synthesized name collides with a user-defined top-level
+        -- identifier in the same module.
+      , expectError
+          "with: mangled entry collides with user identifier"
+          [r|
+        module main (foo, mlcp_foo_lines)
+        fmt :: Int -> <IO> ()
+        fmt x = fmt x
+        mlcp_foo_lines :: Int -> Int
+        mlcp_foo_lines n = n
+        --' with: -l/--lines=fmt
+        foo :: Int -> <IO> Int
+        foo x = x
+          |]
       ]

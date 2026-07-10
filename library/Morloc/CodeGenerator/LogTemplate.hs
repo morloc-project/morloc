@@ -12,12 +12,16 @@ A labeled manifold may carry a 'LogTemplate' describing the text emitted
 when the manifold starts, completes successfully, or throws. The
 templates are user-authored YAML strings with @{varname}@ placeholders.
 
-Resolution order, per subfield (start, pass, fail), at the labeled
-manifold's midx:
+Resolution at the labeled manifold's midx:
 
-  per-label 'manifoldConfigLogTemplate'
-      > program-wide 'stateLogTemplate'
-      > built-in 'defaultLogTemplate'
+  * If a per-label 'manifoldConfigLogTemplate' is present, its 'Just'
+    subfields override the program-wide template field-by-field; its
+    'Nothing' subfields inherit.
+  * If a program-wide 'stateLogTemplate' is present, its 'Nothing'
+    subfields mean \"emit nothing for this event\" and are honored --
+    they do NOT fall through to the built-in default.
+  * The built-in 'defaultLogTemplate' is used only when neither a
+    per-label nor a program-wide template is supplied.
 
 The compile-time substitution pass resolves the placeholders whose
 values are static (@name@, @lang@, @module@, @line@, @column@, @group@,
@@ -136,16 +140,28 @@ renderOne lang programDefault names srcMap (midx, cfg) = do
   where
     srcIdx = fromMaybe midx (manifoldConfigLabelIdx cfg)
 
--- | Resolve each subfield with @per-label > program > built-in@ precedence.
+-- | Resolve the effective template. The built-in default is used only
+-- when neither a per-label nor a program-wide template is present; once
+-- the user supplies a program-wide 'log-template', its 'Nothing'
+-- subfields mean \"emit nothing\" and do not fall through to the
+-- built-in. A per-label template overrides program-wide field-by-field:
+-- 'Just' overrides, 'Nothing' inherits.
 mergeTemplates :: Maybe LogTemplate -> Maybe LogTemplate -> LogTemplate -> LogTemplate
 mergeTemplates perLabel program builtin =
-  LogTemplate
-    { logTemplateStart = pick logTemplateStart
-    , logTemplatePass  = pick logTemplatePass
-    , logTemplateFail  = pick logTemplateFail
-    }
+  case (perLabel, program) of
+    (Nothing, Nothing) -> builtin
+    (Nothing, Just q)  -> q
+    (Just p,  Nothing) -> mergeOver p builtin
+    (Just p,  Just q)  -> mergeOver p q
   where
-    pick f = getFirst $ foldMap (First . (f =<<)) [perLabel, program] <> First (f builtin)
+    mergeOver x fallback =
+      LogTemplate
+        { logTemplateStart = logTemplateStart x `orElse` logTemplateStart fallback
+        , logTemplatePass  = logTemplatePass  x `orElse` logTemplatePass  fallback
+        , logTemplateFail  = logTemplateFail  x `orElse` logTemplateFail  fallback
+        }
+    orElse j@(Just _) _ = j
+    orElse Nothing y = y
 
 -- | Static placeholder bindings for a labeled midx. The labeled idx
 -- (the original VarE position, set by 'collectTags' in

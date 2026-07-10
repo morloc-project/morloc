@@ -134,6 +134,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
       , cmdDocName = docName cmddoc
       , cmdDocArgs = cmdargs
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
+      , cmdDocTerminals = docWith cmddoc
       }
 processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
   loc <- argLocPrefix i
@@ -145,6 +146,7 @@ processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
       , cmdDocName = docName cmddoc
       , cmdDocArgs = []
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
+      , cmdDocTerminals = docWith cmddoc
       }
 processArgDoc i t (ArgDocAlias r) = do
   loc <- argLocPrefix i
@@ -155,6 +157,7 @@ processArgDoc i t (ArgDocAlias r) = do
       , cmdDocName = docName r
       , cmdDocArgs = []
       , cmdDocRet = (t, [])
+      , cmdDocTerminals = []
       }
 processArgDoc i t r = do
   (t', r') <- reduceArgDoc i t r
@@ -173,6 +176,7 @@ processArgDoc i t r = do
           , cmdDocName = docName args
           , cmdDocArgs = cmdargs
           , cmdDocRet = (t, [])
+          , cmdDocTerminals = []
           }
     _ -> MM.throwSystemError "Expected a record type with docstrings but found a non-record type"
 
@@ -261,6 +265,7 @@ reduceArgDoc i t@(VarT v) arg = do
         , docListSource = docListSource r1 <|> docListSource r2
         , docListForm = docListForm r1 <|> docListForm r2
         , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
+        , docWith = if null (docWith r1) then docWith r2 else docWith r1
         }
 reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs

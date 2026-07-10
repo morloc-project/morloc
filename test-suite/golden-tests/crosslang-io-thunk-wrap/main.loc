@@ -1,0 +1,87 @@
+module main
+  ( cppFromPy
+  , pyFromCpp
+  , rFromCpp
+  , cppFromPyMulti
+  , cppFromPyEffErr
+  )
+
+import root-cpp
+import root-py
+import root-r
+
+effect Error
+
+source Cpp from "helpers.hpp"
+  ( "cpp_io"    as cppIO
+  , "cpp_gate"  as cppGate
+  )
+
+source Py from "helpers.py"
+  ( "py_io"        as pyIO
+  , "py_gate"      as pyGate
+  , "py_io2"       as pyIO2
+  , "py_io_error"  as pyIOError
+  )
+
+source R from "helpers.R"
+  ( "r_io"    as rIO
+  , "r_gate"  as rGate
+  )
+
+type Cpp => Int  = "int"
+type Cpp => Bool = "bool"
+type Py  => Int  = "int"
+type Py  => Bool = "bool"
+type R   => Int  = "integer"
+type R   => Bool = "logical"
+
+cppIO     :: Int -> <IO> Int
+cppGate   :: Int -> Bool
+pyIO      :: Int -> <IO> Int
+pyGate    :: Int -> Bool
+pyIO2     :: Int -> Int -> <IO> Int
+pyIOError :: Int -> <IO, Error> Int
+rIO       :: Int -> <IO> Int
+rGate     :: Int -> Bool
+
+-- (1) Cpp-anchored manifold whose guard branches each return a Python
+-- `<IO> Int`. The C++ manifold's declared return is
+-- `std::function<int()>` and the receiver proxy for pyIO must wrap the
+-- deserialized int in that lambda.
+cppFromPy :: Int -> <IO> Int
+cppFromPy n
+  ? cppGate n = pyIO n
+  : pyIO 0
+
+-- (2) Py-anchored manifold whose guard branches each return a Cpp
+-- `<IO> Int`. The Python receiver proxy must wrap in `(lambda: x)`.
+pyFromCpp :: Int -> <IO> Int
+pyFromCpp n
+  ? pyGate n = cppIO n
+  : cppIO 0
+
+-- (3) R-anchored manifold whose guard branches each return a Cpp
+-- `<IO> Int`. The R receiver proxy must wrap in `(function() x)`.
+rFromCpp :: Int -> <IO> Int
+rFromCpp n
+  ? rGate n = cppIO n
+  : cppIO 0
+
+-- (4) Multi-argument `<IO>` source called from the Cpp side. Probes
+-- whether the receiver-side thunk-wrap emission depends on the callee's
+-- argument count. If (1) fails but (4) succeeds (or vice versa) the fix
+-- has to cover both arity paths.
+cppFromPyMulti :: Int -> Int -> <IO> Int
+cppFromPyMulti a b
+  ? cppGate a = pyIO2 a b
+  : pyIO2 0 0
+
+-- (5) Multi-effect `<IO, Error>` source called from the Cpp side.
+-- `pushForceIntoRemote` in Express.hs peels ALL EffectT layers when it
+-- fires; if the receiver wrap is done per-layer or once total, the
+-- multi-layer path can diverge from (1)'s single-layer path.
+cppFromPyEffErr :: Int -> <IO, Error> Int
+cppFromPyEffErr n
+  ? cppGate n = pyIOError n
+  : pyIOError 0

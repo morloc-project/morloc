@@ -1,0 +1,28 @@
+-- Verifies that a typeclass method used as a `--' with:` terminal
+-- resolves to the right per-type instance at the composed binding.
+-- Two exports name the same method as their `--all` terminal but
+-- have different return shapes. Instance selection happens per
+-- composed binding via the existing typeclass instance resolver.
+module main (getNames, getPrimes)
+
+import root-py
+
+source Py from "helpers.py"
+  ( "get_names"    as getNames
+  , "get_primes"   as getPrimes
+  )
+
+class WriteAll a where
+  writeAll :: a -> <IO> ()
+
+instance WriteAll [Str] where
+  source Py from "helpers.py" ("write_strs" as writeAll)
+
+instance WriteAll [Int] where
+  source Py from "helpers.py" ("write_ints" as writeAll)
+
+--' with: -a/--all=writeAll
+getNames :: <IO> [Str]
+
+--' with: -a/--all=writeAll
+getPrimes :: <IO> [Int]

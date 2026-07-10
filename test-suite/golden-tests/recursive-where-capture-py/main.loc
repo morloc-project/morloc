@@ -1,0 +1,126 @@
+module main
+  ( sumScale
+  , listRepeat
+  , twoCaptures
+  , guardUsesCapture
+  , unusedCapture
+  , pointFreeRec
+  , letBoundRec
+  , doubleRec
+  , transitiveWhere
+  , recAsHof
+  , shadowCap
+  )
+
+import root-py
+
+-- Minimal reproducer: single scalar capture in a recursive
+-- where-helper. The extraction pass in Realize hoists `go` into a
+-- top-level rAST but does not lambda-lift `k`; Parameterize then walks
+-- the hoisted helper as a fresh root and never sees `k` as an argument,
+-- so Express raises "Expected VarS ... to match exactly one argument,
+-- found: []".
+sumScale :: Int -> Int -> Int
+sumScale k n = go n where
+  go m ? m == 0 = 0
+       : k + go (m - 1)
+
+-- Container-typed capture (a list). Same lifting path; catches
+-- regressions where the free-variable collection only honors
+-- primitive-typed BndS leaves.
+listRepeat :: Int -> [Int] -> [Int]
+listRepeat n xs = go n where
+  go m ? m == 0 = xs
+       : xs <> go (m - 1)
+
+-- Multiple simultaneous captures of differing types. The lifted
+-- helper must gain multiple LamS params in a stable order; a naive fix
+-- that lifts only the first free variable would still fail this.
+twoCaptures :: Int -> Int -> Int -> Int
+twoCaptures a b n = go n where
+  go m ? m == 0 = 0
+       : a + b + go (m - 1)
+
+-- Captured variable used inside a guard condition, not just a
+-- value expression. Guards desugar into the helper's body, so a free
+-- variable referenced by `size xs == 0` in the guard must still
+-- resolve after extraction.
+guardUsesCapture :: Int -> Int -> Int
+guardUsesCapture k n = go n where
+  go m ? m == 0        = 0
+       ? n // k == 2   = 1
+       : 1 + go (m - 1)
+
+-- Outer scope has extra bindings the helper does NOT reference.
+-- A naive "prepend every outer arg" fix would widen arity with garbage
+-- and misalign call sites.
+unusedCapture :: Int -> Int -> Int -> Int
+unusedCapture used unused n = go n where
+  go m ? m == 0 = 0
+       : used + go (m - 1)
+
+-- Point-free recursive export. The export's body is a bare
+-- reference to the recursive helper; Express.hs:377-398 eta-expands
+-- from the FunT arity. If our fix widens go's FunT with the captured
+-- k, that arity must flow through the eta-expansion, or the exported
+-- manifold gets the wrong shape.
+pointFreeRec :: Int -> Int -> Int
+pointFreeRec k = go where
+  go n ? n == 0 = 0
+       : k + go (n - 1)
+
+-- Recursive helper let-bound as an unapplied value. Tests
+-- Express.hs:1698-1707 (bare CallS at value position). The sketched
+-- patch actively bails on this path; this test proves whether the
+-- fix handles it or refuses it deterministically.
+letBoundRec :: Int -> Int -> Int
+letBoundRec k n =
+  let f = go
+  in f n
+  where
+    go m ? m == 0 = 0
+         : k + go (m - 1)
+
+-- Nested recursive helpers with transitive capture. `outer` is
+-- recursive AND calls the recursive `inner`; `inner` captures `x`.
+-- After the fix lifts inner with x, every AppS (CallS "inner") xs
+-- inside outer's body is rewritten to prepend BndS x. Because outer's
+-- body then references BndS x, outer must ALSO be lifted with x.
+-- Exercises the transitive-lift fixed point.
+doubleRec :: Int -> Int -> Int
+doubleRec x n = outer n where
+  outer m ? m == 0 = 0
+          : inner m + outer (m - 1)
+  inner m ? m == 0 = x
+          : inner (m - 1)
+
+-- Captured value is itself a where-bound (non-recursive) value.
+-- `go` references `k`, which is a where-bound value depending on the
+-- outer `x`. At extraction time `k` has not yet been dissolved by
+-- removeVarS, so `go`'s tree contains `VarS "k" (One <x*2>)`. The
+-- free-variable walker must recurse THROUGH VarS to find BndS x
+-- underneath; a walker that treats VarS as opaque would miss x.
+transitiveWhere :: Int -> Int -> Int
+transitiveWhere x n = go n where
+  go m ? m == 0 = 0
+       : k + go (m - 1)
+  k = x * 2
+
+-- Recursive helper passed to a higher-order function. `go` is a
+-- recursive helper capturing `k`; it is passed by name to `map`.
+-- Exercises both the extraction/lift path AND the eta-expansion at
+-- Express.hs:377 for a non-application value use of CallS.
+recAsHof :: Int -> [Int] -> [Int]
+recAsHof k xs = map go xs where
+  go n ? n == 0 = k
+       : k + go (n - 1)
+
+-- Helper param shadows an outer variable. Treeify's
+-- alpha-conversion should have disambiguated (x@1 vs x@2), so there
+-- is NO capture -- go's body references its own x. A fix that walks
+-- by ORIGINAL name rather than by renamed id would incorrectly lift
+-- outer x, changing go's arity and producing wrong output.
+shadowCap :: Int -> Int -> Int
+shadowCap x n = go n where
+  go x ? x == 0 = 0
+       : x + go (x - 1)

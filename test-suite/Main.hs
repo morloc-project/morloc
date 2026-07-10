@@ -4,6 +4,7 @@
 import qualified System.Directory as SD
 import Test.Tasty
 
+import EffectBoundaryTests (effectBoundaryTests)
 import GoldenMakefileTests (goldenMakefileTest)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
@@ -53,9 +54,11 @@ main = do
       , recursiveRecordTests
       , bidirectionalAppCheckTests
       , postArgPropagationTests
+      , withDocstringTests
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
+      , effectBoundaryTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -67,6 +70,20 @@ main = do
       -- , golden "specialization-1-py - numpy" "specialization-1-py"
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
+
+      , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"
+      , golden "effect-boundary-py" "effect-boundary-py"
+      , golden "effect-boundary-cpp" "effect-boundary-cpp"
+      , golden "terminal-actions-py" "terminal-actions-py"
+      , golden "terminal-polymorphic-py" "terminal-polymorphic-py"
+      , golden "effect-boundary-cross" "effect-boundary-cross"
+      , golden "effect-interaction" "effect-interaction"
+      , golden "recursive-where-capture-multi" "recursive-where-capture-multi"
+      , golden "recursive-where-capture-py" "recursive-where-capture-py"
+      , golden "recursive-where-capture-effect-py" "recursive-where-capture-effect-py"
+
+      , golden "cli-stream-packet-list-receiver" "cli-stream-packet-list-receiver"
+      , golden "cli-stream-packet-istream-receiver" "cli-stream-packet-istream-receiver"
 
       , golden "view-stdin-stream" "view-stdin-stream"
       , golden "view-guardrails" "view-guardrails"

@@ -125,29 +125,17 @@ valuecheck e0 = groundCheck e0 >> check (toE e0) >> return e0
 -- Catches both `omega = omega` and mutual cycles like `a = b; b = a` when
 -- none of the participants has a concrete source.
 groundCheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad ()
-groundCheck (AnnoS _ _ e0) = case e0 of
-  VarS v (Many es) -> do
-    mapM_ groundCheck es
-    if any hasGround es
-      then return ()
-      else case es of
-        (AnnoS (Idx i _) _ _ : _) ->
-          MM.throwSourcedError i $
-            "Self-referential or cyclic binding:" <+> squotes (pretty v)
-              <> "; the term is defined only by reference to itself"
-        [] -> return () -- typechecker would have rejected an alternative-less term
-  AppS f es -> groundCheck f >> mapM_ groundCheck es
-  LamS _ body -> groundCheck body
-  LstS es -> mapM_ groundCheck es
-  TupS es -> mapM_ groundCheck es
-  NamS rs -> mapM_ (groundCheck . snd) rs
-  IfS c t e -> groundCheck c >> groundCheck t >> groundCheck e
-  DoBlockS e -> groundCheck e
-  EvalS e -> groundCheck e
-  CoerceS _ e -> groundCheck e
-  LetS _ e1 e2 -> groundCheck e1 >> groundCheck e2
-  IntrinsicS _ es -> mapM_ groundCheck es
-  _ -> return ()
+groundCheck (AnnoS _ _ (VarS v (Many es))) = do
+  mapM_ groundCheck es
+  if any hasGround es
+    then return ()
+    else case es of
+      (AnnoS (Idx i _) _ _ : _) ->
+        MM.throwSourcedError i $
+          "Self-referential or cyclic binding:" <+> squotes (pretty v)
+            <> "; the term is defined only by reference to itself"
+      [] -> return () -- typechecker would have rejected an alternative-less term
+groundCheck (AnnoS _ _ e) = mapM_ groundCheck (foldExprS (\a -> [a]) e)
 
 -- True if the AnnoS contains any substantive content (not just BndS/CallS
 -- references). VarS forwards to its alternatives.

@@ -167,49 +167,24 @@ applyLambdas
                   es
               )
           )
--- propagate the changes
-applyLambdas (AnnoS g c (AppS f es)) = do
-  f' <- applyLambdas f
-  es' <- mapM applyLambdas es
-  return (AnnoS g c (AppS f' es'))
-applyLambdas (AnnoS g c (LamS vs e)) = AnnoS g c . LamS vs <$> applyLambdas e
-applyLambdas (AnnoS g c (LstS es)) = AnnoS g c . LstS <$> mapM applyLambdas es
-applyLambdas (AnnoS g c (TupS es)) = AnnoS g c . TupS <$> mapM applyLambdas es
-applyLambdas (AnnoS g c (NamS rs)) = AnnoS g c . NamS <$> mapM (secondM applyLambdas) rs
-applyLambdas (AnnoS g c (VarS v (One e))) = AnnoS g c . VarS v . One <$> applyLambdas e
--- Inline let-bound lambdas: the nexus evaluator cannot serialize function types,
--- so substitute the lambda for all references and re-process to beta-reduce
+-- Inline let-bound lambdas: the nexus evaluator cannot serialize function
+-- types, so substitute the lambda for all references and re-process to
+-- beta-reduce.
 applyLambdas (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2)) = do
   e1' <- applyLambdas e1
   let e2' = substituteAnnoS v e1' e2
   inner <- applyLambdas e2'
   let AnnoS _ _ innerExpr = inner
   return (AnnoS g c innerExpr)
-applyLambdas (AnnoS g c (LetS v e1 e2)) = do
-  e1' <- applyLambdas e1
-  e2' <- applyLambdas e2
-  return (AnnoS g c (LetS v e1' e2'))
-applyLambdas (AnnoS g c (IfS cond thenE elseE)) = do
-  cond' <- applyLambdas cond
-  thenE' <- applyLambdas thenE
-  elseE' <- applyLambdas elseE
-  return (AnnoS g c (IfS cond' thenE' elseE'))
-applyLambdas (AnnoS g c (DoBlockS e)) = AnnoS g c . DoBlockS <$> applyLambdas e
--- cancel force-suspend: !{e} --> e. Keep the OUTER general type (the EvalS
--- already strips the effect wrapper from the type), but keep the INNER
--- concrete annotation so the chain's chosen language survives. Without this,
--- the cancellation overrides the chain's lang with the EvalS's lang (which
--- comes from its calling context), defeating fusion when the chain's own
--- statements dictate a different lang.
+-- Cancel force-suspend: !{e} --> e. Keep the OUTER general type (the
+-- EvalS already strips the effect wrapper) but the INNER concrete
+-- annotation, so the chain's chosen language survives fusion.
 applyLambdas (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
   e' <- applyLambdas e
   let AnnoS _ _ inner = e'
   return (AnnoS g cInner inner)
-applyLambdas (AnnoS g c (EvalS e)) = AnnoS g c . EvalS <$> applyLambdas e
-applyLambdas (AnnoS g c (CoerceS co e)) = AnnoS g c . CoerceS co <$> applyLambdas e
-applyLambdas (AnnoS g c (IntrinsicS intr es)) = AnnoS g c . IntrinsicS intr <$> mapM applyLambdas es
-applyLambdas (AnnoS g c (CallS v)) = return (AnnoS g c (CallS v))
-applyLambdas x = return x
+-- Every other node: recurse structurally.
+applyLambdas (AnnoS g c e) = AnnoS g c <$> mapExprSM applyLambdas e
 
 substituteAnnoS ::
   EVar ->
@@ -218,38 +193,8 @@ substituteAnnoS ::
   AnnoS (Indexed Type) One a
 substituteAnnoS v r = f
   where
-    f e@(AnnoS _ _ (BndS v'))
-      | v == v' = r
-      | otherwise = e
-    -- propagate the changes
-    f (AnnoS g c (AppS e es)) =
-      let f' = f e
-          es' = map f es
-       in AnnoS g c (AppS f' es')
-    f e0@(AnnoS g c (LamS vs e))
-      | v `elem` vs = e0 -- the replacement term is shadowed
-      | otherwise =
-          let e' = f e
-           in AnnoS g c (LamS vs e')
-    f (AnnoS g c (LstS es)) =
-      let es' = map f es
-       in AnnoS g c (LstS es')
-    f (AnnoS g c (TupS es)) =
-      let es' = map f es
-       in AnnoS g c (TupS es')
-    f (AnnoS g c (NamS rs)) =
-      let es' = map (f . snd) rs
-       in AnnoS g c (NamS (zip (map fst rs) es'))
-    f e@(AnnoS _ _ (LetBndS v'))
-      | v == v' = r
-      | otherwise = e
-    f e0@(AnnoS g c (LetS v' e1 e2))
-      | v == v' = e0 -- shadowed by let binding
-      | otherwise = AnnoS g c (LetS v' (f e1) (f e2))
-    f (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (f cond) (f thenE) (f elseE))
-    f (AnnoS g c (DoBlockS e)) = AnnoS g c (DoBlockS (f e))
-    f (AnnoS g c (EvalS e)) = AnnoS g c (EvalS (f e))
-    f (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (f e))
-    f (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map f es))
-    -- CallS is a recursive back-edge, not a variable reference to substitute
-    f x = x
+    f (AnnoS _ _ (BndS v'))            | v == v'     = r
+    f (AnnoS _ _ (LetBndS v'))         | v == v'     = r
+    f e0@(AnnoS _ _ (LamS vs _))       | v `elem` vs = e0  -- shadowed
+    f e0@(AnnoS _ _ (LetS v' _ _))     | v == v'     = e0  -- shadowed
+    f (AnnoS g c e)                    = AnnoS g c (mapExprS f e)

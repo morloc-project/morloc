@@ -1655,6 +1655,10 @@ data CmdDocSet = CmdDocSet
   , -- one element for each argument to the function
     cmdDocRet :: (Type, [Text])
     -- description of the return data
+  , cmdDocTerminals :: [WithSpec]
+    -- terminal-action declarations (`--' with:`) attached to this command.
+    -- Empty for internal / synthesized entries and for commands without any
+    -- `--' with:` atom. Populated verbatim from the signature preamble.
   }
   deriving (Show, Ord, Eq)
 

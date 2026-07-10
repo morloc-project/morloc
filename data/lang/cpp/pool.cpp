@@ -4,6 +4,8 @@
 #include <functional>
 #include <vector>
 #include <algorithm>
+#include <iterator>
+#include <climits>
 #include <stdexcept>
 #include <fstream>
 #include <system_error>
@@ -19,6 +21,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <unistd.h>
 
 #include <limits>
@@ -239,6 +242,83 @@ T _get_value(const uint8_t* packet, Schema* schema){
     } else {
         if (format == PACKET_FORMAT_ARROW) {
             throw std::runtime_error("Arrow data but C++ type is not mlc::ArrowTable");
+        }
+
+        // Stream ingest: FILE+DATA pointing at a stream-packet file. Nexus
+        // emits this shape for `[a]` receivers; peek here to distinguish
+        // stream from ordinary data-indirection. Each chunk's SHM is
+        // shfree'd before the next @next, so peak SHM stays at one
+        // sub-packet. Non-vector T instantiations throw at runtime as
+        // defence-in-depth (nexus rejects such receivers upstream).
+        if (source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_DATA) {
+            size_t payload_len = header->length;
+            char path[PATH_MAX];
+            if (payload_len >= sizeof(path)) {
+                throw std::runtime_error("stream ingest: path exceeds PATH_MAX");
+            }
+            std::memcpy(path,
+                        packet + sizeof(morloc_packet_header_t) + header->offset,
+                        payload_len);
+            path[payload_len] = '\0';
+            if (file_is_stream_packet(path)) {
+                if constexpr (is_std_vector<T>::value) {
+                    char* open_err = nullptr;
+                    int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &open_err);
+                    if (open_err) { PROPAGATE_ERROR(open_err); }
+                    // Preallocate via the stream's element_count (from
+                    // StreamDiag) so vector::insert never reallocates.
+                    char* len_err = nullptr;
+                    int64_t total = mlc_ifile_length(handle, &len_err);
+                    T result;
+                    if (!len_err && total > 0) {
+                        result.reserve((size_t)total);
+                    }
+                    if (len_err) free(len_err);
+                    try {
+                        while (true) {
+                            char* nerr = nullptr;
+                            void* chunk = mlc_next(handle, &nerr);
+                            if (nerr) {
+                                char* cerr = nullptr;
+                                mlc_close(handle, &cerr);
+                                if (cerr) free(cerr);
+                                PROPAGATE_ERROR(nerr);
+                            }
+                            if (chunk == nullptr) break;
+                            Array* arr = (Array*)chunk;
+                            if (arr->size == 0) {
+                                char* ferr = nullptr;
+                                shfree((absptr_t)chunk, &ferr);
+                                if (ferr) free(ferr);
+                                break;
+                            }
+                            T* dummy = nullptr;
+                            T chunk_vec = from_voidstar(schema, chunk, dummy);
+                            char* ferr = nullptr;
+                            shfree((absptr_t)chunk, &ferr);
+                            if (ferr) free(ferr);
+                            result.insert(result.end(),
+                                          std::make_move_iterator(chunk_vec.begin()),
+                                          std::make_move_iterator(chunk_vec.end()));
+                        }
+                    } catch (...) {
+                        char* cerr = nullptr;
+                        mlc_close(handle, &cerr);
+                        if (cerr) free(cerr);
+                        throw;
+                    }
+                    char* cerr = nullptr;
+                    mlc_close(handle, &cerr);
+                    if (cerr) free(cerr);
+                    return result;
+                } else {
+                    throw std::runtime_error(
+                        "stream indirection packet received for a "
+                        "non-list receiver type; nexus should have rejected "
+                        "this upstream"
+                    );
+                }
+            }
         }
 
         // Fast path: inline voidstar -- read directly from packet, no SHM needed

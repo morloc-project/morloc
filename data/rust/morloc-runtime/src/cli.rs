@@ -308,6 +308,154 @@ pub unsafe extern "C" fn adjust_voidstar_relptrs(
     }
 }
 
+// ── Stream-packet peek helpers ────────────────────────────────────────────
+
+/// Cheap file-shape sniff: returns the packet header if `path` names a
+/// file whose first 32 bytes parse as a morloc packet, or `None` for
+/// any failure (missing file, short read, wrong magic, unparseable
+/// header). "Not a morloc packet" is not an error.
+pub(crate) unsafe fn peek_packet_header_via_pread(
+    path: *const c_char,
+) -> Option<packet::PacketHeader> {
+    if path.is_null() {
+        return None;
+    }
+    let fd = libc::open(path, libc::O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut header_bytes = [0u8; 32];
+    let n = libc::pread(
+        fd,
+        header_bytes.as_mut_ptr() as *mut libc::c_void,
+        32,
+        0,
+    );
+    libc::close(fd);
+    if n != 32 {
+        return None;
+    }
+    let magic = u32::from_le_bytes(header_bytes[..4].try_into().unwrap());
+    if magic != packet::PACKET_MAGIC {
+        return None;
+    }
+    packet::PacketHeader::from_bytes(&header_bytes).ok()
+}
+
+/// C ABI shim over `peek_packet_header_via_pread`. Returns 1 iff `path`
+/// is a `PACKET_TYPE_STREAM` file, 0 otherwise. Language runtimes call
+/// this from their FILE+DATA unwrap branches to choose between the
+/// legacy data-indirection path and the stream-ingest loop.
+#[no_mangle]
+pub unsafe extern "C" fn file_is_stream_packet(path: *const c_char) -> i32 {
+    match peek_packet_header_via_pread(path) {
+        Some(header) if header.is_stream() => 1,
+        _ => 0,
+    }
+}
+
+/// Wire `try_load_stream_packet_file` into an entry point: on stream
+/// hit return the packet; on non-stream fall through; on error stamp
+/// `errmsg` and return null. Deduplicates the three CLI entry-point
+/// insertions.
+macro_rules! stream_fast_path_or_fallthrough {
+    ($path:expr, $schema:expr, $errmsg:expr) => {
+        match try_load_stream_packet_file($path, $schema) {
+            Ok(Some(pkt)) => return pkt,
+            Ok(None) => {}
+            Err(e) => {
+                set_errmsg($errmsg, &e);
+                return ptr::null_mut();
+            }
+        }
+    };
+}
+
+// ── try_load_stream_packet_file ───────────────────────────────────────────
+
+/// Nexus-side fast path for stream-packet CLI file arguments. Dispatches
+/// on the receiver schema: `Array` → FILE+DATA indirection (pool iterates
+/// chunk-by-chunk), `IStream` → pre-opened `TAG_HANDLE` field, other →
+/// targeted error. Returns `Ok(None)` when the file is not a stream so
+/// callers can fall through to the legacy loader chain.
+pub(crate) unsafe fn try_load_stream_packet_file(
+    path: *const c_char,
+    schema: *const CSchema,
+) -> Result<Option<*mut u8>, MorlocError> {
+    use crate::schema::SerialType;
+    use morloc_runtime_types::stream_handle as sh;
+
+    match peek_packet_header_via_pread(path) {
+        Some(h) if h.is_stream() => {}
+        _ => return Ok(None),
+    };
+
+    if schema.is_null() {
+        return Err(MorlocError::Other(
+            "stream file passed as CLI argument with null schema".into(),
+        ));
+    }
+
+    let rs = CSchema::to_rust(schema);
+    let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
+
+    match rs.serial_type {
+        SerialType::Array => {
+            // Small indirection packet: payload = path bytes.
+            let pkt = crate::packet_ffi::make_data_indirection_packet(path, schema);
+            if pkt.is_null() {
+                return Err(MorlocError::Other(format!(
+                    "make_data_indirection_packet failed for stream file '{}'",
+                    path_str,
+                )));
+            }
+            Ok(Some(pkt))
+        }
+        SerialType::IStream => {
+            // Open the file now; embed the slot id as TAG_HANDLE.
+            let handle = crate::stream::shared_open_istream(&path_str)?;
+            let field_ptr = match shm::shcalloc(1, sh::STREAM_HANDLE_FIELD_SIZE) {
+                Ok(p) => p as *mut u8,
+                Err(e) => {
+                    let _ = crate::stream::shared_discard_handle(handle);
+                    return Err(e);
+                }
+            };
+            sh::write_field(field_ptr, sh::TAG_HANDLE, handle as u64);
+            let mut inner_err: *mut c_char = ptr::null_mut();
+            let pkt = wrap_voidstar_as_packet(
+                field_ptr as *mut c_void,
+                schema,
+                &mut inner_err,
+            );
+            if pkt.is_null() {
+                let _ = shm::shfree(field_ptr as shm::AbsPtr);
+                let _ = crate::stream::shared_discard_handle(handle);
+                let msg = if inner_err.is_null() {
+                    format!("wrap_voidstar_as_packet failed for stream file '{}'", path_str)
+                } else {
+                    let s = CStr::from_ptr(inner_err).to_string_lossy().into_owned();
+                    libc::free(inner_err as *mut c_void);
+                    s
+                };
+                return Err(MorlocError::Other(msg));
+            }
+            Ok(Some(pkt))
+        }
+        other => {
+            // Look up the file's schema string for a targeted error.
+            let file_schema = crate::stream::read_schema_from_file(&path_str)
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            Err(MorlocError::Other(format!(
+                "'{}' is a stream-packet file (schema \"{}\"). The receiver's \
+                 type has serial_type {:?}; only `[a]` (Array) and \
+                 `IStream a` can accept a stream-packet file.",
+                path_str, file_schema, other,
+            )))
+        }
+    }
+}
+
 // ── Layer 2/3: try_load_voidstar_packet_via_mmap ──────────────────────────
 
 /// Layer 2/3 fast path. For inputs that are regular files containing a
@@ -3292,6 +3440,9 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
                 Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
             },
         };
+        if classified.kind == ArgSource::File {
+            stream_fast_path_or_fallthrough!(classified.effective, schema, errmsg);
+        }
         let result = parse_cli_data_argument_classified(
             ptr::null_mut(), classified, schema, errmsg,
         );
@@ -3320,6 +3471,13 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
         }
         (buf, n, ArgSource::Inline)
     } else if source_code == 2 {
+        // Only `-f packet` (form 1) tries the stream fast path here.
+        // Form 0 (auto) handles it in the branch above; forms 2/3/4
+        // (bytes/list/bytes-only) let their own decoders surface a
+        // natural error on the stream file's binary header.
+        if form_code == 1 {
+            stream_fast_path_or_fallthrough!((*arg).value, schema, errmsg);
+        }
         match read_path_into_libc((*arg).value) {
             Ok((buf, sz)) => (buf, sz, ArgSource::File),
             Err(reason) => {
@@ -3395,6 +3553,17 @@ pub unsafe extern "C" fn parse_cli_data_argument(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
     let mut err: *mut c_char = ptr::null_mut();
+
+    // Stream-packet fast path (singular args only): a MORLOC_STREAM_PACKET
+    // file short-circuits the voidstar-then-wrap chain below and returns
+    // a purpose-built packet directly.
+    if (*arg).fields.is_null() && !(*arg).value.is_null() {
+        if let Ok(classified) = classify_arg_source((*arg).value) {
+            if classified.kind == ArgSource::File {
+                stream_fast_path_or_fallthrough!(classified.effective, schema, errmsg);
+            }
+        }
+    }
 
     let result = if (*arg).fields.is_null() {
         parse_cli_data_argument_singular(dest, (*arg).value, schema, &mut err)

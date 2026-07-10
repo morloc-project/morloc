@@ -1,0 +1,116 @@
+-- Boundary-coverage golden mirroring 'effect-boundary-py' but under
+-- C++. The interesting delta is 'void'-returning source functions
+-- (declared '<E> ()' morloc-side): the C++ 'makeLet' void-safe emission
+-- path must fire so a let-binding like @mlc::Unit n = void_call()@
+-- becomes @void_call(); mlc::Unit n{};@ instead of a compile error.
+--
+-- Each export names the smallest expression that hits one row of the
+-- 'EffectBoundary' table. Compared to the Python golden, the shapes
+-- below add:
+--
+--   * 'unitReturn'          '<IO> ()' source (Unit return; C++ void→Unit
+--                           adapter must fire on the let-binding).
+--   * 'unitInDoBlock'       Unit-returning source as a bare do-block
+--                           statement; peephole cancels 'PolyEval ∘
+--                           PolyDoBlock' to a raw void call.
+--   * 'multiEffectUnit'     '<IO,Error> ()' source; multi-label + Unit
+--                           combines the two edge cases.
+module main
+  ( nullaryIo
+  , unaryIo
+  , multiEffectIo
+  , pointFree
+  , doWithBind
+  , doBareStmt
+  , unitReturn
+  , unitInDoBlock
+  , multiEffectUnit
+  , callbackLambda
+  , callbackBare
+  )
+
+import root-cpp
+
+effect Error
+
+source Cpp from "helpers.hpp"
+  ( "gen_small"     as smallSource
+  , "add_one"       as addOne
+  , "risky"         as risky
+  , "read_value"    as readValue
+  , "for_each"      as forEach
+  , "tap"           as tap
+  , "total_so_far"  as totalSoFar
+  , "reset_tally"   as resetTally
+  , "poke"          as poke
+  )
+
+type Cpp => Int = "int"
+type Cpp => Bool = "bool"
+
+smallSource :: <IO> Int
+addOne      :: Int -> <IO> Int
+risky       :: Int -> <IO, Error> Int
+readValue   :: <IO> Int
+forEach     :: [Int] -> (Int -> <IO> ()) -> <IO> ()
+tap         :: Int -> <IO> ()
+totalSoFar  :: <IO> Int
+resetTally  :: <IO> ()
+poke        :: Int -> <IO, Error> ()
+
+-- Shapes shared with the Python golden.
+nullaryIo :: <IO> Int
+nullaryIo = smallSource
+
+unaryIo :: <IO> Int
+unaryIo = addOne 41
+
+multiEffectIo :: <IO, Error> Int
+multiEffectIo = risky 21
+
+pointFree :: <IO> Int
+pointFree = smallSource
+
+doWithBind :: <IO> Int
+doWithBind = do
+  x <- readValue
+  y <- addOne x
+  addOne y
+
+doBareStmt :: <IO> Int
+doBareStmt = do
+  resetTally
+  addOne 41
+
+-- C++-specific shapes: Unit return + void source functions.
+unitReturn :: <IO> Int
+unitReturn = do
+  resetTally
+  addOne 41
+
+unitInDoBlock :: <IO> Int
+unitInDoBlock = do
+  resetTally
+  tap 42
+  tap 8
+  totalSoFar
+
+multiEffectUnit :: <IO, Error> Int
+multiEffectUnit = do
+  resetTally
+  poke 100
+  totalSoFar
+
+-- Higher-order lambda; effect must fire on invocation, not return a
+-- 'std::function<Unit()>' that 'forEach' would discard.
+callbackLambda :: <IO> Int
+callbackLambda = do
+  resetTally
+  forEach [10, 20, 30] (\x -> tap (x + 1))
+  totalSoFar
+
+callbackBare :: <IO> Int
+callbackBare = do
+  resetTally
+  forEach [10, 20, 30] tap
+  totalSoFar
