@@ -1,3 +1,12 @@
+0.92.0 [2026-07-09]
+-------------------
+
+ - add `with:` docstring field for terminal action
+ - allow stream-packet files as CLI arguments
+   - [a] types slurp the packet into memory
+   - `IStream a` types open the file for streaming
+
+
 0.91.0 [2026-07-03]
 -------------------
 
