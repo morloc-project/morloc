@@ -1210,13 +1210,31 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
-  -- Supplement per-manifold typedefs with universal scope entries for named
-  -- record types that appear in this pool but are missing from the per-manifold
-  -- scope (happens in secondary C++ pools called via foreign_call).
-  let usedTypes = Set.unions (map collectNamedRecordTVars es0)
-      missingTypes = Set.difference usedTypes (Map.keysSet perManifold)
+  -- Restrict serializer emission to record types this pool actually needs.
+  -- perManifold accumulates every typedef visible in each manifold's scope
+  -- (populated in Frontend/Restructure.hs from the module import graph), so
+  -- without a filter every named C++ record from any imported module gets a
+  -- to_voidstar / from_voidstar / get_shm_size definition -- and if no
+  -- manifold references it, findSources never pulls in the header that
+  -- declares the struct, leaving the emitted body unbacked (invalid C++).
+  --
+  -- We seed with the named record TVars actually referenced in this pool's
+  -- SerialManifold trees (schemas + expression types), close under record-
+  -- to-record field references so a used record's serializer body can find
+  -- serializers for its field types, and apply the closure to both the
+  -- per-manifold and universal-supplement sides.
+  --
+  -- The universal-supplement branch is preserved because secondary C++
+  -- pools reached via foreign_call may miss a locally-scoped typedef that
+  -- their argument schemas require; usedTypes catches those via
+  -- DeserializeN_ schemas.
+  let directUsed = Set.unions (map collectNamedRecordTVars es0)
+      combinedScope = Map.unionWith mergeScopes perManifold scope
+      keep = closeRecordDeps combinedScope directUsed
+      perManifold' = Map.filterWithKey (\k _ -> Set.member k keep) perManifold
+      missingTypes = Set.difference keep (Map.keysSet perManifold')
       supplemental = Map.filterWithKey (\k _ -> Set.member k missingTypes) scope
-      typedef = Map.unionWith mergeScopes perManifold supplemental
+      typedef = Map.unionWith mergeScopes perManifold' supplemental
 
   foldl groupQuad ([], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where
@@ -1229,6 +1247,36 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
 
     -- there are likely to be repeats in the scopes, we only want the unique ones
     mergeScopes xs ys = unique (xs <> ys)
+
+    -- Fixed-point close a seed set of TVars over Scope-entry field
+    -- references. Overapproximates: walks every TypeU subterm and collects
+    -- any TVar reference. Non-record TVars naturally drop out of the emitted
+    -- output because makeSerial only produces a serializer for NamU entries
+    -- whose head TVar is neither "struct" nor "arrow".
+    closeRecordDeps :: Scope -> Set.Set TVar -> Set.Set TVar
+    closeRecordDeps s = fixSet
+      where
+        fixSet acc =
+          let extra = Set.unions
+                [ tvarsInType body
+                | v <- Set.toList acc
+                , (_, body, _, _, _) <- fromMaybe [] (Map.lookup v s)
+                ]
+              acc' = Set.union acc extra
+          in if Set.size acc' == Set.size acc then acc else fixSet acc'
+
+        tvarsInType :: TypeU -> Set.Set TVar
+        tvarsInType (VarU v) = Set.singleton v
+        tvarsInType (NamU _ v ps rs) =
+          Set.insert v (Set.unions (map tvarsInType ps ++ map (tvarsInType . snd) rs))
+        tvarsInType (AppU t ts) = Set.unions (map tvarsInType (t : ts))
+        tvarsInType (FunU ts t) = Set.unions (map tvarsInType (t : ts))
+        tvarsInType (ForallU _ t) = tvarsInType t
+        tvarsInType (EffectU _ t) = tvarsInType t
+        tvarsInType (OptionalU t) = tvarsInType t
+        tvarsInType (OpU _ ts) = Set.unions (map tvarsInType ts)
+        tvarsInType (LabeledU _ t) = tvarsInType t
+        tvarsInType _ = Set.empty
 
     groupQuad :: ([a], [a]) -> (a, a) -> ([a], [a])
     groupQuad (xs, ys) (x, y) = (x : xs, y : ys)
