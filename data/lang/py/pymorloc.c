@@ -2028,22 +2028,27 @@ static PyObject* pybinding__shm_tracker_flush(PyObject* self, PyObject* args) {
 // these via the morloc Python module.
 extern void morloc_debug_record_frame(
     uint32_t midx,
+    const char* name,
+    const char* srcloc,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
 extern char* morloc_debug_drain_frames(void);
 extern void morloc_debug_flush_dispatch(void);
 
-// debug_record_frame(midx, packets_list, schemas_list) -- packets is a
-// Python list of bytes objects (each a serialized morloc packet);
-// schemas is a Python list of str. The codegen-emitted catch block
-// builds both lists from the per-arg serialization results.
+// debug_record_frame(midx, name, srcloc, packets_list, schemas_list) --
+// name and srcloc are per-manifold string metadata baked into the
+// codegen'd catch block ("" when the compiler had nothing to attach;
+// the Rust runtime treats empty and NULL the same way).
 static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
     (void)self;
     unsigned long midx_arg;
+    const char* name_arg;
+    const char* srcloc_arg;
     PyObject* packets_list;
     PyObject* schemas_list;
-    if (!PyArg_ParseTuple(args, "kOO", &midx_arg, &packets_list, &schemas_list)) {
+    if (!PyArg_ParseTuple(args, "kssOO", &midx_arg, &name_arg, &srcloc_arg,
+                          &packets_list, &schemas_list)) {
         return NULL;
     }
     if (!PyList_Check(packets_list) || !PyList_Check(schemas_list)) {
@@ -2058,7 +2063,8 @@ static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
         return NULL;
     }
     if (n_pkts == 0) {
-        morloc_debug_record_frame((uint32_t)midx_arg, NULL, NULL, 0);
+        morloc_debug_record_frame((uint32_t)midx_arg, name_arg, srcloc_arg,
+                                  NULL, NULL, 0);
         Py_RETURN_NONE;
     }
     const uint8_t** pkt_arr = (const uint8_t**)calloc((size_t)n_pkts, sizeof(uint8_t*));
@@ -2080,7 +2086,8 @@ static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
         pkt_arr[i] = (const uint8_t*)PyBytes_AsString(p);
         sch_arr[i] = PyUnicode_AsUTF8(s);
     }
-    morloc_debug_record_frame((uint32_t)midx_arg, pkt_arr, sch_arr, (size_t)n_pkts);
+    morloc_debug_record_frame((uint32_t)midx_arg, name_arg, srcloc_arg,
+                              pkt_arr, sch_arr, (size_t)n_pkts);
     free(pkt_arr);
     free(sch_arr);
     Py_RETURN_NONE;

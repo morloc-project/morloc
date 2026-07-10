@@ -48,6 +48,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , provideClosure
   , makeManifoldIndexer
   , renderPoolDocs
+  , makeManifoldDebugInfoLookup
   ) where
 
 import qualified Control.Monad.State as CMS
@@ -724,3 +725,21 @@ extractRemoteDispatch labels =
       Identity [(Int, Int)]
     getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
     getRemoteSE x = return $ foldlSE mappend mempty x
+
+{- | Build a pure @midx -> (name, srcloc)@ closure by snapshotting
+'stateName' and 'stateSourceMap' from the monad. Each translator
+calls this once during 'LowerConfig' setup and stores the closure in
+'lcManifoldDebugInfo' so the debug-wrap emitter can look up per-frame
+metadata without touching 'MorlocMonad'. Both strings are empty when
+no info is attached; the runtime treats empties as "omit".
+-}
+makeManifoldDebugInfoLookup :: MorlocMonad (Int -> (Text, Text))
+makeManifoldDebugInfoLookup = do
+  nameMap <- MM.gets stateName
+  srcMap <- MM.gets stateSourceMap
+  let sanitized = Map.map (sanitizeManifoldName . unEVar) nameMap
+      srclocs = Map.mapMaybe renderSrcLocForDebug srcMap
+  return $ \i ->
+    ( Map.findWithDefault "" i sanitized
+    , Map.findWithDefault "" i srclocs
+    )

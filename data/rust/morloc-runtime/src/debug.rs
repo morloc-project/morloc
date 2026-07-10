@@ -89,6 +89,10 @@ struct ArgDump {
 
 struct FrameEntry {
     midx: u32,
+    /// Sanitized morloc-level name; empty for anonymous/synthesized nodes.
+    name: String,
+    /// @path:line:col@ of the manifold; empty when unknown.
+    srcloc: String,
     args: Vec<ArgDump>,
 }
 
@@ -238,12 +242,17 @@ fn try_write(hash_val: u64, bytes: &[u8]) -> Option<PathBuf> {
 /// per-language catch block. Never throws -- failures degrade
 /// gracefully to "(serialize failed)" entries.
 ///
+/// `name` and `srcloc` may be NULL or `""` when the compiler had
+/// nothing to attach; both are treated the same.
+///
 /// Safety: `packets` and `schemas` must each be an array of `n`
 /// pointers. Each `packets[i]` is a NUL-or-packet pointer; each
 /// `schemas[i]` is a NUL or NUL-terminated schema string.
 #[no_mangle]
 pub unsafe extern "C" fn morloc_debug_record_frame(
     midx: u32,
+    name: *const c_char,
+    srcloc: *const c_char,
     packets: *const *const u8,
     schemas: *const *const c_char,
     n: usize,
@@ -304,7 +313,24 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
             }
         }
     }
-    FRAMES.with(|f| f.borrow_mut().push(FrameEntry { midx, args }));
+    let name_str = if name.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(name).to_string_lossy().into_owned()
+    };
+    let srcloc_str = if srcloc.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(srcloc).to_string_lossy().into_owned()
+    };
+    FRAMES.with(|f| {
+        f.borrow_mut().push(FrameEntry {
+            midx,
+            name: name_str,
+            srcloc: srcloc_str,
+            args,
+        })
+    });
 }
 
 /// Reset per-dispatch state. Called by the pool's outer dispatcher
@@ -333,7 +359,19 @@ pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
     let mut out = String::with_capacity(256);
     out.push_str("morloc trace (innermost first):\n");
     for (i, frame) in frames.iter().enumerate() {
-        out.push_str(&format!("  frame {} mid={}\n", i, frame.midx));
+        // Anonymous/synthesized nodes (compositions, IntrMap, tuple
+        // projections, lambdas) render '_' so the header shape is
+        // uniform across every frame.
+        let name = if frame.name.is_empty() { "_" } else { frame.name.as_str() };
+        let loc = if frame.srcloc.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", frame.srcloc)
+        };
+        out.push_str(&format!(
+            "  frame {} {} (mid={}{})\n",
+            i, name, frame.midx, loc
+        ));
         for (j, arg) in frame.args.iter().enumerate() {
             let schema = if arg.schema.is_empty() {
                 "?"
@@ -376,7 +414,31 @@ pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
 
 #[cfg(test)]
 fn push_test_frame(midx: u32, args: Vec<ArgDump>) {
-    FRAMES.with(|f| f.borrow_mut().push(FrameEntry { midx, args }));
+    FRAMES.with(|f| {
+        f.borrow_mut().push(FrameEntry {
+            midx,
+            name: String::new(),
+            srcloc: String::new(),
+            args,
+        })
+    });
+}
+
+#[cfg(test)]
+fn push_test_frame_named(
+    midx: u32,
+    name: &str,
+    srcloc: &str,
+    args: Vec<ArgDump>,
+) {
+    FRAMES.with(|f| {
+        f.borrow_mut().push(FrameEntry {
+            midx,
+            name: name.to_string(),
+            srcloc: srcloc.to_string(),
+            args,
+        })
+    });
 }
 
 #[cfg(test)]
@@ -422,5 +484,26 @@ mod tests {
         morloc_debug_flush_dispatch();
         DUMPED_COUNT.with(|d| assert_eq!(*d.borrow(), 0));
         MIDX_COUNTERS.with(|m| assert!(m.borrow().is_empty()));
+    }
+
+    #[test]
+    fn drain_renders_name_and_srcloc() {
+        FRAMES.with(|f| f.borrow_mut().clear());
+        push_test_frame_named(42, "myfunc", "main.loc:12:5", vec![]);
+        push_test_frame_named(7, "", "", vec![]);
+        push_test_frame_named(3, "namedonly", "", vec![]);
+        push_test_frame_named(4, "", "other.loc:1:1", vec![]);
+        unsafe {
+            let p = morloc_debug_drain_frames();
+            assert!(!p.is_null());
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            libc::free(p as *mut c_void);
+            // Anonymous frames render '_' in the name slot so every
+            // header shares the same "name (mid=..., loc?)" shape.
+            assert!(s.contains("frame 0 myfunc (mid=42, main.loc:12:5)"));
+            assert!(s.contains("frame 1 _ (mid=7)"));
+            assert!(s.contains("frame 2 namedonly (mid=3)"));
+            assert!(s.contains("frame 3 _ (mid=4, other.loc:1:1)"));
+        }
     }
 }

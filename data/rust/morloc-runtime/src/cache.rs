@@ -674,13 +674,24 @@ fn hash_voidstar_inner(
     seed: u64,
 ) -> Result<u64, MorlocError> {
     use crate::schema::SerialType;
+    use crate::utility::mix;
+
+    // Fold the SerialType tag into the seed at every recursion so
+    // structurally distinct schemas can never share a payload hash. Without
+    // this, single-element wrappings collide: `[[1.0, 2.0]]` as `[[Real]]`
+    // walks a 1-iteration outer loop into a fixed-width inner array of 16
+    // bytes and returns `xxh64({1.0,2.0}, 0)` -- exactly the hash `[Real]`
+    // produces for `[1.0, 2.0]`. Arrays additionally mix in `arr.size` so
+    // `[[a,b]]` and `[[a],[b]]` differ even when their flat element bytes
+    // and total counts match.
+    let seed = mix(seed, schema.serial_type as u64);
 
     // SAFETY: data points to voidstar data in SHM with layout described by schema.
     // All reads (Array headers, element data) are within schema-defined bounds.
     unsafe {
         match schema.serial_type {
             SerialType::Int => {
-                // Inline BigInt: hash the value directly for size ≤ 1
+                // Inline BigInt: hash the value directly for size <= 1
                 let size = *(data as *const usize);
                 if size <= 1 {
                     let bytes = std::slice::from_raw_parts(data.add(8), 8);
@@ -723,6 +734,7 @@ fn hash_voidstar_inner(
             }
             SerialType::String | SerialType::Array => {
                 let arr = &*(data as *const shm::Array);
+                let seed = mix(seed, arr.size as u64);
                 let elem_width = if schema.parameters.is_empty() {
                     1 // string bytes
                 } else {

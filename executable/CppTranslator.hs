@@ -306,6 +306,9 @@ data CppTranslatorState = CppTranslatorState
   -- Without this disambiguation, the inline @gv == cv@ leak guard would
   -- false-positive on case 1.
   , translatorCScope :: Scope
+  , translatorDebugInfo :: Int -> (Text, Text)
+  -- ^ Snapshot of per-manifold @(name, srcloc)@ metadata (from
+  -- 'makeManifoldDebugInfoLookup'); consumed by 'cppDebugWrap'.
   }
 
 instance Defaultable CppTranslatorState where
@@ -321,6 +324,7 @@ instance Defaultable CppTranslatorState where
       , translatorLogTemplates = Map.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
+      , translatorDebugInfo = \_ -> ("", "")
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -384,12 +388,14 @@ translate srcs es = do
   labels <- collectLogLabels <$> MM.gets stateManifoldConfig
   templates <- collectRenderedTemplates cppLang
 
+  debugInfo <- makeManifoldDebugInfoLookup
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
         { translatorRecmap = recmap
         , translatorEffectLabels = effectMap
         , translatorLogTemplates = templates
         , translatorCScope = mergedCppScope
+        , translatorDebugInfo = debugInfo
         }
       code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap) translatorState
 
@@ -947,7 +953,15 @@ cppDebugWrap ::
   CppTranslator PoolDocs
 cppDebugWrap midx args bodyPool = do
   wrapIdx <- getCounter
-  let suffix = pretty wrapIdx
+  debugInfoLookup <- CMS.gets translatorDebugInfo
+  let (nameStr, srclocStr) = debugInfoLookup midx
+      -- Empty string means "no info attached"; the runtime treats it
+      -- as NULL and omits the field from the trace line. We still emit
+      -- a string literal (not NULL) so the C++ argument type stays
+      -- @const char*@ unconditionally.
+      nameLit = dquotes (pretty (cppEscapeString nameStr))
+      srclocLit = dquotes (pretty (cppEscapeString srclocStr))
+      suffix = pretty wrapIdx
       hp = "__morloc_"
       resultVar = hp <> "dr_" <> suffix
       packetsVar = hp <> "dpk_" <> suffix
@@ -980,6 +994,8 @@ cppDebugWrap midx args bodyPool = do
             , sizesDecl
             , "(void)" <> sizesVar <> ";"
             , "morloc_debug_record_frame(" <> pretty midx
+                <> ", " <> nameLit
+                <> ", " <> srclocLit
                 <> ", " <> packetsVar
                 <> ", " <> schemasVar
                 <> ", " <> pretty n <> ");"

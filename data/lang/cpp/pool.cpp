@@ -748,6 +748,8 @@ extern "C" char* morloc_debug_drain_frames();
 extern "C" void morloc_debug_flush_dispatch();
 extern "C" void morloc_debug_record_frame(
     uint32_t midx,
+    const char* name,
+    const char* srcloc,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
