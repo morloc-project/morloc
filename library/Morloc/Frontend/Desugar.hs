@@ -2168,9 +2168,46 @@ desugarProgram isImplicitMain cstNodes = do
 
 injectTerminalActions :: ExprI -> D ExprI
 injectTerminalActions (ExprI i (ModE mv body)) = do
+  rejectReservedMlcpPrefix body
   body' <- expandWithBindings body
   return (ExprI i (ModE mv body'))
 injectTerminalActions e = return e
+
+-- | Reject any user-declared top-level identifier whose name starts
+-- with the reserved `mlcp_` prefix. That prefix is compiler-owned
+-- (see 'mangleTerminalName'): 'Frontend/Desugar.synthWithBinding'
+-- synthesizes `mlcp_<parent>_<long>` internal commands from
+-- @--' with:@ atoms, and 'CodeGenerator/Nexus.isInternalTerminalName'
+-- flips a manifest entry to `internal: true` on that prefix alone.
+-- Allowing user code to shadow the prefix would let a user-declared
+-- term silently disappear from the CLI-visible surface (marked
+-- internal in the manifest) or collide with a future synthesized
+-- name.
+--
+-- The check runs before 'expandWithBindings' so the diagnostic
+-- caret lands on the user's own SigE/AssE, not on a subsequent
+-- synthesized entry.
+rejectReservedMlcpPrefix :: [ExprI] -> D ()
+rejectReservedMlcpPrefix body =
+  case find (\(_, ev) -> T.isPrefixOf "mlcp_" (unEVar ev)) binders of
+    Just (spanI, ev) -> do
+      sp <- posOfExprI spanI
+      dfail (startPos sp) . T.unpack $
+        "identifier `" <> unEVar ev
+        <> "` uses the reserved `mlcp_` prefix. That prefix is "
+        <> "compiler-owned -- it names the internal entry points "
+        <> "synthesized from `--' with:` docstring atoms. Rename "
+        <> "the identifier so it does not start with `mlcp_`."
+    Nothing -> return ()
+  where
+    binders :: [(ExprI, EVar)]
+    binders = concatMap pick body
+
+    pick :: ExprI -> [(ExprI, EVar)]
+    pick e@(ExprI _ (SigE (Signature n _ _))) = [(e, n)]
+    pick e@(ExprI _ (AssE n _ _)) = [(e, n)]
+    pick e@(ExprI _ (SrcE src)) = [(e, srcAlias src)]
+    pick _ = []
 
 expandWithBindings :: [ExprI] -> D [ExprI]
 expandWithBindings body =
@@ -2263,6 +2300,11 @@ emitFor (sigExprI, parentName, parentEt, specs) = do
       isEff = returnIsEffectful pt
   mapM (synthWithBinding sp parentName arity isEff) specs
 
+-- | Synthesize the composed internal command for one `--' with:`
+-- atom on a parent signature. Emits only an @AssE@; parent per-arg
+-- docstrings are re-injected downstream in
+-- 'CodeGenerator/Nexus.inheritParentArgDocs'. A @SigE@ here would
+-- need a return type not knowable at desugar time.
 synthWithBinding :: Span -> EVar -> Int -> Bool -> WithSpec -> D ExprI
 synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm) = do
   let mangled = mangleTerminalName parentName long

@@ -31,3 +31,7 @@ nix = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 chrono = "0.4"
+# Already a transitive dep via clap's suggestion machinery; declared
+# explicitly so `did_you_mean` can reuse the same Levenshtein
+# implementation clap uses for its own error hints.
+strsim = "0.11"

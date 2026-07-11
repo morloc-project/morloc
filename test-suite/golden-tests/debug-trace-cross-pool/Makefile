@@ -6,7 +6,7 @@ all:
 	@: > obs.txt
 	morloc make --debug -o nexus main.loc 2> build.err
 	@# Bump cap so both pools' dumps land on disk.
-	./nexus --log-dir logs --debug-cache-depth 4 outerP 0 >/dev/null 2> obs.run.err; \
+	./nexus --log-dir logs --debug-cache-depth 4 @ outerP 0 >/dev/null 2> obs.run.err; \
 	  rc=$$?; test $$rc -ne 0 \
 	  && echo "fail_rc_nonzero: PASS" >> obs.txt \
 	  || echo "fail_rc_nonzero: FAIL" >> obs.txt

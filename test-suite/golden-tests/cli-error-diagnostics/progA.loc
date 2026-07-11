@@ -1,0 +1,7 @@
+module foo (idA)
+
+import root-py
+
+source Py from "helpers.py" ("idA")
+
+idA :: Int -> Int

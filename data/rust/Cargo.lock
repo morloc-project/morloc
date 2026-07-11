@@ -835,6 +835,7 @@ dependencies = [
  "rmp",
  "serde",
  "serde_json",
+ "strsim",
  "thiserror",
 ]
 

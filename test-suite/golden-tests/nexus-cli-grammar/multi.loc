@@ -1,0 +1,11 @@
+-- Multi-export program for the nexus CLI grammar test.
+-- Exercises subcommand-name as separator and "did you mean" hints.
+
+module multi (fhead, describe)
+
+import root-py
+
+source Py from "helpers.py" ("fhead", "describe")
+
+fhead   :: Int -> Str
+describe :: Int -> Str
