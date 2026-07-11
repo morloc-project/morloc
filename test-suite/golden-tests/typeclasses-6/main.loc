@@ -3,4 +3,4 @@ module main (foo)
 import map-cpp
 
 foo :: Str -> Int -> Map Str Int
-foo k v = pack ([k], [v])
+foo k v = pack [(k, v)]

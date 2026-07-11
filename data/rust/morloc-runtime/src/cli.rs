@@ -1316,6 +1316,15 @@ fn split_whitespace_rows(
 /// row as either a JSON array (tuple) or a JSON object (record) using
 /// `row_schema.keys`.
 ///
+/// `form: list` is **headerless by convention**: rows are raw
+/// tuples, not table records, so there is no meaningful place for a
+/// column-name row. If a user wants a full-featured table with
+/// column names, they should declare the argument as `Table` (which
+/// runs through the Arrow Table path and honors headers). Keeping
+/// this rule static (no per-arg `--csv-header` toggle) avoids a
+/// second knob that would double the surface area of an already
+/// weakly-typed loader.
+///
 /// Returns the per-row JSON strings on success.
 fn parse_delimited_rows(
     bytes: &[u8],
@@ -1788,8 +1797,85 @@ unsafe fn try_list_with_config(
             "form: list: no delimiter (tab, comma, whitespace) matched the expected row schema".into(),
         )
     });
-    set_errmsg(errmsg, &final_err);
+    // Very common user mistake: the first line is a column-name
+    // header. `form: list` is headerless by convention (see
+    // `parse_delimited_rows`); detect the shape and append a hint.
+    let hinted = augment_with_header_hint(final_err, &lines, row_schema);
+    set_errmsg(errmsg, &hinted);
     ptr::null_mut()
+}
+
+/// If the first line's cells look like column names (non-numeric
+/// text where the row schema expects a numeric type in that
+/// position), return the original error with a header-row hint
+/// appended. Otherwise return the error unchanged. The probe is
+/// deliberately conservative: only fires when at least one cell is
+/// clearly a name (letters, no digit prefix) opposite an expected
+/// numeric slot, so a genuine text row is not mistaken for a header.
+fn augment_with_header_hint(
+    err: MorlocError,
+    lines: &[&str],
+    row_schema: &crate::schema::Schema,
+) -> MorlocError {
+    let first = match lines.iter().find(|l| !l.trim().is_empty()) {
+        Some(l) => l.trim(),
+        None => return err,
+    };
+    let arity = row_schema.parameters.len();
+    if arity < 2 {
+        return err;
+    }
+    // Try the same delimiters as `parse_delimited_rows` /
+    // `split_whitespace_rows`; use the first split whose cell count
+    // matches the expected row arity.
+    let by_tab: Vec<&str> = first.split('\t').collect();
+    let by_comma: Vec<&str> = first.split(',').collect();
+    let by_ws: Vec<&str> = first.split_whitespace().collect();
+    let cells: &[&str] = if by_tab.len() == arity {
+        &by_tab
+    } else if by_comma.len() == arity {
+        &by_comma
+    } else if by_ws.len() == arity {
+        &by_ws
+    } else {
+        return err;
+    };
+    // Heuristic: at least one cell is a plain identifier (letters
+    // only) opposite an expected numeric column.
+    let looks_like_header = cells
+        .iter()
+        .zip(row_schema.parameters.iter())
+        .any(|(cell, col)| {
+            let cell_trim = cell.trim();
+            let is_name = !cell_trim.is_empty()
+                && cell_trim.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+                && cell_trim.chars().all(|c| !c.is_ascii_digit());
+            is_numeric_serial(&col.serial_type) && is_name
+        });
+    if !looks_like_header {
+        return err;
+    }
+    MorlocError::Other(format!(
+        "{}\n  hint: the first row (`{}`) looks like a column-name \
+         header. `form: list` is headerless -- remove the header row, \
+         or declare the argument as `Table` if you need column names.",
+        err, first,
+    ))
+}
+
+/// True iff the serial type is a numeric scalar (signed / unsigned
+/// integer, floating-point, or arbitrary-precision `Int`). Distinct
+/// from 'is_fixed_width_scalar', which admits `Bool` and excludes
+/// `Int`.
+fn is_numeric_serial(t: &crate::schema::SerialType) -> bool {
+    use crate::schema::SerialType::*;
+    matches!(
+        t,
+        Sint8 | Sint16 | Sint32 | Sint64
+        | Uint8 | Uint16 | Uint32 | Uint64
+        | Float32 | Float64
+        | Int
+    )
 }
 
 /// True iff the element type is a numeric scalar eligible for
@@ -3493,19 +3579,85 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
         }
     };
 
-    // `form: list` requires a file (or stdin) source. The compile-
-    // time check catches every declared violation, but `source: auto`
-    // may resolve to Inline at run time when the argv is JSON-shaped,
-    // so fast-fail here.
+    // `form: list` + inline argv: route through the JSON path when
+    // the argv looks like a JSON array (`[...]`). No overlap with
+    // realistic filenames: files whose first byte is `[` are not
+    // production-realistic. A user hitting the weird edge case can
+    // spell the file source explicitly with `source: file` or `-`.
+    //
+    // Non-JSON inline input on `form: list` (a bare token like
+    // `foo`, missing the `[` prefix) still errors, since there's no
+    // sensible way to parse a scalar token into a list.
     if form_code == 3 && source_kind == ArgSource::Inline {
+        let first_byte = if data.is_null() || data_size == 0 {
+            0
+        } else {
+            *data
+        };
+        if first_byte == b'[' {
+            extern "C" {
+                fn read_json_with_schema(
+                    dest: *mut u8,
+                    json: *mut c_char,
+                    schema: *const CSchema,
+                    errmsg: *mut *mut c_char,
+                ) -> *mut u8;
+            }
+            // Ensure NUL-termination for the C parser. `read_argv_bytes`
+            // returned an exact-length libc allocation without a
+            // sentinel; grow by one and write `\0` at the end.
+            let terminated = libc::realloc(
+                data as *mut c_void,
+                data_size + 1,
+            ) as *mut u8;
+            if terminated.is_null() {
+                if !data.is_null() {
+                    libc::free(data as *mut c_void);
+                }
+                set_errmsg(
+                    errmsg,
+                    &MorlocError::Other(
+                        "form: list inline: realloc for NUL terminator failed".into(),
+                    ),
+                );
+                return ptr::null_mut();
+            }
+            *terminated.add(data_size) = 0;
+            let mut json_err: *mut c_char = ptr::null_mut();
+            let voidstar = read_json_with_schema(
+                ptr::null_mut(),
+                terminated as *mut c_char,
+                schema,
+                &mut json_err,
+            );
+            libc::free(terminated as *mut c_void);
+            if voidstar.is_null() {
+                if !json_err.is_null() {
+                    *errmsg = json_err;
+                } else {
+                    set_errmsg(
+                        errmsg,
+                        &MorlocError::Other(
+                            "form: list inline: JSON parse returned null".into(),
+                        ),
+                    );
+                }
+                return ptr::null_mut();
+            }
+            return wrap_voidstar_as_packet(voidstar as *mut c_void, schema, errmsg);
+        }
+        // Not JSON-shaped -- error with a clearer message than the
+        // previous "requires file/stdin" wording. Inline non-`[`
+        // input can't yield a list.
         if !data.is_null() {
             libc::free(data as *mut c_void);
         }
         set_errmsg(
             errmsg,
             &MorlocError::Other(
-                "form: list requires a file (or stdin) source; got an inline argv. \
-                 Pass a path that names an existing file, or use `-` for stdin."
+                "form: list: inline argv is not a JSON array (must start with `[`). \
+                 Pass a path to a file with one element per line, `-` for stdin, \
+                 or an inline JSON array like '[1,2,3]'."
                     .into(),
             ),
         );

@@ -14,12 +14,12 @@ all:
 	@: > obs.txt
 	morloc make --debug -o nexus main.loc 2> build.err
 	./nexus --log-dir logs1 --debug-cache-depth 10 \
-	    boomP 0 >/dev/null 2> obs.run_1.err; rc=$$?; \
+	    @ boomP 0 >/dev/null 2> obs.run_1.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "run1_fail_rc: PASS" >> obs.txt \
 	  || echo "run1_fail_rc: FAIL" >> obs.txt
 	./nexus --log-dir logs2 --debug-cache-depth 10 \
-	    boomP 0 >/dev/null 2> obs.run_2.err; rc=$$?; \
+	    @ boomP 0 >/dev/null 2> obs.run_2.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "run2_fail_rc: PASS" >> obs.txt \
 	  || echo "run2_fail_rc: FAIL" >> obs.txt

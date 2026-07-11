@@ -1,0 +1,15 @@
+-- The `mlcp_` prefix is reserved for compiler-synthesized internal
+-- entry points (`Frontend/Desugar.synthWithBinding` mangles child
+-- names `mlcp_<parent>_<long>` from `--' with:` docstring atoms).
+-- Allowing a user identifier to use the prefix would let the user
+-- shadow a synthesized name or be silently marked internal in the
+-- manifest. A parse-time check rejects any top-level SigE / AssE /
+-- SrcE binder whose name starts with `mlcp_`.
+
+module main (mlcp_stealth)
+
+import root-py
+
+source Py from "h.py" ("mlcp_stealth")
+
+mlcp_stealth :: Int -> Int

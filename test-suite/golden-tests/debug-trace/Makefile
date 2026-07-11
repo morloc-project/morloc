@@ -1,25 +1,3 @@
-# Debug-trace mode -- exercises `morloc make --debug` end-to-end
-# across all three pool languages.
-#
-#   (1) Failing run per language: triggers the language's throw
-#       mechanism (Py: ZeroDivisionError; Cpp: std::invalid_argument
-#       from throw.hpp; R: stop() from throw.R). The per-manifold
-#       try/catch dumps n0 to $RUNDIR/debug/inputs/, appends a frame,
-#       and the pool dispatcher's drain prepends the morloc trace to
-#       the fail packet's message. summary.json.error gets both the
-#       foreign traceback and the morloc trace.
-#
-#   (2) Successful run per language: with --debug active but no
-#       exception, no frames are recorded and the inputs dir is not
-#       even created (lazy materialization).
-#
-#   (3) Build WITHOUT --debug, fail the same way per language: only
-#       the foreign traceback appears; the morloc trace section is
-#       absent.
-#
-# obs.txt records PASS/FAIL assertions instead of raw output so the
-# test is stable across hash / timestamp / pid drift.
-
 INPUT_FAIL := 0
 INPUT_OK := 1
 
@@ -33,7 +11,7 @@ all:
 	$(MAKE) -s test_lang LANG=R CMD=boomR INPUT=$(INPUT_FAIL) OK_INPUT=$(INPUT_OK)
 	@# Build WITHOUT --debug, confirm no morloc trace.
 	morloc make -o nexus_plain main.loc 2> build_plain.err
-	./nexus_plain --log-dir logs_nodbg boomP $(INPUT_FAIL) >/dev/null 2> obs.nodbg.err; rc=$$?; \
+	./nexus_plain --log-dir logs_nodbg @ boomP $(INPUT_FAIL) >/dev/null 2> obs.nodbg.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "nodbg_fail_rc: PASS" >> obs.txt \
 	  || echo "nodbg_fail_rc: FAIL" >> obs.txt
@@ -48,7 +26,7 @@ all:
 # Per-language assertions. LANG = P/C/R; CMD is the failing export;
 # OK_CMD is derived as the matching ok* variant.
 test_lang:
-	@./nexus_debug --log-dir logs_dbg_$(LANG) $(CMD) $(INPUT) >/dev/null 2> obs.fail_$(LANG).err; \
+	@./nexus_debug --log-dir logs_dbg_$(LANG) @ $(CMD) $(INPUT) >/dev/null 2> obs.fail_$(LANG).err; \
 	  rc=$$?; test $$rc -ne 0 \
 	  && echo "fail_$(LANG)_rc_nonzero: PASS" >> obs.txt \
 	  || echo "fail_$(LANG)_rc_nonzero: FAIL" >> obs.txt
@@ -66,7 +44,7 @@ test_lang:
 	  || echo "fail_$(LANG)_inputs_dumped: FAIL" >> obs.txt
 	@# OK run: same compiled-with-debug binary, succeeds, no inputs dir.
 	@OK_CMD=$$(echo $(CMD) | sed 's/^boom/ok/'); \
-	  ./nexus_debug --log-dir logs_ok_$(LANG) $$OK_CMD $(OK_INPUT) >/dev/null 2> obs.ok_$(LANG).err
+	  ./nexus_debug --log-dir logs_ok_$(LANG) @ $$OK_CMD $(OK_INPUT) >/dev/null 2> obs.ok_$(LANG).err
 	@dir=$$(ls -d logs_ok_$(LANG)/*/ 2>/dev/null); grep -q '"status": "ok"' $$dir/summary.json \
 	  && echo "ok_$(LANG)_status: PASS" >> obs.txt \
 	  || echo "ok_$(LANG)_status: FAIL" >> obs.txt

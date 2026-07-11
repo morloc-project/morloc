@@ -62,6 +62,16 @@ cLang = Lang "c" "c"
 data FData = FData
   { fdataSocket :: Socket
   , fdataSubcommand :: Text
+    -- ^ CLI subcommand name (post `--' name:` rename if any).
+  , fdataTermName :: Text
+    -- ^ Original term name at the Haskell/morloc source level.
+    -- Distinct from 'fdataSubcommand' when the user wrote a
+    -- `--' name:` docstring atom to expose a different name on the
+    -- CLI. Terminal-action mangling (`mangleTerminalName`) at
+    -- desugar time uses the ORIGINAL term name, so downstream
+    -- consumers (manifest terminals emission, parent-arg-doc
+    -- inheritance) must use this field, NOT 'fdataSubcommand', to
+    -- reconstruct the mangled child name.
   , fdataMid :: Int
   , fdataType :: Type
   , fdataSubSockets :: [Socket]
@@ -72,6 +82,9 @@ data FData = FData
 
 data GastData = GastData
   { commandName :: Text
+    -- ^ CLI subcommand name (post `--' name:` rename if any).
+  , commandTermName :: Text
+    -- ^ Original term name. Same rationale as 'fdataTermName'.
   , commandMid :: Int
   , commandType :: Type
   , commandDocs :: CmdDocSet
@@ -79,6 +92,75 @@ data GastData = GastData
   , commandReturnSchema :: Text
   , commandArgSchemas :: [Text]
   }
+
+-- | Slice of a parent command's 'CmdDocSet' that internal
+-- (`mlcp_<parent>_<long>`) terminal-action commands inherit. The
+-- internal's 'Frontend/Desugar' synthesis emits an @AssE@ without a
+-- @SigE@, so its own 'CmdDocSet' has default 'cmdDocArgs' and empty
+-- return-doc description. Kept out of the slice: the internal's
+-- return Type differs (parent may return @Set Str@, internal
+-- @<IO> ()@); 'cmdDocTerminals' must stay empty to prevent recursive
+-- composition; 'cmdDocDesc' / 'cmdDocName' stay the internal's own.
+data ParentDocSlice = ParentDocSlice
+  { parentArgs :: [CmdArg]
+  , parentRetDesc :: [Text]
+  }
+
+-- | Uniform accessor over 'FData' / 'GastData' so terminal-action
+-- inheritance doesn't repeat itself for the two shapes.
+class HasCmdDocSet a where
+  termNameOf :: a -> EVar
+  docSetOf   :: a -> CmdDocSet
+  setDocSet  :: CmdDocSet -> a -> a
+
+instance HasCmdDocSet FData where
+  termNameOf = EV . fdataTermName
+  docSetOf = fdataCmdDocSet
+  setDocSet ds fd = fd { fdataCmdDocSet = ds }
+
+instance HasCmdDocSet GastData where
+  termNameOf = EV . commandTermName
+  docSetOf = commandDocs
+  setDocSet ds g = g { commandDocs = ds }
+
+-- | Map from each compiler-synthesized `--' with:` internal command
+-- name (the mangled `mlcp_<parent>_<long>`) to the parent's inherit
+-- slice. Keying uses the ORIGINAL term name: 'synthWithBinding'
+-- mangles pre-rename, so a parent with @--' name:@ still exposes its
+-- child as @mlcp_<termname>_<long>@.
+buildTerminalParentArgMap :: [FData] -> [GastData] -> Map.Map EVar ParentDocSlice
+buildTerminalParentArgMap fdata gasts =
+  Map.fromList (concatMap entriesFor fdata ++ concatMap entriesFor gasts)
+  where
+    entriesFor :: HasCmdDocSet a => a -> [(EVar, ParentDocSlice)]
+    entriesFor x =
+      let ds = docSetOf x
+          slice = ParentDocSlice
+                    { parentArgs = cmdDocArgs ds
+                    , parentRetDesc = snd (cmdDocRet ds)
+                    }
+       in [ (mangleTerminalName (termNameOf x) (wsLong w), slice)
+          | w <- cmdDocTerminals ds
+          ]
+
+inheritParentArgDocs :: HasCmdDocSet a => Map.Map EVar ParentDocSlice -> a -> a
+inheritParentArgDocs parentMap x =
+  case Map.lookup (termNameOf x) parentMap of
+    Just slice -> setDocSet (applyParentSlice slice (docSetOf x)) x
+    Nothing    -> x
+
+-- | Overlay a parent's slice onto an internal command's own
+-- 'CmdDocSet': parent arg specs replace the internal's defaults;
+-- parent's return-doc description fills the internal's only when the
+-- internal has none. Return Type stays the internal's own.
+applyParentSlice :: ParentDocSlice -> CmdDocSet -> CmdDocSet
+applyParentSlice slice ds =
+  let (retT, retDesc) = cmdDocRet ds
+      retDesc' = if null retDesc then parentRetDesc slice else retDesc
+   in ds
+        { cmdDocArgs = parentArgs slice
+        , cmdDocRet = (retT, retDesc')
+        }
 
 data NexusExpr
   = AppX Text NexusExpr [NexusExpr]
@@ -181,6 +263,7 @@ getFData (t, i, lang, doc, sockets) = do
     FData
       { fdataSocket = socket
       , fdataSubcommand = maybe (unEVar name') id (cmdDocName doc)
+      , fdataTermName = unEVar name'
       , fdataMid = i
       , fdataType = t
       , fdataSubSockets = sockets
@@ -457,6 +540,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   return $
     GastData
       { commandName = maybe (unEVar gname) id (cmdDocName docs)
+      , commandTermName = unEVar gname
       , commandMid = i
       , commandType = gtype
       , commandDocs = docs
@@ -2232,8 +2316,13 @@ buildManifest ManifestInputs{..} =
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
         , ("constraints", jsonArr [])
-        , ("internal", jsonBool (isInternalTerminalName (fdataSubcommand fd)))
-        , ("terminals", terminalsJson (fdataSubcommand fd) (cmdDocTerminals (fdataCmdDocSet fd)))
+        , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
+        -- Terminals array must use the ORIGINAL term name so the
+        -- emitted `entry` field points at the actual synthesized
+        -- `mlcp_<termname>_<long>` command (`Frontend/Desugar`
+        -- mangles pre-rename). Using the display name would emit
+        -- dead pointers whenever the parent has a `--' name:`.
+        , ("terminals", terminalsJson (fdataTermName fd) (cmdDocTerminals (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
         ]
@@ -2248,8 +2337,9 @@ buildManifest ManifestInputs{..} =
         , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
-        , ("internal", jsonBool (isInternalTerminalName (commandName g)))
-        , ("terminals", terminalsJson (commandName g) (cmdDocTerminals (commandDocs g)))
+        , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
+        -- Same term-name-for-mangling rationale as `remoteCmdJson`.
+        , ("terminals", terminalsJson (commandTermName g) (cmdDocTerminals (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
         ]
@@ -2347,11 +2437,19 @@ generate cs rASTs helperRASTs = do
   helperSockets <- fmap concat (mapM findSockets helperRASTs)
 
   xs <- mapM makeFData rASTs
-  fdata <- CM.mapM getFData xs
+  fdataRaw <- CM.mapM getFData xs
       |>> map (\fd -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) helperSockets })
 
   -- Extract data for pure commands
-  gasts <- mapM annotateGasts cs
+  gastsRaw <- mapM annotateGasts cs
+
+  -- Give each `mlcp_<parent>_<long>` internal command the parent's
+  -- per-arg shape docs. Without this the dispatch loader sees the
+  -- internal's default @cmdDocArgs@ and loads positional files in
+  -- the wrong wire format.
+  let parentArgMap = buildTerminalParentArgMap fdataRaw gastsRaw
+      fdata = map (inheritParentArgDocs parentArgMap) fdataRaw
+      gasts = map (inheritParentArgDocs parentArgMap) gastsRaw
 
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime

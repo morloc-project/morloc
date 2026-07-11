@@ -12,8 +12,8 @@ all:
 	: > obs.txt
 	morloc make -o prog main.loc 2> build.err
 	# Materialize a small corpus of data files.
-	./prog -f packet     -o data.packet                              2>> obs.err
-	./prog -f packet -z 5 -o data.packet.zst                         2>> obs.err
+	./prog -f packet      -o data.packet @ 2>> obs.err
+	./prog -f packet -z 5 -o data.packet.zst @ 2>> obs.err
 	printf '["a","b","c"]'        >  data.json
 	$(NEXUS) view data.json -f mpk --schema "as" -o data.mpk                 2>> obs.err
 	# Plain text README -- exercises the bug fix: ASCII text files

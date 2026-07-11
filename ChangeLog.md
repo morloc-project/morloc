@@ -1,11 +1,27 @@
-0.92.0 [2026-07-09]
+0.93.0 [2026-07-11]
 -------------------
 
- - add `with:` docstring field for terminal action
- - allow stream-packet files as CLI arguments
+ * Irrefutable patterns
+   - `foo (a, b) = b`
+   - `foo {a=x, b=y} = y`
+   - `(\(a, b) -> b)`
+   - works for tuples and records (but not lists)
+
+ * Cleaner model separating nexus and command args:
+   - ALL nexus args are on the left of the separator (@ or subcommand)
+   - ALL command args are on the right
+   - this include -h, and --help is no longer the special nexus help
+
+ * Several bug fixes
+
+0.92.0 [2026-07-08]
+-------------------
+
+ * add `with:` docstring field for terminal action
+
+ * allow stream-packet files as CLI arguments
    - [a] types slurp the packet into memory
    - `IStream a` types open the file for streaming
-
 
 0.91.0 [2026-07-03]
 -------------------

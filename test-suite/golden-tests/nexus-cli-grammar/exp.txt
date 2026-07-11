@@ -1,0 +1,16 @@
+"x:2"
+"x:2"
+"x:2"
+"X:2"
+"X:2"
+"X:2"
+"x:2"
+OK
+OK
+OK
+OK
+"fhead:7"
+"describe:42"
+"fhead:7"
+OK: nexus flag right of subcmd rejected
+OK: typo rejected

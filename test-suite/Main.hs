@@ -6,9 +6,11 @@ import Test.Tasty
 
 import EffectBoundaryTests (effectBoundaryTests)
 import GoldenMakefileTests (goldenMakefileTest)
+import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
+import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import UnitTypeTests
 
@@ -48,6 +50,7 @@ main = do
       , natDimTests
       , typedefKindVarTests
       , letBindingTests
+      , irrefutablePatternTests
       , aliasConstructorTests
       , newtypeTests
       , literalDispatchTests
@@ -58,7 +61,9 @@ main = do
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
+      , irrefutablePatternLexerTests
       , effectBoundaryTests
+      , schemaHintTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -92,6 +97,7 @@ main = do
       , golden "view-patterns" "view-patterns"
       , golden "nexus-file-footerless" "nexus-file-footerless"
       , golden "pattern-corpus" "pattern-corpus"
+      , golden "irrefutable-patterns" "irrefutable-patterns"
       , golden "intrmap-tuple-broadcast" "intrmap-tuple-broadcast"
       , golden "ifile-data-patterns" "ifile-data-patterns"
       , golden "ostream-write-roundtrip" "ostream-write-roundtrip"
@@ -124,6 +130,7 @@ main = do
 
       , golden "cli-docstring-negatives" "cli-docstring-negatives"
       , golden "cli-docstring-shapes" "cli-docstring-shapes"
+      , golden "cli-docstring-map-table" "cli-docstring-map-table"
 
       , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
       , golden "nexus-packet-output-zstd" "nexus-packet-output-zstd"
@@ -256,6 +263,10 @@ main = do
       , golden "nexus-let-pure" "nexus-let-pure"
       , golden "nexus-let-lambda" "nexus-let-lambda"
       , golden "nexus-toplevel-null" "nexus-toplevel-null"
+      , golden "nexus-cli-grammar" "nexus-cli-grammar"
+      , golden "terminal-action-rename" "terminal-action-rename"
+      , golden "cli-error-hints" "cli-error-hints"
+      , golden "cli-error-diagnostics" "cli-error-diagnostics"
       , golden "nexus-file-and-view" "nexus-file-and-view"
       , golden "nexus-file-stream" "nexus-file-stream"
       , golden "demo-trimming" "demo-trimming"

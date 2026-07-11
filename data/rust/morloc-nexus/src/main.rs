@@ -295,11 +295,13 @@ fn main() {
         process::redirect_stdout_to(config.output_path.as_deref());
 
         // Route through the manifest-driven parser. `user_zone`
-        // holds the post-`@` (or post-target) slice that the
-        // top-level parse handed off; clap's auto-help and unknown-
-        // flag rejection apply to that slice against the
-        // manifest's command surface. parse_run also extracts
-        // capability-gated flags (`--debug-*`) into `config`.
+        // is the command zone from the pre-scan split -- everything
+        // to the right of `@` (or, in multi-export mode, to the
+        // right of the subcommand-name boundary). clap-manifest
+        // applies auto-help and unknown-flag rejection against the
+        // manifest's command surface. Nexus flags placed in the
+        // command zone are rejected here as unknown; users must
+        // place them left of `@` or left of the subcommand.
         let parsed =
             phase2::parse_run(&manifest, &user_zone, &prog_name);
         let cmd = &manifest.commands[parsed.cmd_index];

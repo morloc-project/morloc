@@ -1,0 +1,34 @@
+--- letTuple0 ---
+10
+--- letTuple1 ---
+20
+--- letRecordA ---
+1
+--- letRecordB ---
+2
+--- letRecordReorder ---
+3
+--- letWildcardOnly ---
+5
+--- letAsPair ---
+200
+--- fnTupleFst ---
+1
+--- fnTupleSnd ---
+2
+--- fnRecordPick ---
+5
+--- fnNestedMix ---
+2
+--- lamTupleFst ---
+3
+--- lamWildcardKeep ---
+42
+--- doTupleBind ---
+11
+--- doRecordBind ---
+44
+--- doWildcardBind ---
+22
+--- doNestedBind ---
+77

@@ -363,7 +363,10 @@ data LowerConfig m = LowerConfig
   -- thrown exception, serializes each arg via its 'SerialAST', calls
   -- @morloc_debug_record_frame@ with the (mid, schema, packet bytes)
   -- tuples, and re-raises. Zero cost on the happy path: only the
-  -- try-frame overhead, no serialization or hashing.
+  -- try-frame overhead, no serialization or hashing. Each translator's
+  -- lcDebugWrap closes over its own manifold @(name, srcloc)@ lookup
+  -- (from 'makeManifoldDebugInfoLookup') and bakes the strings into the
+  -- codegen'd call so the runtime can render them next to @mid=@.
   , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ Let binding assembly at the PoolDocs level
   , lcReleaseStmt :: Text -> MDoc

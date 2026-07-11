@@ -12,7 +12,7 @@ all:
 	@# at least one .pkt dumped to disk.
 	./nexus --log-dir logs_unlimited \
 	    --debug-recursion-cap 0 --debug-cache-depth 0 \
-	    countdownP 5 >/dev/null 2> obs.run_u.err; rc=$$?; \
+	    @ countdownP 5 >/dev/null 2> obs.run_u.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "unlimited_fail_rc: PASS" >> obs.txt \
 	  || echo "unlimited_fail_rc: FAIL" >> obs.txt
@@ -32,7 +32,7 @@ all:
 	@# .pkt dumps land on disk per the depth cap.
 	./nexus --log-dir logs_capped \
 	    --debug-recursion-cap 3 --debug-cache-depth 2 \
-	    countdownP 5 >/dev/null 2> obs.run_c.err; rc=$$?; \
+	    @ countdownP 5 >/dev/null 2> obs.run_c.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "capped_fail_rc: PASS" >> obs.txt \
 	  || echo "capped_fail_rc: FAIL" >> obs.txt

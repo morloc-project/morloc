@@ -3059,6 +3059,8 @@ extern void morloc_debug_flush_dispatch(void);
 // codegen-emitted try/catch wraps in pool.R.
 extern void morloc_debug_record_frame(
     uint32_t midx,
+    const char* name,
+    const char* srcloc,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
@@ -3293,9 +3295,16 @@ SEXP morloc_debug_flush_dispatch_r(void) {
     return R_NilValue;
 }
 
-SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
+SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
+                                 SEXP packets_r, SEXP schemas_r) {
     if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
         MORLOC_ERROR("debug_record_frame: midx must be a single integer");
+    }
+    if (TYPEOF(name_r) != STRSXP || LENGTH(name_r) != 1) {
+        MORLOC_ERROR("debug_record_frame: name must be a single string");
+    }
+    if (TYPEOF(srcloc_r) != STRSXP || LENGTH(srcloc_r) != 1) {
+        MORLOC_ERROR("debug_record_frame: srcloc must be a single string");
     }
     if (TYPEOF(packets_r) != VECSXP) {
         MORLOC_ERROR("debug_record_frame: packets must be a list of raw vectors");
@@ -3307,8 +3316,15 @@ SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
     if (XLENGTH(schemas_r) != n_args) {
         MORLOC_ERROR("debug_record_frame: packets and schemas length mismatch");
     }
+    // "" == "no info attached"; the Rust runtime treats "" and NULL the
+    // same. NA_STRING falls back to "" here so downstream sees empty.
+    SEXP name_elt = STRING_ELT(name_r, 0);
+    SEXP srcloc_elt = STRING_ELT(srcloc_r, 0);
+    const char* name_c = (name_elt == NA_STRING) ? "" : CHAR(name_elt);
+    const char* srcloc_c = (srcloc_elt == NA_STRING) ? "" : CHAR(srcloc_elt);
     if (n_args == 0) {
-        morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], NULL, NULL, 0);
+        morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], name_c, srcloc_c,
+                                  NULL, NULL, 0);
         return R_NilValue;
     }
     const uint8_t** packet_ptrs = (const uint8_t**)R_alloc(n_args, sizeof(uint8_t*));
@@ -3325,8 +3341,8 @@ SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
         }
         schema_ptrs[i] = CHAR(s);
     }
-    morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], packet_ptrs,
-        schema_ptrs, (size_t)n_args);
+    morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], name_c, srcloc_c,
+        packet_ptrs, schema_ptrs, (size_t)n_args);
     return R_NilValue;
 }
 
@@ -3459,7 +3475,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
         {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
         {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
-        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 3},
+        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 5},
         {"r_morloc_debug_flush_dispatch", (DL_FUNC) &morloc_debug_flush_dispatch_r, 0},
         {"r_morloc_cache_lookup", (DL_FUNC) &morloc_cache_lookup_r, 2},
         {"r_morloc_cache_store", (DL_FUNC) &morloc_cache_store_r, 4},

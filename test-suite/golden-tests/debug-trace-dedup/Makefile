@@ -4,13 +4,9 @@
 # to that single file.
 
 all:
-	rm -rf *.err logs nexus pools build.err
-	@: > obs.txt
+	rm -rf *.err logs nexus pools build.err obs.txt
 	morloc make --debug -o nexus main.loc 2> build.err
-	@# --debug-cache-depth 10 lets BOTH args write to disk; dedup
-	@# (not depth) is what keeps the count at 1.
-	./nexus --log-dir logs --debug-cache-depth 10 \
-	    boomP2 7 7 >/dev/null 2> obs.run.err; rc=$$?; \
+	./nexus --log-dir logs --debug-cache-depth 10 @ boomP2 7 7 >/dev/null 2> obs.run.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "fail_rc_nonzero: PASS" >> obs.txt \
 	  || echo "fail_rc_nonzero: FAIL" >> obs.txt

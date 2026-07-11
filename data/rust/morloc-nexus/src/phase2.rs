@@ -92,7 +92,16 @@ pub fn parse_run(
 
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
-        Err(e) => e.exit(),
+        Err(e) => {
+            // Append a placement hint when the rejected token is a
+            // known nexus flag misplaced in the command zone.
+            if let Some(hint) = nexus_flag_hint_for_error(&e) {
+                eprint!("{}", e);
+                eprintln!("{}", hint);
+                std::process::exit(2);
+            }
+            e.exit()
+        }
     };
 
     if single {
@@ -126,6 +135,36 @@ pub fn parse_run(
     let values = extract_values(cmd, chosen_matches);
     let cmd_index = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
     ParsedCommand { cmd_index, values }
+}
+
+/// One-line "did you mean to place this left of `@`" hint when a
+/// clap-manifest error rejects a token that matches a known long
+/// nexus flag. Short flags aren't hinted -- their palettes overlap
+/// between nexus and user programs by design.
+fn nexus_flag_hint_for_error(err: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+
+    if err.kind() != ErrorKind::UnknownArgument {
+        return None;
+    }
+    let token = err.context().find_map(|(k, v)| match (k, v) {
+        (ContextKind::InvalidArg, ContextValue::String(s)) => Some(s.clone()),
+        _ => None,
+    })?;
+    let name_only = token.split_once('=').map(|(n, _)| n).unwrap_or(&token);
+    if name_only.strip_prefix("--").is_none() {
+        return None;
+    }
+    if !crate::cli::all_long_nexus_flags().contains(name_only) {
+        return None;
+    }
+    Some(format!(
+        "hint: `{name}` is a nexus option, not a command option. \
+         Place it left of `@` (single-export) or left of the \
+         subcommand (multi-export), e.g. `./prog {name} X @ cmd arg` \
+         or `./prog {name} X cmd arg`.",
+        name = name_only,
+    ))
 }
 
 /// If any terminal-action flag matched, swap the dispatch target to

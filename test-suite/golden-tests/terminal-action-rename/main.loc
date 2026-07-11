@@ -1,0 +1,42 @@
+-- Regression test for the parent `--' name:` + `--' with:` combo.
+--
+-- Before the fix, Nexus.hs computed the mangled child name using the
+-- parent's CLI display name (post-rename), while
+-- Frontend/Desugar.synthWithBinding mangled using the original term
+-- name. Result: the manifest's `terminals[].entry` pointer named
+-- `mlcp_<displayname>_<long>`, but the actual synthesized command was
+-- `mlcp_<termname>_<long>`. The nexus's `-y` redirect either found
+-- nothing and fell through to the parent (silently disabling the
+-- terminal action), or hit a wrong-shape internal command (schema
+-- mismatch on file inputs).
+--
+-- The fix threads the original term name through FData/GastData as
+-- `fdataTermName`/`commandTermName` and uses it for BOTH the
+-- manifest terminals-array emission AND the parent-arg-doc
+-- inheritance map.
+--
+-- This test uses:
+--   * A parent named `count_entries` at the source level but exposed
+--     on the CLI as `tally` via `--' name: tally`.
+--   * A terminal action `-y/--shout=shout` that composes with the
+--     parent to uppercase its Str result.
+--   * A positional Map Str Int arg with `form: list` so the fix's
+--     inheritance-of-arg-shape path is exercised too.
+
+module main (count_entries)
+
+import map-py (Map)
+import set-py (Set)
+
+--' Uppercase a string.
+shout :: Str -> Str
+
+--' Count entries with value >= 10 and tag the count with a prefix.
+--' name: tally
+--' with: -y/--shout=shout
+count_entries ::
+  --' Entries to filter
+  --' form: list
+  Map Str Int -> Str
+
+source Py from "helpers.py" ("count_entries", "shout")

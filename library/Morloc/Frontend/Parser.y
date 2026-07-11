@@ -48,7 +48,11 @@ import qualified Morloc.BaseTypes as BT
 -- - 1 from import_module_name (module_comp could be namespace prefix or whole name)
 -- - 0 from var_expr qualified name and import 'as' namespace (no new conflicts)
 -- - 13 from type-level Nat arithmetic ('+' and '*' in add_type/mul_type rules)
-%expect 92
+-- - 3 from irrefutable patterns: `_` as atom in atom_expr chain, `@`
+--   as-pattern glue, and do-stmt `atom_expr '<-' expr | expr` overlap.
+--   All resolve correctly by shift (extend the atom chain / take the
+--   bind branch).
+%expect 95
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -67,6 +71,7 @@ import qualified Morloc.BaseTypes as BT
   '_'        { Located _ TokUnderscore _ }
   '!'        { Located _ TokBang _ }
   '?'        { Located _ TokQuestion _ }
+  '@'        { Located _ TokAt _ }
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
   NSDOT      { Located _ TokNsDot _ }
@@ -180,9 +185,9 @@ top_decl :: { [Loc CstExpr] }
 sig_or_ass :: { [Loc CstExpr] }
   : evar_or_op '::' sig_type
       { [at $1 (CSigE (toEVar $1) $3)] }
-  | evar_or_op lower_names '=' expr opt_where_decls
+  | evar_or_op atom_exprs '=' expr opt_where_decls
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
-  | evar_or_op lower_names guard_clauses ':' expr opt_where_decls
+  | evar_or_op atom_exprs guard_clauses ':' expr opt_where_decls
       { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $5 $6)] }
 
 guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
@@ -586,23 +591,22 @@ let_expr :: { Loc CstExpr }
   | 'let' '{' let_bindings_explicit '}' let_expr
       { at $1 (CLetE $3 $5) }
 
-let_bindings :: { [(EVar, Loc CstExpr)] }
+let_bindings :: { [(Loc CstExpr, Loc CstExpr)] }
   : let_binding                        { [$1] }
   | let_bindings VSEMI let_binding     { $1 ++ [$3] }
 
-let_bindings_explicit :: { [(EVar, Loc CstExpr)] }
+let_bindings_explicit :: { [(Loc CstExpr, Loc CstExpr)] }
   : let_binding                              { [$1] }
   | let_bindings_explicit ';' let_binding    { $1 ++ [$3] }
 
-let_binding :: { (EVar, Loc CstExpr) }
-  : LOWER '=' expr                     { (EV (getName $1), $3) }
-  | '_' '=' expr                       { (EV "_", $3) }
+let_binding :: { (Loc CstExpr, Loc CstExpr) }
+  : atom_expr '=' expr                 { ($1, $3) }
   | LOWER guard_clauses ':' expr
-      { (EV (getName $1), Loc ($1 <-> $4) (CGuardExprE $2 $4)) }
+      { (at $1 (CVarE (EV (getName $1))), Loc ($1 <-> $4) (CGuardExprE $2 $4)) }
 
 lambda_expr :: { Loc CstExpr }
-  : '\\' lower_names1 '->' expr
-      { at $1 (CLamE (map EV $2) $4) }
+  : '\\' atom_exprs1 '->' expr
+      { at $1 (CLamE $2 $4) }
 
 infix_expr :: { Loc CstExpr }
   : operand                  { $1 }
@@ -642,6 +646,16 @@ atom_expr :: { Loc CstExpr }
   | do_expr                   { $1 }
   | null_expr                 { $1 }
   | intrinsic_expr            { $1 }
+  | wildcard_expr             { $1 }
+  | as_expr                   { $1 }
+
+-- Legal only in binding positions; rejected elsewhere in Desugar.
+wildcard_expr :: { Loc CstExpr }
+  : '_'                       { at $1 CUnderscoreE }
+
+as_expr :: { Loc CstExpr }
+  : LOWER '@' atom_expr
+      { Loc ($1 <-> $3) (CAsE (EV (getName $1)) $3) }
 
 null_expr :: { Loc CstExpr }
   : 'Null'                    { at $1 CNullE }
@@ -698,9 +712,9 @@ do_stmts_explicit :: { [CstDoStmt] }
   | do_stmts_explicit ';' do_stmt        { $1 ++ $3 }
 
 do_stmt :: { [CstDoStmt] }
-  : LOWER '<-' expr            { [CstDoBind (EV (getName $1)) $3] }
+  : atom_expr '<-' expr        { [CstDoBind $1 $3] }
   | 'let' VLBRACE let_bindings VRBRACE
-      { [CstDoLet (EV v) e | (EV v, e) <- $3] }
+      { [CstDoLet p e | (p, e) <- $3] }
   | expr                       { [CstDoBare $1] }
 
 getter_expr :: { Loc CstExpr }
@@ -947,13 +961,10 @@ where_items_explicit :: { [Loc CstExpr] }
 where_item :: { [Loc CstExpr] }
   : sig_or_ass                { $1 }
 
-lower_names :: { [Text] }
-  : {- empty -}               { [] }
-  | lower_names LOWER         { $1 ++ [getName $2] }
-
-lower_names1 :: { [Text] }
-  : LOWER                     { [getName $1] }
-  | lower_names1 LOWER        { $1 ++ [getName $2] }
+-- Zero-or-more atom_expr for function-def / declaration parameter lists.
+atom_exprs :: { [Loc CstExpr] }
+  : {- empty -}                          { [] }
+  | atom_exprs atom_expr                 { $1 ++ [$2] }
 
 {
 

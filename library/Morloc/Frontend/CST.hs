@@ -25,6 +25,7 @@ module Morloc.Frontend.CST
   , CstAccessorBody (..)
   , CstBracketAxis (..)
   , CstAccessorTail (..)
+  , CstIrrefPat (..)
   , at
   , (<->)
   , valOf
@@ -85,8 +86,8 @@ data CstExpr
     CModE (Maybe Text) CstExport [Loc CstExpr]
   | CImpE Import
   | CSigE EVar CstSigType
-  | CAssE EVar [Text] (Loc CstExpr) [Loc CstExpr]
-  | CGuardedAssE EVar [Text] [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr) [Loc CstExpr]
+  | CAssE EVar [Loc CstExpr] (Loc CstExpr) [Loc CstExpr]
+  | CGuardedAssE EVar [Loc CstExpr] [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr) [Loc CstExpr]
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
   | CIstE ClassName [TypeU] [Loc CstExpr]
@@ -96,8 +97,8 @@ data CstExpr
   | CSrcNewE Located (Maybe Text) [(Bool, Text, Located)]
   | -- Expressions
     CAppE (Loc CstExpr) [Loc CstExpr]
-  | CLamE [EVar] (Loc CstExpr)
-  | CLetE [(EVar, Loc CstExpr)] (Loc CstExpr)
+  | CLamE [Loc CstExpr] (Loc CstExpr)
+  | CLetE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
   | CBopE (Loc CstExpr) Located (Loc CstExpr)
   | CLabeledVarE Text EVar  -- label:var (e.g., large:mean)
   | CVarE EVar
@@ -117,6 +118,8 @@ data CstExpr
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
+  | CUnderscoreE  -- ^ '_' -- only legal in binding positions, checked in Desugar
+  | CAsE EVar (Loc CstExpr)  -- ^ label@expr -- only legal in binding positions, checked in Desugar
   -- Operator sections (Haskell naming: left = left operand given, right = right operand given)
   | CLeftSecE !(Loc CstExpr) !Located  -- ^ (expr op) left section: \x -> expr op x
   | CRightSecE !Located !(Loc CstExpr)  -- ^ (op expr) right section: \x -> x op expr
@@ -152,9 +155,22 @@ data CstSigItem = CstSigItem EVar CstSigType
   deriving (Show, Eq)
 
 data CstDoStmt
-  = CstDoBind EVar (Loc CstExpr)
+  = CstDoBind (Loc CstExpr) (Loc CstExpr)
   | CstDoBare (Loc CstExpr)
-  | CstDoLet EVar (Loc CstExpr)
+  | CstDoLet (Loc CstExpr) (Loc CstExpr)
+  deriving (Show, Eq)
+
+-- | Concrete-syntax irrefutable pattern. Every well-typed receiver
+-- matches (no literals, no alternatives) -- hence "irrefutable".
+-- Built by 'Morloc.Frontend.Desugar.exprToIrrefPat' from an expression
+-- appearing in a binding position, then eliminated into 'LetE' chains
+-- that use the standard 'Pattern' / 'Selector' accessor infrastructure.
+data CstIrrefPat
+  = CIPatVar EVar                            -- ^ x
+  | CIPatWild                                -- ^ _
+  | CIPatTup [Loc CstIrrefPat]               -- ^ (p1, ..., pn), n >= 2
+  | CIPatRec [(Key, Loc CstIrrefPat)]        -- ^ {a=p1, b=p2}
+  | CIPatAs EVar (Loc CstIrrefPat)           -- ^ label@pat
   deriving (Show, Eq)
 
 data CstAccessorBody

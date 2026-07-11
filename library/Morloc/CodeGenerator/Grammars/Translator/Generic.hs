@@ -104,9 +104,10 @@ translateBuiltin lang desc srcs es = do
   homeDir <- asks MC.configHome
   let preambleDocs = map (substitutePreamble home lib opt homeDir) preambleTemplates
 
+  debugInfo <- makeManifoldDebugInfoLookup
   let allSources = preambleDocs ++ includeDocs
       (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -154,8 +155,9 @@ translateExternal cmd lang desc srcs es = do
           then qualifiedSrcName lib
           else \src -> pretty (srcName src)
 
+  debugInfo <- makeManifoldDebugInfoLookup
   let (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -362,14 +364,26 @@ makeImportPath lib =
     toLower' c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
     dropExtensions = reverse . drop 1 . dropWhile (/= '.') . reverse
 
-translateSegment :: LangDescriptor -> (Source -> MDoc) -> SerialManifold -> IndexM MDoc
-translateSegment desc srcNamer m0 =
-  let cfg = genericLowerConfig desc srcNamer
+translateSegment ::
+  LangDescriptor ->
+  (Source -> MDoc) ->
+  (Int -> (Text, Text)) ->
+  SerialManifold ->
+  IndexM MDoc
+translateSegment desc srcNamer debugInfo m0 =
+  let cfg = genericLowerConfig desc srcNamer debugInfo
    in renderPoolDocs <$> foldWithSerialManifoldM (defaultFoldRules cfg) m0
 
--- | Build a LowerConfig from a LangDescriptor and a source name function
-genericLowerConfig :: LangDescriptor -> (Source -> MDoc) -> LowerConfig IndexM
-genericLowerConfig desc srcNamer = cfg
+-- | Build a LowerConfig from a LangDescriptor, a source-name function,
+-- and a manifold debug-info lookup (precomputed from 'stateName' and
+-- 'stateSourceMap' by the caller because IndexM has no access to
+-- MorlocMonad). The lookup is closed over by 'lcDebugWrap'.
+genericLowerConfig ::
+  LangDescriptor ->
+  (Source -> MDoc) ->
+  (Int -> (Text, Text)) ->
+  LowerConfig IndexM
+genericLowerConfig desc srcNamer debugInfo = cfg
   where
     cfg =
       LowerConfig
@@ -419,7 +433,7 @@ genericLowerConfig desc srcNamer = cfg
                   <> tupled [makeGenericSocketPath desc socketFile, midDoc, argsDoc]
         , lcRemoteCall = genericRemoteCall desc
         , lcCacheBody = genericCacheBody desc cfg
-        , lcDebugWrap = genericDebugWrap desc cfg
+        , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
         , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
@@ -599,11 +613,12 @@ genericCacheBody desc cfg resSa lbl midx args bodyPool = do
 genericDebugWrap ::
   LangDescriptor ->
   LowerConfig IndexM ->
+  (Int -> (Text, Text)) ->
   Int ->
   [(Arg TypeM, SerialAST)] ->
   PoolDocs ->
   IndexM PoolDocs
-genericDebugWrap desc cfg midx args bodyPool = do
+genericDebugWrap desc cfg debugInfo midx args bodyPool = do
   let intr = pretty (ldIntrinsicPrefix desc)
       assign = pretty (ldAssignOp desc)
       hp = pretty (ldHelperVarPrefix desc)
@@ -611,6 +626,9 @@ genericDebugWrap desc cfg midx args bodyPool = do
       excVar = hp <> "debug_e"
       dumpExcVar = hp <> "dump_e"
       midxLit = pretty midx <> pretty (ldIntLiteralSuffix desc)
+      (nameStr, srclocStr) = debugInfo midx
+      nameLit = dquotes (pretty (escapeStringLit nameStr))
+      srclocLit = dquotes (pretty (escapeStringLit srclocStr))
   preparedArgs <- mapM (prepareCacheArg desc cfg) args
   let argRefs = [r | (r, _, _) <- preparedArgs]
       schemaRefs = [s | (_, s, _) <- preparedArgs]
@@ -624,7 +642,7 @@ genericDebugWrap desc cfg midx args bodyPool = do
       packetList = genericList argRefs
       schemaList = atomicList schemaRefs
       recordCall = intr <> "debug_record_frame"
-        <> tupled [midxLit, packetList, schemaList]
+        <> tupled [midxLit, nameLit, srclocLit, packetList, schemaList]
       catchStmts = catchSerializeStmts ++ [recordCall]
       -- Defensive inner wrap around the dump: a serialization failure
       -- during the catch must NOT replace the original exception. If

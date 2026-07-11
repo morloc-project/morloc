@@ -1,0 +1,9 @@
+module main (tally)
+
+import map-py (Map)
+
+source Py from "helpers.py" ("tally")
+
+tally ::
+  --' form: list
+  Map Str Int -> Int

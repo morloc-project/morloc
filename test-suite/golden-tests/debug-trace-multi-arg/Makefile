@@ -10,7 +10,7 @@ all:
 	morloc make --debug -o nexus main.loc 2> build.err
 	@# Use --debug-cache-depth=10 so all 3 args land on disk (the
 	@# default of 1 would only dump one of them).
-	./nexus --log-dir logs --debug-cache-depth 10 boomP3 6.5 0 "tag-a" >/dev/null 2> obs.run.err; \
+	./nexus --log-dir logs --debug-cache-depth 10 @ boomP3 6.5 0 "tag-a" >/dev/null 2> obs.run.err; \
 	  rc=$$?; test $$rc -ne 0 \
 	  && echo "fail_rc_nonzero: PASS" >> obs.txt \
 	  || echo "fail_rc_nonzero: FAIL" >> obs.txt

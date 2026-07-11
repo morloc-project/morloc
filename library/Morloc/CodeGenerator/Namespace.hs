@@ -145,11 +145,17 @@ module Morloc.CodeGenerator.Namespace
     -- ** weird baby schemes
   , MonoidFold (..)
   , makeMonoidFoldDefault
+
+    -- ** debug-trace codegen helpers
+  , sanitizeManifoldName
+  , renderSrcLocForDebug
   ) where
 
 import Control.Monad.Identity (runIdentity)
+import qualified Data.Char as Char
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import Morloc.Data.Doc
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
@@ -1737,3 +1743,30 @@ data ArgPosDocSet = ArgPosDocSet
   , argPosDocListChecks :: [Check]
   }
   deriving (Show, Ord, Eq)
+
+-- | Sanitize a morloc term name for embedding in debug-trace output.
+-- Non-ident characters collapse to a single '_'; leading digits are
+-- prefixed with '_' so the result is a valid identifier fragment in
+-- Python/R/C++. Empty input yields the empty string (caller decides
+-- the fallback).
+sanitizeManifoldName :: Text -> Text
+sanitizeManifoldName t
+  | T.null t = t
+  | otherwise = leading (T.pack (collapse (T.unpack t)))
+  where
+    ok c = Char.isAlphaNum c || c == '_'
+    collapse [] = []
+    collapse (c : cs)
+      | ok c = c : collapse cs
+      | otherwise = '_' : collapse (dropWhile (not . ok) cs)
+    leading s = case T.uncons s of
+      Just (c, _) | Char.isDigit c -> T.cons '_' s
+      _ -> s
+
+-- | Render a 'SrcLoc' as @path:line:col@ for embedding in a debug
+-- string literal. Returns 'Nothing' when no path is available -- the
+-- runtime uses that to omit the location field from the trace line.
+renderSrcLocForDebug :: SrcLoc -> Maybe Text
+renderSrcLocForDebug (SrcLoc mpath ln col _ _) = case mpath of
+  Nothing -> Nothing
+  Just p -> Just (T.pack p <> ":" <> T.pack (show ln) <> ":" <> T.pack (show col))

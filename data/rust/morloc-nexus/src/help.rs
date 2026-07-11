@@ -4,16 +4,15 @@
 //! Two cosmetic additions:
 //!
 //! * `override_usage` carries the position rule for nexus options
-//!   (left of the wrapper target / `@` separator) so the printed
-//!   Usage line matches the convention enforced by
-//!   [`crate::cli::split_run_argv_at_separator`].
+//!   (left of `@` or, in multi-export mode, left of the subcommand
+//!   name) so the printed Usage line matches the convention enforced
+//!   by [`crate::cli::split_run_argv_at_separator`].
 //! * `after_long_help` carries a rendered "Nexus Options:" block so
-//!   `--help` discloses the phase-1 dispatch options while `-h`
-//!   stays terse.
+//!   both `-h` and `--help` disclose the phase-1 dispatch options.
 //!
 //! Functional parsing is unchanged: nexus options are still consumed
-//! only by phase 1, before the wrapper target. This module emits
-//! display strings, nothing more.
+//! only by phase 1, in the nexus zone. This module emits display
+//! strings, nothing more.
 //!
 //! The Nexus Options block is rendered once via clap's own formatter
 //! against a throwaway command carrying [`crate::cli::DispatchOptions`],

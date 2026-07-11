@@ -7,7 +7,7 @@ all:
 	@: > obs.txt
 	morloc make --debug -o nexus main.loc 2> build.err
 	./nexus --log-dir logs --debug-cache-max 10 \
-	    boomP '["alpha","bravo","charlie","delta","echo","foxtrot"]' \
+	    @ boomP '["alpha","bravo","charlie","delta","echo","foxtrot"]' \
 	    >/dev/null 2> obs.run.err; rc=$$?; \
 	  test $$rc -ne 0 \
 	  && echo "fail_rc_nonzero: PASS" >> obs.txt \

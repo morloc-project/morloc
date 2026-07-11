@@ -775,6 +775,29 @@ pub struct ValueTakingFlags {
     shorts: std::collections::HashSet<char>,
 }
 
+/// Every long nexus flag declared on the `run` subcommand plus every
+/// capability flag, rendered as `--name`. Distinct from
+/// [`ValueTakingFlags`], which stores only flags that consume a
+/// value; this set includes boolean flags too.
+pub fn all_long_nexus_flags() -> std::collections::HashSet<String> {
+    use clap::CommandFactory;
+    let nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
+    let run_cmd = nexus_cmd
+        .find_subcommand("run")
+        .expect("Nexus declares a 'run' subcommand");
+    let mut longs: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for arg in run_cmd.get_arguments() {
+        if let Some(l) = arg.get_long() {
+            longs.insert(format!("--{}", l));
+        }
+    }
+    for spec in CAPABILITY_FLAGS {
+        longs.insert(format!("--{}", spec.long));
+    }
+    longs
+}
+
 impl ValueTakingFlags {
     /// Build the table from the static `Nexus` command tree.
     pub fn from_nexus() -> Self {
@@ -836,78 +859,141 @@ pub fn looks_like_flag(tok: &str) -> bool {
 }
 
 /// Split a `morloc-nexus run` argv tail (everything after `run`)
-/// into a nexus zone and a user zone.
+/// into a nexus zone (parsed by clap-derive against [`RunArgs`]) and
+/// a command zone (parsed by [`crate::phase2`] against the manifest).
 ///
-/// The scanner walks `tail` left-to-right, consuming each token
-/// according to clap-derive semantics: a known value-taking flag
-/// like `--log-dir` consumes the next token as its value; a
-/// `--key=value` form is self-contained; any other token starting
-/// with `-` is treated as a boolean flag (single token); any other
-/// token is a positional.
+/// The rules are:
 ///
-/// The zone boundary is determined by whichever of these comes
-/// first:
+/// - **Pre-target**: nexus flags are consumed left-to-right; a known
+///   value-taking flag like `--log-dir` consumes its next token as
+///   its value even if that next token is `@`, `-h`, or `--help`.
+///   The wrapper target is the first non-flag, non-`@` positional.
+/// - **Post-target boundary search**: scan for the first unconsumed
+///   `@` (which is consumed as an explicit split) or, in
+///   multi-export mode only, a declared subcommand/group name (which
+///   is the first token of the command zone).
+/// - **Default fallthrough**: if the boundary search reaches
+///   end-of-tail or a non-boundary positional without finding a
+///   split, the split lands IMMEDIATELY after the wrapper target.
+///   Everything after the target becomes the command zone. This is
+///   how `./prog -h` and `./prog arg` both put their post-target
+///   content into the command zone: to reach the nexus zone you
+///   must place tokens before the target (direct invocation only) or
+///   left of `@`.
 ///
-/// - An unconsumed `@` token: the explicit separator. Tokens
-///   before it form the nexus zone; tokens after it form the user
-///   zone.
-/// - The second non-flag positional: the implicit terminator. The
-///   first positional is the wrapper target and belongs to the
-///   nexus zone; the second is the start of the user zone (either
-///   a subcommand name in multi-export mode or the first user
-///   argument in single-export mode).
-///
-/// If the tail contains zero or one positionals and no `@`, the
-/// entire tail is the nexus zone and the user zone is empty.
+/// `-h` and `--help` receive no special treatment. Their help scope
+/// falls out of the position rules above: in the nexus zone they
+/// render run-subcommand help (via clap-derive); in the command zone
+/// they render manifest-driven command help (via clap-manifest).
 pub fn split_run_argv_at_separator(
     tail: &[String],
     flags: &ValueTakingFlags,
+    subcmd_names: Option<&std::collections::HashSet<String>>,
 ) -> (Vec<String>, Vec<String>) {
+    // Phase 1: find the wrapper target position, consuming any
+    // pre-target nexus flags. A pre-target unconsumed `@` (unusual;
+    // only reachable via direct `morloc-nexus run @ ...` invocation)
+    // is treated as an explicit split point.
     let mut i = 0;
-    let mut target_seen = false;
-    while i < tail.len() {
+    let target_pos = loop {
+        if i >= tail.len() {
+            // No target in the tail. This is legal for pure help
+            // invocations (`morloc-nexus run --help`); everything is
+            // in the nexus zone.
+            return (tail.to_vec(), Vec::new());
+        }
         let tok = &tail[i];
-        // Unconsumed `@` is the explicit separator.
-        if tok == "@" {
-            return (tail[..i].to_vec(), tail[i + 1..].to_vec());
-        }
-        // Once the wrapper target has been consumed, a help
-        // request (`-h` / `--help`) is a request for the program's
-        // manifest-driven help, not for the nexus's static help.
-        // Route it to the user zone so the manifest-driven parser
-        // can render per-program help showing the exported
-        // commands and their arguments.
-        if target_seen && (tok == "-h" || tok == "--help") {
-            return (tail[..i].to_vec(), tail[i..].to_vec());
-        }
-        // Known value-taking flag consumes the next token.
         if flags.token_takes_next(tok) {
             i += 2;
             continue;
         }
-        // Other flag-shaped token (boolean flag, --key=value,
-        // short-with-embedded-value, or unknown flag): single
-        // token. Negative numbers (`-5`, `-3.14`) are excluded by
-        // [`looks_like_flag`] and fall through to the positional
-        // branch below.
+        if tok == "@" {
+            return (tail[..i].to_vec(), tail[i + 1..].to_vec());
+        }
         if looks_like_flag(tok) {
             i += 1;
             continue;
         }
-        // Non-flag positional.
-        if !target_seen {
-            // First positional is the wrapper target.
-            target_seen = true;
-            i += 1;
+        break i;
+    };
+
+    // Phase 2: scan post-target for the split boundary. A boundary
+    // is either an unconsumed `@` or (in multi-export mode) a
+    // declared subcommand/group name. If we walk off the end or
+    // encounter a non-boundary positional first, we fall through to
+    // the default: split immediately after the target so that all
+    // post-target tokens land in the command zone.
+    let post_target_start = target_pos + 1;
+    let mut j = post_target_start;
+    while j < tail.len() {
+        let tok = &tail[j];
+        // Value-taking flag consumes its next token even if it's
+        // `@`, `-h`, or a subcommand name.
+        if flags.token_takes_next(tok) {
+            j += 2;
             continue;
         }
-        // Second positional is the implicit terminator. The nexus
-        // zone ends here; the user zone starts at this token.
-        return (tail[..i].to_vec(), tail[i..].to_vec());
+        if tok == "@" {
+            return (tail[..j].to_vec(), tail[j + 1..].to_vec());
+        }
+        if looks_like_flag(tok) {
+            j += 1;
+            continue;
+        }
+        match subcmd_names {
+            // Single-export mode: any non-flag positional means the
+            // fallthrough split fires (all post-target is command
+            // zone).
+            None => break,
+            // Multi-export mode: the split lands at the subcommand
+            // token, which belongs to the command zone. An unknown
+            // positional is a hard error with a `did_you_mean` hint.
+            Some(set) => {
+                if set.contains(tok.as_str()) {
+                    return (tail[..j].to_vec(), tail[j..].to_vec());
+                }
+                let suggestion = did_you_mean(tok, set);
+                match suggestion {
+                    Some(hint) => eprintln!(
+                        "Error: no such command '{}'. Did you mean '{}'?",
+                        tok, hint
+                    ),
+                    None => eprintln!(
+                        "Error: no such command '{}'.", tok
+                    ),
+                }
+                std::process::exit(2);
+            }
+        }
     }
-    // Walked off the end with no implicit or explicit terminator.
-    // Everything is in the nexus zone.
-    (tail.to_vec(), Vec::new())
+    // Default fallthrough: split immediately after the wrapper
+    // target. Everything post-target becomes the command zone.
+    (
+        tail[..post_target_start].to_vec(),
+        tail[post_target_start..].to_vec(),
+    )
+}
+
+/// Suggest the closest declared subcommand name for a
+/// mistyped/unknown token. Returns `Some(name)` when a candidate is
+/// within a small edit distance (Levenshtein via `strsim`), else
+/// `None`. Used to preserve clap-style "did you mean" hints when
+/// the pre-split scanner rejects an unknown subcommand.
+fn did_you_mean<'a, I>(query: &str, candidates: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    // Threshold picked to match clap's own suggestion tolerance:
+    // roughly one edit per three characters of query, minimum 1.
+    let max_distance = (query.chars().count() / 3).max(1);
+    let mut best: Option<(&str, usize)> = None;
+    for cand in candidates {
+        let d = strsim::levenshtein(query, cand.as_str());
+        if d <= max_distance && best.map_or(true, |(_, bd)| d < bd) {
+            best = Some((cand.as_str(), d));
+        }
+    }
+    best.map(|(s, _)| s.to_string())
 }
 
 /// Outcome of the top-level parse, after capability augmentation
@@ -935,11 +1021,52 @@ pub struct CapabilityValues {
     pub debug_recursion_cap: Option<u32>,
 }
 
-/// Find the first non-flag positional in a pre-scanned nexus tail
-/// (everything after `run` / `daemon` in argv). Used to extract the
-/// wrapper target before the manifest can be loaded. Returns the
-/// token's value, not its index.
-fn first_positional<'a>(
+/// Collect the set of declared subcommand and group names from a
+/// manifest, filtered to those the splitter should recognize as a
+/// zone boundary in multi-export mode. Compiler-synthesized internal
+/// commands (`--' with:` terminal-action wrappers) are excluded --
+/// they participate in dispatch only via terminal-flag redirect and
+/// must never appear directly on argv. Returns `None` in
+/// single-export mode (one visible command, no groups) so the
+/// splitter takes the no-name-check path.
+pub fn build_subcmd_names(
+    manifest: &morloc_manifest::Manifest,
+) -> Option<std::collections::HashSet<String>> {
+    let visible_count = manifest.commands.iter().filter(|c| !c.internal).count();
+    if visible_count <= 1 && manifest.groups.is_empty() {
+        return None;
+    }
+    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in &manifest.commands {
+        if !c.internal {
+            set.insert(c.name.clone());
+        }
+    }
+    for g in &manifest.groups {
+        set.insert(g.name.clone());
+    }
+    Some(set)
+}
+
+/// Find the wrapper target in the RAW argv tail (everything after
+/// `run` / `daemon` in argv), consuming pre-target nexus flags and
+/// their values. Used to extract the target before the manifest can
+/// be loaded and before the zone split runs (the split needs the
+/// manifest to know which subcommand names to recognize in
+/// multi-export mode).
+///
+/// The target must appear LEFT of any unconsumed `@` -- an
+/// unconsumed `@` terminates the target search and yields `None`.
+/// This keeps the target-resolution and split-boundary rules
+/// consistent: `morloc-nexus run @ ./prog` places `./prog` in the
+/// command zone, and clap-derive then reports the missing target
+/// against the (empty) nexus zone rather than silently loading a
+/// manifest for a target the split isn't going to see.
+///
+/// A `@` consumed as the value of a preceding value-taking flag
+/// (e.g. `--log-dir @`) is not a separator and does not terminate
+/// the search; the subsequent positional is still the target.
+fn find_wrapper_target<'a>(
     tail: &'a [String],
     flags: &ValueTakingFlags,
 ) -> Option<&'a str> {
@@ -950,12 +1077,12 @@ fn first_positional<'a>(
             i += 2;
             continue;
         }
+        if tok == "@" {
+            return None;
+        }
         if looks_like_flag(tok) {
             i += 1;
             continue;
-        }
-        if tok == "@" {
-            return None;
         }
         return Some(tok.as_str());
     }
@@ -1009,21 +1136,13 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
         .unwrap_or_else(|| "morloc-nexus".to_string());
     let mode_token = if is_run { "run" } else { "daemon" };
     let flags = ValueTakingFlags::from_nexus();
+    let raw_tail: &[String] = &argv[2..];
 
-    // Pre-scan: in run mode, split at `@` / implicit terminator; in
-    // daemon mode there's no user zone, so the entire tail is nexus.
-    let (nexus_tail, user_zone): (Vec<String>, Vec<String>) = if is_run {
-        let (n, u) = split_run_argv_at_separator(&argv[2..], &flags);
-        (n, u)
-    } else {
-        (argv[2..].to_vec(), Vec::new())
-    };
-
-    // Try to find the wrapper target so we can load the manifest
-    // before parsing. A missing target is legal for help-style
-    // invocations (`morloc-nexus run --help`); we fall back to
-    // "all capabilities visible" in that case.
-    let target_str = first_positional(&nexus_tail, &flags);
+    // Resolve the wrapper target from the raw tail so we can load
+    // the manifest before running the zone split. A missing target
+    // is legal for help-style invocations (`morloc-nexus run --help`);
+    // we fall back to "all capabilities visible" in that case.
+    let target_str = find_wrapper_target(raw_tail, &flags);
     let (manifest, manifest_path) = match target_str {
         Some(target) => {
             let resolved = if !is_run {
@@ -1051,14 +1170,31 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
                     std::process::exit(1);
                 }
             };
-            // Friendly error for capability-gated flags the manifest
-            // doesn't advertise. Fires before the augmented clap
-            // parse so the user sees a domain-specific message.
-            check_unsupported_capability_flags(&nexus_tail, &manifest.capabilities);
             (Some(manifest), resolved)
         }
         None => (None, String::new()),
     };
+
+    // Split the raw tail into nexus / command zones. Multi-export
+    // mode needs the set of declared subcommand and group names so
+    // the splitter can recognize the boundary and reject typos with
+    // a suggestion; single-export mode passes None so the first user
+    // positional after the target starts the command zone.
+    let subcmd_names: Option<std::collections::HashSet<String>> =
+        manifest.as_ref().and_then(|m| build_subcmd_names(m));
+    let (nexus_tail, user_zone): (Vec<String>, Vec<String>) = if is_run {
+        split_run_argv_at_separator(raw_tail, &flags, subcmd_names.as_ref())
+    } else {
+        (raw_tail.to_vec(), Vec::new())
+    };
+
+    // Friendly error for capability-gated flags the manifest doesn't
+    // advertise. Runs against the nexus zone (post-split) so a
+    // capability flag written to the right of the separator is
+    // treated as a manifest error, not a capability error.
+    if let Some(m) = manifest.as_ref() {
+        check_unsupported_capability_flags(&nexus_tail, &m.capabilities);
+    }
 
     let caps_for_augment: Option<&[String]> = manifest
         .as_ref()
@@ -1187,39 +1323,57 @@ mod tests {
     }
 
     // ------------------------------------------------------------
-    // Pre-scan: the `@` separator and value-taking-flag handling
+    // Pre-scan: the `@` separator, subcommand-name recognition,
+    // value-taking-flag handling, and `-h`/`--help` positional
+    // semantics.
+    //
+    // Under the current grammar `-h` and `--help` receive NO special
+    // treatment from the splitter -- their help scope emerges from
+    // which zone they land in (nexus vs command). Tests below cover
+    // both zones explicitly.
     // ------------------------------------------------------------
 
     fn s(s: &str) -> String {
         s.to_string()
     }
 
+    /// Build a subcommand-name set for multi-export tests.
+    fn subs(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn split_no_at_no_user_zone_after_target() {
-        // `run ./prog` -> nexus zone ["./prog"], user zone [].
+    fn split_single_no_at_no_command_zone_after_target() {
+        // Single-export: `run ./prog` -> nexus ["./prog"], command [].
         let flags = ValueTakingFlags::from_nexus();
-        let (nx, uz) = split_run_argv_at_separator(&[s("./prog")], &flags);
+        let (nx, uz) =
+            split_run_argv_at_separator(&[s("./prog")], &flags, None);
         assert_eq!(nx, vec![s("./prog")]);
         assert!(uz.is_empty());
     }
 
     #[test]
-    fn split_no_at_user_zone_after_target() {
-        // `run ./prog 7 8` -> nexus ["./prog"], user ["7", "8"].
+    fn split_single_first_user_positional_starts_command_zone() {
+        // Single-export: the first non-flag positional after the
+        // target starts the command zone.
         let flags = ValueTakingFlags::from_nexus();
-        let (nx, uz) =
-            split_run_argv_at_separator(&[s("./prog"), s("7"), s("8")], &flags);
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("7"), s("8")],
+            &flags,
+            None,
+        );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("7"), s("8")]);
     }
 
     #[test]
-    fn split_at_separates_zones() {
-        // `run ./prog @ 7 8` -> nexus ["./prog"], user ["7", "8"].
+    fn split_single_at_separates_zones() {
+        // `run ./prog @ 7 8` -> nexus ["./prog"], command ["7", "8"].
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("@"), s("7"), s("8")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("7"), s("8")]);
@@ -1227,12 +1381,11 @@ mod tests {
 
     #[test]
     fn split_at_with_pre_target_nexus_opts() {
-        // `run --log-dir L ./prog @ 7` -> nexus zone has the opts +
-        // target; user zone is ["7"].
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("--log-dir"), s("L"), s("./prog"), s("@"), s("7")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("--log-dir"), s("L"), s("./prog")]);
         assert_eq!(uz, vec![s("7")]);
@@ -1240,34 +1393,29 @@ mod tests {
 
     #[test]
     fn split_at_consumed_by_flag_is_value_not_separator() {
-        // `run --log-dir @ ./prog @ 7` -> first `@` is the value
-        // of `--log-dir`; second `@` is the separator.
+        // `--log-dir @` binds `@` as the log-dir value; the split
+        // happens at the SECOND `@`. Documents that value-taking
+        // flag handling wins over separator detection.
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[
-                s("--log-dir"),
-                s("@"),
-                s("./prog"),
-                s("@"),
-                s("7"),
+                s("--log-dir"), s("@"),
+                s("./prog"), s("@"), s("7"),
             ],
             &flags,
+            None,
         );
-        assert_eq!(
-            nx,
-            vec![s("--log-dir"), s("@"), s("./prog")]
-        );
+        assert_eq!(nx, vec![s("--log-dir"), s("@"), s("./prog")]);
         assert_eq!(uz, vec![s("7")]);
     }
 
     #[test]
     fn split_short_value_taking_flag_consumes_next() {
-        // `-o` is value-taking; `-o file ./prog @ 7` -> the file
-        // token is the value of `-o`, not the target.
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("-o"), s("file"), s("./prog"), s("@"), s("7")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("-o"), s("file"), s("./prog")]);
         assert_eq!(uz, vec![s("7")]);
@@ -1275,38 +1423,23 @@ mod tests {
 
     #[test]
     fn split_long_equals_form_is_self_contained() {
-        // `--log-dir=L` is one token; the next token is the target.
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("--log-dir=L"), s("./prog"), s("@"), s("7")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("--log-dir=L"), s("./prog")]);
         assert_eq!(uz, vec![s("7")]);
     }
 
     #[test]
-    fn split_at_alone_means_empty_nexus_zone() {
-        // `run @ 7 8` -> empty nexus zone, user zone ["7","8"].
-        // Covers the shell-variable case (`./prog $opts @ 7 8`
-        // where `$opts` is empty).
-        let flags = ValueTakingFlags::from_nexus();
-        let (nx, uz) = split_run_argv_at_separator(
-            &[s("@"), s("7"), s("8")],
-            &flags,
-        );
-        assert!(nx.is_empty());
-        assert_eq!(uz, vec![s("7"), s("8")]);
-    }
-
-    #[test]
-    fn split_at_at_end_leaves_empty_user_zone() {
-        // `run ./prog -p @` -> nexus zone has the opts + target;
-        // user zone is empty.
+    fn split_at_at_end_leaves_empty_command_zone() {
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("-p"), s("@")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog"), s("-p")]);
         assert!(uz.is_empty());
@@ -1314,127 +1447,230 @@ mod tests {
 
     #[test]
     fn split_post_target_at_separates_correctly() {
-        // `run ./prog --log-dir L @ 7` -> the `--log-dir L` is in
-        // the post-target nexus zone (before `@`); user zone ["7"].
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("--log-dir"), s("L"), s("@"), s("7")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog"), s("--log-dir"), s("L")]);
         assert_eq!(uz, vec![s("7")]);
     }
 
     #[test]
-    fn split_user_zone_at_is_literal() {
+    fn split_command_zone_at_is_literal() {
         // Once we're past the separator, additional `@` tokens are
-        // user-zone literals.
+        // command-zone literals.
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("@"), s("@"), s("7")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("@"), s("7")]);
     }
 
     #[test]
-    fn split_implicit_terminator_with_nexus_opts_then_subcmd() {
-        // `run ./prog --log-dir L cmd 7 8` -> the nexus zone holds
-        // the target plus the value-taking `--log-dir L`; the
-        // second positional (`cmd`) is the implicit terminator and
-        // begins the user zone.
+    fn split_multi_subcmd_name_starts_command_zone() {
+        // Multi-export: `run ./prog cmd 7` -> nexus ["./prog"],
+        // command ["cmd", "7"]. The subcommand token belongs to the
+        // command zone.
         let flags = ValueTakingFlags::from_nexus();
+        let names = subs(&["cmd", "other"]);
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("cmd"), s("7")],
+            &flags,
+            Some(&names),
+        );
+        assert_eq!(nx, vec![s("./prog")]);
+        assert_eq!(uz, vec![s("cmd"), s("7")]);
+    }
+
+    #[test]
+    fn split_multi_at_overrides_subcmd_lookup() {
+        // Multi-export: `@` splits at its position even when a
+        // subcommand name is present later.
+        let flags = ValueTakingFlags::from_nexus();
+        let names = subs(&["cmd"]);
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("@"), s("cmd"), s("7")],
+            &flags,
+            Some(&names),
+        );
+        assert_eq!(nx, vec![s("./prog")]);
+        assert_eq!(uz, vec![s("cmd"), s("7")]);
+    }
+
+    #[test]
+    fn split_multi_nexus_opts_before_subcmd() {
+        // `run ./prog --log-dir L cmd 7 8` in multi mode -> the
+        // nexus zone holds the target plus value-taking flag; the
+        // subcommand token starts the command zone.
+        let flags = ValueTakingFlags::from_nexus();
+        let names = subs(&["cmd"]);
         let (nx, uz) = split_run_argv_at_separator(
             &[
-                s("./prog"),
-                s("--log-dir"),
-                s("L"),
-                s("cmd"),
-                s("7"),
-                s("8"),
+                s("./prog"), s("--log-dir"), s("L"),
+                s("cmd"), s("7"), s("8"),
             ],
             &flags,
+            Some(&names),
         );
         assert_eq!(nx, vec![s("./prog"), s("--log-dir"), s("L")]);
         assert_eq!(uz, vec![s("cmd"), s("7"), s("8")]);
     }
 
     #[test]
-    fn split_implicit_terminator_no_nexus_opts() {
-        // `run ./prog 7 8` -> target, then the first positional
-        // after target is the implicit terminator.
+    fn split_multi_boolean_flag_before_subcmd() {
         let flags = ValueTakingFlags::from_nexus();
-        let (nx, uz) = split_run_argv_at_separator(
-            &[s("./prog"), s("7"), s("8")],
-            &flags,
-        );
-        assert_eq!(nx, vec![s("./prog")]);
-        assert_eq!(uz, vec![s("7"), s("8")]);
-    }
-
-    #[test]
-    fn split_implicit_terminator_with_boolean_flag() {
-        // `run ./prog -p cmd 7` -> `-p` is a boolean nexus flag, so
-        // it stays in the nexus zone; the implicit terminator is
-        // at `cmd`.
-        let flags = ValueTakingFlags::from_nexus();
+        let names = subs(&["cmd"]);
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("-p"), s("cmd"), s("7")],
             &flags,
+            Some(&names),
         );
         assert_eq!(nx, vec![s("./prog"), s("-p")]);
         assert_eq!(uz, vec![s("cmd"), s("7")]);
     }
 
     #[test]
-    fn split_post_target_short_help_routes_to_user_zone() {
-        // `./prog -h` -> after the wrapper exec becomes
-        // `morloc-nexus run ./prog -h`. The `-h` belongs to the
-        // program (manifest-driven help), not to the nexus.
+    fn split_single_help_lands_in_command_zone_by_default() {
+        // Under the current grammar, single-export with no `@` puts
+        // EVERYTHING post-target in the command zone -- including
+        // `-h` / `--help`. So `./prog -h` renders the manifest-
+        // driven command help, not the nexus run help. This is the
+        // behavior a user typing `./prog -h` at their shell
+        // expects: help about their program, not about
+        // `morloc-nexus`.
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("-h")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("-h")]);
-    }
 
-    #[test]
-    fn split_post_target_long_help_routes_to_user_zone() {
-        let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("--help")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("--help")]);
     }
 
     #[test]
-    fn split_post_target_help_after_nexus_opts() {
-        // `./prog --log-dir L -h` -> the `--log-dir L` is consumed
-        // in the nexus zone; the `-h` flips into the user zone.
+    fn split_single_help_left_of_at_renders_nexus_help() {
+        // To reach the nexus zone's help in single-export mode, the
+        // user places `-h` (or `--help`) LEFT of an explicit `@`.
+        // The nexus zone renders run-subcommand help via
+        // clap-derive.
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
-            &[s("./prog"), s("--log-dir"), s("L"), s("-h")],
+            &[s("./prog"), s("-h"), s("@")],
             &flags,
+            None,
         );
-        assert_eq!(nx, vec![s("./prog"), s("--log-dir"), s("L")]);
+        assert_eq!(nx, vec![s("./prog"), s("-h")]);
+        assert!(uz.is_empty());
+    }
+
+    #[test]
+    fn split_single_nexus_flag_without_at_lands_in_command_zone() {
+        // A nexus flag written after the target WITHOUT an `@`
+        // sits in the command zone under the strict user rule
+        // ("no @ = all is command args"). clap-manifest will then
+        // reject the unknown flag, prompting the user to add `@`.
+        // This test locks in that intentional strictness so a
+        // future refactor doesn't silently start absorbing nexus
+        // flags in the post-target scan.
+        let flags = ValueTakingFlags::from_nexus();
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("--log-dir"), s("L"), s("arg")],
+            &flags,
+            None,
+        );
+        assert_eq!(nx, vec![s("./prog")]);
+        assert_eq!(uz, vec![s("--log-dir"), s("L"), s("arg")]);
+    }
+
+    #[test]
+    fn split_multi_help_lands_in_command_zone_when_no_subcmd() {
+        // Multi-export with `-h` and no subcommand: falls through
+        // to the default split (immediately post-target) so `-h`
+        // reaches clap-manifest, which renders top-level program
+        // help (list of subcommands + descriptions).
+        let flags = ValueTakingFlags::from_nexus();
+        let names = subs(&["cmd", "other"]);
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("-h")],
+            &flags,
+            Some(&names),
+        );
+        assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("-h")]);
     }
 
     #[test]
-    fn split_negative_number_after_subcommand_in_user_zone() {
-        // `./prog cmd -5` -> the implicit terminator at `cmd`
-        // sends `cmd -5` to the user zone; `-5` must NOT be
-        // mistaken for a short flag (POSIX short flags begin with
-        // a letter).
+    fn split_help_moves_into_command_zone_when_positioned_after_at() {
+        // With an explicit `@`, `-h` on the right renders command
+        // help via clap-manifest.
+        let flags = ValueTakingFlags::from_nexus();
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("@"), s("-h")],
+            &flags,
+            None,
+        );
+        assert_eq!(nx, vec![s("./prog")]);
+        assert_eq!(uz, vec![s("-h")]);
+    }
+
+    #[test]
+    fn split_help_after_positional_in_single_mode() {
+        // `./prog 5 -h`: `5` is the first user positional, splits
+        // there; `-h` is in the command zone.
+        let flags = ValueTakingFlags::from_nexus();
+        let (nx, uz) = split_run_argv_at_separator(
+            &[s("./prog"), s("5"), s("-h")],
+            &flags,
+            None,
+        );
+        assert_eq!(nx, vec![s("./prog")]);
+        assert_eq!(uz, vec![s("5"), s("-h")]);
+    }
+
+    #[test]
+    fn split_help_as_flag_value_is_not_help() {
+        // `--log-dir -h @ arg`: `-h` is the value of `--log-dir`,
+        // NOT a help request. The `@` is the separator; `arg` is
+        // command-zone content. This is a corner case worth
+        // asserting explicitly so a future refactor doesn't
+        // accidentally special-case `-h` early.
+        let flags = ValueTakingFlags::from_nexus();
+        let (nx, uz) = split_run_argv_at_separator(
+            &[
+                s("--log-dir"), s("-h"),
+                s("./prog"), s("@"), s("arg"),
+            ],
+            &flags,
+            None,
+        );
+        assert_eq!(nx, vec![s("--log-dir"), s("-h"), s("./prog")]);
+        assert_eq!(uz, vec![s("arg")]);
+    }
+
+    #[test]
+    fn split_negative_number_after_positional_in_command_zone() {
+        // `./prog cmd -5`: single mode, `cmd` is the first user
+        // positional, splits there; `-5` is a negative number in
+        // the command zone (POSIX short flags start with a letter).
         let flags = ValueTakingFlags::from_nexus();
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("cmd"), s("-5")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("cmd"), s("-5")]);
@@ -1446,6 +1682,7 @@ mod tests {
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("cmd"), s("-3.14")],
             &flags,
+            None,
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("cmd"), s("-3.14")]);
@@ -1468,28 +1705,123 @@ mod tests {
 
     #[test]
     fn split_pre_target_help_stays_in_nexus_zone() {
-        // `morloc-nexus run -h` -- no target yet -- means show the
-        // top-level run help. Stays in the nexus zone for
-        // clap-derive to handle.
+        // `morloc-nexus run -h` (no target yet) -> nexus zone
+        // handles the help request. Empty command zone.
         let flags = ValueTakingFlags::from_nexus();
-        let (nx, uz) = split_run_argv_at_separator(&[s("-h")], &flags);
+        let (nx, uz) = split_run_argv_at_separator(&[s("-h")], &flags, None);
         assert_eq!(nx, vec![s("-h")]);
         assert!(uz.is_empty());
     }
 
     #[test]
-    fn split_explicit_at_overrides_implicit_terminator() {
-        // `run ./prog @ 7 cmd 8` -> the explicit `@` separates
-        // here; subsequent positionals (`7`, `cmd`, `8`) are all in
-        // the user zone, even though `cmd` looks like a subcommand
-        // name.
+    fn split_explicit_at_ahead_of_subcmd_name() {
+        // `run ./prog @ 7 cmd 8`: `@` splits before any subcommand
+        // lookup can happen; `cmd` in the command zone is just
+        // another argv token.
         let flags = ValueTakingFlags::from_nexus();
+        let names = subs(&["cmd"]);
         let (nx, uz) = split_run_argv_at_separator(
             &[s("./prog"), s("@"), s("7"), s("cmd"), s("8")],
             &flags,
+            Some(&names),
         );
         assert_eq!(nx, vec![s("./prog")]);
         assert_eq!(uz, vec![s("7"), s("cmd"), s("8")]);
+    }
+
+    // ------------------------------------------------------------
+    // did_you_mean helper: preserves clap-style typo hints when the
+    // pre-split scanner rejects an unknown subcommand in multi-mode.
+    // ------------------------------------------------------------
+
+    #[test]
+    fn did_you_mean_finds_close_match() {
+        let cands = vec![s("fhead"), s("describe")];
+        assert_eq!(
+            did_you_mean("fheed", &cands),
+            Some(s("fhead"))
+        );
+    }
+
+    #[test]
+    fn did_you_mean_returns_none_for_far_match() {
+        let cands = vec![s("fhead"), s("describe")];
+        assert_eq!(did_you_mean("xyz", &cands), None);
+    }
+
+    #[test]
+    fn did_you_mean_prefers_smaller_distance() {
+        let cands = vec![s("foobar"), s("foo")];
+        // "fo" is 1 edit from "foo", 4 edits from "foobar".
+        assert_eq!(did_you_mean("fo", &cands), Some(s("foo")));
+    }
+
+    // ------------------------------------------------------------
+    // find_wrapper_target: pre-split target resolution on the raw
+    // argv tail. Must handle `@` as a value or as an unconsumed
+    // separator token (skipped when looking for the target).
+    // ------------------------------------------------------------
+
+    #[test]
+    fn find_target_basic() {
+        let flags = ValueTakingFlags::from_nexus();
+        assert_eq!(
+            find_wrapper_target(&[s("./prog"), s("arg")], &flags),
+            Some("./prog")
+        );
+    }
+
+    #[test]
+    fn find_target_skips_nexus_opts() {
+        let flags = ValueTakingFlags::from_nexus();
+        assert_eq!(
+            find_wrapper_target(
+                &[s("--log-dir"), s("L"), s("-p"), s("./prog")],
+                &flags,
+            ),
+            Some("./prog"),
+        );
+    }
+
+    #[test]
+    fn find_target_consumes_at_as_flag_value_but_stops_at_separator_at() {
+        // `--log-dir @ ./prog @ 7`: the first `@` is the log-dir
+        // value; `./prog` is the target (left of any unconsumed
+        // `@`); the second `@` is a separator and lies past the
+        // target.
+        let flags = ValueTakingFlags::from_nexus();
+        assert_eq!(
+            find_wrapper_target(
+                &[
+                    s("--log-dir"), s("@"),
+                    s("./prog"), s("@"), s("7"),
+                ],
+                &flags,
+            ),
+            Some("./prog"),
+        );
+    }
+
+    #[test]
+    fn find_target_stops_at_unconsumed_at() {
+        // `@ ./prog`: the unconsumed `@` terminates the search
+        // before `./prog` is reached. Consistent with the splitter,
+        // which places `./prog` in the command zone under the same
+        // invocation.
+        let flags = ValueTakingFlags::from_nexus();
+        assert_eq!(
+            find_wrapper_target(&[s("@"), s("./prog")], &flags),
+            None,
+        );
+    }
+
+    #[test]
+    fn find_target_none_when_absent() {
+        let flags = ValueTakingFlags::from_nexus();
+        assert_eq!(
+            find_wrapper_target(&[s("-h")], &flags),
+            None
+        );
     }
 
     #[test]

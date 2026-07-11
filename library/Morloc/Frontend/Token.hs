@@ -85,6 +85,10 @@ data Token
     TokBang
   | -- | ?
     TokQuestion
+  | -- | @ (as-pattern; only emitted when preceded by an identifier
+    -- with zero-width gap. When followed by a lowercase letter at
+    -- token-start position, the lexer emits TokIntrinsic instead.)
+    TokAt
   | -- | . (operator position, e.g., f . g)
     TokDot
   | -- | . (getter prefix, e.g., .name)
@@ -207,6 +211,7 @@ showToken TokBackslash = "'\\'"
 showToken TokUnderscore = "'_'"
 showToken TokBang = "'!'"
 showToken TokQuestion = "'?'"
+showToken TokAt = "'@'"
 showToken TokDot = "'.'"
 showToken TokGetterDot = "'.'"
 showToken TokNsDot = "'.' (namespace)"
