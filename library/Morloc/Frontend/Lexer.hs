@@ -365,7 +365,16 @@ lexOne st@(LexState input pos toks _) = case input of
     | null rest || not (isAlphaNum (head rest) || head rest == '_' || head rest == '\'') ->
         Right st { lsInput = rest, lsPos = advanceCol pos 7
                  , lsTokens = Located pos TokPragmaInline "%inline" : toks }
-  -- Intrinsics: @name (@ followed by lowercase letter)
+  -- As-pattern '@': emitted when '@' is glued to an operand-finishing
+  -- token (identifier, ')', etc.) with no intervening whitespace. In
+  -- that position an intrinsic reference would be nonsensical anyway
+  -- (you can't apply an intrinsic without a delimiter), so grabbing
+  -- '@' as TokAt is unambiguous. Precedes the intrinsic rule so that
+  -- 'x@lst' lexes as x, @, lst rather than x, @lst.
+  '@' : rest | isAsPatPosition pos toks ->
+    emit1 TokAt "@" rest
+  -- Intrinsics: @name (@ followed by lowercase letter, at token-start
+  -- position: preceded by whitespace or a non-operand-finishing token).
   '@' : c : rest | isLower c ->
     let (word, rest') = span (\x -> isAlphaNum x || x == '\'' || x == '_') (c : rest)
         name = T.pack word
@@ -797,6 +806,14 @@ isUnaryDashPosition :: Pos -> [Located] -> Bool
 isUnaryDashPosition dashPos toks = case prevSignificantToken toks of
   Nothing -> True
   Just (prev, prevEnd) -> prevEnd /= dashPos || not (isOperandFinishing prev)
+
+-- | Decide whether an '@' at @atPos@ is an as-pattern operator (TokAt) rather
+-- than the head of a TokIntrinsic. True when the previous significant token
+-- is operand-finishing and its end position is exactly @atPos@ (no whitespace).
+isAsPatPosition :: Pos -> [Located] -> Bool
+isAsPatPosition atPos toks = case prevSignificantToken toks of
+  Nothing -> False
+  Just (prev, prevEnd) -> prevEnd == atPos && isOperandFinishing prev
 
 -- | The most recent token, skipping docstrings and group annotations. Returns
 -- the token plus the position of the character immediately after its text.

@@ -1322,6 +1322,227 @@ mergeSelectors sels =
         _ -> error "Cannot mix key and index selectors in getter"
 
 --------------------------------------------------------------------
+-- Irrefutable-pattern desugaring
+--------------------------------------------------------------------
+
+-- | Convert an expression appearing in a binding position into an
+-- irrefutable pattern. Binding positions (lambda params, function-def
+-- args, LHS of let, LHS of do-bind) are parsed as expressions to avoid
+-- LALR expr/pat overlap; this converter enforces the pattern subset.
+exprToIrrefPat :: Loc CstExpr -> D (Loc CstIrrefPat)
+exprToIrrefPat (Loc sp (CVarE v))       = return (Loc sp (CIPatVar v))
+exprToIrrefPat (Loc sp CUnderscoreE)    = return (Loc sp CIPatWild)
+exprToIrrefPat (Loc sp (CAsE v inner))  = do
+  inner' <- exprToIrrefPat inner
+  return (Loc sp (CIPatAs v inner'))
+exprToIrrefPat (Loc _ (CParenE inner))  = exprToIrrefPat inner
+exprToIrrefPat (Loc sp (CTupE es))
+  | length es < 2 =
+      dfail (startPos sp) "tuple pattern requires at least two components"
+  | otherwise = do
+      ps <- mapM exprToIrrefPat es
+      return (Loc sp (CIPatTup ps))
+exprToIrrefPat (Loc sp (CNamE entries)) = do
+  ps <- mapM (\(k, e) -> do p <- exprToIrrefPat e; return (k, p)) entries
+  return (Loc sp (CIPatRec ps))
+exprToIrrefPat (Loc sp _) =
+  dfail (startPos sp)
+    "expected a pattern (variable, '_', tuple, record, or label@pattern) in binding position"
+
+-- | Extend an existing selector chain by one tuple-index step at the tail.
+extendSelIdx :: Int -> Selector -> Selector
+extendSelIdx i SelectorEnd             = SelectorIdx (i, SelectorEnd) []
+extendSelIdx i (SelectorIdx (j, t) ss) = SelectorIdx (j, extendSelIdx i t) ss
+extendSelIdx i (SelectorKey (k, t) ss) = SelectorKey (k, extendSelIdx i t) ss
+extendSelIdx _ sel                     = sel  -- bracket selectors: not reached from irrefutable-pattern walk
+
+-- | Extend an existing selector chain by one record-key step at the tail.
+extendSelKey :: Text -> Selector -> Selector
+extendSelKey k SelectorEnd              = SelectorKey (k, SelectorEnd) []
+extendSelKey k (SelectorIdx (j, t) ss)  = SelectorIdx (j, extendSelKey k t) ss
+extendSelKey k (SelectorKey (k', t) ss) = SelectorKey (k', extendSelKey k t) ss
+extendSelKey _ sel                      = sel
+
+-- | Walk an irrefutable pattern to its leaves, collecting
+-- (bound-name, chained-selector-from-receiver) pairs. Wildcards contribute
+-- no leaves; as-patterns bind the label at the current chain and continue
+-- with the inner pattern.
+walkIrrefPat :: Loc CstIrrefPat -> Selector -> [(EVar, Selector)]
+walkIrrefPat (Loc _ (CIPatVar v))   sel = [(v, sel)]
+walkIrrefPat (Loc _ CIPatWild)      _   = []
+walkIrrefPat (Loc _ (CIPatAs v p))  sel = (v, sel) : walkIrrefPat p sel
+walkIrrefPat (Loc _ (CIPatTup ps))  sel = concat
+  [ walkIrrefPat p (extendSelIdx i sel) | (i, p) <- zip [0 ..] ps ]
+walkIrrefPat (Loc _ (CIPatRec kps)) sel = concat
+  [ walkIrrefPat p (extendSelKey k sel) | (Key k, p) <- kps ]
+
+-- | Emit one LetE-style binding per leaf, projecting from 'receiver'.
+-- A SelectorEnd chain (as-pattern binding the entire receiver) is
+-- realized as a bare VarE reference rather than a PatE application on
+-- an empty chain.
+materializeIrrefLeaves :: Span -> EVar -> [(EVar, Selector)] -> D [(EVar, ExprI)]
+materializeIrrefLeaves sp recv = mapM $ \(v, sel) -> do
+  subj <- freshExprSpan sp (VarE defaultValue recv)
+  rhs <- case sel of
+    SelectorEnd -> return subj
+    _ -> do
+      pat <- freshExprSpan sp (PatE (PatternStruct sel))
+      freshExprSpan sp (AppE pat [subj])
+  return (v, rhs)
+
+-- | If the desugared expression is a bare VarE, return its name so callers
+-- can chain accessors directly on the variable instead of introducing a
+-- receiver temp.
+asBareVar :: ExprI -> Maybe EVar
+asBareVar (ExprI _ (VarE _ v)) = Just v
+asBareVar _                    = Nothing
+
+-- | Fresh name for the receiver temp introduced when an irrefutable pattern
+-- destructures a non-variable RHS. Also used for _ = rhs to keep the RHS
+-- evaluated for effect.
+freshIrrefVar :: Span -> D EVar
+freshIrrefVar sp = do
+  idx <- freshIdSpan sp
+  return (EV ("_irref_" <> T.pack (show idx)))
+
+-- | Fresh name for the lambda parameter introduced when a lambda or
+-- function-arg is written with an irrefutable pattern rather than a plain
+-- variable. Prefix matches the existing 'mlcp_x_' convention used for
+-- implicit-main and eta-expansion parameters.
+freshIrrefLamParam :: Span -> D EVar
+freshIrrefLamParam sp = do
+  idx <- freshIdSpan sp
+  return (EV ("mlcp_x_" <> T.pack (show idx)))
+
+-- | Extract the span of a Loc-wrapped value.
+irrefPatSpan :: Loc CstIrrefPat -> Span
+irrefPatSpan (Loc s _) = s
+
+-- | Given an irrefutable pattern and its already-desugared RHS, produce a
+-- flat list of (name, expr) bindings suitable for a LetE. Introduces one
+-- fresh temp when the receiver is not already a bare variable. A pattern
+-- whose only content is a wildcard still emits a binding so its RHS is
+-- evaluated (do-block <- semantics).
+desugarIrrefPat :: Loc CstIrrefPat -> ExprI -> D [(EVar, ExprI)]
+-- Bare variable pattern: bind rhs directly. No temp, no aliasing, so
+-- downstream codegen sees the same shape as pre-pattern let/do-bind.
+desugarIrrefPat (Loc _ (CIPatVar v)) rhs = return [(v, rhs)]
+desugarIrrefPat p rhs = do
+  validateIrrefPat p
+  let leaves = walkIrrefPat p SelectorEnd
+      sp = irrefPatSpan p
+  case leaves of
+    [] -> do
+      throwaway <- freshIrrefVar sp
+      return [(throwaway, rhs)]
+    _ -> case asBareVar rhs of
+      Just recv -> materializeIrrefLeaves sp recv leaves
+      Nothing -> do
+        tmp <- freshIrrefVar sp
+        body <- materializeIrrefLeaves sp tmp leaves
+        return ((tmp, rhs) : body)
+
+-- | Desugar an irrefutable pattern into a fresh lambda parameter plus
+-- inner projection bindings. Returns (param-name, [(binder, projection)]).
+-- The caller is expected to wrap the projection bindings in a LetE around
+-- the lambda body.
+--
+-- The 'usedNames' set holds names free in the lambda body -- leaves whose
+-- binder is not used are dropped. This is required because a lambda
+-- parameter's type is existential until the lambda is applied; a
+-- projection off it (e.g. @b = .1 mlcp_x_N@) picks up an unresolved
+-- @_pattern_@ existential in its stored type, and nothing later closes it
+-- because @b@ is dead. Codegen then fails with "cannot serialize type:
+-- _pattern_N" at export.
+desugarIrrefLamParam :: Set.Set EVar -> Loc CstIrrefPat -> D (EVar, [(EVar, ExprI)])
+-- Bare variable pattern: use the variable name directly as the lambda
+-- parameter. No fresh temp, no let-alias -- preserves the pre-pattern
+-- LamE shape that downstream codegen (Express, Realize) expects.
+desugarIrrefLamParam _ (Loc _ (CIPatVar v)) = return (v, [])
+desugarIrrefLamParam usedNames p = do
+  validateIrrefPat p
+  let sp = irrefPatSpan p
+  v <- freshIrrefLamParam sp
+  let leaves = walkIrrefPat p SelectorEnd
+      usedLeaves = filter (\(n, _) -> Set.member n usedNames) leaves
+  bindings <- materializeIrrefLeaves sp v usedLeaves
+  return (v, bindings)
+
+-- | Free-variable set of an already-desugared expression. Used to decide
+-- which pattern-projection let-bindings a lambda body actually needs.
+-- Exhaustive on 'Expr' constructors so a new constructor forces a decision
+-- here (missing one silently makes 'desugarIrrefLamParam' drop live bindings).
+freeVarsE :: ExprI -> Set.Set EVar
+freeVarsE (ExprI _ e) = case e of
+  -- Value expressions that carry names
+  VarE _ v            -> Set.singleton v
+  BopE l _ v r        -> Set.unions [freeVarsE l, Set.singleton v, freeVarsE r]
+  LstE es             -> Set.unions (map freeVarsE es)
+  TupE es             -> Set.unions (map freeVarsE es)
+  NamE kes            -> Set.unions (map (freeVarsE . snd) kes)
+  AppE f xs           -> Set.union (freeVarsE f) (Set.unions (map freeVarsE xs))
+  LamE params body    -> Set.difference (freeVarsE body) (Set.fromList params)
+  AnnE inner _        -> freeVarsE inner
+  LetE bindings body  ->
+    let bound = Set.fromList (map fst bindings)
+        rhsFvs = Set.unions (map (freeVarsE . snd) bindings)
+    in Set.union (Set.difference (freeVarsE body) bound) rhsFvs
+  IfE c t f           -> Set.unions [freeVarsE c, freeVarsE t, freeVarsE f]
+  DoBlockE inner      -> freeVarsE inner
+  EvalE inner         -> freeVarsE inner
+  IntrinsicE _ es     -> Set.unions (map freeVarsE es)
+  ParenE inner        -> freeVarsE inner
+  AssE _ body wheres  -> Set.union (freeVarsE body) (Set.unions (map freeVarsE wheres))
+  IstE _ _ body       -> Set.unions (map freeVarsE body)
+  ModE _ body         -> Set.unions (map freeVarsE body)
+  -- Leaf value expressions (no names bound or referenced)
+  UniE                -> Set.empty
+  NullE               -> Set.empty
+  IntE _              -> Set.empty
+  RealE _             -> Set.empty
+  LogE _              -> Set.empty
+  StrE _              -> Set.empty
+  PatE _              -> Set.empty
+  -- Declaration nodes: only appear at top level, not inside lambda bodies.
+  -- Return empty rather than error so that a defensive caller against
+  -- unusual desugarings still produces a well-defined FV set.
+  ClsE _              -> Set.empty
+  EffE _ _            -> Set.empty
+  TypE _              -> Set.empty
+  ImpE _              -> Set.empty
+  ExpE _              -> Set.empty
+  SrcE _              -> Set.empty
+  SigE _              -> Set.empty
+  FixE _              -> Set.empty
+
+-- | Names bound by an irrefutable pattern, each paired with the source
+-- position of the leaf that binds it. Wildcards contribute nothing;
+-- as-patterns contribute both the label and any names in the inner pattern.
+-- Positions let 'validateIrrefPat' caret at the duplicating occurrence;
+-- callers who only need names take 'fst'.
+irrefPatBoundNames :: Loc CstIrrefPat -> [(Text, Pos)]
+irrefPatBoundNames (Loc sp (CIPatVar (EV n)))  = [(n, startPos sp)]
+irrefPatBoundNames (Loc _  CIPatWild)          = []
+irrefPatBoundNames (Loc sp (CIPatAs (EV n) p)) = (n, startPos sp) : irrefPatBoundNames p
+irrefPatBoundNames (Loc _  (CIPatTup ps))      = concatMap irrefPatBoundNames ps
+irrefPatBoundNames (Loc _  (CIPatRec kps))     = concatMap (irrefPatBoundNames . snd) kps
+
+-- | Reject an irrefutable pattern that binds the same name twice, e.g.
+-- (x, x) = e or {a=x, b=x} = r or x@(x, _) = e. Carets at the second
+-- occurrence's source position.
+validateIrrefPat :: Loc CstIrrefPat -> D ()
+validateIrrefPat p =
+  case findFirstDup Set.empty (irrefPatBoundNames p) of
+    Nothing -> return ()
+    Just (n, pos) -> dfail pos ("duplicate binder in pattern: " ++ T.unpack n)
+  where
+    findFirstDup :: Set.Set Text -> [(Text, Pos)] -> Maybe (Text, Pos)
+    findFirstDup _ [] = Nothing
+    findFirstDup seen ((x, pos) : xs)
+      | Set.member x seen = Just (x, pos)
+      | otherwise = findFirstDup (Set.insert x seen) xs
+
+--------------------------------------------------------------------
 -- Do-notation desugaring
 --------------------------------------------------------------------
 
@@ -1336,15 +1557,19 @@ desugarDo sp [] = dfail (startPos sp) "empty do block"
 desugarDo _sp [CstDoBare e] = desugarExpr e
 desugarDo sp [CstDoBind _ _] = dfail (startPos sp) "do block cannot end with a bind (<-)"
 desugarDo sp [CstDoLet _ _] = dfail (startPos sp) "do block cannot end with a let binding"
-desugarDo sp (CstDoLet v e : rest) = do
+desugarDo sp (CstDoLet p e : rest) = do
+  p' <- exprToIrrefPat p
   e' <- desugarExpr e
+  bindings <- desugarIrrefPat p' e'
   restE <- desugarDo sp rest
-  freshExprSpan sp (LetE [(v, e')] restE)
-desugarDo sp (CstDoBind v e : rest) = do
+  freshExprSpan sp (LetE bindings restE)
+desugarDo sp (CstDoBind p e : rest) = do
+  p' <- exprToIrrefPat p
   e' <- desugarExpr e
   forceE <- freshExprSpan sp (EvalE e')
+  bindings <- desugarIrrefPat p' forceE
   restE <- desugarDo sp rest
-  freshExprSpan sp (LetE [(v, forceE)] restE)
+  freshExprSpan sp (LetE bindings restE)
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
   let discardVar = EV ("_do_" <> T.pack (show idx))
@@ -1424,11 +1649,15 @@ desugarExpr (Loc _ (CAppE f args)) = do
   f' <- desugarExpr f
   args' <- mapM desugarExpr args
   freshExprFrom f' (AppE f' args')
-desugarExpr (Loc sp (CLamE vs body)) = do
+desugarExpr (Loc sp (CLamE pats body)) = do
+  pats' <- mapM exprToIrrefPat pats
   body' <- desugarExpr body
-  freshExprSpan sp (LamE vs body')
+  buildLamWithIrrefPats sp pats' body'
 desugarExpr (Loc sp (CLetE bindings body)) = do
-  bindings' <- mapM (\(v, e) -> do e' <- desugarExpr e; return (v, e')) bindings
+  bindings' <- concatMapM (\(p, e) -> do
+    p' <- exprToIrrefPat p
+    e' <- desugarExpr e
+    desugarIrrefPat p' e') bindings
   body' <- desugarExpr body
   freshExprSpan sp (LetE bindings' body')
 desugarExpr (Loc sp (CParenE inner@(Loc _ CBopE{}))) = do
@@ -1491,6 +1720,10 @@ desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in e
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
 desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
 desugarExpr (Loc _ (CInlineE {})) = error "desugarExpr: unexpected CInlineE in expression position"
+desugarExpr (Loc sp CUnderscoreE) =
+  dfail (startPos sp) "'_' is only valid in a binding position (let / do-bind / lambda / function-def arg)"
+desugarExpr (Loc sp (CAsE _ _)) =
+  dfail (startPos sp) "as-pattern '@' is only valid in a binding position"
 
 -- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
 -- Fully applied intrinsics pass through as IntrinsicE nodes.
@@ -1567,25 +1800,27 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   e <- freshExprSpan sp (SigE (Signature name Nothing et))
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
-  checkWhereScope params whereDecls
+  params' <- mapM exprToIrrefPat params
+  checkWhereScope params' whereDecls
   captureDeclDocs (startPos sp) name
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
-  e <- case params of
+  e <- case params' of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
-    vs -> do
-      lam <- freshExprSpan sp (LamE (map EV vs) body')
+    ps -> do
+      lam <- buildLamWithIrrefPats sp ps body'
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
 desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
-  checkWhereScope params whereDecls
+  params' <- mapM exprToIrrefPat params
+  checkWhereScope params' whereDecls
   captureDeclDocs (startPos sp) name
   body' <- desugarGuards sp guards defaultExpr
   whereDecls' <- concatMapM desugarTopLevel whereDecls
-  e <- case params of
+  e <- case params' of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
-    vs -> do
-      lam <- freshExprSpan sp (LamE (map EV vs) body')
+    ps -> do
+      lam <- buildLamWithIrrefPats sp ps body'
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
 desugarTopLevel (Loc sp (CTypE td)) = desugarTypeDef sp td
@@ -1626,18 +1861,33 @@ desugarTopLevel node = do
   e <- desugarExpr node
   return [e]
 
+-- | Build a LamE from a list of irrefutable pattern parameters plus a
+-- desugared body. Each pattern becomes a fresh formal, with projection
+-- bindings wrapped around the body in a LetE. Unused pattern binders
+-- are dropped -- see 'desugarIrrefLamParam' for why.
+buildLamWithIrrefPats :: Span -> [Loc CstIrrefPat] -> ExprI -> D ExprI
+buildLamWithIrrefPats sp ps body = do
+  let bodyFvs = freeVarsE body
+  paramResults <- mapM (desugarIrrefLamParam bodyFvs) ps
+  let paramNames = map fst paramResults
+      projBindings = concatMap snd paramResults
+  wrapped <- case projBindings of
+    [] -> return body
+    bs -> freshExprSpan sp (LetE bs body)
+  freshExprSpan sp (LamE paramNames wrapped)
+
 -- Reject where-clause bindings that shadow a function parameter or
 -- duplicate a sibling where-binding. Only inspects value bindings
 -- (CAssE/CGuardedAssE); type signatures (CSigE) may legally repeat the
--- term name. Underscore (_) bindings are skipped.
-checkWhereScope :: [Text] -> [Loc CstExpr] -> D ()
-checkWhereScope params decls = go (Set.fromList params) Set.empty decls
+-- term name.
+checkWhereScope :: [Loc CstIrrefPat] -> [Loc CstExpr] -> D ()
+checkWhereScope params decls =
+  go (Set.fromList (map fst (concatMap irrefPatBoundNames params))) Set.empty decls
   where
     go :: Set.Set Text -> Set.Set Text -> [Loc CstExpr] -> D ()
     go _ _ [] = return ()
     go ps seen (d : rest) = case bindingName d of
       Nothing -> go ps seen rest
-      Just (n, _) | n == "_" -> go ps seen rest
       Just (n, pos)
         | Set.member n ps ->
             dfail pos ("where-clause binding shadows function parameter: " ++ T.unpack n)

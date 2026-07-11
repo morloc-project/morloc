@@ -1,0 +1,122 @@
+-- End-to-end coverage for irrefutable patterns (tuples, records,
+-- as-patterns, wildcards) across let, lambda, and function-def binding
+-- sites. Native path only. If the parser, desugar, or codegen forgets
+-- to project a leaf, the nexus output will drift.
+--
+-- Record patterns on a let LHS require parenthesization because
+-- `let {` is otherwise parsed as an explicit let-bindings block.
+
+module main
+  ( letTuple0
+  , letTuple1
+  , letRecordA
+  , letRecordB
+  , letRecordReorder
+  , letWildcardOnly
+  , letAsPair
+  , fnTupleFst
+  , fnTupleSnd
+  , fnRecordPick
+  , fnNestedMix
+  , lamTupleFst
+  , lamWildcardKeep
+  , doTupleBind
+  , doRecordBind
+  , doWildcardBind
+  , doNestedBind
+  )
+
+import root-py
+
+record Pair = Pair { a :: Int, b :: Int }
+
+effect IO
+
+source Py from "helpers.py"
+  ( "make_pair"   as mkPair
+  , "make_record" as mkRec
+  , "combined"    as mkCombined
+  )
+
+mkPair     :: <IO> (Int, Int)
+mkRec      :: <IO> Pair
+mkCombined :: <IO> (Int, Pair)
+
+-- ------------------------------------------------------------------
+-- let with tuple pattern
+letTuple0 :: Int
+letTuple0 = let (a, b) = (10, 20) in a
+
+letTuple1 :: Int
+letTuple1 = let (a, b) = (10, 20) in b
+
+-- let with record pattern (order-agnostic, field-polymorphic).
+-- Parens around `{...}` are required to distinguish from `let {a=1;b=2}`.
+letRecordA :: Int
+letRecordA = let ({a = p, b = q}) = ({a = 1, b = 2} :: Pair) in p
+
+letRecordB :: Int
+letRecordB = let ({a = p, b = q}) = ({a = 1, b = 2} :: Pair) in q
+
+letRecordReorder :: Int
+letRecordReorder = let ({b = q, a = p}) = ({a = 3, b = 4} :: Pair) in p
+
+-- Wildcard let: RHS is evaluated but discarded; body returns something
+-- unrelated. Confirms wildcards don't crash desugar.
+letWildcardOnly :: Int
+letWildcardOnly = let _ = 99 in 5
+
+-- As-pattern: bind whole and destructure. Return one of the components
+-- to prove the pattern bound its variables.
+letAsPair :: Int
+letAsPair = let p@(a, b) = (100, 200) in b
+
+-- ------------------------------------------------------------------
+-- Function-argument patterns (no need for parens on record here since
+-- `foo {a=x}` unambiguously parses).
+fnTupleFst :: (Int, Int) -> Int
+fnTupleFst (x, _) = x
+
+fnTupleSnd :: (Int, Int) -> Int
+fnTupleSnd (_, y) = y
+
+fnRecordPick :: Pair -> Int
+fnRecordPick {a = x, b = _} = x
+
+-- Nested pattern: outer tuple + inner record, wildcards mixed in.
+fnNestedMix :: (Int, Pair) -> Int
+fnNestedMix (_, {a = _, b = q}) = q
+
+-- ------------------------------------------------------------------
+-- Lambda patterns
+lamTupleFst :: Int
+lamTupleFst = (\ (a, b) -> a) (3, 4)
+
+lamWildcardKeep :: Int
+lamWildcardKeep = (\ (_, keep) -> keep) (0, 42)
+
+-- ------------------------------------------------------------------
+-- Do-block pattern binds (require parens on record patterns because
+-- `do` is a layout keyword that claims '{' as an explicit-block opener).
+doTupleBind :: <IO> Int
+doTupleBind = do
+  (a, b) <- mkPair
+  a
+
+doRecordBind :: <IO> Int
+doRecordBind = do
+  ({a = p, b = q}) <- mkRec
+  q
+
+doWildcardBind :: <IO> Int
+doWildcardBind = do
+  (_, keep) <- mkPair
+  keep
+
+-- Nested pattern in do-bind: destructure tuple whose second element is a
+-- record, project the record's b field. Exercises the pattern walker on a
+-- non-variable receiver at the do-bind site.
+doNestedBind :: <IO> Int
+doNestedBind = do
+  (n, ({a = _, b = q})) <- mkCombined
+  q

@@ -6,6 +6,7 @@ import Test.Tasty
 
 import EffectBoundaryTests (effectBoundaryTests)
 import GoldenMakefileTests (goldenMakefileTest)
+import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
@@ -48,6 +49,7 @@ main = do
       , natDimTests
       , typedefKindVarTests
       , letBindingTests
+      , irrefutablePatternTests
       , aliasConstructorTests
       , newtypeTests
       , literalDispatchTests
@@ -58,6 +60,7 @@ main = do
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
+      , irrefutablePatternLexerTests
       , effectBoundaryTests
 
       -- -- These tests pass locally and when I run the same container that I
@@ -92,6 +95,7 @@ main = do
       , golden "view-patterns" "view-patterns"
       , golden "nexus-file-footerless" "nexus-file-footerless"
       , golden "pattern-corpus" "pattern-corpus"
+      , golden "irrefutable-patterns" "irrefutable-patterns"
       , golden "intrmap-tuple-broadcast" "intrmap-tuple-broadcast"
       , golden "ifile-data-patterns" "ifile-data-patterns"
       , golden "ostream-write-roundtrip" "ostream-write-roundtrip"

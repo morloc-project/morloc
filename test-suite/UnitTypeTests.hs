@@ -36,6 +36,7 @@ module UnitTypeTests
   , natKindPromotionTests
   , natDimTests
   , letBindingTests
+  , irrefutablePatternTests
   , aliasConstructorTests
   , newtypeTests
   , literalDispatchTests
@@ -5476,6 +5477,177 @@ letBindingTests =
           "do with explicit braces, multiple lets"
           "module main (x)\nx = do { let a = 1; let b = 2; b }"
           int
+      ]
+
+-- ============================================================
+-- Irrefutable-pattern binding syntax
+-- ============================================================
+
+irrefutablePatternTests :: TestTree
+irrefutablePatternTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "Irrefutable pattern bindings"
+      [ -- === Tuple destructuring in let ===
+        assertGeneralType
+          "let with tuple pattern picks first component"
+          "module main (x)\nx = let (a, b) = (1, True) in a"
+          int
+
+      , assertGeneralType
+          "let with tuple pattern picks second component"
+          "module main (x)\nx = let (a, b) = (1, True) in b"
+          bool
+
+      , assertGeneralType
+          "let with wildcard in tuple ignores component"
+          "module main (x)\nx = let (_, b) = (1, True) in b"
+          bool
+
+      , assertGeneralType
+          "let with nested tuple pattern"
+          "module main (x)\nx = let (a, (b, c)) = (1, (True, 3)) in b"
+          bool
+
+      -- === Tuple destructuring in lambda ===
+      -- These use signatures because inferring through a lambda-projected
+      -- irrefutable pattern still hits the existential-leak bug tracked as
+      -- a separate TODO. The desugar produces the correct AST; the tests
+      -- confirm end-to-end synth+check works when the outer type is fixed.
+
+      , assertGeneralType
+          "lambda with tuple pattern picks first"
+          "module main (x)\nx :: Int\nx = (\\ (a, b) -> a) (7, True)"
+          int
+
+      , assertGeneralType
+          "lambda with wildcard in tuple pattern"
+          "module main (x)\nx :: Bool\nx = (\\ (_, b) -> b) (7, True)"
+          bool
+
+      -- === Tuple destructuring in function args ===
+
+      , assertGeneralType
+          "function-arg tuple pattern picks first"
+          [r|
+        fst2 :: (Int, Bool) -> Int
+        fst2 (a, b) = a
+        fst2 (42, True)
+          |]
+          int
+
+      , assertGeneralType
+          "function-arg tuple pattern picks second"
+          [r|
+        snd2 :: (Int, Bool) -> Bool
+        snd2 (a, b) = b
+        snd2 (42, True)
+          |]
+          bool
+
+      , assertGeneralType
+          "function-arg wildcard in tuple"
+          [r|
+        second :: (Int, Bool, Int) -> Bool
+        second (_, b, _) = b
+        second (1, True, 3)
+          |]
+          bool
+
+      -- === Record destructuring (field-polymorphic on structural records) ===
+      -- NOTE: `let {...}` alone is ambiguous with explicit let-blocks, so
+      -- record patterns on a let LHS must be parenthesized.
+
+      , assertGeneralType
+          "let with record pattern extracts named field"
+          "module main (x)\nx = let ({a=p, b=q}) = {a=1, b=True} in p"
+          int
+
+      , assertGeneralType
+          "record pattern extracts second field"
+          "module main (x)\nx = let ({a=p, b=q}) = {a=1, b=True} in q"
+          bool
+
+      , assertGeneralType
+          "record pattern field order does not matter"
+          "module main (x)\nx = let ({b=q, a=p}) = {a=1, b=True} in p"
+          int
+
+      -- === As-patterns ===
+
+      , assertGeneralType
+          "as-pattern binds label to whole receiver"
+          [r|
+        first p@(a, b) = p
+        first (1, True)
+          |]
+          (tuple [int, bool])
+
+      , assertGeneralType
+          "as-pattern binds label and inner components together"
+          [r|
+        firstElem :: (Int, Bool) -> Int
+        firstElem p@(a, b) = a
+        firstElem (1, True)
+          |]
+          int
+
+      -- === Do-block pattern binds ===
+
+      , expectPass
+          "do-block tuple bind unpacks and returns first component"
+          [r|
+        module main (x)
+        effect IO
+        f :: <IO> (Int, Bool)
+        x = do
+            (a, b) <- f
+            a
+          |]
+
+      , expectPass
+          "do-block wildcard bind runs effect and returns other"
+          [r|
+        module main (x)
+        effect IO
+        f :: <IO> (Int, Bool)
+        x = do
+            (_, b) <- f
+            b
+          |]
+
+      -- === Nested / complex patterns ===
+
+      , assertGeneralType
+          "function-arg mixing tuple, record, wildcard"
+          [r|
+        record R = R {a :: Bool, b :: Real}
+        pick :: (Int, R) -> Real
+        pick (n, {a=_, b=q}) = q
+        pick (1, {a=True, b=3.5})
+          |]
+          real
+
+      , assertGeneralType
+          "wildcard in let followed by identity use"
+          "module main (x)\nx = let _ = 42 in True"
+          bool
+
+      -- === Error cases ===
+
+      , expectError
+          "duplicate binder in tuple pattern is rejected"
+          [r|
+        module main (x)
+        x = let (a, a) = (1, 2) in a
+          |]
+
+      , expectError
+          "duplicate binder across as-pattern is rejected"
+          [r|
+        module main (x)
+        x = let a@(a, b) = (1, 2) in b
+          |]
       ]
 
 -- | Tests for typeclass instance resolution across newtype boundaries.
