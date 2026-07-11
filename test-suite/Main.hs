@@ -128,6 +128,7 @@ main = do
 
       , golden "cli-docstring-negatives" "cli-docstring-negatives"
       , golden "cli-docstring-shapes" "cli-docstring-shapes"
+      , golden "cli-docstring-map-table" "cli-docstring-map-table"
 
       , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
       , golden "nexus-packet-output-zstd" "nexus-packet-output-zstd"

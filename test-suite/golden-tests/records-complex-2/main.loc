@@ -23,7 +23,7 @@ addShitPy  :: Str -> Int -> Foo -> Foo
 addShitR   :: Str -> Int -> Foo -> Foo
 
 emptyMap :: Map Str (Map Str Int)
-emptyMap = pack ([],[])
+emptyMap = pack []
 
 -- test interop
 foo s =
