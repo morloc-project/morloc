@@ -477,8 +477,12 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
                 }
-            } else if (schema->hint == NULL) {
-                // No hint, non-UInt8: default to a Python list
+            } else {
+                // No hint OR an unrecognized hint (e.g. `<dict>` from a
+                // Packable outer type like Map): materialize the wire form
+                // as a Python list. The hint describes the POST-pack native
+                // shape produced by generated code above this layer, not
+                // the wire shape from_voidstar is decoding.
                 obj = PyList_New(array->size);
                 if(obj == NULL){
                     PyRAISE("Failed to allocate list");
@@ -494,8 +498,6 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                         }
                     }
                 }
-            } else {
-                PyRAISE("Unexpected array hint");
             }
             break;
         }
