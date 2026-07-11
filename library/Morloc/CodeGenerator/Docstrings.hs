@@ -671,6 +671,7 @@ peelHint t = case MT.uncons t of
     Nothing    -> t
   _ -> t
   where
+    skipBalanced :: Text -> Int -> Maybe Text
     skipBalanced s d = case MT.uncons s of
       Nothing -> Nothing
       Just ('>', rest)

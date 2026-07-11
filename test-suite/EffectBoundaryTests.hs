@@ -26,7 +26,6 @@ module EffectBoundaryTests
   ) where
 
 import qualified Data.Set as Set
-import Data.Text (Text)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
