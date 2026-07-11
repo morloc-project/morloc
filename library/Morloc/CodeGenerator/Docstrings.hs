@@ -661,13 +661,23 @@ data ArgShape
 
 -- | Strip a leading `<...>` hint decoration. Hints carry the
 -- concrete-type tag for newtypes / aliases over a built-in primitive.
+-- The hint payload can itself contain angle brackets (e.g. the C++
+-- template parameters in `<std::map<$1,$2>>`), so we track angle-bracket
+-- depth to find the matching close instead of stopping at the first `>`.
 peelHint :: Text -> Text
 peelHint t = case MT.uncons t of
-  Just ('<', tt) -> case MT.span (/= '>') tt of
-    (_, post) -> case MT.uncons post of
-      Just ('>', after) -> peelHint after
-      _ -> t
+  Just ('<', tt) -> case skipBalanced tt 1 of
+    Just after -> peelHint after
+    Nothing    -> t
   _ -> t
+  where
+    skipBalanced s d = case MT.uncons s of
+      Nothing -> Nothing
+      Just ('>', rest)
+        | d == 1    -> Just rest
+        | otherwise -> skipBalanced rest (d - 1)
+      Just ('<', rest) -> skipBalanced rest (d + 1)
+      Just (_, rest)   -> skipBalanced rest d
 
 -- | Strip a leading `&<klen><name>` rec-decl prefix.
 peelRecDecl :: Text -> Text

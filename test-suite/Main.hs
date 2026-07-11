@@ -10,6 +10,7 @@ import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
+import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import UnitTypeTests
 
@@ -62,6 +63,7 @@ main = do
       , patternChainTests
       , irrefutablePatternLexerTests
       , effectBoundaryTests
+      , schemaHintTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
