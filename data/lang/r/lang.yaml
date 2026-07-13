@@ -84,8 +84,11 @@ ldReturnTemplate: "return({{expr}})"
 ldFuncDefHeader: "{{name}} <- function({{args}})"
 ldBlockStyle: braces
 ldBlockEnd: "}"
-ldErrorWrapOpen: ""
-ldErrorWrapClose: []
+ldErrorWrapOpen: "tryCatch({"
+ldErrorWrapClose:
+  - "}, error = function(e) {"
+  - "    stop(paste0(conditionMessage(e), \"\\n  at {{name}} [r] (mid={{mid}}{{srcloc_suffix}})\"), call.=FALSE)"
+  - "})"
 ldPatternStyle: concat_call
 ldConcatFn: "paste0"
 ldQuoteTerminator: '"'

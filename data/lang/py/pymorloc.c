@@ -2032,25 +2032,27 @@ extern void morloc_debug_record_frame(
     uint32_t midx,
     const char* name,
     const char* srcloc,
+    const char* lang,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
 extern char* morloc_debug_drain_frames(void);
 extern void morloc_debug_flush_dispatch(void);
 
-// debug_record_frame(midx, name, srcloc, packets_list, schemas_list) --
-// name and srcloc are per-manifold string metadata baked into the
-// codegen'd catch block ("" when the compiler had nothing to attach;
-// the Rust runtime treats empty and NULL the same way).
+// debug_record_frame(midx, name, srcloc, lang, packets_list, schemas_list) --
+// name, srcloc, and lang are per-manifold string metadata baked into
+// the codegen'd catch block ("" when the compiler had nothing to
+// attach; the Rust runtime treats empty and NULL the same way).
 static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
     (void)self;
     unsigned long midx_arg;
     const char* name_arg;
     const char* srcloc_arg;
+    const char* lang_arg;
     PyObject* packets_list;
     PyObject* schemas_list;
-    if (!PyArg_ParseTuple(args, "kssOO", &midx_arg, &name_arg, &srcloc_arg,
-                          &packets_list, &schemas_list)) {
+    if (!PyArg_ParseTuple(args, "ksssOO", &midx_arg, &name_arg, &srcloc_arg,
+                          &lang_arg, &packets_list, &schemas_list)) {
         return NULL;
     }
     if (!PyList_Check(packets_list) || !PyList_Check(schemas_list)) {
@@ -2066,7 +2068,7 @@ static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
     }
     if (n_pkts == 0) {
         morloc_debug_record_frame((uint32_t)midx_arg, name_arg, srcloc_arg,
-                                  NULL, NULL, 0);
+                                  lang_arg, NULL, NULL, 0);
         Py_RETURN_NONE;
     }
     const uint8_t** pkt_arr = (const uint8_t**)calloc((size_t)n_pkts, sizeof(uint8_t*));
@@ -2089,7 +2091,7 @@ static PyObject* pybinding__debug_record_frame(PyObject* self, PyObject* args) {
         sch_arr[i] = PyUnicode_AsUTF8(s);
     }
     morloc_debug_record_frame((uint32_t)midx_arg, name_arg, srcloc_arg,
-                              pkt_arr, sch_arr, (size_t)n_pkts);
+                              lang_arg, pkt_arr, sch_arr, (size_t)n_pkts);
     free(pkt_arr);
     free(sch_arr);
     Py_RETURN_NONE;
@@ -2116,6 +2118,7 @@ static PyObject* pybinding__debug_flush_dispatch(PyObject* self, PyObject* args)
     morloc_debug_flush_dispatch();
     Py_RETURN_NONE;
 }
+
 
 
 // Release the SHM ref owned by a put_value-produced packet. The codegen

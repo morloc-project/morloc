@@ -2588,12 +2588,18 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
             (const uint8_t*)result, &fail_check_err);
         if (fail_check_err != NULL) { free(fail_check_err); }
         if (fail_msg != NULL) {
-            char buf[8192];
-            snprintf(buf, sizeof(buf), "%s", fail_msg);
+            // Take ownership of fail_msg before longjmping out via error().
+            // Rf_error longjmps to R's condition handler; the copy leaks on
+            // that path (process is unwinding anyway) but the previous fixed
+            // 8KB buffer silently truncated long tracebacks.
+            char* msg_copy = strdup(fail_msg);
             free(fail_msg);
             free(packet);
             free(result);
-            error("%s", buf);
+            if (msg_copy == NULL) {
+                error("morloc R foreign_call: OOM copying fail message");
+            }
+            error("%s", msg_copy);
         }
     }
 
@@ -3061,6 +3067,7 @@ extern void morloc_debug_record_frame(
     uint32_t midx,
     const char* name,
     const char* srcloc,
+    const char* lang,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
@@ -3068,6 +3075,8 @@ extern void morloc_debug_record_frame(
 // Send a fail packet to the client (best-effort, ignores send errors).
 // Concatenates any recorded debug trace with the message so the nexus's
 // summary.json carries both the foreign error and the morloc frames.
+// Every manifold catch also appends its own "  at <name> [r] (mid=...,
+// srcloc)" line to the exception message via string concat.
 static void send_fail_to_client(int client_fd, const char* msg) {
     char* errmsg = NULL;
     char* trace = morloc_debug_drain_frames();
@@ -3296,7 +3305,7 @@ SEXP morloc_debug_flush_dispatch_r(void) {
 }
 
 SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
-                                 SEXP packets_r, SEXP schemas_r) {
+                                 SEXP lang_r, SEXP packets_r, SEXP schemas_r) {
     if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
         MORLOC_ERROR("debug_record_frame: midx must be a single integer");
     }
@@ -3305,6 +3314,9 @@ SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
     }
     if (TYPEOF(srcloc_r) != STRSXP || LENGTH(srcloc_r) != 1) {
         MORLOC_ERROR("debug_record_frame: srcloc must be a single string");
+    }
+    if (TYPEOF(lang_r) != STRSXP || LENGTH(lang_r) != 1) {
+        MORLOC_ERROR("debug_record_frame: lang must be a single string");
     }
     if (TYPEOF(packets_r) != VECSXP) {
         MORLOC_ERROR("debug_record_frame: packets must be a list of raw vectors");
@@ -3320,11 +3332,13 @@ SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
     // same. NA_STRING falls back to "" here so downstream sees empty.
     SEXP name_elt = STRING_ELT(name_r, 0);
     SEXP srcloc_elt = STRING_ELT(srcloc_r, 0);
+    SEXP lang_elt = STRING_ELT(lang_r, 0);
     const char* name_c = (name_elt == NA_STRING) ? "" : CHAR(name_elt);
     const char* srcloc_c = (srcloc_elt == NA_STRING) ? "" : CHAR(srcloc_elt);
+    const char* lang_c = (lang_elt == NA_STRING) ? "" : CHAR(lang_elt);
     if (n_args == 0) {
         morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], name_c, srcloc_c,
-                                  NULL, NULL, 0);
+                                  lang_c, NULL, NULL, 0);
         return R_NilValue;
     }
     const uint8_t** packet_ptrs = (const uint8_t**)R_alloc(n_args, sizeof(uint8_t*));
@@ -3342,7 +3356,7 @@ SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
         schema_ptrs[i] = CHAR(s);
     }
     morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], name_c, srcloc_c,
-        packet_ptrs, schema_ptrs, (size_t)n_args);
+        lang_c, packet_ptrs, schema_ptrs, (size_t)n_args);
     return R_NilValue;
 }
 
@@ -3475,7 +3489,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
         {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
         {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
-        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 5},
+        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 6},
         {"r_morloc_debug_flush_dispatch", (DL_FUNC) &morloc_debug_flush_dispatch_r, 0},
         {"r_morloc_cache_lookup", (DL_FUNC) &morloc_cache_lookup_r, 2},
         {"r_morloc_cache_store", (DL_FUNC) &morloc_cache_store_r, 4},

@@ -389,6 +389,7 @@ data LowerConfig m = LowerConfig
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   , -- manifold lowering fields
     lcMakeFunction ::
+      Int ->
       MDoc ->
       [Arg TypeM] ->
       TypeM ->
@@ -396,8 +397,10 @@ data LowerConfig m = LowerConfig
       MDoc ->
       Maybe HeadManifoldForm ->
       m (Maybe MDoc)
-  -- ^ name, all args, manifold type, priorLines, body, headForm
-  -- Returns Nothing if dedup'd (C++), Just funcDef otherwise
+  -- ^ mid, name, all args, manifold type, priorLines, body, headForm
+  -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
+  -- is threaded so the per-manifold error-wrap can look up user name
+  -- and srcloc for the trace line.
   , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
   -- ^ name, contextArgs, boundArgs - partial application expression
   , lcRegisterSchema :: Text -> m Int
@@ -965,7 +968,7 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
       body = if retFlag then lcReturn cfg bodyExpr else bodyExpr
       args = typeMofForm form
       mname = manNamer m
-  maybeNewManifold <- lcMakeFunction cfg mname args manifoldType priorLines body headForm
+  maybeNewManifold <- lcMakeFunction cfg m mname args manifoldType priorLines body headForm
   let call = case form of
         (ManifoldPass _) -> mname
         (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))

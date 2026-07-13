@@ -750,6 +750,7 @@ extern "C" void morloc_debug_record_frame(
     uint32_t midx,
     const char* name,
     const char* srcloc,
+    const char* lang,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
@@ -777,8 +778,9 @@ extern "C" void morloc_debug_record_frame(
 // rendered morloc trace with the caught exception's message so the
 // fail packet carries both. When --debug is off (or no frames were
 // recorded), the drain returns NULL and we forward the message
-// unchanged.
-
+// unchanged. Every manifold catch also appends its own "  at <name>
+// [cpp] (mid=..., srcloc)" line to the message via string concat,
+// so non-debug tracebacks still compose across pools.
 static uint8_t* make_fail_packet_with_trace(const char* msg) {
     char* trace = morloc_debug_drain_frames();
     if (trace == NULL) {
@@ -805,6 +807,13 @@ static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
         return local_dispatch(mid, args);
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
+    } catch (const char* e) {
+        // Codegen-emitted manifold catches usually normalize const char*
+        // throws into std::runtime_error already, but a foreign helper
+        // that throws outside a wrapped body reaches here directly.
+        return make_fail_packet_with_trace(e ? e : "An unknown error occurred");
+    } catch (const std::string& e) {
+        return make_fail_packet_with_trace(e.c_str());
     } catch (...) {
         return make_fail_packet_with_trace("An unknown error occurred");
     }
@@ -818,6 +827,10 @@ static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
         return remote_dispatch(mid, args);
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
+    } catch (const char* e) {
+        return make_fail_packet_with_trace(e ? e : "An unknown error occurred");
+    } catch (const std::string& e) {
+        return make_fail_packet_with_trace(e.c_str());
     } catch (...) {
         return make_fail_packet_with_trace("An unknown error occurred");
     }
