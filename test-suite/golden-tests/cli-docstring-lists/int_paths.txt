@@ -1,5 +1,0 @@
-packets/int_1.pkt
-packets/int_2.pkt
-packets/int_3.pkt
-packets/int_4.pkt
-packets/int_5.pkt

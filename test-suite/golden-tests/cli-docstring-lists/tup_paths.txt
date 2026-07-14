@@ -1,3 +1,0 @@
-packets/tup_1.pkt
-packets/tup_2.pkt
-packets/tup_3.pkt
