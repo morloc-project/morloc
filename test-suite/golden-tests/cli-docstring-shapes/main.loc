@@ -17,6 +17,10 @@ module main
   , many_str
   , many_int
   , default_tuple
+  , record_list_str
+  , record_list_int
+  , record_dna_len
+  , record_pathr_len
   )
 
 import root-py
@@ -27,6 +31,10 @@ source Py from "helper.py"
   , "py_sum_int"
   , "py_sum_float"
   , "py_fst_int"
+  , "py_rec_xs_len"
+  , "py_rec_ys_sum"
+  , "py_rec_dna_len"
+  , "py_rec_pathr_len"
   )
 
 py_id        :: a -> a
@@ -34,6 +42,10 @@ py_size      :: [a] -> Int
 py_sum_int   :: [Int] -> Int
 py_sum_float :: [Float64] -> Float64
 py_fst_int   :: (Int, Str) -> Int
+py_rec_xs_len :: RecOpts -> Int
+py_rec_ys_sum :: RecOpts -> Int
+py_rec_dna_len :: RecOpts -> Int
+py_rec_pathr_len :: RecOpts -> Int
 
 --' Str default inline: echoes argv verbatim as the Str value.
 str_default :: Str -> Str
@@ -138,3 +150,60 @@ many_int xs = py_sum_int xs
 --' (Int, Str) default JSON: extract the first (Int) element of argv.
 default_tuple :: (Int, Str) -> Int
 default_tuple t = py_fst_int t
+
+--' Options record whose per-field directives exercise the four
+--' shape-family paths (`form: list`, `source: inline + form: bytes`,
+--' `check.path:`, Unix `-` shorthand) across the unrolled-record
+--' boundary.
+--' unroll: true
+record RecOpts where
+  --' one Str per line, JSON array, or `-` for stdin
+  --' arg: --xs
+  --' form: list
+  --' default: []
+  xs :: [Str]
+
+  --' one Int per line, JSON array, or `-` for stdin
+  --' arg: --ys
+  --' form: list
+  --' default: []
+  ys :: [Int]
+
+  --' ASCII bytes shortcut on `[UInt8]`: `--dna GATTACA` becomes
+  --' `[71,65,84,84,65,67,65]` before the value reaches the pool.
+  --' arg: --dna
+  --' source: inline
+  --' form: bytes
+  --' default: []
+  dna :: [UInt8]
+
+  --' `check.path: r` gate: `--pathr FILE` must be readable at CLI
+  --' parse time; `-` rewrites to `/dev/stdin`.
+  --' arg: --pathr
+  --' check.path: r
+  --' default: "/dev/null"
+  pathr :: Str
+
+record Py => RecOpts = "dict"
+
+--' Return the number of Str elements in the unrolled record field
+--' `--xs`. `form: list` on the record entry means `--xs FILE` reads
+--' one Str per line from FILE.
+record_list_str :: RecOpts -> Int
+record_list_str opts = py_rec_xs_len opts
+
+--' Return the sum of Int elements in the unrolled record field
+--' `--ys`. `form: list` on the record entry means `--ys FILE` reads
+--' one Int per line from FILE.
+record_list_int :: RecOpts -> Int
+record_list_int opts = py_rec_ys_sum opts
+
+--' Return the byte count of the `--dna` field. Exercises the
+--' `source: inline + form: bytes` ASCII shortcut on a record entry.
+record_dna_len :: RecOpts -> Int
+record_dna_len opts = py_rec_dna_len opts
+
+--' Return the string length of the `--pathr` field (after `-` ->
+--' `/dev/stdin` substitution and `check.path: r` validation).
+record_pathr_len :: RecOpts -> Int
+record_pathr_len opts = py_rec_pathr_len opts

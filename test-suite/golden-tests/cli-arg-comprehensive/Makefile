@@ -30,7 +30,10 @@ all:
 	./main defaults -i 7 2>> obs.err >> obs.txt
 	# JSON-shape preempts file_exists: token `null` -> JSON null,
 	# token `42` -> JSON 42 (not the decoy file contents of 999).
-	./main nullKeyword null 2>> obs.err >> obs.txt
+	# `--keep-null` on the first invocation so the classifier's null
+	# resolution is visible in stdout (top-level null is suppressed by
+	# default; the assertion here is about which value reached the pool).
+	./main --keep-null nullKeyword null 2>> obs.err >> obs.txt
 	./main nullKeyword 42 2>> obs.err >> obs.txt
 	# recursive-record default validation: omitted (default tree) /
 	# user-supplied tree.

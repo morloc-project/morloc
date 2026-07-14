@@ -38,7 +38,7 @@ all:
 	./nexus foo -m foo [1,2,3] 2>&1 | grep -c "field 'm'" >> obs.txt || true
 	./nexus foo --alg-config='{"x":1}' [1,2,3] 2>&1 | grep -c "unknown field 'x'" >> obs.txt || true
 	./nexus foo --alg-config='{"m":1}' -n notanint [1,2,3] 2>&1 | grep -c "field 'n'" >> obs.txt || true
-	printf '{"m":100,"n":1000}' | ./nexus foo --alg-config=- -m - [1,2,3] 2>&1 | grep -c "stdin" >> obs.txt || true
+	printf '{"m":100,"n":1000}' | ./nexus foo --alg-config=- - 2>&1 | grep -c "stdin" >> obs.txt || true
 
 clean:
 	rm -rf nexus pools __pycache__

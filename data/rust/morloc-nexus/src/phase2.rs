@@ -20,7 +20,7 @@
 
 use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
-use crate::dispatch::{apply_checks, quoted, substitute_stdio_dash, ArgValue};
+use crate::dispatch::{preprocess_cli_value, ArgValue};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
 
 /// Leak a string into a `&'static str` for clap's static-only
@@ -628,17 +628,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("clap-required positional must have a value");
-                    // Unix `-` stdin/stdout shorthand: rewrite to the
-                    // `/dev/std{in,out}` path so the pool's fopen
-                    // works without any user-side dash handling.
-                    let val = substitute_stdio_dash(&val, checks).unwrap_or(val);
-                    // Run value-invariant checks on the (possibly
-                    // substituted) argv before any wrap.
-                    if let Err(e) = apply_checks(&val, checks) {
-                        crate::runlog::die_with_error(
-                            &format!("argument #{}: {}", i, e));
-                    }
-                    let v = if *q { quoted(&val) } else { val };
+                    let v = preprocess_cli_value(val, checks, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 }
             }
@@ -682,15 +672,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
-                    // Unix `-` stdin/stdout shorthand: rewrite to the
-                    // `/dev/std{in,out}` path so the pool's fopen
-                    // works without any user-side dash handling.
-                    let v = substitute_stdio_dash(&v, checks).unwrap_or(v);
-                    if let Err(e) = apply_checks(&v, checks) {
-                        crate::runlog::die_with_error(
-                            &format!("argument #{}: {}", i, e));
-                    }
-                    let v = if *q { quoted(&v) } else { v };
+                    let v = preprocess_cli_value(v, checks, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else if let Some(def) = default_val {
                     out.push(ArgValue::Value(def.clone()));
@@ -763,12 +745,13 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                                 None
                             }
                         }
-                        ManifestArg::Optional { quoted: q, .. } => {
+                        ManifestArg::Optional { quoted: q, checks, .. } => {
                             let from_cli = matches.value_source(&eid)
                                 == Some(ValueSource::CommandLine);
                             if from_cli {
-                                matches.get_one::<String>(&eid).cloned().map(
-                                    |v| if *q { quoted(&v) } else { v },
+                                matches.get_one::<String>(&eid).cloned().map(|v|
+                                    preprocess_cli_value(v, checks, *q,
+                                        &format!("record entry '{}'", entry.key))
                                 )
                             } else {
                                 None

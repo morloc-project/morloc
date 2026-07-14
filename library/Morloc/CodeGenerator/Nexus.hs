@@ -76,6 +76,10 @@ data FData = FData
   , fdataType :: Type
   , fdataSubSockets :: [Socket]
   , fdataArgSchemas :: [Text]
+  , fdataArgAsts :: [SerialAST]
+    -- ^ Per-arg SerialAST, index-aligned with 'fdataArgSchemas'.
+    -- Consumed at emit time to derive per-entry wire schemas for
+    -- group args (see 'groupEntryWireSchemas').
   , fdataReturnSchema :: Text
   , fdataCmdDocSet :: CmdDocSet
   }
@@ -91,6 +95,9 @@ data GastData = GastData
   , commandExpr :: NexusExpr
   , commandReturnSchema :: Text
   , commandArgSchemas :: [Text]
+  , commandArgAsts :: [SerialAST]
+    -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
+    -- Same role as 'fdataArgAsts'; see 'groupEntryWireSchemas'.
   }
 
 -- | Slice of a parent command's 'CmdDocSet' that internal
@@ -268,6 +275,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataType = t
       , fdataSubSockets = sockets
       , fdataArgSchemas = argSchemas
+      , fdataArgAsts = argAsts
       , fdataReturnSchema = returnSchema
       , fdataCmdDocSet = doc
       }
@@ -547,6 +555,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandExpr = expr
       , commandReturnSchema = returnSchema
       , commandArgSchemas = argSchemas
+      , commandArgAsts = argAsts
       }
   where
     type2schema :: Type -> MorlocMonad Text
@@ -1125,35 +1134,55 @@ formListHint elemSchema mLSrc mLForm lcks =
       CatList inner -> inner
       _             -> es
 
--- | Serialize a 'CmdArg' to its JSON manifest form. The optional
--- 'Maybe Text' is the pre-rendered serialization schema for typed
--- args (pos/opt/grp); flags pass 'Nothing' since they have no schema.
--- Group entries also pass 'Nothing' because the group's top-level
--- schema covers the whole record; entries never dispatch individually.
-argToJson :: Maybe Text -> CmdArg -> Text
-argToJson mschema (CmdArgPos r) =
+-- | Peel any Packable wrappers off a group's SerialAST and return the
+-- inner record's per-entry wire schemas, keyed by field name. Non-
+-- record SerialASTs (which shouldn't reach a group arg in a well-typed
+-- manifest) return the empty list; the caller falls back to @Nothing@
+-- per entry, matching the pre-split behavior for that entry.
+groupEntryWireSchemas :: SerialAST -> [(Key, Text)]
+groupEntryWireSchemas ast0 = case peelPack ast0 of
+    SerialObject _ _ _ kids ->
+      [(k, render (Serial.serialAstToMsgpackSchema child)) | (k, child) <- kids]
+    _ -> []
+  where
+    peelPack (SerialPack _ (_, inner)) = peelPack inner
+    peelPack x                          = x
+
+-- | Serialize a 'CmdArg' to JSON.
+--
+--   * @mEmit@         written into the "schema" field. 'Nothing' skips
+--                     the field entirely (group entries pass 'Nothing'
+--                     because the group's schema is authoritative).
+--   * @mShape@        consulted by 'classifySchema' for shape defaults
+--                     (source, quoted, format hint). Distinct from
+--                     @mEmit@ so a group entry can resolve defaults
+--                     against its own wire schema without emitting one.
+--   * @entrySchemas@  per-entry wire schemas for 'CmdArgGrp'; unused
+--                     for pos/opt/flag.
+argToJson :: Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
+argToJson mEmit mShape _ (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
-    ++ schemaField mschema
+    ++ schemaField mEmit
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mschema))
+       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
        , ("many", jsonBool (argPosDocMany r))
        , ("desc", jsonStrArr (argPosDocDesc r))
        , ("constraints", constraintsJsonFor (argPosDocType r))
        , ("metadata", metadataEmpty)
        ]
-    ++ ioShapeFields mschema (argPosDocMany r)
+    ++ ioShapeFields mShape (argPosDocMany r)
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
-argToJson mschema (CmdArgOpt r) =
+argToJson mEmit mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
-    ++ schemaField mschema
+    ++ schemaField mEmit
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r) (argOptDocSource r) (argOptDocChecks r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mschema))
+       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mShape))
        , ("many", jsonBool (argOptDocMany r))
        , ("short", cliOptShortJson (argOptDocArg r))
        , ("long", cliOptLongJson (argOptDocArg r))
@@ -1162,11 +1191,11 @@ argToJson mschema (CmdArgOpt r) =
        , ("constraints", constraintsJsonFor (argOptDocType r))
        , ("metadata", metadataEmpty)
        ]
-    ++ ioShapeFields mschema (argOptDocMany r)
+    ++ ioShapeFields mShape (argOptDocMany r)
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
-argToJson _ (CmdArgFlag r) =
+argToJson _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
     , ("short", cliOptShortJson (argFlagDocOpt r))
@@ -1176,10 +1205,10 @@ argToJson _ (CmdArgFlag r) =
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
-argToJson mschema (CmdArgGrp r) =
+argToJson mEmit _ entrySchemas (CmdArgGrp r) =
   jsonObj $
     [ ("kind", jsonStr "grp") ]
-    ++ schemaField mschema
+    ++ schemaField mEmit
     ++ [ ("type", jsonStr (render (pretty (recDocType r))))
        , ("metavar", jsonStr (recDocMetavar r))
        , ("desc", jsonStrArr (recDocDesc r))
@@ -1196,12 +1225,13 @@ argToJson mschema (CmdArgGrp r) =
         , ("long", cliOptLongJson opt)
         ]
 
-    -- Group entries never carry their own schema; the group's top-level
-    -- schema is used for dispatch. Pass 'Nothing' to the recursive call.
+    -- No emit-schema (group's schema is authoritative); per-entry
+    -- shape schema so Str/scalar entries pick the correct defaults.
     grpEntryJson key entry =
       jsonObj
         [ ("key", jsonStr (unKey key))
-        , ("arg", argToJson Nothing (either CmdArgFlag CmdArgOpt entry))
+        , ("arg", argToJson Nothing (lookup key entrySchemas) []
+                    (either CmdArgFlag CmdArgOpt entry))
         ]
 
 -- | Prefixed @schema@ field when a schema is present, otherwise empty.
@@ -2313,7 +2343,7 @@ buildManifest ManifestInputs{..} =
         , ("pool", jsonInt (miLangToPool (socketLang (fdataSocket fd))))
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
-        , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd))
+        , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
@@ -2333,7 +2363,7 @@ buildManifest ManifestInputs{..} =
         [ ("name", jsonStr (commandName g))
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
-        , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g))
+        , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
         , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
@@ -2375,22 +2405,28 @@ buildManifest ManifestInputs{..} =
     -- their schema in the JSON output (it's never used at dispatch
     -- time for boolean flags) but we still consume the schema slot to
     -- keep the index alignment intact for subsequent args.
-    argsJson :: [CmdArg] -> [Text] -> Text
-    argsJson docArgs schemas =
-      jsonArr (pairArgsWithSchemas docArgs schemas)
+    argsJson :: [CmdArg] -> [Text] -> [SerialAST] -> Text
+    argsJson docArgs schemas asts =
+      jsonArr (walk docArgs schemas asts)
       where
-        pairArgsWithSchemas :: [CmdArg] -> [Text] -> [Text]
-        pairArgsWithSchemas [] _ = []
+        walk :: [CmdArg] -> [Text] -> [SerialAST] -> [Text]
+        walk [] _ _ = []
         -- Flags consume a schema slot but emit no `schema` field.
-        pairArgsWithSchemas (a@(CmdArgFlag _) : rest) (_ : ss) =
-          argToJson Nothing a : pairArgsWithSchemas rest ss
-        pairArgsWithSchemas (a : rest) (s : ss) =
-          argToJson (Just s) a : pairArgsWithSchemas rest ss
-        pairArgsWithSchemas (a : rest) [] =
-          -- Defensive: more args than schemas. Emit with no schema
-          -- so we fail cleanly downstream rather than silently
-          -- misaligning.
-          argToJson Nothing a : pairArgsWithSchemas rest []
+        walk (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
+          argToJson Nothing Nothing [] a : walk rest ss as
+        walk (a : rest) (s : ss) (ast : as) =
+          let entries = case a of
+                          CmdArgGrp _ -> groupEntryWireSchemas ast
+                          _           -> []
+          in argToJson (Just s) (Just s) entries a : walk rest ss as
+        walk (a : rest) [] _ =
+          -- Defensive: more args than schemas. Emit with no schema so
+          -- we fail cleanly downstream rather than silently misaligning.
+          argToJson Nothing Nothing [] a : walk rest [] []
+        walk (a : rest) (s : ss) [] =
+          -- Defensive: validateArgSpecs should have caught this. Emit
+          -- with no per-entry schemas rather than crash.
+          argToJson (Just s) (Just s) [] a : walk rest ss []
 
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and

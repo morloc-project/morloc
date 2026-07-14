@@ -44,6 +44,18 @@ all:
 	./nexus many_str a b c d >> obs.txt 2>> obs.err
 	./nexus many_int 10 20 30 40 >> obs.txt 2>> obs.err
 	./nexus default_tuple '[42,"hi"]' >> obs.txt 2>> obs.err
+	# --- form: list on unrolled record entries ---
+	./nexus record_list_str --xs strs.txt >> obs.txt 2>> obs.err
+	./nexus record_list_str --xs '["one","two"]' >> obs.txt 2>> obs.err
+	./nexus record_list_int --ys ints.txt >> obs.txt 2>> obs.err
+	./nexus record_list_int --ys '[100,200,300]' >> obs.txt 2>> obs.err
+	# --- source: inline + form: bytes shortcut on a record entry ---
+	./nexus record_dna_len --dna GATTACA >> obs.txt 2>> obs.err
+	# --- check.path: r on a record entry (positive + negative) ---
+	./nexus record_pathr_len --pathr strs.txt >> obs.txt 2>> obs.err
+	./nexus record_pathr_len --pathr no-such-file 2>&1 | grep -c "check.path" >> obs.txt || true
+	# --- Unix `-` shorthand on a record entry with check.path: r ---
+	./nexus record_pathr_len --pathr - >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.bin text.txt strs.txt ints.txt tuples_json.txt tuples_tsv.txt paths.txt
