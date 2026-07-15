@@ -93,8 +93,12 @@ data CstExpr
   | CIstE ClassName [TypeU] [Loc CstExpr]
   | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
-  | CSrcOldE Located (Maybe Text) [(Text, Maybe Text)]
-  | CSrcNewE Located (Maybe Text) [(Bool, Text, Located)]
+  -- Source-item tuple: (isBacktick, foreign-name, morloc-alias).
+  -- isBacktick=True marks the name as `-quoted; it will bypass ldNamePattern/ldOperatorPattern
+  -- validation and be emitted verbatim as an infix operator.
+  | CSrcOldE Located (Maybe Text) [(Bool, Text, Maybe Text)]
+  -- Source-item tuple: (isInline, isBacktick, foreign-name, name-token).
+  | CSrcNewE Located (Maybe Text) [(Bool, Bool, Text, Located)]
   | -- Expressions
     CAppE (Loc CstExpr) [Loc CstExpr]
   | CLamE [Loc CstExpr] (Loc CstExpr)

@@ -1,0 +1,16 @@
+module main (test1, test2, test3, test4)
+
+type Py => Bool = "bool"
+
+source Py from "lib.py" (
+    `and` as mand,
+    `or`  as mor
+  )
+
+mand :: Bool -> Bool -> Bool
+mor  :: Bool -> Bool -> Bool
+
+test1 = mand True True
+test2 = mand True False
+test3 = mor False False
+test4 = mor (mand True True) False

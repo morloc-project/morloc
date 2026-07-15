@@ -126,6 +126,7 @@ import qualified Morloc.BaseTypes as BT
   INTERPCLOSE { Located _ TokInterpClose _ }
   INTRINSIC  { Located _ (TokIntrinsic _) _ }
   TICKNAME   { Located _ (TokTickName _) _ }
+  BACKTICK   { Located _ (TokBacktickName _) _ }
   ';'        { Located _ TokSemicolon _ }
   '%inline'  { Located _ TokPragmaInline _ }
   EOF        { Located _ TokEOF _ }
@@ -529,38 +530,46 @@ opt_from :: { Maybe Text }
   : {- empty -}                    { Nothing }
   | 'from' STRING                  { Just (getString $2) }
 
-source_items :: { [(Text, Maybe Text)] }
+source_items :: { [(Bool, Text, Maybe Text)] }
   : source_item                          { [$1] }
   | source_items ',' source_item         { $1 ++ [$3] }
 
-source_item :: { (Text, Maybe Text) }
-  : STRING                              { (getString $1, Nothing) }
-  | STRING 'as' LOWER                   { (getString $1, Just (getName $3)) }
-  | STRING 'as' UPPER                   { (getString $1, Just (getName $3)) }
-  | STRING 'as' source_op               { (getString $1, Just $3) }
-  | source_op                           { ($1, Nothing) }
-  | source_op 'as' source_op            { ($1, Just $3) }
-  | source_op 'as' LOWER               { ($1, Just (getName $3)) }
-  | source_op 'as' UPPER               { ($1, Just (getName $3)) }
+source_item :: { (Bool, Text, Maybe Text) }
+  : STRING                              { (False, getString $1, Nothing) }
+  | STRING 'as' LOWER                   { (False, getString $1, Just (getName $3)) }
+  | STRING 'as' UPPER                   { (False, getString $1, Just (getName $3)) }
+  | STRING 'as' source_op               { (False, getString $1, Just $3) }
+  | source_op                           { (False, $1, Nothing) }
+  | source_op 'as' source_op            { (False, $1, Just $3) }
+  | source_op 'as' LOWER               { (False, $1, Just (getName $3)) }
+  | source_op 'as' UPPER               { (False, $1, Just (getName $3)) }
+  -- Backtick-quoted foreign name: `text` forces the sourced binding to
+  -- be treated as an infix operator whose emitted string is <text>.
+  -- The alias is required (there is no useful "morloc-side name" for a
+  -- keyword like `and`, so the user must supply e.g. `and` as (&&)).
+  | BACKTICK 'as' source_op             { (True, getBacktick $1, Just $3) }
+  | BACKTICK 'as' LOWER                 { (True, getBacktick $1, Just (getName $3)) }
+  | BACKTICK 'as' UPPER                 { (True, getBacktick $1, Just (getName $3)) }
 
 source_op :: { Text }
   : '(' operator_name ')'              { getOp $2 }
   | '(' '-' ')'                        { "-" }
   | '(' '.' ')'                        { "." }
 
-source_new_items :: { [(Bool, Text, Located)] }
+source_new_items :: { [(Bool, Bool, Text, Located)] }
   : source_new_item                          { [$1] }
   | source_new_items VSEMI source_new_item   { $1 ++ [$3] }
 
-source_new_item :: { (Bool, Text, Located) }
-  : '%inline' source_new_term         { (True, fst $2, snd $2) }
-  | source_new_term                   { (False, fst $1, snd $1) }
+source_new_item :: { (Bool, Bool, Text, Located) }
+  : '%inline' source_new_term         { let (b, n, t) = $2 in (True, b, n, t) }
+  | source_new_term                   { let (b, n, t) = $1 in (False, b, n, t) }
 
-source_new_term :: { (Text, Located) }
-  : LOWER                             { (getName $1, $1) }
-  | '(' operator_name ')'            { (getOp $2, $2) }
-  | '(' '-' ')'                      { ("-", $2) }
-  | '(' '.' ')'                      { (".", $2) }
+source_new_term :: { (Bool, Text, Located) }
+  : LOWER                             { (False, getName $1, $1) }
+  | '(' operator_name ')'            { (False, getOp $2, $2) }
+  | '(' '-' ')'                      { (False, "-", $2) }
+  | '(' '.' ')'                      { (False, ".", $2) }
+  | BACKTICK                          { (True, getBacktick $1, $1) }
 
 --------------------------------------------------------------------
 -- Expressions
@@ -1026,6 +1035,12 @@ getIntrinsicName _ = ""
 getTickName :: Located -> Text
 getTickName (Located _ (TokTickName n) _) = n
 getTickName _ = ""
+
+-- Payload of a backtick-quoted name (the enclosing backticks are not
+-- included). Used only by source-item productions.
+getBacktick :: Located -> Text
+getBacktick (Located _ (TokBacktickName n) _) = n
+getBacktick _ = ""
 
 parseKind :: Text -> Kind
 parseKind "Nat" = KindNat

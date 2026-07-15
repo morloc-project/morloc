@@ -205,6 +205,25 @@ lexOne st@(LexState input pos toks _) = case input of
   -- Triple-quoted strings
   '\'' : '\'' : '\'' : rest -> lexMultilineString pos "'''" rest st
   '"' : '"' : '"' : rest -> lexMultilineString pos "\"\"\"" rest st
+  -- Backtick-quoted name: `text` -- lexed as a single TokBacktickName
+  -- carrying the enclosed text verbatim. Only meaningful in source-item
+  -- positions (source declarations); the parser rejects it elsewhere.
+  -- Rejects newlines and empty content up front for clear diagnostics.
+  '`' : rest ->
+    let (body, rest') = span (\c -> c /= '`' && c /= '\n') rest
+     in case rest' of
+          ('`' : after) ->
+            if null body
+              then Left (LexError pos "empty backtick-quoted name")
+              else
+                let name = T.pack body
+                    fullTxt = "`" <> name <> "`"
+                 in Right st
+                      { lsInput = after
+                      , lsPos = advanceCol pos (2 + length body)
+                      , lsTokens = Located pos (TokBacktickName name) fullTxt : toks
+                      }
+          _ -> Left (LexError pos "unterminated backtick-quoted name")
   -- Tick-prefix type-level Str literal: 'identifier (e.g. 'x, 'col_name).
   -- Must come AFTER triple-quote check so that '''abc''' lexes as a
   -- multiline string rather than a tick-name followed by operators.

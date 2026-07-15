@@ -76,6 +76,7 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "backtick-operator-py" "backtick-operator-py"
       , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"
       , golden "effect-boundary-py" "effect-boundary-py"
       , golden "effect-boundary-cpp" "effect-boundary-cpp"

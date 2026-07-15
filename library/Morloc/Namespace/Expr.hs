@@ -112,6 +112,11 @@ data Source
   , srcNote :: [Text]
   , srcInline :: !Bool
   , srcOperator :: !Bool
+  -- | True when the source name came from a backtick-quoted form
+  -- (@`and`@). Backtick names are always treated as operators and
+  -- bypass the language-descriptor pattern check in Treeify; the
+  -- enclosed text is emitted verbatim between the two args.
+  , srcBacktick :: !Bool
   }
   deriving (Ord, Eq, Show)
 
@@ -1024,7 +1029,7 @@ instance Pretty Expr where
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
-  pretty (SrcE (Source srcname lang file' alias _ rsizes _ _ _)) =
+  pretty (SrcE (Source srcname lang file' alias _ rsizes _ _ _ _)) =
     "source"
       <+> viaShow lang
       <> maybe "" (\f -> "from" <+> pretty f) file'

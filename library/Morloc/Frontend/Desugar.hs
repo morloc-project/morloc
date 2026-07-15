@@ -2097,8 +2097,8 @@ desugarSigItem (CstSigItem name sigType) = do
 -- Source desugaring
 --------------------------------------------------------------------
 
-mkOldSource :: Span -> Lang -> Maybe Path -> (Text, Maybe Text) -> D ExprI
-mkOldSource sp lang path (name, mayAlias) = do
+mkOldSource :: Span -> Lang -> Maybe Path -> (Bool, Text, Maybe Text) -> D ExprI
+mkOldSource sp lang path (isBacktick, name, mayAlias) = do
   let alias = maybe name id mayAlias
   freshExprSpan
     sp
@@ -2112,14 +2112,15 @@ mkOldSource sp lang path (name, mayAlias) = do
           , srcRsize = []
           , srcNote = []
           , srcInline = False
-          , srcOperator = isOperatorName name
+          , srcOperator = isBacktick || isOperatorName name
+          , srcBacktick = isBacktick
           }
     )
 
-mkNewSource :: Span -> Lang -> Maybe Path -> (Bool, Text, Located) -> D ExprI
-mkNewSource sp lang path (isInline, name, nameTok) = do
+mkNewSource :: Span -> Lang -> Maybe Path -> (Bool, Bool, Text, Located) -> D ExprI
+mkNewSource sp lang path (isInline, isBacktick, name, nameTok) = do
   docLines' <- lookupDocsAt (locPos nameTok)
-  let isOp = isOperatorName name
+  let isOp = isBacktick || isOperatorName name
       baseSrc =
         Source
           { srcName = SrcName name
@@ -2131,6 +2132,7 @@ mkNewSource sp lang path (isInline, name, nameTok) = do
           , srcNote = []
           , srcInline = isInline
           , srcOperator = isOp
+          , srcBacktick = isBacktick
           }
   src <- applySourceDocsD docLines' baseSrc
   freshExprSpan sp (SrcE src)

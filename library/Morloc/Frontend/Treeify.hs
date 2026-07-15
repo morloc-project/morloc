@@ -177,6 +177,11 @@ checkSourceNames :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
   where
     checkNode :: ExprI -> MorlocMonad ()
+    -- Backtick-quoted names bypass the language-descriptor patterns
+    -- entirely: they are the user's explicit "trust me, emit this string
+    -- verbatim as an infix operator" opt-out for keyword-shaped foreign
+    -- operators (Python `and`, R `%in%`, etc.).
+    checkNode (ExprI _ (SrcE src)) | srcBacktick src = return ()
     checkNode (ExprI i (SrcE src)) =
       let lang = ML.langName (srcLang src)
           nm = unSrcName (srcName src)

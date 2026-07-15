@@ -186,6 +186,12 @@ data Token
     -- type-level strings. The leading-tick prefix disambiguates from
     -- value-level identifiers and from prime-suffixed identifiers (x').
     TokTickName !Text
+  | -- Backtick-quoted name (`text`) -- marks a foreign source symbol as
+    -- an infix operator whose emitted string is the enclosed text. Only
+    -- accepted in source-item positions; used to bind keyword-shaped
+    -- foreign operators (Python `and`/`or`, R `%in%`, etc.) that neither
+    -- 'ldNamePattern' nor 'ldOperatorPattern' would accept.
+    TokBacktickName !Text
   | -- Pragmas
     TokPragmaInline
   | -- Special
@@ -267,5 +273,6 @@ showToken (TokDocLine _) = "docstring"
 showToken (TokGroupLine _) = "group annotation"
 showToken (TokIntrinsic n) = "intrinsic '@" ++ T.unpack n ++ "'"
 showToken (TokTickName n) = "type-level string \"'" ++ T.unpack n ++ "\""
+showToken (TokBacktickName n) = "backtick-quoted operator '`" ++ T.unpack n ++ "`'"
 showToken TokPragmaInline = "'%inline'"
 showToken TokEOF = "end of input"
