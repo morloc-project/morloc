@@ -225,16 +225,16 @@ fn json_to_voidstar_inner(
             };
             let w = alloc(dest, 1)?; w.write_val::<u8>(0, b); Ok(w.as_ptr())
         }
-        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_sint(text, i8::MIN  as i64, i8::MAX  as i64, "Int8")?  as i8);  Ok(w.as_ptr()) }
-        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_sint(text, i16::MIN as i64, i16::MAX as i64, "Int16")? as i16); Ok(w.as_ptr()) }
-        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "Int32")? as i32); Ok(w.as_ptr()) }
-        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "Int64")?);        Ok(w.as_ptr()) }
-        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "UInt8")?  as u8);  Ok(w.as_ptr()) }
-        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_uint(text, u16::MAX as u64, "UInt16")? as u16); Ok(w.as_ptr()) }
-        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_uint(text, u32::MAX as u64, "UInt32")? as u32); Ok(w.as_ptr()) }
-        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_uint(text, u64::MAX,        "UInt64")?);        Ok(w.as_ptr()) }
-        SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, parse_float(text, "Float32")? as f32); Ok(w.as_ptr()) }
-        SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "Float64")?);        Ok(w.as_ptr()) }
+        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_sint(text, i8::MIN  as i64, i8::MAX  as i64, "I8")?  as i8);  Ok(w.as_ptr()) }
+        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_sint(text, i16::MIN as i64, i16::MAX as i64, "I16")? as i16); Ok(w.as_ptr()) }
+        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "I32")? as i32); Ok(w.as_ptr()) }
+        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "I64")?);        Ok(w.as_ptr()) }
+        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "U8")?  as u8);  Ok(w.as_ptr()) }
+        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_uint(text, u16::MAX as u64, "U16")? as u16); Ok(w.as_ptr()) }
+        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_uint(text, u32::MAX as u64, "U32")? as u32); Ok(w.as_ptr()) }
+        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_uint(text, u64::MAX,        "U64")?);        Ok(w.as_ptr()) }
+        SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, parse_float(text, "F32")? as f32); Ok(w.as_ptr()) }
+        SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "F64")?);        Ok(w.as_ptr()) }
 
         SerialType::Int => {
             // Variable-width integer (BigInt): hand the raw digit string

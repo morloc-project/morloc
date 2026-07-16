@@ -8,6 +8,6 @@ import root
 foo ::
   --' form: list
   --' list.form: packet
-  [[Int32]] ->
+  [[I32]] ->
   Int
 foo x = 0

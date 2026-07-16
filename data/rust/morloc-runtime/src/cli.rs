@@ -1896,9 +1896,9 @@ fn fixed_width_scalar_name(elem: &crate::schema::SerialType) -> &'static str {
     use crate::schema::SerialType::*;
     match elem {
         Bool => "Bool",
-        Sint8 => "Int8",   Sint16 => "Int16", Sint32 => "Int32", Sint64 => "Int64",
-        Uint8 => "UInt8",  Uint16 => "UInt16",Uint32 => "UInt32",Uint64 => "UInt64",
-        Float32 => "Float32", Float64 => "Float64",
+        Sint8 => "I8",   Sint16 => "I16", Sint32 => "I32", Sint64 => "I64",
+        Uint8 => "U8",  Uint16 => "U16",Uint32 => "U32",Uint64 => "U64",
+        Float32 => "F32", Float64 => "F64",
         _ => "non-scalar",
     }
 }

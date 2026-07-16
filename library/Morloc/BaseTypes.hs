@@ -88,40 +88,40 @@ real :: TVar
 real = TV "Real"
 
 f32 :: TVar
-f32 = TV "Float32"
+f32 = TV "F32"
 
 f64 :: TVar
-f64 = TV "Float64"
+f64 = TV "F64"
 
 int :: TVar
 int = TV "Int"
 
 i8 :: TVar
-i8 = TV "Int8"
+i8 = TV "I8"
 
 i16 :: TVar
-i16 = TV "Int16"
+i16 = TV "I16"
 
 i32 :: TVar
-i32 = TV "Int32"
+i32 = TV "I32"
 
 i64 :: TVar
-i64 = TV "Int64"
+i64 = TV "I64"
 
 u8 :: TVar
-u8 = TV "UInt8"
+u8 = TV "U8"
 
 uint :: TVar
 uint = TV "UInt"
 
 u16 :: TVar
-u16 = TV "UInt16"
+u16 = TV "U16"
 
 u32 :: TVar
-u32 = TV "UInt32"
+u32 = TV "U32"
 
 u64 :: TVar
-u64 = TV "UInt64"
+u64 = TV "U64"
 
 bool :: TVar
 bool = TV "Bool"
@@ -253,40 +253,40 @@ realU :: TypeU
 realU = VarU $ TV "Real"
 
 f32U :: TypeU
-f32U = VarU $ TV "Float32"
+f32U = VarU $ TV "F32"
 
 f64U :: TypeU
-f64U = VarU $ TV "Float64"
+f64U = VarU $ TV "F64"
 
 intU :: TypeU
 intU = VarU $ TV "Int"
 
 i8U :: TypeU
-i8U = VarU $ TV "Int8"
+i8U = VarU $ TV "I8"
 
 i16U :: TypeU
-i16U = VarU $ TV "Int16"
+i16U = VarU $ TV "I16"
 
 i32U :: TypeU
-i32U = VarU $ TV "Int32"
+i32U = VarU $ TV "I32"
 
 i64U :: TypeU
-i64U = VarU $ TV "Int64"
+i64U = VarU $ TV "I64"
 
 u8U :: TypeU
-u8U = VarU $ TV "UInt8"
+u8U = VarU $ TV "U8"
 
 uintU :: TypeU
 uintU = VarU $ TV "UInt"
 
 u16U :: TypeU
-u16U = VarU $ TV "UInt16"
+u16U = VarU $ TV "U16"
 
 u32U :: TypeU
-u32U = VarU $ TV "UInt32"
+u32U = VarU $ TV "U32"
 
 u64U :: TypeU
-u64U = VarU $ TV "UInt64"
+u64U = VarU $ TV "U64"
 
 boolU :: TypeU
 boolU = VarU $ TV "Bool"

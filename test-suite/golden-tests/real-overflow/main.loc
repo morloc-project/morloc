@@ -40,7 +40,7 @@ import root-cpp
 realId :: Real -> Real
 realId x = x
 
-f32Id :: Float32 -> Float32
+f32Id :: F32 -> F32
 f32Id x = x
 
 -- Reproduces the report's `f 200` factorial overflow example.

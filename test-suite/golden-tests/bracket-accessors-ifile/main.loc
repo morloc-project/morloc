@@ -47,10 +47,10 @@ module main (
   , ifileDeepChain
   , ifileIndexFromForeignLength
   , ifileSliceFromOptionalStart
-  , ifileIndexInt8
-  , ifileIndexInt16
-  , ifileIndexUInt32
-  , ifileSliceInt8Bound
+  , ifileIndexI8
+  , ifileIndexI16
+  , ifileIndexU32
+  , ifileSliceI8Bound
   , ifileSliceMixedWidthBounds
   -- Cross-pool tests
   , ifileCrossPoolReceiverPyToCpp
@@ -135,8 +135,8 @@ crossPoolSlicePts = ptIdCpp
 
 -- Top-level optional bound for sliceFromOptionalStart parity. Null at
 -- bind-time so the runtime sees has=0 for that slot.
-optStart :: ?Int32
-optStart = (Null :: ?Int32)
+optStart :: ?I32
+optStart = (Null :: ?I32)
 
 -- ─── Per-pool range tests ───────────────────────────────────────────────
 -- Save 'ten' to a file, open as IFile [Int], and run every pattern from
@@ -358,7 +358,7 @@ ifileIndexFromForeignLength path = do
   f <- @open path :: <IO> IFile [Int]
   .[length [10, 20, 30] - 1] f
 
--- Optional-typed bound (?Int32) on IFile slice. The Null bound flows
+-- Optional-typed bound (?I32) on IFile slice. The Null bound flows
 -- through __to_index__ as has=0; the runtime walker treats it as
 -- "default start for positive step" (0).
 ifileSliceFromOptionalStart :: Str -> <IO> [Int]
@@ -370,35 +370,35 @@ ifileSliceFromOptionalStart path = do
 -- Each annotation pins the bound to a specific IndexLike instance.
 -- For IFile, the index value flows through the runtime as a raw i64
 -- regardless of source width.
-ifileIndexInt8 :: Str -> <IO> Int
-ifileIndexInt8 path = do
+ifileIndexI8 :: Str -> <IO> Int
+ifileIndexI8 path = do
   @save 0 [10, 20, 30] path
   f <- @open path :: <IO> IFile [Int]
-  .[(0 :: Int8)] f
+  .[(0 :: I8)] f
 
-ifileIndexInt16 :: Str -> <IO> Int
-ifileIndexInt16 path = do
+ifileIndexI16 :: Str -> <IO> Int
+ifileIndexI16 path = do
   @save 0 [10, 20, 30] path
   f <- @open path :: <IO> IFile [Int]
-  .[(1 :: Int16)] f
+  .[(1 :: I16)] f
 
-ifileIndexUInt32 :: Str -> <IO> Int
-ifileIndexUInt32 path = do
+ifileIndexU32 :: Str -> <IO> Int
+ifileIndexU32 path = do
   @save 0 [10, 20, 30] path
   f <- @open path :: <IO> IFile [Int]
-  .[(2 :: UInt32)] f
+  .[(2 :: U32)] f
 
-ifileSliceInt8Bound :: Str -> <IO> [Int]
-ifileSliceInt8Bound path = do
+ifileSliceI8Bound :: Str -> <IO> [Int]
+ifileSliceI8Bound path = do
   @save 0 [10, 20, 30, 40, 50] path
   f <- @open path :: <IO> IFile [Int]
-  .[(1 :: Int8):3] f
+  .[(1 :: I8):3] f
 
 ifileSliceMixedWidthBounds :: Str -> <IO> [Int]
 ifileSliceMixedWidthBounds path = do
   @save 0 [10, 20, 30, 40, 50] path
   f <- @open path :: <IO> IFile [Int]
-  .[(1 :: Int8):(4 :: Int16)] f
+  .[(1 :: I8):(4 :: I16)] f
 
 -- ─── Cross-pool tests ──────────────────────────────────────────────────
 -- The IFile handle (a u64) is passed through one pool's identity

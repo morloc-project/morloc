@@ -1,6 +1,6 @@
 module main (tooBig)
 
--- Integer literal that overflows Float32 after promotion. checkRealBounds
+-- Integer literal that overflows F32 after promotion. checkRealBounds
 -- must still fire even though the source token is an integer.
-tooBig :: Float32
+tooBig :: F32
 tooBig = 999999999999999999999999999999999999999999999

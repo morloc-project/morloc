@@ -150,7 +150,7 @@ static const Schema* recur_env_lookup(const char* name) {
 
 // {{{ bit64 (integer64) helpers
 //
-// Int64 / UInt64 / IFile handles are mapped to the `bit64::integer64`
+// I64 / U64 / IFile handles are mapped to the `bit64::integer64`
 // R class (stdlib/root-r/main.loc). integer64 is implemented as a
 // REALSXP whose 8 bytes per cell are reinterpreted as int64_t; the S3
 // class attribute "integer64" tags the storage. The R-level package

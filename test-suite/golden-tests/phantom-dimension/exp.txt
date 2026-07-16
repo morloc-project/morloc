@@ -2,7 +2,7 @@
 [1,2,3,4]
 --- vecReal0 ---
 []
---- vecInt3 ---
+--- vecI3 ---
 [10,20,30]
 --- vecBool2 ---
 [true,false]
@@ -20,9 +20,9 @@
 [1,2,3,4]
 --- rtVecReal0 ---
 []
---- rtVecInt3 ---
+--- rtVecI3 ---
 [10,20,30]
---- rtVecInt0 ---
+--- rtVecI0 ---
 []
 --- rtVecBool2 ---
 [true,false]

@@ -1,4 +1,4 @@
--- Float literal whose magnitude exceeds Float64 (max ~1.8e308). The
+-- Float literal whose magnitude exceeds F64 (max ~1.8e308). The
 -- compile must fail and the error must caret on the literal at line 8,
 -- not the export reference. Mirrors int-overflow's bad-sign / too-big
 -- precedent for integer literal bounds.

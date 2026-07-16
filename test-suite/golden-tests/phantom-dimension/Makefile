@@ -5,8 +5,8 @@ all:
 	./nexus vecReal4 >> obs.txt 2>> obs.err
 	echo "--- vecReal0 ---" >> obs.txt
 	./nexus vecReal0 >> obs.txt 2>> obs.err
-	echo "--- vecInt3 ---" >> obs.txt
-	./nexus vecInt3 >> obs.txt 2>> obs.err
+	echo "--- vecI3 ---" >> obs.txt
+	./nexus vecI3 >> obs.txt 2>> obs.err
 	echo "--- vecBool2 ---" >> obs.txt
 	./nexus vecBool2 >> obs.txt 2>> obs.err
 	echo "--- vecStr3 ---" >> obs.txt
@@ -23,10 +23,10 @@ all:
 	./nexus rtVecReal4 >> obs.txt 2>> obs.err
 	echo "--- rtVecReal0 ---" >> obs.txt
 	./nexus rtVecReal0 >> obs.txt 2>> obs.err
-	echo "--- rtVecInt3 ---" >> obs.txt
-	./nexus rtVecInt3 >> obs.txt 2>> obs.err
-	echo "--- rtVecInt0 ---" >> obs.txt
-	./nexus rtVecInt0 >> obs.txt 2>> obs.err
+	echo "--- rtVecI3 ---" >> obs.txt
+	./nexus rtVecI3 >> obs.txt 2>> obs.err
+	echo "--- rtVecI0 ---" >> obs.txt
+	./nexus rtVecI0 >> obs.txt 2>> obs.err
 	echo "--- rtVecBool2 ---" >> obs.txt
 	./nexus rtVecBool2 >> obs.txt 2>> obs.err
 	echo "--- rtChainVec ---" >> obs.txt

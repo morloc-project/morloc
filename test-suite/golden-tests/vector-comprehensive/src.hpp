@@ -51,7 +51,7 @@ inline int64_t cppSumI32(const std::vector<int32_t>& v) { return sum_int(v); }
 inline int64_t cppSumI64(const std::vector<int64_t>& v) { return sum_int(v); }
 inline int64_t cppSumU8 (const std::vector<uint8_t>&  v) { return sum_int(v); }
 inline int64_t cppSumU16(const std::vector<uint16_t>& v) { return sum_int(v); }
-// U32/U64 sums cross 2^31, so return uint64_t to match the morloc UInt64
+// U32/U64 sums cross 2^31, so return uint64_t to match the morloc U64
 // signature and avoid platform-int truncation at the wire.
 inline uint64_t cppSumU32(const std::vector<uint32_t>& v) {
     uint64_t s = 0;

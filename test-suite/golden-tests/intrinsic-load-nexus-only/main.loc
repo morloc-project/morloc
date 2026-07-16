@@ -10,7 +10,7 @@
 -- helper that converts mlc_load's single-block payload into the
 -- multi-block layout the rest of the evaluator uses:
 --   * Int  -- primitive (wrapper IS the data)
---   * Real -- primitive (Float64)
+--   * Real -- primitive (F64)
 --   * Str  -- Array<u8>: wrapper + separate char block
 --   * [Str] -- nested Array<Array<u8>>: variable-width elements
 --   * (Int, Str) -- Tuple with mixed fixed and variable elements

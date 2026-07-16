@@ -1643,18 +1643,18 @@ expectedJsonShape = go
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
     go (SerialReal _)                = "Real"
-    go (SerialFloat32 _)             = "Float32"
-    go (SerialFloat64 _)             = "Float64"
+    go (SerialFloat32 _)             = "F32"
+    go (SerialFloat64 _)             = "F64"
     go (SerialInt _)                 = "Int"
-    go (SerialInt8 _)                = "Int8"
-    go (SerialInt16 _)               = "Int16"
-    go (SerialInt32 _)               = "Int32"
-    go (SerialInt64 _)               = "Int64"
+    go (SerialInt8 _)                = "I8"
+    go (SerialInt16 _)               = "I16"
+    go (SerialInt32 _)               = "I32"
+    go (SerialInt64 _)               = "I64"
     go (SerialUInt _)                = "UInt"
-    go (SerialUInt8 _)               = "UInt8"
-    go (SerialUInt16 _)              = "UInt16"
-    go (SerialUInt32 _)              = "UInt32"
-    go (SerialUInt64 _)              = "UInt64"
+    go (SerialUInt8 _)               = "U8"
+    go (SerialUInt16 _)              = "U16"
+    go (SerialUInt32 _)              = "U32"
+    go (SerialUInt64 _)              = "U64"
     go (SerialOptional _ s)          = go s <> " | null"
     go (SerialList _ Nothing s)      = "[" <> go s <> "]"
     go (SerialList _ (Just (NatLitF n)) s) =
@@ -1679,10 +1679,10 @@ expectedRange (SerialInt16 _)       = "Int16 in -32768 .. 32767"
 expectedRange (SerialInt32 _)       = "Int32 in -2147483648 .. 2147483647"
 expectedRange (SerialInt64 _)       = "Int64 in -9223372036854775808 .. 9223372036854775807"
 expectedRange (SerialUInt _)        = "UInt >= 0 (BigInt)"
-expectedRange (SerialUInt8 _)       = "UInt8 in 0 .. 255"
-expectedRange (SerialUInt16 _)      = "UInt16 in 0 .. 65535"
-expectedRange (SerialUInt32 _)      = "UInt32 in 0 .. 4294967295"
-expectedRange (SerialUInt64 _)      = "UInt64 in 0 .. 18446744073709551615"
+expectedRange (SerialUInt8 _)       = "U8 in 0 .. 255"
+expectedRange (SerialUInt16 _)      = "U16 in 0 .. 65535"
+expectedRange (SerialUInt32 _)      = "U32 in 0 .. 4294967295"
+expectedRange (SerialUInt64 _)      = "U64 in 0 .. 18446744073709551615"
 expectedRange ast = error
   $ "expectedRange: non-numeric SerialAST node reached the range reporter; "
   <> "this indicates 'rangeMismatch' was called outside an integer arm. "
@@ -1793,7 +1793,7 @@ validateBracketBound role (AnnoS (Idx i t) _ _) =
     then return ()
     else MM.throwSourcedError i $
       "Bracket" <+> pretty role <+> "bound must be an integer wire type"
-      <+> "in pure morloc (one of Int, Int8/16/32/64, UInt8/16/32/64);"
+      <+> "in pure morloc (one of Int, I8/16/32/64, U8/16/32/64);"
       <+> "got" <+> pretty t
 
 -- | True if the receiver expression has an IFile-headed type. Used to
@@ -1814,8 +1814,8 @@ isIntegralPureBound :: Type -> Bool
 isIntegralPureBound t = case peel t of
   VarT (TV n) -> n `elem`
     [ "Int"
-    , "Int8", "Int16", "Int32", "Int64"
-    , "UInt", "UInt8", "UInt16", "UInt32", "UInt64"
+    , "I8", "I16", "I32", "I64"
+    , "UInt", "U8", "U16", "U32", "U64"
     ]
   _ -> False
   where

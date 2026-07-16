@@ -32,7 +32,7 @@
 module main
   ( vecReal4
   , vecReal0
-  , vecInt3
+  , vecI3
   , vecBool2
   , vecStr3
   , chainVecReal3
@@ -41,8 +41,8 @@ module main
   , fixedPairStr
   , rtVecReal4
   , rtVecReal0
-  , rtVecInt3
-  , rtVecInt0
+  , rtVecI3
+  , rtVecI0
   , rtVecBool2
   , rtChainVec
   , rtFixedPair
@@ -89,8 +89,8 @@ vecReal4 = [1.0, 2.0, 3.0, 4.0]
 vecReal0 :: Vector 0 Real
 vecReal0 = []
 
-vecInt3 :: Vector 3 Int
-vecInt3 = [10, 20, 30]
+vecI3 :: Vector 3 Int
+vecI3 = [10, 20, 30]
 
 vecBool2 :: Vector 2 Bool
 vecBool2 = [True, False]
@@ -116,8 +116,8 @@ fixedPairStr = ("hello", "world")
 rtVecReal4 :: Vector 4 Real
 rtVecReal4 = idcpp ([1.0, 2.0, 3.0, 4.0] :: Vector 4 Real)
 
-rtVecInt3 :: Vector 3 Int
-rtVecInt3 = idcpp ([10, 20, 30] :: Vector 3 Int)
+rtVecI3 :: Vector 3 Int
+rtVecI3 = idcpp ([10, 20, 30] :: Vector 3 Int)
 
 rtVecBool2 :: Vector 2 Bool
 rtVecBool2 = idcpp ([True, False] :: Vector 2 Bool)
@@ -173,8 +173,8 @@ makeVecResult = makeVecCpp
 rtVecReal0 :: Vector 0 Real
 rtVecReal0 = idcpp ([] :: Vector 0 Real)
 
-rtVecInt0 :: Vector 0 Int
-rtVecInt0 = idcpp ([] :: Vector 0 Int)
+rtVecI0 :: Vector 0 Int
+rtVecI0 = idcpp ([] :: Vector 0 Int)
 
 -- 9) Matrix with NatLit 0 dimensions. The Packable wire form for Matrix
 --    is `((Int, Int), Vector (d1 * d2) a)`, so any zero dim drives a

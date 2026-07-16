@@ -1,13 +1,13 @@
 module main (
     -- single-language round-trips:
-    --   Str -> [UInt8] -> [UInt8] -> Str  inside one language
+    --   Str -> [U8] -> [U8] -> Str  inside one language
     pyStr, cppStr, rStr,
 
-    -- two-language [UInt8] pipelines:
+    -- two-language [U8] pipelines:
     --   encode in lang A, echo in lang B (one wire crossing), decode in lang A
     pyCpp, pyR, cppPy, cppR, rPy, rCpp,
 
-    -- three-language [UInt8] pipelines:
+    -- three-language [U8] pipelines:
     --   encode in py, echo through the other two, decode at the end
     pyCppR, pyRCpp,
 
@@ -21,10 +21,10 @@ module main (
 import root ((.))
 
 -- ============================================================================
--- [UInt8] across languages
+-- [U8] across languages
 --
 -- This golden test pins down the per-language native representation of
--- the morloc `[UInt8]` type (a packed array of unsigned 8-bit bytes) and
+-- the morloc `[U8]` type (a packed array of unsigned 8-bit bytes) and
 -- verifies that values round-trip without distortion across every
 -- pairwise and triple-language combination.
 --
@@ -48,61 +48,61 @@ import root ((.))
 --      determinism.
 --
 --   R        raw
---      The R runtime (rmorloc.c) routes any [UInt8] array to RAWSXP
+--      The R runtime (rmorloc.c) routes any [U8] array to RAWSXP
 --      regardless of hint; declaring the mapping makes the contract
 --      explicit at the type level. R's only other 1-byte type is
 --      `character` (which carries encoding metadata) -- `raw` is the
 --      idiomatic byte-buffer choice.
 --
 -- Each language therefore exposes the same four operations:
---   encode :: Str    -> [UInt8]   - pack a string's UTF-8 bytes
---   decode :: [UInt8] -> Str      - unpack bytes back to a string
---   echo   :: [UInt8] -> [UInt8]  - identity, plus a runtime type assertion
---   native :: [UInt8] -> Str      - report the runtime-observed native type
+--   encode :: Str    -> [U8]   - pack a string's UTF-8 bytes
+--   decode :: [U8] -> Str      - unpack bytes back to a string
+--   echo   :: [U8] -> [U8]  - identity, plus a runtime type assertion
+--   native :: [U8] -> Str      - report the runtime-observed native type
 --
 -- The pipelines below combine these to force every cross-language wire
--- crossing for [UInt8].
+-- crossing for [U8].
 -- ============================================================================
 
 type Py  => Str   = "str"
-type Py  => UInt8 = "int"
-type Py  => (List UInt8) = "bytes" UInt8
+type Py  => U8 = "int"
+type Py  => (List U8) = "bytes" U8
 
 type Cpp => Str   = "std::string"
-type Cpp => UInt8 = "uint8_t"
+type Cpp => U8 = "uint8_t"
 type Cpp => (List a) = "std::vector<$1>" a
 
 type R   => Str   = "character"
-type R   => UInt8 = "integer"
-type R   => (List UInt8) = "raw" UInt8
+type R   => U8 = "integer"
+type R   => (List U8) = "raw" U8
 
 source Py  from "ops.py"  ("py_encode",  "py_decode",  "py_echo",  "py_native")
 source Cpp from "ops.hpp" ("cpp_encode", "cpp_decode", "cpp_echo", "cpp_native")
 source R   from "ops.R"   ("r_encode",   "r_decode",   "r_echo",   "r_native")
 
-py_encode  :: Str -> [UInt8]
-py_decode  :: [UInt8] -> Str
-py_echo    :: [UInt8] -> [UInt8]
-py_native  :: [UInt8] -> Str
+py_encode  :: Str -> [U8]
+py_decode  :: [U8] -> Str
+py_echo    :: [U8] -> [U8]
+py_native  :: [U8] -> Str
 
-cpp_encode :: Str -> [UInt8]
-cpp_decode :: [UInt8] -> Str
-cpp_echo   :: [UInt8] -> [UInt8]
-cpp_native :: [UInt8] -> Str
+cpp_encode :: Str -> [U8]
+cpp_decode :: [U8] -> Str
+cpp_echo   :: [U8] -> [U8]
+cpp_native :: [U8] -> Str
 
-r_encode   :: Str -> [UInt8]
-r_decode   :: [UInt8] -> Str
-r_echo     :: [UInt8] -> [UInt8]
-r_native   :: [UInt8] -> Str
+r_encode   :: Str -> [U8]
+r_decode   :: [U8] -> Str
+r_echo     :: [U8] -> [U8]
+r_native   :: [U8] -> Str
 
--- single-language round-trips. No wire crossing for [UInt8]; this is
+-- single-language round-trips. No wire crossing for [U8]; this is
 -- the baseline check that each language can produce and consume its
 -- own native byte type.
 pyStr  = py_decode  . py_echo  . py_encode
 cppStr = cpp_decode . cpp_echo . cpp_encode
 rStr   = r_decode   . r_echo   . r_encode
 
--- two-language pipelines. Forces one [UInt8] wire crossing in each
+-- two-language pipelines. Forces one [U8] wire crossing in each
 -- direction between the named language pair. The fact that the source
 -- bindings live in different pools forces the compiler to insert the
 -- crossing -- there is no in-pool fallback that the optimiser can take.
@@ -113,11 +113,11 @@ cppR   = cpp_decode . r_echo   . cpp_encode
 rPy    = r_decode   . py_echo  . r_encode
 rCpp   = r_decode   . cpp_echo . r_encode
 
--- three-language pipelines. Two [UInt8] wire crossings in sequence.
+-- three-language pipelines. Two [U8] wire crossings in sequence.
 pyCppR = py_decode . r_echo . cpp_echo . py_encode
 pyRCpp = py_decode . cpp_echo . r_echo . py_encode
 
--- native-type witnesses. Each takes a [UInt8] produced in Python and
+-- native-type witnesses. Each takes a [U8] produced in Python and
 -- reports what runtime type it actually observed in the target pool.
 -- Confirms that the wire deserialiser delivered the contracted native
 -- byte type and not, e.g., a Python list.

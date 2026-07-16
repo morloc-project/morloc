@@ -1,6 +1,6 @@
 -- Negative-side literal overflow. The lexer merges `-1e500` into a single
 -- TokFloat with negated Scientific value, so checkRealBounds sees a single
--- finite Scientific that becomes -Inf when converted to Float64. The
+-- finite Scientific that becomes -Inf when converted to F64. The
 -- explicit non-finite literal form is `-Inf`, which compiles cleanly via
 -- the negate-of-Inf path; only finite literal forms are bounds-checked.
 module badNeg (tooNeg)

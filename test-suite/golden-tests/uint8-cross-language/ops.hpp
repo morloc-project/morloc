@@ -2,7 +2,7 @@
 
 // C++ implementations for the uint8-cross-language golden test.
 //
-// The morloc type [UInt8] maps to std::vector<uint8_t> here (inherited
+// The morloc type [U8] maps to std::vector<uint8_t> here (inherited
 // from root-cpp's generic `(List a) = "std::vector<$1>" a`). The
 // vector is a packed 1-byte-per-element buffer, identical in storage
 // to std::string; both are valid mappings and either could be picked

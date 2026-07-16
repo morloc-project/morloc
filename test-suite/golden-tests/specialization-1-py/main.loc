@@ -2,7 +2,7 @@ module main (foo, square)
 
 type Py => Numpy1D a = "numpy.ndarray" a
 type Py => List a = "list" a
-type Py => Int64 = "int64"
+type Py => I64 = "int64"
 
 -- No, this is not an error.
 
@@ -10,18 +10,18 @@ type Py => Int64 = "int64"
 -- stores integers larger than 32 bits. These still cannot truly represent 64 bit
 -- integers because 11 bits used in the exponent. So in reality this is a 53 bit
 -- integer.
-type R => List Int64 = "double" Int64
-type R => Int64 = "double"
+type R => List I64 = "double" I64
+type R => I64 = "double"
 
 type Numpy1D a = List a
 
 source Py from "foo.py" ("list2numpy", "numpy2list", "square")
 list2numpy :: List a -> Numpy1D a
 numpy2list :: Numpy1D a -> List a
-square :: Numpy1D Int64 -> Numpy1D Int64
+square :: Numpy1D I64 -> Numpy1D I64
 
 source R from "foo.R" ("rid")
 rid :: a -> a
 
-foo :: List Int64 -> List Int64
+foo :: List I64 -> List I64
 foo = numpy2list . square . list2numpy

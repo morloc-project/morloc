@@ -72,7 +72,7 @@ double cppSum4d(const mlc::Tensor4<double>& t) {
     return s;
 }
 
-// --- 1D Int32 (8 elements, values 10..17) ---
+// --- 1D I32 (8 elements, values 10..17) ---
 
 std::vector<int32_t> cppMakeIntVec() {
     std::vector<int32_t> v(8);

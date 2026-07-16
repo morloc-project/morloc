@@ -2,12 +2,12 @@ module main (foo)
 
 import root
 
--- `[UInt8]` with `source: inline + form: bytes` is allowed: the argv
+-- `[U8]` with `source: inline + form: bytes` is allowed: the argv
 -- string's bytes (after escape-sequence interpretation) become the
 -- byte buffer.
 foo ::
   --' source: inline
   --' form: bytes
-  [UInt8] ->
+  [U8] ->
   Int
 foo x = 0

@@ -101,10 +101,10 @@ all:
 	./nexus rint16Dbl 16384 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	./nexus rint32Dbl 1073741823 >> obs.txt
 	./nexus rint32Dbl 1073741824 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
-	# rint64Dbl: R now uses bit64::integer64 for Int64, which covers the
+	# rint64Dbl: R now uses bit64::integer64 for I64, which covers the
 	# full 2^63 range losslessly. 2^52 and 2^52+1 both round-trip; their
-	# doubled values (2^53 and 2^53+2) sit comfortably below Int64 max.
-	# (R-side arithmetic on integer64 wraps silently on Int64 overflow --
+	# doubled values (2^53 and 2^53+2) sit comfortably below I64 max.
+	# (R-side arithmetic on integer64 wraps silently on I64 overflow --
 	# matching C int64_t -fwrapv semantics -- so an explicit doubling
 	# OVERFLOW boundary near 2^63 is not catchable post-hoc.)
 	./nexus rint64Dbl 4503599627370496 >> obs.txt
@@ -115,9 +115,9 @@ all:
 	./nexus ruint16Dbl 32768 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	./nexus ruint32Dbl 2147483647 >> obs.txt
 	./nexus ruint32Dbl 2147483648 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
-	# ruint64Dbl: same bit64 round-trip semantics as rint64Dbl. UInt64 is
+	# ruint64Dbl: same bit64 round-trip semantics as rint64Dbl. U64 is
 	# carried as integer64 bytes; 2^52+1 doubled is 2^53+2, well within
-	# UInt64. (Arithmetic wrap at 2^64 is not catchable in R, see above.)
+	# U64. (Arithmetic wrap at 2^64 is not catchable in R, see above.)
 	./nexus ruint64Dbl 4503599627370496 >> obs.txt
 	./nexus ruint64Dbl 4503599627370497 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	echo "" >> obs.txt
@@ -148,8 +148,8 @@ all:
 	./nexus rint32Dbl -1073741824 >> obs.txt
 	./nexus rint32Dbl -1073741825 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	# rint64Dbl: with bit64::integer64, -2^52-1 doubles to -2^53-2 which is
-	# well within Int64 min (-2^63). The full negative Int64 range
-	# round-trips losslessly; near-Int64-min arithmetic wraps silently
+	# well within I64 min (-2^63). The full negative I64 range
+	# round-trips losslessly; near-I64-min arithmetic wraps silently
 	# (not catchable post-hoc).
 	./nexus rint64Dbl -4503599627370496 >> obs.txt
 	./nexus rint64Dbl -4503599627370497 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
@@ -188,10 +188,10 @@ all:
 	./nexus intId -18446744073709551616 >> obs.txt # -2^64 (deeper multi-limb)
 	echo "" >> obs.txt
 	echo "=== S15: R narrow numeric (round-trip identity through R) ===" >> obs.txt
-	# Int8/Int16 and UInt8/UInt16 fit R's 32-bit "integer".
-	# Int32 and UInt32 map to R's "numeric" (double); values up to 2^53
+	# I8/I16 and U8/U16 fit R's 32-bit "integer".
+	# I32 and U32 map to R's "numeric" (double); values up to 2^53
 	# round-trip exactly.
-	# Int64 and UInt64 map to bit64::integer64, which uses 8 bytes per
+	# I64 and U64 map to bit64::integer64, which uses 8 bytes per
 	# element and round-trips the full 64-bit range losslessly. (The
 	# Int instance -- variable-precision BigInt -- still maps to R's
 	# numeric, so values beyond 2^53 there still surface as OVERFLOW.)
@@ -206,13 +206,13 @@ all:
 	./nexus ruint32Id 4294967295 >> obs.txt   # fits 2^53, should round-trip
 	./nexus rint64Id 9007199254740992 >> obs.txt   # 2^53 (was last losslessly representable under double; still round-trips)
 	./nexus rint64Id 9007199254740993 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt   # 2^53 + 1 (bit64 round-trips losslessly)
-	./nexus rint64Id 9223372036854775807 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt   # Int64 max (bit64 round-trips losslessly)
-	./nexus rint64Id -9223372036854775808 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt  # Int64 min (bit-identical even at NA_INTEGER64 collision; bytes survive the idr round-trip)
-	./nexus ruint64Id 18446744073709551615 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt # UInt64 max (carried as -1 in bit64's signed view; bits round-trip)
+	./nexus rint64Id 9223372036854775807 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt   # I64 max (bit64 round-trips losslessly)
+	./nexus rint64Id -9223372036854775808 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt  # I64 min (bit-identical even at NA_INTEGER64 collision; bytes survive the idr round-trip)
+	./nexus ruint64Id 18446744073709551615 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt # U64 max (carried as -1 in bit64's signed view; bits round-trip)
 	./nexus rintId 100000000000000000000000000000 >> obs.txt 2>/dev/null || echo "OVERFLOW" >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S16: R NA rejection on integer pack ===" >> obs.txt
-	./nexus returnNAInt8 0 >> obs.txt 2>/dev/null || echo "NA_REJECTED" >> obs.txt
+	./nexus returnNAI8 0 >> obs.txt 2>/dev/null || echo "NA_REJECTED" >> obs.txt
 
 
 clean:

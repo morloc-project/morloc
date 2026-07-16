@@ -1,18 +1,18 @@
 === S1: compile-time real-literal overflow ===
 bad-overflow-f64.loc:8:10: error:
-Float literal 1.0e500 overflows Float64 (|x| > 1.8e308)
+Float literal 1.0e500 overflows F64 (|x| > 1.8e308)
   |
 8 | tooBig = 1e500
   |          ^
 
 bad-neg-overflow.loc:9:10: error:
-Float literal -1.0e500 overflows Float64 (|x| > 1.8e308)
+Float literal -1.0e500 overflows F64 (|x| > 1.8e308)
   |
 9 | tooNeg = -1e500
   |          ^
 
 bad-overflow-f32.loc:10:13: error:
-Float literal 1.0e100 overflows Float32 (|x| > 3.4e38)
+Float literal 1.0e100 overflows F32 (|x| > 3.4e38)
    |
 10 | tooBigF32 = 1e100
    |             ^
@@ -59,7 +59,7 @@ Float literal 1.0e100 overflows Float32 (|x| > 3.4e38)
 PARSE_ERROR
 PARSE_ERROR
 
-=== S11: Float32 round-trip incl. non-finites ===
+=== S11: F32 round-trip incl. non-finites ===
 3.14
 "inf"
 "-inf"

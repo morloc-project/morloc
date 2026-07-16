@@ -23,9 +23,9 @@ import root-py
 import root-cpp
 
 -- An entry: header string, list of reals, maybe-a-quality-string, and a
--- 64-bit position. Picks up Str + Array + Optional + Int64 in one
+-- 64-bit position. Picks up Str + Array + Optional + I64 in one
 -- record.
-type Entry = (Str, [Real], ?Str, Int64)
+type Entry = (Str, [Real], ?Str, I64)
 
 genBig :: Int -> Int -> [[Entry]]
 sumBig :: [[Entry]] -> (Int, Real, Int, Int)

@@ -49,14 +49,14 @@ all:
 	./nexus indexFromForeignLength >> obs.txt 2>> obs.err
 	echo "--- sliceFromOptionalStart ---" >> obs.txt
 	./nexus sliceFromOptionalStart >> obs.txt 2>> obs.err
-	echo "--- indexInt8 ---" >> obs.txt
-	./nexus indexInt8 >> obs.txt 2>> obs.err
-	echo "--- indexInt16 ---" >> obs.txt
-	./nexus indexInt16 >> obs.txt 2>> obs.err
-	echo "--- indexUInt32 ---" >> obs.txt
-	./nexus indexUInt32 >> obs.txt 2>> obs.err
-	echo "--- sliceInt8Bound ---" >> obs.txt
-	./nexus sliceInt8Bound >> obs.txt 2>> obs.err
+	echo "--- indexI8 ---" >> obs.txt
+	./nexus indexI8 >> obs.txt 2>> obs.err
+	echo "--- indexI16 ---" >> obs.txt
+	./nexus indexI16 >> obs.txt 2>> obs.err
+	echo "--- indexU32 ---" >> obs.txt
+	./nexus indexU32 >> obs.txt 2>> obs.err
+	echo "--- sliceI8Bound ---" >> obs.txt
+	./nexus sliceI8Bound >> obs.txt 2>> obs.err
 	echo "--- sliceMixedWidthBounds ---" >> obs.txt
 	./nexus sliceMixedWidthBounds >> obs.txt 2>> obs.err
 	echo "--- crossPoolReceiverPyToCpp ---" >> obs.txt

@@ -46,7 +46,7 @@ mlc::Tensor2<double> makeOneByOne() {
     return m;
 }
 
-// Int32 elements
+// I32 elements
 std::vector<int32_t> makeIntVec() {
     return std::vector<int32_t>{-10, 0, 42, 2147483647};
 }
@@ -56,7 +56,7 @@ std::vector<uint8_t> makeBoolVec() {
     return std::vector<uint8_t>{1, 0, 1};
 }
 
-// Float32 elements
+// F32 elements
 std::vector<float> makeF32Vec() {
     return std::vector<float>{1.5f, -2.5f, 0.0f};
 }

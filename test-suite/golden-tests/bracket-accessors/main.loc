@@ -23,10 +23,10 @@ module main (
   , deepChain
   , indexFromForeignLength
   , sliceFromOptionalStart
-  , indexInt8
-  , indexInt16
-  , indexUInt32
-  , sliceInt8Bound
+  , indexI8
+  , indexI16
+  , indexU32
+  , sliceI8Bound
   , sliceMixedWidthBounds
   , crossPoolReceiverPyToCpp
   , crossPoolReceiverCppToR
@@ -268,37 +268,37 @@ deepChain = .[0:2].(.a.[0].0, .b.[0].y) deepChainRows
 indexFromForeignLength :: Int
 indexFromForeignLength = .[length [10, 20, 30] - 1] [100, 200, 300, 400, 500]
 
--- ─── Optional-typed bound (?Int32) ─────────────────────────────────────────
--- `optStart` is a top-level value of type `?Int32`. With
--- `__to_index__ :: i -> ?Int64` and the new `IndexLike (?Int32)`
+-- ─── Optional-typed bound (?I32) ─────────────────────────────────────────
+-- `optStart` is a top-level value of type `?I32`. With
+-- `__to_index__ :: i -> ?I64` and the new `IndexLike (?I32)`
 -- instance, this exercises the lookup-and-wrap path for a non-Null,
 -- non-literal Optional bound. A blank slot from the desugar would
 -- produce the same shape; this case verifies the user-level optional
 -- expression composes identically.
-optStart :: ?Int32
-optStart = (Null :: ?Int32)
+optStart :: ?I32
+optStart = (Null :: ?I32)
 
 sliceFromOptionalStart :: [Int]
 sliceFromOptionalStart = .[optStart:3] [10, 20, 30, 40, 50]
 
 -- ─── Various integer-width bounds ─────────────────────────────────────────
 -- Each annotation pins the bound to a specific IndexLike instance.
--- Mixing widths in one slice (Int8 start, Int16 stop) ensures the
+-- Mixing widths in one slice (I8 start, I16 stop) ensures the
 -- per-bound lookup is per-position, not per-call.
-indexInt8 :: Int
-indexInt8 = .[(0 :: Int8)] [10, 20, 30]
+indexI8 :: Int
+indexI8 = .[(0 :: I8)] [10, 20, 30]
 
-indexInt16 :: Int
-indexInt16 = .[(1 :: Int16)] [10, 20, 30]
+indexI16 :: Int
+indexI16 = .[(1 :: I16)] [10, 20, 30]
 
-indexUInt32 :: Int
-indexUInt32 = .[(2 :: UInt32)] [10, 20, 30]
+indexU32 :: Int
+indexU32 = .[(2 :: U32)] [10, 20, 30]
 
-sliceInt8Bound :: [Int]
-sliceInt8Bound = .[(1 :: Int8):3] [10, 20, 30, 40, 50]
+sliceI8Bound :: [Int]
+sliceI8Bound = .[(1 :: I8):3] [10, 20, 30, 40, 50]
 
 sliceMixedWidthBounds :: [Int]
-sliceMixedWidthBounds = .[(1 :: Int8):(4 :: Int16)] [10, 20, 30, 40, 50]
+sliceMixedWidthBounds = .[(1 :: I8):(4 :: I16)] [10, 20, 30, 40, 50]
 
 -- ─── Cross-pool stress: bracket with args/result in different languages ───
 -- The bracket is necessarily local to ONE pool after Realize picks the

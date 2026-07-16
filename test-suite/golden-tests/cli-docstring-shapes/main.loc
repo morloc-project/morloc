@@ -40,7 +40,7 @@ source Py from "helper.py"
 py_id        :: a -> a
 py_size      :: [a] -> Int
 py_sum_int   :: [Int] -> Int
-py_sum_float :: [Float64] -> Float64
+py_sum_float :: [F64] -> F64
 py_fst_int   :: (Int, Str) -> Int
 py_rec_xs_len :: RecOpts -> Int
 py_rec_ys_sum :: RecOpts -> Int
@@ -63,39 +63,39 @@ str_check_r ::
   Str -> Str
 str_check_r s = py_id s
 
---' [UInt8] default JSON inline: returns the array length.
-bytes_default :: [UInt8] -> Int
+--' [U8] default JSON inline: returns the array length.
+bytes_default :: [U8] -> Int
 bytes_default xs = py_size xs
 
---' [UInt8] form: bytes: file is sniffed (packet -> raw); count bytes.
+--' [U8] form: bytes: file is sniffed (packet -> raw); count bytes.
 bytes_hybrid ::
   --' form: bytes
-  [UInt8] -> Int
+  [U8] -> Int
 bytes_hybrid xs = py_size xs
 
---' [UInt8] form: bytes-only: file is raw bytes (no sniff); count.
+--' [U8] form: bytes-only: file is raw bytes (no sniff); count.
 bytes_only ::
   --' form: bytes-only
-  [UInt8] -> Int
+  [U8] -> Int
 bytes_only xs = py_size xs
 
---' [UInt8] inline + form: bytes: ASCII chars become bytes; count.
+--' [U8] inline + form: bytes: ASCII chars become bytes; count.
 bytes_inline ::
   --' source: inline
   --' form: bytes
-  [UInt8] -> Int
+  [U8] -> Int
 bytes_inline xs = py_size xs
 
---' [Int32] form: bytes: file has packed 32-bit ints; count elements.
+--' [I32] form: bytes: file has packed 32-bit ints; count elements.
 bytes_int32 ::
   --' form: bytes
-  [Int32] -> Int
+  [I32] -> Int
 bytes_int32 xs = py_size xs
 
---' [Float64] form: bytes-only: file is packed 8-byte floats; sum.
+--' [F64] form: bytes-only: file is packed 8-byte floats; sum.
 bytes_float64 ::
   --' form: bytes-only
-  [Float64] -> Float64
+  [F64] -> F64
 bytes_float64 xs = py_sum_float xs
 
 --' [Bool] form: bytes: file is 0/1 bytes; count elements.
@@ -169,13 +169,13 @@ record RecOpts where
   --' default: []
   ys :: [Int]
 
-  --' ASCII bytes shortcut on `[UInt8]`: `--dna GATTACA` becomes
+  --' ASCII bytes shortcut on `[U8]`: `--dna GATTACA` becomes
   --' `[71,65,84,84,65,67,65]` before the value reaches the pool.
   --' arg: --dna
   --' source: inline
   --' form: bytes
   --' default: []
-  dna :: [UInt8]
+  dna :: [U8]
 
   --' `check.path: r` gate: `--pathr FILE` must be readable at CLI
   --' parse time; `-` rewrites to `/dev/stdin`.

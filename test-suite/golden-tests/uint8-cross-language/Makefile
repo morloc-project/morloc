@@ -2,7 +2,7 @@ all:
 	rm -f *.err obs.txt
 	morloc make -o nexus main.loc 2> build.err
 
-	# single-language [UInt8] round-trips. No wire crossing for the byte
+	# single-language [U8] round-trips. No wire crossing for the byte
 	# array; checks that each language's encode/echo/decode chain works
 	# inside one pool.
 	echo "=== single-language round-trips ===" >> obs.txt
@@ -10,7 +10,7 @@ all:
 	./nexus cppStr "hello world" >> obs.txt 2>> obs.err
 	./nexus rStr   "hello world" >> obs.txt 2>> obs.err
 
-	# two-language [UInt8] pipelines. Each forces one wire crossing for
+	# two-language [U8] pipelines. Each forces one wire crossing for
 	# the byte array between the named language pair, in both directions.
 	echo "=== two-language pipelines ===" >> obs.txt
 	./nexus pyCpp "hello world" >> obs.txt 2>> obs.err
@@ -27,7 +27,7 @@ all:
 	./nexus pyRCpp "hello world" >> obs.txt 2>> obs.err
 
 	# native runtime-type witnesses: each pool reports the runtime type
-	# it actually observed for the [UInt8] argument.
+	# it actually observed for the [U8] argument.
 	echo "=== native runtime types ===" >> obs.txt
 	./nexus nativePy  "abc" >> obs.txt 2>> obs.err
 	./nexus nativeCpp "abc" >> obs.txt 2>> obs.err

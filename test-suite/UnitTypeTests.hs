@@ -860,10 +860,10 @@ typeAliasTests =
       ]
 
 -- | Tests for integer/real literal defaulting through type aliases.
--- A literal `65` checked against a type alias such as `type Char = UInt8`
+-- A literal `65` checked against a type alias such as `type Char = U8`
 -- must take on the aliased base integer type instead of synthesizing as
--- `Int` and failing the `Int <: UInt8` subtype step. Same for real
--- literals and Float32/Float64 aliases. Covers single-depth and multi-hop
+-- `Int` and failing the `Int <: U8` subtype step. Same for real
+-- literals and F32/F64 aliases. Covers single-depth and multi-hop
 -- alias chains, and every fixed-width primitive in the integer/real
 -- families.
 numericLiteralAliasTests :: TestTree
@@ -873,77 +873,77 @@ numericLiteralAliasTests =
       "Numeric literal defaulting through type aliases"
       [ -- single-depth integer aliases: every fixed-width family member
         assertGeneralType
-          "int literal :: Char  (Char = UInt8)"
+          "int literal :: Char  (Char = U8)"
           [r|
         module main (x)
-        type Char = UInt8
+        type Char = U8
         x :: Char
         x = 65
         |]
-          (var "UInt8")
+          (var "U8")
       , assertGeneralType
-          "int literal :: Word16  (Word16 = UInt16)"
+          "int literal :: Word16  (Word16 = U16)"
           [r|
         module main (x)
-        type Word16 = UInt16
+        type Word16 = U16
         x :: Word16
         x = 65000
         |]
-          (var "UInt16")
+          (var "U16")
       , assertGeneralType
-          "int literal :: Word32  (Word32 = UInt32)"
+          "int literal :: Word32  (Word32 = U32)"
           [r|
         module main (x)
-        type Word32 = UInt32
+        type Word32 = U32
         x :: Word32
         x = 1
         |]
-          (var "UInt32")
+          (var "U32")
       , assertGeneralType
-          "int literal :: Word64  (Word64 = UInt64)"
+          "int literal :: Word64  (Word64 = U64)"
           [r|
         module main (x)
-        type Word64 = UInt64
+        type Word64 = U64
         x :: Word64
         x = 1
         |]
-          (var "UInt64")
+          (var "U64")
       , assertGeneralType
-          "int literal :: Byte  (Byte = Int8)"
+          "int literal :: Byte  (Byte = I8)"
           [r|
         module main (x)
-        type Byte = Int8
+        type Byte = I8
         x :: Byte
         x = 1
         |]
-          (var "Int8")
+          (var "I8")
       , assertGeneralType
-          "int literal :: Short  (Short = Int16)"
+          "int literal :: Short  (Short = I16)"
           [r|
         module main (x)
-        type Short = Int16
+        type Short = I16
         x :: Short
         x = 1
         |]
-          (var "Int16")
+          (var "I16")
       , assertGeneralType
-          "int literal :: I32  (I32 = Int32)"
+          "int literal :: I32  (I32 = I32)"
           [r|
         module main (x)
-        type I32 = Int32
-        x :: I32
+        type Int32 = I32
+        x :: Int32
         x = 1
         |]
-          (var "Int32")
+          (var "I32")
       , assertGeneralType
-          "int literal :: I64  (I64 = Int64)"
+          "int literal :: I64  (I64 = I64)"
           [r|
         module main (x)
-        type I64 = Int64
-        x :: I64
+        type Int64 = I64
+        x :: Int64
         x = 1
         |]
-          (var "Int64")
+          (var "I64")
       , assertGeneralType
           "int literal :: Word  (Word = UInt)"
           [r|
@@ -955,67 +955,67 @@ numericLiteralAliasTests =
           (var "UInt")
         -- multi-hop alias chains: literal must default through the chain
       , assertGeneralType
-          "int literal :: FooChar  (FooChar = Char = UInt8)"
+          "int literal :: FooChar  (FooChar = Char = U8)"
           [r|
         module main (x)
-        type Char = UInt8
+        type Char = U8
         type FooChar = Char
         x :: FooChar
         x = 65
         |]
-          (var "UInt8")
+          (var "U8")
       , assertGeneralType
-          "int literal :: A  (A = B = C = UInt32)"
+          "int literal :: A  (A = B = C = U32)"
           [r|
         module main (x)
         type A = B
         type B = C
-        type C = UInt32
+        type C = U32
         x :: A
         x = 1
         |]
-          (var "UInt32")
+          (var "U32")
         -- list literal flowing each element through the alias:
         -- mirrors the encode/decode test in stdlib char-cpp that
         -- triggered the original bug report.
       , assertGeneralType
-          "list of int literals :: [Char]  (Char = UInt8)"
+          "list of int literals :: [Char]  (Char = U8)"
           [r|
         module main (xs)
-        type Char = UInt8
+        type Char = U8
         xs :: [Char]
         xs = [65, 66, 67]
         |]
-          (lst (var "UInt8"))
+          (lst (var "U8"))
       , assertGeneralType
-          "list of int literals :: [FooChar]  (chain to UInt8)"
+          "list of int literals :: [FooChar]  (chain to U8)"
           [r|
         module main (xs)
-        type Char = UInt8
+        type Char = U8
         type FooChar = Char
         xs :: [FooChar]
         xs = [65, 66, 67]
         |]
-          (lst (var "UInt8"))
+          (lst (var "U8"))
         -- single-depth real aliases
       , assertGeneralType
-          "real literal :: Mass  (Mass = Float32)"
+          "real literal :: Mass  (Mass = F32)"
           [r|
         module main (x)
-        type Mass = Float32
+        type Mass = F32
         x :: Mass
         x = 1.5
         |]
-          (var "Float32")
+          (var "F32")
       , assertGeneralType
-          "real literal :: Distance  (Distance = Float64)"
+          "real literal :: Distance  (Distance = F64)"
           [r|
         module main (x)
-        type Distance = Float64
+        type Distance = F64
         x :: Distance
         x = 1.5
         |]
-          (var "Float64")
+          (var "F64")
       , assertGeneralType
           "real literal :: Quantity  (Quantity = Real)"
           [r|
@@ -1027,24 +1027,24 @@ numericLiteralAliasTests =
           (var "Real")
         -- multi-hop real alias chain
       , assertGeneralType
-          "real literal :: A  (A = B = Float32)"
+          "real literal :: A  (A = B = F32)"
           [r|
         module main (x)
         type A = B
-        type B = Float32
+        type B = F32
         x :: A
         x = 1.5
         |]
-          (var "Float32")
+          (var "F32")
       , assertGeneralType
-          "list of real literals :: [Mass]  (Mass = Float32)"
+          "list of real literals :: [Mass]  (Mass = F32)"
           [r|
         module main (xs)
-        type Mass = Float32
+        type Mass = F32
         xs :: [Mass]
         xs = [1.0, 2.0, 3.0]
         |]
-          (lst (var "Float32"))
+          (lst (var "F32"))
         -- negative: an integer literal still cannot inhabit a non-numeric
         -- alias. Guards against the fix accidentally letting any alias
         -- swallow integer literals.
@@ -1058,77 +1058,77 @@ numericLiteralAliasTests =
         |]
         -- negative: a real literal still cannot inhabit an integer alias.
       , expectError
-          "real literal :: Char (Char = UInt8) must fail"
+          "real literal :: Char (Char = U8) must fail"
           [r|
         module main (x)
-        type Char = UInt8
+        type Char = U8
         x :: Char
         x = 1.5
         |]
-        -- Nat-parameterized list aliases: `Vector 4 Int32` reduces via
-        -- `type Vector (n :: Nat) a = List a` to `List Int32`. The list
+        -- Nat-parameterized list aliases: `Vector 4 I32` reduces via
+        -- `type Vector (n :: Nat) a = List a` to `List I32`. The list
         -- literal's elements must take on the reduced element type,
         -- not synthesize as `Int` and fail the subsequent subtype check.
         -- This is the user's original reproducer from the bug report.
       , assertGeneralType
-          "list literal :: Vector 4 Int32  (Vector (n::Nat) a = List a)"
+          "list literal :: Vector 4 I32  (Vector (n::Nat) a = List a)"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 4 Int32
+        x :: Vector 4 I32
         x = [1, 2, 3, 4]
         |]
-          (lst (var "Int32"))
+          (lst (var "I32"))
       , assertGeneralType
-          "list literal :: Vector 3 Int8  (other fixed-width int)"
+          "list literal :: Vector 3 I8  (other fixed-width int)"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 3 Int8
+        x :: Vector 3 I8
         x = [1, 2, 3]
         |]
-          (lst (var "Int8"))
+          (lst (var "I8"))
       , assertGeneralType
-          "list literal :: Vector 2 UInt16  (unsigned fixed-width int)"
+          "list literal :: Vector 2 U16  (unsigned fixed-width int)"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 2 UInt16
+        x :: Vector 2 U16
         x = [1, 2]
         |]
-          (lst (var "UInt16"))
+          (lst (var "U16"))
         -- Nested nat-parameterized alias: Matrix m n a = [[a]] requires
         -- the element-type propagation to recurse through both layers.
       , assertGeneralType
-          "nested list literal :: Matrix 2 2 Int32"
+          "nested list literal :: Matrix 2 2 I32"
           [r|
         module main (x)
         type Matrix (m :: Nat) (n :: Nat) a = List (List a)
-        x :: Matrix 2 2 Int32
+        x :: Matrix 2 2 I32
         x = [[1, 2], [3, 4]]
         |]
-          (lst (lst (var "Int32")))
+          (lst (lst (var "I32")))
         -- Real literals through nat-parameterized aliases use the same
         -- dispatch — confirm the RealS path is unaffected.
       , assertGeneralType
-          "real list literal :: Vector 2 Float32"
+          "real list literal :: Vector 2 F32"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 2 Float32
+        x :: Vector 2 F32
         x = [1.5, 2.5]
         |]
-          (lst (var "Float32"))
+          (lst (var "F32"))
         -- Negative: Nat-dimension mismatch must still fail. The element
-        -- type was successfully propagated (Int32 accepted into the
+        -- type was successfully propagated (I32 accepted into the
         -- literals), but length 3 does not satisfy Nat dimension 4.
         -- This guards against the fix bypassing the nat-dim check.
       , expectError
-          "list literal :: Vector 4 Int32 with wrong length must fail"
+          "list literal :: Vector 4 I32 with wrong length must fail"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 4 Int32
+        x :: Vector 4 I32
         x = [1, 2, 3]
         |]
       ]
@@ -1174,21 +1174,21 @@ pendingNumLitTests =
         |]
           real
       , assertGeneralType
-          "int literal :: Float32 (promotes)"
+          "int literal :: F32 (promotes)"
           [r|
         module main (x)
-        x :: Float32
+        x :: F32
         x = 42
         |]
-          (var "Float32")
+          (var "F32")
       , assertGeneralType
-          "int literal :: Float64 (promotes)"
+          "int literal :: F64 (promotes)"
           [r|
         module main (x)
-        x :: Float64
+        x :: F64
         x = 42
         |]
-          (var "Float64")
+          (var "F64")
 
       -- ----- Mixed-numeric list literal -----
       , assertGeneralType
@@ -1254,16 +1254,16 @@ pendingNumLitTests =
 
       -- ----- Annotated arg pins the existential, literal adopts the width -----
       , assertGeneralType
-          "add of int literal + Int8-annotated -- literal adopts Int8"
+          "add of int literal + I8-annotated -- literal adopts I8"
           [r|
         module main (x)
         add :: a -> a -> a
-        y :: Int8
+        y :: I8
         y = 5
-        x :: Int8
+        x :: I8
         x = add 1 y
         |]
-          (var "Int8")
+          (var "I8")
 
       -- ----- Negative: numeric literal in a non-numeric slot fails -----
       , exprTestBad
@@ -6463,15 +6463,15 @@ literalDispatchTests =
           |]
 
       , -- Bare-VarT newtype-list: an unparameterised newtype that aliases
-        -- a fully-applied list (e.g. @newtype Bytes = List UInt8@).
+        -- a fully-applied list (e.g. @newtype Bytes = List U8@).
         -- A list literal at @Bytes@ is accepted because the wire-parent
         -- chain reaches a list shape; the children are typed at the
         -- wire-parent's element type.
         assertGeneralType
-          "list literal at bare-VarT newtype Bytes (Bytes = List UInt8)"
+          "list literal at bare-VarT newtype Bytes (Bytes = List U8)"
           [r|
         module main (x)
-        newtype Bytes = List UInt8
+        newtype Bytes = List U8
         x :: Bytes
         x = [1, 2, 3]
           |]
@@ -6513,7 +6513,7 @@ literalDispatchTests =
           [r|
         module main (f)
         class IndexLike i where
-          __to_index__ :: i -> Int64
+          __to_index__ :: i -> I64
         instance IndexLike Int where
           source Py ("identity" as __to_index__)
         newtype Vec (n :: Nat) a = List a
@@ -6528,7 +6528,7 @@ literalDispatchTests =
           [r|
         module main (f)
         class IndexLike i where
-          __to_index__ :: i -> Int64
+          __to_index__ :: i -> I64
         instance IndexLike Int where
           source Py ("identity" as __to_index__)
         f :: [Int] -> [Int]

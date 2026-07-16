@@ -26,8 +26,8 @@ source Py from "helper.py"
 py_id          :: a -> a
 py_size        :: [a] -> Int
 py_sum_int     :: [Int] -> Int
-py_sum_real    :: [Float64] -> Float64
-py_total_bytes :: [[UInt8]] -> Int
+py_sum_real    :: [F64] -> F64
+py_total_bytes :: [[U8]] -> Int
 
 -- ── Producers ──────────────────────────────────────────────────────
 -- Identity functions whose output a `nexus -f packet` call captures
@@ -37,8 +37,8 @@ py_total_bytes :: [[UInt8]] -> Int
 mk_int :: Int -> Int
 mk_int x = py_id x
 
---' Identity Float64 producer; dump via `nexus -f packet mk_real F`.
-mk_real :: Float64 -> Float64
+--' Identity F64 producer; dump via `nexus -f packet mk_real F`.
+mk_real :: F64 -> F64
 mk_real x = py_id x
 
 --' Identity Str producer; dump via `nexus -f packet mk_str S`.
@@ -74,12 +74,12 @@ sum_ints_auto ::
   [Int] -> Int
 sum_ints_auto xs = py_sum_int xs
 
---' Sum Float64 packets via strict per-element packet decoding.
+--' Sum F64 packets via strict per-element packet decoding.
 sum_reals_packets ::
   --' form: list
   --' list.source: file
   --' list.form: packet
-  [Float64] -> Float64
+  [F64] -> F64
 sum_reals_packets xs = py_sum_real xs
 
 --' Count Str packets listed in the per-element-packet manifest file.
@@ -103,7 +103,7 @@ size_byte_files ::
   --' form: list
   --' list.source: file
   --' list.form: bytes
-  [[UInt8]] -> Int
+  [[U8]] -> Int
 size_byte_files xss = py_size xss
 
 --' Sum total bytes across the raw-binary files in the manifest.
@@ -111,5 +111,5 @@ total_byte_files ::
   --' form: list
   --' list.source: file
   --' list.form: bytes
-  [[UInt8]] -> Int
+  [[U8]] -> Int
 total_byte_files xss = py_total_bytes xss

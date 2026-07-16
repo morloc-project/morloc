@@ -1,12 +1,12 @@
 === S1: compile-time literal errors (negative tests) ===
 bad-sign.loc:8:11: error:
-Integer literal -12 overflows UInt8 (range 0 to 255)
+Integer literal -12 overflows U8 (range 0 to 255)
   |
 8 | badSign = -12
   |           ^
 
 too-big.loc:8:12: error:
-Integer literal 1000 overflows UInt8 (range 0 to 255)
+Integer literal 1000 overflows U8 (range 0 to 255)
   |
 8 | tooLarge = 1000
   |            ^

@@ -1,8 +1,8 @@
 -- Test alias deduplication correctness and performance.
--- Verifies that type aliases (Deque/Array = List, Int32/Int64 = Int)
+-- Verifies that type aliases (Deque/Array = List, I32/I64 = Int)
 -- are handled correctly by the typechecker's instance resolution dedup.
 
-module main (testAliasPy, testAliasCpp, testInt32Cpp, testDeepChainPy)
+module main (testAliasPy, testAliasCpp, testI32Cpp, testDeepChainPy)
 
 import root-py
 import root-cpp
@@ -69,11 +69,11 @@ chainArray xs =
   in fold (\a x -> a + x) 0 ys
 
 -- ===== INT32/INT64 ARITHMETIC (C++ only) =====
--- Int32 = Int at the general level, but "int32_t" in C++.
-add32 :: Int32 -> Int32 -> Int32
+-- I32 = Int at the general level, but "int32_t" in C++.
+add32 :: I32 -> I32 -> I32
 add32 x y = x + y
 
-mul64 :: Int64 -> Int64 -> Int64
+mul64 :: I64 -> I64 -> I64
 mul64 x y = x * y
 
 -- ===== DEEP CHAIN (performance stress) =====
@@ -139,8 +139,8 @@ testAliasCpp =
       t14 = eqDeque && eqArray
   in t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11 && t12 && t13 && t14
 
-testInt32Cpp :: Bool
-testInt32Cpp =
+testI32Cpp :: Bool
+testI32Cpp =
   let t1 = add32 10 20 == 30
   let t2 = mul64 100 200 == 20000
   in t1 && t2

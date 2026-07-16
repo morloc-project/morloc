@@ -26,7 +26,7 @@ r5 = 0o377
 ys :: [Real]
 ys = [-1.5, -2.0e-3, -0xff]
 
--- Float32 slot with an in-range integer: promotion succeeds and the
--- existing Nexus checkRealBounds passes because 1_000_000 fits Float32.
-f32Ok :: Float32
+-- F32 slot with an in-range integer: promotion succeeds and the
+-- existing Nexus checkRealBounds passes because 1_000_000 fits F32.
+f32Ok :: F32
 f32Ok = 1000000

@@ -1,6 +1,6 @@
 """Test workload generator and structural verifier.
 
-The shape mirrors the morloc-side `Entry = (Str, [Real], ?Str, Int64)`
+The shape mirrors the morloc-side `Entry = (Str, [Real], ?Str, I64)`
 nested as `[[Entry]]`. Generation is deterministic in (outer_count,
 str_len) so the verifier can compare exact scalar fingerprints across
 runs and across languages.

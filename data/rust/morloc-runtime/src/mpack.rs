@@ -450,12 +450,12 @@ fn unpack_int(ptr: AbsPtr, st: SerialType, reader: &mut &[u8]) -> Result<(), Mor
     };
 
     // Compute the narrowed values (with checks) outside the unsafe block.
-    let i8v = if matches!(st, SerialType::Sint8)  { check_s(i8::MIN  as i64, i8::MAX  as i64, "Int8" )? as i8  } else { 0 };
-    let i16v = if matches!(st, SerialType::Sint16) { check_s(i16::MIN as i64, i16::MAX as i64, "Int16")? as i16 } else { 0 };
-    let i32v = if matches!(st, SerialType::Sint32) { check_s(i32::MIN as i64, i32::MAX as i64, "Int32")? as i32 } else { 0 };
-    let u8v  = if matches!(st, SerialType::Uint8)  { check_u(u8::MAX  as u64, "UInt8" )? as u8  } else { 0 };
-    let u16v = if matches!(st, SerialType::Uint16) { check_u(u16::MAX as u64, "UInt16")? as u16 } else { 0 };
-    let u32v = if matches!(st, SerialType::Uint32) { check_u(u32::MAX as u64, "UInt32")? as u32 } else { 0 };
+    let i8v = if matches!(st, SerialType::Sint8)  { check_s(i8::MIN  as i64, i8::MAX  as i64, "I8" )? as i8  } else { 0 };
+    let i16v = if matches!(st, SerialType::Sint16) { check_s(i16::MIN as i64, i16::MAX as i64, "I16")? as i16 } else { 0 };
+    let i32v = if matches!(st, SerialType::Sint32) { check_s(i32::MIN as i64, i32::MAX as i64, "I32")? as i32 } else { 0 };
+    let u8v  = if matches!(st, SerialType::Uint8)  { check_u(u8::MAX  as u64, "U8" )? as u8  } else { 0 };
+    let u16v = if matches!(st, SerialType::Uint16) { check_u(u16::MAX as u64, "U16")? as u16 } else { 0 };
+    let u32v = if matches!(st, SerialType::Uint32) { check_u(u32::MAX as u64, "U32")? as u32 } else { 0 };
     let u64v: u64 = if matches!(st, SerialType::Uint64) {
         if val < 0 {
             return Err(MorlocError::Serialization(format!(

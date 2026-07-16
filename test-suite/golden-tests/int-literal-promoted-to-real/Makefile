@@ -11,7 +11,7 @@ all:
 	./nexus f32Ok  >> obs.txt 2>> obs.err
 	morloc make -o bad_overflow bad_overflow.loc 2>&1 \
 	  | sed 's|.*bad_overflow\.loc|bad_overflow.loc|' \
-	  | grep -F 'overflows Float32' >> obs.txt || true
+	  | grep -F 'overflows F32' >> obs.txt || true
 
 clean:
 	rm -rf nexus bad_overflow pools

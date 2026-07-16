@@ -1,7 +1,7 @@
 # Positive coverage for the v1 CLI docstring grammar:
 #   * Str: default inline, source: file, check.path: r
-#   * [UInt8]: default JSON, form: bytes, bytes-only, source: inline + bytes
-#   * Wider fixed-width arrays: form: bytes on [Int32], [Float64], [Bool]
+#   * [U8]: default JSON, form: bytes, bytes-only, source: inline + bytes
+#   * Wider fixed-width arrays: form: bytes on [I32], [F64], [Bool]
 #   * form: list on [Str], [Int], [(Int, Str)] (JSON & TSV fallback)
 #   * Per-element: list.check.path: r
 #   * many: true on [Str] and [Int]

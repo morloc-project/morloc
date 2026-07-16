@@ -19,10 +19,10 @@ all:
 	./nexus sliceStepClosed >> obs.txt 2>> obs.err
 	echo "--- sliceEmpty ---" >> obs.txt
 	./nexus sliceEmpty >> obs.txt 2>> obs.err
-	echo "--- indexAnnotInt8 ---" >> obs.txt
-	./nexus indexAnnotInt8 >> obs.txt 2>> obs.err
-	echo "--- indexAnnotUInt32 ---" >> obs.txt
-	./nexus indexAnnotUInt32 >> obs.txt 2>> obs.err
+	echo "--- indexAnnotI8 ---" >> obs.txt
+	./nexus indexAnnotI8 >> obs.txt 2>> obs.err
+	echo "--- indexAnnotU32 ---" >> obs.txt
+	./nexus indexAnnotU32 >> obs.txt 2>> obs.err
 	echo "--- sliceAnnotBound ---" >> obs.txt
 	./nexus sliceAnnotBound >> obs.txt 2>> obs.err
 	echo "--- sliceAnnotNull ---" >> obs.txt
