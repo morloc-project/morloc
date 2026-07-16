@@ -26,6 +26,7 @@ module UnitTypeTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
+  , evalSugarTests
   , effectEscapabilityTests
   , effectPartialApplicationTests
   , namespaceErrorTests
@@ -3559,6 +3560,56 @@ effectSynthesisTests =
           [x, y]
           |]
           (ioEff (lst int))
+
+        -- Polymorphic effectful typeclass method used TWICE inside a
+        -- nested do-block that is bound with '<-'. The inner do-block's
+        -- final synths to a concrete type (Int, driven by 'add'), so the
+        -- inner DoBlockS returns 'EffectU collected Int'. Without the
+        -- ForallU peel in 'effectOfAnno', 'collected' comes back empty
+        -- because 'random :: forall a. <IO> a' is not a bare EffectU;
+        -- then 'mkEffectU' collapses '<> Int' to 'Int', and the outer
+        -- '<-' EvalS throws "Cannot force a non-effectful value (got
+        -- type Int)."
+      , assertGeneralType
+          "polymorphic method twice inside nested '<-' do-block"
+          [r|
+        module main (foo)
+        effect IO
+        class C a where
+          random :: <IO> a
+        instance C Int where
+          source Py from "helpers.py" ("r" as random)
+        add :: Int -> Int -> Int
+        foo :: <IO> Int
+        foo = do
+          a <- (do
+            v1 <- random
+            v2 <- random
+            add v1 v2)
+          a
+          |]
+          (ioEff int)
+
+        -- The same shape via '!' sugar. Under Option A, 'a <- add !v1 !v2'
+        -- desugars to 'a <- (do; x <- v1; y <- v2; add x y)', so this
+        -- exercises the identical typechecker path with a different
+        -- surface syntax.
+      , assertGeneralType
+          "polymorphic method twice through '!' in a '<-' bind RHS"
+          [r|
+        module main (foo)
+        effect IO
+        class C a where
+          random :: <IO> a
+        instance C Int where
+          source Py from "helpers.py" ("r" as random)
+        add :: Int -> Int -> Int
+        foo :: <IO> Int
+        foo = do
+          a <- add !random !random
+          a
+          |]
+          (ioEff int)
       ]
 
 -- | Program-level effect rejection tests.  Each test is a complete
@@ -3651,6 +3702,317 @@ effectErrorTests =
         consume :: <IO> Int -> Int
         x = consume rrand
           |]
+      ]
+
+-- | Eval-sugar ('!' prefix) desugars to do-block binds pre-typecheck.
+-- The typechecker never sees a '!'. These tests confirm:
+--   * Types match the equivalent explicit do-block form.
+--   * '!' at various expression positions (tuple, application, lambda,
+--     let, guard branches) sequences into the enclosing scope, with
+--     effect propagating outward (nothing is discharged).
+--   * '!' at redundant positions ('<-' RHS, bare do stmt) is rejected
+--     during desugaring.
+--   * '!' on a pure value is rejected during typechecking as it would
+--     be for an explicit do-bind.
+evalSugarTests :: TestTree
+evalSugarTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Eval-sugar '!' desugar tests"
+      [ -- '!' inside a tuple: hoist per-element to a wrapping do-block.
+        -- Type must match the explicit do-block form.
+        assertGeneralType
+          "'!' in tuple: (!x, !y)"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = (!x, !y)
+          |]
+          (ioEff (tuple [int, int]))
+
+        -- Reference: the equivalent explicit do-block has the same type.
+      , assertGeneralType
+          "do-block form of (!x, !y)"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = do
+          a <- x
+          b <- y
+          (a, b)
+          |]
+          (ioEff (tuple [int, int]))
+
+        -- '!' as function arguments: bar (!x) (!y).
+      , assertGeneralType
+          "'!' as function arguments"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = add !x !y
+          |]
+          (ioEff int)
+
+        -- '!' inside a lambda body: hoists INSIDE the body (per-call).
+      , assertGeneralType
+          "'!' in lambda body: \\x -> !(f x)"
+          [r|
+        module main (foo)
+        effect IO
+        f :: Int -> <IO> Int
+        foo = \x -> !(f x)
+          |]
+          (fun [int, ioEff int])
+
+
+        -- '!' in guard branches (branch-local): each branch is a boundary.
+      , assertGeneralType
+          "'!' in guard branches"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo b
+          ? b = !x
+          : !y
+          |]
+          (fun [bool, ioEff int])
+
+        -- '!' inside an existing do-block: hoist per-statement to a fresh
+        -- bind inserted BEFORE the containing statement, preserving order.
+      , assertGeneralType
+          "'!' inside a do-block bind RHS"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = do
+          a <- add !x !y
+          a
+          |]
+          (ioEff int)
+
+        -- '!' inside a nested do-block: the inner do is a boundary; its
+        -- effect does not leak out (the outer only sees the inner block's
+        -- return type wrapped in its own inferred effect).
+      , assertGeneralType
+          "'!' in a nested do-block"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = do
+          a <- do
+            x
+            x
+          c <- do
+            y
+            y
+          (a, c)
+          |]
+          (ioEff (tuple [int, int]))
+
+        -- '!' with an AnnE: the ascription applies to the do-block wrapper.
+      , assertGeneralType
+          "'!' with type annotation"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo = (!x) :: <IO> Int
+          |]
+          (ioEff int)
+
+        -- '!' on a pure value is rejected: EvalS on a non-effectful type.
+      , exprTestBad
+          "'!' on a pure value"
+          [r|
+        module main (foo)
+        x :: Int
+        foo :: Int
+        foo = !x
+          |]
+
+        -- Redundant '!' on the RHS of '<-' is a desugar error.
+      , exprTestBad
+          "redundant '!' on RHS of '<-'"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          y <- !x
+          y
+          |]
+
+        -- Redundant '!' as a bare do statement is a desugar error.
+      , exprTestBad
+          "redundant '!' as bare do statement"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          !x
+          x
+          |]
+
+        -- '!' at the RHS of a let in a do-block is rejected. 'let'
+        -- should bind a pure value; a bang at a hoistable position
+        -- would silently rewrite the let into an effectful bind chain
+        -- followed by a pure let, making the surface line read as pure
+        -- while the effect fires above it. Bare form.
+      , exprTestBad
+          "bare '!' as RHS of let in do-block"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          let y = !x
+          y
+          |]
+
+        -- Same rejection for a composite RHS: any '!' at a hoistable
+        -- position inside the let RHS is rejected, not just a bare
+        -- '!expr'.
+      , exprTestBad
+          "composite let RHS with '!' at hoistable position"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          let s = add !x !y
+          s
+          |]
+
+        -- '!' inside a lambda body under a let is fine: the lambda body
+        -- is a boundary, so the bang stays local (the effect fires when
+        -- the function is applied, not at the let itself). The let
+        -- correctly binds a function value.
+      , assertGeneralType
+          "'!' inside a lambda body under a let stays legal"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          let f = \z -> !x
+          y <- f 42
+          y
+          |]
+          (ioEff int)
+
+        -- '!' inside the RHS of a '<-' bind is legal: the RHS is a
+        -- boundary, so the bangs seal into a nested do-block wrapping
+        -- the residual expression. This keeps the effect firing at the
+        -- '<-' line rather than silently hoisting above it.
+      , assertGeneralType
+          "'!' inside a '<-' bind RHS with pure residual"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          a <- add !x !y
+          a
+          |]
+          (ioEff int)
+
+        -- Same for a bare non-final do statement: the RHS is a boundary.
+      , assertGeneralType
+          "'!' inside a bare non-final do statement"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          add !x !y
+          x
+          |]
+          (ioEff int)
+
+        -- The same rejection applies OUTSIDE a do-block: 'let x = !expr
+        -- in body' is rejected. Keeps the mental model uniform (let
+        -- always binds a pure value; effect firing goes through '<-')
+        -- and avoids the compiler silently synthesizing a LetE with an
+        -- effect-firing binding from a user 'let'.
+      , exprTestBad
+          "'!' at RHS of an expression-level 'let ... in ...'"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = let z = !x in add z 1
+          |]
+
+        -- Same in composite form.
+      , exprTestBad
+          "composite '!' in expression-level let RHS"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = let s = add !x !y in s
+          |]
+
+        -- '!' inside a lambda body under an expression-level let is
+        -- still legal (bang sealed by lambda boundary).
+      , assertGeneralType
+          "'!' inside a lambda body under expression-level let"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: Int -> <IO> Int
+        foo = let f = \z -> !x in f
+          |]
+          (fun [int, ioEff int])
+
+        -- '!' inside the BODY of an expression-level let is legal:
+        -- the bang hoists into the LetE's continuation (bindings still
+        -- in scope), and the whole let becomes an effectful expression.
+      , assertGeneralType
+          "'!' inside the body of an expression-level let"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = let n = 5 in add n !x
+          |]
+          (ioEff int)
       ]
 
 -- | Escapability tests.  An effect is inescapable by default

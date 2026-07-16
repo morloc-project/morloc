@@ -39,6 +39,7 @@ main = do
       , effectSubtypeTests
       , effectSynthesisTests
       , effectErrorTests
+      , evalSugarTests
       , effectEscapabilityTests
       , effectPartialApplicationTests
       , namespaceErrorTests
@@ -585,6 +586,9 @@ main = do
       , golden "optional-coerce-interop" "optional-coerce-interop"
       , golden "optional-coerce-return-py" "optional-coerce-return-py"
       , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
+      , -- eval-sugar ('!' prefix) end-to-end: '!' form must produce the
+        -- same output as the equivalent explicit do-block form.
+        golden "eval-sugar-py" "eval-sugar-py"
       , -- multi-label and subtyping effect tests
         golden "effect-multi-label-py" "effect-multi-label-py"
       , golden "effect-subtype-py" "effect-subtype-py"

@@ -1192,20 +1192,26 @@ synthE i g (IfS cond thenE elseE) = do
             <> line <> "  else-branch: " <> prettyTypeU t3'
 synthE i g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
-  case apply g1 t1 of
+  -- Strip forall wrappers before matching EffectU: a polymorphic final
+  -- like a typeclass method 'random :: forall a. <Random> a' otherwise
+  -- appears as ForallU (EffectU ...) and falls into the bareT branch,
+  -- producing '<collected> (forall a. <Random> a)' -- a nested effect
+  -- type. Mirrors the stripForallU call in synthE (EvalS ...).
+  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  case t1' of
     EffectU _ iT -> do
       -- Final expr is effectful: wrap it in EvalS so codegen forces the
       -- thunk and collectDoEffects picks up its effects alongside the
       -- non-final EvalS nodes.
       e1' <- wrapFinalEvalS i iT e1
       let collected = collectDoEffects e1'
-      return (g1, EffectU collected iT, DoBlockS e1')
+      return (g1', EffectU collected iT, DoBlockS e1')
     bareT -> do
       -- Pure final: the block's type is <collected> bareT. An empty or
       -- smaller effect set is a subtype of any expected effect set, so no
       -- pure-to-effect lift is needed at the use site.
       let collected = collectDoEffects e1
-      return (g1, EffectU collected bareT, DoBlockS e1)
+      return (g1', EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
@@ -1223,8 +1229,8 @@ synthE i g (EvalS e) = do
       return (g3, apply g3 bt, EvalS (applyGen g3 e1))
     t -> throwTypeError i $
       "Cannot force a non-effectful value (got type" <+> pretty t <> ")."
-      <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
-      <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
+      <+> "An effectful type <E> T is required here -- this diagnostic fires at a bare non-final do-block statement, the RHS of a '<-' bind, or the '!' operator."
+      <+> "Pure expressions should be bound with a pure 'let' or moved to the do-block's final position."
 -- IntrMap: the desugar-inserted implicit map for bracket-accessor
 -- chains. Typed as @(a -> b) -> f a -> f b@ with @f@ a fresh
 -- existential so the same intrinsic covers @List@, @Vector m@, etc.
@@ -1282,6 +1288,13 @@ synthE i g (IntrinsicS intr args) = do
 stripForallU :: Gamma -> TypeU -> (Gamma, TypeU)
 stripForallU g (ForallU v t) = stripForallU (g +> v) (substitute v t)
 stripForallU g t = (g, t)
+
+-- | Peel ForallU layers without touching bound variables. Cheap for
+-- inspecting the underlying constructor of an annotation type (e.g. to
+-- see whether it is an EffectU) when no gamma is available.
+peelForallU :: TypeU -> TypeU
+peelForallU (ForallU _ t) = peelForallU t
+peelForallU t = t
 
 -- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials.
 -- Receives the synthesized argument types so result types like `@next`'s `[a]`
@@ -1781,8 +1794,8 @@ checkE i g (EvalS e) t = do
       return (g4, apply g4 t, EvalS (applyGen g4 e1))
     t' -> throwTypeError i $
       "Cannot force a non-effectful value (got type" <+> pretty t' <> ")."
-      <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
-      <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
+      <+> "An effectful type <E> T is required here -- this diagnostic fires at a bare non-final do-block statement, the RHS of a '<-' bind, or the '!' operator."
+      <+> "Pure expressions should be bound with a pure 'let' or moved to the do-block's final position."
 
 -- Resolve solved existentials so specific handlers (LstS, TupS, etc.) can match
 checkE i g e t@(ExistU v _ _)
@@ -2434,8 +2447,14 @@ collectDoEffects = go
       IntrinsicS _ es -> unions (map go es)
       _ -> emptyEffectSet
 
-    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
-    effectOfAnno _ = emptyEffectSet
+    -- Peel ForallU so a polymorphic effectful type ('forall a. <E> a',
+    -- e.g. a class method 'random :: forall a. <Random> a') still
+    -- contributes its effects. Without this the empty effect set
+    -- collapses via 'mkEffectU', turning '<> Real' into a bare 'Real'
+    -- at the next 'apply' and breaking the enclosing EvalS.
+    effectOfAnno (AnnoS (Idx _ t) _ _) = case peelForallU t of
+      EffectU effs _ -> effs
+      _ -> emptyEffectSet
 
     unions = foldl effUnion emptyEffectSet
 
@@ -2476,8 +2495,9 @@ inferExprEffects = go
       LamS _ _ -> emptyEffectSet
       _ -> emptyEffectSet
 
-    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
-    effectOfAnno _ = emptyEffectSet
+    effectOfAnno (AnnoS (Idx _ t) _ _) = case peelForallU t of
+      EffectU effs _ -> effs
+      _ -> emptyEffectSet
 
     unions = foldl effUnion emptyEffectSet
 
@@ -2578,8 +2598,9 @@ uncoveredEvalIdxs uncovered = go
       IntrinsicS _ es -> concatMap go es
       _ -> []
 
-    effLabels (AnnoS (Idx _ (EffectU effs _)) _ _) = resolveEffectSet effs
-    effLabels _ = Set.empty
+    effLabels (AnnoS (Idx _ t) _ _) = case peelForallU t of
+      EffectU effs _ -> resolveEffectSet effs
+      _ -> Set.empty
 
 -- helpers
 

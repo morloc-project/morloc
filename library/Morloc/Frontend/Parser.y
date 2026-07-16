@@ -52,7 +52,11 @@ import qualified Morloc.BaseTypes as BT
 --   as-pattern glue, and do-stmt `atom_expr '<-' expr | expr` overlap.
 --   All resolve correctly by shift (extend the atom chain / take the
 --   bind branch).
-%expect 95
+-- - 2 from '!' prefix eval-sugar: when an atom_expr chain has seen its
+--   current atom and the next token is '!', the parser can either reduce
+--   the chain or extend it with a new force_expr atom. Shift is correct
+--   (extend the atom chain, so `bar !x` = `bar (!x)`).
+%expect 97
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -657,6 +661,11 @@ atom_expr :: { Loc CstExpr }
   | intrinsic_expr            { $1 }
   | wildcard_expr             { $1 }
   | as_expr                   { $1 }
+  | force_expr                { $1 }
+
+-- '!' e -- eval sugar, tight prefix so `bar !x` = `bar (!x)` and `!!x` = `!(!x)`.
+force_expr :: { Loc CstExpr }
+  : '!' atom_expr             { Loc ($1 <-> $2) (CForceE $2) }
 
 -- Legal only in binding positions; rejected elsewhere in Desugar.
 wildcard_expr :: { Loc CstExpr }

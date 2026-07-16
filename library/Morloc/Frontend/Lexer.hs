@@ -345,7 +345,7 @@ lexOne st@(LexState input pos toks _) = case input of
         emit1 TokDot "." (c : rest)
   '.' : [] ->
     emit1 TokDot "." []
-  -- Bang -- special: ! is force operator, !! is chained force
+  -- Bang -- special: ! is the eval-sugar prefix, !! is a chained double eval
   -- But !!! or != etc. are user-defined operators (fall through to operator lexer)
   '!' : '!' : c : rest
     | not (isOperatorChar c) ->

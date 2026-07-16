@@ -1546,8 +1546,62 @@ validateIrrefPat p =
 -- Do-notation desugaring
 --------------------------------------------------------------------
 
+-- Look for a '!' (CForceE) at a position that would hoist out of the
+-- containing expression. Recurses through non-boundary constructors
+-- (application, tuple, list, record, binop, paren, interpolation) and
+-- stops at boundaries where the bang would seal locally (lambda,
+-- nested do, guard branches, type-ascription subject, nested let,
+-- operator sections which desugar to lambdas).
+findHoistableBang :: Loc CstExpr -> Maybe Pos
+findHoistableBang le@(Loc _ e) = go e
+  where
+    firstBang :: [Loc CstExpr] -> Maybe Pos
+    firstBang = foldr (\x acc -> findHoistableBang x <|> acc) Nothing
+
+    go (CForceE _) = Just (startPos le)
+    go (CAppE f args) = firstBang (f : args)
+    go (CTupE es) = firstBang es
+    go (CLstE es) = firstBang es
+    go (CNamE rs) = firstBang (map snd rs)
+    go (CBopE lhs _ rhs) = firstBang [lhs, rhs]
+    go (CParenE inner) = findHoistableBang inner
+    go (CInterpE _ es _ _) = firstBang es
+    -- Boundaries: any bang inside stays local, so it does not hoist out
+    go (CLamE _ _) = Nothing
+    go (CDoE _) = Nothing
+    go (CGuardExprE _ _) = Nothing
+    go (CAnnE _ _) = Nothing
+    go (CLetE _ _) = Nothing
+    go (CLeftSecE _ _) = Nothing
+    go (CRightSecE _ _) = Nothing
+    -- Leaves and non-expression constructors: no bang possible here
+    go _ = Nothing
+
+-- Every misplaced-'!' diagnostic shares the same clarification about what
+-- '!' actually does, so keep it in one place.
+bangSemanticsNote :: String
+bangSemanticsNote =
+  " Note: '!' sequences an effect into the enclosing do-block; it does not discharge it."
+
+-- Uniform rejection of hoistable '!' at the RHS of any let binding
+-- (do-block 'let x = ...' or expression-level 'let x = ... in ...').
+-- A bang whose hoist boundary would land above the let makes the surface
+-- 'let x = ...' line read as pure while the effect fires above it; the
+-- uniform fix is to spell the effect as 'x <- expr' inside a do-block.
+-- Bangs sealed by an inner boundary (lambda body, nested do, guard
+-- branch, type ascription, nested let) are unaffected.
+rejectHoistableBangInLetRhs :: Loc CstExpr -> D ()
+rejectHoistableBangInLetRhs e =
+  case findHoistableBang e of
+    Nothing -> return ()
+    Just bangPos ->
+      dfail bangPos $
+        "'!' at the RHS of a let: 'let' binds a pure value, so hoisting the effect above the let would make the binding read misleadingly."
+        <> " Use a do-block with 'x <- expr' for effectful bindings; a bang inside a lambda body, nested do-block, or guard branch is fine because it stays local."
+        <> bangSemanticsNote
+
 -- Desugar a do-block to a let-chain. Non-final bare statements and <- binds
--- are wrapped in EvalE so the typechecker sees them as forced effects (pure
+-- are wrapped in EvalE so the typechecker sees them as sequenced effects (pure
 -- non-finals are therefore rejected). The final bare statement is returned
 -- unwrapped: synthE DoBlockS flattens it when effectful, otherwise the block
 -- type is <collected-effects> (type-of-final) and an empty effect set is a
@@ -1558,11 +1612,16 @@ desugarDo _sp [CstDoBare e] = desugarExpr e
 desugarDo sp [CstDoBind _ _] = dfail (startPos sp) "do block cannot end with a bind (<-)"
 desugarDo sp [CstDoLet _ _] = dfail (startPos sp) "do block cannot end with a let binding"
 desugarDo sp (CstDoLet p e : rest) = do
+  rejectHoistableBangInLetRhs e
   p' <- exprToIrrefPat p
   e' <- desugarExpr e
   bindings <- desugarIrrefPat p' e'
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE bindings restE)
+desugarDo _sp (CstDoBind _ (Loc rsp (CForceE _)) : _) =
+  dfail (startPos rsp) $
+    "redundant '!' on the right-hand side of '<-': the bind already sequences the effect."
+    <> bangSemanticsNote
 desugarDo sp (CstDoBind p e : rest) = do
   p' <- exprToIrrefPat p
   e' <- desugarExpr e
@@ -1570,6 +1629,10 @@ desugarDo sp (CstDoBind p e : rest) = do
   bindings <- desugarIrrefPat p' forceE
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE bindings restE)
+desugarDo _sp (CstDoBare (Loc bsp (CForceE _)) : _) =
+  dfail (startPos bsp) $
+    "redundant '!' on a bare do statement: bare statements already sequence their effect."
+    <> bangSemanticsNote
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
   let discardVar = EV ("_do_" <> T.pack (show idx))
@@ -1617,6 +1680,11 @@ desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
 desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
+-- Eval-sugar: '!' e -- pre-hoist marker; the hoistEvals pass rewrites these into
+-- fresh do-block binds. Effect propagates outward; nothing is discharged.
+desugarExpr (Loc sp (CForceE e)) = do
+  e' <- desugarExpr e
+  freshExprSpan sp (EvalE e')
 -- Intrinsics: eta-expand when under-applied so they behave as first-class functions
 desugarExpr (Loc sp (CIntrinsicE name)) = do
   intr <- resolveIntrinsic (startPos sp) name
@@ -1655,6 +1723,7 @@ desugarExpr (Loc sp (CLamE pats body)) = do
   buildLamWithIrrefPats sp pats' body'
 desugarExpr (Loc sp (CLetE bindings body)) = do
   bindings' <- concatMapM (\(p, e) -> do
+    rejectHoistableBangInLetRhs e
     p' <- exprToIrrefPat p
     e' <- desugarExpr e
     desugarIrrefPat p' e') bindings

@@ -1,7 +1,21 @@
--- Test: polymorphic effectful typeclass method used with <- in a do-block
--- Mirrors bug-reports/report-2/bug1.loc
+-- Polymorphic effectful typeclass method inside a do-block. Three
+-- forms of the same computation must produce the same result:
+--   * 'test'       binds the class method with '<-' and returns the
+--                  bound value.
+--   * 'testFinal'  places the class method at the do-block's final
+--                  position without an explicit '<-'. Without the
+--                  stripForallU call in synthE (DoBlockS ...), this
+--                  form typechecks the whole block as '<Random>
+--                  (forall a. <Random> a)' -- a nested effect -- and
+--                  fails.
+--   * 'testNested' binds a NESTED do-block containing the class method
+--                  via '<-'. Without the ForallU peel in
+--                  'effectOfAnno', the inner do-block's collected
+--                  effect set is empty, 'mkEffectU' collapses '<> Real'
+--                  to 'Real', and the outer EvalS throws "Cannot force
+--                  a non-effectful value."
 
-module main (test)
+module main (test, testFinal, testNested)
 
 effect Random
 
@@ -21,3 +35,15 @@ test = do
   setSeed 42
   x <- random
   x
+
+testFinal :: <Random> Real
+testFinal = do
+  setSeed 42
+  random
+
+testNested :: <Random> Real
+testNested = do
+  a <- (do
+    setSeed 42
+    random)
+  a

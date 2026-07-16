@@ -563,12 +563,3 @@ reindexExpr (DoBlockE e) = DoBlockE <$> reindexExprI e
 reindexExpr (EvalE e) = EvalE <$> reindexExprI e
 reindexExpr (IntrinsicE intr es) = IntrinsicE intr <$> mapM reindexExprI es
 reindexExpr e = return e
-
--- FIXME: when I add linking to line numbers, I'll need to update that map
--- also. The trace should be recorded.
-newIndex :: Int -> MorlocMonad Int
-newIndex i = do
-  i' <- MM.getCounter
-  copyState i i'
-  MM.sayVVV $ "Set indices " <> pretty i <> " = " <> pretty i'
-  return i'

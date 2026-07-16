@@ -128,6 +128,7 @@ data CstExpr
   | CLeftSecE !(Loc CstExpr) !Located  -- ^ (expr op) left section: \x -> expr op x
   | CRightSecE !Located !(Loc CstExpr)  -- ^ (op expr) right section: \x -> x op expr
   | CInlineE (Loc CstExpr) -- ^ %inline wrapper for source declarations
+  | CForceE !(Loc CstExpr) -- ^ '!' e -- eval sugar; hoisted to a fresh do-bind by hoistEvals
   deriving (Show, Eq)
 
 data CstExport

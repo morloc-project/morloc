@@ -1,3 +1,10 @@
+0.94.0 [2026-07-15]
+-------------------
+
+ * Allow arbitrary infix strings in backticks in import statement
+ * Allow docstring forms in records
+ * Include names, srcloc, and lang in all tracebacks
+
 0.93.0 [2026-07-11]
 -------------------
 

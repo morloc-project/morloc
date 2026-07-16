@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 Module      : Morloc.Frontend.Namespace
 Description : Re-exports of core namespace types plus frontend-specific helpers
@@ -18,11 +20,13 @@ module Morloc.Frontend.Namespace
   , mapExprM
   , isGeneric
   , copyState
+  , newIndex
   ) where
 
 import qualified Data.Char as DC
 import Data.Text (Text)
 import qualified Data.Text as DT
+import Morloc.Data.Doc (pretty)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
@@ -132,3 +136,13 @@ copyState oldIndex newIndex = do
       Nothing -> m
 
     updateList xs = if oldIndex `elem` xs then newIndex : xs else xs
+
+-- | Allocate a fresh index that inherits all index-keyed state from @parent@.
+-- FIXME: when line-number linking is added, this map must be updated too and
+-- the trace should be recorded.
+newIndex :: Int -> MorlocMonad Int
+newIndex parent = do
+  i <- MM.getCounter
+  copyState parent i
+  MM.sayVVV $ "Set indices " <> pretty parent <> " = " <> pretty i
+  return i
