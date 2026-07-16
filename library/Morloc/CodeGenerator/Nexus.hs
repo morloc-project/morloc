@@ -42,6 +42,7 @@ import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.IFile as IFile
+import qualified Morloc.CodeGenerator.NumericLiteral as NL
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc (concatWith, hardline, indent, line, pretty, render, squotes, vcat, (<+>))
@@ -654,37 +655,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
-    -- Use the literal's own source-map index (litIx) for overflow reporting,
-    -- mirroring the IntS path. RealS carries litIx in its first parameter.
-    -- Non-finite variants (Inf/-Inf/NaN) bypass bounds-checking and emit
-    -- the canonical wire string ("inf" / "-inf" / "nan"); the runtime JSON
-    -- decoder accepts these on parse.
-    toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) = do
-      s <- generalTypeToSerialAST litIx t
-      checkRealBounds litIx v s
-      let litCode = case s of
-            (SerialFloat32 _) -> F32X
-            _ -> F64X
-      return $ LitX litCode (MT.pack (showRealLit v))
-    -- Use the literal's own source-map index (litIx) for overflow reporting.
-    -- The wrapping AnnoS index points at the term that owns the literal,
-    -- which after term inlining is often the export reference, not the
-    -- literal itself. See Treeify.collectExprS for where litIx is set.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) = do
-      s <- generalTypeToSerialAST litIx t
-      checkIntBounds litIx v s
-      return $ case s of
-        (SerialInt8 _) -> LitX I8X (MT.pack (show v))
-        (SerialInt16 _) -> LitX I16X (MT.pack (show v))
-        (SerialInt _) -> LitX IntX (MT.pack (show v))
-        (SerialInt32 _) -> LitX I32X (MT.pack (show v))
-        (SerialInt64 _) -> LitX I64X (MT.pack (show v))
-        (SerialUInt8 _) -> LitX U8X (MT.pack (show v))
-        (SerialUInt16 _) -> LitX U16X (MT.pack (show v))
-        (SerialUInt _) -> LitX U64X (MT.pack (show v))
-        (SerialUInt32 _) -> LitX U32X (MT.pack (show v))
-        (SerialUInt64 _) -> LitX U64X (MT.pack (show v))
-        _ -> LitX I64X (MT.pack (show v))
+    -- litIx (not the wrapping AnnoS index) drives overflow diagnostics
+    -- so the caret lands on the literal itself, not the enclosing term.
+    toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) =
+      resolveNumericToLitX litIx t (NL.RealSrc v)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) =
+      resolveNumericToLitX litIx t (NL.IntSrc v)
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
@@ -851,52 +827,27 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
 
-checkIntBounds :: Int -> Integer -> SerialAST -> MorlocMonad ()
-checkIntBounds i v s =
-  let (name, lo, hi) = case s of
-        SerialInt8 _  -> ("Int8", -128, 127)
-        SerialInt16 _ -> ("Int16", -32768, 32767)
-        SerialInt32 _ -> ("Int32", -2147483648, 2147483647)
-        SerialInt _   -> ("", v, v) -- variable-width, no overflow possible
-        SerialInt64 _ -> ("Int64", -9223372036854775808, 9223372036854775807)
-        SerialUInt8 _  -> ("UInt8", 0, 255)
-        SerialUInt16 _ -> ("UInt16", 0, 65535)
-        SerialUInt32 _ -> ("UInt32", 0, 4294967295)
-        SerialUInt _   -> ("UInt", 0, 18446744073709551615)
-        SerialUInt64 _ -> ("UInt64", 0, 18446744073709551615)
-        _ -> ("", v, v) -- no check for non-integer types
-  in CM.when (v < lo || v > hi) $
-       MM.throwSourcedError i $
-         "Integer literal " <> pretty v
-         <> " overflows " <> (name :: MDoc)
-         <> " (range " <> pretty lo <> " to " <> pretty hi <> ")"
-
--- Check that a finite Real literal fits its target IEEE-754 representation.
--- Data.Scientific.toRealFloat collapses out-of-range values to infinity, so
--- isInfinite on the result detects overflow at compile time. The non-finite
--- RealLit variants (Inf/-Inf/NaN) are explicitly written by the user and
--- bypass the bounds check entirely.
-checkRealBounds :: Int -> RealLit -> SerialAST -> MorlocMonad ()
-checkRealBounds i (RealFinite v) s = case s of
-  SerialFloat32 _ ->
-    let f = DS.toRealFloat v :: Float
-     in CM.when (isInfinite f) $
-          MM.throwSourcedError i $
-            "Float literal " <> pretty (show v)
-            <> " overflows Float32 (|x| > 3.4e38)"
-  -- Real and Float64 share the same IEEE-754 binary64 representation; bound
-  -- both against Float64 max.
-  SerialFloat64 _ -> overflowsF64
-  SerialReal _    -> overflowsF64
-  _ -> return ()
-  where
-    overflowsF64 =
-      let d = DS.toRealFloat v :: Double
-       in CM.when (isInfinite d) $
-            MM.throwSourcedError i $
-              "Float literal " <> pretty (show v)
-              <> " overflows Float64 (|x| > 1.8e308)"
-checkRealBounds _ _ _ = return ()
+-- Resolve a numeric literal against the target type and map the shared
+-- resolver's decision to nexus LitType wire markers. F32X/F64X carry
+-- the textual RealLit form ("inf"/"-inf"/"nan"/decimal); IntX uses the
+-- literal's decimal Integer.
+resolveNumericToLitX :: Int -> Type -> NL.NumLitSrc -> MorlocMonad NexusExpr
+resolveNumericToLitX litIx t src = do
+  s <- generalTypeToSerialAST litIx t
+  resolved <- NL.resolveNumericLiteral litIx src s
+  return $ case resolved of
+    NL.ResolvedInt NL.I8   n -> LitX I8X  (MT.pack (show n))
+    NL.ResolvedInt NL.I16  n -> LitX I16X (MT.pack (show n))
+    NL.ResolvedInt NL.I32  n -> LitX I32X (MT.pack (show n))
+    NL.ResolvedInt NL.I64  n -> LitX I64X (MT.pack (show n))
+    NL.ResolvedInt NL.IVar n -> LitX IntX (MT.pack (show n))
+    NL.ResolvedInt NL.U8   n -> LitX U8X  (MT.pack (show n))
+    NL.ResolvedInt NL.U16  n -> LitX U16X (MT.pack (show n))
+    NL.ResolvedInt NL.U32  n -> LitX U32X (MT.pack (show n))
+    NL.ResolvedInt NL.U64  n -> LitX U64X (MT.pack (show n))
+    NL.ResolvedInt NL.UVar n -> LitX U64X (MT.pack (show n))
+    NL.ResolvedReal NL.F32 r -> LitX F32X (MT.pack (showRealLit r))
+    NL.ResolvedReal NL.F64 r -> LitX F64X (MT.pack (showRealLit r))
 
 -- | Storage type of an intrinsic's `<IO> (Handle a)` result. Peels the
 -- effect + handle head and delegates to 'MBT.handleStorageType'.

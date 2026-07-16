@@ -4,6 +4,7 @@
  * Allow arbitrary infix strings in backticks in import statement
  * Allow docstring forms in records
  * Include names, srcloc, and lang in all tracebacks
+ * Fix literal type promotion
 
 0.93.0 [2026-07-11]
 -------------------

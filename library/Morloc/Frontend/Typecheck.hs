@@ -2059,7 +2059,9 @@ checkE i g (IntS si x) t = do
       -- Float64) via integer-to-real promotion. This is what lets @4 + 2.3@
       -- typecheck: the @4@ is checked against the same type slot as @2.3@,
       -- so when that slot resolves to @Real@, the integer literal adopts
-      -- @Real@ as well.
+      -- @Real@ as well. The AST node stays as IntS -- codegen consults
+      -- the resolved type annotation via CodeGenerator/NumericLiteral to
+      -- pick the wire form and convert the value.
       acceptable u = BT.isIntegerBaseType u || BT.isRealBaseType u
   if acceptable tApplied || acceptable tEval || acceptable tWire
     then return (g, tApplied, IntS si x)

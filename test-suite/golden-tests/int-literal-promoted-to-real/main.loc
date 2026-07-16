@@ -1,0 +1,32 @@
+module main (r1, r2, r3, r4, r5, ys, f32Ok)
+
+-- Integer literals in a Real-typed slot must be promoted to reals at
+-- typecheck time, not passed through as-is. The nexus otherwise emits an
+-- I64 wire literal for the Real slot and the runtime reads the int's bit
+-- pattern as an IEEE-754 double, producing subnormals (positive input)
+-- or NaN (negative input).
+
+r1 :: Real
+r1 = 255
+
+r2 :: Real
+r2 = -255
+
+r3 :: Real
+r3 = 0xff
+
+r4 :: Real
+r4 = -0xff
+
+r5 :: Real
+r5 = 0o377
+
+-- Integer element in a [Real] literal takes the same path (mixed-int-real
+-- list). The doc example from features-integers.asc.
+ys :: [Real]
+ys = [-1.5, -2.0e-3, -0xff]
+
+-- Float32 slot with an in-range integer: promotion succeeds and the
+-- existing Nexus checkRealBounds passes because 1_000_000 fits Float32.
+f32Ok :: Float32
+f32Ok = 1000000
