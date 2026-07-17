@@ -400,9 +400,13 @@ data Intrinsic
                     -- the nexus. At most one @stdout per nexus.
   | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
                     -- @stdout for stderr.
-  | IntrThrow       -- ^ @throw :: Str -> <IO> a@ -- raise a MorlocException
+  | IntrThrow       -- ^ @throw :: Str -> <Err> a@ -- raise a MorlocException
                     -- with the given message. Return type is a fresh
                     -- existential so `@throw` fits in any branch.
+  | IntrCatch       -- ^ @catch :: <e, Err> a -> <e> a -> <e> a@ --
+                    -- intercept a fallible expression, substituting the
+                    -- fallback value when it raises. Effect-strip removes
+                    -- Err; other effects propagate through.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -444,6 +448,7 @@ intrinsicName IntrStdin = "stdin"
 intrinsicName IntrStdout = "stdout"
 intrinsicName IntrStderr = "stderr"
 intrinsicName IntrThrow = "throw"
+intrinsicName IntrCatch = "catch"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
@@ -478,6 +483,7 @@ parseIntrinsic "stdin" = Just IntrStdin
 parseIntrinsic "stdout" = Just IntrStdout
 parseIntrinsic "stderr" = Just IntrStderr
 parseIntrinsic "throw" = Just IntrThrow
+parseIntrinsic "catch" = Just IntrCatch
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -510,6 +516,7 @@ intrinsicArity IntrStdin = 0
 intrinsicArity IntrStdout = 0
 intrinsicArity IntrStderr = 0
 intrinsicArity IntrThrow = 1
+intrinsicArity IntrCatch = 2
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

@@ -1,0 +1,48 @@
+-- Test @catch in a Python-bound pool: verifies that
+--   (a) @catch intercepts a raised @throw and substitutes the fallback
+--   (b) when the fallible does NOT throw, its value passes through
+--       unchanged (fallback ignored)
+--   (c) mixed <IO,Err> effect strips to <IO>: a fallible that does
+--       Python I/O and may throw catches to a fallback that itself
+--       does I/O
+--   (d) a foreign exception (Python-side raise from a sourced function)
+--       is caught the same way as a morloc @throw -- the Err effect is
+--       an API contract, but runtime catch is broad
+--   (e) `!` inside @catch's fallible arg seals at the arg site (both
+--       @catch args are eval-sugar boundaries in Restructure.hs), so
+--       the raise fires inside @catch's try/catch scope and is caught.
+module main (catchBare, catchInDo, catchMixedIO, catchForeignRaise, catchBangFallible)
+
+import root
+import root-py
+
+source Py from "helper.py" ("py_len", "py_may_fail")
+
+py_len      :: Str -> Int
+py_may_fail :: Str -> <Err> Int
+
+catchBare :: Int
+catchBare = @catch (@throw "boom") 42
+
+catchInDo :: Str -> Int
+catchInDo s = @catch (do
+    let n = py_len s
+    ? n < 4 = @throw "too short"
+    : n
+  ) 999
+
+catchMixedIO :: Str -> Int
+catchMixedIO s = @catch (do
+    let n = py_len s
+    ? n == 0 = @throw "empty"
+    : n
+  ) (py_len "fallback")
+
+catchForeignRaise :: Str -> Int
+catchForeignRaise s = @catch (do
+    let n = py_may_fail s
+    n
+  ) 0
+
+catchBangFallible :: Str -> Int
+catchBangFallible s = @catch !(py_may_fail s) 77

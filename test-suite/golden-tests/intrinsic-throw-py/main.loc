@@ -15,15 +15,15 @@ source Py from "helper.py" ("py_len", "py_show_len")
 py_len :: Str -> Int
 py_show_len :: Str -> Str
 
-plainThrow :: <IO> ()
+plainThrow :: <Err> ()
 plainThrow = @throw "PLAIN: boom"
 
-interpThrow :: Str -> <IO> ()
+interpThrow :: Str -> <Err> ()
 interpThrow s = do
   let shown = py_show_len s
   @throw "INTERP: #{s} n=#{shown}"
 
-guardThrow :: Str -> <IO> Int
+guardThrow :: Str -> <Err> Int
 guardThrow s = do
   let n = py_len s
   let shown = py_show_len s

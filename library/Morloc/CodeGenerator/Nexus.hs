@@ -225,6 +225,7 @@ data NexusExpr
   | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
   | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
+  | CatchX    NexusExpr NexusExpr   -- fallible, fallback -- try/catch
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -783,6 +784,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       FlushX <$> toNexusExpr handle
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrThrow [msg])) =
       ThrowX <$> toNexusExpr msg
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrCatch [fallible, fallback])) =
+      CatchX <$> toNexusExpr fallible <*> toNexusExpr fallback
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
       StdinX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
@@ -2061,6 +2064,12 @@ exprToJson (ThrowX msg) =
   jsonObj
     [ ("tag", jsonStr "throw")
     , ("msg", exprToJson msg)
+    ]
+exprToJson (CatchX fallible fallback) =
+  jsonObj
+    [ ("tag", jsonStr "catch")
+    , ("fallible", exprToJson fallible)
+    , ("fallback", exprToJson fallback)
     ]
 exprToJson (OptX schema child) =
   jsonObj

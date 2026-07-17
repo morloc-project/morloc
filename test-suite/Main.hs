@@ -80,6 +80,11 @@ main = do
       , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
       , golden "intrinsic-throw-py" "intrinsic-throw-py"
       , golden "intrinsic-throw-r" "intrinsic-throw-r"
+      , golden "intrinsic-catch-cpp" "intrinsic-catch-cpp"
+      , golden "intrinsic-catch-py" "intrinsic-catch-py"
+      , golden "intrinsic-catch-r" "intrinsic-catch-r"
+      , golden "intrinsic-catch-rejects-non-err" "intrinsic-catch-rejects-non-err"
+      , golden "intrinsic-catch-cross-pool" "intrinsic-catch-cross-pool"
 
       , golden "int-literal-promoted-to-real" "int-literal-promoted-to-real"
       , golden "backtick-operator-py" "backtick-operator-py"

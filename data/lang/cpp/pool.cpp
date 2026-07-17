@@ -488,6 +488,14 @@ struct _MlcThrowHelper {
 inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
     throw MorlocException(msg);
 }
+// @catch: run `fallible()`; on any std::exception, run `fallback()` and
+// return its result. Template deduction picks the return type from the
+// fallible thunk. The fallback must return the same type.
+template<typename FL, typename FB>
+auto _mlc_catch(FL&& fallible, FB&& fallback) -> decltype(fallible()) {
+    try { return fallible(); }
+    catch (const std::exception&) { return fallback(); }
+}
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
     char* errmsg = NULL;

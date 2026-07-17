@@ -1277,6 +1277,32 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
+-- Bespoke effect-strip rule for @catch. Not routed through subtypeEffRows
+-- because that path's four row shapes can't express the constructed RHS
+-- <e | Err>: effectSetParts would flatten it to (labels={Err}, vars={e})
+-- and dispatch to the wrong subtype branch.
+synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
+  (g1, fallibleT, fallibleE') <- synthG g fallibleE
+  let fallibleT' = apply g1 fallibleT
+  case peelForallU fallibleT' of
+    EffectU effs innerT -> do
+      let labels = resolveEffectSet effs
+      unless (Set.member "Err" labels) $
+        throwTypeError i $
+          "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
+      when (effectSetHasVar effs) $
+        throwTypeError i $
+          "@catch cannot determine whether Err is present in a polymorphic effect row;"
+          <+> "add an effect annotation on the fallible expression"
+      let expectedFallbackT = mkEffectU (removeEffectLabel "Err" effs) innerT
+      (g2, _, fallbackE') <- checkG g1 fallbackE expectedFallbackT
+      return (g2, apply g2 expectedFallbackT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
+    _ ->
+      throwTypeError i $
+        "@catch's first argument must have effect Err; got a non-effectful type"
+        <+> prettyTypeU fallibleT'
+synthE i _ (IntrinsicS IntrCatch args) =
+  MM.throwCompilerBugAt i $ "IntrCatch expects 2 args (fallible, fallback), got " <> pretty (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -1349,7 +1375,7 @@ intrinsicTypeG g IntrStderr _ =
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 intrinsicTypeG g IntrThrow _ =
   let (g', a) = newvar "throw_" g
-  in (g', EffectU ioEffectSet a)
+  in (g', EffectU errEffectSet a)
 intrinsicTypeG g intr _ = (g, intrinsicType intr)
 
 -- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
@@ -1405,6 +1431,8 @@ intrinsicType IntrStderr =
   error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
 intrinsicType IntrThrow =
   error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
+intrinsicType IntrCatch =
+  error "intrinsicType: IntrCatch must be typed via synthE's dedicated clause"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
 -- it never appears as a user-facing intrinsic so no type rule is needed.
 intrinsicType IntrIFileWalk =

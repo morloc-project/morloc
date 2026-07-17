@@ -90,6 +90,7 @@ module Morloc.Namespace.Type
   , resolveEffectSet
   , emptyEffectSet
   , ioEffectSet
+  , errEffectSet
   , effectSubsetOf
   , effectSetHasVar
   , effectSetParts
@@ -97,6 +98,7 @@ module Morloc.Namespace.Type
   , isEmptyEffectSet
   , normalizeEffectSet
   , unionEffectSet
+  , removeEffectLabel
   , mkEffectU
   , mkEffectT
   , prettyEffectSet
@@ -176,6 +178,10 @@ emptyEffectSet = EffectSet Set.empty
 ioEffectSet :: EffectSet
 ioEffectSet = EffectSet (Set.singleton "IO")
 
+-- | An Err effect set. Carried by @throw and discharged by @catch.
+errEffectSet :: EffectSet
+errEffectSet = EffectSet (Set.singleton "Err")
+
 -- | Check if one effect set is a subset of another (resolved labels).
 -- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
 effectSubsetOf :: EffectSet -> EffectSet -> Bool
@@ -232,6 +238,20 @@ normalizeEffectSet es =
 -- | Union of two effect sets, normalized.
 unionEffectSet :: EffectSet -> EffectSet -> EffectSet
 unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
+
+-- | Strip a specific label from an effect set. Concrete labels are removed
+-- from an 'EffectSet'; 'EffectUnion' recurses into both sides and normalizes
+-- the result. Callers MUST reject a bare 'EffectVar' before invoking this
+-- helper because row-var membership is not decidable here -- silently
+-- no-op-stripping would let ill-typed programs through the effect-strip
+-- rule. We panic on the misuse rather than silently misbehave.
+removeEffectLabel :: EffectLabel -> EffectSet -> EffectSet
+removeEffectLabel lbl (EffectSet ls) = EffectSet (Set.delete lbl ls)
+removeEffectLabel _   (EffectVar v) =
+  error $ "removeEffectLabel: called on unresolved EffectVar " <> show v
+          <> "; callers must reject undecidable row tails first"
+removeEffectLabel lbl (EffectUnion a b) =
+  normalizeEffectSet (EffectUnion (removeEffectLabel lbl a) (removeEffectLabel lbl b))
 
 ---- Type definitions
 

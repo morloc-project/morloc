@@ -47,6 +47,10 @@ morloc_mlc_throw <- function(msg) {
     list(message = msg, call = NULL)
   ))
 }
+# @catch: evaluate fallible; on any error condition, evaluate fallback.
+morloc_mlc_catch <- function(fallible, fallback) {
+  tryCatch(fallible(), error = function(e) fallback())
+}
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
 morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }

@@ -333,9 +333,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
-                     IntrStdin, IntrStdout, IntrStderr, IntrThrow] = do
+                     IntrStdin, IntrStdout, IntrStderr, IntrThrow,
+                     IntrCatch] = do
           tf <- inferType t
-          es' <- mapM (nativeExpr m) es
+          esBase <- mapM (nativeExpr m) es
+          -- @catch's args must both reach mlc_catch as no-arg callables;
+          -- see 'thunkifyForCatch' below.
+          let es' = case intr of
+                IntrCatch -> map thunkifyForCatch esBase
+                _         -> esBase
           es'' <- unpackDataArgIfNeeded m intr es'
           msch <- intrinsicSchema m intr tf es''
           let innerTf = case tf of
@@ -370,6 +376,18 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
+    -- Idempotently wrap a NativeExpr in a DoBlockN so it renders as a
+    -- no-arg thunk. Any effect-typed NativeExpr is already thunk-shaped
+    -- via the enclosing DoBlockN-wrap step; a structural pattern-match
+    -- would have to enumerate every pass-through constructor
+    -- (MapOptionalN, CoerceN, ReturnN, ...) and silently misbehave when
+    -- a new one is added, so we dispatch on the type wrapper instead.
+    thunkifyForCatch :: NativeExpr -> NativeExpr
+    thunkifyForCatch e = case typeFof e of
+      EffectF _ _ -> e
+      t           -> DoBlockN t e
+
+
     unpackDataArgIfNeeded ::
       Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
     -- @save's first argument is the compression level, not the data;

@@ -148,6 +148,8 @@ printExpr (IIntrinsicStderr sid) =
   [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicThrow msg) =
   [idoc|_mlc_throw(#{printExpr msg})|]
+printExpr (IIntrinsicCatch fallible fallback) =
+  [idoc|_mlc_catch(#{printExpr fallible}, #{printExpr fallback})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
 -- float-typed per C99 but convert losslessly to double; non-default Real

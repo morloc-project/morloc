@@ -1,0 +1,42 @@
+-- Test @catch in a C++-bound pool: same coverage as the Py variant --
+-- pure catch of @throw, catch inside a do-block, mixed <IO,Err> catch,
+-- and catch of a foreign C++ exception (std::runtime_error thrown
+-- inside a sourced function). This last case validates the plan's claim
+-- that language-native exceptions are caught the same as morloc @throw.
+module main (catchBare, catchInDo, catchMixedIO, catchForeignRaise, catchBangFallible)
+
+import root
+import root-cpp
+
+source Cpp from "helper.hpp" ("cpp_len", "cpp_may_fail")
+
+cpp_len      :: Str -> Int
+cpp_may_fail :: Str -> <Err> Int
+
+catchBare :: Int
+catchBare = @catch (@throw "boom") 42
+
+catchInDo :: Str -> <IO> Int
+catchInDo s = @catch (do
+    let n = cpp_len s
+    ? n < 4 = @throw "too short"
+    : n
+  ) 999
+
+catchMixedIO :: Str -> <IO> Int
+catchMixedIO s = @catch (do
+    let n = cpp_len s
+    ? n == 0 = @throw "empty"
+    : n
+  ) (cpp_len "fallback")
+
+catchForeignRaise :: Str -> <IO> Int
+catchForeignRaise s = @catch (do
+    let n = cpp_may_fail s
+    n
+  ) 0
+
+-- ! inside @catch's fallible seals at the arg site (Restructure.hs
+-- IntrCatch special-case). Empty string raises inside the try/catch.
+catchBangFallible :: Str -> Int
+catchBangFallible s = @catch !(cpp_may_fail s) 77

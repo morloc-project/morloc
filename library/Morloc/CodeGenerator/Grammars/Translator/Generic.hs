@@ -998,6 +998,9 @@ genericPrintExpr desc = go
     go (IIntrinsicThrow msg) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_throw(" <> go msg <> ")"
+    go (IIntrinsicCatch fallible fallback) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_catch(" <> go fallible <> ", " <> go fallback <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R

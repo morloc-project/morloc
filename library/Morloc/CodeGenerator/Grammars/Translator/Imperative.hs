@@ -180,7 +180,11 @@ data IExpr
   | IIntrinsicStderr Int
       -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicThrow IExpr
-      -- ^ @throw :: Str -> <IO> a: raise a MorlocException with the message.
+      -- ^ @throw :: Str -> <Err> a: raise a MorlocException with the message.
+  | IIntrinsicCatch IExpr IExpr
+      -- ^ @catch fallible fallback: fallible-first thunks. Runtime evaluates
+      --   fallible in a try; on any language-native exception, evaluates
+      --   fallback and returns its value.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -867,6 +871,19 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicThrow (IRawExpr (render (poolExpr msgDocs))))
     }
+-- @catch: emit each arg raw. Serialize.hs::thunkifyForCatch has already
+-- forced both args into DoBlockN thunks, so each poolExpr is a bound
+-- thunk name (like `helperN`). The pool's mlc_catch helper invokes them.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrCatch _ [fallibleDocs, fallbackDocs]) =
+  let allDocs = [fallibleDocs, fallbackDocs]
+      raw d = IRawExpr (render (poolExpr d))
+   in return $ fallibleDocs
+        { poolExpr = lcPrintExpr cfg
+            (IIntrinsicCatch (raw fallibleDocs) (raw fallbackDocs))
+        , poolPriorExprs = concatMap poolPriorExprs allDocs
+        , poolPriorLines = concatMap poolPriorLines allDocs
+        , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
+        }
 -- @stdin / @stdout / @stderr: nullary intrinsics. The runtime enforces
 -- singleton opens per stdio kind; codegen just emits the call with the
 -- element schema.

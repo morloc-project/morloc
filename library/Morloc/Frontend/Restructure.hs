@@ -738,6 +738,18 @@ hoistEvals = DAG.mapNodeM hoistNode
         (\(k, e) -> do (e', bs) <- hoistIn e; return ((k, e'), bs))
         rs
       return (ExprI i (NamE rs'), bs)
+    -- @catch's args are boundaries: '!' inside a fallible or fallback
+    -- seals at the arg site instead of hoisting above the @catch. Without
+    -- this, `@catch !(foo x) fb` would rewrite to `do { v <- foo x; @catch
+    -- v fb }`, evaluating the fallible outside @catch's try/catch scope
+    -- and defeating the catch entirely (and rejecting at typecheck since
+    -- the fallible would then be pure). Both args are sealed because the
+    -- fallback is lazy at runtime -- a bang in fallback that hoisted up
+    -- would fire eagerly even on the happy path.
+    hoistIn (ExprI i (IntrinsicE IntrCatch [fallible, fallback])) = do
+      fallible' <- hoistBoundary fallible
+      fallback' <- hoistBoundary fallback
+      return (ExprI i (IntrinsicE IntrCatch [fallible', fallback']), [])
     hoistIn (ExprI i (IntrinsicE intr es)) = do
       (es', bs) <- mapAndCollect hoistIn es
       return (ExprI i (IntrinsicE intr es'), bs)

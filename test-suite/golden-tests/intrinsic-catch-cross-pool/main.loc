@@ -1,0 +1,27 @@
+-- Cross-pool @catch: verifies that a fail packet from a foreign-pool
+-- call (Python -> C++) surfaces as a language-native exception in the
+-- calling pool, so @catch's runtime helper intercepts it via the
+-- normal try/catch machinery.
+--
+-- The scenario:
+--   * cpp_fail is sourced from C++ and throws std::runtime_error on empty.
+--   * catchCross is Python-bound: it wraps `cpp_fail s` in @catch.
+--   * The Python pool calls C++ via foreign_call; C++ pool catches the
+--     std::runtime_error at its manifold boundary and emits a fail packet.
+--   * Python's foreign_call sees the fail packet and re-raises as an
+--     Exception subclass; @catch's mlc_catch intercepts it and returns
+--     the fallback value.
+--
+-- If any link in the fail-packet -> re-raise -> catch chain is broken,
+-- the fallback wouldn't fire and the program would exit non-zero.
+module main (catchCross)
+
+import root
+import root-py
+import root-cpp
+
+source Cpp from "helper.hpp" ("cpp_fail")
+cpp_fail :: Str -> <Err> Int
+
+catchCross :: Str -> Int
+catchCross s = @catch (cpp_fail s) 55

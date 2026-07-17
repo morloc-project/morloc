@@ -2029,7 +2029,38 @@ unsafe fn morloc_eval_r(
             let arr = &*(msg_ptr as *const shm::Array);
             let abs = shm::rel2abs(arr.data)?;
             let bytes = std::slice::from_raw_parts(abs as *const u8, arr.size);
-            return Err(MorlocError::Other(String::from_utf8_lossy(bytes).into_owned()));
+            return Err(MorlocError::UserThrow(String::from_utf8_lossy(bytes).into_owned()));
+        }
+
+        MorlocExpressionType::Catch => {
+            // Fallible is evaluated with dest=null so morloc_eval_r sizes
+            // its scratch from the fallible's own schema -- the catch
+            // node's schema is the fallback's, which may differ (e.g.
+            // fallible = @throw carries the Unit "z" sentinel).
+            //
+            // The arena checkpoint brackets the fallible's evaluation so
+            // any SHM/files/slots it allocated are reclaimed before the
+            // fallback runs (failure path) or the caller continues
+            // (success path, after we've memcpy'd the value into dest).
+            let catch = (*expr).expr.catch_expr;
+            let fallible = (*catch).fallible;
+            let fallback = (*catch).fallback;
+            let cp = crate::eval_arena::checkpoint();
+            match morloc_eval_r(fallible, ptr::null_mut(), 0, bndvars) {
+                Ok(src_ptr) => {
+                    if width > 0 {
+                        debug_assert!(!src_ptr.is_null(),
+                            "Catch: fallible returned Ok(null) at width={}", width);
+                        ptr::copy_nonoverlapping(src_ptr as *const u8, dest, width);
+                    }
+                    crate::eval_arena::rollback_to(cp);
+                }
+                Err(e) if is_user_throw(&e) => {
+                    crate::eval_arena::rollback_to(cp);
+                    morloc_eval_r(fallback, dest, width, bndvars)?;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         other => {
@@ -2053,6 +2084,16 @@ unsafe fn morloc_eval_r(
     }
 
     Ok(dest)
+}
+
+/// Predicate: is this error interceptable by @catch?
+/// Distinguishes user-visible failures (a direct `@throw`, or a fail
+/// packet returned from a foreign pool whose function was annotated
+/// `<Err>`) from internal-invariant failures (compiler bug, allocation
+/// fault, corrupt manifest). The user promised catchability via the
+/// `<Err>` effect only for the former.
+fn is_user_throw(e: &MorlocError) -> bool {
+    matches!(e, MorlocError::UserThrow(_) | MorlocError::Packet(_))
 }
 
 /// Extract a NUL-terminated path C-string from a voidstar Str

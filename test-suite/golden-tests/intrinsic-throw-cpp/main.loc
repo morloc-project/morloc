@@ -17,15 +17,15 @@ source Cpp from "helper.hpp" ("cpp_len", "cpp_show_len")
 cpp_len :: Str -> Int
 cpp_show_len :: Str -> Str
 
-plainThrow :: <IO> ()
+plainThrow :: <Err> ()
 plainThrow = @throw "PLAIN: boom"
 
-interpThrow :: Str -> <IO> ()
+interpThrow :: Str -> <Err> ()
 interpThrow s = do
   let shown = cpp_show_len s
   @throw "INTERP: #{s} n=#{shown}"
 
-guardThrow :: Str -> <IO> Int
+guardThrow :: Str -> <Err> Int
 guardThrow s = do
   let n = cpp_len s
   let shown = cpp_show_len s

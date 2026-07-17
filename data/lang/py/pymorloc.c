@@ -2820,6 +2820,28 @@ error:
     return NULL;
 }
 
+// @catch: evaluate fallible; on any Exception subclass, evaluate fallback.
+// Fallible-first order matches the intrinsic type `@catch fallible fallback`.
+// Narrows to Exception (not BaseException) so KeyboardInterrupt / SystemExit
+// / GeneratorExit propagate as the user expects.
+static PyObject* pybinding__mlc_catch(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* fallible; PyObject* fallback;
+    if (!PyArg_ParseTuple(args, "OO", &fallible, &fallback)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    PyObject* r = PyObject_CallObject(fallible, NULL);
+    if (r == NULL) {
+        if (!PyErr_ExceptionMatches(PyExc_Exception)) {
+            return NULL;
+        }
+        PyErr_Clear();
+        r = PyObject_CallObject(fallback, NULL);
+    }
+    return r;
+error:
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_fschema(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;
     if (!PyArg_ParseTuple(args, "s", &path)) {
@@ -3191,6 +3213,7 @@ static PyMethodDef Methods[] = {
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
+    {"mlc_catch", pybinding__mlc_catch, METH_VARARGS, "Evaluate fallible; on exception, evaluate fallback"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 
