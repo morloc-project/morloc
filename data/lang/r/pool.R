@@ -37,6 +37,16 @@ morloc_mlc_write                     <- function(...){ .Call("morloc_mlc_write",
 morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append",                    ...) }
 morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
 morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
+# @throw: raise a classed condition. The pool's manifold-level tryCatch
+# (from ldErrorWrapOpen/Close in lang.yaml) catches all conditions and
+# appends the frame info to `conditionMessage`, so the class tag survives
+# only at the innermost frame; the message propagates outward.
+morloc_mlc_throw <- function(msg) {
+  stop(structure(
+    class = c("MorlocException", "error", "condition"),
+    list(message = msg, call = NULL)
+  ))
+}
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
 morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }

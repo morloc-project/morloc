@@ -2804,6 +2804,22 @@ error:
     return NULL;
 }
 
+// morloc.MorlocException: user-thrown error class raised by @throw.
+// Subclass of RuntimeError so the pool's `except Exception as e:` wrap
+// catches it; the wrap re-raises RuntimeError with the frame suffix,
+// which loses the subclass identity but preserves the message.
+static PyObject* PyMorlocException = NULL;
+
+static PyObject* pybinding__mlc_throw(PyObject* self, PyObject* args) { MAYFAIL
+    const char* msg;
+    if (!PyArg_ParseTuple(args, "s", &msg)) {
+        PyRAISE("Failed to parse arguments");
+    }
+    PyErr_SetString(PyMorlocException, msg);
+error:
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_fschema(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;
     if (!PyArg_ParseTuple(args, "s", &path)) {
@@ -3174,6 +3190,7 @@ static PyMethodDef Methods[] = {
     {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
+    {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 
@@ -3186,5 +3203,18 @@ static struct PyModuleDef pymorloc = {
 };
 
 PyMODINIT_FUNC PyInit_pymorloc(void) {
-    return PyModule_Create(&pymorloc);
+    PyObject* m = PyModule_Create(&pymorloc);
+    if (m == NULL) return NULL;
+    PyMorlocException = PyErr_NewException("pymorloc.MorlocException", PyExc_RuntimeError, NULL);
+    if (PyMorlocException == NULL) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(PyMorlocException);
+    if (PyModule_AddObject(m, "MorlocException", PyMorlocException) < 0) {
+        Py_DECREF(PyMorlocException);
+        Py_DECREF(m);
+        return NULL;
+    }
+    return m;
 }

@@ -1347,6 +1347,9 @@ intrinsicTypeG g IntrStdout _ =
 intrinsicTypeG g IntrStderr _ =
   let (g', a) = newvar "stderr_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+intrinsicTypeG g IntrThrow _ =
+  let (g', a) = newvar "throw_" g
+  in (g', EffectU ioEffectSet a)
 intrinsicTypeG g intr _ = (g, intrinsicType intr)
 
 -- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
@@ -1400,6 +1403,8 @@ intrinsicType IntrStdout =
   error "intrinsicType: IntrStdout must be typed via intrinsicTypeG (polymorphic element type)"
 intrinsicType IntrStderr =
   error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
+intrinsicType IntrThrow =
+  error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
 -- it never appears as a user-facing intrinsic so no type rule is needed.
 intrinsicType IntrIFileWalk =
@@ -1491,6 +1496,7 @@ checkIntrinsicArgs i g intr argTypes = do
           let (g'a, a) = newvar "flush_a_" g
               expectedT = AppU (VarU BT.ostreamVar) [a]
            in subtype' i handleT expectedT g'a
+        (IntrThrow, [msgT]) -> subtype' i msgT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g

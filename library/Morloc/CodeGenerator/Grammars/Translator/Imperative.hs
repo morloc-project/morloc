@@ -179,6 +179,8 @@ data IExpr
       -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStderr Int
       -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
+  | IIntrinsicThrow IExpr
+      -- ^ @throw :: Str -> <IO> a: raise a MorlocException with the message.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -859,6 +861,11 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
+    }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
+  return $ msgDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicThrow (IRawExpr (render (poolExpr msgDocs))))
     }
 -- @stdin / @stdout / @stderr: nullary intrinsics. The runtime enforces
 -- singleton opens per stdio kind; codegen just emits the call with the

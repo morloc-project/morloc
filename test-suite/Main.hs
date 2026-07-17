@@ -77,6 +77,10 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
+      , golden "intrinsic-throw-py" "intrinsic-throw-py"
+      , golden "intrinsic-throw-r" "intrinsic-throw-r"
+
       , golden "int-literal-promoted-to-real" "int-literal-promoted-to-real"
       , golden "backtick-operator-py" "backtick-operator-py"
       , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"

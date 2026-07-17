@@ -472,6 +472,22 @@ inline void _mlc_close(int64_t handle) {
     mlc_close(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
 }
+
+class MorlocException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+// _mlc_throw returns a universal-conversion helper so that
+// `<cond> ? _mlc_throw(msg) : someInt` type-checks in either branch of a
+// conditional (both arms of morloc's `?`/`:` lower to lambdas of the same
+// return type). The constructor throws, so control never reaches the
+// operator T() bodies; std::terminate is just a defence in depth.
+struct _MlcThrowHelper {
+    template<typename T> operator T() const { std::terminate(); }
+};
+inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
+    throw MorlocException(msg);
+}
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
     char* errmsg = NULL;

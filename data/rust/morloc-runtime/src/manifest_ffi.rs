@@ -75,6 +75,8 @@ pub enum MorlocExpressionType {
     Stdin = 24,       // schema_str -> IStream handle bound to fd 0 (nexus-owned).
     Stdout = 25,      // schema_str -> OStream handle bound to fd 1 (nexus-owned).
     Stderr = 26,      // schema_str -> OStream handle bound to fd 2 (nexus-owned).
+    Throw = 27,       // msg (Str expr) -> raises MorlocError with the message.
+                      // Never returns; the return schema is a sentinel "z".
 }
 
 #[repr(C)]
@@ -1225,6 +1227,22 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::Flush;
             (*expr).schema = schema;
             (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
+        "throw" => {
+            let c_schema_str = CString::new("z").unwrap();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let msg = build_expr(je.get("msg").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Throw;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = msg;
             Ok(expr)
         }
 

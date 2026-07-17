@@ -333,7 +333,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
-                     IntrStdin, IntrStdout, IntrStderr] = do
+                     IntrStdin, IntrStdout, IntrStderr, IntrThrow] = do
           tf <- inferType t
           es' <- mapM (nativeExpr m) es
           es'' <- unpackDataArgIfNeeded m intr es'

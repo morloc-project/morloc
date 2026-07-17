@@ -995,6 +995,9 @@ genericPrintExpr desc = go
     go (IIntrinsicStderr sid) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_stderr(" <> schemaRef sid <> ")"
+    go (IIntrinsicThrow msg) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_throw(" <> go msg <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R

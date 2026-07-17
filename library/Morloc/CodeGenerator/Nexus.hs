@@ -224,6 +224,7 @@ data NexusExpr
   | StdinX    Text                  -- element schema (a) -- @stdin :: <IO> IStream a
   | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
+  | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -780,6 +781,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
       FlushX <$> toNexusExpr handle
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrThrow [msg])) =
+      ThrowX <$> toNexusExpr msg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
       StdinX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
@@ -2053,6 +2056,11 @@ exprToJson (StderrX schema) =
   jsonObj
     [ ("tag", jsonStr "stderr")
     , ("schema", jsonStr schema)
+    ]
+exprToJson (ThrowX msg) =
+  jsonObj
+    [ ("tag", jsonStr "throw")
+    , ("msg", exprToJson msg)
     ]
 exprToJson (OptX schema child) =
   jsonObj

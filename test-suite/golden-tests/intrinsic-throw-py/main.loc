@@ -1,0 +1,31 @@
+-- Test @throw in a Python-bound pool: verifies that
+--   (a) a plain @throw raises with the given message and exit != 0
+--   (b) string interpolation `#{expr}` flows into the raised message
+--   (c) @throw can inhabit one arm of a `?/:` conditional whose other
+--       arm has a concrete non-Unit return type (polymorphic return via
+--       fresh existential; sibling arm pins to Int)
+--   (d) the happy branch still succeeds and returns its value
+module main (plainThrow, interpThrow, guardThrow)
+
+import root
+import root-py
+
+source Py from "helper.py" ("py_len", "py_show_len")
+
+py_len :: Str -> Int
+py_show_len :: Str -> Str
+
+plainThrow :: <IO> ()
+plainThrow = @throw "PLAIN: boom"
+
+interpThrow :: Str -> <IO> ()
+interpThrow s = do
+  let shown = py_show_len s
+  @throw "INTERP: #{s} n=#{shown}"
+
+guardThrow :: Str -> <IO> Int
+guardThrow s = do
+  let n = py_len s
+  let shown = py_show_len s
+  ? n < 4 = @throw "GUARD: too short n=#{shown}"
+  : n

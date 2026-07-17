@@ -2023,6 +2023,15 @@ unsafe fn morloc_eval_r(
             ptr::write_bytes(dest, 0, width);
         }
 
+        MorlocExpressionType::Throw => {
+            let msg_expr = (*expr).expr.unary_expr;
+            let msg_ptr = morloc_eval_r(msg_expr, ptr::null_mut(), 0, bndvars)?;
+            let arr = &*(msg_ptr as *const shm::Array);
+            let abs = shm::rel2abs(arr.data)?;
+            let bytes = std::slice::from_raw_parts(abs as *const u8, arr.size);
+            return Err(MorlocError::Other(String::from_utf8_lossy(bytes).into_owned()));
+        }
+
         other => {
             // Catch-all: the manifest carried an expression type that
             // this eval handler doesn't recognise. Include the
