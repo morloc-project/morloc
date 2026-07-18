@@ -1277,16 +1277,12 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
--- Bespoke effect-strip rule for @catch. Not routed through subtypeEffRows
--- because that path's four row shapes can't express the constructed RHS
--- <e | Err>: effectSetParts would flatten it to (labels={Err}, vars={e})
--- and dispatch to the wrong subtype branch.
---
--- Polymorphic row-tails are accepted: as long as Err is concretely
--- present in the resolved label set, the strip is well-defined and any
--- residual row-var is preserved in the fallback's expected effect row.
--- This lets fallible I/O compose through higher-order combinators like
--- 'map (\p -> @catch (@load p) 0)' whose lambda carries `<Err | ?rest>`.
+-- Bespoke rule for @catch. The primary must carry Err. The fallback
+-- declares its own effect row and the whole expression inherits it, so
+-- the result row is (primary effects minus Err) UNION (fallback effects).
+-- A pure fallback strips Err; a fallible fallback keeps it. Two
+-- independent open row-tails in the union are rejected because the
+-- effect infrastructure carries at most one tail variable per row.
 synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
   (g1, fallibleT, fallibleE') <- synthG g fallibleE
   let fallibleT' = apply g1 fallibleT
@@ -1296,9 +1292,22 @@ synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
       unless (Set.member "Err" labels) $
         throwTypeError i $
           "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
-      let expectedFallbackT = mkEffectU (removeEffectLabel "Err" effs) innerT
-      (g2, _, fallbackE') <- checkG g1 fallbackE expectedFallbackT
-      return (g2, apply g2 expectedFallbackT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
+      (g2, fallbackT, fallbackE') <- synthG g1 fallbackE
+      let fallbackT' = apply g2 fallbackT
+          (fbEffs, fbInnerT) = case peelForallU fallbackT' of
+            EffectU e t -> (e, t)
+            t           -> (emptyEffectSet, t)
+      g3 <- subtype' i fbInnerT (apply g2 innerT) g2
+      let strippedEffs = applyEff g3 (removeEffectLabel "Err" effs)
+          fbEffs' = applyEff g3 fbEffs
+          resultEffs = unionEffectSet strippedEffs fbEffs'
+          (_, tailVars) = effectSetParts resultEffs
+      when (Set.size tailVars > 1) $
+        throwTypeError i $
+          "@catch cannot polymorphically combine two open effect rows;"
+          <+> "annotate one argument's effect row."
+      let resultT = mkEffectU resultEffs (apply g3 innerT)
+      return (g3, resultT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
     _ ->
       throwTypeError i $
         "@catch's first argument must have effect Err; got a non-effectful type"

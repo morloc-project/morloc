@@ -30,6 +30,7 @@ module UnitTypeTests
   , effectEscapabilityTests
   , effectPartialApplicationTests
   , polymorphicEffectRowTests
+  , catchRowInheritTests
   , effectCoverageMessageTests
   , namespaceErrorTests
   , typeclassTests
@@ -4440,6 +4441,87 @@ polymorphicEffectRowTests =
         readInt :: <IO> Int
         bad :: <IO> Int
         bad = @catch readInt 0
+          |]
+      ]
+
+-- | Row-inheritance of @catch. The fallback declares its own effect row
+-- and the whole @catch inherits it, so the same operator handles both
+-- "recover to pure" (fallback is <>) and "fall through to another
+-- fallible attempt" (fallback keeps Err). The primary's non-Err effects
+-- propagate too.
+catchRowInheritTests :: TestTree
+catchRowInheritTests =
+  localOption (mkTimeout 200000) $
+    testGroup
+      "@catch row-inheritance"
+      [ expectPass
+          "chained @catch: fallback raises Err, result is <Err>"
+          [r|
+        module main (chained)
+        escapable effect Err
+        source Py ("thrower1", "thrower2")
+        thrower1 :: <Err> Int
+        thrower2 :: <Err> Int
+        chained :: <Err> Int
+        chained = @catch thrower1 thrower2
+          |]
+
+      , expectPass
+          "nested @catch chain terminates in pure default -> stripped"
+          [r|
+        module main (safe)
+        escapable effect Err
+        source Py ("thrower1", "thrower2", "thrower3")
+        thrower1 :: <Err> Int
+        thrower2 :: <Err> Int
+        thrower3 :: <Err> Int
+        safe :: Int
+        safe = @catch thrower1 (@catch thrower2 (@catch thrower3 0))
+          |]
+
+      , expectPass
+          "primary <IO, Err>, pure fallback -> <IO>"
+          [r|
+        module main (recovered)
+        effect IO
+        escapable effect Err
+        source Py ("readIntOrFail")
+        readIntOrFail :: <IO, Err> Int
+        recovered :: <IO> Int
+        recovered = @catch readIntOrFail 0
+          |]
+
+      , expectPass
+          "primary <IO, Err>, <Err> fallback -> <IO, Err>"
+          [r|
+        module main (retried)
+        effect IO
+        escapable effect Err
+        source Py ("readIntOrFail", "retryOrFail")
+        readIntOrFail :: <IO, Err> Int
+        retryOrFail :: <Err> Int
+        retried :: <IO, Err> Int
+        retried = @catch readIntOrFail retryOrFail
+          |]
+
+      , expectPass
+          "concrete <Err> primary + pure fallback strips to plain type"
+          [r|
+        module main (safe)
+        escapable effect Err
+        source Py ("thrower")
+        thrower :: <Err> Int
+        safe :: Int
+        safe = @catch thrower 0
+          |]
+
+      , expectError
+          "two independent open effect rows in @catch rejected"
+          [r|
+        module main (twoTail)
+        escapable effect Err
+        twoTail :: (a -> <e, Err> b) -> (a -> <f> b) -> a -> b
+        twoTail f g x = @catch (f x) (g x)
           |]
       ]
 

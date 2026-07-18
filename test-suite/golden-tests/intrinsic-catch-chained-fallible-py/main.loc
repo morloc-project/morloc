@@ -1,0 +1,23 @@
+module main
+  ( chained
+  , nested
+  )
+
+import root
+import root-py
+
+source Py from "helper.py"
+  ( "loadA"
+  , "loadB"
+  , "loadC"
+  )
+
+loadA :: Int -> <Err> Int
+loadB :: Int -> <Err> Int
+loadC :: Int -> <Err> Int
+
+chained :: Int -> <Err> Int
+chained n = @catch (loadA n) (loadB n)
+
+nested :: Int -> Int
+nested n = @catch (loadA n) (@catch (loadB n) (@catch (loadC n) 999))

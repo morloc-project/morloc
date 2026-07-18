@@ -43,6 +43,7 @@ main = do
       , effectEscapabilityTests
       , effectPartialApplicationTests
       , polymorphicEffectRowTests
+      , catchRowInheritTests
       , effectCoverageMessageTests
       , namespaceErrorTests
       , typeclassTests
@@ -79,6 +80,7 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "intrinsic-catch-chained-fallible-py" "intrinsic-catch-chained-fallible-py"
       , golden "intrinsic-io-catch" "intrinsic-io-catch"
       , golden "intrinsic-catch-polymorphic-row" "intrinsic-catch-polymorphic-row"
       , golden "intrinsic-load-schema-mismatch" "intrinsic-load-schema-mismatch"

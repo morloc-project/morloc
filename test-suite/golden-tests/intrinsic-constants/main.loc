@@ -15,5 +15,5 @@ langstr = do
   xs  <- @load "z"
   ys  <- @load "zp"
   zs  <- @load "zj"
-  bad <- @catch (@load "zany") (do [])
+  bad <- @catch (@load "zany") []
   (xs, ys, zs, bad)
