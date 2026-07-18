@@ -329,7 +329,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- emit it as a plain inline call and let surrounding expressions
     -- consume the value directly.
     nativeExpr m (MonoIntrinsic t intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad,
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
@@ -356,7 +356,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
             Just (packerSrc, _) ->
               return $ AppExeN innerTf (SrcCallP packerSrc) [NativeArgExpr raw]
             Nothing -> return raw
-          return $ DoBlockN tf wrapped
+          -- Wrap in DoBlockN only when the result still carries an effect
+          -- (needs to be a thunk that EvalN or a language-native catch can
+          -- invoke). @catch fully strips its Err effect when the residual
+          -- row is empty, yielding a plain-typed value; wrapping such a
+          -- value in DoBlockN turns it into a callable that never gets
+          -- forced when passed as a function argument.
+          return $ case tf of
+            EffectF _ _ -> DoBlockN tf wrapped
+            _           -> wrapped
     nativeExpr m (MonoIntrinsic t intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es

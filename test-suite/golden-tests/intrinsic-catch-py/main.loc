@@ -11,15 +11,50 @@
 --   (e) `!` inside @catch's fallible arg seals at the arg site (both
 --       @catch args are eval-sugar boundaries in Restructure.hs), so
 --       the raise fires inside @catch's try/catch scope and is caught.
-module main (catchBare, catchInDo, catchMixedIO, catchForeignRaise, catchBangFallible)
+--   (f) an @catch expression whose Err is fully stripped (leaving a
+--       plain type) can be passed as an argument to a native or
+--       sourced function without a lambda-wrapped thunk sneaking in.
+--       Regression: Serialize.hs::nativeExpr used to wrap every
+--       IntrCatch result in DoBlockN unconditionally, so a plain-Int
+--       @catch result reached callers as an unforced callable and
+--       every downstream `x + y`-style use silently misbehaved.
+--   (g) @read inside @catch's fallible slot must be emitted as a
+--       thunk so thunkifyForCatch's "already thunk-shaped" test
+--       matches the codegen. Regression: IntrRead was missing from
+--       Serialize.hs's DoBlockN-wrap list, so mlc_read(...) was
+--       called eagerly and the Err raise fired before @catch could
+--       intercept it.
+module main
+  ( catchBare
+  , catchInDo
+  , catchMixedIO
+  , catchForeignRaise
+  , catchBangFallible
+  , catchReadAsArg
+  , catchThrowAsArg
+  , catchForeignAsArg
+  , catchAsBothArgs
+  , catchInListArg
+  , catchInTupleArg
+  , catchReadRoundTrip
+  )
 
 import root
 import root-py
 
-source Py from "helper.py" ("py_len", "py_may_fail")
+source Py from "helper.py"
+  ( "py_len"
+  , "py_may_fail"
+  , "py_add"
+  , "py_pair"
+  , "py_sum_list"
+  )
 
 py_len      :: Str -> Int
 py_may_fail :: Str -> <Err> Int
+py_add      :: Int -> Int -> Int
+py_pair     :: Int -> Int -> (Int, Int)
+py_sum_list :: [Int] -> Int
 
 catchBare :: Int
 catchBare = @catch (@throw "boom") 42
@@ -46,3 +81,39 @@ catchForeignRaise s = @catch (do
 
 catchBangFallible :: Str -> Int
 catchBangFallible s = @catch !(py_may_fail s) 77
+
+-- @catch (@read s) passed as an argument to a sourced Python function.
+-- @read is <Err>-only, so the strip is complete and the @catch
+-- expression has plain-Int type. The pool must call py_add with the
+-- forced value, not with a lambda that returns the value.
+catchReadAsArg :: Str -> Int -> Int
+catchReadAsArg s x = py_add (@catch (@read s) 0) x
+
+-- @catch (@throw ...) with plain-Int result passed as an argument.
+-- Same shape as catchReadAsArg but exercises the @throw side of the
+-- @catch dispatch (fallible always raises).
+catchThrowAsArg :: Int -> Int
+catchThrowAsArg x = py_add (@catch (@throw "raised-inside-arg") 42) x
+
+-- @catch on a foreign-raising sourced function passed as an argument.
+-- The fallible is a sourced Python function whose signature declares
+-- <Err>; runtime catches the native ValueError.
+catchForeignAsArg :: Str -> Int -> Int
+catchForeignAsArg s x = py_add (@catch (py_may_fail s) 0) x
+
+-- Both arguments to py_add are @catch expressions.
+catchAsBothArgs :: Str -> Str -> Int
+catchAsBothArgs a b = py_add (@catch (@read a) 0) (@catch (@read b) 0)
+
+-- @catch result embedded in a list literal, then passed as an argument.
+catchInListArg :: Str -> Int
+catchInListArg s = py_sum_list [1, @catch (@read s) 0, 3]
+
+-- @catch result inside a tuple constructor.
+catchInTupleArg :: Str -> (Int, Int)
+catchInTupleArg s = py_pair (@catch (@read s) 0) 99
+
+-- Full round-trip: @show, then @read (inside @catch), then use the
+-- recovered value as an argument to a sourced function.
+catchReadRoundTrip :: Int -> Int
+catchReadRoundTrip n = py_add (@catch (@read (@show n)) 0) 1000
