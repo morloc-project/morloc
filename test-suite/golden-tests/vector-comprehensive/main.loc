@@ -54,8 +54,6 @@ module main
   , litCliEmpty, litCliSingle
   )
 
-effect IO
-
 import root-cpp
 import root-py
 import root-r (Real, Int, Bool)
@@ -389,17 +387,17 @@ rcPerm = cppAtIdx3 rMakePerm
 -- Vector with a Nat parameter has never gone through @save in the test
 -- suite. Each format takes a different code path inside voidstar.
 -- =========================================================================
-fileBin :: Str -> <IO> ?(Vector 10 Real)
+fileBin :: Str -> <IO, Err> (Vector 10 Real)
 fileBin path = do
   @save 0 cppMakeReal10 path
   @load path
 
-fileJson :: Str -> <IO> ?(Vector 10 Real)
+fileJson :: Str -> <IO, Err> (Vector 10 Real)
 fileJson path = do
   @savej path cppMakeReal10
   @load path
 
-fileMsg :: Str -> <IO> ?(Vector 10 Real)
+fileMsg :: Str -> <IO, Err> (Vector 10 Real)
 fileMsg path = do
   @savem path cppMakeReal10
   @load path
@@ -407,17 +405,17 @@ fileMsg path = do
 -- File IO + computation: after the round-trip, sum the loaded vector
 -- through the Python pool. Verifies that @load returns a value usable
 -- as a Vector (not just a structurally-equal list).
-fileSumBin :: Str -> <IO> ?Real
+fileSumBin :: Str -> <IO, Err> Real
 fileSumBin path = do
   @save 0 cppMakeReal10 path
   v <- @load path
-  mapMaybe pySumReal10 v
+  pySumReal10 v
 
-fileSumJson :: Str -> <IO> ?Real
+fileSumJson :: Str -> <IO, Err> Real
 fileSumJson path = do
   @savej path cppMakeReal10
   v <- @load path
-  mapMaybe pySumReal10 v
+  pySumReal10 v
 
 -- =========================================================================
 -- (5) Zero-copy direct assertions. The Python helper reports the numpy

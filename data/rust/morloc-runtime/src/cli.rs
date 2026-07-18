@@ -563,8 +563,11 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     }
 
     // Pull the metadata block out so we can check for a vol_idx hint
-    // without a full mmap. Falls back to hint = 0 (legacy Layer 2) if
-    // metadata is absent, malformed, or doesn't include the block.
+    // AND validate the packet's stored schema against the caller's
+    // requested schema without a full mmap. Falls back to hint = 0
+    // (legacy Layer 2) if metadata is absent, malformed, or doesn't
+    // include the block. Schema mismatch surfaces as UserThrow (via
+    // libmorloc's errmsg convention -- see check_packet_schema_matches).
     let vol_idx_hint: u16 = if metadata_size > 0 {
         let mut meta = vec![0u8; metadata_size];
         let nm = libc::pread(
@@ -576,6 +579,11 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         if nm as usize != metadata_size {
             libc::close(fd);
             return Ok(None);
+        }
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if let Err(e) = check_packet_schema_matches(&meta, schema, &path_str) {
+            libc::close(fd);
+            return Err(e);
         }
         let mut full = Vec::with_capacity(32 + metadata_size);
         full.extend_from_slice(&header_bytes);
@@ -799,6 +807,17 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     let mut full_header_and_meta = Vec::with_capacity(32 + metadata_size);
     full_header_and_meta.extend_from_slice(&header_bytes);
     full_header_and_meta.extend_from_slice(&metadata_bytes);
+
+    // Validate the packet's stored schema against the caller's
+    // requested schema before committing to the (expensive)
+    // decompression + rebase path.
+    if metadata_size > 0 {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if let Err(e) = check_packet_schema_matches(&metadata_bytes, schema, &path_str) {
+            libc::close(fd);
+            return Err(e);
+        }
+    }
 
     let vol_idx_hint: u16 = packet::read_vol_index_from_meta(&full_header_and_meta)
         .ok()
@@ -2018,6 +2037,69 @@ unsafe fn try_bytes_hybrid(
     try_bytes_only(data, data_size, schema, errmsg)
 }
 
+// ── Schema-check helper for packet loads ──────────────────────────────────
+
+/// Compare the schema string embedded in a morloc packet's metadata
+/// block to the caller's requested schema. Returns `Ok(())` on match
+/// or when there's nothing to compare against (missing metadata entry,
+/// null requested schema). Returns `Err(MorlocError::UserThrow(_))`
+/// on mismatch so `@catch` can intercept.
+///
+/// Without this check, `load_morloc_data_file`'s format-specific
+/// decoders would silently reinterpret payload bytes under the wrong
+/// schema (e.g. reading a Str-packet's Array header as an Int64),
+/// producing garbage instead of a catchable failure.
+///
+/// Comparison is byte-for-byte on the canonical `schema_to_string`
+/// form. Both sides go through the same renderer, which no longer
+/// emits language-specific `<hint>` prefixes (hints are pool-local
+/// codegen state, not wire data), so cross-language save/load pairs
+/// compare equal for identical wire types.
+unsafe fn check_packet_schema_matches(
+    meta_bytes: &[u8],
+    requested_schema: *const CSchema,
+    path_hint: &str,
+) -> Result<(), MorlocError> {
+    use morloc_runtime_types::packet::{
+        decode_schema_entry, iter_metadata, METADATA_TYPE_SCHEMA_STRING,
+    };
+    use morloc_runtime_types::schema::schema_to_string;
+
+    let stored = iter_metadata(meta_bytes)
+        .find_map(|(kind, data)| {
+            if kind == METADATA_TYPE_SCHEMA_STRING {
+                Some(decode_schema_entry(data))
+            } else {
+                None
+            }
+        });
+
+    let stored = match stored {
+        Some(s) => s,
+        None => return Ok(()), // no schema entry to compare against
+    };
+
+    if requested_schema.is_null() {
+        return Ok(());
+    }
+
+    let requested_rs = CSchema::to_rust(requested_schema);
+    let requested = schema_to_string(&requested_rs);
+
+    if stored != requested {
+        let path_prefix = if path_hint.is_empty() {
+            String::new()
+        } else {
+            format!(" reading '{}'", path_hint)
+        };
+        return Err(MorlocError::UserThrow(format!(
+            "@load: schema mismatch{}: file has schema `{}`, requested `{}`",
+            path_prefix, stored, requested,
+        )));
+    }
+    Ok(())
+}
+
 // ── load_morloc_data_file ──────────────────────────────────────────────────
 // This function is complex and calls many C functions (read_json_with_schema,
 // unpack_with_schema). Keep delegating to C for now via extern declarations.
@@ -2430,6 +2512,18 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 }
                 let offset = { header.offset } as usize;
                 let length = { header.length } as usize;
+                // Compare the packet's stored schema descriptor to the
+                // caller's requested schema. Mismatch is user-attributable
+                // (loading the wrong type from a file) so surface as
+                // UserThrow via errmsg; @catch intercepts.
+                if offset > 0 {
+                    let meta_slice = std::slice::from_raw_parts(data.add(32), offset);
+                    if let Err(e) = check_packet_schema_matches(meta_slice, schema, &path_str) {
+                        libc::free(data as *mut c_void);
+                        set_errmsg(errmsg, &e);
+                        return ptr::null_mut();
+                    }
+                }
                 let payload = data.add(32 + offset);
                 let format = { header.command.data.format };
 

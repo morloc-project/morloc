@@ -15,15 +15,16 @@ showCpp x = @show (identityInt x)
 showNexus :: Int -> Str
 showNexus x = @show x
 
--- round-trip: show then read should recover the original value
-roundTrip :: Int -> ?Int
+-- round-trip: show then read should recover the original value.
+-- @read raises Err on parse failure; caller can @catch or declare <Err>.
+roundTrip :: Int -> <Err> Int
 roundTrip x = @read (@show x)
 
 testShow :: Bool
 testShow = showCpp 42 == "42" && showNexus 42 == "42"
 
-testRead :: ?Int
-testRead = @read "42"
+testRead :: Int
+testRead = @catch (@read "42" :: <Err> Int) -1
 
-testRoundTrip :: ?Int
-testRoundTrip = roundTrip 99
+testRoundTrip :: Int
+testRoundTrip = @catch (roundTrip 99) -1

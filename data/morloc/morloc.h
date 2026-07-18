@@ -1369,6 +1369,16 @@ void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 relptr_t write_voidstar_binary(int fd, const void* data, const Schema* schema, ERRMSG);
 
 // ── Stream-handle intrinsics ─────────────────────────────────────────────
+// Probe a file for a valid morloc packet without opening it as a typed
+// handle or allocating SHM. Opens the file, reads the packet-header
+// prefix, validates magic + structural sanity, and closes. Returns 0 if
+// the file exists, is readable, and starts with a well-formed morloc
+// packet header. Returns non-zero (with errmsg set) on any failure:
+// missing file, permission denied, short read, header parse failure.
+// Used by @open for IFile validation, where we need eager
+// packet-format verification but don't want to pay the cost of a full
+// mlc_open / mlc_close cycle.
+int mlc_probe_packet(const char* path, ERRMSG);
 // Open a STREAM_PACKET file as the given handle kind (MLC_KIND_*) and
 // return a 64-bit handle ID. Returns -1 on failure, with errmsg set.
 int64_t mlc_open(const char* path, uint8_t kind, ERRMSG);

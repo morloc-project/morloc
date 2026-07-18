@@ -27,9 +27,9 @@ import root-cpp
 -- 50 small Int @writes coalesced into the buffer + close. The
 -- buffer flushes at @close as one sub-packet (or oversize-bypass
 -- behavior if the cumulative size exceeds the buffer).
-stressIntCoalesce :: Str -> <IO> Int
+stressIntCoalesce :: Str -> <IO, Err> Int
 stressIntCoalesce path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3, 4, 5]
   @write 0 o [6, 7, 8, 9, 10]
   @write 0 o [11, 12, 13, 14, 15]
@@ -42,14 +42,14 @@ stressIntCoalesce path = do
   @write 0 o [41, 42, 43, 44, 45]
   @write 0 o [46, 47, 48, 49, 50]
   @close o
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s
 
 -- Variable-width round-trip: many strings of different lengths,
 -- compressed, buffered. Asserts total element count.
-stressStrRoundtrip :: Str -> <IO> Int
+stressStrRoundtrip :: Str -> <IO, Err> Int
 stressStrRoundtrip path = do
-  o <- @open path :: <IO> OStream Str
+  o <- @open path :: <IO, Err> OStream Str
   @write 1 o ["alpha", "bravo", "charlie"]
   @write 1 o ["delta", "echo"]
   @flush o
@@ -58,35 +58,35 @@ stressStrRoundtrip path = do
   @flush o
   @write 1 o ["kilo", "lima", "mike", "november", "oscar"]
   @close o
-  s <- @open path :: <IO> IStream Str
+  s <- @open path :: <IO, Err> IStream Str
   @flen s
 
 -- Cross-pool: cpp opener + multi-pool writers + cpp close.
-stressCrossPoolMixed :: Str -> <IO> Int
+stressCrossPoolMixed :: Str -> <IO, Err> Int
 stressCrossPoolMixed path = do
-  o <- @open (idcpp path) :: <IO> OStream Int
+  o <- @open (idcpp path) :: <IO, Err> OStream Int
   @write 0 o (idcpp [100, 101, 102, 103, 104])
   @write 0 o (idpy [200, 201, 202])
   @flush o
   @write 0 o (idpy [300, 301])
   @write 0 o (idcpp [400])
   @close o
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s
 
 -- A 4 KiB buffer + a single large @write forces element-level
 -- split into multiple sub-packets. Followed by more @writes
 -- that go through the (now empty) buffer normally. @flen
 -- returns the total.
-stressOversizeMixed :: Str -> <IO> Int
+stressOversizeMixed :: Str -> <IO, Err> Int
 stressOversizeMixed path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o (range 1 1001)    -- 8000 B > 4096 B buffer;
   @write 0 o [9001, 9002]
   @close o
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s
 
 -- A small write buffer + a 200-element write produces many sub-
@@ -95,10 +95,10 @@ stressOversizeMixed path = do
 -- under the slot futex). Reading back via IStream traverses every
 -- sub-packet; @flen returns the total via the StreamDiag's
 -- element_count, which the index doubling must not perturb.
-stressManySubpackets :: Str -> <IO> Int
+stressManySubpackets :: Str -> <IO, Err> Int
 stressManySubpackets path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o (range 1 201)
   @close o
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s

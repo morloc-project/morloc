@@ -19,22 +19,22 @@ module main
 
 import root-py -- python only needed for `range`
 
-writeBig :: Str -> <IO> ()
+writeBig :: Str -> <IO, Err> ()
 writeBig path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o (range 1 3001)
   @close o
 
-testIndexGrowTotalCount :: Str -> <IO> Int
+testIndexGrowTotalCount :: Str -> <IO, Err> Int
 testIndexGrowTotalCount path = do
   writeBig path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s
 
-testIndexGrowFirstElement :: Str -> <IO> Int
+testIndexGrowFirstElement :: Str -> <IO, Err> Int
 testIndexGrowFirstElement path = do
   writeBig path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   xs <- @next s
   .[0] xs
 
@@ -42,10 +42,10 @@ testIndexGrowFirstElement path = do
 -- (zero-indexed: element at position 1024 has value 1025).
 -- This pins that the grow's data-region memmove + relptr
 -- adjustment didn't corrupt elements straddling the boundary.
-testIndexGrowAtBoundary :: Str -> <IO> Int
+testIndexGrowAtBoundary :: Str -> <IO, Err> Int
 testIndexGrowAtBoundary path = do
   writeBig path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   xs <- @next s
   -- The 1025th element (1-indexed) is value 1025.
   .[1024] xs

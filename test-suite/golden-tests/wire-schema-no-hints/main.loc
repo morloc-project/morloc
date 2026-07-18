@@ -1,0 +1,23 @@
+-- Regression: schema strings embedded in on-disk packet metadata must
+-- NOT include language-specific `<hint>` prefixes. Hints are pool-side
+-- compile-time state for native-type dispatch (numpy / std::vector /
+-- list) and have no place on the wire. If hints leak back into
+-- schema_to_string, cross-language save/load pairs stop matching at
+-- the schema check and the wire format becomes gratuitously
+-- language-specific.
+--
+-- We save a Vector 4 Real from a C++ pool (a case where a Packable
+-- with a native-type hint is definitely in play) and inspect the raw
+-- metadata bytes at a known offset. The exp.txt asserts the schema
+-- string contains no `<` byte.
+
+module main (saveVec)
+
+import root-cpp
+import vector-cpp
+
+source Cpp from "src.hpp" ("mkVec4")
+mkVec4 :: Vector 4 Real
+
+saveVec :: Str -> <IO, Err> ()
+saveVec path = @save 0 mkVec4 path

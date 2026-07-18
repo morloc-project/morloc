@@ -387,13 +387,15 @@ pub unsafe extern "C" fn mlc_load(
 
     // Layer 2 fast path: large MESG+VOIDSTAR packets `pread` straight
     // into a fresh SHM allocation, skipping the libc::malloc + read +
-    // shmalloc + memcpy chain.
+    // shmalloc + memcpy chain. On failure (e.g. schema mismatch), the
+    // error is propagated to the caller via errmsg, not swallowed to
+    // stderr -- @catch downstream needs the classified failure to
+    // intercept.
     match crate::cli::try_load_voidstar_packet_via_mmap(path, schema) {
         Ok(Some(ptr)) => return ptr as *mut c_void,
         Ok(None) => { /* fall through */ }
         Err(e) => {
-            let path_str = CStr::from_ptr(path).to_string_lossy();
-            eprintln!("@load warning ({}): {}", path_str, e);
+            set_errmsg(errmsg, &e);
             return ptr::null_mut();
         }
     }
@@ -406,8 +408,7 @@ pub unsafe extern "C" fn mlc_load(
         Ok(Some(ptr)) => return ptr as *mut c_void,
         Ok(None) => { /* fall through */ }
         Err(e) => {
-            let path_str = CStr::from_ptr(path).to_string_lossy();
-            eprintln!("@load warning ({}): {}", path_str, e);
+            set_errmsg(errmsg, &e);
             return ptr::null_mut();
         }
     }
@@ -416,23 +417,21 @@ pub unsafe extern "C" fn mlc_load(
     let mut file_size: usize = 0;
     let data = read_binary_file(path, &mut file_size, &mut err);
     if data.is_null() {
+        // Propagate the file-read error verbatim so the caller sees
+        // (for example) "no such file or directory" rather than a
+        // generic NULL return; @catch relies on this text.
         if !err.is_null() {
-            let path_str = CStr::from_ptr(path).to_string_lossy();
-            let err_str = CStr::from_ptr(err).to_string_lossy();
-            eprintln!("@load warning ({}): {}", path_str, err_str);
-            libc::free(err as *mut libc::c_void);
+            *errmsg = err;
         }
         return ptr::null_mut();
     }
 
     // Decompression is now handled inside `load_morloc_data_file`,
     // which is the single choke point all packet-load paths share.
+    // Any error message it sets flows through to the caller's errmsg.
     let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
     if result.is_null() && !err.is_null() {
-        let path_str = CStr::from_ptr(path).to_string_lossy();
-        let err_str = CStr::from_ptr(err).to_string_lossy();
-        eprintln!("@load warning ({}): {}", path_str, err_str);
-        libc::free(err as *mut libc::c_void);
+        *errmsg = err;
     }
     result
 }
@@ -568,6 +567,59 @@ unsafe fn _write_voidstar_binary_rust(
 // concrete open routine to invoke. OStream is routed through the typed
 // entry point `mlc_open_ostream(schema_str, path)` because the writer
 // needs the element schema at open time.
+
+/// Probe a file for a valid morloc packet header without allocating
+/// SHM or setting up any cursor state. Returns 0 if the file exists,
+/// is readable, and starts with a well-formed morloc packet header.
+/// Returns non-zero (with errmsg set) on any failure: missing file,
+/// permission denied, short read, magic mismatch. Used by @open's
+/// IFile branch for eager packet-format validation.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_probe_packet(
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_probe_packet: null path".into()));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_probe_packet: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path_str) {
+        Ok(f) => f,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::UserThrow(format!(
+                "@open probe: cannot open '{path_str}': {e}"
+            )));
+            return -1;
+        }
+    };
+    let mut hdr_buf = [0u8; 32];
+    if let Err(e) = file.read_exact(&mut hdr_buf) {
+        set_errmsg(errmsg, &MorlocError::UserThrow(format!(
+            "@open probe: '{path_str}' is not a valid morloc packet (short read: {e})"
+        )));
+        return -1;
+    }
+    match morloc_runtime_types::packet::PacketHeader::from_bytes(&hdr_buf) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::UserThrow(format!(
+                "@open probe: '{path_str}' is not a valid morloc packet: {e}"
+            )));
+            -1
+        }
+    }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn mlc_open(

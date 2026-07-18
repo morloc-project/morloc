@@ -22,42 +22,42 @@ module main
 
 import root-py
 
-twoStdin :: <IO> (IStream Int)
+twoStdin :: <IO, Err> (IStream Int)
 twoStdin = do
-  @stdin :: <IO> IStream Int
-  @stdin :: <IO> IStream Int
+  @stdin :: <IO, Err> IStream Int
+  @stdin :: <IO, Err> IStream Int
 
-twoStdout :: <IO> (OStream Int)
+twoStdout :: <IO, Err> (OStream Int)
 twoStdout = do
-  @stdout :: <IO> OStream Int
-  @stdout :: <IO> OStream Int
+  @stdout :: <IO, Err> OStream Int
+  @stdout :: <IO, Err> OStream Int
 
-twoStderr :: <IO> (OStream Int)
+twoStderr :: <IO, Err> (OStream Int)
 twoStderr = do
-  @stderr :: <IO> OStream Int
-  @stderr :: <IO> OStream Int
+  @stderr :: <IO, Err> OStream Int
+  @stderr :: <IO, Err> OStream Int
 
-reopenAfterClose :: <IO> ()
+reopenAfterClose :: <IO, Err> ()
 reopenAfterClose = do
-  s1 <- @stdin :: <IO> IStream Int
+  s1 <- @stdin :: <IO, Err> IStream Int
   @close s1
-  s2 <- @stdin :: <IO> IStream Int
+  s2 <- @stdin :: <IO, Err> IStream Int
   @close s2
 
-allThreeAtOnce :: <IO> ()
+allThreeAtOnce :: <IO, Err> ()
 allThreeAtOnce = do
-  i <- @stdin :: <IO> IStream Int
-  o <- @stdout :: <IO> OStream Int
-  e <- @stderr :: <IO> OStream Int
+  i <- @stdin :: <IO, Err> IStream Int
+  o <- @stdout :: <IO, Err> OStream Int
+  e <- @stderr :: <IO, Err> OStream Int
   @close i
   @close o
   @close e
 
-openDevStdin :: <IO> (IStream Int)
-openDevStdin = @open "/dev/stdin" :: <IO> IStream Int
+openDevStdin :: <IO, Err> (IStream Int)
+openDevStdin = @open "/dev/stdin" :: <IO, Err> IStream Int
 
-openDevStdout :: <IO> (OStream Int)
-openDevStdout = @open "/dev/stdout" :: <IO> OStream Int
+openDevStdout :: <IO, Err> (OStream Int)
+openDevStdout = @open "/dev/stdout" :: <IO, Err> OStream Int
 
-openDevStderr :: <IO> (OStream Int)
-openDevStderr = @open "/dev/stderr" :: <IO> OStream Int
+openDevStderr :: <IO, Err> (OStream Int)
+openDevStderr = @open "/dev/stderr" :: <IO, Err> OStream Int

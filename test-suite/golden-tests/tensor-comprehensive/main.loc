@@ -62,8 +62,6 @@ module main
   , litCliMatInt, litCliT3
   )
 
-effect IO
-
 import root-cpp
 import root-py
 import root-r (Real, Int, Bool)
@@ -363,32 +361,32 @@ cornersPyToR = rCornersT3 pyMakeT3
 -- (4) File IO: @save/@savej/@savem of a Matrix. The wire form is
 -- ((Int,Int), Vector (d1*d2) a) which has never been pushed through @save.
 -- =========================================================================
-matFileBin :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileBin :: Str -> <IO, Err> (Matrix 3 4 Real)
 matFileBin path = do
   @save 0 cppMakeMat34 path
   @load path
 
-matFileJson :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileJson :: Str -> <IO, Err> (Matrix 3 4 Real)
 matFileJson path = do
   @savej path cppMakeMat34
   @load path
 
-matFileMsg :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileMsg :: Str -> <IO, Err> (Matrix 3 4 Real)
 matFileMsg path = do
   @savem path cppMakeMat34
   @load path
 
-matFileSumBin :: Str -> <IO> ?Real
+matFileSumBin :: Str -> <IO, Err> Real
 matFileSumBin path = do
   @save 0 cppMakeMat34 path
   m <- @load path
-  mapMaybe pySumMat34 m
+  pySumMat34 m
 
-matFileSumJson :: Str -> <IO> ?Real
+matFileSumJson :: Str -> <IO, Err> Real
 matFileSumJson path = do
   @savej path cppMakeMat34
   m <- @load path
-  mapMaybe pySumMat34 m
+  pySumMat34 m
 
 -- =========================================================================
 -- (5) Element types on Matrix. Values 1..16 packed in 4x4. sum:

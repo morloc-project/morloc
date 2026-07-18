@@ -23,10 +23,10 @@ record NestedRow where
   members :: [Person]
 record Py => NestedRow = "dict"
 
-mkFlatList :: Str -> <IO> ()
+mkFlatList :: Str -> <IO, Err> ()
 mkFlatList path = @save 0 [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] path
 
-mkRecords :: Str -> <IO> ()
+mkRecords :: Str -> <IO, Err> ()
 mkRecords path = @save 0
   [ {name = "Alice", age = 30, tags = ["a", "b"]}
   , {name = "Bob",   age = 25, tags = ["c"]}
@@ -34,7 +34,7 @@ mkRecords path = @save 0
   ] path
 
 -- Not list-shaped at the top level -- only exercised as a DATA packet.
-mkNested :: Str -> <IO> ()
+mkNested :: Str -> <IO, Err> ()
 mkNested path = @save 0
   { label = "team-a"
   , members =

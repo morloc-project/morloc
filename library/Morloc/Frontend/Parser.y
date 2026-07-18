@@ -180,7 +180,7 @@ top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
-  | effect_decl       { [$1] }
+  | effect_decl       { $1 }
   | instance_decl     { $1 }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
@@ -446,11 +446,25 @@ typeclass_decl :: { Loc CstExpr }
 -- importable/exportable entity (like a type or class name). Default is
 -- inescapable (safe); `escapable` opts a single effect into being
 -- discharge-able by a sourced handler.
-effect_decl :: { Loc CstExpr }
-  : 'effect' UPPER              { at $1 (CEffE (getName $2) False) }
-  | 'escapable' 'effect' UPPER  { at $1 (CEffE (getName $3) True) }
+--
+-- Multiple effects may be declared on one line, comma-separated:
+-- `effect IO, Err` desugars to `effect IO` followed by `effect Err`.
+-- The `escapable` prefix applies to every name in the list.
+effect_decl :: { [Loc CstExpr] }
+  : 'effect' effect_name_list
+      { map (\n -> at $1 (CEffE (getName n) False)) $2 }
+  | 'escapable' 'effect' effect_name_list
+      { map (\n -> at $1 (CEffE (getName n) True)) $3 }
   | 'effect' LOWER              {% effectNameError $2 }
   | 'escapable' 'effect' LOWER  {% effectNameError $3 }
+
+-- Comma-separated list of effect names.  All must be UPPER; a LOWER
+-- anywhere in the list triggers 'effectNameError' pointing at the
+-- offending token.
+effect_name_list :: { [Located] }
+  : UPPER                            { [$1] }
+  | effect_name_list ',' UPPER       { $1 ++ [$3] }
+  | effect_name_list ',' LOWER       {% effectNameError $3 }
 
 class_head :: { CstClassHead }
   : app_type '=>' app_type

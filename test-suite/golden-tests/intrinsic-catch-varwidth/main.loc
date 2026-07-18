@@ -1,0 +1,95 @@
+-- Regression: @catch on variable-width return types.
+--
+-- The original @catch implementation memcpy'd only the value's outer
+-- header (e.g. `Array {size, data}` for a Str) and then rolled back
+-- the eval arena. This freed the SHM sub-blocks the header's relptrs
+-- referenced (character data, list elements, tuple string fields),
+-- leaving `dest` with dangling relptrs that resolved to freed SHM --
+-- typically zero-filled. Symptom: a Str "hello" came back as five
+-- null bytes; a [Int] [1,2,3] came back as [0,0,0]; a tuple's Str
+-- field came back as null bytes.
+--
+-- The current design passes @catch's dest through to fallible so the
+-- value is written directly (no memcpy) and no arena rollback happens
+-- on the Ok path (fallible's arena allocations, including the sub-
+-- blocks dest references, stay live until the outer eval-arena drops).
+-- These tests lock in the correct behaviour for Str, [Int], nested
+-- tuple, and [Str] returns.
+--
+-- The happy path exercises "fallible succeeds, no rollback needed";
+-- the sentinel path exercises "fallible fails, fallback populates
+-- dest fresh."
+
+module main
+  ( catchStrHappy
+  , catchStrFallback
+  , catchListHappy
+  , catchListFallback
+  , catchTupleHappy
+  , catchTupleFallback
+  , catchListStrHappy
+  , catchListStrFallback
+  )
+
+effect IO
+escapable effect Err
+
+-- Str return through @catch. Sub-block: character data.
+-- One @catch wraps the whole save+load round-trip so both @save's
+-- and @load's <Err> effect are absorbed together.
+catchStrHappy :: Str -> <IO> Str
+catchStrHappy path =
+  @catch
+    (do
+       @save 0 "hello, morloc" path
+       @load path :: <IO, Err> Str)
+    "fallback-not-used"
+
+catchStrFallback :: <IO> Str
+catchStrFallback =
+  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> Str)
+    "fallback-str-content"
+
+-- [Int] return through @catch. Sub-block: element storage.
+catchListHappy :: Str -> <IO> [Int]
+catchListHappy path =
+  @catch
+    (do
+       @save 0 [10, 20, 30, 40] path
+       @load path :: <IO, Err> [Int])
+    [-1]
+
+catchListFallback :: <IO> [Int]
+catchListFallback =
+  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> [Int])
+    [99, 98, 97]
+
+-- (Int, Str) return through @catch. Sub-block: the Str's char data
+-- inside the tuple's Str field.
+catchTupleHappy :: Str -> <IO> (Int, Str)
+catchTupleHappy path =
+  @catch
+    (do
+       @save 0 (42, "answer") path
+       @load path :: <IO, Err> (Int, Str))
+    (0, "fallback")
+
+catchTupleFallback :: <IO> (Int, Str)
+catchTupleFallback =
+  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> (Int, Str))
+    (999, "sentinel")
+
+-- [Str] return through @catch. Sub-block: outer Array + per-element
+-- Array headers + per-element char storage. Two levels of indirection.
+catchListStrHappy :: Str -> <IO> [Str]
+catchListStrHappy path =
+  @catch
+    (do
+       @save 0 ["alpha", "bravo", "charlie"] path
+       @load path :: <IO, Err> [Str])
+    ["fallback"]
+
+catchListStrFallback :: <IO> [Str]
+catchListStrFallback =
+  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> [Str])
+    ["a", "b"]

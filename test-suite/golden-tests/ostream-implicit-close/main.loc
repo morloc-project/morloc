@@ -44,9 +44,9 @@ import root
 -- disk. No @close: the surrounding dispatch's sweep will release
 -- the slot. Because each flush wrote a sub-packet already, the
 -- on-disk file has data the reader can recover.
-writeAndFlush :: Str -> <IO> ()
+writeAndFlush :: Str -> <IO, Err> ()
 writeAndFlush path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
@@ -58,40 +58,40 @@ writeAndFlush path = do
 -- buffered elements never make it to disk: discard_handle drops
 -- the SHM buffer. The on-disk file ends up with just the stream
 -- header + temp footer (zero sub-packets).
-writeWithoutFlush :: Str -> <IO> ()
+writeWithoutFlush :: Str -> <IO, Err> ()
 writeWithoutFlush path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @write 0 o [4, 5]
   @write 0 o [6, 7, 8, 9]
 
-countViaIStream :: Str -> <IO> Int
+countViaIStream :: Str -> <IO, Err> Int
 countViaIStream path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s
 
-drainFirstSubpacket :: Str -> <IO> [Int]
+drainFirstSubpacket :: Str -> <IO, Err> [Int]
 drainFirstSubpacket path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
 
-drainSecondSubpacket :: Str -> <IO> [Int]
+drainSecondSubpacket :: Str -> <IO, Err> [Int]
 drainSecondSubpacket path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
 
-drainThirdSubpacket :: Str -> <IO> [Int]
+drainThirdSubpacket :: Str -> <IO, Err> [Int]
 drainThirdSubpacket path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s
 
 -- Fourth @next past the last sub-packet must return [].
-drainPastEnd :: Str -> <IO> [Int]
+drainPastEnd :: Str -> <IO, Err> [Int]
 drainPastEnd path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s
@@ -99,7 +99,7 @@ drainPastEnd path = do
 
 -- After writeWithoutFlush, the first @next must return [] -- the
 -- file has no sub-packets, only the stream header + temp footer.
-drainAfterNoFlush :: Str -> <IO> [Int]
+drainAfterNoFlush :: Str -> <IO, Err> [Int]
 drainAfterNoFlush path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s

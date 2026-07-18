@@ -91,6 +91,7 @@ module Morloc.Namespace.Type
   , emptyEffectSet
   , ioEffectSet
   , errEffectSet
+  , ioErrEffectSet
   , effectSubsetOf
   , effectSetHasVar
   , effectSetParts
@@ -182,6 +183,10 @@ ioEffectSet = EffectSet (Set.singleton "IO")
 errEffectSet :: EffectSet
 errEffectSet = EffectSet (Set.singleton "Err")
 
+-- | Combined IO+Err effect set for fallible I/O intrinsics.
+ioErrEffectSet :: EffectSet
+ioErrEffectSet = EffectSet (Set.fromList ["IO", "Err"])
+
 -- | Check if one effect set is a subset of another (resolved labels).
 -- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
 effectSubsetOf :: EffectSet -> EffectSet -> Bool
@@ -245,11 +250,15 @@ unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
 -- helper because row-var membership is not decidable here -- silently
 -- no-op-stripping would let ill-typed programs through the effect-strip
 -- rule. We panic on the misuse rather than silently misbehave.
+-- Removing a concrete label from a row variable is a no-op: the
+-- variable's substitution is unknown, so we neither add nor remove any
+-- concrete label. Callers must independently verify the label was
+-- concretely present in the row (via 'resolveEffectSet') before relying
+-- on the strip; otherwise this silently succeeds on a row that never
+-- carried the label.
 removeEffectLabel :: EffectLabel -> EffectSet -> EffectSet
 removeEffectLabel lbl (EffectSet ls) = EffectSet (Set.delete lbl ls)
-removeEffectLabel _   (EffectVar v) =
-  error $ "removeEffectLabel: called on unresolved EffectVar " <> show v
-          <> "; callers must reject undecidable row tails first"
+removeEffectLabel _   v@(EffectVar _) = v
 removeEffectLabel lbl (EffectUnion a b) =
   normalizeEffectSet (EffectUnion (removeEffectLabel lbl a) (removeEffectLabel lbl b))
 

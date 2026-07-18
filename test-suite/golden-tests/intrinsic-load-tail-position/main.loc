@@ -13,17 +13,17 @@ import root-py
 source Py from "helper.py" ("identity")
 identity :: a -> a
 
-roundTripBin :: Int -> Str -> <IO> ?Int
+roundTripBin :: Int -> Str -> <IO, Err> Int
 roundTripBin x path = do
   @save 0 (identity x) path
   @load path
 
-roundTripMsg :: Int -> Str -> <IO> ?Int
+roundTripMsg :: Int -> Str -> <IO, Err> Int
 roundTripMsg x path = do
   @savem path (identity x)
   @load path
 
-roundTripJson :: Int -> Str -> <IO> ?Int
+roundTripJson :: Int -> Str -> <IO, Err> Int
 roundTripJson x path = do
   @savej path (identity x)
   @load path

@@ -123,6 +123,25 @@ char* get_prior_err(){
     goto error; \
     }
 
+// PyMorlocException extends RuntimeError; `_mlc_catch`'s `except
+// Exception:` intercepts it. PyMorlocInternalError inherits from
+// BaseException so `_mlc_catch` naturally skips it and the error
+// terminates the pool. Both set in PyInit_pymorloc.
+static PyObject* PyMorlocException = NULL;
+static PyObject* PyMorlocInternalError = NULL;
+
+#define PyINTERNAL_ABORT(msg, ...) { \
+    PyErr_Format(PyMorlocInternalError, \
+                 "morloc internal error (Py pool, %s:%d in %s):\n" msg "\n", \
+                 __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    goto error; \
+    }
+
+#define PARSE_ARGS_OR_ABORT(args, fmt, ...) \
+    if (!PyArg_ParseTuple((args), (fmt), __VA_ARGS__)) { \
+        PyINTERNAL_ABORT("PyArg_ParseTuple failed"); \
+    }
+
 #define PyTRACE(cond) \
     if(cond){ \
         char* prior_err = get_prior_err(); \
@@ -303,7 +322,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                                    data, base_ptr, kind);
             obj = PyLong_FromLongLong((long long)handle);
             if (!obj) {
-                PyRAISE("Failed to wrap stream handle as PyLong");
+                PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
             }
             break;
         }
@@ -393,7 +412,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 npy_intp dims[] = {array->size};
                 obj = PyArray_SimpleNew(1, dims, NPY_OBJECT);
                 if (obj == NULL) {
-                    PyRAISE("Failed to allocate numpy object array");
+                    PyINTERNAL_ABORT("Failed to allocate numpy object array");
                 }
                 if (array->size > 0) {
                     char* start = (char*)absptr;
@@ -426,7 +445,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 if (base_ptr != NULL || array->size == 0) {
                     obj = PyArray_SimpleNew(1, dims, numpy_type_num);
                     if (obj == NULL) {
-                        PyRAISE("Failed to allocate numpy array");
+                        PyINTERNAL_ABORT("Failed to allocate numpy array");
                     }
                     if (array->size > 0) {
                         size_t nbytes = (size_t)array->size *
@@ -450,7 +469,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 // of the same morloc type.
                 obj = PyList_New(array->size);
                 if(obj == NULL){
-                    PyRAISE("Failed to allocate list");
+                    PyINTERNAL_ABORT("Failed to allocate list");
                 }
                 if(array->size > 0){
                     char* start = (char*)absptr;
@@ -485,7 +504,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 // the wire shape from_voidstar is decoding.
                 obj = PyList_New(array->size);
                 if(obj == NULL){
-                    PyRAISE("Failed to allocate list");
+                    PyINTERNAL_ABORT("Failed to allocate list");
                 }
                 if(array->size > 0){
                     char* start = (char*)absptr;
@@ -570,7 +589,7 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
             // Schema pointer so the recursive call can navigate.
             const Schema* target = recur_env_lookup(schema->name);
             if (target == NULL) {
-                PyRAISE("Recur back-reference to undeclared schema name '%s'",
+                PyINTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
             obj = from_voidstar(target, data, base_ptr);
@@ -748,7 +767,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                             // handles instead of N.
                             int64_t* handles = (int64_t*)malloc(list_size * sizeof(int64_t));
                             if (!handles) {
-                                PyRAISE("get_shm_size: out of memory sizing stream-handle array");
+                                PyINTERNAL_ABORT("get_shm_size: out of memory sizing stream-handle array");
                             }
                             if (extract_ifile_handles_pylist(obj, handles, list_size) != 0) {
                                 free(handles);
@@ -910,7 +929,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
             // walk.
             const Schema* target = recur_env_lookup(schema->name);
             if (target == NULL) {
-                PyRAISE("Recur back-reference to undeclared schema name '%s'",
+                PyINTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
             return get_shm_size_inner(target, obj);
@@ -920,7 +939,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
             PyRAISE("Unsupported schema type %d in calc_required_size", (int)schema->type);
     }
 
-    PyRAISE("Reached the unreachable");
+    PyINTERNAL_ABORT("Reached the unreachable");
 
 error:
     return -1;
@@ -1297,7 +1316,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
             // already on the stack from an outer push.
             const Schema* target = recur_env_lookup(schema->name);
             if (target == NULL) {
-                PyRAISE("Recur back-reference to undeclared schema name '%s'",
+                PyINTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
                         schema->name ? schema->name : "?");
             }
             if (to_voidstar_inner_impl(dest, cursor, target, obj) != 0) {
@@ -1550,9 +1569,7 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
 static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* daemon_capsule;
 
-    if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
 
     language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
@@ -1594,9 +1611,7 @@ error:
 static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     PyObject* daemon_capsule;
 
-    if (!PyArg_ParseTuple(args, "O", &daemon_capsule)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
 
     language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
@@ -1619,17 +1634,15 @@ static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* a
     PyObject* py_args = NULL;
     PyObject* py_mid = NULL;
 
-    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#", &packet, &packet_size);
     call_packet = PyTRY(read_morloc_call_packet, (const uint8_t*)packet);
 
     py_tuple = PyTuple_New(2);
-    if (!py_tuple) { PyRAISE("Allocation failed"); }
+    if (!py_tuple) { PyINTERNAL_ABORT("Allocation failed (py_tuple)"); }
     py_args = PyList_New(call_packet->nargs);
-    if (!py_args) { PyRAISE("Allocation failed"); }
+    if (!py_args) { PyINTERNAL_ABORT("Allocation failed (py_args)"); }
     py_mid = PyLong_FromLong((long)call_packet->midx);
-    if (!py_mid) { PyRAISE("Allocation failed"); }
+    if (!py_mid) { PyINTERNAL_ABORT("Allocation failed (py_mid)"); }
     for(size_t i = 0; i < call_packet->nargs; i++){
         size_t arg_packet_size = PyTRY(morloc_packet_size, call_packet->args[i]);
         PyObject* py_arg = PyBytes_FromStringAndSize(
@@ -1661,9 +1674,7 @@ static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObj
     uint8_t* packet = NULL;
     size_t packet_size = 0;
 
-    if (!PyArg_ParseTuple(args, "iy#", &client_fd, &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "iy#", &client_fd, &packet, &packet_size);
 
     size_t bytes_sent = PyTRY(send_packet_to_foreign_server, client_fd, packet);
 
@@ -1678,9 +1689,7 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
     int client_fd = 0;
     uint8_t* packet = NULL;
 
-    if (!PyArg_ParseTuple(args, "i", &client_fd)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "i", &client_fd);
 
     packet = PyTRY(stream_from_client, client_fd);
 
@@ -1702,9 +1711,7 @@ error:
 static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
     int socket_id = 0;
 
-    if (!PyArg_ParseTuple(args, "i", &socket_id)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "i", &socket_id);
 
     close_socket(socket_id);
 
@@ -1725,9 +1732,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     PyObject* obj;
     const char* schema_str;
 
-    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
 
     schema = PyTRY(parse_schema, schema_str);
 
@@ -1745,7 +1750,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
             "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
         if (!export_result) {
             free_schema(schema);
-            PyRAISE("Failed to export pyarrow object via C Data Interface");
+            PyINTERNAL_ABORT("Failed to export pyarrow object via C Data Interface");
         }
         Py_DECREF(export_result);
 
@@ -1766,7 +1771,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         packet = make_arrow_data_packet(relptr, schema);
         if (!packet) {
             free_schema(schema);
-            PyRAISE("Failed to create arrow data packet");
+            PyINTERNAL_ABORT("Failed to create arrow data packet");
         }
 
         // Track shm for cleanup
@@ -1845,9 +1850,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     size_t packet_size;
     const char* schema_str;
 
-    if (!PyArg_ParseTuple(args, "y#s", &packet, &packet_size, &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#s", &packet, &packet_size, &schema_str);
 
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
@@ -1887,7 +1890,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
             free_schema(schema);
-            PyRAISE("Failed to get pyarrow.RecordBatch");
+            PyINTERNAL_ABORT("Failed to get pyarrow.RecordBatch");
         }
 
         // Use RecordBatch._import_from_c(array_ptr, schema_ptr)
@@ -2130,9 +2133,7 @@ static PyObject* pybinding__release_packet_shm(PyObject* self, PyObject* args) {
     const char* packet;
     Py_ssize_t packet_size;
 
-    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#", &packet, &packet_size);
 
     if ((size_t)packet_size < sizeof(morloc_packet_header_t)) {
         Py_RETURN_NONE;
@@ -2276,9 +2277,7 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
     const uint8_t** arg_packets = NULL;
     uint8_t* result = NULL;
 
-    if (!PyArg_ParseTuple(args, "issOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "issOO", &midx, &socket_base, &cache_path, &res_struct, &arg_packets_obj);
 
     if (!PyBytes_Check(res_struct)) {
         PyRAISE("res_struct must be a bytes object from struct.pack()");
@@ -2296,7 +2295,7 @@ static PyObject* pybinding__remote_call(PyObject* self, PyObject* args) { MAYFAI
 
     arg_packets = calloc(nargs, sizeof(uint8_t*));
     if (arg_packets == NULL) {
-        PyRAISE("Memory allocation failed");
+        PyINTERNAL_ABORT("Memory allocation failed");
     }
 
     for (Py_ssize_t i = 0; i < nargs; i++) {
@@ -2341,9 +2340,7 @@ static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
     size_t packet_size;
 
-    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#", &packet, &packet_size);
 
     bool is_ping = PyTRY(packet_is_ping, (uint8_t*)packet);
 
@@ -2360,9 +2357,7 @@ static PyObject* pybinding__is_local_call(PyObject* self, PyObject* args) { MAYF
     char* packet;
     size_t packet_size;
 
-    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#", &packet, &packet_size);
 
     bool is_local_call = PyTRY(packet_is_local_call, (uint8_t*)packet);
 
@@ -2378,9 +2373,7 @@ static PyObject* pybinding__is_remote_call(PyObject* self, PyObject* args) { MAY
     char* packet;
     size_t packet_size;
 
-    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#", &packet, &packet_size);
 
     bool is_remote_call = PyTRY(packet_is_remote_call, (uint8_t*)packet);
 
@@ -2398,9 +2391,7 @@ static PyObject* pybinding__pong(PyObject* self, PyObject* args) { MAYFAIL
     size_t packet_size;
     uint8_t* pong = NULL;
 
-    if (!PyArg_ParseTuple(args, "y#", &packet, &packet_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "y#", &packet, &packet_size);
 
     pong = PyTRY(return_ping, (uint8_t*)packet);
 
@@ -2433,9 +2424,7 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     size_t volume_index;
     size_t shm_default_size;
 
-    if (!PyArg_ParseTuple(args, "skk", &shm_basename, &volume_index, &shm_default_size)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "skk", &shm_basename, &volume_index, &shm_default_size);
 
     shm = PyTRY(
         shinit,
@@ -2456,9 +2445,7 @@ static PyObject* pybinding__make_fail_packet(PyObject* self, PyObject* args) { M
     const char* packet_errmsg;
     uint8_t* packet = NULL;
 
-    if (!PyArg_ParseTuple(args, "s", &packet_errmsg)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "s", &packet_errmsg);
 
     packet = make_fail_packet(packet_errmsg);
 
@@ -2482,9 +2469,7 @@ static PyObject* pybinding__mlc_hash(PyObject* self, PyObject* args) { MAYFAIL
     void* voidstar = NULL;
     char* hex = NULL;
 
-    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
 
     schema = PyTRY(parse_schema, schema_str);
 
@@ -2528,9 +2513,7 @@ static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
     // Args: (value, schema, level, path). The level is accepted here
     // for ABI uniformity with mlc_save_voidstar; the runtime ignores it
     // for the msgpack format (not a packet file).
-    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
     uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
@@ -2568,9 +2551,7 @@ static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { 
 
     // Args: (value, schema, level, path). level is the zstd preset
     // (0 = uncompressed, 1-9 = increasing ratio).
-    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
     uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
@@ -2607,9 +2588,7 @@ static PyObject* pybinding__mlc_save_json(PyObject* self, PyObject* args) { MAYF
     void* voidstar = NULL;
 
     // Args: (value, schema, level, path). level accepted for ABI uniformity.
-    if (!PyArg_ParseTuple(args, "OsLs", &obj, &schema_str, &level_ll, &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
     uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
@@ -2644,9 +2623,7 @@ static PyObject* pybinding__mlc_show(PyObject* self, PyObject* args) { MAYFAIL
     void* voidstar = NULL;
     char* json = NULL;
 
-    if (!PyArg_ParseTuple(args, "Os", &obj, &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
 
     schema = PyTRY(parse_schema, schema_str);
 
@@ -2684,25 +2661,29 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     const char* json_str;
     Schema* schema = NULL;
     void* voidstar = NULL;
+    char* read_err = NULL;
 
-    if (!PyArg_ParseTuple(args, "ss", &schema_str, &json_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &json_str);
 
     schema = PyTRY(parse_schema, schema_str);
 
-    {
-        char* errmsg = NULL;
-        voidstar = mlc_read(json_str, schema, &errmsg);
-        if (errmsg != NULL) {
-            free(errmsg);
-        }
-    }
+    voidstar = mlc_read(json_str, schema, &read_err);
 
+    // @read :: Str -> <Err> a -- parse failure raises MorlocException
+    // so _mlc_catch can intercept.
     if (voidstar == NULL) {
+        if (PyMorlocException != NULL) {
+            PyErr_SetString(PyMorlocException,
+                            read_err != NULL ? read_err : "@read: parse failed");
+        } else {
+            PyErr_SetString(PyExc_RuntimeError,
+                            read_err != NULL ? read_err : "@read: parse failed");
+        }
+        if (read_err != NULL) free(read_err);
         free_schema(schema);
-        Py_RETURN_NONE;
+        return NULL;
     }
+    if (read_err != NULL) { free(read_err); read_err = NULL; }
 
     {
         // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
@@ -2737,19 +2718,29 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;
     Schema* schema = NULL;
     void* voidstar = NULL;
+    char* load_err = NULL;
 
-    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
 
     schema = PyTRY(parse_schema, schema_str);
 
-    voidstar = PyTRY(mlc_load, path, schema);
+    voidstar = mlc_load(path, schema, &load_err);
 
+    // @load :: Str -> <IO, Err> a -- missing file / decode failure
+    // raises MorlocException so _mlc_catch can intercept.
     if (voidstar == NULL) {
+        if (PyMorlocException != NULL) {
+            PyErr_SetString(PyMorlocException,
+                            load_err != NULL ? load_err : "@load: failed to load file");
+        } else {
+            PyErr_SetString(PyExc_RuntimeError,
+                            load_err != NULL ? load_err : "@load: failed to load file");
+        }
+        if (load_err != NULL) free(load_err);
         free_schema(schema);
-        Py_RETURN_NONE;
+        return NULL;
     }
+    if (load_err != NULL) { free(load_err); load_err = NULL; }
 
     {
         // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
@@ -2784,9 +2775,7 @@ error:
 static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;
     int kind_i;
-    if (!PyArg_ParseTuple(args, "si", &path, &kind_i)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "si", &path, &kind_i);
     int64_t handle = PyTRY(mlc_open, path, (uint8_t)kind_i);
     return PyLong_FromLongLong((long long)handle);
 error:
@@ -2795,26 +2784,16 @@ error:
 
 static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
-    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     PyTRY(mlc_close, (int64_t)handle_ll);
     Py_RETURN_NONE;
 error:
     return NULL;
 }
 
-// morloc.MorlocException: user-thrown error class raised by @throw.
-// Subclass of RuntimeError so the pool's `except Exception as e:` wrap
-// catches it; the wrap re-raises RuntimeError with the frame suffix,
-// which loses the subclass identity but preserves the message.
-static PyObject* PyMorlocException = NULL;
-
 static PyObject* pybinding__mlc_throw(PyObject* self, PyObject* args) { MAYFAIL
     const char* msg;
-    if (!PyArg_ParseTuple(args, "s", &msg)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "s", &msg);
     PyErr_SetString(PyMorlocException, msg);
 error:
     return NULL;
@@ -2826,9 +2805,7 @@ error:
 // / GeneratorExit propagate as the user expects.
 static PyObject* pybinding__mlc_catch(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* fallible; PyObject* fallback;
-    if (!PyArg_ParseTuple(args, "OO", &fallible, &fallback)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "OO", &fallible, &fallback);
     PyObject* r = PyObject_CallObject(fallible, NULL);
     if (r == NULL) {
         if (!PyErr_ExceptionMatches(PyExc_Exception)) {
@@ -2844,12 +2821,10 @@ error:
 
 static PyObject* pybinding__mlc_fschema(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;
-    if (!PyArg_ParseTuple(args, "s", &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "s", &path);
     char* s = PyTRY(mlc_fschema, path);
     if (s == NULL) {
-        PyRAISE("mlc_fschema returned NULL");
+        PyINTERNAL_ABORT("mlc_fschema returned NULL (libmorloc contract violation)");
     }
     PyObject* obj = PyUnicode_FromString(s);
     free(s);
@@ -2872,16 +2847,14 @@ static PyObject* pybinding__mlc_ifile_walk(PyObject* self, PyObject* args) { MAY
     void* voidstar = NULL;
     mlc_ifile_walk_arg* packed = NULL;
 
-    if (!PyArg_ParseTuple(args, "sLsO", &schema_str, &handle_ll, &path, &args_list)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "sLsO", &schema_str, &handle_ll, &path, &args_list);
     if (!PyList_Check(args_list)) {
         PyRAISE("mlc_ifile_walk: args must be a list");
     }
     Py_ssize_t n = PyList_GET_SIZE(args_list);
     if (n > 0) {
         packed = (mlc_ifile_walk_arg*)calloc((size_t)n, sizeof(mlc_ifile_walk_arg));
-        if (packed == NULL) PyRAISE("mlc_ifile_walk: alloc failed");
+        if (packed == NULL) PyINTERNAL_ABORT("mlc_ifile_walk: alloc failed (OOM)");
         for (Py_ssize_t i = 0; i < n; i++) {
             PyObject* a = PyList_GET_ITEM(args_list, i);
             if (a == Py_None) {
@@ -2937,9 +2910,7 @@ error:
 
 static PyObject* pybinding__mlc_ifile_length(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
-    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     int64_t n = PyTRY(mlc_ifile_length, (int64_t)handle_ll);
     return PyLong_FromLongLong((long long)n);
 error:
@@ -2954,9 +2925,7 @@ static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
     Schema* schema = NULL;
     void* voidstar = NULL;
-    if (!PyArg_ParseTuple(args, "sL", &schema_str, &handle_ll)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
     schema = PyTRY(parse_schema, schema_str);
     voidstar = PyTRY(mlc_next, (int64_t)handle_ll);
     if (voidstar == NULL) {
@@ -2987,9 +2956,7 @@ error:
 
 static PyObject* pybinding__mlc_stream(PyObject* self, PyObject* args) { MAYFAIL
     long long ifile_handle_ll;
-    if (!PyArg_ParseTuple(args, "L", &ifile_handle_ll)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "L", &ifile_handle_ll);
     int64_t h = PyTRY(mlc_stream, (int64_t)ifile_handle_ll);
     return PyLong_FromLongLong((long long)h);
 error:
@@ -3000,9 +2967,7 @@ error:
 static PyObject* pybinding__mlc_open_ostream(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
-    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
     int64_t h = PyTRY(mlc_open_ostream, schema_str, path);
     return PyLong_FromLongLong((long long)h);
 error:
@@ -3015,9 +2980,7 @@ error:
 // SHM registry and route @next / @write through the pool-nexus RPC.
 static PyObject* pybinding__mlc_open_stdin(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
-    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
     int64_t h = PyTRY(mlc_open_stdin, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
@@ -3026,9 +2989,7 @@ error:
 
 static PyObject* pybinding__mlc_open_stdout(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
-    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
     int64_t h = PyTRY(mlc_open_stdout, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
@@ -3037,9 +2998,7 @@ error:
 
 static PyObject* pybinding__mlc_open_stderr(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
-    if (!PyArg_ParseTuple(args, "s", &schema_str)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
     int64_t h = PyTRY(mlc_open_stderr, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
@@ -3056,10 +3015,8 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
     Schema* schema = NULL;
     void* voidstar = NULL;
-    if (!PyArg_ParseTuple(args, "sLOL",
-            &schema_str, &level_ll, &value_obj, &handle_ll)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "sLOL",
+            &schema_str, &level_ll, &value_obj, &handle_ll);
     schema = PyTRY(parse_schema, schema_str);
     ssize_t bytes = get_shm_size(schema, value_obj);
     if (bytes < 0) { goto error; }
@@ -3090,9 +3047,7 @@ error:
 static PyObject* pybinding__mlc_append(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
-    if (!PyArg_ParseTuple(args, "ss", &schema_str, &path)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
     int64_t h = PyTRY(mlc_append, schema_str, path);
     return PyLong_FromLongLong((long long)h);
 error:
@@ -3103,9 +3058,7 @@ error:
 static PyObject* pybinding__mlc_concat(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* paths_list;
     const char* dest;
-    if (!PyArg_ParseTuple(args, "Os", &paths_list, &dest)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "Os", &paths_list, &dest);
     if (!PyList_Check(paths_list)) {
         PyRAISE("mlc_concat: paths must be a list");
     }
@@ -3113,7 +3066,7 @@ static PyObject* pybinding__mlc_concat(PyObject* self, PyObject* args) { MAYFAIL
     const char** raw = NULL;
     if (n > 0) {
         raw = (const char**)malloc((size_t)n * sizeof(char*));
-        if (!raw) PyRAISE("mlc_concat: out of memory");
+        if (!raw) PyINTERNAL_ABORT("mlc_concat: out of memory");
         for (Py_ssize_t i = 0; i < n; i++) {
             PyObject* p = PyList_GET_ITEM(paths_list, i);
             if (!PyUnicode_Check(p)) {
@@ -3136,7 +3089,7 @@ static PyObject* pybinding__mlc_concat(PyObject* self, PyObject* args) { MAYFAIL
     }
     free(raw);
     if (rc != 0) {
-        PyRAISE("mlc_concat: failed with no errmsg");
+        PyINTERNAL_ABORT("mlc_concat: failed with no errmsg (libmorloc contract violation)");
     }
     Py_RETURN_NONE;
 error:
@@ -3147,9 +3100,7 @@ error:
 // flush as a sub-packet now (instead of waiting for full / @close).
 static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
-    if (!PyArg_ParseTuple(args, "L", &handle_ll)) {
-        PyRAISE("Failed to parse arguments");
-    }
+    PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     PyTRY(mlc_flush, (int64_t)handle_ll);
     Py_RETURN_NONE;
 error:
@@ -3236,6 +3187,19 @@ PyMODINIT_FUNC PyInit_pymorloc(void) {
     Py_INCREF(PyMorlocException);
     if (PyModule_AddObject(m, "MorlocException", PyMorlocException) < 0) {
         Py_DECREF(PyMorlocException);
+        Py_DECREF(m);
+        return NULL;
+    }
+    // BaseException-derived so `_mlc_catch`'s `except Exception:` skips it.
+    PyMorlocInternalError = PyErr_NewException(
+        "pymorloc.MorlocInternalError", PyExc_BaseException, NULL);
+    if (PyMorlocInternalError == NULL) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(PyMorlocInternalError);
+    if (PyModule_AddObject(m, "MorlocInternalError", PyMorlocInternalError) < 0) {
+        Py_DECREF(PyMorlocInternalError);
         Py_DECREF(m);
         return NULL;
     }

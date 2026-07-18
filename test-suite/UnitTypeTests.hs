@@ -29,6 +29,8 @@ module UnitTypeTests
   , evalSugarTests
   , effectEscapabilityTests
   , effectPartialApplicationTests
+  , polymorphicEffectRowTests
+  , effectCoverageMessageTests
   , namespaceErrorTests
   , typeclassTests
   , natErrorTests
@@ -4312,6 +4314,212 @@ effectPartialApplicationTests =
         h = handle (foo 1)
           |]
           int
+      ]
+
+-- | Pure values filling `<e> T` slots must recurse on the inner type
+-- only. Solving the RHS row (via subtypeEffRows with a synthetic empty
+-- LHS) would over-constrain any open row-variable to empty; adding an
+-- existential-LHS guard would spuriously trip the occurs check when
+-- the RHS's inner referenced the same existential.
+polymorphicEffectRowTests :: TestTree
+polymorphicEffectRowTests =
+  localOption (mkTimeout 200000) $
+    testGroup
+      "Polymorphic effect row / pure-into-effect subtype"
+      [ -- A helper that @catches on a polymorphic fallible must
+        -- typecheck (guards against InstantiateL firing to solve
+        -- `b := <e> b` and tripping the occurs check).
+        expectPass
+          "1. @catch on polymorphic <e, Err> b with bare fallback"
+          [r|
+        module main (withCatch)
+        escapable effect Err
+        withCatch :: (a -> <e, Err> b) -> a -> b -> <e> b
+        withCatch f x fb = @catch (f x) fb
+          |]
+
+        -- A pure value filling a `<e> T` slot must NOT solve e := empty.
+        -- The surrounding <IO> constraint is the real solver.
+      , expectPass
+          "2. pure Int in <e> Int slot does not pin e to empty"
+          [r|
+        module main (pureRoot)
+        effect IO
+        passThrough :: <e> Int -> <e> Int
+        passThrough x = x
+        pureRoot :: <IO> Int
+        pureRoot = passThrough 42
+          |]
+
+        -- Trivial concrete-into-concrete pure lift still works.
+      , expectPass
+          "3. pure Int in <IO, Err> Int slot"
+          [r|
+        module main (x)
+        effect IO
+        escapable effect Err
+        x :: <IO, Err> Int
+        x = 42
+          |]
+
+        -- === Nested polymorphic @catch ===
+        -- Outer @catch's fallback is itself an @catch, both polymorphic
+        -- in e. Each layer independently exercises the pure-into-
+        -- existential-EffectU rule when its bare fallback is checked.
+      , expectPass
+          "4. nested @catch, both layers polymorphic in e"
+          [r|
+        module main (withTwoCatches)
+        escapable effect Err
+        withTwoCatches :: (a -> <e, Err> b) -> (a -> <e, Err> b) -> a -> b -> <e> b
+        withTwoCatches f g x fb = @catch (f x) (@catch (g x) fb)
+          |]
+
+        -- Two pure arguments: solving e := empty on the first would
+        -- fail to unify against the export's <IO> on the second.
+      , expectPass
+          "5. row-var survives two pure arguments"
+          [r|
+        module main (run)
+        effect IO
+        pick :: <e> Int -> <e> Int -> <e> Int
+        pick x _ = x
+        run :: <IO> Int
+        run = pick 42 99
+          |]
+
+        -- === Pure-then-effectful ordering ===
+        -- First arg pure, second arg concretely effectful. The row
+        -- var must be solvable to <IO> by the second arg despite the
+        -- first arg not constraining it.
+      , expectPass
+          "6. row-var solved by effectful second arg after pure first"
+          [r|
+        module main (run)
+        effect IO
+        source Py ("saveInt")
+        saveInt :: Int -> <IO> Int
+        seq2 :: <e> Int -> <e> Int -> <e> Int
+        seq2 _ y = y
+        run :: <IO> Int
+        run = seq2 42 (saveInt 99)
+          |]
+
+        -- === Negative: effect cannot drop when caller expects pure ===
+        -- The pure-into-EffectU rule must NOT be bidirectional; the
+        -- reverse (EffectU-into-pure) is unsound and must still reject.
+      , expectError
+          "7. <Err> Int in Int slot rejected (wrong subtype direction)"
+          [r|
+        module main (f)
+        escapable effect Err
+        f :: Int
+        f = @throw "x"
+          |]
+
+      , expectError
+          "8. <IO> Int in Int slot rejected via direct assignment"
+          [r|
+        module main (bad)
+        effect IO
+        source Py ("readInt")
+        readInt :: <IO> Int
+        bad :: Int
+        bad = readInt
+          |]
+
+        -- === Negative: @catch on non-Err fallible still rejected ===
+        -- Loosening the pure-into-EffectU rule must NOT loosen
+        -- @catch's requirement that its fallible have Err in its row.
+      , expectError
+          "9. @catch on <IO>-only (no Err) fallible rejected"
+          [r|
+        module main (bad)
+        effect IO
+        source Py ("readInt")
+        readInt :: <IO> Int
+        bad :: <IO> Int
+        bad = @catch readInt 0
+          |]
+      ]
+
+-- | Effect-coverage error message shape.
+--
+-- After the message rewrite, effect-coverage failures name the
+-- specific missing effects and adapt the fix suggestion based on
+-- escapability (Err → mention @catch; other escapable → mention
+-- handler function; all non-escapable → suggest declaration only).
+--
+-- Per the workspace convention we do NOT assert on exact message
+-- text (it drifts as wording is tuned). We assert that these
+-- programs are rejected (they must remain rejected under any future
+-- message improvement) and rely on running the tests interactively
+-- to eyeball the message quality.
+effectCoverageMessageTests :: TestTree
+effectCoverageMessageTests =
+  localOption (mkTimeout 200000) $
+    testGroup
+      "Effect-coverage error messages (rejection-only, message quality checked manually)"
+      [ -- Err missing → message should suggest declare + mention @catch.
+        expectError
+          "Err in body, sig declares only <IO> → rejected"
+          [r|
+        module main (bad)
+        effect IO
+        escapable effect Err
+        bad :: <IO> Int
+        bad = do
+          @throw "oops"
+          0
+          |]
+
+        -- Non-Err escapable missing → message should suggest declare
+        -- + mention handler function (no @catch mention).
+      , expectError
+          "escapable non-Err in body, sig pure → rejected"
+          [r|
+        module main (bad)
+        escapable effect Log
+        source Py ("plog")
+        plog :: Str -> <Log> ()
+        bad :: Int
+        bad = do
+          plog "hi"
+          0
+          |]
+
+        -- Non-escapable missing → message should suggest declaration
+        -- ONLY (no handler-function mention).
+      , expectError
+          "inescapable effect in body, sig pure → rejected"
+          [r|
+        module main (bad)
+        effect IO
+        source Py ("psideEffect")
+        psideEffect :: Int -> <IO> Int
+        bad :: Int
+        bad = do
+          x <- psideEffect 1
+          x
+          |]
+
+        -- Mixed escapable + inescapable missing → message should
+        -- suggest declaration for all, mention handler for escapable
+        -- ones, and specifically @catch for Err.
+      , expectError
+          "Err + inescapable both missing → rejected"
+          [r|
+        module main (bad)
+        effect IO
+        escapable effect Err
+        source Py ("psideEffect")
+        psideEffect :: Int -> <IO> Int
+        bad :: Int
+        bad = do
+          x <- psideEffect 1
+          @throw "boom"
+          x
+          |]
       ]
 
 namespaceErrorTests :: TestTree

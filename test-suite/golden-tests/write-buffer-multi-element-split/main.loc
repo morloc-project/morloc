@@ -21,21 +21,21 @@ module main
 
 import root-py
 
-writeOneBigList :: Str -> <IO> ()
+writeOneBigList :: Str -> <IO, Err> ()
 writeOneBigList path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o (range 1 601)
   @close o
 
-testTotalCount :: Str -> <IO> Int
+testTotalCount :: Str -> <IO, Err> Int
 testTotalCount path = do
   writeOneBigList path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @flen s
 
-testFirstElement :: Str -> <IO> Int
+testFirstElement :: Str -> <IO, Err> Int
 testFirstElement path = do
   writeOneBigList path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   xs <- @next s
   .[0] xs

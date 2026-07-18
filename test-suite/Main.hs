@@ -42,6 +42,8 @@ main = do
       , evalSugarTests
       , effectEscapabilityTests
       , effectPartialApplicationTests
+      , polymorphicEffectRowTests
+      , effectCoverageMessageTests
       , namespaceErrorTests
       , typeclassTests
       , natErrorTests
@@ -77,6 +79,9 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "intrinsic-io-catch" "intrinsic-io-catch"
+      , golden "intrinsic-catch-polymorphic-row" "intrinsic-catch-polymorphic-row"
+      , golden "intrinsic-load-schema-mismatch" "intrinsic-load-schema-mismatch"
       , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
       , golden "intrinsic-throw-py" "intrinsic-throw-py"
       , golden "intrinsic-throw-r" "intrinsic-throw-r"
@@ -85,6 +90,9 @@ main = do
       , golden "intrinsic-catch-r" "intrinsic-catch-r"
       , golden "intrinsic-catch-rejects-non-err" "intrinsic-catch-rejects-non-err"
       , golden "intrinsic-catch-cross-pool" "intrinsic-catch-cross-pool"
+      , golden "intrinsic-catch-varwidth" "intrinsic-catch-varwidth"
+      , golden "catch-cross-language-load" "catch-cross-language-load"
+      , golden "wire-schema-no-hints" "wire-schema-no-hints"
 
       , golden "int-literal-promoted-to-real" "int-literal-promoted-to-real"
       , golden "backtick-operator-py" "backtick-operator-py"

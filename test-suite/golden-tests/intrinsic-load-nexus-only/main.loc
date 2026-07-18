@@ -16,6 +16,10 @@
 --   * (Int, Str) -- Tuple with mixed fixed and variable elements
 --   * [(Int, Real)] -- Array of fixed-width Tuple (bulk-copy path)
 -- across the three save formats (binary voidstar, msgpack, json).
+--
+-- @load and @save both raise Err on failure now; the round-trip
+-- signatures declare `<IO, Err>` so that propagates. The missing-file
+-- case is exercised via @catch to demonstrate the fallback pattern.
 
 module main
   ( binInt
@@ -40,97 +44,99 @@ module main
   )
 
 effect IO
+effect Err
 
-binInt :: Int -> Str -> <IO> ?Int
+binInt :: Int -> Str -> <IO, Err> Int
 binInt x path = do
   @save 0 x path
   @load path
 
-msgInt :: Int -> Str -> <IO> ?Int
+msgInt :: Int -> Str -> <IO, Err> Int
 msgInt x path = do
   @savem path x
   @load path
 
-jsonInt :: Int -> Str -> <IO> ?Int
+jsonInt :: Int -> Str -> <IO, Err> Int
 jsonInt x path = do
   @savej path x
   @load path
 
-binReal :: Real -> Str -> <IO> ?Real
+binReal :: Real -> Str -> <IO, Err> Real
 binReal x path = do
   @save 0 x path
   @load path
 
-msgReal :: Real -> Str -> <IO> ?Real
+msgReal :: Real -> Str -> <IO, Err> Real
 msgReal x path = do
   @savem path x
   @load path
 
-jsonReal :: Real -> Str -> <IO> ?Real
+jsonReal :: Real -> Str -> <IO, Err> Real
 jsonReal x path = do
   @savej path x
   @load path
 
-binStr :: Str -> Str -> <IO> ?Str
+binStr :: Str -> Str -> <IO, Err> Str
 binStr s path = do
   @save 0 s path
   @load path
 
-msgStr :: Str -> Str -> <IO> ?Str
+msgStr :: Str -> Str -> <IO, Err> Str
 msgStr s path = do
   @savem path s
   @load path
 
-jsonStr :: Str -> Str -> <IO> ?Str
+jsonStr :: Str -> Str -> <IO, Err> Str
 jsonStr s path = do
   @savej path s
   @load path
 
-binList :: [Str] -> Str -> <IO> ?[Str]
+binList :: [Str] -> Str -> <IO, Err> [Str]
 binList xs path = do
   @save 0 xs path
   @load path
 
-msgList :: [Str] -> Str -> <IO> ?[Str]
+msgList :: [Str] -> Str -> <IO, Err> [Str]
 msgList xs path = do
   @savem path xs
   @load path
 
-jsonList :: [Str] -> Str -> <IO> ?[Str]
+jsonList :: [Str] -> Str -> <IO, Err> [Str]
 jsonList xs path = do
   @savej path xs
   @load path
 
-binTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
+binTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
 binTup t path = do
   @save 0 t path
   @load path
 
-msgTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
+msgTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
 msgTup t path = do
   @savem path t
   @load path
 
-jsonTup :: (Int, Str) -> Str -> <IO> ?(Int, Str)
+jsonTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
 jsonTup t path = do
   @savej path t
   @load path
 
-binFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
+binFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
 binFixedTupList xs path = do
   @save 0 xs path
   @load path
 
-msgFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
+msgFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
 msgFixedTupList xs path = do
   @savem path xs
   @load path
 
-jsonFixedTupList :: [(Int, Real)] -> Str -> <IO> ?[(Int, Real)]
+jsonFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
 jsonFixedTupList xs path = do
   @savej path xs
   @load path
 
--- Loading a missing file must return null, not crash.
-loadMissing :: Str -> <IO> ?Int
-loadMissing path = @load path
+-- @load on a missing file raises Err; @catch intercepts and substitutes
+-- the sentinel (-1) so the caller sees a well-defined value.
+loadMissing :: Str -> <IO> Int
+loadMissing path = @catch (@load path :: <IO, Err> Int) (-1)

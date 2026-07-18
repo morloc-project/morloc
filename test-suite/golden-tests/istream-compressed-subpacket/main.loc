@@ -23,12 +23,12 @@ module main
 import root
 
 -- Single compressed sub-packet, drained in one @next.
-testCompressedReadback :: Str -> <IO> [Int]
+testCompressedReadback :: Str -> <IO, Err> [Int]
 testCompressedReadback path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 3 o [100, 200, 300, 400, 500]
   @close o
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
 
 -- Three compressed sub-packets concatenated, drained back to back.
@@ -39,16 +39,16 @@ testCompressedReadback path = do
 -- sub-packets on disk. Without `@flush`, the three writes coalesce
 -- into one packet at @close and the test would see one big payload
 -- instead of three.
-testCompressedThreeBatch :: Str -> <IO> [Int]
+testCompressedThreeBatch :: Str -> <IO, Err> [Int]
 testCompressedThreeBatch path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 3 o [1, 2, 3]
   @flush o
   @write 3 o [40, 50]
   @flush o
   @write 3 o [600, 700, 800, 900]
   @close o
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s

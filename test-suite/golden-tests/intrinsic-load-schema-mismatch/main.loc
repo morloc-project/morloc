@@ -1,0 +1,16 @@
+-- @load with a requested type that doesn't match the on-disk packet's
+-- schema should raise Err (catchable), not silently reinterpret bytes.
+-- Saves a Str, then attempts to load as Int; the mismatch is
+-- classified as user-attributable, so @catch intercepts.
+
+module main
+  ( saveThenLoadWrongType
+  )
+
+effect IO
+escapable effect Err
+
+saveThenLoadWrongType :: Str -> <IO, Err> Int
+saveThenLoadWrongType path = do
+  @save 0 "not-an-int-payload" path
+  @catch (@load path :: <IO, Err> Int) 999

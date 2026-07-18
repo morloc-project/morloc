@@ -47,9 +47,28 @@ morloc_mlc_throw <- function(msg) {
     list(message = msg, call = NULL)
   ))
 }
-# @catch: evaluate fallible; on any error condition, evaluate fallback.
+# Raise a genuine morloc-invariant violation (compiler bug, contract
+# violation, unreachable branch). Uses the MorlocInternalError class;
+# morloc_mlc_catch inspects and re-raises so @catch cannot swallow it.
+# The condition still derives from "error" so R's default handling
+# prints a stacktrace; the class marker is what routes it past @catch.
+morloc_mlc_internal_abort <- function(msg) {
+  stop(structure(
+    class = c("MorlocInternalError", "error", "condition"),
+    list(message = paste0("morloc internal error (R pool): ", msg), call = NULL)
+  ))
+}
+# @catch: evaluate fallible; on any error EXCEPT MorlocInternalError,
+# evaluate fallback. MorlocInternalError bypasses -- genuine compiler
+# bugs propagate past user @catch and terminate the pool.
 morloc_mlc_catch <- function(fallible, fallback) {
-  tryCatch(fallible(), error = function(e) fallback())
+  tryCatch(
+    fallible(),
+    error = function(e) {
+      if (inherits(e, "MorlocInternalError")) stop(e)
+      fallback()
+    }
+  )
 }
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }

@@ -16,9 +16,9 @@ import root-py
 sumList :: [Int] -> Int
 sumList xs = fold (+) 0 xs
 
-produce :: <IO> ()
+produce :: <IO, Err> ()
 produce = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
@@ -26,9 +26,9 @@ produce = do
   @write 0 o [6, 7, 8, 9, 10]
   @close o
 
-consume :: <IO> Int
+consume :: <IO, Err> Int
 consume = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs1 <- @next s
   xs2 <- @next s
   xs3 <- @next s

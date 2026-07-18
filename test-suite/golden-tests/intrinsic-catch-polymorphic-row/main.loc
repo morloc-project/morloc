@@ -1,0 +1,39 @@
+-- @catch composed through a helper whose fallible-arg lambda carries
+-- a polymorphic effect row (`<e, Err>`). Two independent compiler
+-- properties must both hold for this to compile:
+--
+--   1. @catch's synth rule accepts a fallible whose effect row is
+--      `<Err | e>` where `e` is a row variable, rather than requiring
+--      `Err` to be the only label (fixed by dropping `effectSetHasVar`
+--      rejection in Typecheck.hs's IntrCatch clause).
+--
+--   2. The subtype checker accepts a bare-value fallback into the
+--      `<e> b` slot that @catch's rule constructs, even when `b` is
+--      an unsolved existential. Without an existential-into-EffectU
+--      subtype rule, `fb :: b` checked against `<e> b` triggers an
+--      occurs check at InstantiateL and typecheck fails.
+
+module main
+  ( catchIntLoadFallback
+  , catchIntLoadPrimary
+  )
+
+effect IO
+escapable effect Err
+
+-- Both arguments to @catch are polymorphic in `e`. The bare-value
+-- fallback `fb :: b` fills the `<e> b` slot via the pure-into-effect
+-- subtype rule extended to existentials.
+withCatch :: (a -> <e, Err> b) -> a -> b -> <e> b
+withCatch f x fb = @catch (f x) fb
+
+tryLoad :: Str -> <IO, Err> Int
+tryLoad path = @load path
+
+catchIntLoadFallback :: <IO> Int
+catchIntLoadFallback =
+  withCatch tryLoad "/tmp/poly-catch-no-such-file.dat" -1
+
+catchIntLoadPrimary :: Str -> <IO> Int
+catchIntLoadPrimary path =
+  withCatch tryLoad path 0

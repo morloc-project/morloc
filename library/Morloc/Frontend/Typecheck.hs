@@ -1272,7 +1272,7 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
   (g3, _, levelE')  <- checkG g2 levelE  BT.intU
   (g4, _, listE')   <- checkG g3 listE   listExpectedT
   return ( g4
-         , EffectU ioEffectSet BT.unitU
+         , EffectU ioErrEffectSet BT.unitU
          , IntrinsicS IntrWrite [levelE', handleE', listE']
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
@@ -1281,6 +1281,12 @@ synthE _ _ (IntrinsicS IntrWrite args) =
 -- because that path's four row shapes can't express the constructed RHS
 -- <e | Err>: effectSetParts would flatten it to (labels={Err}, vars={e})
 -- and dispatch to the wrong subtype branch.
+--
+-- Polymorphic row-tails are accepted: as long as Err is concretely
+-- present in the resolved label set, the strip is well-defined and any
+-- residual row-var is preserved in the fallback's expected effect row.
+-- This lets fallible I/O compose through higher-order combinators like
+-- 'map (\p -> @catch (@load p) 0)' whose lambda carries `<Err | ?rest>`.
 synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
   (g1, fallibleT, fallibleE') <- synthG g fallibleE
   let fallibleT' = apply g1 fallibleT
@@ -1290,10 +1296,6 @@ synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
       unless (Set.member "Err" labels) $
         throwTypeError i $
           "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
-      when (effectSetHasVar effs) $
-        throwTypeError i $
-          "@catch cannot determine whether Err is present in a polymorphic effect row;"
-          <+> "add an effect annotation on the fallible expression"
       let expectedFallbackT = mkEffectU (removeEffectLabel "Err" effs) innerT
       (g2, _, fallbackE') <- checkG g1 fallbackE expectedFallbackT
       return (g2, apply g2 expectedFallbackT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
@@ -1326,47 +1328,50 @@ peelForallU t = t
 -- Receives the synthesized argument types so result types like `@next`'s `[a]`
 -- can extract `a` from the receiver's type.
 intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> (Gamma, TypeU)
+-- @load :: Str -> <IO, Err> a. Failure (missing file, decode mismatch,
+-- schema mismatch) raises Err; discharge with @catch.
 intrinsicTypeG g IntrLoad _ =
   let (g', loadType) = newvar "load_" g
-  in (g', EffectU ioEffectSet (OptionalU loadType))
+  in (g', EffectU ioErrEffectSet loadType)
+-- @read :: Str -> <Err> a. Pure JSON parse; failure raises Err.
 intrinsicTypeG g IntrRead _ =
   let (g', readType) = newvar "read_" g
-  in (g', OptionalU readType)
+  in (g', EffectU errEffectSet readType)
 -- @open: polymorphic return -- the user's inline ascription (e.g.
 -- `@open path :: IFile Sequence`) resolves the existential to the
 -- concrete handle type at typecheck time; codegen then inspects the
 -- resolved TypeF to dispatch to the right runtime entry point.
+-- Failure (missing/unreadable/non-packet) raises Err.
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
-  in (g', EffectU ioEffectSet openType)
+  in (g', EffectU ioErrEffectSet openType)
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
 intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
--- @next :: IStream a -> <IO> [a]. Pull `a` straight from the IStream
--- receiver's apply head; subtyping in checkIntrinsicArgs has already
--- pinned the receiver to `IStream <fresh>`.
+-- @next :: IStream a -> <IO, Err> [a]. Mid-stream decode failures raise Err.
 intrinsicTypeG g IntrNext [argT] =
   let a = streamElemTypeU argT in
-  (g, EffectU ioEffectSet (BT.listU a))
+  (g, EffectU ioErrEffectSet (BT.listU a))
 -- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
--- head on the result side.
+-- head on the result side. The IFile was already validated at @open,
+-- so this handle-setup step does not itself fail with Err.
 intrinsicTypeG g IntrStream [argT] =
   let a = streamElemTypeU argT in
   (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
 -- @append: polymorphic return like @open; the user ascription resolves
--- to the concrete OStream/IStream/IFile shape.
+-- to the concrete OStream/IStream/IFile shape. Failure raises Err.
 intrinsicTypeG g IntrAppend _ =
   let (g', appendType) = newvar "append_" g
-  in (g', EffectU ioEffectSet appendType)
--- @stdin / @stdout / @stderr: nullary intrinsics that produce a
--- typed stream handle. Element type is fixed by the user's ascription
--- (e.g. `@stdin :: <IO> IStream Int`); we mint the handle head here
--- and leave the element type as a fresh existential the ascription
--- unifies against.
+  in (g', EffectU ioErrEffectSet appendType)
+-- @stdin :: <IO, Err> IStream a. Claims the stdin slot; second open
+-- fails via the CAS-per-kind uniqueness guard. Piped-content decode
+-- errors surface at @next, not here (no isatty pre-check -- users
+-- may want the handle before any read).
+-- @stdout / @stderr: handle setup only; no Err since writes happen elsewhere.
 intrinsicTypeG g IntrStdin _ =
   let (g', a) = newvar "stdin_a" g in
-  (g', EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
+  (g', EffectU ioErrEffectSet (AppU (VarU BT.istreamVar) [a]))
 intrinsicTypeG g IntrStdout _ =
   let (g', a) = newvar "stdout_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
@@ -1389,10 +1394,10 @@ streamElemTypeU t = t
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
-intrinsicType IntrSave = EffectU ioEffectSet BT.unitU
-intrinsicType IntrSaveM = EffectU ioEffectSet BT.unitU
-intrinsicType IntrSaveJ = EffectU ioEffectSet BT.unitU
-intrinsicType IntrLoad = EffectU ioEffectSet (OptionalU (ExistU (TV "load_a") ([], Open) ([], Open)))
+intrinsicType IntrSave = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrSaveM = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrSaveJ = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrLoad = EffectU ioErrEffectSet (ExistU (TV "load_a") ([], Open) ([], Open))
 intrinsicType IntrHash = BT.strU
 intrinsicType IntrVersion = BT.strU
 intrinsicType IntrCompiled = BT.strU
@@ -1400,24 +1405,24 @@ intrinsicType IntrLang = BT.strU
 intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
-intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
+intrinsicType IntrRead = EffectU errEffectSet (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
 -- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
 intrinsicType IntrOpen =
   error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
 intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
-intrinsicType IntrFSchema = EffectU ioEffectSet BT.strU
-intrinsicType IntrFLength = EffectU ioEffectSet BT.intU
+intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
+intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
 intrinsicType IntrNext =
   error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
 intrinsicType IntrStream =
   error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
-intrinsicType IntrWrite = EffectU ioEffectSet BT.unitU
+intrinsicType IntrWrite = EffectU ioErrEffectSet BT.unitU
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
-intrinsicType IntrConcat = EffectU ioEffectSet BT.unitU
-intrinsicType IntrFlush = EffectU ioEffectSet BT.unitU
+intrinsicType IntrConcat = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrFlush = EffectU ioErrEffectSet BT.unitU
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
@@ -1613,10 +1618,10 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
 expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
 expand _ 0 g x = return (g, x)
 expand parentIdx n g e@(AppS _ _) = do
-  newIndex <- MM.getCounterWithPos parentIdx
+  newIdx <- MM.getCounterWithPos parentIdx
   let (g', v') = evarname g "v"
   e' <- applyExistential parentIdx v' e
-  let x' = LamS [v'] (AnnoS newIndex newIndex e')
+  let x' = LamS [v'] (AnnoS newIdx newIdx e')
   expand parentIdx (n - 1) g' x'
 expand parentIdx n g (LamS vs' (AnnoS t ci e)) = do
   let (g', v') = evarname g "v"
@@ -1626,8 +1631,8 @@ expand _ _ g x = return (g, x)
 
 applyExistential :: Int -> EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
 applyExistential parentIdx v' (AppS f xs') = do
-  newIndex <- MM.getCounterWithPos parentIdx
-  return $ AppS f (xs' <> [AnnoS newIndex newIndex (BndS v')])
+  newIdx <- MM.getCounterWithPos parentIdx
+  return $ AppS f (xs' <> [AnnoS newIdx newIdx (BndS v')])
 -- possibly illegal application, will type check after expansion
 applyExistential parentIdx v' e = do
   appIndex <- MM.getCounterWithPos parentIdx
@@ -2596,14 +2601,35 @@ checkEffectCoverage idx declared body = do
       uncovered = Set.difference inferred declEffs
   if Set.null uncovered
     then return ()
-    else
-      let blameIdx = case uncoveredEvalIdxs uncovered innerBody of
+    else do
+      -- Look up per-label escapability so the fix suggestion adapts:
+      -- - non-escapable missing labels can only be declared
+      -- - escapable missing labels may alternatively be handled by
+      --   a user-defined handler function
+      -- - `Err` specifically has @catch as its built-in handler.
+      effectMap <- MM.gets stateEffects
+      let anyEscapable = any (\l -> Map.lookup l effectMap == Just True)
+                             (Set.toList uncovered)
+          errMissing = Set.member "Err" uncovered
+          handlerLine
+            | not anyEscapable = ""
+            | errMissing =
+                "\nEscapable effects may alternatively be handled locally"
+                  <+> "with a handler function;"
+                  <+> "@catch specifically discharges Err."
+            | otherwise =
+                "\nEscapable effects may alternatively be handled locally"
+                  <+> "with a handler function."
+          blameIdx = case uncoveredEvalIdxs uncovered innerBody of
             (i : _) -> i
             [] -> idx
-       in MM.throwSourcedError blameIdx $
-            "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
-              <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
-              <+> "Either add the effect to the signature or sequence the operation in a do-block."
+      MM.throwSourcedError blameIdx $
+        "Effect-coverage failure: body produces effect(s) not in the signature."
+          <> "\n  declared:" <+> renderEffectLabels declEffs
+          <> "\n  inferred:" <+> renderEffectLabels inferred
+          <> "\n  missing: " <+> renderEffectLabels uncovered
+          <> "\nFix by declaring the missing effect(s) in the signature."
+          <> handlerLine
   where
     renderEffectLabels s
       | Set.null s = "<>"

@@ -12,10 +12,10 @@ module main (dataAndLog)
 
 import root-py
 
-dataAndLog :: <IO> ()
+dataAndLog :: <IO, Err> ()
 dataAndLog = do
-  o <- @stdout :: <IO> OStream Int
-  e <- @stderr :: <IO> OStream Str
+  o <- @stdout :: <IO, Err> OStream Int
+  e <- @stderr :: <IO, Err> OStream Str
   @write 0 e ["started"]
   @flush e
   @write 0 o [100, 200, 300]
