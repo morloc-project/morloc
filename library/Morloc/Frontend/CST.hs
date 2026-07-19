@@ -104,7 +104,6 @@ data CstExpr
   | CLamE [Loc CstExpr] (Loc CstExpr)
   | CLetE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
   | CBopE (Loc CstExpr) Located (Loc CstExpr)
-  | CLabeledVarE Text EVar  -- label:var (e.g., large:mean)
   | CVarE EVar
   | CIntE Integer
   | CRealE RealLit

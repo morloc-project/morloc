@@ -7,7 +7,7 @@ sum = fold (+) 0.0
 
 -- Labeled: every call should materialize $MORLOC_RUN_BASE/<id>/a/log
 foo :: [Real] -> Real
-foo = a:sum
+foo = a@sum
 
 -- Unlabeled: no log emission, so the run dir must NEVER be materialized
 bar :: [Real] -> Real

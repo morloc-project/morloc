@@ -1666,13 +1666,6 @@ mkImplicitMain es = do
 
 desugarExpr :: Loc CstExpr -> D ExprI
 -- Variables and literals
-desugarExpr (Loc sp (CLabeledVarE label v)) = do
-  moduleConfig <- State.gets dsModuleConfig
-  case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
-    Just config -> freshExprSpan sp (VarE (config { manifoldConfigLabel = Just label }) v)
-    Nothing -> dfail (startPos sp)
-      ("Undefined label '" ++ T.unpack label
-       ++ "': no matching entry in module config labeled-groups")
 desugarExpr (Loc sp (CVarE v)) = freshExprSpan sp (VarE defaultValue v)
 desugarExpr (Loc sp (CIntE n)) = freshExprSpan sp (IntE n)
 desugarExpr (Loc sp (CRealE n)) = freshExprSpan sp (RealE n)
@@ -1791,6 +1784,17 @@ desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedA
 desugarExpr (Loc _ (CInlineE {})) = error "desugarExpr: unexpected CInlineE in expression position"
 desugarExpr (Loc sp CUnderscoreE) =
   dfail (startPos sp) "'_' is only valid in a binding position (let / do-bind / lambda / function-def arg)"
+-- Hook / labeled variable: `label@name` in expression position. The parser
+-- produces CAsE for `LOWER '@' atom_expr`; a bare-identifier body here means
+-- the user intended a hook (route the call through the labeled manifold
+-- group), not an as-pattern.
+desugarExpr (Loc sp (CAsE (EV label) (Loc _ (CVarE v)))) = do
+  moduleConfig <- State.gets dsModuleConfig
+  case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
+    Just config -> freshExprSpan sp (VarE (config { manifoldConfigLabel = Just label }) v)
+    Nothing -> dfail (startPos sp)
+      ("Undefined label '" ++ T.unpack label
+       ++ "': no matching entry in module config labeled-groups")
 desugarExpr (Loc sp (CAsE _ _)) =
   dfail (startPos sp) "as-pattern '@' is only valid in a binding position"
 

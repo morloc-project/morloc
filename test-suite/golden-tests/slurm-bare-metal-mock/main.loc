@@ -7,4 +7,4 @@ source Py from "bar.py" ("bar")
 bar :: Int -> Int
 
 foo :: Int -> Int
-foo x = big:bar x
+foo x = big@bar x

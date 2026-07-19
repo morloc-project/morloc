@@ -79,7 +79,6 @@ import qualified Morloc.BaseTypes as BT
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
   NSDOT      { Located _ TokNsDot _ }
-  LABELCOLON { Located _ TokLabelColon _ }
   GDOTCHAIN  { Located _ TokGetterDotChain _ }
   '='        { Located _ TokEquals _ }
   '::'       { Located _ TokDColon _ }
@@ -798,7 +797,6 @@ bracket_axis :: { CstBracketAxis }
 
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
-  | LOWER LABELCOLON LOWER    { Loc ($1 <-> $3) (CLabeledVarE (getName $1) (EV (getName $3))) }
   | LOWER                     { at $1 (CVarE (EV (getName $1))) }
 
 bool_expr :: { Loc CstExpr }
