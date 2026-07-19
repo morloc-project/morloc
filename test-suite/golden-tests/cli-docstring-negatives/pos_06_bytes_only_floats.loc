@@ -6,6 +6,6 @@ import root
 -- packed raw bytes without packet sniffing.
 foo ::
   --' form: bytes-only
-  [Float64] ->
+  [F64] ->
   Int
 foo x = 0

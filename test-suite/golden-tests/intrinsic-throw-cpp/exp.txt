@@ -1,0 +1,8 @@
+exit:1
+PLAIN: boom
+exit:1
+INTERP: hello n=5
+exit:1
+GUARD: too short n=2
+5
+exit:0

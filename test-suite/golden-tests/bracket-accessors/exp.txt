@@ -46,13 +46,13 @@ true
 300
 --- sliceFromOptionalStart ---
 [10,20,30]
---- indexInt8 ---
+--- indexI8 ---
 10
---- indexInt16 ---
+--- indexI16 ---
 20
---- indexUInt32 ---
+--- indexU32 ---
 30
---- sliceInt8Bound ---
+--- sliceI8Bound ---
 [20,30]
 --- sliceMixedWidthBounds ---
 [20,30,40]

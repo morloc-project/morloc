@@ -49,14 +49,14 @@ all:
 	./nexus ifileIndexFromForeignLength       "/tmp/bai-idx-foreign.pkt"        >> obs.txt 2>> obs.err
 	echo "--- ifileSliceFromOptionalStart ---" >> obs.txt
 	./nexus ifileSliceFromOptionalStart       "/tmp/bai-slc-optstart.pkt"       >> obs.txt 2>> obs.err
-	echo "--- ifileIndexInt8 ---"             >> obs.txt
-	./nexus ifileIndexInt8                    "/tmp/bai-idx-i8.pkt"             >> obs.txt 2>> obs.err
-	echo "--- ifileIndexInt16 ---"            >> obs.txt
-	./nexus ifileIndexInt16                   "/tmp/bai-idx-i16.pkt"            >> obs.txt 2>> obs.err
-	echo "--- ifileIndexUInt32 ---"           >> obs.txt
-	./nexus ifileIndexUInt32                  "/tmp/bai-idx-u32.pkt"            >> obs.txt 2>> obs.err
-	echo "--- ifileSliceInt8Bound ---"        >> obs.txt
-	./nexus ifileSliceInt8Bound               "/tmp/bai-slc-i8.pkt"             >> obs.txt 2>> obs.err
+	echo "--- ifileIndexI8 ---"             >> obs.txt
+	./nexus ifileIndexI8                    "/tmp/bai-idx-i8.pkt"             >> obs.txt 2>> obs.err
+	echo "--- ifileIndexI16 ---"            >> obs.txt
+	./nexus ifileIndexI16                   "/tmp/bai-idx-i16.pkt"            >> obs.txt 2>> obs.err
+	echo "--- ifileIndexU32 ---"           >> obs.txt
+	./nexus ifileIndexU32                  "/tmp/bai-idx-u32.pkt"            >> obs.txt 2>> obs.err
+	echo "--- ifileSliceI8Bound ---"        >> obs.txt
+	./nexus ifileSliceI8Bound               "/tmp/bai-slc-i8.pkt"             >> obs.txt 2>> obs.err
 	echo "--- ifileSliceMixedWidthBounds ---" >> obs.txt
 	./nexus ifileSliceMixedWidthBounds        "/tmp/bai-slc-mixed.pkt"          >> obs.txt 2>> obs.err
 	echo "--- ifileCrossPoolReceiverPyToCpp ---" >> obs.txt

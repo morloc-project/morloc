@@ -16,14 +16,14 @@ Morloc provides a set of built-in types that map to native representations acros
 
 | Type | Width | Signedness |
 |------|-------|------------|
-| `Int8` | 8-bit | Signed |
-| `Int16` | 16-bit | Signed |
-| `Int32` | 32-bit | Signed |
-| `Int64` | 64-bit | Signed |
-| `UInt8` | 8-bit | Unsigned |
-| `UInt16` | 16-bit | Unsigned |
-| `UInt32` | 32-bit | Unsigned |
-| `UInt64` | 64-bit | Unsigned |
+| `I8` | 8-bit | Signed |
+| `I16` | 16-bit | Signed |
+| `I32` | 32-bit | Signed |
+| `I64` | 64-bit | Signed |
+| `U8` | 8-bit | Unsigned |
+| `U16` | 16-bit | Unsigned |
+| `U32` | 32-bit | Unsigned |
+| `U64` | 64-bit | Unsigned |
 
 The unsized `Int` type is equivalent to the platform's default integer width. For serialization, `Int` uses the msgpack `i8` (64-bit signed) schema.
 
@@ -31,8 +31,8 @@ The unsized `Int` type is equivalent to the platform's default integer width. Fo
 
 | Type | Precision |
 |------|-----------|
-| `Float32` | IEEE 754 single precision |
-| `Float64` | IEEE 754 double precision |
+| `F32` | IEEE 754 single precision |
+| `F64` | IEEE 754 double precision |
 
 The unsized `Real` type is equivalent to `Float64`.
 

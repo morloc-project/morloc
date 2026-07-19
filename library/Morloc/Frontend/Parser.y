@@ -52,7 +52,11 @@ import qualified Morloc.BaseTypes as BT
 --   as-pattern glue, and do-stmt `atom_expr '<-' expr | expr` overlap.
 --   All resolve correctly by shift (extend the atom chain / take the
 --   bind branch).
-%expect 95
+-- - 2 from '!' prefix eval-sugar: when an atom_expr chain has seen its
+--   current atom and the next token is '!', the parser can either reduce
+--   the chain or extend it with a new force_expr atom. Shift is correct
+--   (extend the atom chain, so `bar !x` = `bar (!x)`).
+%expect 96
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -75,7 +79,6 @@ import qualified Morloc.BaseTypes as BT
   '.'        { Located _ TokDot _ }
   GDOT       { Located _ TokGetterDot _ }
   NSDOT      { Located _ TokNsDot _ }
-  LABELCOLON { Located _ TokLabelColon _ }
   GDOTCHAIN  { Located _ TokGetterDotChain _ }
   '='        { Located _ TokEquals _ }
   '::'       { Located _ TokDColon _ }
@@ -126,6 +129,7 @@ import qualified Morloc.BaseTypes as BT
   INTERPCLOSE { Located _ TokInterpClose _ }
   INTRINSIC  { Located _ (TokIntrinsic _) _ }
   TICKNAME   { Located _ (TokTickName _) _ }
+  BACKTICK   { Located _ (TokBacktickName _) _ }
   ';'        { Located _ TokSemicolon _ }
   '%inline'  { Located _ TokPragmaInline _ }
   EOF        { Located _ TokEOF _ }
@@ -175,7 +179,7 @@ top_decl :: { [Loc CstExpr] }
   : import_decl       { [$1] }
   | typedef_decl      { [$1] }
   | typeclass_decl    { [$1] }
-  | effect_decl       { [$1] }
+  | effect_decl       { $1 }
   | instance_decl     { $1 }
   | fixity_decl       { [$1] }
   | source_decl       { $1 }
@@ -423,7 +427,7 @@ non_string_atom :: { TypeU }
   | '[' type ']'              { BT.listU $2 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { LabeledU (TV (getName $1)) $3 }
+  | LOWER '@' non_fun_type   { LabeledU (TV (getName $1)) $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | INTEGER                   { NatLitU (getInt $1) }
 
@@ -441,11 +445,25 @@ typeclass_decl :: { Loc CstExpr }
 -- importable/exportable entity (like a type or class name). Default is
 -- inescapable (safe); `escapable` opts a single effect into being
 -- discharge-able by a sourced handler.
-effect_decl :: { Loc CstExpr }
-  : 'effect' UPPER              { at $1 (CEffE (getName $2) False) }
-  | 'escapable' 'effect' UPPER  { at $1 (CEffE (getName $3) True) }
+--
+-- Multiple effects may be declared on one line, comma-separated:
+-- `effect IO, Err` desugars to `effect IO` followed by `effect Err`.
+-- The `escapable` prefix applies to every name in the list.
+effect_decl :: { [Loc CstExpr] }
+  : 'effect' effect_name_list
+      { map (\n -> at $1 (CEffE (getName n) False)) $2 }
+  | 'escapable' 'effect' effect_name_list
+      { map (\n -> at $1 (CEffE (getName n) True)) $3 }
   | 'effect' LOWER              {% effectNameError $2 }
   | 'escapable' 'effect' LOWER  {% effectNameError $3 }
+
+-- Comma-separated list of effect names.  All must be UPPER; a LOWER
+-- anywhere in the list triggers 'effectNameError' pointing at the
+-- offending token.
+effect_name_list :: { [Located] }
+  : UPPER                            { [$1] }
+  | effect_name_list ',' UPPER       { $1 ++ [$3] }
+  | effect_name_list ',' LOWER       {% effectNameError $3 }
 
 class_head :: { CstClassHead }
   : app_type '=>' app_type
@@ -529,38 +547,46 @@ opt_from :: { Maybe Text }
   : {- empty -}                    { Nothing }
   | 'from' STRING                  { Just (getString $2) }
 
-source_items :: { [(Text, Maybe Text)] }
+source_items :: { [(Bool, Text, Maybe Text)] }
   : source_item                          { [$1] }
   | source_items ',' source_item         { $1 ++ [$3] }
 
-source_item :: { (Text, Maybe Text) }
-  : STRING                              { (getString $1, Nothing) }
-  | STRING 'as' LOWER                   { (getString $1, Just (getName $3)) }
-  | STRING 'as' UPPER                   { (getString $1, Just (getName $3)) }
-  | STRING 'as' source_op               { (getString $1, Just $3) }
-  | source_op                           { ($1, Nothing) }
-  | source_op 'as' source_op            { ($1, Just $3) }
-  | source_op 'as' LOWER               { ($1, Just (getName $3)) }
-  | source_op 'as' UPPER               { ($1, Just (getName $3)) }
+source_item :: { (Bool, Text, Maybe Text) }
+  : STRING                              { (False, getString $1, Nothing) }
+  | STRING 'as' LOWER                   { (False, getString $1, Just (getName $3)) }
+  | STRING 'as' UPPER                   { (False, getString $1, Just (getName $3)) }
+  | STRING 'as' source_op               { (False, getString $1, Just $3) }
+  | source_op                           { (False, $1, Nothing) }
+  | source_op 'as' source_op            { (False, $1, Just $3) }
+  | source_op 'as' LOWER               { (False, $1, Just (getName $3)) }
+  | source_op 'as' UPPER               { (False, $1, Just (getName $3)) }
+  -- Backtick-quoted foreign name: `text` forces the sourced binding to
+  -- be treated as an infix operator whose emitted string is <text>.
+  -- The alias is required (there is no useful "morloc-side name" for a
+  -- keyword like `and`, so the user must supply e.g. `and` as (&&)).
+  | BACKTICK 'as' source_op             { (True, getBacktick $1, Just $3) }
+  | BACKTICK 'as' LOWER                 { (True, getBacktick $1, Just (getName $3)) }
+  | BACKTICK 'as' UPPER                 { (True, getBacktick $1, Just (getName $3)) }
 
 source_op :: { Text }
   : '(' operator_name ')'              { getOp $2 }
   | '(' '-' ')'                        { "-" }
   | '(' '.' ')'                        { "." }
 
-source_new_items :: { [(Bool, Text, Located)] }
+source_new_items :: { [(Bool, Bool, Text, Located)] }
   : source_new_item                          { [$1] }
   | source_new_items VSEMI source_new_item   { $1 ++ [$3] }
 
-source_new_item :: { (Bool, Text, Located) }
-  : '%inline' source_new_term         { (True, fst $2, snd $2) }
-  | source_new_term                   { (False, fst $1, snd $1) }
+source_new_item :: { (Bool, Bool, Text, Located) }
+  : '%inline' source_new_term         { let (b, n, t) = $2 in (True, b, n, t) }
+  | source_new_term                   { let (b, n, t) = $1 in (False, b, n, t) }
 
-source_new_term :: { (Text, Located) }
-  : LOWER                             { (getName $1, $1) }
-  | '(' operator_name ')'            { (getOp $2, $2) }
-  | '(' '-' ')'                      { ("-", $2) }
-  | '(' '.' ')'                      { (".", $2) }
+source_new_term :: { (Bool, Text, Located) }
+  : LOWER                             { (False, getName $1, $1) }
+  | '(' operator_name ')'            { (False, getOp $2, $2) }
+  | '(' '-' ')'                      { (False, "-", $2) }
+  | '(' '.' ')'                      { (False, ".", $2) }
+  | BACKTICK                          { (True, getBacktick $1, $1) }
 
 --------------------------------------------------------------------
 -- Expressions
@@ -648,6 +674,11 @@ atom_expr :: { Loc CstExpr }
   | intrinsic_expr            { $1 }
   | wildcard_expr             { $1 }
   | as_expr                   { $1 }
+  | force_expr                { $1 }
+
+-- '!' e -- eval sugar, tight prefix so `bar !x` = `bar (!x)` and `!!x` = `!(!x)`.
+force_expr :: { Loc CstExpr }
+  : '!' atom_expr             { Loc ($1 <-> $2) (CForceE $2) }
 
 -- Legal only in binding positions; rejected elsewhere in Desugar.
 wildcard_expr :: { Loc CstExpr }
@@ -766,7 +797,6 @@ bracket_axis :: { CstBracketAxis }
 
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
-  | LOWER LABELCOLON LOWER    { Loc ($1 <-> $3) (CLabeledVarE (getName $1) (EV (getName $3))) }
   | LOWER                     { at $1 (CVarE (EV (getName $1))) }
 
 bool_expr :: { Loc CstExpr }
@@ -842,7 +872,7 @@ atom_type :: { TypeU }
   -- out the ambiguity.
   | '[' tick_list1 ']'        { ListLitU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { $3 }
+  | LOWER '@' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { StrLitU (getString $1) }
   | INTEGER                   { NatLitU (getInt $1) }
@@ -919,7 +949,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '{' '}'                      { (locPos $1, RecEmptyU) }
   | '{' rec_entries '}'          { (locPos $1, foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
-  | LOWER ':' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
+  | LOWER '@' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
   | STRING                      { (locPos $1, StrLitU (getString $1)) }
   | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }
@@ -1026,6 +1056,12 @@ getIntrinsicName _ = ""
 getTickName :: Located -> Text
 getTickName (Located _ (TokTickName n) _) = n
 getTickName _ = ""
+
+-- Payload of a backtick-quoted name (the enclosing backticks are not
+-- included). Used only by source-item productions.
+getBacktick :: Located -> Text
+getBacktick (Located _ (TokBacktickName n) _) = n
+getBacktick _ = ""
 
 parseKind :: Text -> Kind
 parseKind "Nat" = KindNat

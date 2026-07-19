@@ -10,7 +10,7 @@ import table-py
 --   {x=Int} + {y=Str} = {x=Int, y=Str}).
 --
 -- Section 2 (setCol-dropCols): each call lifts a Str literal into the
---   type-level row schema via the f:Str / l:[Str] label mechanism,
+--   type-level row schema via the f@Str / l:[Str] label mechanism,
 --   exercising the full parser-promotion-substitution-reduction chain
 --   on a real stdlib signature. The implicit Disjoint constraint on the
 --   `(r - f) + Singleton f a` form discharges trivially since (r - f)

@@ -47,7 +47,7 @@ module main (
   ruint32Id,
   ruint64Id,
   -- r NA: source returns NA_integer_; pack-side must refuse
-  returnNAInt8,
+  returnNAI8,
   -- cpp
   cintDbl,
   cint16Dbl,
@@ -75,34 +75,34 @@ bigVarIntNeg = -123456789012345678901234567890
 intId :: Int -> Int
 intId x = x
 
-uint8Id :: UInt8 -> UInt8
+uint8Id :: U8 -> U8
 uint8Id x = x
 
-uint8ListId :: [UInt8] -> [UInt8]
+uint8ListId :: [U8] -> [U8]
 uint8ListId x = x
 
 intListId :: [Int] -> [Int]
 intListId x = x
 
-uint16Id :: UInt16 -> UInt16
+uint16Id :: U16 -> U16
 uint16Id x = x
 
-uint32Id :: UInt32 -> UInt32
+uint32Id :: U32 -> U32
 uint32Id x = x
 
-uint64Id :: UInt64 -> UInt64
+uint64Id :: U64 -> U64
 uint64Id x = x
 
-int8Id :: Int8 -> Int8
+int8Id :: I8 -> I8
 int8Id x = x
 
-int16Id :: Int16 -> Int16
+int16Id :: I16 -> I16
 int16Id x = x
 
-int32Id :: Int32 -> Int32
+int32Id :: I32 -> I32
 int32Id x = x
 
-int64Id :: Int64 -> Int64
+int64Id :: I64 -> I64
 int64Id x = x
 
 
@@ -110,28 +110,28 @@ int64Id x = x
 pintDbl :: Int -> Int
 pintDbl x = idpy (x * 2)
 
-puint8Dbl :: UInt8 -> UInt8
+puint8Dbl :: U8 -> U8
 puint8Dbl x = idpy (x * 2)
 
-puint16Dbl :: UInt16 -> UInt16
+puint16Dbl :: U16 -> U16
 puint16Dbl x = idpy (x * 2)
 
-puint32Dbl :: UInt32 -> UInt32
+puint32Dbl :: U32 -> U32
 puint32Dbl x = idpy (x * 2)
 
-puint64Dbl :: UInt64 -> UInt64
+puint64Dbl :: U64 -> U64
 puint64Dbl x = idpy (x * 2)
 
-pint8Dbl :: Int8 -> Int8
+pint8Dbl :: I8 -> I8
 pint8Dbl x = idpy (x * 2)
 
-pint16Dbl :: Int16 -> Int16
+pint16Dbl :: I16 -> I16
 pint16Dbl x = idpy (x * 2)
 
-pint32Dbl :: Int32 -> Int32
+pint32Dbl :: I32 -> I32
 pint32Dbl x = idpy (x * 2)
 
-pint64Dbl :: Int64 -> Int64
+pint64Dbl :: I64 -> I64
 pint64Dbl x = idpy (x * 2)
 
 
@@ -139,28 +139,28 @@ pint64Dbl x = idpy (x * 2)
 cintDbl :: Int -> Int
 cintDbl x = idcpp (x * 2)
 
-cuint8Dbl :: UInt8 -> UInt8
+cuint8Dbl :: U8 -> U8
 cuint8Dbl x = idcpp (x * 2)
 
-cuint16Dbl :: UInt16 -> UInt16
+cuint16Dbl :: U16 -> U16
 cuint16Dbl x = idcpp (x * 2)
 
-cuint32Dbl :: UInt32 -> UInt32
+cuint32Dbl :: U32 -> U32
 cuint32Dbl x = idcpp (x * 2)
 
-cuint64Dbl :: UInt64 -> UInt64
+cuint64Dbl :: U64 -> U64
 cuint64Dbl x = idcpp (x * 2)
 
-cint8Dbl :: Int8 -> Int8
+cint8Dbl :: I8 -> I8
 cint8Dbl x = idcpp (x * 2)
 
-cint16Dbl :: Int16 -> Int16
+cint16Dbl :: I16 -> I16
 cint16Dbl x = idcpp (x * 2)
 
-cint32Dbl :: Int32 -> Int32
+cint32Dbl :: I32 -> I32
 cint32Dbl x = idcpp (x * 2)
 
-cint64Dbl :: Int64 -> Int64
+cint64Dbl :: I64 -> I64
 cint64Dbl x = idcpp (x * 2)
 
 -- Python -> wire -> C++ Int chain. Python preserves arbitrary-precision
@@ -174,64 +174,64 @@ pintToCint x = idcpp (idpy x)
 rintDbl :: Int -> Int
 rintDbl x = idr (x * 2)
 
-ruint8Dbl :: UInt8 -> UInt8
+ruint8Dbl :: U8 -> U8
 ruint8Dbl x = idr (x * 2)
 
-ruint16Dbl :: UInt16 -> UInt16
+ruint16Dbl :: U16 -> U16
 ruint16Dbl x = idr (x * 2)
 
-ruint32Dbl :: UInt32 -> UInt32
+ruint32Dbl :: U32 -> U32
 ruint32Dbl x = idr (x * 2)
 
-ruint64Dbl :: UInt64 -> UInt64
+ruint64Dbl :: U64 -> U64
 ruint64Dbl x = idr (x * 2)
 
-rint8Dbl :: Int8 -> Int8
+rint8Dbl :: I8 -> I8
 rint8Dbl x = idr (x * 2)
 
-rint16Dbl :: Int16 -> Int16
+rint16Dbl :: I16 -> I16
 rint16Dbl x = idr (x * 2)
 
-rint32Dbl :: Int32 -> Int32
+rint32Dbl :: I32 -> I32
 rint32Dbl x = idr (x * 2)
 
-rint64Dbl :: Int64 -> Int64
+rint64Dbl :: I64 -> I64
 rint64Dbl x = idr (x * 2)
 
 
 
 -- R identity round-trips. R has only "integer" (32-bit signed) and
--- "numeric" (double, exact integers up to 2^53). Int64 / UInt32 / UInt64
+-- "numeric" (double, exact integers up to 2^53). I64 / U32 / U64
 -- map to "numeric"; values beyond 2^53 are not exactly representable and
 -- may silently lose precision.
 rintId :: Int -> Int
 rintId x = idr x
 
-rint8Id :: Int8 -> Int8
+rint8Id :: I8 -> I8
 rint8Id x = idr x
 
-rint16Id :: Int16 -> Int16
+rint16Id :: I16 -> I16
 rint16Id x = idr x
 
-rint32Id :: Int32 -> Int32
+rint32Id :: I32 -> I32
 rint32Id x = idr x
 
-rint64Id :: Int64 -> Int64
+rint64Id :: I64 -> I64
 rint64Id x = idr x
 
-ruint8Id :: UInt8 -> UInt8
+ruint8Id :: U8 -> U8
 ruint8Id x = idr x
 
-ruint16Id :: UInt16 -> UInt16
+ruint16Id :: U16 -> U16
 ruint16Id x = idr x
 
-ruint32Id :: UInt32 -> UInt32
+ruint32Id :: U32 -> U32
 ruint32Id x = idr x
 
-ruint64Id :: UInt64 -> UInt64
+ruint64Id :: U64 -> U64
 ruint64Id x = idr x
 
--- R source returns NA_integer_; the wire-pack into Int8 must refuse
+-- R source returns NA_integer_; the wire-pack into I8 must refuse
 -- rather than silently casting NaN to INT8_MIN.
-returnNAInt8 :: Int8 -> Int8
-source R from "naSrc.R" ("returnNAInt8" as returnNAInt8)
+returnNAI8 :: I8 -> I8
+source R from "naSrc.R" ("returnNAI8" as returnNAI8)

@@ -14,7 +14,7 @@ all:
 	  && echo "trace_in_summary: PASS" >> obs.txt \
 	  || echo "trace_in_summary: FAIL" >> obs.txt
 	@dir=$$(ls -d logs/*/ 2>/dev/null); \
-	  cnt=$$(grep -o "frame " $$dir/summary.json | wc -l); \
+	  cnt=$$(grep -o "  at " $$dir/summary.json | wc -l); \
 	  test $$cnt -ge 2 \
 	  && echo "trace_has_multiple_frames: PASS" >> obs.txt \
 	  || echo "trace_has_multiple_frames: FAIL (got $$cnt)" >> obs.txt

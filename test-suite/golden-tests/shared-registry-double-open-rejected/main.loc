@@ -18,9 +18,9 @@ module main
 
 import root
 
-testDoubleOpen :: Str -> <IO> ()
+testDoubleOpen :: Str -> <IO, Err> ()
 testDoubleOpen path = do
-  @open path :: <IO> OStream Int
+  @open path :: <IO, Err> OStream Int
   -- This second open MUST error: file already exists + flocked.
-  @open path :: <IO> OStream Int
+  @open path :: <IO, Err> OStream Int
   ()

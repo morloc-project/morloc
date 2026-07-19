@@ -1,0 +1,74 @@
+-- @catch on the migrated fallible I/O intrinsics. Every intrinsic
+-- that gained <Err> in the effect-row migration is exercised via a
+-- fallible + fallback pair; the fallible path always fails (missing
+-- file, malformed content, etc.) so the fallback value is what the
+-- nexus returns.
+
+module main
+  ( catchLoad
+  , catchLoadFallbackChain
+  , catchRead
+  , catchOpen
+  , catchOpenTypedIStream
+  , catchFschema
+  , catchLoadNested
+  , directOpenSucceeds
+  )
+
+effect IO, Err
+
+-- @load a nonexistent file, catch, return a default value. @catch
+-- strips only Err; the residual <IO> propagates to the signature.
+catchLoad :: Int -> <IO> Int
+catchLoad def = @catch (@load "/tmp/intrinsic-io-catch-missing-XYZ.dat" :: <IO, Err> Int) def
+
+-- Nested @catch: primary fails, fallback also fails, catch again.
+catchLoadFallbackChain :: <IO> Int
+catchLoadFallbackChain =
+  @catch (@load "/tmp/io-catch-nope-1.dat" :: <IO, Err> Int)
+    (@catch (@load "/tmp/io-catch-nope-2.dat" :: <IO, Err> Int) 999)
+
+-- @read is <Err>-only (no IO); the strip leaves no effect.
+catchRead :: Str -> Int
+catchRead def_str = @catch (@read "not valid json" :: <Err> Int) 7
+
+-- @open of a missing file, catch. Return a sentinel string.
+catchOpen :: <IO> Str
+catchOpen =
+  @catch (do
+    _ <- @open "/tmp/io-catch-missing-XYZ.dat" :: <IO, Err> (IFile Int)
+    "opened")
+    "missing"
+
+-- @open IStream on a missing file, catch.
+catchOpenTypedIStream :: <IO> Str
+catchOpenTypedIStream =
+  @catch (do
+    _ <- @open "/tmp/io-catch-nope-stream.dat" :: <IO, Err> (IStream Int)
+    "stream-ok")
+    "stream-missing"
+
+-- @fschema on a missing file, catch.
+catchFschema :: <IO> Str
+catchFschema =
+  @catch (@fschema "/tmp/io-catch-fschema-missing.dat" :: <IO, Err> Str)
+    "fschema-fallback"
+
+-- Nested @catch: the fallback is itself a @catch on a fallible
+-- expression. When the primary and the secondary both fail, the
+-- innermost sentinel is what surfaces. This is the natural shape
+-- for tiered fallback -- each fallible tier must be Err-stripped
+-- (by its own @catch) before appearing as the fallback of the tier
+-- above.
+catchLoadNested :: <IO> Int
+catchLoadNested =
+  @catch (@load "/tmp/io-catch-inner-nope-1.dat" :: <IO, Err> Int)
+    (@catch (@load "/tmp/io-catch-inner-nope-2.dat" :: <IO, Err> Int) 77)
+
+-- Sanity check: a working path succeeds, no @catch needed at the top
+-- level (Err escapes to the export signature, which declares it).
+directOpenSucceeds :: Str -> <IO, Err> Str
+directOpenSucceeds path = do
+  @save 0 "morloc-payload" path
+  s <- @load path :: <IO, Err> Str
+  s

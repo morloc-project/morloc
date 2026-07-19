@@ -601,13 +601,6 @@ subtypeError t1 t2 msg =
       <> "\n  "
       <> prettyTypeU t1 <+> "<:" <+> prettyTypeU t2
 
-isExistU :: TypeU -> Bool
-isExistU ExistU{} = True
-isExistU _ = False
-
-notExistU :: TypeU -> Bool
-notExistU = not . isExistU
-
 -- | Bind an effect-row tail variable to an effect set in 'gammaEffSubs'.
 -- Mirrors nat-variable solving (occurs-check, then insert). The set is
 -- reduced through the current gamma first so we never store a stale or
@@ -639,28 +632,41 @@ subtypeEffRows scope e1 e2 i1 i2 g =
       lhs = EffectU e1' i1
       rhs = EffectU e2' i2
       recurse g' = subtype scope (apply g' i1) (apply g' i2) g'
+      -- Effect-coverage failure message. The subtype code has no
+      -- MorlocMonad access, so it cannot look up per-label
+      -- escapability. `checkEffectCoverage` in Typecheck.hs produces
+      -- a richer, escapability-aware version of this message for the
+      -- coverage-check path; here we keep the general fixes.
+      missingMsg missing =
+        "body performs effect(s)"
+          <+> renderEffectLabels missing
+          <+> "not in the declared type."
+          <+> "Fix by declaring the missing effect(s) in the signature."
+          <> if Set.member "Err" missing
+               then
+                 "\n  Escapable effects may alternatively be handled locally"
+                 <+> "with a handler function;"
+                 <+> "@catch specifically discharges Err."
+               else ""
    in case (Set.toList vs1, Set.toList vs2) of
         -- closed <: closed : effect subsumption
         ([], []) ->
           if Set.isSubsetOf l1 l2
             then subtype scope i1 i2 g
             else
-              subtypeError lhs rhs
-                "the left effect set is not a subset of the right effect set"
+              subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
         -- left open <: closed : l1 must fit, solve the tail to the remainder
         ([t1], []) ->
           if Set.isSubsetOf l1 l2
             then solveEff t1 (EffectSet (Set.difference l2 l1)) g >>= recurse
             else
-              subtypeError lhs rhs
-                "the left effect labels are not contained in the closed right row"
+              subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
         -- closed <: right open : l2 must fit, solve the tail to the remainder
         ([], [t2]) ->
           if Set.isSubsetOf l2 l1
             then solveEff t2 (EffectSet (Set.difference l1 l2)) g >>= recurse
             else
-              subtypeError lhs rhs
-                "the right effect labels are not contained in the closed left row"
+              subtypeError lhs rhs (missingMsg (Set.difference l2 l1))
         -- open <: open
         ([t1], [t2])
           -- shared tail variable: the tails cancel, subsumption on labels
@@ -668,8 +674,7 @@ subtypeEffRows scope e1 e2 i1 i2 g =
               if Set.isSubsetOf l1 l2
                 then subtype scope i1 i2 g
                 else
-                  subtypeError lhs rhs
-                    "effect labels around the shared row variable are not a subset"
+                  subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
           -- distinct tails: solve the left tail to (l2 \ l1) | t2
           | Set.isSubsetOf l1 l2 ->
               solveEff
@@ -678,12 +683,15 @@ subtypeEffRows scope e1 e2 i1 i2 g =
                 g
                 >>= recurse
           | otherwise ->
-              subtypeError lhs rhs
-                "the left effect labels are not contained in the right open row"
+              subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
         -- more than one tail variable in a row is unsupported
         _ ->
           subtypeError lhs rhs
             "an effect row may contain at most one effect variable"
+  where
+    renderEffectLabels s
+      | Set.null s = "<>"
+      | otherwise = "<" <> hcat (punctuate ", " (map pretty (Set.toList s))) <> ">"
 
 -- Nat expression helpers for SOP-based comparison
 isNatExpr :: TypeU -> Bool
@@ -1032,6 +1040,20 @@ subtype scope t1@(NamU o1 v1 p1 ((k1, x1) : rs1)) t2@(NamU o2 v2 p2 es2) g0 =
     (Just (_, x2), rs2) ->
       subtype scope x1 x2 g0
         >>= subtype scope (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2)
+-- Pure-into-EffectU rule (must precede the generic InstantiateL /
+-- InstantiateR arms below). A pure value fits into any effect-typed
+-- slot; the effect wrap is transparently absorbed by context. We
+-- recurse only on the inner type -- do NOT route through
+-- subtypeEffRows, which would over-eagerly solve a row-variable on
+-- the RHS to empty (interpreting the contrived empty LHS row as a
+-- real constraint) and later force unrelated call sites to that
+-- empty solution.
+--
+-- Fires for both concrete and existential LHS. For an existential
+-- LHS this avoids the occurs check that would fire in InstantiateL
+-- when the RHS's inner references the same existential (typical
+-- @catch fallback shape `fb :: b` vs expected `<e> b`).
+subtype scope a (EffectU _e2 i2) g = subtype scope a i2 g
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
@@ -1117,15 +1139,6 @@ subtype scope (ForallU v a) b g0 = subtype scope (substitute v a) b (g0 +> v)
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
 subtype scope a (ForallU v b) g = subtype scope a b (g +> VarG v) >>= cut (VarG v)
--- Pure (non-effect) left vs effectful right. A pure value is <> A, so
--- unify the empty row against the expected row (subsumption when the
--- expected row is closed; solve its tail var when open). Reaching here
--- the left is neither EffectU (consumed above), a ForallU, nor an
--- empty-parameter ExistU (routed to substitute/instantiate above); the
--- ExistU guard keeps any remaining existential on the instantiate path
--- so do-block forcing of a polymorphic effect still works.
-subtype scope a (EffectU e2 i2) g
-  | notExistU a = subtypeEffRows scope emptyEffectSet e2 a i2 g
 -- NatVoidU is the erased-phantom-Nat sentinel; it is wildcard-compatible
 -- with any Nat expression. This mirrors the PartialOrd instance and is
 -- needed for subtyping at the codegen boundary, where unweaved TypeFs
@@ -2230,7 +2243,7 @@ collectNatVarNames = go
 
 -- | Collect StrVarU variable names from a type. Mirrors collectNatVarNames.
 -- Used by the resolveStrLabels bridge that turns runtime Str-literal args
--- into type-level Str solutions when the function uses f:Str labels.
+-- into type-level Str solutions when the function uses f@Str labels.
 collectStrVarNames :: TypeU -> [TVar]
 collectStrVarNames = go
   where
@@ -2682,7 +2695,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (SizeU c) = "Size" <+> f False c
     f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
-    f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
+    f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v

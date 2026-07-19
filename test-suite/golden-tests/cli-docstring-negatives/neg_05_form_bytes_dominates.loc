@@ -6,6 +6,6 @@ import root
 foo ::
   --' source: file
   --' form: bytes|packet
-  [UInt8] ->
+  [U8] ->
   Int
 foo x = 0

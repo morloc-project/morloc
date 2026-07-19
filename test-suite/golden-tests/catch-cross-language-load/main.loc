@@ -1,0 +1,62 @@
+-- Cross-language save+load through @catch. Exercises two invariants
+-- that landed in this session:
+--
+--   1. Wire schemas have no `<hint>` prefixes. A C++ pool saves a
+--      Vector using the pool's std::vector-hinted schema; a Python
+--      pool loads via numpy-hinted schema. If hints were on the wire,
+--      the two schemas would disagree and load would fail with a
+--      schema-mismatch error.
+--
+--   2. @catch on cross-language load surfaces schema mismatch as a
+--      catchable UserThrow, not a fatal invariant failure. Loading a
+--      Real-typed packet as an Int should raise Err through the pool
+--      boundary, propagate to the nexus, and be caught by @catch.
+--
+-- The happy path (test 1) proves cross-language load works. The
+-- mismatch path (test 2) proves the mismatch is catchable.
+
+module main
+  ( saveCpp
+  , loadPyHappy
+  , loadPyMismatch
+  )
+
+import root-cpp
+import root-py
+import vector-cpp
+import vector-py
+
+source Cpp from "src.hpp" ("cppMkVec4", "cppSumVec4")
+cppMkVec4  :: Vector 4 Real
+cppSumVec4 :: Vector 4 Real -> Real
+
+source Py from "src.py" ("pySumVec4")
+pySumVec4 :: Vector 4 Real -> Real
+
+effect IO
+escapable effect Err
+
+-- Save via C++ pool (native std::vector<double>).
+saveCpp :: Str -> <IO, Err> Real
+saveCpp path = do
+  @save 0 cppMkVec4 path
+  cppSumVec4 cppMkVec4
+
+-- Load via Python pool (native numpy.ndarray). The wire schema
+-- carries no hints, so C++ save + Python load agree on the schema
+-- and load succeeds. Sum the loaded vector in Python to prove the
+-- data landed correctly.
+loadPyHappy :: Str -> <IO> Real
+loadPyHappy path =
+  @catch
+    (do v <- @load path :: <IO, Err> (Vector 4 Real)
+        pySumVec4 v)
+    (0.0 - 1.0)
+
+-- Load a Vector 4 Real packet as [Str]. Wire form differs, so the
+-- schema-check in the load path raises UserThrow; @catch intercepts
+-- and returns the sentinel.
+loadPyMismatch :: Str -> <IO> [Str]
+loadPyMismatch path =
+  @catch (@load path :: <IO, Err> [Str])
+    ["schema-mismatch-caught"]

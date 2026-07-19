@@ -7,9 +7,9 @@
 -- C++ cannot implicitly convert vector to deque in an initializer list.
 --
 -- BUG 2: Integer alias literal type mismatch.
--- Int64 = Int at the general level, but int64_t vs int in C++.
+-- I64 = Int at the general level, but int64_t vs int in C++.
 -- When comparing `mul64 x y == 20000`, the literal 20000 is Int (int)
--- but the LHS is Int64 (int64_t). morloc_eq<A>(A, A) fails template
+-- but the LHS is I64 (int64_t). morloc_eq<A>(A, A) fails template
 -- deduction because int64_t != int.
 
 module main (bug1_nested_alias_py, bug1_nested_alias_cpp, bug2_int64_eq_cpp)
@@ -27,8 +27,8 @@ bug1_nested_alias_py = nestedDeque [[1,2],[3]] == [[2,3],[4]]
 bug1_nested_alias_cpp :: Bool
 bug1_nested_alias_cpp = nestedDeque [[1,2],[3]] == [[2,3],[4]]
 
--- BUG 2: Minimal repro - Int64 compared to Int literal
-mul64 :: Int64 -> Int64 -> Int64
+-- BUG 2: Minimal repro - I64 compared to Int literal
+mul64 :: I64 -> I64 -> I64
 mul64 x y = x * y
 
 bug2_int64_eq_cpp :: Bool

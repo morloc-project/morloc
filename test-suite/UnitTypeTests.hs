@@ -26,8 +26,12 @@ module UnitTypeTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
+  , evalSugarTests
   , effectEscapabilityTests
   , effectPartialApplicationTests
+  , polymorphicEffectRowTests
+  , catchRowInheritTests
+  , effectCoverageMessageTests
   , namespaceErrorTests
   , typeclassTests
   , natErrorTests
@@ -859,10 +863,10 @@ typeAliasTests =
       ]
 
 -- | Tests for integer/real literal defaulting through type aliases.
--- A literal `65` checked against a type alias such as `type Char = UInt8`
+-- A literal `65` checked against a type alias such as `type Char = U8`
 -- must take on the aliased base integer type instead of synthesizing as
--- `Int` and failing the `Int <: UInt8` subtype step. Same for real
--- literals and Float32/Float64 aliases. Covers single-depth and multi-hop
+-- `Int` and failing the `Int <: U8` subtype step. Same for real
+-- literals and F32/F64 aliases. Covers single-depth and multi-hop
 -- alias chains, and every fixed-width primitive in the integer/real
 -- families.
 numericLiteralAliasTests :: TestTree
@@ -872,77 +876,77 @@ numericLiteralAliasTests =
       "Numeric literal defaulting through type aliases"
       [ -- single-depth integer aliases: every fixed-width family member
         assertGeneralType
-          "int literal :: Char  (Char = UInt8)"
+          "int literal :: Char  (Char = U8)"
           [r|
         module main (x)
-        type Char = UInt8
+        type Char = U8
         x :: Char
         x = 65
         |]
-          (var "UInt8")
+          (var "U8")
       , assertGeneralType
-          "int literal :: Word16  (Word16 = UInt16)"
+          "int literal :: Word16  (Word16 = U16)"
           [r|
         module main (x)
-        type Word16 = UInt16
+        type Word16 = U16
         x :: Word16
         x = 65000
         |]
-          (var "UInt16")
+          (var "U16")
       , assertGeneralType
-          "int literal :: Word32  (Word32 = UInt32)"
+          "int literal :: Word32  (Word32 = U32)"
           [r|
         module main (x)
-        type Word32 = UInt32
+        type Word32 = U32
         x :: Word32
         x = 1
         |]
-          (var "UInt32")
+          (var "U32")
       , assertGeneralType
-          "int literal :: Word64  (Word64 = UInt64)"
+          "int literal :: Word64  (Word64 = U64)"
           [r|
         module main (x)
-        type Word64 = UInt64
+        type Word64 = U64
         x :: Word64
         x = 1
         |]
-          (var "UInt64")
+          (var "U64")
       , assertGeneralType
-          "int literal :: Byte  (Byte = Int8)"
+          "int literal :: Byte  (Byte = I8)"
           [r|
         module main (x)
-        type Byte = Int8
+        type Byte = I8
         x :: Byte
         x = 1
         |]
-          (var "Int8")
+          (var "I8")
       , assertGeneralType
-          "int literal :: Short  (Short = Int16)"
+          "int literal :: Short  (Short = I16)"
           [r|
         module main (x)
-        type Short = Int16
+        type Short = I16
         x :: Short
         x = 1
         |]
-          (var "Int16")
+          (var "I16")
       , assertGeneralType
-          "int literal :: I32  (I32 = Int32)"
+          "int literal :: I32  (I32 = I32)"
           [r|
         module main (x)
-        type I32 = Int32
-        x :: I32
+        type Int32 = I32
+        x :: Int32
         x = 1
         |]
-          (var "Int32")
+          (var "I32")
       , assertGeneralType
-          "int literal :: I64  (I64 = Int64)"
+          "int literal :: I64  (I64 = I64)"
           [r|
         module main (x)
-        type I64 = Int64
-        x :: I64
+        type Int64 = I64
+        x :: Int64
         x = 1
         |]
-          (var "Int64")
+          (var "I64")
       , assertGeneralType
           "int literal :: Word  (Word = UInt)"
           [r|
@@ -954,67 +958,67 @@ numericLiteralAliasTests =
           (var "UInt")
         -- multi-hop alias chains: literal must default through the chain
       , assertGeneralType
-          "int literal :: FooChar  (FooChar = Char = UInt8)"
+          "int literal :: FooChar  (FooChar = Char = U8)"
           [r|
         module main (x)
-        type Char = UInt8
+        type Char = U8
         type FooChar = Char
         x :: FooChar
         x = 65
         |]
-          (var "UInt8")
+          (var "U8")
       , assertGeneralType
-          "int literal :: A  (A = B = C = UInt32)"
+          "int literal :: A  (A = B = C = U32)"
           [r|
         module main (x)
         type A = B
         type B = C
-        type C = UInt32
+        type C = U32
         x :: A
         x = 1
         |]
-          (var "UInt32")
+          (var "U32")
         -- list literal flowing each element through the alias:
         -- mirrors the encode/decode test in stdlib char-cpp that
         -- triggered the original bug report.
       , assertGeneralType
-          "list of int literals :: [Char]  (Char = UInt8)"
+          "list of int literals :: [Char]  (Char = U8)"
           [r|
         module main (xs)
-        type Char = UInt8
+        type Char = U8
         xs :: [Char]
         xs = [65, 66, 67]
         |]
-          (lst (var "UInt8"))
+          (lst (var "U8"))
       , assertGeneralType
-          "list of int literals :: [FooChar]  (chain to UInt8)"
+          "list of int literals :: [FooChar]  (chain to U8)"
           [r|
         module main (xs)
-        type Char = UInt8
+        type Char = U8
         type FooChar = Char
         xs :: [FooChar]
         xs = [65, 66, 67]
         |]
-          (lst (var "UInt8"))
+          (lst (var "U8"))
         -- single-depth real aliases
       , assertGeneralType
-          "real literal :: Mass  (Mass = Float32)"
+          "real literal :: Mass  (Mass = F32)"
           [r|
         module main (x)
-        type Mass = Float32
+        type Mass = F32
         x :: Mass
         x = 1.5
         |]
-          (var "Float32")
+          (var "F32")
       , assertGeneralType
-          "real literal :: Distance  (Distance = Float64)"
+          "real literal :: Distance  (Distance = F64)"
           [r|
         module main (x)
-        type Distance = Float64
+        type Distance = F64
         x :: Distance
         x = 1.5
         |]
-          (var "Float64")
+          (var "F64")
       , assertGeneralType
           "real literal :: Quantity  (Quantity = Real)"
           [r|
@@ -1026,24 +1030,24 @@ numericLiteralAliasTests =
           (var "Real")
         -- multi-hop real alias chain
       , assertGeneralType
-          "real literal :: A  (A = B = Float32)"
+          "real literal :: A  (A = B = F32)"
           [r|
         module main (x)
         type A = B
-        type B = Float32
+        type B = F32
         x :: A
         x = 1.5
         |]
-          (var "Float32")
+          (var "F32")
       , assertGeneralType
-          "list of real literals :: [Mass]  (Mass = Float32)"
+          "list of real literals :: [Mass]  (Mass = F32)"
           [r|
         module main (xs)
-        type Mass = Float32
+        type Mass = F32
         xs :: [Mass]
         xs = [1.0, 2.0, 3.0]
         |]
-          (lst (var "Float32"))
+          (lst (var "F32"))
         -- negative: an integer literal still cannot inhabit a non-numeric
         -- alias. Guards against the fix accidentally letting any alias
         -- swallow integer literals.
@@ -1057,77 +1061,77 @@ numericLiteralAliasTests =
         |]
         -- negative: a real literal still cannot inhabit an integer alias.
       , expectError
-          "real literal :: Char (Char = UInt8) must fail"
+          "real literal :: Char (Char = U8) must fail"
           [r|
         module main (x)
-        type Char = UInt8
+        type Char = U8
         x :: Char
         x = 1.5
         |]
-        -- Nat-parameterized list aliases: `Vector 4 Int32` reduces via
-        -- `type Vector (n :: Nat) a = List a` to `List Int32`. The list
+        -- Nat-parameterized list aliases: `Vector 4 I32` reduces via
+        -- `type Vector (n :: Nat) a = List a` to `List I32`. The list
         -- literal's elements must take on the reduced element type,
         -- not synthesize as `Int` and fail the subsequent subtype check.
         -- This is the user's original reproducer from the bug report.
       , assertGeneralType
-          "list literal :: Vector 4 Int32  (Vector (n::Nat) a = List a)"
+          "list literal :: Vector 4 I32  (Vector (n::Nat) a = List a)"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 4 Int32
+        x :: Vector 4 I32
         x = [1, 2, 3, 4]
         |]
-          (lst (var "Int32"))
+          (lst (var "I32"))
       , assertGeneralType
-          "list literal :: Vector 3 Int8  (other fixed-width int)"
+          "list literal :: Vector 3 I8  (other fixed-width int)"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 3 Int8
+        x :: Vector 3 I8
         x = [1, 2, 3]
         |]
-          (lst (var "Int8"))
+          (lst (var "I8"))
       , assertGeneralType
-          "list literal :: Vector 2 UInt16  (unsigned fixed-width int)"
+          "list literal :: Vector 2 U16  (unsigned fixed-width int)"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 2 UInt16
+        x :: Vector 2 U16
         x = [1, 2]
         |]
-          (lst (var "UInt16"))
+          (lst (var "U16"))
         -- Nested nat-parameterized alias: Matrix m n a = [[a]] requires
         -- the element-type propagation to recurse through both layers.
       , assertGeneralType
-          "nested list literal :: Matrix 2 2 Int32"
+          "nested list literal :: Matrix 2 2 I32"
           [r|
         module main (x)
         type Matrix (m :: Nat) (n :: Nat) a = List (List a)
-        x :: Matrix 2 2 Int32
+        x :: Matrix 2 2 I32
         x = [[1, 2], [3, 4]]
         |]
-          (lst (lst (var "Int32")))
+          (lst (lst (var "I32")))
         -- Real literals through nat-parameterized aliases use the same
         -- dispatch — confirm the RealS path is unaffected.
       , assertGeneralType
-          "real list literal :: Vector 2 Float32"
+          "real list literal :: Vector 2 F32"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 2 Float32
+        x :: Vector 2 F32
         x = [1.5, 2.5]
         |]
-          (lst (var "Float32"))
+          (lst (var "F32"))
         -- Negative: Nat-dimension mismatch must still fail. The element
-        -- type was successfully propagated (Int32 accepted into the
+        -- type was successfully propagated (I32 accepted into the
         -- literals), but length 3 does not satisfy Nat dimension 4.
         -- This guards against the fix bypassing the nat-dim check.
       , expectError
-          "list literal :: Vector 4 Int32 with wrong length must fail"
+          "list literal :: Vector 4 I32 with wrong length must fail"
           [r|
         module main (x)
         type Vector (n :: Nat) a = List a
-        x :: Vector 4 Int32
+        x :: Vector 4 I32
         x = [1, 2, 3]
         |]
       ]
@@ -1173,21 +1177,21 @@ pendingNumLitTests =
         |]
           real
       , assertGeneralType
-          "int literal :: Float32 (promotes)"
+          "int literal :: F32 (promotes)"
           [r|
         module main (x)
-        x :: Float32
+        x :: F32
         x = 42
         |]
-          (var "Float32")
+          (var "F32")
       , assertGeneralType
-          "int literal :: Float64 (promotes)"
+          "int literal :: F64 (promotes)"
           [r|
         module main (x)
-        x :: Float64
+        x :: F64
         x = 42
         |]
-          (var "Float64")
+          (var "F64")
 
       -- ----- Mixed-numeric list literal -----
       , assertGeneralType
@@ -1253,16 +1257,16 @@ pendingNumLitTests =
 
       -- ----- Annotated arg pins the existential, literal adopts the width -----
       , assertGeneralType
-          "add of int literal + Int8-annotated -- literal adopts Int8"
+          "add of int literal + I8-annotated -- literal adopts I8"
           [r|
         module main (x)
         add :: a -> a -> a
-        y :: Int8
+        y :: I8
         y = 5
-        x :: Int8
+        x :: I8
         x = add 1 y
         |]
-          (var "Int8")
+          (var "I8")
 
       -- ----- Negative: numeric literal in a non-numeric slot fails -----
       , exprTestBad
@@ -3559,6 +3563,56 @@ effectSynthesisTests =
           [x, y]
           |]
           (ioEff (lst int))
+
+        -- Polymorphic effectful typeclass method used TWICE inside a
+        -- nested do-block that is bound with '<-'. The inner do-block's
+        -- final synths to a concrete type (Int, driven by 'add'), so the
+        -- inner DoBlockS returns 'EffectU collected Int'. Without the
+        -- ForallU peel in 'effectOfAnno', 'collected' comes back empty
+        -- because 'random :: forall a. <IO> a' is not a bare EffectU;
+        -- then 'mkEffectU' collapses '<> Int' to 'Int', and the outer
+        -- '<-' EvalS throws "Cannot force a non-effectful value (got
+        -- type Int)."
+      , assertGeneralType
+          "polymorphic method twice inside nested '<-' do-block"
+          [r|
+        module main (foo)
+        effect IO
+        class C a where
+          random :: <IO> a
+        instance C Int where
+          source Py from "helpers.py" ("r" as random)
+        add :: Int -> Int -> Int
+        foo :: <IO> Int
+        foo = do
+          a <- (do
+            v1 <- random
+            v2 <- random
+            add v1 v2)
+          a
+          |]
+          (ioEff int)
+
+        -- The same shape via '!' sugar. Under Option A, 'a <- add !v1 !v2'
+        -- desugars to 'a <- (do; x <- v1; y <- v2; add x y)', so this
+        -- exercises the identical typechecker path with a different
+        -- surface syntax.
+      , assertGeneralType
+          "polymorphic method twice through '!' in a '<-' bind RHS"
+          [r|
+        module main (foo)
+        effect IO
+        class C a where
+          random :: <IO> a
+        instance C Int where
+          source Py from "helpers.py" ("r" as random)
+        add :: Int -> Int -> Int
+        foo :: <IO> Int
+        foo = do
+          a <- add !random !random
+          a
+          |]
+          (ioEff int)
       ]
 
 -- | Program-level effect rejection tests.  Each test is a complete
@@ -3651,6 +3705,317 @@ effectErrorTests =
         consume :: <IO> Int -> Int
         x = consume rrand
           |]
+      ]
+
+-- | Eval-sugar ('!' prefix) desugars to do-block binds pre-typecheck.
+-- The typechecker never sees a '!'. These tests confirm:
+--   * Types match the equivalent explicit do-block form.
+--   * '!' at various expression positions (tuple, application, lambda,
+--     let, guard branches) sequences into the enclosing scope, with
+--     effect propagating outward (nothing is discharged).
+--   * '!' at redundant positions ('<-' RHS, bare do stmt) is rejected
+--     during desugaring.
+--   * '!' on a pure value is rejected during typechecking as it would
+--     be for an explicit do-bind.
+evalSugarTests :: TestTree
+evalSugarTests =
+  localOption (mkTimeout 100000) $ -- 0.1 second timeout
+    testGroup
+      "Eval-sugar '!' desugar tests"
+      [ -- '!' inside a tuple: hoist per-element to a wrapping do-block.
+        -- Type must match the explicit do-block form.
+        assertGeneralType
+          "'!' in tuple: (!x, !y)"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = (!x, !y)
+          |]
+          (ioEff (tuple [int, int]))
+
+        -- Reference: the equivalent explicit do-block has the same type.
+      , assertGeneralType
+          "do-block form of (!x, !y)"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = do
+          a <- x
+          b <- y
+          (a, b)
+          |]
+          (ioEff (tuple [int, int]))
+
+        -- '!' as function arguments: bar (!x) (!y).
+      , assertGeneralType
+          "'!' as function arguments"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = add !x !y
+          |]
+          (ioEff int)
+
+        -- '!' inside a lambda body: hoists INSIDE the body (per-call).
+      , assertGeneralType
+          "'!' in lambda body: \\x -> !(f x)"
+          [r|
+        module main (foo)
+        effect IO
+        f :: Int -> <IO> Int
+        foo = \x -> !(f x)
+          |]
+          (fun [int, ioEff int])
+
+
+        -- '!' in guard branches (branch-local): each branch is a boundary.
+      , assertGeneralType
+          "'!' in guard branches"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo b
+          ? b = !x
+          : !y
+          |]
+          (fun [bool, ioEff int])
+
+        -- '!' inside an existing do-block: hoist per-statement to a fresh
+        -- bind inserted BEFORE the containing statement, preserving order.
+      , assertGeneralType
+          "'!' inside a do-block bind RHS"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = do
+          a <- add !x !y
+          a
+          |]
+          (ioEff int)
+
+        -- '!' inside a nested do-block: the inner do is a boundary; its
+        -- effect does not leak out (the outer only sees the inner block's
+        -- return type wrapped in its own inferred effect).
+      , assertGeneralType
+          "'!' in a nested do-block"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        y :: <IO> Int
+        foo = do
+          a <- do
+            x
+            x
+          c <- do
+            y
+            y
+          (a, c)
+          |]
+          (ioEff (tuple [int, int]))
+
+        -- '!' with an AnnE: the ascription applies to the do-block wrapper.
+      , assertGeneralType
+          "'!' with type annotation"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo = (!x) :: <IO> Int
+          |]
+          (ioEff int)
+
+        -- '!' on a pure value is rejected: EvalS on a non-effectful type.
+      , exprTestBad
+          "'!' on a pure value"
+          [r|
+        module main (foo)
+        x :: Int
+        foo :: Int
+        foo = !x
+          |]
+
+        -- Redundant '!' on the RHS of '<-' is a desugar error.
+      , exprTestBad
+          "redundant '!' on RHS of '<-'"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          y <- !x
+          y
+          |]
+
+        -- Redundant '!' as a bare do statement is a desugar error.
+      , exprTestBad
+          "redundant '!' as bare do statement"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          !x
+          x
+          |]
+
+        -- '!' at the RHS of a let in a do-block is rejected. 'let'
+        -- should bind a pure value; a bang at a hoistable position
+        -- would silently rewrite the let into an effectful bind chain
+        -- followed by a pure let, making the surface line read as pure
+        -- while the effect fires above it. Bare form.
+      , exprTestBad
+          "bare '!' as RHS of let in do-block"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          let y = !x
+          y
+          |]
+
+        -- Same rejection for a composite RHS: any '!' at a hoistable
+        -- position inside the let RHS is rejected, not just a bare
+        -- '!expr'.
+      , exprTestBad
+          "composite let RHS with '!' at hoistable position"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          let s = add !x !y
+          s
+          |]
+
+        -- '!' inside a lambda body under a let is fine: the lambda body
+        -- is a boundary, so the bang stays local (the effect fires when
+        -- the function is applied, not at the let itself). The let
+        -- correctly binds a function value.
+      , assertGeneralType
+          "'!' inside a lambda body under a let stays legal"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          let f = \z -> !x
+          y <- f 42
+          y
+          |]
+          (ioEff int)
+
+        -- '!' inside the RHS of a '<-' bind is legal: the RHS is a
+        -- boundary, so the bangs seal into a nested do-block wrapping
+        -- the residual expression. This keeps the effect firing at the
+        -- '<-' line rather than silently hoisting above it.
+      , assertGeneralType
+          "'!' inside a '<-' bind RHS with pure residual"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          a <- add !x !y
+          a
+          |]
+          (ioEff int)
+
+        -- Same for a bare non-final do statement: the RHS is a boundary.
+      , assertGeneralType
+          "'!' inside a bare non-final do statement"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = do
+          add !x !y
+          x
+          |]
+          (ioEff int)
+
+        -- The same rejection applies OUTSIDE a do-block: 'let x = !expr
+        -- in body' is rejected. Keeps the mental model uniform (let
+        -- always binds a pure value; effect firing goes through '<-')
+        -- and avoids the compiler silently synthesizing a LetE with an
+        -- effect-firing binding from a user 'let'.
+      , exprTestBad
+          "'!' at RHS of an expression-level 'let ... in ...'"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = let z = !x in add z 1
+          |]
+
+        -- Same in composite form.
+      , exprTestBad
+          "composite '!' in expression-level let RHS"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        y :: <IO> Int
+        foo :: <IO> Int
+        foo = let s = add !x !y in s
+          |]
+
+        -- '!' inside a lambda body under an expression-level let is
+        -- still legal (bang sealed by lambda boundary).
+      , assertGeneralType
+          "'!' inside a lambda body under expression-level let"
+          [r|
+        module main (foo)
+        effect IO
+        x :: <IO> Int
+        foo :: Int -> <IO> Int
+        foo = let f = \z -> !x in f
+          |]
+          (fun [int, ioEff int])
+
+        -- '!' inside the BODY of an expression-level let is legal:
+        -- the bang hoists into the LetE's continuation (bindings still
+        -- in scope), and the whole let becomes an effectful expression.
+      , assertGeneralType
+          "'!' inside the body of an expression-level let"
+          [r|
+        module main (foo)
+        effect IO
+        add :: Int -> Int -> Int
+        x :: <IO> Int
+        foo :: <IO> Int
+        foo = let n = 5 in add n !x
+          |]
+          (ioEff int)
       ]
 
 -- | Escapability tests.  An effect is inescapable by default
@@ -3950,6 +4315,293 @@ effectPartialApplicationTests =
         h = handle (foo 1)
           |]
           int
+      ]
+
+-- | Pure values filling `<e> T` slots must recurse on the inner type
+-- only. Solving the RHS row (via subtypeEffRows with a synthetic empty
+-- LHS) would over-constrain any open row-variable to empty; adding an
+-- existential-LHS guard would spuriously trip the occurs check when
+-- the RHS's inner referenced the same existential.
+polymorphicEffectRowTests :: TestTree
+polymorphicEffectRowTests =
+  localOption (mkTimeout 200000) $
+    testGroup
+      "Polymorphic effect row / pure-into-effect subtype"
+      [ -- A helper that @catches on a polymorphic fallible must
+        -- typecheck (guards against InstantiateL firing to solve
+        -- `b := <e> b` and tripping the occurs check).
+        expectPass
+          "1. @catch on polymorphic <e, Err> b with bare fallback"
+          [r|
+        module main (withCatch)
+        escapable effect Err
+        withCatch :: (a -> <e, Err> b) -> a -> b -> <e> b
+        withCatch f x fb = @catch (f x) fb
+          |]
+
+        -- A pure value filling a `<e> T` slot must NOT solve e := empty.
+        -- The surrounding <IO> constraint is the real solver.
+      , expectPass
+          "2. pure Int in <e> Int slot does not pin e to empty"
+          [r|
+        module main (pureRoot)
+        effect IO
+        passThrough :: <e> Int -> <e> Int
+        passThrough x = x
+        pureRoot :: <IO> Int
+        pureRoot = passThrough 42
+          |]
+
+        -- Trivial concrete-into-concrete pure lift still works.
+      , expectPass
+          "3. pure Int in <IO, Err> Int slot"
+          [r|
+        module main (x)
+        effect IO
+        escapable effect Err
+        x :: <IO, Err> Int
+        x = 42
+          |]
+
+        -- === Nested polymorphic @catch ===
+        -- Outer @catch's fallback is itself an @catch, both polymorphic
+        -- in e. Each layer independently exercises the pure-into-
+        -- existential-EffectU rule when its bare fallback is checked.
+      , expectPass
+          "4. nested @catch, both layers polymorphic in e"
+          [r|
+        module main (withTwoCatches)
+        escapable effect Err
+        withTwoCatches :: (a -> <e, Err> b) -> (a -> <e, Err> b) -> a -> b -> <e> b
+        withTwoCatches f g x fb = @catch (f x) (@catch (g x) fb)
+          |]
+
+        -- Two pure arguments: solving e := empty on the first would
+        -- fail to unify against the export's <IO> on the second.
+      , expectPass
+          "5. row-var survives two pure arguments"
+          [r|
+        module main (run)
+        effect IO
+        pick :: <e> Int -> <e> Int -> <e> Int
+        pick x _ = x
+        run :: <IO> Int
+        run = pick 42 99
+          |]
+
+        -- === Pure-then-effectful ordering ===
+        -- First arg pure, second arg concretely effectful. The row
+        -- var must be solvable to <IO> by the second arg despite the
+        -- first arg not constraining it.
+      , expectPass
+          "6. row-var solved by effectful second arg after pure first"
+          [r|
+        module main (run)
+        effect IO
+        source Py ("saveInt")
+        saveInt :: Int -> <IO> Int
+        seq2 :: <e> Int -> <e> Int -> <e> Int
+        seq2 _ y = y
+        run :: <IO> Int
+        run = seq2 42 (saveInt 99)
+          |]
+
+        -- === Negative: effect cannot drop when caller expects pure ===
+        -- The pure-into-EffectU rule must NOT be bidirectional; the
+        -- reverse (EffectU-into-pure) is unsound and must still reject.
+      , expectError
+          "7. <Err> Int in Int slot rejected (wrong subtype direction)"
+          [r|
+        module main (f)
+        escapable effect Err
+        f :: Int
+        f = @throw "x"
+          |]
+
+      , expectError
+          "8. <IO> Int in Int slot rejected via direct assignment"
+          [r|
+        module main (bad)
+        effect IO
+        source Py ("readInt")
+        readInt :: <IO> Int
+        bad :: Int
+        bad = readInt
+          |]
+
+        -- === Negative: @catch on non-Err fallible still rejected ===
+        -- Loosening the pure-into-EffectU rule must NOT loosen
+        -- @catch's requirement that its fallible have Err in its row.
+      , expectError
+          "9. @catch on <IO>-only (no Err) fallible rejected"
+          [r|
+        module main (bad)
+        effect IO
+        source Py ("readInt")
+        readInt :: <IO> Int
+        bad :: <IO> Int
+        bad = @catch readInt 0
+          |]
+      ]
+
+-- | Row-inheritance of @catch. The fallback declares its own effect row
+-- and the whole @catch inherits it, so the same operator handles both
+-- "recover to pure" (fallback is <>) and "fall through to another
+-- fallible attempt" (fallback keeps Err). The primary's non-Err effects
+-- propagate too.
+catchRowInheritTests :: TestTree
+catchRowInheritTests =
+  localOption (mkTimeout 200000) $
+    testGroup
+      "@catch row-inheritance"
+      [ expectPass
+          "chained @catch: fallback raises Err, result is <Err>"
+          [r|
+        module main (chained)
+        escapable effect Err
+        source Py ("thrower1", "thrower2")
+        thrower1 :: <Err> Int
+        thrower2 :: <Err> Int
+        chained :: <Err> Int
+        chained = @catch thrower1 thrower2
+          |]
+
+      , expectPass
+          "nested @catch chain terminates in pure default -> stripped"
+          [r|
+        module main (safe)
+        escapable effect Err
+        source Py ("thrower1", "thrower2", "thrower3")
+        thrower1 :: <Err> Int
+        thrower2 :: <Err> Int
+        thrower3 :: <Err> Int
+        safe :: Int
+        safe = @catch thrower1 (@catch thrower2 (@catch thrower3 0))
+          |]
+
+      , expectPass
+          "primary <IO, Err>, pure fallback -> <IO>"
+          [r|
+        module main (recovered)
+        effect IO
+        escapable effect Err
+        source Py ("readIntOrFail")
+        readIntOrFail :: <IO, Err> Int
+        recovered :: <IO> Int
+        recovered = @catch readIntOrFail 0
+          |]
+
+      , expectPass
+          "primary <IO, Err>, <Err> fallback -> <IO, Err>"
+          [r|
+        module main (retried)
+        effect IO
+        escapable effect Err
+        source Py ("readIntOrFail", "retryOrFail")
+        readIntOrFail :: <IO, Err> Int
+        retryOrFail :: <Err> Int
+        retried :: <IO, Err> Int
+        retried = @catch readIntOrFail retryOrFail
+          |]
+
+      , expectPass
+          "concrete <Err> primary + pure fallback strips to plain type"
+          [r|
+        module main (safe)
+        escapable effect Err
+        source Py ("thrower")
+        thrower :: <Err> Int
+        safe :: Int
+        safe = @catch thrower 0
+          |]
+
+      , expectError
+          "two independent open effect rows in @catch rejected"
+          [r|
+        module main (twoTail)
+        escapable effect Err
+        twoTail :: (a -> <e, Err> b) -> (a -> <f> b) -> a -> b
+        twoTail f g x = @catch (f x) (g x)
+          |]
+      ]
+
+-- | Effect-coverage error message shape.
+--
+-- After the message rewrite, effect-coverage failures name the
+-- specific missing effects and adapt the fix suggestion based on
+-- escapability (Err → mention @catch; other escapable → mention
+-- handler function; all non-escapable → suggest declaration only).
+--
+-- Per the workspace convention we do NOT assert on exact message
+-- text (it drifts as wording is tuned). We assert that these
+-- programs are rejected (they must remain rejected under any future
+-- message improvement) and rely on running the tests interactively
+-- to eyeball the message quality.
+effectCoverageMessageTests :: TestTree
+effectCoverageMessageTests =
+  localOption (mkTimeout 200000) $
+    testGroup
+      "Effect-coverage error messages (rejection-only, message quality checked manually)"
+      [ -- Err missing → message should suggest declare + mention @catch.
+        expectError
+          "Err in body, sig declares only <IO> → rejected"
+          [r|
+        module main (bad)
+        effect IO
+        escapable effect Err
+        bad :: <IO> Int
+        bad = do
+          @throw "oops"
+          0
+          |]
+
+        -- Non-Err escapable missing → message should suggest declare
+        -- + mention handler function (no @catch mention).
+      , expectError
+          "escapable non-Err in body, sig pure → rejected"
+          [r|
+        module main (bad)
+        escapable effect Log
+        source Py ("plog")
+        plog :: Str -> <Log> ()
+        bad :: Int
+        bad = do
+          plog "hi"
+          0
+          |]
+
+        -- Non-escapable missing → message should suggest declaration
+        -- ONLY (no handler-function mention).
+      , expectError
+          "inescapable effect in body, sig pure → rejected"
+          [r|
+        module main (bad)
+        effect IO
+        source Py ("psideEffect")
+        psideEffect :: Int -> <IO> Int
+        bad :: Int
+        bad = do
+          x <- psideEffect 1
+          x
+          |]
+
+        -- Mixed escapable + inescapable missing → message should
+        -- suggest declaration for all, mention handler for escapable
+        -- ones, and specifically @catch for Err.
+      , expectError
+          "Err + inescapable both missing → rejected"
+          [r|
+        module main (bad)
+        effect IO
+        escapable effect Err
+        source Py ("psideEffect")
+        psideEffect :: Int -> <IO> Int
+        bad :: Int
+        bad = do
+          x <- psideEffect 1
+          @throw "boom"
+          x
+          |]
       ]
 
 namespaceErrorTests :: TestTree
@@ -4719,14 +5371,14 @@ typedefKindVarTests =
 natLabelTests :: TestTree
 natLabelTests =
   testGroup
-    "nat labeled params (m:Int syntax)"
+    "nat labeled params (m@Int syntax)"
     [ -- === Positive: literal int args resolve nat vars ===
       assertRawType
         "labeled literal resolves dimension: makeVec 5 :: Tensor1 5 Real"
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec 5
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -4735,7 +5387,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec 0
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 0, VarU (TV "Real")])
@@ -4744,7 +5396,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = makeMat 3 4
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
@@ -4753,7 +5405,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       id_ :: Tensor1 n Real -> Tensor1 n Real
       x = id_ (makeVec 7)
         |]
@@ -4764,10 +5416,10 @@ natLabelTests =
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
-      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
-      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+      makeImg :: h@Int -> w@Int -> Tensor2 h w Real
+      makeK :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
       type Tensor1 (d :: Nat) a = [a]
-      makeB :: k:Int -> Tensor1 k Real
+      makeB :: k@Int -> Tensor1 k Real
       conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
       x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
         |]
@@ -4778,7 +5430,7 @@ natLabelTests =
       module main (x)
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
       type Tensor1 (d :: Nat) a = [a]
-      makeT :: a:Int -> b:Int -> c:Int -> Tensor3 a b c Real
+      makeT :: a@Int -> b@Int -> c@Int -> Tensor3 a b c Real
       flatten :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
       x = flatten (makeT 2 3 3)
         |]
@@ -4788,7 +5440,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      makeT :: m@Int -> n@Int -> Tensor2 m n Real
       scale :: Real -> Tensor2 m n Real -> Tensor2 m n Real
       x = scale 2.0 (makeT 3 4)
         |]
@@ -4798,7 +5450,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      eye :: n:Int -> Tensor2 n n Real
+      eye :: n@Int -> Tensor2 n n Real
       x = eye 4
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 4, NatLitU 4, VarU (TV "Real")])
@@ -4809,7 +5461,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = let n = 5 in makeVec n
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -4818,7 +5470,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = let a = 7 in let b = a in makeVec b
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
@@ -4827,7 +5479,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = let m = 3 in let n = 4 in makeMat m n
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
@@ -4838,7 +5490,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec (.0 (5, 6))
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -4847,7 +5499,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = let dims = (3, 4) in makeMat (.0 dims) (.1 dims)
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
@@ -4856,7 +5508,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = let d = (8, 9) in let n = .0 d in makeVec n
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 8, VarU (TV "Real")])
@@ -4867,7 +5519,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\n -> n) 5)
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -4876,7 +5528,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\t -> .1 t) (1, 2, 3))
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 2, VarU (TV "Real")])
@@ -4885,7 +5537,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\a b -> a) 7 99)
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
@@ -4896,7 +5548,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      makeT :: m@Int -> n@Int -> Tensor2 m n Real
       add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
       x = add (makeT 3 4) (makeT 3 5)
         |]
@@ -4905,7 +5557,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       dot :: Tensor1 n Real -> Tensor1 n Real -> Real
       x = dot (makeVec 3) (makeVec 5)
         |]
@@ -4916,9 +5568,9 @@ natLabelTests =
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
       type Tensor1 (d :: Nat) a = [a]
-      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
-      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
-      makeB :: k:Int -> Tensor1 k Real
+      makeImg :: h@Int -> w@Int -> Tensor2 h w Real
+      makeK :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
+      makeB :: k@Int -> Tensor1 k Real
       conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
       x :: Tensor3 2 3 4 Real
       x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
@@ -4928,7 +5580,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x :: Tensor1 99 Real
       x = makeVec 5
         |]
@@ -4949,7 +5601,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeFrom :: Real -> n:Int -> Tensor1 n Real
+      makeFrom :: Real -> n@Int -> Tensor1 n Real
       x = makeFrom 1.0 10
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 10, VarU (TV "Real")])
@@ -4972,7 +5624,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> T1 n Real
+      makeVec :: n@Int -> T1 n Real
       x = makeVec 5
         |]
         (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
@@ -4982,7 +5634,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 d a = [a]
-      makeVec :: n:Int -> T1 n Real
+      makeVec :: n@Int -> T1 n Real
       x = makeVec 5
         |]
         -- Without :: Nat, n is VarU not NatVarU, so resolveNatLabels cannot
@@ -5027,11 +5679,11 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       f :: T1 n Real -> T1 n Real
       g :: T1 n Real -> T1 n Real
       x = g (f (makeVec 9))
-      makeVec :: n:Int -> T1 n Real
+      makeVec :: n@Int -> T1 n Real
       x = g (f (make 9))
         |]
         (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
@@ -5041,7 +5693,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       f :: T1 n Real -> T1 n Real
       x = let a = make 4
           in let b = f a
@@ -5058,7 +5710,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: h:Int -> w:Int -> T1 (h - w + 1) Real
+      make :: h@Int -> w@Int -> T1 (h - w + 1) Real
       x = make 10 3
         |]
         (AppU (VarU (TV "T1")) [NatLitU 8, VarU (TV "Real")])
@@ -5068,7 +5720,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: m:Int -> n:Int -> T1 (m * n) Real
+      make :: m@Int -> n@Int -> T1 (m * n) Real
       x = make 3 4
         |]
         (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
@@ -5078,7 +5730,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> d:Int -> T1 (n / d) Real
+      make :: n@Int -> d@Int -> T1 (n / d) Real
       x = make 12 4
         |]
         (AppU (VarU (TV "T1")) [NatLitU 3, VarU (TV "Real")])
@@ -5088,7 +5740,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: a:Int -> b:Int -> c:Int -> T1 (a * b - c) Real
+      make :: a@Int -> b@Int -> c@Int -> T1 (a * b - c) Real
       x = make 6 2 1
         |]
         (AppU (VarU (TV "T1")) [NatLitU 11, VarU (TV "Real")])
@@ -5102,7 +5754,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: h:Int -> w:Int -> T1 (h - w + 1) Real
+      make :: h@Int -> w@Int -> T1 (h - w + 1) Real
       x :: T1 7 Real
       x = make 10 3
         |]
@@ -5112,7 +5764,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: m:Int -> n:Int -> T1 (m * n) Real
+      make :: m@Int -> n@Int -> T1 (m * n) Real
       consume :: T1 11 Real -> Int
       x = consume (make 3 4)
         |]
@@ -5126,7 +5778,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      tryMake :: n:Int -> ?(T1 n Real)
+      tryMake :: n@Int -> ?(T1 n Real)
       x = tryMake 5
         |]
         (OptionalU (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]))
@@ -5141,7 +5793,7 @@ natKindPromotionTests =
       module main (x)
       effect IO
       type T1 (d :: Nat) a = [a]
-      ioMake :: n:Int -> <IO> T1 n Real
+      ioMake :: n@Int -> <IO> T1 n Real
       x = ioMake 5
         |]
         (EffectU (EffectSet (Set.singleton "IO"))
@@ -5156,7 +5808,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> [T1 n Real]
+      make :: n@Int -> [T1 n Real]
       x = make 5
         |]
         (AppU (VarU (TV "List")) [AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]])
@@ -5166,7 +5818,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: m:Int -> n:Int -> (T1 m Real, T1 n Real)
+      make :: m@Int -> n@Int -> (T1 m Real, T1 n Real)
       x = make 3 7
         |]
         (AppU (VarU (TV "Tuple2"))
@@ -5185,7 +5837,7 @@ natKindPromotionTests =
       type T1 (d :: Nat) a = [a]
       type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       flatten :: T2 m n Real -> T1 (m * n) Real
-      make :: m:Int -> n:Int -> T2 m n Real
+      make :: m@Int -> n@Int -> T2 m n Real
       x = flatten (make 3 4)
         |]
         (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
@@ -5197,7 +5849,7 @@ natKindPromotionTests =
       type T1 (d :: Nat) a = [a]
       type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       flatten :: T2 m n Real -> T1 (m * n) Real
-      make :: m:Int -> n:Int -> T2 m n Real
+      make :: m@Int -> n@Int -> T2 m n Real
       consume :: T1 11 Real -> Int
       x = consume (flatten (make 3 4))
         |]
@@ -5211,7 +5863,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type Sized (n :: Nat) a = [a]
-      make :: n:Int -> Sized n Int
+      make :: n@Int -> Sized n Int
       x = make 10
         |]
         (AppU (VarU (TV "Sized")) [NatLitU 10, VarU (TV "Int")])
@@ -5228,7 +5880,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 m Real
+      make :: n@Int -> T1 m Real
       x = make 5
         |]
         (AppU (VarU (TV "T1")) [NatVarU (TV "a"), VarU (TV "Real")])
@@ -5242,7 +5894,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 (n - 0) Real
+      make :: n@Int -> T1 (n - 0) Real
       x = make 7
         |]
         (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
@@ -5252,7 +5904,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 (n * 1) Real
+      make :: n@Int -> T1 (n * 1) Real
       x = make 7
         |]
         (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
@@ -5262,7 +5914,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 (n * 0) Real
+      make :: n@Int -> T1 (n * 0) Real
       x = make 7
         |]
         (AppU (VarU (TV "T1")) [NatLitU 0, VarU (TV "Real")])
@@ -5275,7 +5927,7 @@ natKindPromotionTests =
         result <- runFrontRaw [r|
       module main (x, y)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       x = make 3
       y = make 7
           |]
@@ -5299,7 +5951,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       x = make 1000000
         |]
         (AppU (VarU (TV "T1")) [NatLitU 1000000, VarU (TV "Real")])
@@ -5314,7 +5966,7 @@ natKindPromotionTests =
       module main (x)
       type T1 (d :: Nat) a = [a]
       combine :: T1 n Real -> T1 n Real -> T1 n Real
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       x = combine (make 3) (make 5)
         |]
 
@@ -5327,7 +5979,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type Opaque (d :: Nat) a
-      make :: n:Int -> Opaque n Real
+      make :: n@Int -> Opaque n Real
       x = make 42
         |]
         (AppU (VarU (TV "Opaque")) [NatLitU 42, VarU (TV "Real")])
@@ -5337,7 +5989,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type Opaque (d :: Nat) a
-      make :: n:Int -> Opaque n Real
+      make :: n@Int -> Opaque n Real
       consume :: Opaque 10 Real -> Int
       x = consume (make 5)
         |]
@@ -6101,15 +6753,15 @@ literalDispatchTests =
           |]
 
       , -- Bare-VarT newtype-list: an unparameterised newtype that aliases
-        -- a fully-applied list (e.g. @newtype Bytes = List UInt8@).
+        -- a fully-applied list (e.g. @newtype Bytes = List U8@).
         -- A list literal at @Bytes@ is accepted because the wire-parent
         -- chain reaches a list shape; the children are typed at the
         -- wire-parent's element type.
         assertGeneralType
-          "list literal at bare-VarT newtype Bytes (Bytes = List UInt8)"
+          "list literal at bare-VarT newtype Bytes (Bytes = List U8)"
           [r|
         module main (x)
-        newtype Bytes = List UInt8
+        newtype Bytes = List U8
         x :: Bytes
         x = [1, 2, 3]
           |]
@@ -6151,7 +6803,7 @@ literalDispatchTests =
           [r|
         module main (f)
         class IndexLike i where
-          __to_index__ :: i -> Int64
+          __to_index__ :: i -> I64
         instance IndexLike Int where
           source Py ("identity" as __to_index__)
         newtype Vec (n :: Nat) a = List a
@@ -6166,7 +6818,7 @@ literalDispatchTests =
           [r|
         module main (f)
         class IndexLike i where
-          __to_index__ :: i -> Int64
+          __to_index__ :: i -> I64
         instance IndexLike Int where
           source Py ("identity" as __to_index__)
         f :: [Int] -> [Int]
@@ -6603,7 +7255,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         id_ :: T1 n Real -> T1 n Real
         x = id_ (make 5)
           |]
@@ -6616,7 +7268,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         id :: a -> a
         x = id (make 6)
           |]
@@ -6630,7 +7282,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         x = g (f (make 7))
@@ -6645,7 +7297,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f1 :: T1 n Real -> T1 n Real
         f2 :: T1 n Real -> T1 n Real
         f3 :: T1 n Real -> T1 n Real
@@ -6662,7 +7314,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-        make :: m:Int -> n:Int -> T2 m n Real
+        make :: m@Int -> n@Int -> T2 m n Real
         id_ :: T2 m n Real -> T2 m n Real
         x = id_ (make 3 4)
           |]
@@ -6675,7 +7327,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         scale :: Real -> T1 n Real -> T1 n Real
         x = scale 2.0 (make 8)
           |]
@@ -6691,7 +7343,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         add :: T1 n Real -> T1 n Real -> T1 n Real
         x = add (make 4) (make 4)
           |]
@@ -6704,7 +7356,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         consume :: T1 5 Real -> Int
@@ -6718,7 +7370,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         add :: T1 n Real -> T1 n Real -> T1 n Real
         x = add (make 3) (make 5)
           |]
@@ -6731,7 +7383,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: m:Int -> n:Int -> T1 (m * n) Real
+        make :: m@Int -> n@Int -> T1 (m * n) Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         x = g (f (make 6 2))
@@ -6746,7 +7398,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         id :: a -> a
         scale :: Real -> T1 n Real -> T1 n Real
         x = scale 1.0 (id (make 9))
@@ -6762,7 +7414,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         fst_ :: (a, Bool) -> a
         x = fst_ (make 5, True)
           |]
@@ -6777,7 +7429,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         x = g (f (make 9))

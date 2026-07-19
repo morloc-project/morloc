@@ -83,6 +83,26 @@ The final record literal is pure; it coerces to `<Rand> Config` to match the dec
 
 The lift inserts a thunk wrapper at compile time. At runtime, forcing the thunk just yields the pure value.
 
+### Design rationale: capabilities, not commitments
+
+Two readings of `<E> T` exist in the effect-typing literature:
+
+- **Commitment**: `<E> T` means "this value DOES perform E." Pure values are structurally distinct and must be lifted with `pure`/`return`. Haskell (`IO`), Idris `Eff`, Frank, and Effekt take this position.
+- **Capability**: `<E> T` means "this value MAY perform E." The row is an upper bound on permitted effects, not a claim about performed effects. A pure value inhabits any effect slot trivially. Koka takes this position; so does Morloc.
+
+Morloc chose capabilities because:
+
+1. **Ergonomics.** `pure` at every boundary is noise. `@catch (@load p) 42` should not require `@catch (@load p) (pure 42)`. Do-block trailing expressions should not require `pure`. Pure exports like `foo :: <IO> Int; foo = 42` should typecheck without ceremony.
+
+2. **No correctness issue.** Subsumption `E1 ⊆ E2` is monotone in the "more effects" direction; a pure value is the trivial case that uses none of the granted capabilities. The reading is internally consistent.
+
+3. **The "dishonesty" objection dissolves.** A literal `4 :: <Rand> Int` is not a lie under the capability reading — 4 names a value in the set of random-Int outcomes where the probability of 4 is exactly 1. The same intuition already applies to classical subtyping: `5 :: Number` is not dishonest despite 5 being an integer.
+
+### Implementation site
+
+The pure-into-EffectU subtype rule lives in `library/Morloc/Typecheck/Internal.hs`, above the InstantiateL arm. It fires for both concrete and existential LHS; the existential case is what makes `@catch (f x) fb` typecheck when the fallback is bare in a polymorphic effect row.
+
+
 ## Forcing Effects
 
 A suspended value is forced in one of two ways:

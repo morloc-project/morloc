@@ -639,6 +639,23 @@ fn check_parent_writable(argv: &str, mode: &str) -> Result<(), String> {
     }
 }
 
+/// `-` -> `/dev/stdio` substitution, `check.path:` validation, and
+/// the `literal: true` quoting shim -- the pre-wrap pipeline every
+/// user-supplied argv token flows through before reaching the runtime.
+/// Errors abort via `die_with_error` with the caller-supplied prefix.
+pub fn preprocess_cli_value(
+    val: String,
+    checks: &[Check],
+    quoted_flag: bool,
+    error_prefix: &str,
+) -> String {
+    let v = substitute_stdio_dash(&val, checks).unwrap_or(val);
+    if let Err(e) = apply_checks(&v, checks) {
+        crate::runlog::die_with_error(&format!("{}: {}", error_prefix, e));
+    }
+    if quoted_flag { quoted(&v) } else { v }
+}
+
 /// Apply the shape directives to a raw argv token: run any nexus-side
 /// transforms (inline bytes -> JSON array) and value-invariant checks
 /// (`check.path`). Any error aborts via `die_with_error`.
@@ -923,21 +940,49 @@ fn run_remote_command(
                 )
             },
             ArgValue::Group { grp_val, fields, defaults } => {
-                // Group arg: use initialize_unrolled (matches C nexus behavior)
                 extern "C" {
                     fn initialize_unrolled(
                         size: usize, default_value: *mut std::ffi::c_char,
                         fields: *mut *mut std::ffi::c_char,
                         default_fields: *mut *mut std::ffi::c_char,
                     ) -> *mut std::ffi::c_void;
+                    fn parse_cli_data_argument_group_shaped(
+                        dest: *mut u8,
+                        arg: *const std::ffi::c_void,
+                        schema: *const morloc_runtime_types::cschema::CSchema,
+                        source_codes: *const u8,
+                        form_codes: *const u8,
+                        list_config_jsons: *const *const std::ffi::c_char,
+                        n_fields: usize,
+                        errmsg: *mut *mut std::ffi::c_char,
+                    ) -> *mut u8;
                 }
+                let n = fields.len();
+                let entry_shapes: Vec<Option<ArgShape>> = match arg_def {
+                    crate::manifest::Arg::Group { entries, .. } => entries.iter()
+                        .map(|e| ArgShape::from_arg(&e.arg))
+                        .collect(),
+                    _ => vec![None; n],
+                };
+                let any_shaped = entry_shapes.iter().any(|s| s.as_ref()
+                    .map(|sh| !sh.is_default())
+                    .unwrap_or(false));
+
                 // Hold every CString until after the C call so its
                 // strdup'd copy inside argument_t is the only owner
                 // that lives past this scope.
                 let grp_val_keep: Option<std::ffi::CString> =
                     grp_val.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap());
-                let fields_keep: Vec<Option<std::ffi::CString>> = fields.iter()
-                    .map(|f| f.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap()))
+                let fields_keep: Vec<Option<std::ffi::CString>> = fields.iter().enumerate()
+                    .map(|(k, f)| f.as_ref().map(|s| {
+                        let shape_ref = entry_shapes.get(k).and_then(|o| o.as_ref());
+                        let processed = if shape_ref.map(|sh| sh.is_default()).unwrap_or(true) {
+                            s.clone()
+                        } else {
+                            apply_shape_to_argv(s.clone(), shape_ref, i)
+                        };
+                        std::ffi::CString::new(processed).unwrap()
+                    }))
                     .collect();
                 let defaults_keep: Vec<Option<std::ffi::CString>> = defaults.iter()
                     .map(|d| d.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap()))
@@ -956,11 +1001,37 @@ fn run_remote_command(
                               .unwrap_or(std::ptr::null_mut()))
                     .collect();
 
-                let n = fields.len();
                 let c_arg = unsafe {
                     initialize_unrolled(n, grp_val_c, c_fields.as_mut_ptr(), c_defaults.as_mut_ptr())
                 };
-                let pkt = unsafe { dispatch_one_arg(None, c_arg, c_schema, &mut errmsg) };
+
+                let pkt = if any_shaped {
+                    let mut src_codes: Vec<u8> = Vec::with_capacity(n);
+                    let mut frm_codes: Vec<u8> = Vec::with_capacity(n);
+                    let mut list_cfg_keep: Vec<Option<std::ffi::CString>> = Vec::with_capacity(n);
+                    for shape in &entry_shapes {
+                        let (sc, fc) = shape.as_ref().and_then(shaped_dispatch_codes).unwrap_or((0, 0));
+                        let list_cfg_json = shape.as_ref().and_then(build_list_config_json);
+                        src_codes.push(sc);
+                        frm_codes.push(fc);
+                        list_cfg_keep.push(list_cfg_json
+                            .and_then(|s| std::ffi::CString::new(s).ok()));
+                    }
+                    let list_cfg_ptrs: Vec<*const std::ffi::c_char> = list_cfg_keep.iter()
+                        .map(|o| o.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null()))
+                        .collect();
+                    let p = unsafe {
+                        parse_cli_data_argument_group_shaped(
+                            std::ptr::null_mut(), c_arg, c_schema,
+                            src_codes.as_ptr(), frm_codes.as_ptr(),
+                            list_cfg_ptrs.as_ptr(), n, &mut errmsg,
+                        )
+                    };
+                    drop(list_cfg_keep);
+                    p
+                } else {
+                    unsafe { dispatch_one_arg(None, c_arg, c_schema, &mut errmsg) }
+                };
                 unsafe { free_argument_t(c_arg) };
                 drop(grp_val_keep);
                 drop(fields_keep);

@@ -21,9 +21,9 @@ module main
 import root-py
 import root-cpp
 
-prepFile :: Str -> <IO> ()
+prepFile :: Str -> <IO, Err> ()
 prepFile path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
@@ -35,12 +35,12 @@ prepFile path = do
 -- combinator. `idcpp (@next s)` would unify a polymorphic type
 -- variable with @next's effectful return, which the type checker
 -- rejects; binding @next first puts the forced value in scope.
-cppRead :: IStream Int -> <IO> [Int]
+cppRead :: IStream Int -> <IO, Err> [Int]
 cppRead s = do
   xs <- @next s
   idcpp xs
 
-pyRead :: IStream Int -> <IO> [Int]
+pyRead :: IStream Int -> <IO, Err> [Int]
 pyRead s = do
   xs <- @next s
   idpy xs
@@ -48,10 +48,10 @@ pyRead s = do
 -- Each pool's @next claims one sub-packet from the shared
 -- cursor. Sum of element counts = 7. The exact split depends
 -- on call order, which is deterministic here.
-testCrossPoolReaders :: Str -> <IO> UInt64
+testCrossPoolReaders :: Str -> <IO, Err> U64
 testCrossPoolReaders path = do
   prepFile path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   a <- cppRead s        -- claims sub-packet 0 (3 elements)
   b <- pyRead s         -- claims sub-packet 1 (2 elements)
   c <- cppRead s        -- claims sub-packet 2 (2 elements)
@@ -59,10 +59,10 @@ testCrossPoolReaders path = do
 
 -- After all 3 sub-packets drained, the 4th read (from any pool)
 -- returns []. This shows the EOF signal propagates cross-pool.
-testCrossPoolReadersEof :: Str -> <IO> UInt64
+testCrossPoolReadersEof :: Str -> <IO, Err> U64
 testCrossPoolReadersEof path = do
   prepFile path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   cppRead s
   pyRead s
   cppRead s

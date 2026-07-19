@@ -1,5 +1,5 @@
 # Nested labeled cache across all three pool languages. Per language,
-# foo applies `a:map b:sum` over a list of sublists. After one run
+# foo applies `a@map b@sum` over a list of sublists. After one run
 # per language we expect one 'a' entry (the whole map call) and two
 # 'b' entries (one per sublist input). After three languages: 3
 # a-packets, 6 b-packets.

@@ -59,7 +59,7 @@ all:
 	./nexus realId "hello" >> obs.txt 2>/dev/null || echo "PARSE_ERROR" >> obs.txt
 	./nexus realId "infinit" >> obs.txt 2>/dev/null || echo "PARSE_ERROR" >> obs.txt
 	echo "" >> obs.txt
-	echo "=== S11: Float32 round-trip incl. non-finites ===" >> obs.txt
+	echo "=== S11: F32 round-trip incl. non-finites ===" >> obs.txt
 	./nexus f32Id 3.14 >> obs.txt
 	./nexus f32Id "inf" >> obs.txt
 	./nexus f32Id "\-inf" >> obs.txt

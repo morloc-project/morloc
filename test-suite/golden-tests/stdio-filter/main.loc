@@ -23,9 +23,9 @@ sumList xs = fold (+) 0 xs
 doubleList :: [Int] -> [Int]
 doubleList xs = map (\x -> x * 2) xs
 
-producer :: <IO> ()
+producer :: <IO, Err> ()
 producer = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5, 6]
@@ -33,10 +33,10 @@ producer = do
   @write 0 o [7, 8, 9, 10]
   @close o
 
-doubler :: <IO> ()
+doubler :: <IO, Err> ()
 doubler = do
-  s <- @stdin  :: <IO> IStream Int
-  o <- @stdout :: <IO> OStream Int
+  s <- @stdin  :: <IO, Err> IStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   xs1 <- @next s
   @write 0 o (doubleList xs1)
   @flush o
@@ -47,9 +47,9 @@ doubler = do
   @write 0 o (doubleList xs3)
   @close o
 
-checkSum :: <IO> Int
+checkSum :: <IO, Err> Int
 checkSum = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs1 <- @next s
   xs2 <- @next s
   xs3 <- @next s

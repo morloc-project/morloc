@@ -10,6 +10,18 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::manifest_ffi::*;
 use crate::shm::{self, AbsPtr, RelPtr};
 
+/// Consume a C errmsg pointer, return its text (freeing the C string)
+/// or a fallback if it's null. Used by every intrinsic handler that
+/// turns an errmsg outparam into a `MorlocError::UserThrow` message.
+unsafe fn take_c_errmsg_or(err: *mut c_char, fallback: &str) -> String {
+    if err.is_null() {
+        return fallback.to_string();
+    }
+    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+    libc::free(err as *mut c_void);
+    m
+}
+
 // ── Constructor functions (called by manifest_ffi.rs and daemon.c) ───────────
 
 #[no_mangle]
@@ -673,13 +685,7 @@ unsafe fn read_int_as_i64(
             &mut err,
         );
         if handle < 0 {
-            let msg = if !err.is_null() {
-                let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                m
-            } else {
-                "mlc_read_stream_field returned -1".to_string()
-            };
+            let msg = take_c_errmsg_or(err, "mlc_read_stream_field returned -1");
             return Err(MorlocError::Other(msg));
         }
         Ok(handle)
@@ -1251,49 +1257,58 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Read => {
-            // Deserialize JSON string to typed data, return optional.
-            //
-            // Optional is now a single relptr slot (RELNULL = absent).
-            // Allocate the inner T's body in SHM, parse the JSON into
-            // it, and write the relptr into the slot. Empty string or
-            // parse failure → RELNULL.
+            // `read_json_with_schema` encodes internal relptrs relative
+            // to an SHM-backed destination, so parse into a fresh SHM
+            // inner and deep-copy into `dest` (which may not be SHM).
             let child = (*expr).expr.unary_expr;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
             let str_arr = &*(child_result as *const shm::Array);
 
-            let opt_slot = dest as *mut shm::RelPtr;
-            let inner_schema = *(*schema).parameters;
-            let inner_width = (*inner_schema).width;
-
-            if str_arr.size > 0 {
-                let str_abs = shm::rel2abs(str_arr.data)?;
-                let json_str = libc::malloc(str_arr.size + 1) as *mut c_char;
-                if json_str.is_null() {
-                    return Err(MorlocError::Other("Failed to allocate for @read".into()));
-                }
-                ptr::copy_nonoverlapping(str_abs, json_str as *mut u8, str_arr.size);
-                *json_str.add(str_arr.size) = 0;
-
-                extern "C" {
-                    fn read_json_with_schema(dest: *mut u8, json: *mut c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
-                }
-
-                let inner_abs = shm::shmalloc(inner_width)?;
-                ptr::write_bytes(inner_abs, 0, inner_width);
-                let mut parse_err: *mut c_char = ptr::null_mut();
-                let parsed = read_json_with_schema(inner_abs, json_str, inner_schema, &mut parse_err);
-                libc::free(json_str as *mut c_void);
-
-                if !parse_err.is_null() || parsed.is_null() {
-                    libc::free(parse_err as *mut c_void);
-                    let _ = shm::shfree(inner_abs);
-                    *opt_slot = shm::RELNULL;
-                } else {
-                    *opt_slot = shm::abs2rel(inner_abs)?;
-                }
-            } else {
-                *opt_slot = shm::RELNULL;
+            if str_arr.size == 0 {
+                return Err(MorlocError::UserThrow(
+                    "@read: empty input string".into(),
+                ));
             }
+
+            let str_abs = shm::rel2abs(str_arr.data)?;
+            let json_str = libc::malloc(str_arr.size + 1) as *mut c_char;
+            if json_str.is_null() {
+                return Err(MorlocError::Other("Failed to allocate for @read".into()));
+            }
+            ptr::copy_nonoverlapping(str_abs, json_str as *mut u8, str_arr.size);
+            *json_str.add(str_arr.size) = 0;
+
+            extern "C" {
+                fn read_json_with_schema(dest: *mut u8, json: *mut c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
+            }
+
+            let inner_abs = shm::shmalloc(width)?;
+            ptr::write_bytes(inner_abs, 0, width);
+            let mut parse_err: *mut c_char = ptr::null_mut();
+            let parsed = read_json_with_schema(inner_abs, json_str, schema, &mut parse_err);
+            libc::free(json_str as *mut c_void);
+
+            if !parse_err.is_null() || parsed.is_null() {
+                let msg = if !parse_err.is_null() {
+                    let m = CStr::from_ptr(parse_err).to_string_lossy().into_owned();
+                    libc::free(parse_err as *mut c_void);
+                    m
+                } else {
+                    "@read: JSON parse failed".to_string()
+                };
+                let _ = shm::shfree(inner_abs);
+                return Err(MorlocError::UserThrow(msg));
+            }
+
+            let inner_rs = crate::cschema::CSchema::to_rust(schema);
+            ptr::write_bytes(dest, 0, width);
+            let copy_result = crate::voidstar::deep_copy(
+                inner_abs as *const u8,
+                dest,
+                &inner_rs,
+            );
+            let _ = shm::shfree(inner_abs);
+            copy_result?;
         }
 
         MorlocExpressionType::Hash => {
@@ -1372,23 +1387,15 @@ unsafe fn morloc_eval_r(
                 _ => mlc_save_voidstar(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
             };
             libc::free(path_cstr as *mut c_void);
-            if rc != 0 && !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
+            if rc != 0 {
+                let fb = format!("@save({fmt}): failed with rc={rc}");
+                return Err(MorlocError::UserThrow(take_c_errmsg_or(err, &fb)));
             }
             // Return unit (zero-fill dest)
             ptr::write_bytes(dest, 0, width);
         }
 
         MorlocExpressionType::Load => {
-            // Load data from file, return optional.
-            //
-            // Optional is now a single relptr slot. On a successful
-            // load we allocate the inner T's body in SHM, deep-copy
-            // the loaded data into it, and store the relptr in the
-            // slot. On failure (file missing, parse error, etc.) the
-            // slot gets RELNULL.
             let child = (*expr).expr.unary_expr;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
 
@@ -1405,48 +1412,36 @@ unsafe fn morloc_eval_r(
             extern "C" {
                 fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
             }
-            let opt_slot = dest as *mut shm::RelPtr;
-            let inner_schema = *(*schema).parameters;
-            let inner_width = (*inner_schema).width;
-
             let mut err: *mut c_char = ptr::null_mut();
-            let loaded = mlc_load(path_cstr, inner_schema, &mut err);
-            libc::free(path_cstr as *mut c_void);
+            let loaded = mlc_load(path_cstr, schema, &mut err);
 
             if loaded.is_null() {
-                if !err.is_null() {
-                    libc::free(err as *mut c_void);
-                }
-                *opt_slot = shm::RELNULL;
-            } else {
-                // mlc_load returns SHM but the layout depends on the file
-                // format: msgpack and voidstar pack the wrapper and nested
-                // data into a single block (relptrs reference addresses
-                // inside the block), JSON returns a multi-block tree. A
-                // straight bit-copy of the wrapper would alias the source
-                // block, and libc::free on SHM is undefined. Deep-copy
-                // into a fresh inner allocation so the result matches what
-                // the rest of the evaluator produces, then shfree the
-                // source block as one allocation.
-                let inner_rs = crate::cschema::CSchema::to_rust(inner_schema);
-                let inner_abs = shm::shmalloc(inner_width)?;
-                ptr::write_bytes(inner_abs, 0, inner_width);
-                let copy_result = crate::voidstar::deep_copy(
-                    loaded as *const u8,
-                    inner_abs,
-                    &inner_rs,
-                );
-                let _ = shm::shfree(loaded as shm::AbsPtr);
-                match copy_result {
-                    Ok(_) => {
-                        *opt_slot = shm::abs2rel(inner_abs)?;
-                    }
-                    Err(e) => {
-                        let _ = shm::shfree(inner_abs);
-                        return Err(e);
-                    }
-                }
+                let fb = {
+                    let p = CStr::from_ptr(path_cstr).to_string_lossy().into_owned();
+                    format!("@load: failed to load '{p}'")
+                };
+                libc::free(path_cstr as *mut c_void);
+                return Err(MorlocError::UserThrow(take_c_errmsg_or(err, &fb)));
             }
+            libc::free(path_cstr as *mut c_void);
+
+            // mlc_load returns SHM but the layout depends on the file
+            // format: msgpack and voidstar pack the wrapper and nested
+            // data into a single block (relptrs reference addresses
+            // inside the block), JSON returns a multi-block tree. A
+            // straight bit-copy of the wrapper would alias the source
+            // block, and libc::free on SHM is undefined. Deep-copy
+            // directly into `dest`, then shfree the source block as one
+            // allocation.
+            let inner_rs = crate::cschema::CSchema::to_rust(schema);
+            ptr::write_bytes(dest, 0, width);
+            let copy_result = crate::voidstar::deep_copy(
+                loaded as *const u8,
+                dest,
+                &inner_rs,
+            );
+            let _ = shm::shfree(loaded as shm::AbsPtr);
+            copy_result?;
         }
 
         MorlocExpressionType::Map => {
@@ -1514,63 +1509,67 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Open => {
-            // Dispatch on handle kind. IFile's wire form is the path
-            // laid into a tagged stream-handle field (TAG_PATH); the
-            // receiving pool reopens locally. IStream needs a stable
-            // cursor and OStream's flock rejects mid-session re-open,
-            // so for those the nexus opens once and stores the real
-            // i64 handle in dest.
+            // IFile eager-validates the packet header (mlc_probe_packet);
+            // the pool re-opens locally from TAG_PATH. IStream opens
+            // through the runtime so the cursor stays stable across the
+            // enclosing nexus scope. OStream routes through
+            // MorlocExpressionType::OpenOStream (needs the schema at
+            // open time). Unknown kind is a codegen invariant violation.
             let open = (*expr).expr.open_expr;
             let kind = (*open).kind;
             let path_expr = (*open).path;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
             let path_cstr = path_voidstar_to_cstr(path_result, "@open")?;
 
-            if kind == 0 {
-                // IFile: write the path into a TAG_PATH stream-handle
-                // field. Lazy validation: the first downstream read
-                // goes through mlc_read_stream_field which opens and
-                // surfaces any ENOENT / format error then.
-                use morloc_runtime_types::stream_handle as sh;
-                let path_len = libc::strlen(path_cstr);
-                let payload = if path_len == 0 {
-                    sh::RELNULL_PAYLOAD
-                } else {
-                    let block = shm::shmalloc(sh::path_suballoc_size(path_len))?;
-                    sh::write_path_suballoc(
-                        block,
-                        std::slice::from_raw_parts(path_cstr as *const u8, path_len),
-                    );
-                    shm::abs2rel(block)? as u64
-                };
-                sh::write_field(dest, sh::TAG_PATH, payload);
-                libc::free(path_cstr as *mut c_void);
-            } else {
-                // IStream / OStream: actually open via the runtime so
-                // the cursor / fd is stable across subsequent ops in
-                // this nexus scope. The eval_arena tracks and closes
-                // the handle when the scope ends. The result lands in
-                // dest as a TAG_HANDLE stream-handle field so downstream
-                // reads go through mlc_read_stream_field uniformly with
-                // the IFile TAG_PATH case above.
-                extern "C" {
-                    fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
-                }
-                use morloc_runtime_types::stream_handle as sh;
-                let mut err: *mut c_char = ptr::null_mut();
-                let handle = mlc_open(path_cstr, kind, &mut err);
-                libc::free(path_cstr as *mut c_void);
-                if handle < 0 {
-                    let msg = if !err.is_null() {
-                        let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                        libc::free(err as *mut c_void);
-                        m
+            match kind {
+                0 => {
+                    extern "C" {
+                        fn mlc_probe_packet(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+                    }
+                    use morloc_runtime_types::stream_handle as sh;
+                    let mut err: *mut c_char = ptr::null_mut();
+                    let probe_rc = mlc_probe_packet(path_cstr, &mut err);
+                    if probe_rc != 0 {
+                        let fb = {
+                            let p = CStr::from_ptr(path_cstr).to_string_lossy().into_owned();
+                            format!("@open probe: '{p}' is not a valid morloc packet")
+                        };
+                        libc::free(path_cstr as *mut c_void);
+                        return Err(MorlocError::UserThrow(take_c_errmsg_or(err, &fb)));
+                    }
+                    let path_len = libc::strlen(path_cstr);
+                    let payload = if path_len == 0 {
+                        sh::RELNULL_PAYLOAD
                     } else {
-                        format!("mlc_open(kind={}) returned -1 without errmsg", kind)
+                        let block = shm::shmalloc(sh::path_suballoc_size(path_len))?;
+                        sh::write_path_suballoc(
+                            block,
+                            std::slice::from_raw_parts(path_cstr as *const u8, path_len),
+                        );
+                        shm::abs2rel(block)? as u64
                     };
-                    return Err(MorlocError::Other(msg));
+                    sh::write_field(dest, sh::TAG_PATH, payload);
+                    libc::free(path_cstr as *mut c_void);
                 }
-                sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+                1 => {
+                    extern "C" {
+                        fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
+                    }
+                    use morloc_runtime_types::stream_handle as sh;
+                    let mut err: *mut c_char = ptr::null_mut();
+                    let handle = mlc_open(path_cstr, kind, &mut err);
+                    libc::free(path_cstr as *mut c_void);
+                    if handle < 0 {
+                        let msg = take_c_errmsg_or(err, "@open IStream: mlc_open returned -1 without errmsg");
+                        return Err(MorlocError::UserThrow(msg));
+                    }
+                    sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+                }
+                other => {
+                    libc::free(path_cstr as *mut c_void);
+                    panic!("compiler bug: @open received unknown kind byte {other} \
+                            (expected 0=IFile or 1=IStream; OStream routes through OpenOStream)");
+                }
             }
         }
 
@@ -1585,13 +1584,7 @@ unsafe fn morloc_eval_r(
             let mut err: *mut c_char = ptr::null_mut();
             let rc = mlc_close(handle_i, &mut err);
             if rc != 0 {
-                let msg = if !err.is_null() {
-                    let s = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    s
-                } else {
-                    "mlc_close returned non-zero with no error message".to_string()
-                };
+                let msg = take_c_errmsg_or(err, "mlc_close returned non-zero with no error message");
                 return Err(MorlocError::Other(msg));
             }
             // Return unit (zero-fill dest).
@@ -1609,14 +1602,8 @@ unsafe fn morloc_eval_r(
             let s = mlc_fschema(path_cstr, &mut err);
             libc::free(path_cstr as *mut c_void);
             if s.is_null() {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_fschema returned NULL with no error message".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@fschema: mlc_fschema returned NULL with no error message");
+                return Err(MorlocError::UserThrow(msg));
             }
             // Materialise the returned string into a voidstar Str
             // (Array of u8) in SHM, then write the Array header into dest.
@@ -1642,14 +1629,8 @@ unsafe fn morloc_eval_r(
             let mut err: *mut c_char = ptr::null_mut();
             let n = mlc_ifile_length(handle_i, &mut err);
             if n < 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_ifile_length returned -1".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@flen: mlc_ifile_length returned -1");
+                return Err(MorlocError::UserThrow(msg));
             }
             write_int_to_dest(dest, schema, n)?;
         }
@@ -1665,14 +1646,8 @@ unsafe fn morloc_eval_r(
             let mut err: *mut c_char = ptr::null_mut();
             let voidstar = mlc_next(handle_i, &mut err);
             if voidstar.is_null() {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_next returned NULL".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@next: mlc_next returned NULL");
+                return Err(MorlocError::UserThrow(msg));
             }
             let result_rs = crate::cschema::CSchema::to_rust(schema);
             crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
@@ -1691,13 +1666,7 @@ unsafe fn morloc_eval_r(
             let mut err: *mut c_char = ptr::null_mut();
             let new_h = mlc_stream(handle_i, &mut err);
             if new_h < 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_stream returned -1".to_string()
-                };
+                let msg = take_c_errmsg_or(err, "mlc_stream returned -1");
                 return Err(MorlocError::Other(msg));
             }
             sh::write_field(dest, sh::TAG_HANDLE, new_h as u64);
@@ -1756,14 +1725,8 @@ unsafe fn morloc_eval_r(
                 &mut err,
             );
             if voidstar.is_null() {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_ifile_walk returned NULL".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@ifile_walk: returned NULL");
+                return Err(MorlocError::UserThrow(msg));
             }
             let result_rs = crate::cschema::CSchema::to_rust(schema);
             crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
@@ -1803,14 +1766,8 @@ unsafe fn morloc_eval_r(
             libc::free(path_cstr as *mut c_void);
             libc::free(schema_cstr as *mut c_void);
             if handle < 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_open_ostream returned -1 without errmsg".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@open OStream: mlc_open_ostream returned -1 without errmsg");
+                return Err(MorlocError::UserThrow(msg));
             }
             sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
         }
@@ -1844,14 +1801,8 @@ unsafe fn morloc_eval_r(
             let mut err: *mut c_char = ptr::null_mut();
             let rc = mlc_write(level_i as u8, handle_i, value_voidstar as *const c_void, &mut err);
             if rc != 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_write returned non-zero without errmsg".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@write: mlc_write returned non-zero without errmsg");
+                return Err(MorlocError::UserThrow(msg));
             }
             // Return unit (zero-fill dest).
             ptr::write_bytes(dest, 0, width);
@@ -1882,14 +1833,8 @@ unsafe fn morloc_eval_r(
             libc::free(path_cstr as *mut c_void);
             libc::free(schema_cstr as *mut c_void);
             if handle < 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_append returned -1 without errmsg".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@append: mlc_append returned -1 without errmsg");
+                return Err(MorlocError::UserThrow(msg));
             }
             use morloc_runtime_types::stream_handle as sh;
             sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
@@ -1951,14 +1896,8 @@ unsafe fn morloc_eval_r(
             for p in owned { libc::free(p as *mut c_void); }
             libc::free(dest_cstr as *mut c_void);
             if rc != 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_concat returned non-zero without errmsg".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@concat: mlc_concat returned non-zero without errmsg");
+                return Err(MorlocError::UserThrow(msg));
             }
             // Return unit.
             ptr::write_bytes(dest, 0, width);
@@ -1974,6 +1913,9 @@ unsafe fn morloc_eval_r(
                 fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
             }
             use morloc_runtime_types::stream_handle as sh;
+            // No isatty gate on @stdin: programs may want the handle
+            // before any read (e.g. to test the CAS uniqueness guard).
+            // Read-time failures surface at @next, which is `<IO, Err>`.
             let schema_cstr = schema_to_string(schema);
             if schema_cstr.is_null() {
                 return Err(MorlocError::Other(
@@ -1988,14 +1930,8 @@ unsafe fn morloc_eval_r(
             };
             libc::free(schema_cstr as *mut c_void);
             if handle < 0 {
-                let msg = if !err.is_null() {
-                    let m = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    m
-                } else {
-                    "mlc_open_std* returned -1 without errmsg".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "mlc_open_std* returned -1 without errmsg");
+                return Err(MorlocError::UserThrow(msg));
             }
             sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
         }
@@ -2011,16 +1947,70 @@ unsafe fn morloc_eval_r(
             let mut err: *mut c_char = ptr::null_mut();
             let rc = mlc_flush(handle_i, &mut err);
             if rc != 0 {
-                let msg = if !err.is_null() {
-                    let s = CStr::from_ptr(err).to_string_lossy().into_owned();
-                    libc::free(err as *mut c_void);
-                    s
-                } else {
-                    "mlc_flush returned non-zero with no error message".to_string()
-                };
-                return Err(MorlocError::Other(msg));
+                let msg = take_c_errmsg_or(err, "@flush: mlc_flush returned non-zero with no error message");
+                return Err(MorlocError::UserThrow(msg));
             }
             ptr::write_bytes(dest, 0, width);
+        }
+
+        MorlocExpressionType::Throw => {
+            let msg_expr = (*expr).expr.unary_expr;
+            let msg_ptr = morloc_eval_r(msg_expr, ptr::null_mut(), 0, bndvars)?;
+            let arr = &*(msg_ptr as *const shm::Array);
+            let abs = shm::rel2abs(arr.data)?;
+            let bytes = std::slice::from_raw_parts(abs as *const u8, arr.size);
+            return Err(MorlocError::UserThrow(String::from_utf8_lossy(bytes).into_owned()));
+        }
+
+        MorlocExpressionType::Catch => {
+            // Pass @catch's dest through to fallible: fallible writes
+            // directly into the caller's slot. On success, no copy is
+            // needed. On failure, rollback frees fallible's arena
+            // allocations, we clear any partial write, then evaluate
+            // fallback into the same dest.
+            //
+            // Schema note: @catch's dest is sized per the fallback's
+            // schema (see manifest_ffi.rs: catch's result schema comes
+            // from fallback because fallible may be @throw with a Unit
+            // sentinel). morloc_eval_r's dest/width consistency check
+            // requires the passed width to match the callee's own
+            // schema width, so we pass fallible's schema width, not
+            // @catch's. This is safe because:
+            //   - non-@throw fallible has the same type-width as the
+            //     fallback by the typechecker's @catch rule, so
+            //     fallible_width == width and dest is fully populated.
+            //   - @throw as fallible has schema width 0; it never
+            //     writes to dest anyway (always returns Err), so the
+            //     trailing dest bytes are irrelevant on the Ok branch
+            //     (unreachable) and overwritten by fallback on the
+            //     Err branch.
+            let catch = (*expr).expr.catch_expr;
+            let fallible = (*catch).fallible;
+            let fallback = (*catch).fallback;
+            let fallible_width = (*(*fallible).schema).width;
+            let cp = crate::eval_arena::checkpoint();
+            match morloc_eval_r(fallible, dest, fallible_width, bndvars) {
+                Ok(src_ptr) => {
+                    // morloc_eval_r's calling convention is loose: most
+                    // handlers write into `dest` and return `Ok(dest)`,
+                    // but a few (Dat with is_voidstar=true, some Bnd
+                    // paths) return a different pointer to the value.
+                    // If we got a different pointer back, memcpy from
+                    // it. Common path is src_ptr == dest, hitting the
+                    // early return with zero copy.
+                    if !src_ptr.is_null() && src_ptr != dest && width > 0 {
+                        ptr::copy_nonoverlapping(src_ptr as *const u8, dest, width);
+                    }
+                }
+                Err(e) if is_user_throw(&e) => {
+                    crate::eval_arena::rollback_to(cp);
+                    if width > 0 {
+                        ptr::write_bytes(dest, 0, width);
+                    }
+                    morloc_eval_r(fallback, dest, width, bndvars)?;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         other => {
@@ -2044,6 +2034,16 @@ unsafe fn morloc_eval_r(
     }
 
     Ok(dest)
+}
+
+/// Predicate: is this error interceptable by @catch?
+/// Distinguishes user-visible failures (a direct `@throw`, or a fail
+/// packet returned from a foreign pool whose function was annotated
+/// `<Err>`) from internal-invariant failures (compiler bug, allocation
+/// fault, corrupt manifest). The user promised catchability via the
+/// `<Err>` effect only for the former.
+fn is_user_throw(e: &MorlocError) -> bool {
+    matches!(e, MorlocError::UserThrow(_) | MorlocError::Packet(_))
 }
 
 /// Extract a NUL-terminated path C-string from a voidstar Str

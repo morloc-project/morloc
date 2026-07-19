@@ -15,7 +15,7 @@ import root-py
 --   No explicit signature -> kindless polymorphic row. The CSV has five
 --   int-looking rows in column y followed by float rows. A too-small sniff
 --   window mis-infers y as Int and fails at the float boundary; the 100-row
---   default catches the Int->Float64 promotion and is locked in here.
+--   default catches the Int->F64 promotion and is locked in here.
 --
 -- polymorphic_json:
 --   Bare `T` wire schema (no declared columns). Pre-refactor failed with

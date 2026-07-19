@@ -32,9 +32,9 @@ module main
 
 import root-py
 
-writeMixed :: Str -> <IO> ()
+writeMixed :: Str -> <IO, Err> ()
 writeMixed path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3, 4, 5]
   @flush o
   @write 0 o (range 1 2001)
@@ -44,39 +44,39 @@ writeMixed path = do
 -- First @next returns the explicitly flushed batch verbatim. This
 -- pins the contract that @flush emits exactly the buffer's current
 -- contents -- no coalescing with later writes.
-testFirstSubpacket :: Str -> <IO> [Int]
+testFirstSubpacket :: Str -> <IO, Err> [Int]
 testFirstSubpacket path = do
   writeMixed path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
 
 -- Total element count is invariant under sub-packet splits: this
 -- pins that mid-@write flushes no lose no elements and emit
 -- duplicates, regardless of how the runtime chooses to split.
-testTotalCount :: Str -> <IO> Int
+testTotalCount :: Str -> <IO, Err> Int
 testTotalCount path = do
   writeMixed path
-  f <- @open path :: <IO> IFile Int
+  f <- @open path :: <IO, Err> IFile Int
   @flen f
 
 -- Sub-packet 2 is the first chunk of the 2000-element @write. The
 -- split size is (buf_size - 16) / w = 255 for the 16-byte BigInt
 -- wire form. Pins the splitting formula so the test notices if
 -- buffer-fit math changes.
-testSplitSize :: Str -> <IO> UInt64
+testSplitSize :: Str -> <IO, Err> U64
 testSplitSize path = do
   writeMixed path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   xs <- @next s
   size xs
 
 -- The file holds nine sub-packets; the tenth @next is past the
 -- final footer and returns an empty list.
-testEof :: Str -> <IO> [Int]
+testEof :: Str -> <IO, Err> [Int]
 testEof path = do
   writeMixed path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s

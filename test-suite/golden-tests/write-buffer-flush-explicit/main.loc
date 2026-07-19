@@ -15,9 +15,9 @@ module main
 
 import root
 
-writeWithFlushes :: Str -> <IO> ()
+writeWithFlushes :: Str -> <IO, Err> ()
 writeWithFlushes path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [10, 20, 30]
   @flush o
   @write 0 o [40, 50]
@@ -25,31 +25,31 @@ writeWithFlushes path = do
   @write 0 o [60, 70, 80, 90]
   @close o
 
-testFlushFirst :: Str -> <IO> [Int]
+testFlushFirst :: Str -> <IO, Err> [Int]
 testFlushFirst path = do
   writeWithFlushes path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
 
-testFlushSecond :: Str -> <IO> [Int]
+testFlushSecond :: Str -> <IO, Err> [Int]
 testFlushSecond path = do
   writeWithFlushes path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
 
-testFlushThird :: Str -> <IO> [Int]
+testFlushThird :: Str -> <IO, Err> [Int]
 testFlushThird path = do
   writeWithFlushes path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s
 
-testFlushEof :: Str -> <IO> [Int]
+testFlushEof :: Str -> <IO, Err> [Int]
 testFlushEof path = do
   writeWithFlushes path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s

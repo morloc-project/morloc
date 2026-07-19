@@ -93,14 +93,17 @@ data CstExpr
   | CIstE ClassName [TypeU] [Loc CstExpr]
   | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
-  | CSrcOldE Located (Maybe Text) [(Text, Maybe Text)]
-  | CSrcNewE Located (Maybe Text) [(Bool, Text, Located)]
+  -- Source-item tuple: (isBacktick, foreign-name, morloc-alias).
+  -- isBacktick=True marks the name as `-quoted; it will bypass ldNamePattern/ldOperatorPattern
+  -- validation and be emitted verbatim as an infix operator.
+  | CSrcOldE Located (Maybe Text) [(Bool, Text, Maybe Text)]
+  -- Source-item tuple: (isInline, isBacktick, foreign-name, name-token).
+  | CSrcNewE Located (Maybe Text) [(Bool, Bool, Text, Located)]
   | -- Expressions
     CAppE (Loc CstExpr) [Loc CstExpr]
   | CLamE [Loc CstExpr] (Loc CstExpr)
   | CLetE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
   | CBopE (Loc CstExpr) Located (Loc CstExpr)
-  | CLabeledVarE Text EVar  -- label:var (e.g., large:mean)
   | CVarE EVar
   | CIntE Integer
   | CRealE RealLit
@@ -124,6 +127,7 @@ data CstExpr
   | CLeftSecE !(Loc CstExpr) !Located  -- ^ (expr op) left section: \x -> expr op x
   | CRightSecE !Located !(Loc CstExpr)  -- ^ (op expr) right section: \x -> x op expr
   | CInlineE (Loc CstExpr) -- ^ %inline wrapper for source declarations
+  | CForceE !(Loc CstExpr) -- ^ '!' e -- eval sugar; hoisted to a fresh do-bind by hoistEvals
   deriving (Show, Eq)
 
 data CstExport

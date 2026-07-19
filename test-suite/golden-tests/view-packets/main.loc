@@ -13,12 +13,12 @@ import root
 payload :: [Int]
 payload = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
-mkData :: Str -> <IO> ()
+mkData :: Str -> <IO, Err> ()
 mkData path = @save 0 payload path
 
-mkStream :: Str -> <IO> ()
+mkStream :: Str -> <IO, Err> ()
 mkStream path = do
-  s <- @open path :: <IO> OStream Int
+  s <- @open path :: <IO, Err> OStream Int
   @write 0 s [1, 2, 3, 4, 5]
   @flush s
   @write 0 s [6, 7, 8, 9, 10]

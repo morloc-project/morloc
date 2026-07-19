@@ -83,7 +83,10 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
 def _with_debug_trace(msg: str) -> str:
     # Concatenate the morloc debug trace (if --debug was compiled in
     # and any frames were recorded) with the raised exception's
-    # message. Returns msg unchanged when no trace is present.
+    # message. Returns msg unchanged when no trace is present. Each
+    # manifold catch also appends its own "  at <name> [py] (mid=...,
+    # srcloc)" line to the message via string concat, so non-debug
+    # tracebacks still compose across pools.
     trace = morloc.debug_drain_frames()
     return f"{msg}\n{trace}" if trace else msg
 

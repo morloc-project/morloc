@@ -1,0 +1,21 @@
+-- Negative test for @catch's bespoke effect-strip rule: a fallible
+-- whose effect set does not contain `Err` must be rejected at
+-- typecheck time. Without this rejection, effect-strip would silently
+-- produce a smaller set that never had Err in it, letting the pool
+-- helper run try/catch around an expression the user did not promise
+-- was catchable.
+--
+-- This test EXPECTS typecheck to fail.
+module main (bad)
+
+import root
+import root-py
+
+source Py from "helper.py" ("py_id")
+py_id :: a -> a
+
+-- bad's fallible is `py_id "hi"` with type `Str` -- no effect at all,
+-- much less Err. @catch should reject with a clear diagnostic naming
+-- Err as the required effect.
+bad :: Str
+bad = @catch (py_id "hi") "fallback"

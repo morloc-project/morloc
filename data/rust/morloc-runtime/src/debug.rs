@@ -64,6 +64,17 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+/// NULL or empty C string -> `String::new()`; otherwise the borrowed
+/// UTF-8 (lossy). Used everywhere in this module to turn optional
+/// codegen-supplied metadata into owned Strings for FrameEntry.
+unsafe fn cstr_to_string(p: *const c_char) -> String {
+    if p.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(p).to_string_lossy().into_owned()
+    }
+}
+
 /// Why the catch couldn't (or didn't) write an arg to disk. Used to
 /// pick the right one-line message in the rendered trace -- collapsing
 /// these into a single "depth cap reached or write unavailable" string
@@ -93,6 +104,8 @@ struct FrameEntry {
     name: String,
     /// @path:line:col@ of the manifold; empty when unknown.
     srcloc: String,
+    /// "py" / "cpp" / "r"; identifies which pool the frame was recorded in.
+    lang: String,
     args: Vec<ArgDump>,
 }
 
@@ -242,8 +255,8 @@ fn try_write(hash_val: u64, bytes: &[u8]) -> Option<PathBuf> {
 /// per-language catch block. Never throws -- failures degrade
 /// gracefully to "(serialize failed)" entries.
 ///
-/// `name` and `srcloc` may be NULL or `""` when the compiler had
-/// nothing to attach; both are treated the same.
+/// `name`, `srcloc`, and `lang` may be NULL or `""` when the
+/// compiler had nothing to attach; all three are treated the same.
 ///
 /// Safety: `packets` and `schemas` must each be an array of `n`
 /// pointers. Each `packets[i]` is a NUL-or-packet pointer; each
@@ -253,6 +266,7 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
     midx: u32,
     name: *const c_char,
     srcloc: *const c_char,
+    lang: *const c_char,
     packets: *const *const u8,
     schemas: *const *const c_char,
     n: usize,
@@ -279,11 +293,7 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
     for i in 0..n {
         let packet = *packets.add(i);
         let schema_cstr = *schemas.add(i);
-        let schema = if schema_cstr.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr(schema_cstr).to_string_lossy().into_owned()
-        };
+        let schema = cstr_to_string(schema_cstr);
         match serialize_and_hash(packet, schema_cstr) {
             None => args.push(ArgDump {
                 schema,
@@ -313,21 +323,12 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
             }
         }
     }
-    let name_str = if name.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(name).to_string_lossy().into_owned()
-    };
-    let srcloc_str = if srcloc.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(srcloc).to_string_lossy().into_owned()
-    };
     FRAMES.with(|f| {
         f.borrow_mut().push(FrameEntry {
             midx,
-            name: name_str,
-            srcloc: srcloc_str,
+            name: cstr_to_string(name),
+            srcloc: cstr_to_string(srcloc),
+            lang: cstr_to_string(lang),
             args,
         })
     });
@@ -346,6 +347,7 @@ pub extern "C" fn morloc_debug_flush_dispatch() {
     OVERFLOW_REPORTED.store(0, Ordering::Relaxed);
 }
 
+
 /// Render the accumulated trace as a multi-line C string and clear
 /// the per-thread state. Caller takes ownership and must free with
 /// `libc::free`. Returns NULL when no frames were recorded.
@@ -357,11 +359,21 @@ pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
         return ptr::null_mut();
     }
     let mut out = String::with_capacity(256);
-    out.push_str("morloc trace (innermost first):\n");
-    for (i, frame) in frames.iter().enumerate() {
+    // The header names the pool this drain came from -- every frame in
+    // one drain call was recorded in the same pool, so a single tag on
+    // the header is sufficient; the per-frame [lang] would be redundant
+    // and is elided below.
+    let header_lang = frames.first().map(|f| f.lang.as_str()).unwrap_or("");
+    if header_lang.is_empty() {
+        out.push_str("morloc trace:\n");
+    } else {
+        out.push_str(&format!("morloc trace [{} pool]:\n", header_lang));
+    }
+    for frame in frames.iter() {
         // Anonymous/synthesized nodes (compositions, IntrMap, tuple
         // projections, lambdas) render '_' so the header shape is
-        // uniform across every frame.
+        // uniform across every frame. Missing srcloc collapses
+        // cleanly. Language is on the pool header, not per-frame.
         let name = if frame.name.is_empty() { "_" } else { frame.name.as_str() };
         let loc = if frame.srcloc.is_empty() {
             String::new()
@@ -369,8 +381,8 @@ pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
             format!(", {}", frame.srcloc)
         };
         out.push_str(&format!(
-            "  frame {} {} (mid={}{})\n",
-            i, name, frame.midx, loc
+            "  at {} (mid={}{})\n",
+            name, frame.midx, loc
         ));
         for (j, arg) in frame.args.iter().enumerate() {
             let schema = if arg.schema.is_empty() {
@@ -388,8 +400,7 @@ pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
                     j, schema, arg.hash
                 )),
                 DumpStatus::DepthCapped => out.push_str(&format!(
-                    "    arg[{}] :: {} (hash={:016x}, depth cap reached -- raise --debug-cache-depth to dump more)\n",
-                    j, schema, arg.hash
+                    "    arg[{}] :: {}\n", j, schema
                 )),
                 DumpStatus::WriteFailed => out.push_str(&format!(
                     "    arg[{}] :: {} (hash={:016x}, write failed -- check that the debug dir is writable)\n",
@@ -419,6 +430,7 @@ fn push_test_frame(midx: u32, args: Vec<ArgDump>) {
             midx,
             name: String::new(),
             srcloc: String::new(),
+            lang: String::new(),
             args,
         })
     });
@@ -436,6 +448,7 @@ fn push_test_frame_named(
             midx,
             name: name.to_string(),
             srcloc: srcloc.to_string(),
+            lang: String::new(),
             args,
         })
     });
@@ -498,12 +511,37 @@ mod tests {
             assert!(!p.is_null());
             let s = CStr::from_ptr(p).to_string_lossy().into_owned();
             libc::free(p as *mut c_void);
-            // Anonymous frames render '_' in the name slot so every
-            // header shares the same "name (mid=..., loc?)" shape.
-            assert!(s.contains("frame 0 myfunc (mid=42, main.loc:12:5)"));
-            assert!(s.contains("frame 1 _ (mid=7)"));
-            assert!(s.contains("frame 2 namedonly (mid=3)"));
-            assert!(s.contains("frame 3 _ (mid=4, other.loc:1:1)"));
+            // Anonymous frames render '_' in the name slot; missing
+            // srcloc drops the trailing ", <loc>". Empty lang on all
+            // frames means the header is the plain "morloc trace:".
+            assert!(s.contains("morloc trace:\n"));
+            assert!(s.contains("at myfunc (mid=42, main.loc:12:5)"));
+            assert!(s.contains("at _ (mid=7)"));
+            assert!(s.contains("at namedonly (mid=3)"));
+            assert!(s.contains("at _ (mid=4, other.loc:1:1)"));
+        }
+    }
+
+    #[test]
+    fn drain_names_pool_from_first_frame_lang() {
+        FRAMES.with(|f| f.borrow_mut().clear());
+        FRAMES.with(|f| {
+            f.borrow_mut().push(FrameEntry {
+                midx: 1,
+                name: "foo".into(),
+                srcloc: "main.loc:1:1".into(),
+                lang: "cpp".into(),
+                args: vec![],
+            })
+        });
+        unsafe {
+            let p = morloc_debug_drain_frames();
+            assert!(!p.is_null());
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            libc::free(p as *mut c_void);
+            assert!(s.contains("morloc trace [cpp pool]:\n"));
+            // No per-frame [lang] tag anymore.
+            assert!(!s.contains("[cpp]"));
         }
     }
 }

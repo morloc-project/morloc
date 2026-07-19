@@ -9,9 +9,9 @@ module main
 
 import root
 
-mkStream :: Str -> <IO> ()
+mkStream :: Str -> <IO, Err> ()
 mkStream path = do
-  s <- @open path :: <IO> OStream Int
+  s <- @open path :: <IO, Err> OStream Int
   @write 0 s [1, 2]
   @flush s
   @write 0 s [3, 4]

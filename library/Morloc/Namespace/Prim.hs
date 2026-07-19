@@ -88,9 +88,9 @@ import Text.Read (readMaybe)
 --
 -- - 'KindType' - proper type variable (the default)
 -- - 'KindNat' - natural number (for dimensions, e.g. Vector n a)
--- - 'KindStr' - string literal at the type level (for column names, e.g. f:Str
+-- - 'KindStr' - string literal at the type level (for column names, e.g. f@Str
 --               in the Stage 2 tables refactor). See plans/tables/04-str-solver-scope.md.
--- - 'KindRec' - row-polymorphic record schema (for column maps, e.g. r:Rec in
+-- - 'KindRec' - row-polymorphic record schema (for column maps, e.g. r@Rec in
 --               Table n r). See plans/tables/10-rec-solver-decidability.md.
 -- - 'KindList' - ordered, position-preserving sequence parameterised by an
 --               element kind (e.g. List Str for column-name lists).

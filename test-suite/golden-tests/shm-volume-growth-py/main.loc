@@ -6,7 +6,7 @@ import root-cpp
 source Py from "main.py" ("pywrap")
 source Cpp from "main.hpp" ("crun")
 
-pywrap :: Int -> Int -> (Str -> UInt64) -> UInt64
-crun :: Str -> UInt64
+pywrap :: Int -> Int -> (Str -> U64) -> U64
+crun :: Str -> U64
 
 foo strLen arrLen = pywrap strLen arrLen crun

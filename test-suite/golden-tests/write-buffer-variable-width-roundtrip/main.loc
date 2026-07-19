@@ -20,23 +20,23 @@ module main
 
 import root
 
-writeStrings :: Str -> <IO> ()
+writeStrings :: Str -> <IO, Err> ()
 writeStrings path = do
-  o <- @open path :: <IO> OStream Str
+  o <- @open path :: <IO, Err> OStream Str
   @write 0 o ["apple", "banana", "cherry"]
   @write 0 o ["date", "elderberry"]
   @close o
 
 -- Coalesces into one sub-packet via the buffer; reader sees
 -- all five strings in order.
-testStringsRoundtrip :: Str -> <IO> [Str]
+testStringsRoundtrip :: Str -> <IO, Err> [Str]
 testStringsRoundtrip path = do
   writeStrings path
-  s <- @open path :: <IO> IStream Str
+  s <- @open path :: <IO, Err> IStream Str
   @next s
 
-testStringsCount :: Str -> <IO> Int
+testStringsCount :: Str -> <IO, Err> Int
 testStringsCount path = do
   writeStrings path
-  s <- @open path :: <IO> IStream Str
+  s <- @open path :: <IO, Err> IStream Str
   @flen s

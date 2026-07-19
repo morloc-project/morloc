@@ -21,12 +21,12 @@ import root-cpp
 -- The whole do-block runs inside a Cpp manifold thanks to the outer
 -- `idcpp`. Every @open / @write / through @close / @next fires
 -- `pool.cpp`'s `_mlc_*` bridge wrappers.
-testPoolWriteRoundtrip :: Str -> <IO> [Int]
+testPoolWriteRoundtrip :: Str -> <IO, Err> [Int]
 testPoolWriteRoundtrip path = idcpp (do
-  s <- @open path :: <IO> OStream Int
+  s <- @open path :: <IO, Err> OStream Int
   @write 0 s [10, 20, 30]
   @close s
-  r <- @open path :: <IO> IStream Int
+  r <- @open path :: <IO, Err> IStream Int
   @next r)
 
 -- Three @write calls inside a single Cpp manifold so the pool-side
@@ -34,12 +34,12 @@ testPoolWriteRoundtrip path = idcpp (do
 -- registry lock briefly, mutates entry.cursor + subpacket_index, and
 -- releases). After @close, the @flen on the IFile reads the final
 -- footer's element count.
-testPoolWriteMulti :: Str -> <IO> Int
+testPoolWriteMulti :: Str -> <IO, Err> Int
 testPoolWriteMulti path = idcpp (do
-  s <- @open path :: <IO> OStream Int
+  s <- @open path :: <IO, Err> OStream Int
   @write 0 s [1, 2, 3]
   @write 0 s [4, 5, 6, 7]
   @write 0 s [8]
   @close s
-  f <- @open path :: <IO> IFile Int
+  f <- @open path :: <IO, Err> IFile Int
   @flen f)

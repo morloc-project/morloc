@@ -90,6 +90,8 @@ module Morloc.Namespace.Type
   , resolveEffectSet
   , emptyEffectSet
   , ioEffectSet
+  , errEffectSet
+  , ioErrEffectSet
   , effectSubsetOf
   , effectSetHasVar
   , effectSetParts
@@ -97,6 +99,7 @@ module Morloc.Namespace.Type
   , isEmptyEffectSet
   , normalizeEffectSet
   , unionEffectSet
+  , removeEffectLabel
   , mkEffectU
   , mkEffectT
   , prettyEffectSet
@@ -176,6 +179,14 @@ emptyEffectSet = EffectSet Set.empty
 ioEffectSet :: EffectSet
 ioEffectSet = EffectSet (Set.singleton "IO")
 
+-- | An Err effect set. Carried by @throw and discharged by @catch.
+errEffectSet :: EffectSet
+errEffectSet = EffectSet (Set.singleton "Err")
+
+-- | Combined IO+Err effect set for fallible I/O intrinsics.
+ioErrEffectSet :: EffectSet
+ioErrEffectSet = EffectSet (Set.fromList ["IO", "Err"])
+
 -- | Check if one effect set is a subset of another (resolved labels).
 -- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
 effectSubsetOf :: EffectSet -> EffectSet -> Bool
@@ -232,6 +243,24 @@ normalizeEffectSet es =
 -- | Union of two effect sets, normalized.
 unionEffectSet :: EffectSet -> EffectSet -> EffectSet
 unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
+
+-- | Strip a specific label from an effect set. Concrete labels are removed
+-- from an 'EffectSet'; 'EffectUnion' recurses into both sides and normalizes
+-- the result. Callers MUST reject a bare 'EffectVar' before invoking this
+-- helper because row-var membership is not decidable here -- silently
+-- no-op-stripping would let ill-typed programs through the effect-strip
+-- rule. We panic on the misuse rather than silently misbehave.
+-- Removing a concrete label from a row variable is a no-op: the
+-- variable's substitution is unknown, so we neither add nor remove any
+-- concrete label. Callers must independently verify the label was
+-- concretely present in the row (via 'resolveEffectSet') before relying
+-- on the strip; otherwise this silently succeeds on a row that never
+-- carried the label.
+removeEffectLabel :: EffectLabel -> EffectSet -> EffectSet
+removeEffectLabel lbl (EffectSet ls) = EffectSet (Set.delete lbl ls)
+removeEffectLabel _   v@(EffectVar _) = v
+removeEffectLabel lbl (EffectUnion a b) =
+  normalizeEffectSet (EffectUnion (removeEffectLabel lbl a) (removeEffectLabel lbl b))
 
 ---- Type definitions
 
@@ -399,7 +428,7 @@ data TypeU
   -- constructors ('mkNatAdd', ...).
   | OpU OpTag [TypeU]
   | LitU TyLit
-  | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
+  | LabeledU TVar TypeU -- ^ Transient: m@Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
 -- Pattern synonyms for the migrated Nat-kind constructors. These are
@@ -526,7 +555,7 @@ data EType
   { etype :: TypeU
   , econs :: Set.Set Constraint
   , edocs :: ArgDoc
-  , enatLabels :: Map TVar Int -- ^ Nat var name -> argument position index (from m:Int syntax)
+  , enatLabels :: Map TVar Int -- ^ Nat var name -> argument position index (from m@Int syntax)
   }
   deriving (Show, Eq, Ord)
 
@@ -1443,7 +1472,7 @@ instance Pretty TypeU where
       f _ (LitU (LRec fs)) = braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fs]))
       f _ (LitU (LList es)) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
       f _ (LitU (LSet es)) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
-      f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
+      f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         "*"

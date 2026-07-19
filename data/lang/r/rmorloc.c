@@ -40,6 +40,34 @@
 
 #define MORLOC_ERROR(msg, ...) error("Error in R pool (%s:%d in %s):" msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__);
 
+// Raise a MorlocInternalError-classed R error for genuine morloc-
+// invariant violations (compiler bugs, unreachable branches, libmorloc
+// contract violations). morloc_mlc_catch (in pool.R) inspects the
+// class and re-raises, so @catch cannot swallow it. The message goes
+// through the same "Error in R pool ..." prefix as MORLOC_ERROR so
+// diagnostic tooling picks it up uniformly. Use ONLY for genuine
+// bugs; user-attributable failures must go through MORLOC_ERROR so
+// @catch can intercept.
+#define MORLOC_INTERNAL_ABORT(msg, ...) do { \
+    SEXP _cond = PROTECT(allocVector(VECSXP, 2)); \
+    SEXP _names = PROTECT(allocVector(STRSXP, 2)); \
+    SEXP _cls = PROTECT(allocVector(STRSXP, 3)); \
+    char _buf[4096]; \
+    snprintf(_buf, sizeof(_buf), "morloc internal error (R pool, %s:%d in %s): " msg, \
+             __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+    SET_STRING_ELT(_names, 0, mkChar("message")); \
+    SET_STRING_ELT(_names, 1, mkChar("call")); \
+    SET_VECTOR_ELT(_cond, 0, mkString(_buf)); \
+    SET_VECTOR_ELT(_cond, 1, R_NilValue); \
+    setAttrib(_cond, R_NamesSymbol, _names); \
+    SET_STRING_ELT(_cls, 0, mkChar("MorlocInternalError")); \
+    SET_STRING_ELT(_cls, 1, mkChar("error")); \
+    SET_STRING_ELT(_cls, 2, mkChar("condition")); \
+    setAttrib(_cond, R_ClassSymbol, _cls); \
+    UNPROTECT(3); \
+    Rf_eval(Rf_lang2(install("stop"), _cond), R_GlobalEnv); \
+} while (0)
+
 /// }}}
 
 // {{{ shm_tracker
@@ -150,7 +178,7 @@ static const Schema* recur_env_lookup(const char* name) {
 
 // {{{ bit64 (integer64) helpers
 //
-// Int64 / UInt64 / IFile handles are mapped to the `bit64::integer64`
+// I64 / U64 / IFile handles are mapped to the `bit64::integer64`
 // R class (stdlib/root-r/main.loc). integer64 is implemented as a
 // REALSXP whose 8 bytes per cell are reinterpreted as int64_t; the S3
 // class attribute "integer64" tags the storage. The R-level package
@@ -431,7 +459,7 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         case MORLOC_RECUR: {
             const Schema* target = recur_env_lookup(schema->name);
             if (target == NULL) {
-                MORLOC_ERROR("Recur back-reference to undeclared schema name '%s'",
+                MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
                              schema->name ? schema->name : "?");
             }
             return get_shm_size_inner(target, obj);
@@ -879,7 +907,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
         case MORLOC_RECUR: {
             const Schema* target = recur_env_lookup(schema->name);
             if (target == NULL) {
-                MORLOC_ERROR("Recur back-reference to undeclared schema name '%s'",
+                MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
                              schema->name ? schema->name : "?");
             }
             // Dispatch directly to _inner so the Recur node itself
@@ -1366,7 +1394,7 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         case MORLOC_RECUR: {
             const Schema* target = recur_env_lookup(schema->name);
             if (target == NULL) {
-                MORLOC_ERROR("Recur back-reference to undeclared schema name '%s'",
+                MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
                              schema->name ? schema->name : "?");
                 goto error;
             }
@@ -1569,7 +1597,7 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
             client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
             if (new_client == NULL) {
                 close(fd);
-                MORLOC_ERROR("calloc failed");
+                MORLOC_INTERNAL_ABORT("calloc failed (OOM)");
             }
             new_client->fd = fd;
             new_client->next = NULL;
@@ -1632,7 +1660,7 @@ SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
 
 SEXP morloc_send_packet_to_foreign_server(SEXP client_fd_r, SEXP packet_r) { MAYFAIL
     if (TYPEOF(client_fd_r) != INTSXP || LENGTH(client_fd_r) != 1) {
-        MORLOC_ERROR("client_fd must be a single integer");
+        MORLOC_INTERNAL_ABORT("client_fd must be a single integer");
     }
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
@@ -1657,7 +1685,7 @@ SEXP morloc_send_packet_to_foreign_server(SEXP client_fd_r, SEXP packet_r) { MAY
 // Read from socket returning raw vector of received data
 SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
     if (TYPEOF(client_fd_r) != INTSXP || LENGTH(client_fd_r) != 1) {
-        MORLOC_ERROR("client_fd must be a single integer");
+        MORLOC_INTERNAL_ABORT("client_fd must be a single integer");
     }
 
     int client_fd = INTEGER(client_fd_r)[0];
@@ -1681,7 +1709,7 @@ SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
 // close_socket
 SEXP morloc_close_socket(SEXP socket_id_r) {
     if (TYPEOF(socket_id_r) != INTSXP || LENGTH(socket_id_r) != 1) {
-        MORLOC_ERROR("socket_id must be a single integer");
+        MORLOC_INTERNAL_ABORT("socket_id must be a single integer");
     }
     int socket_id = INTEGER(socket_id_r)[0];
     close_socket(socket_id);
@@ -1693,7 +1721,7 @@ SEXP morloc_close_socket(SEXP socket_id_r) {
 // put_value
 SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("schema must be a single string");
+        MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
 
     const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
@@ -1741,7 +1769,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         uint8_t* packet = make_arrow_data_packet(relptr, schema);
         if (!packet) {
             free_schema(schema);
-            MORLOC_ERROR("Failed to create arrow data packet");
+            MORLOC_INTERNAL_ABORT("Failed to create arrow data packet");
         }
 
         size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
@@ -1805,10 +1833,10 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 // realistic morloc program.
 SEXP morloc_mlc_open(SEXP path_r, SEXP kind_r) { MAYFAIL
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_ERROR("mlc_open: path must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_open: path must be a single string");
     }
     if ((TYPEOF(kind_r) != INTSXP && TYPEOF(kind_r) != REALSXP) || LENGTH(kind_r) != 1) {
-        MORLOC_ERROR("mlc_open: kind must be a single integer");
+        MORLOC_INTERNAL_ABORT("mlc_open: kind must be a single integer");
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
     int kind_i = (TYPEOF(kind_r) == INTSXP) ? INTEGER(kind_r)[0] : (int)REAL(kind_r)[0];
@@ -1822,7 +1850,7 @@ SEXP morloc_mlc_open(SEXP path_r, SEXP kind_r) { MAYFAIL
 
 SEXP morloc_mlc_close(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_ERROR("mlc_close: handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_close: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
     R_TRY(mlc_close, handle);
@@ -1831,12 +1859,12 @@ SEXP morloc_mlc_close(SEXP handle_r) { MAYFAIL
 
 SEXP morloc_mlc_fschema(SEXP path_r) { MAYFAIL
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_ERROR("mlc_fschema: path must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_fschema: path must be a single string");
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
     char* s = R_TRY(mlc_fschema, path);
     if (s == NULL) {
-        MORLOC_ERROR("mlc_fschema returned NULL");
+        MORLOC_INTERNAL_ABORT("mlc_fschema returned NULL (libmorloc contract violation)");
     }
     SEXP result = PROTECT(mkString(s));
     free(s);
@@ -1920,7 +1948,7 @@ SEXP morloc_mlc_save_json(SEXP obj_r, SEXP schema_str_r,
 // Mirrors pymorloc.c's pybinding__mlc_hash / pool.cpp's _mlc_hash.
 SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_hash: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_hash: schema must be a single string");
     }
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
@@ -1949,15 +1977,14 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     return result;
 }
 
-// @load :: load a value from a file (auto-detects voidstar / msgpack
-// based on the file's header). Returns the decoded value, or NULL on
-// IO / parse error. Mirrors pymorloc.c's pybinding__mlc_load.
+// @load :: Str -> <IO, Err> a. Missing file / decode failure raises
+// via MORLOC_ERROR (an R error condition catchable by morloc_mlc_catch).
 SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_load: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_load: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_ERROR("mlc_load: path must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_load: path must be a single string");
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
@@ -1967,10 +1994,10 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
 
     void* voidstar = R_TRY_WITH(free_schema(schema), mlc_load, path, schema);
     if (voidstar == NULL) {
-        // Clean parse/IO failure with no errmsg -> surface as R NULL so
-        // morloc's <Maybe>-typed @load arm can pattern-match.
+        // Failure with no errmsg (e.g. file missing with clean NULL
+        // return) surfaces as a catchable R error.
         free_schema(schema);
-        return R_NilValue;
+        MORLOC_ERROR("@load: failed to load '%s'", path);
     }
 
     SEXP obj = from_voidstar(voidstar, schema, NULL);
@@ -1984,14 +2011,14 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     return obj;
 }
 
-// @read :: parse a JSON string into a value. Returns the decoded value,
-// or NULL on parse error. Mirrors pymorloc.c's pybinding__mlc_read.
+// @read :: Str -> <Err> a. Parse failure raises via MORLOC_ERROR
+// (an R error condition catchable by morloc_mlc_catch).
 SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_read: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_read: schema must be a single string");
     }
     if (TYPEOF(json_str_r) != STRSXP || LENGTH(json_str_r) != 1) {
-        MORLOC_ERROR("mlc_read: json must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_read: json must be a single string");
     }
     const char* json_str = CHAR(STRING_ELT(json_str_r, 0));
 
@@ -1999,18 +2026,21 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    // mlc_read may legitimately return NULL on parse failure even with
-    // no errmsg set; the morloc <Maybe>-typed @read arm relies on that
-    // to surface as R NULL.
     char* errmsg = NULL;
     void* voidstar = mlc_read(json_str, schema, &errmsg);
-    if (errmsg != NULL) {
-        free(errmsg);
-    }
     if (voidstar == NULL) {
+        // Parse failure surfaces as a catchable R error condition.
+        char msg_buf[512];
+        if (errmsg != NULL) {
+            snprintf(msg_buf, sizeof(msg_buf), "@read: %s", errmsg);
+            free(errmsg);
+        } else {
+            snprintf(msg_buf, sizeof(msg_buf), "@read: parse failed");
+        }
         free_schema(schema);
-        return R_NilValue;
+        MORLOC_ERROR("%s", msg_buf);
     }
+    if (errmsg != NULL) { free(errmsg); }
 
     SEXP obj = from_voidstar(voidstar, schema, NULL);
     shm_tracker_push((absptr_t)voidstar, schema);
@@ -2056,16 +2086,16 @@ static inline void r_optint_to_pair(SEXP x, uint8_t* has_out, int64_t* val_out) 
 SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
                            SEXP path_r, SEXP args_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_ifile_walk: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: schema must be a single string");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_ERROR("mlc_ifile_walk: handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: handle must be a single number");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_ERROR("mlc_ifile_walk: path must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: path must be a single string");
     }
     if (TYPEOF(args_r) != VECSXP) {
-        MORLOC_ERROR("mlc_ifile_walk: args must be a list");
+        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: args must be a list");
     }
     int64_t handle = i64_from_sexp(handle_r);
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -2074,7 +2104,7 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
     mlc_ifile_walk_arg* packed = NULL;
     if (n > 0) {
         packed = (mlc_ifile_walk_arg*)calloc((size_t)n, sizeof(mlc_ifile_walk_arg));
-        if (packed == NULL) MORLOC_ERROR("mlc_ifile_walk: alloc failed");
+        if (packed == NULL) MORLOC_INTERNAL_ABORT("mlc_ifile_walk: alloc failed (OOM)");
         for (R_xlen_t i = 0; i < n; i++) {
             r_optint_to_pair(VECTOR_ELT(args_r, i), &packed[i].has, &packed[i].value);
         }
@@ -2105,7 +2135,7 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
 
 SEXP morloc_mlc_ifile_length(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_ERROR("mlc_ifile_length: handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_ifile_length: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
     int64_t n = R_TRY(mlc_ifile_length, handle);
@@ -2126,10 +2156,10 @@ SEXP morloc_mlc_ifile_length(SEXP handle_r) { MAYFAIL
 // pattern so from_voidstar can produce zero-copy views.
 SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_next: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_next: schema must be a single string");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_ERROR("mlc_next: handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_next: handle must be a single number");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
@@ -2152,7 +2182,7 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
 SEXP morloc_mlc_stream(SEXP ifile_handle_r) { MAYFAIL
     if ((TYPEOF(ifile_handle_r) != INTSXP && TYPEOF(ifile_handle_r) != REALSXP)
         || LENGTH(ifile_handle_r) != 1) {
-        MORLOC_ERROR("mlc_stream: ifile handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_stream: ifile handle must be a single number");
     }
     int64_t ifh = i64_from_sexp(ifile_handle_r);
     int64_t new_h = R_TRY(mlc_stream, ifh);
@@ -2165,10 +2195,10 @@ SEXP morloc_mlc_stream(SEXP ifile_handle_r) { MAYFAIL
 // @open path :: <IO> (OStream T) -- typed open binding.
 SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_open_ostream: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_open_ostream: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_ERROR("mlc_open_ostream: path must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_open_ostream: path must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -2184,7 +2214,7 @@ SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
 // pool-nexus RPC socket.
 SEXP morloc_mlc_open_stdin(SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_open_stdin: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_open_stdin: schema must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t h = R_TRY(mlc_open_stdin, schema_str);
@@ -2196,7 +2226,7 @@ SEXP morloc_mlc_open_stdin(SEXP schema_str_r) { MAYFAIL
 
 SEXP morloc_mlc_open_stdout(SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_open_stdout: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_open_stdout: schema must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t h = R_TRY(mlc_open_stdout, schema_str);
@@ -2208,7 +2238,7 @@ SEXP morloc_mlc_open_stdout(SEXP schema_str_r) { MAYFAIL
 
 SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_open_stderr: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_open_stderr: schema must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t h = R_TRY(mlc_open_stderr, schema_str);
@@ -2221,15 +2251,15 @@ SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
 // @write: serialise value to voidstar, emit one sub-packet.
 SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_write: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_write: schema must be a single string");
     }
     if ((TYPEOF(level_r) != INTSXP && TYPEOF(level_r) != REALSXP)
         || LENGTH(level_r) != 1) {
-        MORLOC_ERROR("mlc_write: level must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_write: level must be a single number");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP)
         || LENGTH(handle_r) != 1) {
-        MORLOC_ERROR("mlc_write: handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_write: handle must be a single number");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
@@ -2251,10 +2281,10 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
 
 SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("mlc_append: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_append: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_ERROR("mlc_append: path must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_append: path must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -2267,10 +2297,10 @@ SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
 
 SEXP morloc_mlc_concat(SEXP paths_r, SEXP dest_r) { MAYFAIL
     if (TYPEOF(paths_r) != STRSXP) {
-        MORLOC_ERROR("mlc_concat: paths must be a character vector");
+        MORLOC_INTERNAL_ABORT("mlc_concat: paths must be a character vector");
     }
     if (TYPEOF(dest_r) != STRSXP || LENGTH(dest_r) != 1) {
-        MORLOC_ERROR("mlc_concat: dest must be a single string");
+        MORLOC_INTERNAL_ABORT("mlc_concat: dest must be a single string");
     }
     R_xlen_t n = XLENGTH(paths_r);
     const char** raw = NULL;
@@ -2286,7 +2316,7 @@ SEXP morloc_mlc_concat(SEXP paths_r, SEXP dest_r) { MAYFAIL
 
 SEXP morloc_mlc_flush(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_ERROR("mlc_flush: handle must be a single number");
+        MORLOC_INTERNAL_ABORT("mlc_flush: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
     R_TRY(mlc_flush, handle);
@@ -2297,7 +2327,7 @@ SEXP morloc_mlc_flush(SEXP handle_r) { MAYFAIL
 // mlc_show: serialize a value to a JSON string
 SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("schema must be a single string");
+        MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
@@ -2331,7 +2361,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_ERROR("packet must be a raw vector");
     }
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_ERROR("schema must be a single string");
+        MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
 
     // Extract arguments
@@ -2537,13 +2567,13 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
 SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     // Validate inputs
     if (TYPEOF(socket_path_r) != STRSXP || LENGTH(socket_path_r) != 1) {
-        MORLOC_ERROR("socket_path must be a single string");
+        MORLOC_INTERNAL_ABORT("socket_path must be a single string");
     }
     if (TYPEOF(mid_r) != INTSXP || LENGTH(mid_r) != 1) {
-        MORLOC_ERROR("mid must be a single integer");
+        MORLOC_INTERNAL_ABORT("mid must be a single integer");
     }
     if (TYPEOF(args_r) != VECSXP) {
-        MORLOC_ERROR("args must be a list of raw vectors");
+        MORLOC_INTERNAL_ABORT("args must be a list of raw vectors");
     }
 
     // Extract arguments
@@ -2588,12 +2618,18 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
             (const uint8_t*)result, &fail_check_err);
         if (fail_check_err != NULL) { free(fail_check_err); }
         if (fail_msg != NULL) {
-            char buf[8192];
-            snprintf(buf, sizeof(buf), "%s", fail_msg);
+            // Take ownership of fail_msg before longjmping out via error().
+            // Rf_error longjmps to R's condition handler; the copy leaks on
+            // that path (process is unwinding anyway) but the previous fixed
+            // 8KB buffer silently truncated long tracebacks.
+            char* msg_copy = strdup(fail_msg);
             free(fail_msg);
             free(packet);
             free(result);
-            error("%s", buf);
+            if (msg_copy == NULL) {
+                error("morloc R foreign_call: OOM copying fail message");
+            }
+            error("%s", msg_copy);
         }
     }
 
@@ -2624,7 +2660,7 @@ SEXP morloc_log_next_id_r(void) {
 
 SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP group_r, SEXP runtime_r, SEXP call_id_r) {
     if (TYPEOF(tmpl_r) != STRSXP || LENGTH(tmpl_r) != 1) {
-        MORLOC_ERROR("log_emit: template must be a single string");
+        MORLOC_INTERNAL_ABORT("log_emit: template must be a single string");
     }
     const char* tmpl = CHAR(STRING_ELT(tmpl_r, 0));
     // group may be NA or an empty string -- both translate to a NULL
@@ -2744,7 +2780,7 @@ SEXP morloc_release_packet_shm(SEXP packet_r) {
 
 SEXP extract_element_by_name(SEXP list, const char* key) {
   // Ensure inputs are correct types
-  if (TYPEOF(list) != VECSXP) MORLOC_ERROR("Input must be a list");
+  if (TYPEOF(list) != VECSXP) MORLOC_INTERNAL_ABORT("Input must be a list");
 
   // Get list names attribute
   SEXP names = Rf_getAttrib(list, R_NamesSymbol);
@@ -3061,6 +3097,7 @@ extern void morloc_debug_record_frame(
     uint32_t midx,
     const char* name,
     const char* srcloc,
+    const char* lang,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
@@ -3068,6 +3105,8 @@ extern void morloc_debug_record_frame(
 // Send a fail packet to the client (best-effort, ignores send errors).
 // Concatenates any recorded debug trace with the message so the nexus's
 // summary.json carries both the foreign error and the morloc frames.
+// Every manifold catch also appends its own "  at <name> [r] (mid=...,
+// srcloc)" line to the exception message via string concat.
 static void send_fail_to_client(int client_fd, const char* msg) {
     char* errmsg = NULL;
     char* trace = morloc_debug_drain_frames();
@@ -3240,13 +3279,13 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_
 // 2^53, fine for our xxh64 keys round-tripping back into other cache calls).
 SEXP morloc_cache_key_compute_r(SEXP midx_r, SEXP packets_r, SEXP schemas_r) {
     if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
-        MORLOC_ERROR("cache_key_compute: midx must be a single integer");
+        MORLOC_INTERNAL_ABORT("cache_key_compute: midx must be a single integer");
     }
     if (TYPEOF(packets_r) != VECSXP) {
-        MORLOC_ERROR("cache_key_compute: packets must be a list of raw vectors");
+        MORLOC_INTERNAL_ABORT("cache_key_compute: packets must be a list of raw vectors");
     }
     if (TYPEOF(schemas_r) != STRSXP) {
-        MORLOC_ERROR("cache_key_compute: schemas must be a character vector");
+        MORLOC_INTERNAL_ABORT("cache_key_compute: schemas must be a character vector");
     }
     R_xlen_t n_args = XLENGTH(packets_r);
     if (XLENGTH(schemas_r) != n_args) {
@@ -3296,35 +3335,40 @@ SEXP morloc_debug_flush_dispatch_r(void) {
 }
 
 SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
-                                 SEXP packets_r, SEXP schemas_r) {
+                                 SEXP lang_r, SEXP packets_r, SEXP schemas_r) {
     if (TYPEOF(midx_r) != INTSXP || LENGTH(midx_r) != 1) {
-        MORLOC_ERROR("debug_record_frame: midx must be a single integer");
+        MORLOC_INTERNAL_ABORT("debug_record_frame: midx must be a single integer");
     }
     if (TYPEOF(name_r) != STRSXP || LENGTH(name_r) != 1) {
-        MORLOC_ERROR("debug_record_frame: name must be a single string");
+        MORLOC_INTERNAL_ABORT("debug_record_frame: name must be a single string");
     }
     if (TYPEOF(srcloc_r) != STRSXP || LENGTH(srcloc_r) != 1) {
-        MORLOC_ERROR("debug_record_frame: srcloc must be a single string");
+        MORLOC_INTERNAL_ABORT("debug_record_frame: srcloc must be a single string");
+    }
+    if (TYPEOF(lang_r) != STRSXP || LENGTH(lang_r) != 1) {
+        MORLOC_INTERNAL_ABORT("debug_record_frame: lang must be a single string");
     }
     if (TYPEOF(packets_r) != VECSXP) {
-        MORLOC_ERROR("debug_record_frame: packets must be a list of raw vectors");
+        MORLOC_INTERNAL_ABORT("debug_record_frame: packets must be a list of raw vectors");
     }
     if (TYPEOF(schemas_r) != STRSXP) {
-        MORLOC_ERROR("debug_record_frame: schemas must be a character vector");
+        MORLOC_INTERNAL_ABORT("debug_record_frame: schemas must be a character vector");
     }
     R_xlen_t n_args = XLENGTH(packets_r);
     if (XLENGTH(schemas_r) != n_args) {
-        MORLOC_ERROR("debug_record_frame: packets and schemas length mismatch");
+        MORLOC_INTERNAL_ABORT("debug_record_frame: packets and schemas length mismatch (codegen invariant)");
     }
     // "" == "no info attached"; the Rust runtime treats "" and NULL the
     // same. NA_STRING falls back to "" here so downstream sees empty.
     SEXP name_elt = STRING_ELT(name_r, 0);
     SEXP srcloc_elt = STRING_ELT(srcloc_r, 0);
+    SEXP lang_elt = STRING_ELT(lang_r, 0);
     const char* name_c = (name_elt == NA_STRING) ? "" : CHAR(name_elt);
     const char* srcloc_c = (srcloc_elt == NA_STRING) ? "" : CHAR(srcloc_elt);
+    const char* lang_c = (lang_elt == NA_STRING) ? "" : CHAR(lang_elt);
     if (n_args == 0) {
         morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], name_c, srcloc_c,
-                                  NULL, NULL, 0);
+                                  lang_c, NULL, NULL, 0);
         return R_NilValue;
     }
     const uint8_t** packet_ptrs = (const uint8_t**)R_alloc(n_args, sizeof(uint8_t*));
@@ -3342,14 +3386,14 @@ SEXP morloc_debug_record_frame_r(SEXP midx_r, SEXP name_r, SEXP srcloc_r,
         schema_ptrs[i] = CHAR(s);
     }
     morloc_debug_record_frame((uint32_t)INTEGER(midx_r)[0], name_c, srcloc_c,
-        packet_ptrs, schema_ptrs, (size_t)n_args);
+        lang_c, packet_ptrs, schema_ptrs, (size_t)n_args);
     return R_NilValue;
 }
 
 SEXP morloc_cache_lookup_r(SEXP key_r, SEXP label_r) {
     uint64_t key = (uint64_t)asReal(key_r);
     if (TYPEOF(label_r) != STRSXP || LENGTH(label_r) != 1) {
-        MORLOC_ERROR("cache_lookup: label must be a single string");
+        MORLOC_INTERNAL_ABORT("cache_lookup: label must be a single string");
     }
     const char* label = CHAR(STRING_ELT(label_r, 0));
     size_t size = 0;
@@ -3374,13 +3418,13 @@ SEXP morloc_cache_lookup_r(SEXP key_r, SEXP label_r) {
 SEXP morloc_cache_store_r(SEXP key_r, SEXP label_r, SEXP packet_r, SEXP schema_r) {
     uint64_t key = (uint64_t)asReal(key_r);
     if (TYPEOF(label_r) != STRSXP || LENGTH(label_r) != 1) {
-        MORLOC_ERROR("cache_store: label must be a single string");
+        MORLOC_INTERNAL_ABORT("cache_store: label must be a single string");
     }
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("cache_store: packet must be a raw vector");
     }
     if (TYPEOF(schema_r) != STRSXP || LENGTH(schema_r) != 1) {
-        MORLOC_ERROR("cache_store: schema must be a single string");
+        MORLOC_INTERNAL_ABORT("cache_store: schema must be a single string");
     }
     const char* label = CHAR(STRING_ELT(label_r, 0));
     const char* schema = CHAR(STRING_ELT(schema_r, 0));
@@ -3475,7 +3519,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
         {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
         {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
-        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 5},
+        {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 6},
         {"r_morloc_debug_flush_dispatch", (DL_FUNC) &morloc_debug_flush_dispatch_r, 0},
         {"r_morloc_cache_lookup", (DL_FUNC) &morloc_cache_lookup_r, 2},
         {"r_morloc_cache_store", (DL_FUNC) &morloc_cache_store_r, 4},

@@ -2,10 +2,10 @@ module main (foo)
 
 import root
 
--- `form: bytes` on `[Int32]` reads a file as packed 4-byte values.
+-- `form: bytes` on `[I32]` reads a file as packed 4-byte values.
 -- The runtime sniffs packet magic first; on a miss it loads raw bytes.
 foo ::
   --' form: bytes
-  [Int32] ->
+  [I32] ->
   Int
 foo x = 0

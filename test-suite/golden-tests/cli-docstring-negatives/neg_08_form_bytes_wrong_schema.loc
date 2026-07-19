@@ -2,7 +2,7 @@ module main (foo)
 
 import root
 
--- form: bytes requires the wire schema to be au1 (Vec<UInt8>).
+-- form: bytes requires the wire schema to be au1 (Vec<U8>).
 foo ::
   --' source: file
   --' form: bytes

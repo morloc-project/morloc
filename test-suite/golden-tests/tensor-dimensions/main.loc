@@ -35,17 +35,17 @@ source Cpp from "src.hpp"
   , "cppSum5d"
   )
 
-pyMake1d :: Vector 6 Int32
-pyMake2d :: Matrix 2 3 Int32
-pyMake3d :: Tensor3 2 3 4 Int32
-pyMake4d :: Tensor4 2 3 2 2 Int32
-pyMake5d :: Tensor5 2 2 2 3 2 Int32
+pyMake1d :: Vector 6 I32
+pyMake2d :: Matrix 2 3 I32
+pyMake3d :: Tensor3 2 3 4 I32
+pyMake4d :: Tensor4 2 3 2 2 I32
+pyMake5d :: Tensor5 2 2 2 3 2 I32
 
-cppSum1d :: Vector 6 Int32 -> Int32
-cppSum2d :: Matrix 2 3 Int32 -> Int32
-cppSum3d :: Tensor3 2 3 4 Int32 -> Int32
-cppSum4d :: Tensor4 2 3 2 2 Int32 -> Int32
-cppSum5d :: Tensor5 2 2 2 3 2 Int32 -> Int32
+cppSum1d :: Vector 6 I32 -> I32
+cppSum2d :: Matrix 2 3 I32 -> I32
+cppSum3d :: Tensor3 2 3 4 I32 -> I32
+cppSum4d :: Tensor4 2 3 2 2 I32 -> I32
+cppSum5d :: Tensor5 2 2 2 3 2 I32 -> I32
 
 t1d = pyMake1d
 t2d = pyMake2d
@@ -53,17 +53,17 @@ t3d = pyMake3d
 t4d = pyMake4d
 t5d = pyMake5d
 
-testSum1d :: Int32
+testSum1d :: I32
 testSum1d = cppSum1d pyMake1d
 
-testSum2d :: Int32
+testSum2d :: I32
 testSum2d = cppSum2d pyMake2d
 
-testSum3d :: Int32
+testSum3d :: I32
 testSum3d = cppSum3d pyMake3d
 
-testSum4d :: Int32
+testSum4d :: I32
 testSum4d = cppSum4d pyMake4d
 
-testSum5d :: Int32
+testSum5d :: I32
 testSum5d = cppSum5d pyMake5d

@@ -1,0 +1,8 @@
+"hello, morloc"
+"fallback-str-content"
+[10,20,30,40]
+[99,98,97]
+[42,"answer"]
+[999,"sentinel"]
+["alpha","bravo","charlie"]
+["a","b"]

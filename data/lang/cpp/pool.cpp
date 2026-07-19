@@ -45,13 +45,40 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute_
 // the user-source includes so foreign code can use mlc::Unit too.
 #include "mlccpptypes/prelude.hpp"
 
+// Forward-declared here so PROPAGATE_ERROR can reference it before the
+// class body is fully defined further down. MorlocException is the
+// user-catchable class (@catch intercepts). Compiler / invariant bugs
+// go through _mlc_internal_abort (below), which bypasses @catch.
+class MorlocException;
+
 #define PROPAGATE_ERROR(errmsg) \
     if(errmsg != NULL) { \
       char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
       snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error C++ pool (%s:%d in %s):\n%s" , __FILE__, __LINE__, __func__, errmsg); \
       free(errmsg); \
-      throw std::runtime_error(errmsg_buffer); \
+      throw MorlocException(errmsg_buffer); \
     }
+
+// Terminal helper for morloc-compiler / runtime invariant violations
+// (unreachable branches, contract violations from libmorloc, arity
+// mismatches emitted by codegen). Prints a diagnostic to stderr, then
+// aborts the pool process. The nexus sees the pool crash and treats
+// it as a fatal error -- @catch never gets a chance to intercept.
+// Use this only for genuine bugs: any error attributable to user data,
+// paths, ascriptions, or foreign-function behavior must go through
+// PROPAGATE_ERROR / MorlocException instead so @catch works.
+[[noreturn]] static inline void _mlc_internal_abort(
+    const char* file, int line, const char* func, const char* msg
+) {
+    std::fprintf(
+        stderr,
+        "morloc internal error (C++ pool, %s:%d in %s):\n  %s\n",
+        file, line, func, msg
+    );
+    std::abort();
+}
+
+#define MLC_INTERNAL_ABORT(msg) _mlc_internal_abort(__FILE__, __LINE__, __func__, (msg))
 
 #define PROPAGATE_FAIL_PACKET(errmsg) \
     if(errmsg != NULL){ \
@@ -71,7 +98,9 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 {
     // Validate sizes - errors here indicate a bug in the morloc compiler
     if (first.size() != second.size() + 1) {
-        throw std::invalid_argument("First list must have exactly 1 more element than second list");
+        MLC_INTERNAL_ABORT(
+            "interweave_strings: first list must have exactly 1 more element than second list"
+        );
     }
 
     // Pre-calculate total size to avoid reallocations
@@ -163,7 +192,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         relptr_t relptr = tbl.move_to_shm();
 
         uint8_t* packet = make_arrow_data_packet(relptr, schema);
-        if (!packet) { throw std::runtime_error("Failed to create arrow data packet"); }
+        if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
 
         char* err = nullptr;
         void* shm_ptr = rel2abs(relptr, &err);
@@ -174,7 +203,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through
         // mlc::ArrowTable. The legacy `<arrow>` hint has been retired.
         if (schema->type == MORLOC_TABLE) {
-            throw std::runtime_error("Table schema but C++ type is not mlc::ArrowTable");
+            MLC_INTERNAL_ABORT("table schema but C++ type is not mlc::ArrowTable");
         }
 
         void* voidstar = nullptr;
@@ -241,7 +270,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         return mlc::ArrowTable(std::move(as), std::move(aa));
     } else {
         if (format == PACKET_FORMAT_ARROW) {
-            throw std::runtime_error("Arrow data but C++ type is not mlc::ArrowTable");
+            MLC_INTERNAL_ABORT("arrow data but C++ type is not mlc::ArrowTable");
         }
 
         // Stream ingest: FILE+DATA pointing at a stream-packet file. Nexus
@@ -254,7 +283,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
             size_t payload_len = header->length;
             char path[PATH_MAX];
             if (payload_len >= sizeof(path)) {
-                throw std::runtime_error("stream ingest: path exceeds PATH_MAX");
+                throw MorlocException("stream ingest: path exceeds PATH_MAX");
             }
             std::memcpy(path,
                         packet + sizeof(morloc_packet_header_t) + header->offset,
@@ -312,10 +341,9 @@ T _get_value(const uint8_t* packet, Schema* schema){
                     if (cerr) free(cerr);
                     return result;
                 } else {
-                    throw std::runtime_error(
+                    MLC_INTERNAL_ABORT(
                         "stream indirection packet received for a "
-                        "non-list receiver type; nexus should have rejected "
-                        "this upstream"
+                        "non-list receiver type; nexus should have rejected this upstream"
                     );
                 }
             }
@@ -422,17 +450,29 @@ std::string _mlc_show(const T& value, Schema* schema) {
     return result;
 }
 
-// Deserialize a JSON string to a typed value
-// Returns std::nullopt on parse failure
+// MorlocException carries a @throw / catchable-intrinsic-failure
+// message across the pool call stack. Defined here (before _mlc_read /
+// _mlc_load) so those shims can throw it directly on failure. Also
+// used by _mlc_throw (below) and caught by _mlc_catch.
+class MorlocException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// Deserialize a JSON string to a typed value.
+// @read :: Str -> <Err> a. Parse failure throws MorlocException so
+// _mlc_catch can intercept.
 template <typename T>
-std::optional<T> _mlc_read(Schema* schema, const std::string& json_str) {
+T _mlc_read(Schema* schema, const std::string& json_str) {
     char* errmsg = NULL;
     void* voidstar = mlc_read(json_str.c_str(), schema, &errmsg);
     if (errmsg != NULL) {
-        PROPAGATE_ERROR(errmsg)
+        std::string msg(errmsg);
+        free(errmsg);
+        throw MorlocException(std::string("@read: ") + msg);
     }
     if (voidstar == NULL) {
-        return std::nullopt;
+        throw MorlocException("@read: parse failed on '" + json_str + "'");
     }
     T* dummy = nullptr;
     T result = from_voidstar(schema, voidstar, dummy);
@@ -440,17 +480,20 @@ std::optional<T> _mlc_read(Schema* schema, const std::string& json_str) {
     return result;
 }
 
-// Load a value from file, auto-detecting format
-// Returns std::nullopt if file does not exist
+// Load a value from file, auto-detecting format.
+// @load :: Str -> <IO, Err> a. Missing file / decode failure throws
+// MorlocException so _mlc_catch can intercept.
 template <typename T>
-std::optional<T> _mlc_load(Schema* schema, const std::string& path) {
+T _mlc_load(Schema* schema, const std::string& path) {
     char* errmsg = NULL;
     void* voidstar = mlc_load(path.c_str(), schema, &errmsg);
     if (errmsg != NULL) {
-        PROPAGATE_ERROR(errmsg)
+        std::string msg(errmsg);
+        free(errmsg);
+        throw MorlocException(std::string("@load: ") + msg);
     }
     if (voidstar == NULL) {
-        return std::nullopt;
+        throw MorlocException("@load: failed to load '" + path + "'");
     }
     T* dummy = nullptr;
     T result = from_voidstar(schema, voidstar, dummy);
@@ -471,6 +514,26 @@ inline void _mlc_close(int64_t handle) {
     char* errmsg = NULL;
     mlc_close(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+}
+
+// _mlc_throw returns a universal-conversion helper so that
+// `<cond> ? _mlc_throw(msg) : someInt` type-checks in either branch of a
+// conditional (both arms of morloc's `?`/`:` lower to lambdas of the same
+// return type). The constructor throws, so control never reaches the
+// operator T() bodies; std::terminate is just a defence in depth.
+struct _MlcThrowHelper {
+    template<typename T> operator T() const { std::terminate(); }
+};
+inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
+    throw MorlocException(msg);
+}
+// @catch: run `fallible()`; on any std::exception, run `fallback()` and
+// return its result. Template deduction picks the return type from the
+// fallible thunk. The fallback must return the same type.
+template<typename FL, typename FB>
+auto _mlc_catch(FL&& fallible, FB&& fallback) -> decltype(fallible()) {
+    try { return fallible(); }
+    catch (const std::exception&) { return fallback(); }
 }
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
@@ -553,7 +616,7 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
     if (s == NULL) {
-        throw std::runtime_error("_mlc_open_ostream: schema_to_string returned NULL");
+        MLC_INTERNAL_ABORT("_mlc_open_ostream: schema_to_string returned NULL (invalid compile-time schema table entry)");
     }
     int64_t h = mlc_open_ostream(s, path.c_str(), &errmsg);
     free(s);
@@ -567,7 +630,7 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
 inline int64_t _mlc_open_stdin(Schema* schema) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
-    if (s == NULL) throw std::runtime_error("_mlc_open_stdin: schema_to_string NULL");
+    if (s == NULL) MLC_INTERNAL_ABORT("_mlc_open_stdin: schema_to_string returned NULL");
     int64_t h = mlc_open_stdin(s, &errmsg);
     free(s);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
@@ -577,7 +640,7 @@ inline int64_t _mlc_open_stdin(Schema* schema) {
 inline int64_t _mlc_open_stdout(Schema* schema) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
-    if (s == NULL) throw std::runtime_error("_mlc_open_stdout: schema_to_string NULL");
+    if (s == NULL) MLC_INTERNAL_ABORT("_mlc_open_stdout: schema_to_string returned NULL");
     int64_t h = mlc_open_stdout(s, &errmsg);
     free(s);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
@@ -587,7 +650,7 @@ inline int64_t _mlc_open_stdout(Schema* schema) {
 inline int64_t _mlc_open_stderr(Schema* schema) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
-    if (s == NULL) throw std::runtime_error("_mlc_open_stderr: schema_to_string NULL");
+    if (s == NULL) MLC_INTERNAL_ABORT("_mlc_open_stderr: schema_to_string returned NULL");
     int64_t h = mlc_open_stderr(s, &errmsg);
     free(s);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
@@ -609,7 +672,7 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     shfree_cpp(voidstar);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     if (rc != 0) {
-        throw std::runtime_error("mlc_write failed with no errmsg");
+        MLC_INTERNAL_ABORT("mlc_write returned non-zero without setting errmsg (libmorloc contract violation)");
     }
 }
 
@@ -618,7 +681,7 @@ inline int64_t _mlc_append(Schema* schema, const std::string& path) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
     if (s == NULL) {
-        throw std::runtime_error("_mlc_append: schema_to_string returned NULL");
+        MLC_INTERNAL_ABORT("_mlc_append: schema_to_string returned NULL (invalid compile-time schema table entry)");
     }
     int64_t h = mlc_append(s, path.c_str(), &errmsg);
     free(s);
@@ -641,7 +704,7 @@ inline void _mlc_concat(const std::vector<std::string>& paths, const std::string
         &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     if (rc != 0) {
-        throw std::runtime_error("mlc_concat failed with no errmsg");
+        MLC_INTERNAL_ABORT("mlc_concat returned non-zero without setting errmsg (libmorloc contract violation)");
     }
 }
 
@@ -651,7 +714,7 @@ inline void _mlc_flush(int64_t handle) {
     int rc = mlc_flush(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     if (rc != 0) {
-        throw std::runtime_error("mlc_flush failed with no errmsg");
+        MLC_INTERNAL_ABORT("mlc_flush returned non-zero without setting errmsg (libmorloc contract violation)");
     }
 }
 
@@ -670,7 +733,7 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 
     // Allocate and populate args array
     const uint8_t** args_array = (const uint8_t**)malloc((nargs + 1) * sizeof(uint8_t*));
-    if (!args_array) throw std::runtime_error("malloc failed in foreign_call");
+    if (!args_array) MLC_INTERNAL_ABORT("malloc failed in foreign_call (OOM)");
 
     va_start(args, mid);
     for (size_t i = 0; i < nargs; i++) {
@@ -711,7 +774,7 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
             free(fail_msg);
             free(result);
             free(args_array);
-            throw std::runtime_error(msg);
+            throw MorlocException(msg);
         }
     }
 
@@ -750,6 +813,7 @@ extern "C" void morloc_debug_record_frame(
     uint32_t midx,
     const char* name,
     const char* srcloc,
+    const char* lang,
     const uint8_t** packets,
     const char** schemas,
     size_t n);
@@ -777,8 +841,9 @@ extern "C" void morloc_debug_record_frame(
 // rendered morloc trace with the caught exception's message so the
 // fail packet carries both. When --debug is off (or no frames were
 // recorded), the drain returns NULL and we forward the message
-// unchanged.
-
+// unchanged. Every manifold catch also appends its own "  at <name>
+// [cpp] (mid=..., srcloc)" line to the message via string concat,
+// so non-debug tracebacks still compose across pools.
 static uint8_t* make_fail_packet_with_trace(const char* msg) {
     char* trace = morloc_debug_drain_frames();
     if (trace == NULL) {
@@ -805,6 +870,13 @@ static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
         return local_dispatch(mid, args);
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
+    } catch (const char* e) {
+        // Codegen-emitted manifold catches usually normalize const char*
+        // throws into std::runtime_error already, but a foreign helper
+        // that throws outside a wrapped body reaches here directly.
+        return make_fail_packet_with_trace(e ? e : "An unknown error occurred");
+    } catch (const std::string& e) {
+        return make_fail_packet_with_trace(e.c_str());
     } catch (...) {
         return make_fail_packet_with_trace("An unknown error occurred");
     }
@@ -818,6 +890,10 @@ static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
         return remote_dispatch(mid, args);
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
+    } catch (const char* e) {
+        return make_fail_packet_with_trace(e ? e : "An unknown error occurred");
+    } catch (const std::string& e) {
+        return make_fail_packet_with_trace(e.c_str());
     } catch (...) {
         return make_fail_packet_with_trace("An unknown error occurred");
     }

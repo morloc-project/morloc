@@ -39,8 +39,12 @@ main = do
       , effectSubtypeTests
       , effectSynthesisTests
       , effectErrorTests
+      , evalSugarTests
       , effectEscapabilityTests
       , effectPartialApplicationTests
+      , polymorphicEffectRowTests
+      , catchRowInheritTests
+      , effectCoverageMessageTests
       , namespaceErrorTests
       , typeclassTests
       , natErrorTests
@@ -76,6 +80,24 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "intrinsic-catch-chained-fallible-py" "intrinsic-catch-chained-fallible-py"
+      , golden "intrinsic-io-catch" "intrinsic-io-catch"
+      , golden "intrinsic-catch-polymorphic-row" "intrinsic-catch-polymorphic-row"
+      , golden "intrinsic-load-schema-mismatch" "intrinsic-load-schema-mismatch"
+      , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
+      , golden "intrinsic-throw-py" "intrinsic-throw-py"
+      , golden "intrinsic-throw-r" "intrinsic-throw-r"
+      , golden "intrinsic-catch-cpp" "intrinsic-catch-cpp"
+      , golden "intrinsic-catch-py" "intrinsic-catch-py"
+      , golden "intrinsic-catch-r" "intrinsic-catch-r"
+      , golden "intrinsic-catch-rejects-non-err" "intrinsic-catch-rejects-non-err"
+      , golden "intrinsic-catch-cross-pool" "intrinsic-catch-cross-pool"
+      , golden "intrinsic-catch-varwidth" "intrinsic-catch-varwidth"
+      , golden "catch-cross-language-load" "catch-cross-language-load"
+      , golden "wire-schema-no-hints" "wire-schema-no-hints"
+
+      , golden "int-literal-promoted-to-real" "int-literal-promoted-to-real"
+      , golden "backtick-operator-py" "backtick-operator-py"
       , golden "crosslang-io-thunk-wrap" "crosslang-io-thunk-wrap"
       , golden "effect-boundary-py" "effect-boundary-py"
       , golden "effect-boundary-cpp" "effect-boundary-cpp"
@@ -584,6 +606,9 @@ main = do
       , golden "optional-coerce-interop" "optional-coerce-interop"
       , golden "optional-coerce-return-py" "optional-coerce-return-py"
       , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
+      , -- eval-sugar ('!' prefix) end-to-end: '!' form must produce the
+        -- same output as the equivalent explicit do-block form.
+        golden "eval-sugar-py" "eval-sugar-py"
       , -- multi-label and subtyping effect tests
         golden "effect-multi-label-py" "effect-multi-label-py"
       , golden "effect-subtype-py" "effect-subtype-py"

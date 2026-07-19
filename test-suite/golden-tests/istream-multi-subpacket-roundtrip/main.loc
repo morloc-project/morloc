@@ -28,9 +28,9 @@ import root
 -- before the next @write, producing three distinct sub-packets on
 -- disk (1: [1,2,3]; 2: [4,5]; 3: [6,7,8,9]). Without `@flush`, all
 -- three @writes would coalesce into a single sub-packet at @close.
-writeThree :: Str -> <IO> ()
+writeThree :: Str -> <IO, Err> ()
 writeThree path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
@@ -38,33 +38,33 @@ writeThree path = do
   @write 0 o [6, 7, 8, 9]
   @close o
 
-testFirstSubpacket :: Str -> <IO> [Int]
+testFirstSubpacket :: Str -> <IO, Err> [Int]
 testFirstSubpacket path = do
   writeThree path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
 
-testSecondSubpacket :: Str -> <IO> [Int]
+testSecondSubpacket :: Str -> <IO, Err> [Int]
 testSecondSubpacket path = do
   writeThree path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
 
-testThirdSubpacket :: Str -> <IO> [Int]
+testThirdSubpacket :: Str -> <IO, Err> [Int]
 testThirdSubpacket path = do
   writeThree path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s
 
 -- After draining all three sub-packets, the next call returns [],
 -- and a fifth call (post-EOF) still returns [].
-testEofAfterDrain :: Str -> <IO> [Int]
+testEofAfterDrain :: Str -> <IO, Err> [Int]
 testEofAfterDrain path = do
   writeThree path
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   @next s
   @next s
   @next s

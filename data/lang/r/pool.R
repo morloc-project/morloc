@@ -37,6 +37,39 @@ morloc_mlc_write                     <- function(...){ .Call("morloc_mlc_write",
 morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append",                    ...) }
 morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
 morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
+# @throw: raise a classed condition. The pool's manifold-level tryCatch
+# (from ldErrorWrapOpen/Close in lang.yaml) catches all conditions and
+# appends the frame info to `conditionMessage`, so the class tag survives
+# only at the innermost frame; the message propagates outward.
+morloc_mlc_throw <- function(msg) {
+  stop(structure(
+    class = c("MorlocException", "error", "condition"),
+    list(message = msg, call = NULL)
+  ))
+}
+# Raise a genuine morloc-invariant violation (compiler bug, contract
+# violation, unreachable branch). Uses the MorlocInternalError class;
+# morloc_mlc_catch inspects and re-raises so @catch cannot swallow it.
+# The condition still derives from "error" so R's default handling
+# prints a stacktrace; the class marker is what routes it past @catch.
+morloc_mlc_internal_abort <- function(msg) {
+  stop(structure(
+    class = c("MorlocInternalError", "error", "condition"),
+    list(message = paste0("morloc internal error (R pool): ", msg), call = NULL)
+  ))
+}
+# @catch: evaluate fallible; on any error EXCEPT MorlocInternalError,
+# evaluate fallback. MorlocInternalError bypasses -- genuine compiler
+# bugs propagate past user @catch and terminate the pool.
+morloc_mlc_catch <- function(fallible, fallback) {
+  tryCatch(
+    fallible(),
+    error = function(e) {
+      if (inherits(e, "MorlocInternalError")) stop(e)
+      fallback()
+    }
+  )
+}
 morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
 morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }

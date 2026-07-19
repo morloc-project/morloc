@@ -8,4 +8,4 @@ import tensor-py
 
 source Py from "src.py" ("id_matrix" as idMatrix)
 
-idMatrix :: Matrix 2 3 Int32 -> Matrix 2 3 Int32
+idMatrix :: Matrix 2 3 I32 -> Matrix 2 3 I32

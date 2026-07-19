@@ -47,8 +47,8 @@ makeSingle :: Vector 1 Real
 makeOneByOne :: Matrix 1 1 Real
 
 -- Element type variety
-makeIntVec :: Vector 4 Int32
-makeF32Vec :: Vector 3 Float32
+makeIntVec :: Vector 4 I32
+makeF32Vec :: Vector 3 F32
 
 -- Extraction: tensor -> scalar
 sumMat :: Matrix 3 4 Real -> Real

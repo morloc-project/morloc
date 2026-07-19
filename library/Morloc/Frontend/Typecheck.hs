@@ -896,7 +896,7 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  -- Resolve nat labels: if the function has labeled nat params (m:Int syntax)
+  -- Resolve nat labels: if the function has labeled nat params (m@Int syntax)
   -- and corresponding args are int literals, inject NatVarU solutions into gamma
   let g1' = resolveNatLabels f funType0 xs0 g1
 
@@ -1192,20 +1192,26 @@ synthE i g (IfS cond thenE elseE) = do
             <> line <> "  else-branch: " <> prettyTypeU t3'
 synthE i g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
-  case apply g1 t1 of
+  -- Strip forall wrappers before matching EffectU: a polymorphic final
+  -- like a typeclass method 'random :: forall a. <Random> a' otherwise
+  -- appears as ForallU (EffectU ...) and falls into the bareT branch,
+  -- producing '<collected> (forall a. <Random> a)' -- a nested effect
+  -- type. Mirrors the stripForallU call in synthE (EvalS ...).
+  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  case t1' of
     EffectU _ iT -> do
       -- Final expr is effectful: wrap it in EvalS so codegen forces the
       -- thunk and collectDoEffects picks up its effects alongside the
       -- non-final EvalS nodes.
       e1' <- wrapFinalEvalS i iT e1
       let collected = collectDoEffects e1'
-      return (g1, EffectU collected iT, DoBlockS e1')
+      return (g1', EffectU collected iT, DoBlockS e1')
     bareT -> do
       -- Pure final: the block's type is <collected> bareT. An empty or
       -- smaller effect set is a subtype of any expected effect set, so no
       -- pure-to-effect lift is needed at the use site.
       let collected = collectDoEffects e1
-      return (g1, EffectU collected bareT, DoBlockS e1)
+      return (g1', EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
@@ -1223,8 +1229,8 @@ synthE i g (EvalS e) = do
       return (g3, apply g3 bt, EvalS (applyGen g3 e1))
     t -> throwTypeError i $
       "Cannot force a non-effectful value (got type" <+> pretty t <> ")."
-      <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
-      <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
+      <+> "An effectful type <E> T is required here -- this diagnostic fires at a bare non-final do-block statement, the RHS of a '<-' bind, or the '!' operator."
+      <+> "Pure expressions should be bound with a pure 'let' or moved to the do-block's final position."
 -- IntrMap: the desugar-inserted implicit map for bracket-accessor
 -- chains. Typed as @(a -> b) -> f a -> f b@ with @f@ a fresh
 -- existential so the same intrinsic covers @List@, @Vector m@, etc.
@@ -1266,11 +1272,48 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
   (g3, _, levelE')  <- checkG g2 levelE  BT.intU
   (g4, _, listE')   <- checkG g3 listE   listExpectedT
   return ( g4
-         , EffectU ioEffectSet BT.unitU
+         , EffectU ioErrEffectSet BT.unitU
          , IntrinsicS IntrWrite [levelE', handleE', listE']
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
+-- Bespoke rule for @catch. The primary must carry Err. The fallback
+-- declares its own effect row and the whole expression inherits it, so
+-- the result row is (primary effects minus Err) UNION (fallback effects).
+-- A pure fallback strips Err; a fallible fallback keeps it. Two
+-- independent open row-tails in the union are rejected because the
+-- effect infrastructure carries at most one tail variable per row.
+synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
+  (g1, fallibleT, fallibleE') <- synthG g fallibleE
+  let fallibleT' = apply g1 fallibleT
+  case peelForallU fallibleT' of
+    EffectU effs innerT -> do
+      let labels = resolveEffectSet effs
+      unless (Set.member "Err" labels) $
+        throwTypeError i $
+          "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
+      (g2, fallbackT, fallbackE') <- synthG g1 fallbackE
+      let fallbackT' = apply g2 fallbackT
+          (fbEffs, fbInnerT) = case peelForallU fallbackT' of
+            EffectU e t -> (e, t)
+            t           -> (emptyEffectSet, t)
+      g3 <- subtype' i fbInnerT (apply g2 innerT) g2
+      let strippedEffs = applyEff g3 (removeEffectLabel "Err" effs)
+          fbEffs' = applyEff g3 fbEffs
+          resultEffs = unionEffectSet strippedEffs fbEffs'
+          (_, tailVars) = effectSetParts resultEffs
+      when (Set.size tailVars > 1) $
+        throwTypeError i $
+          "@catch cannot polymorphically combine two open effect rows;"
+          <+> "annotate one argument's effect row."
+      let resultT = mkEffectU resultEffs (apply g3 innerT)
+      return (g3, resultT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
+    _ ->
+      throwTypeError i $
+        "@catch's first argument must have effect Err; got a non-effectful type"
+        <+> prettyTypeU fallibleT'
+synthE i _ (IntrinsicS IntrCatch args) =
+  MM.throwCompilerBugAt i $ "IntrCatch expects 2 args (fallible, fallback), got " <> pretty (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -1283,57 +1326,70 @@ stripForallU :: Gamma -> TypeU -> (Gamma, TypeU)
 stripForallU g (ForallU v t) = stripForallU (g +> v) (substitute v t)
 stripForallU g t = (g, t)
 
+-- | Peel ForallU layers without touching bound variables. Cheap for
+-- inspecting the underlying constructor of an annotation type (e.g. to
+-- see whether it is an EffectU) when no gamma is available.
+peelForallU :: TypeU -> TypeU
+peelForallU (ForallU _ t) = peelForallU t
+peelForallU t = t
+
 -- | Return type of a fully applied intrinsic, threading Gamma for fresh existentials.
 -- Receives the synthesized argument types so result types like `@next`'s `[a]`
 -- can extract `a` from the receiver's type.
 intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> (Gamma, TypeU)
+-- @load :: Str -> <IO, Err> a. Failure (missing file, decode mismatch,
+-- schema mismatch) raises Err; discharge with @catch.
 intrinsicTypeG g IntrLoad _ =
   let (g', loadType) = newvar "load_" g
-  in (g', EffectU ioEffectSet (OptionalU loadType))
+  in (g', EffectU ioErrEffectSet loadType)
+-- @read :: Str -> <Err> a. Pure JSON parse; failure raises Err.
 intrinsicTypeG g IntrRead _ =
   let (g', readType) = newvar "read_" g
-  in (g', OptionalU readType)
+  in (g', EffectU errEffectSet readType)
 -- @open: polymorphic return -- the user's inline ascription (e.g.
 -- `@open path :: IFile Sequence`) resolves the existential to the
 -- concrete handle type at typecheck time; codegen then inspects the
 -- resolved TypeF to dispatch to the right runtime entry point.
+-- Failure (missing/unreadable/non-packet) raises Err.
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
-  in (g', EffectU ioEffectSet openType)
+  in (g', EffectU ioErrEffectSet openType)
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
 intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
--- @next :: IStream a -> <IO> [a]. Pull `a` straight from the IStream
--- receiver's apply head; subtyping in checkIntrinsicArgs has already
--- pinned the receiver to `IStream <fresh>`.
+-- @next :: IStream a -> <IO, Err> [a]. Mid-stream decode failures raise Err.
 intrinsicTypeG g IntrNext [argT] =
   let a = streamElemTypeU argT in
-  (g, EffectU ioEffectSet (BT.listU a))
+  (g, EffectU ioErrEffectSet (BT.listU a))
 -- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
--- head on the result side.
+-- head on the result side. The IFile was already validated at @open,
+-- so this handle-setup step does not itself fail with Err.
 intrinsicTypeG g IntrStream [argT] =
   let a = streamElemTypeU argT in
   (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
 -- @append: polymorphic return like @open; the user ascription resolves
--- to the concrete OStream/IStream/IFile shape.
+-- to the concrete OStream/IStream/IFile shape. Failure raises Err.
 intrinsicTypeG g IntrAppend _ =
   let (g', appendType) = newvar "append_" g
-  in (g', EffectU ioEffectSet appendType)
--- @stdin / @stdout / @stderr: nullary intrinsics that produce a
--- typed stream handle. Element type is fixed by the user's ascription
--- (e.g. `@stdin :: <IO> IStream Int`); we mint the handle head here
--- and leave the element type as a fresh existential the ascription
--- unifies against.
+  in (g', EffectU ioErrEffectSet appendType)
+-- @stdin :: <IO, Err> IStream a. Claims the stdin slot; second open
+-- fails via the CAS-per-kind uniqueness guard. Piped-content decode
+-- errors surface at @next, not here (no isatty pre-check -- users
+-- may want the handle before any read).
+-- @stdout / @stderr: handle setup only; no Err since writes happen elsewhere.
 intrinsicTypeG g IntrStdin _ =
   let (g', a) = newvar "stdin_a" g in
-  (g', EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
+  (g', EffectU ioErrEffectSet (AppU (VarU BT.istreamVar) [a]))
 intrinsicTypeG g IntrStdout _ =
   let (g', a) = newvar "stdout_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 intrinsicTypeG g IntrStderr _ =
   let (g', a) = newvar "stderr_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+intrinsicTypeG g IntrThrow _ =
+  let (g', a) = newvar "throw_" g
+  in (g', EffectU errEffectSet a)
 intrinsicTypeG g intr _ = (g, intrinsicType intr)
 
 -- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
@@ -1347,10 +1403,10 @@ streamElemTypeU t = t
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
-intrinsicType IntrSave = EffectU ioEffectSet BT.unitU
-intrinsicType IntrSaveM = EffectU ioEffectSet BT.unitU
-intrinsicType IntrSaveJ = EffectU ioEffectSet BT.unitU
-intrinsicType IntrLoad = EffectU ioEffectSet (OptionalU (ExistU (TV "load_a") ([], Open) ([], Open)))
+intrinsicType IntrSave = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrSaveM = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrSaveJ = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrLoad = EffectU ioErrEffectSet (ExistU (TV "load_a") ([], Open) ([], Open))
 intrinsicType IntrHash = BT.strU
 intrinsicType IntrVersion = BT.strU
 intrinsicType IntrCompiled = BT.strU
@@ -1358,24 +1414,24 @@ intrinsicType IntrLang = BT.strU
 intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
-intrinsicType IntrRead = OptionalU (ExistU (TV "read_a") ([], Open) ([], Open))
+intrinsicType IntrRead = EffectU errEffectSet (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
 -- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
 intrinsicType IntrOpen =
   error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
 intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
-intrinsicType IntrFSchema = EffectU ioEffectSet BT.strU
-intrinsicType IntrFLength = EffectU ioEffectSet BT.intU
+intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
+intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
 intrinsicType IntrNext =
   error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
 intrinsicType IntrStream =
   error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
-intrinsicType IntrWrite = EffectU ioEffectSet BT.unitU
+intrinsicType IntrWrite = EffectU ioErrEffectSet BT.unitU
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
-intrinsicType IntrConcat = EffectU ioEffectSet BT.unitU
-intrinsicType IntrFlush = EffectU ioEffectSet BT.unitU
+intrinsicType IntrConcat = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrFlush = EffectU ioErrEffectSet BT.unitU
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
@@ -1387,6 +1443,10 @@ intrinsicType IntrStdout =
   error "intrinsicType: IntrStdout must be typed via intrinsicTypeG (polymorphic element type)"
 intrinsicType IntrStderr =
   error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
+intrinsicType IntrThrow =
+  error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
+intrinsicType IntrCatch =
+  error "intrinsicType: IntrCatch must be typed via synthE's dedicated clause"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
 -- it never appears as a user-facing intrinsic so no type rule is needed.
 intrinsicType IntrIFileWalk =
@@ -1478,6 +1538,7 @@ checkIntrinsicArgs i g intr argTypes = do
           let (g'a, a) = newvar "flush_a_" g
               expectedT = AppU (VarU BT.ostreamVar) [a]
            in subtype' i handleT expectedT g'a
+        (IntrThrow, [msgT]) -> subtype' i msgT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
         (IntrCompiled, []) -> return g
@@ -1566,10 +1627,10 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
 expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
 expand _ 0 g x = return (g, x)
 expand parentIdx n g e@(AppS _ _) = do
-  newIndex <- MM.getCounterWithPos parentIdx
+  newIdx <- MM.getCounterWithPos parentIdx
   let (g', v') = evarname g "v"
   e' <- applyExistential parentIdx v' e
-  let x' = LamS [v'] (AnnoS newIndex newIndex e')
+  let x' = LamS [v'] (AnnoS newIdx newIdx e')
   expand parentIdx (n - 1) g' x'
 expand parentIdx n g (LamS vs' (AnnoS t ci e)) = do
   let (g', v') = evarname g "v"
@@ -1579,8 +1640,8 @@ expand _ _ g x = return (g, x)
 
 applyExistential :: Int -> EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
 applyExistential parentIdx v' (AppS f xs') = do
-  newIndex <- MM.getCounterWithPos parentIdx
-  return $ AppS f (xs' <> [AnnoS newIndex newIndex (BndS v')])
+  newIdx <- MM.getCounterWithPos parentIdx
+  return $ AppS f (xs' <> [AnnoS newIdx newIdx (BndS v')])
 -- possibly illegal application, will type check after expansion
 applyExistential parentIdx v' e = do
   appIndex <- MM.getCounterWithPos parentIdx
@@ -1781,8 +1842,8 @@ checkE i g (EvalS e) t = do
       return (g4, apply g4 t, EvalS (applyGen g4 e1))
     t' -> throwTypeError i $
       "Cannot force a non-effectful value (got type" <+> pretty t' <> ")."
-      <+> "The ! operator and non-final do-block statements require an effectful type <E> T."
-      <+> "Pure expressions in a do-block should be bound via 'let' or moved to the final position."
+      <+> "An effectful type <E> T is required here -- this diagnostic fires at a bare non-final do-block statement, the RHS of a '<-' bind, or the '!' operator."
+      <+> "Pure expressions should be bound with a pure 'let' or moved to the do-block's final position."
 
 -- Resolve solved existentials so specific handlers (LstS, TupS, etc.) can match
 checkE i g e t@(ExistU v _ _)
@@ -2046,7 +2107,9 @@ checkE i g (IntS si x) t = do
       -- Float64) via integer-to-real promotion. This is what lets @4 + 2.3@
       -- typecheck: the @4@ is checked against the same type slot as @2.3@,
       -- so when that slot resolves to @Real@, the integer literal adopts
-      -- @Real@ as well.
+      -- @Real@ as well. The AST node stays as IntS -- codegen consults
+      -- the resolved type annotation via CodeGenerator/NumericLiteral to
+      -- pick the wire form and convert the value.
       acceptable u = BT.isIntegerBaseType u || BT.isRealBaseType u
   if acceptable tApplied || acceptable tEval || acceptable tWire
     then return (g, tApplied, IntS si x)
@@ -2120,7 +2183,7 @@ checkE i g UniS t = do
 --      (RecDiff `r - f`, NatArith `m * n`, OptionalU wrappers, etc.)
 --      to invert.
 --   2. For functions with structured return types (e.g.
---      `f :: T1 n Real -> T1 n Real` or `dropF :: f:Str -> r - f`),
+--      `f :: T1 n Real -> T1 n Real` or `dropF :: f@Str -> r - f`),
 --      pre-subtype either defers uselessly (matching NatVar against
 --      NatVar) or over-commits (forcing the row variable to a shape
 --      the actual arg cannot satisfy). The OLD synth+subtype path
@@ -2434,8 +2497,14 @@ collectDoEffects = go
       IntrinsicS _ es -> unions (map go es)
       _ -> emptyEffectSet
 
-    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
-    effectOfAnno _ = emptyEffectSet
+    -- Peel ForallU so a polymorphic effectful type ('forall a. <E> a',
+    -- e.g. a class method 'random :: forall a. <Random> a') still
+    -- contributes its effects. Without this the empty effect set
+    -- collapses via 'mkEffectU', turning '<> Real' into a bare 'Real'
+    -- at the next 'apply' and breaking the enclosing EvalS.
+    effectOfAnno (AnnoS (Idx _ t) _ _) = case peelForallU t of
+      EffectU effs _ -> effs
+      _ -> emptyEffectSet
 
     unions = foldl effUnion emptyEffectSet
 
@@ -2476,8 +2545,9 @@ inferExprEffects = go
       LamS _ _ -> emptyEffectSet
       _ -> emptyEffectSet
 
-    effectOfAnno (AnnoS (Idx _ (EffectU effs _)) _ _) = effs
-    effectOfAnno _ = emptyEffectSet
+    effectOfAnno (AnnoS (Idx _ t) _ _) = case peelForallU t of
+      EffectU effs _ -> effs
+      _ -> emptyEffectSet
 
     unions = foldl effUnion emptyEffectSet
 
@@ -2540,14 +2610,35 @@ checkEffectCoverage idx declared body = do
       uncovered = Set.difference inferred declEffs
   if Set.null uncovered
     then return ()
-    else
-      let blameIdx = case uncoveredEvalIdxs uncovered innerBody of
+    else do
+      -- Look up per-label escapability so the fix suggestion adapts:
+      -- - non-escapable missing labels can only be declared
+      -- - escapable missing labels may alternatively be handled by
+      --   a user-defined handler function
+      -- - `Err` specifically has @catch as its built-in handler.
+      effectMap <- MM.gets stateEffects
+      let anyEscapable = any (\l -> Map.lookup l effectMap == Just True)
+                             (Set.toList uncovered)
+          errMissing = Set.member "Err" uncovered
+          handlerLine
+            | not anyEscapable = ""
+            | errMissing =
+                "\nEscapable effects may alternatively be handled locally"
+                  <+> "with a handler function;"
+                  <+> "@catch specifically discharges Err."
+            | otherwise =
+                "\nEscapable effects may alternatively be handled locally"
+                  <+> "with a handler function."
+          blameIdx = case uncoveredEvalIdxs uncovered innerBody of
             (i : _) -> i
             [] -> idx
-       in MM.throwSourcedError blameIdx $
-            "Body produces uncovered effect(s)" <+> renderEffectLabels uncovered
-              <> "; declared type permits" <+> renderEffectLabels declEffs <> "."
-              <+> "Either add the effect to the signature or sequence the operation in a do-block."
+      MM.throwSourcedError blameIdx $
+        "Effect-coverage failure: body produces effect(s) not in the signature."
+          <> "\n  declared:" <+> renderEffectLabels declEffs
+          <> "\n  inferred:" <+> renderEffectLabels inferred
+          <> "\n  missing: " <+> renderEffectLabels uncovered
+          <> "\nFix by declaring the missing effect(s) in the signature."
+          <> handlerLine
   where
     renderEffectLabels s
       | Set.null s = "<>"
@@ -2578,8 +2669,9 @@ uncoveredEvalIdxs uncovered = go
       IntrinsicS _ es -> concatMap go es
       _ -> []
 
-    effLabels (AnnoS (Idx _ (EffectU effs _)) _ _) = resolveEffectSet effs
-    effLabels _ = Set.empty
+    effLabels (AnnoS (Idx _ t) _ _) = case peelForallU t of
+      EffectU effs _ -> resolveEffectSet effs
+      _ -> Set.empty
 
 -- helpers
 
@@ -2743,10 +2835,10 @@ tryExtractStrListPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe [Text]
 tryExtractStrListPre g (AnnoS _ _ e) = tryEvalStrList g e
 
 -- | Resolve nat / str labels from literal arguments.
--- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
+-- When a function has labeled nat params (e.g., m@Int -> Tensor1 m Real)
 -- and the corresponding arguments are int literals or let-bound ints,
 -- inject NatVarU solutions into gamma so the return type gets concrete
--- dimensions. Same for Str labels (e.g., f:Str -> Tagged f a) - extract
+-- dimensions. Same for Str labels (e.g., f@Str -> Tagged f a) - extract
 -- string literals from the corresponding args and inject StrVarU solutions
 -- into gammaStrSubs. See plans/tables/05-labels-as-type-vars.md.
 resolveNatLabels ::

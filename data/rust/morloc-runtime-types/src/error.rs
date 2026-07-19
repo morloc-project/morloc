@@ -24,6 +24,16 @@ pub enum MorlocError {
     /// upstream policy can react without string-matching an Io error.
     #[error("broken pipe")]
     PipeClosed,
+    /// User-raised error from @throw. Distinct from Other so @catch can
+    /// intercept ONLY user-thrown errors and let internal-invariant
+    /// failures (compiler bugs, allocation faults, corrupt manifests)
+    /// propagate. Message text is the user-supplied @throw argument.
+    /// The eval_ffi Catch handler treats this variant AND `Packet`
+    /// (cross-pool fail packet) as the interceptable class -- both are
+    /// user-visible failures that a caller declared catchable via the
+    /// `<Err>` effect.
+    #[error("{0}")]
+    UserThrow(String),
 }
 
 /// Write a MorlocError into the C ERRMSG convention.

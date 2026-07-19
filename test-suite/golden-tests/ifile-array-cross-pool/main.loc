@@ -31,32 +31,32 @@ import root-r
 --   * [IFile a] put_value in nexus
 --   * [IFile a] get_value in target pool (per-element path-unpack)
 --   * .[i] f IFile pattern walk in target pool
-testInPool :: (Int -> Int) -> Str -> Str -> <IO> Int
+testInPool :: (Int -> Int) -> Str -> Str -> <IO, Err> Int
 testInPool langId pathA pathB = do
   @save 0 [10, 20, 30, 40, 50] pathA
   @save 0 [100, 200, 300, 400, 500] pathB
-  fa <- @open pathA :: <IO> IFile [Int]
-  fb <- @open pathB :: <IO> IFile [Int]
+  fa <- @open pathA :: <IO, Err> IFile [Int]
+  fb <- @open pathB :: <IO, Err> IFile [Int]
   -- [fa, fb] crosses to langId's pool. Inside that pool, .[1] indexes
   -- the list (the second IFile = fb), then .[1] on the IFile reads its
   -- element 1 (= 200). The result returns to the nexus.
   langId (.[1] (.[1] [fa, fb]))
 
-testArrayCpp :: Str -> Str -> <IO> Int
+testArrayCpp :: Str -> Str -> <IO, Err> Int
 testArrayCpp = testInPool idcpp
 
-testArrayPy :: Str -> Str -> <IO> Int
+testArrayPy :: Str -> Str -> <IO, Err> Int
 testArrayPy = testInPool idpy
 
-testArrayR :: Str -> Str -> <IO> Int
+testArrayR :: Str -> Str -> <IO, Err> Int
 testArrayR = testInPool idr
 
 -- One IFile opened, copied into a 3-element list `[f, f, f]`, then
 -- sent to cpp. Each list slot must independently re-open the same
 -- path. Reads element 4 from the third slot (= 40). Catches the case
 -- where per-element path-bytes share storage / overwrite each other.
-testArrayMixedDispatch :: Str -> <IO> Int
+testArrayMixedDispatch :: Str -> <IO, Err> Int
 testArrayMixedDispatch path = do
   @save 0 [10, 20, 30, 40, 50] path
-  f <- @open path :: <IO> IFile [Int]
+  f <- @open path :: <IO, Err> IFile [Int]
   idcpp (.[3] (.[2] [f, f, f]))

@@ -6,6 +6,6 @@ module main (f)
 f ::
   --' arg: -i
   --' default: 999
-  Int8 ->
-  Int8
+  I8 ->
+  I8
 f x = x

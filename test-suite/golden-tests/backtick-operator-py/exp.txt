@@ -1,0 +1,6 @@
+pool contains 'and'
+pool contains 'or'
+true
+false
+false
+true

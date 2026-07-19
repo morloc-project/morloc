@@ -1,16 +1,16 @@
---- testDequeInt32Cp ---
+--- testDequeI32Cp ---
 108
---- testDequeInt32Pc ---
+--- testDequeI32Pc ---
 108
---- testDequeInt64Cp ---
+--- testDequeI64Cp ---
 108
---- testDequeInt64Pc ---
+--- testDequeI64Pc ---
 108
---- testDequeFloat32Cp ---
+--- testDequeF32Cp ---
 7.5
---- testDequeFloat32Pc ---
+--- testDequeF32Pc ---
 7.5
---- testDequeFloat64Cp ---
+--- testDequeF64Cp ---
 7.5
---- testDequeFloat64Pc ---
+--- testDequeF64Pc ---
 7.5

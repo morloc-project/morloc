@@ -1,0 +1,33 @@
+-- Test @throw in a C++-bound pool: verifies that
+--   (a) a plain @throw raises with the given message and exit != 0
+--   (b) string interpolation `#{expr}` flows into the raised message
+--   (c) @throw can inhabit one arm of a `?/:` conditional whose other
+--       arm has a concrete non-Unit return type. This is the mixed-branch
+--       case that requires _MlcThrowHelper's universal conversion in
+--       pool.cpp; without it libstdc++'s std::function<Int()> rejects
+--       the throwing branch's lambda.
+--   (d) the happy branch still succeeds and returns its value
+module main (plainThrow, interpThrow, guardThrow)
+
+import root
+import root-cpp
+
+source Cpp from "helper.hpp" ("cpp_len", "cpp_show_len")
+
+cpp_len :: Str -> Int
+cpp_show_len :: Str -> Str
+
+plainThrow :: <Err> ()
+plainThrow = @throw "PLAIN: boom"
+
+interpThrow :: Str -> <Err> ()
+interpThrow s = do
+  let shown = cpp_show_len s
+  @throw "INTERP: #{s} n=#{shown}"
+
+guardThrow :: Str -> <Err> Int
+guardThrow s = do
+  let n = cpp_len s
+  let shown = cpp_show_len s
+  ? n < 4 = @throw "GUARD: too short n=#{shown}"
+  : n

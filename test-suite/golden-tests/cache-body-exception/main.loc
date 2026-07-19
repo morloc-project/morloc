@@ -13,10 +13,10 @@ crashy_r   :: Real -> Real
 crashy_cpp :: Real -> Real
 
 fooP :: Real -> Real
-fooP = a:crashy_py
+fooP = a@crashy_py
 
 fooR :: Real -> Real
-fooR = a:crashy_r
+fooR = a@crashy_r
 
 fooC :: Real -> Real
-fooC = a:crashy_cpp
+fooC = a@crashy_cpp

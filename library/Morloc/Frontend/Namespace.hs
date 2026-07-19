@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 Module      : Morloc.Frontend.Namespace
 Description : Re-exports of core namespace types plus frontend-specific helpers
@@ -18,11 +20,13 @@ module Morloc.Frontend.Namespace
   , mapExprM
   , isGeneric
   , copyState
+  , newIndex
   ) where
 
 import qualified Data.Char as DC
 import Data.Text (Text)
 import qualified Data.Text as DT
+import Morloc.Data.Doc (pretty)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
@@ -69,7 +73,7 @@ mapExprM f = g
 Used when a module is re-indexed (e.g., after merging duplicate imports).
 -}
 copyState :: Int -> Int -> MorlocMonad ()
-copyState oldIndex newIndex = do
+copyState oldIdx newIdx = do
   s <- MM.get
 
   -- Could be defined more succinctly, but it is IMPERATIVE that every index
@@ -123,12 +127,22 @@ copyState oldIndex newIndex = do
       , stateSerialAncestors = stateSerialAncestors s
       }
   where
-    updateGMap g = case GMap.yIsX oldIndex newIndex g of
+    updateGMap g = case GMap.yIsX oldIdx newIdx g of
       (Just g') -> g'
       Nothing -> g
 
-    updateMap m = case Map.lookup oldIndex m of
-      (Just x) -> Map.insert newIndex x m
+    updateMap m = case Map.lookup oldIdx m of
+      (Just x) -> Map.insert newIdx x m
       Nothing -> m
 
-    updateList xs = if oldIndex `elem` xs then newIndex : xs else xs
+    updateList xs = if oldIdx `elem` xs then newIdx : xs else xs
+
+-- | Allocate a fresh index that inherits all index-keyed state from @parent@.
+-- FIXME: when line-number linking is added, this map must be updated too and
+-- the trace should be recorded.
+newIndex :: Int -> MorlocMonad Int
+newIndex parent = do
+  i <- MM.getCounter
+  copyState parent i
+  MM.sayVVV $ "Set indices " <> pretty parent <> " = " <> pretty i
+  return i

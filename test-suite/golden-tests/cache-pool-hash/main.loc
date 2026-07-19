@@ -8,10 +8,10 @@ sum :: [Real] -> Real
 sum = fold (+) 0.0
 
 fooP :: [Real] -> Real
-fooP xs = a:idpy (sum xs)
+fooP xs = a@idpy (sum xs)
 
 fooR :: [Real] -> Real
-fooR xs = a:idr (sum xs)
+fooR xs = a@idr (sum xs)
 
 fooC :: [Real] -> Real
-fooC xs = a:idcpp (sum xs)
+fooC xs = a@idcpp (sum xs)

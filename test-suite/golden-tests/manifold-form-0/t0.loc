@@ -1,16 +1,16 @@
 module main (*)
 
-import root (Int, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Real, Bool, Str)
+import root (Int, I8, I16, I32, I64, U8, U16, U32, U64, Real, Bool, Str)
 
 checkInt    = 1 :: Int
-checkInt8   = 2 :: Int8
-checkInt16  = 3 :: Int16
-checkInt32  = 4 :: Int32
-checkInt64  = 5 :: Int64
-checkUInt8  = 6 :: UInt8
-checkUInt16 = 7 :: UInt16
-checkUInt32 = 8 :: UInt32
-checkUInt64 = 9 :: UInt64
+checkI8   = 2 :: I8
+checkI16  = 3 :: I16
+checkI32  = 4 :: I32
+checkI64  = 5 :: I64
+checkU8  = 6 :: U8
+checkU16 = 7 :: U16
+checkU32 = 8 :: U32
+checkU64 = 9 :: U64
 checkReal   = 420.69 :: Real
 checkBool   = True
 checkStr    = "abcd"

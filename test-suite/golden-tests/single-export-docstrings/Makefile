@@ -1,10 +1,6 @@
 all:
 	rm -f *.err obs.txt
 	morloc make -o alg     alg.loc     >  /dev/null 2>  build.err
-	morloc make -o syscfg  syscfg.loc  >  /dev/null 2>> build.err
-	morloc make -o literal literal.loc >  /dev/null 2>> build.err
-	morloc make -o neg     neg.loc     >  /dev/null 2>> build.err
-	@: > obs.txt
 	echo alg >> obs.txt 2>  obs.err
 	./alg [1,2,3] 2>> obs.err  >> obs.txt
 	./alg foo [1,2,3] 2>> obs.err  >> obs.txt
@@ -15,17 +11,20 @@ all:
 	./alg -m 5 [1,2,3] 2>> obs.err  >> obs.txt
 	./alg -m 5 -n 2 [1,2,3] 2>> obs.err  >> obs.txt
 	./alg --alg-config=algconf.json -m 0 -n 0 [1,2,3] 2>> obs.err  >> obs.txt
+	morloc make -o syscfg  syscfg.loc  >  /dev/null 2>> build.err
 	echo syscfg >> obs.txt 2>> obs.err
 	./syscfg 2>> obs.err  >> obs.txt
 	./syscfg bif 2>> obs.err  >> obs.txt
 	./syscfg --clean 2>> obs.err  >> obs.txt
 	./syscfg --sys-config sysconf.json 2>> obs.err  >> obs.txt
 	./syscfg --sys-config sysconf.json --no-clean 2>> obs.err  >> obs.txt
+	morloc make -o literal literal.loc >  /dev/null 2>> build.err
 	echo literal >> obs.txt 2>> obs.err
 	./literal 2>> obs.err  >> obs.txt
 	./literal greet 2>> obs.err  >> obs.txt
 	./literal -y a 2>> obs.err  >> obs.txt
 	./literal --yolo hello 2>> obs.err  >> obs.txt
+	morloc make -o neg     neg.loc     >  /dev/null 2>> build.err
 	echo neg >> obs.txt 2>> obs.err
 	./neg [1,2,3] 2>> obs.err  >> obs.txt
 	./neg calc [1,2,3] 2>> obs.err  >> obs.txt

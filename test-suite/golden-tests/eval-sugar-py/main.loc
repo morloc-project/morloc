@@ -1,0 +1,180 @@
+module main
+  ( tupleEval, tupleDo
+  , appEval, appDo
+  , lamEval, lamDo
+  , letEval, letDo
+  , guardEval, guardDo
+  , nestedEval, nestedDo
+  , finalEval, finalDo
+  , totalLogEval, totalLogDo
+  )
+
+import root-py
+
+source Py from "helpers.py"
+  ( "reset_log" as resetLog
+  , "bump_a"    as bumpA
+  , "bump_b"    as bumpB
+  , "read_log"  as readLog
+  , "add_i"     as addI
+  , "double_it" as doubleIt
+  )
+
+resetLog :: <IO> ()
+bumpA    :: <IO> Int
+bumpB    :: <IO> Int
+readLog  :: <IO> Str
+addI     :: Int -> Int -> Int
+doubleIt :: Int -> Int
+
+-- (1) '!' in tuple position: (!x, !y) hoists both bangs into the
+-- wrapping do-block, left-to-right.  Expected result: (1, 2).
+tupleEval :: <IO> (Int, Int)
+tupleEval = do
+  resetLog
+  (!bumpA, !bumpB)
+
+tupleDo :: <IO> (Int, Int)
+tupleDo = do
+  resetLog
+  a <- bumpA
+  b <- bumpB
+  (a, b)
+
+-- (2) '!' as function arguments at the final position of a do-block.
+-- 'addI' is pure; result = 1 + 2 = 3.
+appEval :: <IO> Int
+appEval = do
+  resetLog
+  addI !bumpA !bumpB
+
+appDo :: <IO> Int
+appDo = do
+  resetLog
+  a <- bumpA
+  b <- bumpB
+  addI a b
+
+-- (3) '!' inside a lambda body: the lambda body is a boundary, so
+-- the effect fires ON EACH CALL, not at lambda construction. Called
+-- twice by 'applyTwice'; expected result: (1, 2).
+applyTwice :: (Int -> <IO> Int) -> <IO> (Int, Int)
+applyTwice f = do
+  x <- f 10
+  y <- f 20
+  (x, y)
+
+lamEval :: <IO> (Int, Int)
+lamEval = do
+  resetLog
+  applyTwice (\_ -> !bumpA)
+
+lamDo :: <IO> (Int, Int)
+lamDo = do
+  resetLog
+  applyTwice (\_ -> do {v <- bumpA; v})
+
+-- (4) '!' inside a composite let RHS in a do-block. The bang hoists
+-- to a fresh do-bind before the let, and the let itself binds a pure
+-- value (as let should). Both forms produce the same trace and result.
+-- Expected: doubleIt 1 = 2.
+letEval :: <IO> Int
+letEval = do
+  resetLog
+  doubleIt !bumpA
+
+letDo :: <IO> Int
+letDo = do
+  resetLog
+  v <- bumpA
+  doubleIt v
+
+-- (5) '!' in guard branches: branch-local. Only the taken branch's
+-- effect fires. We prove branch-locality by counting: pickEval True
+-- fires bumpA (counter -> 1), then bumpA fires again (-> 2), then
+-- pickEval False fires bumpB (-> 3). Expected result: (1, 2, 3). If
+-- '!' had hoisted ACROSS branches, we would see (1, 3, 5).
+pickEval :: Bool -> <IO> Int
+pickEval b
+  ? b = !bumpA
+  : !bumpB
+
+pickDo :: Bool -> <IO> Int
+pickDo b
+  ? b = do
+      v <- bumpA
+      v
+  : do
+      v <- bumpB
+      v
+
+guardEval :: <IO> (Int, Int, Int)
+guardEval = do
+  resetLog
+  a <- pickEval True
+  x <- bumpA
+  b <- pickEval False
+  (a, x, b)
+
+guardDo :: <IO> (Int, Int, Int)
+guardDo = do
+  resetLog
+  a <- pickDo True
+  x <- bumpA
+  b <- pickDo False
+  (a, x, b)
+
+-- (6) '!' inside a nested do-block. The inner do is a boundary, so its
+-- effects do not leak to the outer chain; the outer sees the inner
+-- block only through its return value. Inner: addI 1 2 = 3. Outer:
+-- c = 3. Expected result: (3, 3).
+nestedEval :: <IO> (Int, Int)
+nestedEval = do
+  resetLog
+  a <- addI !bumpA !bumpB
+  c <- bumpA
+  (a, c)
+
+nestedDo :: <IO> (Int, Int)
+nestedDo = do
+  resetLog
+  a <- do
+    v1 <- bumpA
+    v2 <- bumpB
+    addI v1 v2
+  c <- bumpA
+  (a, c)
+
+-- (7) '!' at the final position of a do-block: single bang. Expected
+-- result: 1.
+finalEval :: <IO> Int
+finalEval = do
+  resetLog
+  !bumpA
+
+finalDo :: <IO> Int
+finalDo = do
+  resetLog
+  bumpA
+
+-- (8) File-based observation. The Eval form embeds '!' inside a
+-- composite let RHS (which the desugar hoists into two do-binds) and
+-- follows with a bare bumpA statement; the log file records the actual
+-- effect order. The Do form spells the same sequence out explicitly.
+-- Both must produce "A1,B2,A3", proving the writes hit disk in the
+-- expected order.
+totalLogEval :: <IO> Str
+totalLogEval = do
+  resetLog
+  sum <- addI !bumpA !bumpB
+  bumpA
+  readLog
+
+totalLogDo :: <IO> Str
+totalLogDo = do
+  resetLog
+  v1 <- bumpA
+  v2 <- bumpB
+  let sum = addI v1 v2
+  bumpA
+  readLog

@@ -42,6 +42,7 @@ import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.IFile as IFile
+import qualified Morloc.CodeGenerator.NumericLiteral as NL
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc (concatWith, hardline, indent, line, pretty, render, squotes, vcat, (<+>))
@@ -76,6 +77,10 @@ data FData = FData
   , fdataType :: Type
   , fdataSubSockets :: [Socket]
   , fdataArgSchemas :: [Text]
+  , fdataArgAsts :: [SerialAST]
+    -- ^ Per-arg SerialAST, index-aligned with 'fdataArgSchemas'.
+    -- Consumed at emit time to derive per-entry wire schemas for
+    -- group args (see 'groupEntryWireSchemas').
   , fdataReturnSchema :: Text
   , fdataCmdDocSet :: CmdDocSet
   }
@@ -91,6 +96,9 @@ data GastData = GastData
   , commandExpr :: NexusExpr
   , commandReturnSchema :: Text
   , commandArgSchemas :: [Text]
+  , commandArgAsts :: [SerialAST]
+    -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
+    -- Same role as 'fdataArgAsts'; see 'groupEntryWireSchemas'.
   }
 
 -- | Slice of a parent command's 'CmdDocSet' that internal
@@ -216,6 +224,8 @@ data NexusExpr
   | StdinX    Text                  -- element schema (a) -- @stdin :: <IO> IStream a
   | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
+  | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
+  | CatchX    NexusExpr NexusExpr   -- fallible, fallback -- try/catch
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -268,6 +278,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataType = t
       , fdataSubSockets = sockets
       , fdataArgSchemas = argSchemas
+      , fdataArgAsts = argAsts
       , fdataReturnSchema = returnSchema
       , fdataCmdDocSet = doc
       }
@@ -547,6 +558,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandExpr = expr
       , commandReturnSchema = returnSchema
       , commandArgSchemas = argSchemas
+      , commandArgAsts = argAsts
       }
   where
     type2schema :: Type -> MorlocMonad Text
@@ -645,37 +657,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (NamS rs)) =
       NamX <$> type2schema t <*> mapM (\(k, e) -> (,) (unKey k) <$> toNexusExpr e) rs
     toNexusExpr (AnnoS (Idx _ t) _ (StrS v)) = StrX <$> type2schema t <*> pure v
-    -- Use the literal's own source-map index (litIx) for overflow reporting,
-    -- mirroring the IntS path. RealS carries litIx in its first parameter.
-    -- Non-finite variants (Inf/-Inf/NaN) bypass bounds-checking and emit
-    -- the canonical wire string ("inf" / "-inf" / "nan"); the runtime JSON
-    -- decoder accepts these on parse.
-    toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) = do
-      s <- generalTypeToSerialAST litIx t
-      checkRealBounds litIx v s
-      let litCode = case s of
-            (SerialFloat32 _) -> F32X
-            _ -> F64X
-      return $ LitX litCode (MT.pack (showRealLit v))
-    -- Use the literal's own source-map index (litIx) for overflow reporting.
-    -- The wrapping AnnoS index points at the term that owns the literal,
-    -- which after term inlining is often the export reference, not the
-    -- literal itself. See Treeify.collectExprS for where litIx is set.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) = do
-      s <- generalTypeToSerialAST litIx t
-      checkIntBounds litIx v s
-      return $ case s of
-        (SerialInt8 _) -> LitX I8X (MT.pack (show v))
-        (SerialInt16 _) -> LitX I16X (MT.pack (show v))
-        (SerialInt _) -> LitX IntX (MT.pack (show v))
-        (SerialInt32 _) -> LitX I32X (MT.pack (show v))
-        (SerialInt64 _) -> LitX I64X (MT.pack (show v))
-        (SerialUInt8 _) -> LitX U8X (MT.pack (show v))
-        (SerialUInt16 _) -> LitX U16X (MT.pack (show v))
-        (SerialUInt _) -> LitX U64X (MT.pack (show v))
-        (SerialUInt32 _) -> LitX U32X (MT.pack (show v))
-        (SerialUInt64 _) -> LitX U64X (MT.pack (show v))
-        _ -> LitX I64X (MT.pack (show v))
+    -- litIx (not the wrapping AnnoS index) drives overflow diagnostics
+    -- so the caret lands on the literal itself, not the enclosing term.
+    toNexusExpr (AnnoS (Idx _ t) _ (RealS litIx v)) =
+      resolveNumericToLitX litIx t (NL.RealSrc v)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) =
+      resolveNumericToLitX litIx t (NL.IntSrc v)
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
@@ -795,6 +782,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
       FlushX <$> toNexusExpr handle
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrThrow [msg])) =
+      ThrowX <$> toNexusExpr msg
+    toNexusExpr (AnnoS _ _ (IntrinsicS IntrCatch [fallible, fallback])) =
+      CatchX <$> toNexusExpr fallible <*> toNexusExpr fallback
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
       StdinX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
@@ -842,52 +833,27 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
 
-checkIntBounds :: Int -> Integer -> SerialAST -> MorlocMonad ()
-checkIntBounds i v s =
-  let (name, lo, hi) = case s of
-        SerialInt8 _  -> ("Int8", -128, 127)
-        SerialInt16 _ -> ("Int16", -32768, 32767)
-        SerialInt32 _ -> ("Int32", -2147483648, 2147483647)
-        SerialInt _   -> ("", v, v) -- variable-width, no overflow possible
-        SerialInt64 _ -> ("Int64", -9223372036854775808, 9223372036854775807)
-        SerialUInt8 _  -> ("UInt8", 0, 255)
-        SerialUInt16 _ -> ("UInt16", 0, 65535)
-        SerialUInt32 _ -> ("UInt32", 0, 4294967295)
-        SerialUInt _   -> ("UInt", 0, 18446744073709551615)
-        SerialUInt64 _ -> ("UInt64", 0, 18446744073709551615)
-        _ -> ("", v, v) -- no check for non-integer types
-  in CM.when (v < lo || v > hi) $
-       MM.throwSourcedError i $
-         "Integer literal " <> pretty v
-         <> " overflows " <> (name :: MDoc)
-         <> " (range " <> pretty lo <> " to " <> pretty hi <> ")"
-
--- Check that a finite Real literal fits its target IEEE-754 representation.
--- Data.Scientific.toRealFloat collapses out-of-range values to infinity, so
--- isInfinite on the result detects overflow at compile time. The non-finite
--- RealLit variants (Inf/-Inf/NaN) are explicitly written by the user and
--- bypass the bounds check entirely.
-checkRealBounds :: Int -> RealLit -> SerialAST -> MorlocMonad ()
-checkRealBounds i (RealFinite v) s = case s of
-  SerialFloat32 _ ->
-    let f = DS.toRealFloat v :: Float
-     in CM.when (isInfinite f) $
-          MM.throwSourcedError i $
-            "Float literal " <> pretty (show v)
-            <> " overflows Float32 (|x| > 3.4e38)"
-  -- Real and Float64 share the same IEEE-754 binary64 representation; bound
-  -- both against Float64 max.
-  SerialFloat64 _ -> overflowsF64
-  SerialReal _    -> overflowsF64
-  _ -> return ()
-  where
-    overflowsF64 =
-      let d = DS.toRealFloat v :: Double
-       in CM.when (isInfinite d) $
-            MM.throwSourcedError i $
-              "Float literal " <> pretty (show v)
-              <> " overflows Float64 (|x| > 1.8e308)"
-checkRealBounds _ _ _ = return ()
+-- Resolve a numeric literal against the target type and map the shared
+-- resolver's decision to nexus LitType wire markers. F32X/F64X carry
+-- the textual RealLit form ("inf"/"-inf"/"nan"/decimal); IntX uses the
+-- literal's decimal Integer.
+resolveNumericToLitX :: Int -> Type -> NL.NumLitSrc -> MorlocMonad NexusExpr
+resolveNumericToLitX litIx t src = do
+  s <- generalTypeToSerialAST litIx t
+  resolved <- NL.resolveNumericLiteral litIx src s
+  return $ case resolved of
+    NL.ResolvedInt NL.I8   n -> LitX I8X  (MT.pack (show n))
+    NL.ResolvedInt NL.I16  n -> LitX I16X (MT.pack (show n))
+    NL.ResolvedInt NL.I32  n -> LitX I32X (MT.pack (show n))
+    NL.ResolvedInt NL.I64  n -> LitX I64X (MT.pack (show n))
+    NL.ResolvedInt NL.IVar n -> LitX IntX (MT.pack (show n))
+    NL.ResolvedInt NL.U8   n -> LitX U8X  (MT.pack (show n))
+    NL.ResolvedInt NL.U16  n -> LitX U16X (MT.pack (show n))
+    NL.ResolvedInt NL.U32  n -> LitX U32X (MT.pack (show n))
+    NL.ResolvedInt NL.U64  n -> LitX U64X (MT.pack (show n))
+    NL.ResolvedInt NL.UVar n -> LitX U64X (MT.pack (show n))
+    NL.ResolvedReal NL.F32 r -> LitX F32X (MT.pack (showRealLit r))
+    NL.ResolvedReal NL.F64 r -> LitX F64X (MT.pack (showRealLit r))
 
 -- | Storage type of an intrinsic's `<IO> (Handle a)` result. Peels the
 -- effect + handle head and delegates to 'MBT.handleStorageType'.
@@ -1125,35 +1091,55 @@ formListHint elemSchema mLSrc mLForm lcks =
       CatList inner -> inner
       _             -> es
 
--- | Serialize a 'CmdArg' to its JSON manifest form. The optional
--- 'Maybe Text' is the pre-rendered serialization schema for typed
--- args (pos/opt/grp); flags pass 'Nothing' since they have no schema.
--- Group entries also pass 'Nothing' because the group's top-level
--- schema covers the whole record; entries never dispatch individually.
-argToJson :: Maybe Text -> CmdArg -> Text
-argToJson mschema (CmdArgPos r) =
+-- | Peel any Packable wrappers off a group's SerialAST and return the
+-- inner record's per-entry wire schemas, keyed by field name. Non-
+-- record SerialASTs (which shouldn't reach a group arg in a well-typed
+-- manifest) return the empty list; the caller falls back to @Nothing@
+-- per entry, matching the pre-split behavior for that entry.
+groupEntryWireSchemas :: SerialAST -> [(Key, Text)]
+groupEntryWireSchemas ast0 = case peelPack ast0 of
+    SerialObject _ _ _ kids ->
+      [(k, render (Serial.serialAstToMsgpackSchema child)) | (k, child) <- kids]
+    _ -> []
+  where
+    peelPack (SerialPack _ (_, inner)) = peelPack inner
+    peelPack x                          = x
+
+-- | Serialize a 'CmdArg' to JSON.
+--
+--   * @mEmit@         written into the "schema" field. 'Nothing' skips
+--                     the field entirely (group entries pass 'Nothing'
+--                     because the group's schema is authoritative).
+--   * @mShape@        consulted by 'classifySchema' for shape defaults
+--                     (source, quoted, format hint). Distinct from
+--                     @mEmit@ so a group entry can resolve defaults
+--                     against its own wire schema without emitting one.
+--   * @entrySchemas@  per-entry wire schemas for 'CmdArgGrp'; unused
+--                     for pos/opt/flag.
+argToJson :: Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
+argToJson mEmit mShape _ (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
-    ++ schemaField mschema
+    ++ schemaField mEmit
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mschema))
+       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
        , ("many", jsonBool (argPosDocMany r))
        , ("desc", jsonStrArr (argPosDocDesc r))
        , ("constraints", constraintsJsonFor (argPosDocType r))
        , ("metadata", metadataEmpty)
        ]
-    ++ ioShapeFields mschema (argPosDocMany r)
+    ++ ioShapeFields mShape (argPosDocMany r)
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
-argToJson mschema (CmdArgOpt r) =
+argToJson mEmit mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
-    ++ schemaField mschema
+    ++ schemaField mEmit
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r) (argOptDocSource r) (argOptDocChecks r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mschema))
+       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mShape))
        , ("many", jsonBool (argOptDocMany r))
        , ("short", cliOptShortJson (argOptDocArg r))
        , ("long", cliOptLongJson (argOptDocArg r))
@@ -1162,11 +1148,11 @@ argToJson mschema (CmdArgOpt r) =
        , ("constraints", constraintsJsonFor (argOptDocType r))
        , ("metadata", metadataEmpty)
        ]
-    ++ ioShapeFields mschema (argOptDocMany r)
+    ++ ioShapeFields mShape (argOptDocMany r)
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
-argToJson _ (CmdArgFlag r) =
+argToJson _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
     , ("short", cliOptShortJson (argFlagDocOpt r))
@@ -1176,10 +1162,10 @@ argToJson _ (CmdArgFlag r) =
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
-argToJson mschema (CmdArgGrp r) =
+argToJson mEmit _ entrySchemas (CmdArgGrp r) =
   jsonObj $
     [ ("kind", jsonStr "grp") ]
-    ++ schemaField mschema
+    ++ schemaField mEmit
     ++ [ ("type", jsonStr (render (pretty (recDocType r))))
        , ("metavar", jsonStr (recDocMetavar r))
        , ("desc", jsonStrArr (recDocDesc r))
@@ -1196,12 +1182,13 @@ argToJson mschema (CmdArgGrp r) =
         , ("long", cliOptLongJson opt)
         ]
 
-    -- Group entries never carry their own schema; the group's top-level
-    -- schema is used for dispatch. Pass 'Nothing' to the recursive call.
+    -- No emit-schema (group's schema is authoritative); per-entry
+    -- shape schema so Str/scalar entries pick the correct defaults.
     grpEntryJson key entry =
       jsonObj
         [ ("key", jsonStr (unKey key))
-        , ("arg", argToJson Nothing (either CmdArgFlag CmdArgOpt entry))
+        , ("arg", argToJson Nothing (lookup key entrySchemas) []
+                    (either CmdArgFlag CmdArgOpt entry))
         ]
 
 -- | Prefixed @schema@ field when a schema is present, otherwise empty.
@@ -1662,18 +1649,18 @@ expectedJsonShape = go
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
     go (SerialReal _)                = "Real"
-    go (SerialFloat32 _)             = "Float32"
-    go (SerialFloat64 _)             = "Float64"
+    go (SerialFloat32 _)             = "F32"
+    go (SerialFloat64 _)             = "F64"
     go (SerialInt _)                 = "Int"
-    go (SerialInt8 _)                = "Int8"
-    go (SerialInt16 _)               = "Int16"
-    go (SerialInt32 _)               = "Int32"
-    go (SerialInt64 _)               = "Int64"
+    go (SerialInt8 _)                = "I8"
+    go (SerialInt16 _)               = "I16"
+    go (SerialInt32 _)               = "I32"
+    go (SerialInt64 _)               = "I64"
     go (SerialUInt _)                = "UInt"
-    go (SerialUInt8 _)               = "UInt8"
-    go (SerialUInt16 _)              = "UInt16"
-    go (SerialUInt32 _)              = "UInt32"
-    go (SerialUInt64 _)              = "UInt64"
+    go (SerialUInt8 _)               = "U8"
+    go (SerialUInt16 _)              = "U16"
+    go (SerialUInt32 _)              = "U32"
+    go (SerialUInt64 _)              = "U64"
     go (SerialOptional _ s)          = go s <> " | null"
     go (SerialList _ Nothing s)      = "[" <> go s <> "]"
     go (SerialList _ (Just (NatLitF n)) s) =
@@ -1698,10 +1685,10 @@ expectedRange (SerialInt16 _)       = "Int16 in -32768 .. 32767"
 expectedRange (SerialInt32 _)       = "Int32 in -2147483648 .. 2147483647"
 expectedRange (SerialInt64 _)       = "Int64 in -9223372036854775808 .. 9223372036854775807"
 expectedRange (SerialUInt _)        = "UInt >= 0 (BigInt)"
-expectedRange (SerialUInt8 _)       = "UInt8 in 0 .. 255"
-expectedRange (SerialUInt16 _)      = "UInt16 in 0 .. 65535"
-expectedRange (SerialUInt32 _)      = "UInt32 in 0 .. 4294967295"
-expectedRange (SerialUInt64 _)      = "UInt64 in 0 .. 18446744073709551615"
+expectedRange (SerialUInt8 _)       = "U8 in 0 .. 255"
+expectedRange (SerialUInt16 _)      = "U16 in 0 .. 65535"
+expectedRange (SerialUInt32 _)      = "U32 in 0 .. 4294967295"
+expectedRange (SerialUInt64 _)      = "U64 in 0 .. 18446744073709551615"
 expectedRange ast = error
   $ "expectedRange: non-numeric SerialAST node reached the range reporter; "
   <> "this indicates 'rangeMismatch' was called outside an integer arm. "
@@ -1812,7 +1799,7 @@ validateBracketBound role (AnnoS (Idx i t) _ _) =
     then return ()
     else MM.throwSourcedError i $
       "Bracket" <+> pretty role <+> "bound must be an integer wire type"
-      <+> "in pure morloc (one of Int, Int8/16/32/64, UInt8/16/32/64);"
+      <+> "in pure morloc (one of Int, I8/16/32/64, U8/16/32/64);"
       <+> "got" <+> pretty t
 
 -- | True if the receiver expression has an IFile-headed type. Used to
@@ -1833,8 +1820,8 @@ isIntegralPureBound :: Type -> Bool
 isIntegralPureBound t = case peel t of
   VarT (TV n) -> n `elem`
     [ "Int"
-    , "Int8", "Int16", "Int32", "Int64"
-    , "UInt", "UInt8", "UInt16", "UInt32", "UInt64"
+    , "I8", "I16", "I32", "I64"
+    , "UInt", "U8", "U16", "U32", "U64"
     ]
   _ -> False
   where
@@ -2072,6 +2059,17 @@ exprToJson (StderrX schema) =
   jsonObj
     [ ("tag", jsonStr "stderr")
     , ("schema", jsonStr schema)
+    ]
+exprToJson (ThrowX msg) =
+  jsonObj
+    [ ("tag", jsonStr "throw")
+    , ("msg", exprToJson msg)
+    ]
+exprToJson (CatchX fallible fallback) =
+  jsonObj
+    [ ("tag", jsonStr "catch")
+    , ("fallible", exprToJson fallible)
+    , ("fallback", exprToJson fallback)
     ]
 exprToJson (OptX schema child) =
   jsonObj
@@ -2313,7 +2311,7 @@ buildManifest ManifestInputs{..} =
         , ("pool", jsonInt (miLangToPool (socketLang (fdataSocket fd))))
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
-        , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd))
+        , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
@@ -2333,7 +2331,7 @@ buildManifest ManifestInputs{..} =
         [ ("name", jsonStr (commandName g))
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
-        , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g))
+        , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
         , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
@@ -2375,22 +2373,28 @@ buildManifest ManifestInputs{..} =
     -- their schema in the JSON output (it's never used at dispatch
     -- time for boolean flags) but we still consume the schema slot to
     -- keep the index alignment intact for subsequent args.
-    argsJson :: [CmdArg] -> [Text] -> Text
-    argsJson docArgs schemas =
-      jsonArr (pairArgsWithSchemas docArgs schemas)
+    argsJson :: [CmdArg] -> [Text] -> [SerialAST] -> Text
+    argsJson docArgs schemas asts =
+      jsonArr (walk docArgs schemas asts)
       where
-        pairArgsWithSchemas :: [CmdArg] -> [Text] -> [Text]
-        pairArgsWithSchemas [] _ = []
+        walk :: [CmdArg] -> [Text] -> [SerialAST] -> [Text]
+        walk [] _ _ = []
         -- Flags consume a schema slot but emit no `schema` field.
-        pairArgsWithSchemas (a@(CmdArgFlag _) : rest) (_ : ss) =
-          argToJson Nothing a : pairArgsWithSchemas rest ss
-        pairArgsWithSchemas (a : rest) (s : ss) =
-          argToJson (Just s) a : pairArgsWithSchemas rest ss
-        pairArgsWithSchemas (a : rest) [] =
-          -- Defensive: more args than schemas. Emit with no schema
-          -- so we fail cleanly downstream rather than silently
-          -- misaligning.
-          argToJson Nothing a : pairArgsWithSchemas rest []
+        walk (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
+          argToJson Nothing Nothing [] a : walk rest ss as
+        walk (a : rest) (s : ss) (ast : as) =
+          let entries = case a of
+                          CmdArgGrp _ -> groupEntryWireSchemas ast
+                          _           -> []
+          in argToJson (Just s) (Just s) entries a : walk rest ss as
+        walk (a : rest) [] _ =
+          -- Defensive: more args than schemas. Emit with no schema so
+          -- we fail cleanly downstream rather than silently misaligning.
+          argToJson Nothing Nothing [] a : walk rest [] []
+        walk (a : rest) (s : ss) [] =
+          -- Defensive: validateArgSpecs should have caught this. Emit
+          -- with no per-entry schemas rather than crash.
+          argToJson (Just s) (Just s) [] a : walk rest ss []
 
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and

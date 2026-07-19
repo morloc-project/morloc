@@ -1,4 +1,4 @@
--- Test labeled nat params (m:Int syntax)
+-- Test labeled nat params (m@Int syntax)
 -- Labels bind Int args to nat-kinded type params
 
 module main (testMakeVec, testMakeMat, testId)
@@ -15,10 +15,10 @@ source Cpp from "labeled.hpp"
   )
 
 -- Labeled: Int arg determines vector length
-makeVec :: n:Int -> Vector n Real
+makeVec :: n@Int -> Vector n Real
 
 -- Labeled: two Int args determine matrix dims
-makeMat :: m:Int -> n:Int -> Matrix m n Real
+makeMat :: m@Int -> n@Int -> Matrix m n Real
 
 -- Generic: works for any length vector
 idVec :: Vector n Real -> Vector n Real

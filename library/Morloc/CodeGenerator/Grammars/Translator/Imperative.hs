@@ -179,6 +179,12 @@ data IExpr
       -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStderr Int
       -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
+  | IIntrinsicThrow IExpr
+      -- ^ @throw :: Str -> <Err> a: raise a MorlocException with the message.
+  | IIntrinsicCatch IExpr IExpr
+      -- ^ @catch fallible fallback: fallible-first thunks. Runtime evaluates
+      --   fallible in a try; on any language-native exception, evaluates
+      --   fallback and returns its value.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -389,6 +395,7 @@ data LowerConfig m = LowerConfig
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   , -- manifold lowering fields
     lcMakeFunction ::
+      Int ->
       MDoc ->
       [Arg TypeM] ->
       TypeM ->
@@ -396,8 +403,10 @@ data LowerConfig m = LowerConfig
       MDoc ->
       Maybe HeadManifoldForm ->
       m (Maybe MDoc)
-  -- ^ name, all args, manifold type, priorLines, body, headForm
-  -- Returns Nothing if dedup'd (C++), Just funcDef otherwise
+  -- ^ mid, name, all args, manifold type, priorLines, body, headForm
+  -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
+  -- is threaded so the per-manifold error-wrap can look up user name
+  -- and srcloc for the trace line.
   , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
   -- ^ name, contextArgs, boundArgs - partial application expression
   , lcRegisterSchema :: Text -> m Int
@@ -725,18 +734,21 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  innerType <- case typeFof origExpr of
-    OptionalF t -> lcTypeOf cfg t
-    _ -> return Nothing
+  -- Post effect-migration, @load returns bare `T` (no OptionalF wrap).
+  -- The pool-side shim `_mlc_load<T>` requires an explicit template
+  -- argument since `T` only appears in the return position; template
+  -- deduction from the surrounding context is unreliable, so pass the
+  -- resolved type unconditionally.
+  innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad sid innerType (IRawExpr (render (poolExpr pathDocs))))}
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs))))}
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  innerType <- case typeFof origExpr of
-    OptionalF t -> lcTypeOf cfg t
-    _ -> return Nothing
+  -- Same rationale as IntrLoad above: @read returns bare `T` now,
+  -- pass the resolved type so `_mlc_read<T>` gets its template arg.
+  innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead sid innerType (IRawExpr (render (poolExpr strDocs))))}
 -- @schema and @typeof erase their argument: the result is a compile-time
 -- constant string (the schema or user-facing type name), already resolved
@@ -857,6 +869,24 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
     }
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
+  return $ msgDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicThrow (IRawExpr (render (poolExpr msgDocs))))
+    }
+-- @catch: emit each arg raw. Serialize.hs::thunkifyForCatch has already
+-- forced both args into DoBlockN thunks, so each poolExpr is a bound
+-- thunk name (like `helperN`). The pool's mlc_catch helper invokes them.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrCatch _ [fallibleDocs, fallbackDocs]) =
+  let allDocs = [fallibleDocs, fallbackDocs]
+      raw d = IRawExpr (render (poolExpr d))
+   in return $ fallibleDocs
+        { poolExpr = lcPrintExpr cfg
+            (IIntrinsicCatch (raw fallibleDocs) (raw fallbackDocs))
+        , poolPriorExprs = concatMap poolPriorExprs allDocs
+        , poolPriorLines = concatMap poolPriorLines allDocs
+        , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
+        }
 -- @stdin / @stdout / @stderr: nullary intrinsics. The runtime enforces
 -- singleton opens per stdio kind; codegen just emits the call with the
 -- element schema.
@@ -965,7 +995,7 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
       body = if retFlag then lcReturn cfg bodyExpr else bodyExpr
       args = typeMofForm form
       mname = manNamer m
-  maybeNewManifold <- lcMakeFunction cfg mname args manifoldType priorLines body headForm
+  maybeNewManifold <- lcMakeFunction cfg m mname args manifoldType priorLines body headForm
   let call = case form of
         (ManifoldPass _) -> mname
         (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))

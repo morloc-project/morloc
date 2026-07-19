@@ -12,3 +12,4 @@ log
 *.err
 main
 nexus
+*.pkt

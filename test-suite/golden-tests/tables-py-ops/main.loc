@@ -18,7 +18,7 @@ source Py from "src.py"
 --   pickRows + reverse + range = the "reverse rows" idiom (no dedicated
 --     primitive any more; this exercises the composition rule)
 --   rbind (Nat addition), cbind (Rec union)
---   setCol / dropCols (typed runtime add/drop with f:Str / l:[Str]
+--   setCol / dropCols (typed runtime add/drop with f@Str / l:[Str]
 --     label lifting and (r - f) + Singleton f a / (r - l) reductions)
 --   selectCols (typed list-label projection via Restrict)
 

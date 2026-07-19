@@ -27,33 +27,34 @@ module main
   )
 
 effect IO
+effect Err
 
-binIntLvl0 :: Int -> Str -> <IO> ?Int
+binIntLvl0 :: Int -> Str -> <IO, Err> Int
 binIntLvl0 x path = do
   @save 0 x path
   @load path
 
-binIntLvl1 :: Int -> Str -> <IO> ?Int
+binIntLvl1 :: Int -> Str -> <IO, Err> Int
 binIntLvl1 x path = do
   @save 1 x path
   @load path
 
-binIntLvl5 :: Int -> Str -> <IO> ?Int
+binIntLvl5 :: Int -> Str -> <IO, Err> Int
 binIntLvl5 x path = do
   @save 5 x path
   @load path
 
-binIntLvl9 :: Int -> Str -> <IO> ?Int
+binIntLvl9 :: Int -> Str -> <IO, Err> Int
 binIntLvl9 x path = do
   @save 9 x path
   @load path
 
-binListLvl0 :: [Int] -> Str -> <IO> ?[Int]
+binListLvl0 :: [Int] -> Str -> <IO, Err> [Int]
 binListLvl0 xs path = do
   @save 0 xs path
   @load path
 
-binListLvl5 :: [Int] -> Str -> <IO> ?[Int]
+binListLvl5 :: [Int] -> Str -> <IO, Err> [Int]
 binListLvl5 xs path = do
   @save 5 xs path
   @load path

@@ -57,17 +57,17 @@ concatStrs xs = fold (<>) "" (map (\p -> .0 p) xs)
 
 -- (Str, Int) tuple stream through stdio. Multi-sub-packet split by
 -- explicit @flush calls. Consumer returns "<concat>:<sum>".
-prodTuples :: <IO> ()
+prodTuples :: <IO, Err> ()
 prodTuples = do
-  o <- @stdout :: <IO> OStream (Str, Int)
+  o <- @stdout :: <IO, Err> OStream (Str, Int)
   @write 0 o [("a", 1), ("bb", 2)]
   @flush o
   @write 0 o [("ccc", 3), ("dd", 4), ("e", 5)]
   @close o
 
-consTuples :: <IO> Str
+consTuples :: <IO, Err> Str
 consTuples = do
-  s <- @stdin :: <IO> IStream (Str, Int)
+  s <- @stdin :: <IO, Err> IStream (Str, Int)
   xs1 <- @next s
   xs2 <- @next s
   concatStrs xs1 <> concatStrs xs2 <> ":" <> @show (sumSecond xs1 + sumSecond xs2)
@@ -75,28 +75,28 @@ consTuples = do
 -- Optional-element stream. Producer alternates value/Null. Consumer
 -- catMaybes-filters and sums. Exercises the Optional serial-type
 -- through the buffered path.
-prodOpt :: <IO> ()
+prodOpt :: <IO, Err> ()
 prodOpt = do
-  o <- @stdout :: <IO> OStream (?Int)
+  o <- @stdout :: <IO, Err> OStream (?Int)
   @write 0 o [10, Null, 20, Null, 30]
   @close o
 
-consOpt :: <IO> Int
+consOpt :: <IO, Err> Int
 consOpt = do
-  s <- @stdin :: <IO> IStream (?Int)
+  s <- @stdin :: <IO, Err> IStream (?Int)
   xs <- @next s
   sumOpt xs
 
 -- Empty stream. Writer opens and closes immediately; no @write.
 -- Reader's first @next lands on EOF (empty list). Consumer returns 0.
-prodEmpty :: <IO> ()
+prodEmpty :: <IO, Err> ()
 prodEmpty = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @close o
 
-consEmpty :: <IO> Int
+consEmpty :: <IO, Err> Int
 consEmpty = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs <- @next s
   sumInt xs
 
@@ -104,39 +104,39 @@ consEmpty = do
 -- fast), level 3 (default balanced), level 7 (long-mode enabled).
 -- Each writes the same payload; each consumer sums. All three should
 -- produce the same sum.
-prodComp1 :: <IO> ()
+prodComp1 :: <IO, Err> ()
 prodComp1 = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @write 1 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @close o
 
-consComp1 :: <IO> Int
+consComp1 :: <IO, Err> Int
 consComp1 = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs <- @next s
   sumInt xs
 
-prodComp3 :: <IO> ()
+prodComp3 :: <IO, Err> ()
 prodComp3 = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @write 3 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @close o
 
-consComp3 :: <IO> Int
+consComp3 :: <IO, Err> Int
 consComp3 = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs <- @next s
   sumInt xs
 
-prodComp7 :: <IO> ()
+prodComp7 :: <IO, Err> ()
 prodComp7 = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @write 7 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @close o
 
-consComp7 :: <IO> Int
+consComp7 :: <IO, Err> Int
 consComp7 = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs <- @next s
   sumInt xs
 
@@ -150,15 +150,15 @@ consComp7 = do
 -- IStream and pulls the handles back. Exercises the on-disk
 -- handle_scan TAG_HANDLE -> TAG_PATH rewrite + the reader's
 -- TAG_PATH -> local-handle reconstitution end-to-end.
-prodHandles :: Str -> Str -> Str -> Str -> <IO> ()
+prodHandles :: Str -> Str -> Str -> Str -> <IO, Err> ()
 prodHandles dest pa pb pc = do
   @save 0 [100, 101, 102] pa
   @save 0 [200, 201, 202] pb
   @save 0 [300, 301, 302] pc
-  fa <- @open pa :: <IO> IFile [Int]
-  fb <- @open pb :: <IO> IFile [Int]
-  fc <- @open pc :: <IO> IFile [Int]
-  o <- @open dest :: <IO> OStream (IFile [Int])
+  fa <- @open pa :: <IO, Err> IFile [Int]
+  fb <- @open pb :: <IO, Err> IFile [Int]
+  fc <- @open pc :: <IO, Err> IFile [Int]
+  o <- @open dest :: <IO, Err> OStream (IFile [Int])
   @write 0 o (idpy [fa, fb, fc])
   @close o
 
@@ -169,9 +169,9 @@ prodHandles dest pa pb pc = do
 firstOf :: IFile [Int] -> Int
 firstOf f = .[0] f
 
-consHandles :: Str -> <IO> Int
+consHandles :: Str -> <IO, Err> Int
 consHandles dest = do
-  s <- @open dest :: <IO> IStream (IFile [Int])
+  s <- @open dest :: <IO, Err> IStream (IFile [Int])
   fs <- @next s
   idpy (sumInt (map firstOf fs))
 
@@ -179,9 +179,9 @@ consHandles dest = do
 -- MORLOC_WRITE_BUFFER_BYTES low; the single 50-element list then
 -- exceeds the buffer and flushes as one oversize sub-packet through
 -- append_one_element's dedicated branch.
-prodOversize :: <IO> ()
+prodOversize :: <IO, Err> ()
 prodOversize = do
-  o <- @stdout :: <IO> OStream Int
+  o <- @stdout :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
               11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
@@ -189,9 +189,9 @@ prodOversize = do
               41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
   @close o
 
-consOversize :: <IO> Int
+consOversize :: <IO, Err> Int
 consOversize = do
-  s <- @stdin :: <IO> IStream Int
+  s <- @stdin :: <IO, Err> IStream Int
   xs <- @next s
   sumInt xs
 
@@ -199,9 +199,9 @@ consOversize = do
 -- exits; `fileRead <path>` opens the same path in a later invocation.
 -- Exercises the full open-sync-close lifecycle across separate nexus
 -- processes with no shared SHM state.
-fileWrite :: Str -> <IO> ()
+fileWrite :: Str -> <IO, Err> ()
 fileWrite path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 3 o [10, 20, 30]
   @flush o
   @write 3 o [40, 50]
@@ -209,9 +209,9 @@ fileWrite path = do
   @write 3 o [60, 70, 80, 90, 100]
   @close o
 
-fileRead :: Str -> <IO> Int
+fileRead :: Str -> <IO, Err> Int
 fileRead path = do
-  s <- @open path :: <IO> IStream Int
+  s <- @open path :: <IO, Err> IStream Int
   xs1 <- @next s
   xs2 <- @next s
   xs3 <- @next s

@@ -563,8 +563,11 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     }
 
     // Pull the metadata block out so we can check for a vol_idx hint
-    // without a full mmap. Falls back to hint = 0 (legacy Layer 2) if
-    // metadata is absent, malformed, or doesn't include the block.
+    // AND validate the packet's stored schema against the caller's
+    // requested schema without a full mmap. Falls back to hint = 0
+    // (legacy Layer 2) if metadata is absent, malformed, or doesn't
+    // include the block. Schema mismatch surfaces as UserThrow (via
+    // libmorloc's errmsg convention -- see check_packet_schema_matches).
     let vol_idx_hint: u16 = if metadata_size > 0 {
         let mut meta = vec![0u8; metadata_size];
         let nm = libc::pread(
@@ -576,6 +579,11 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         if nm as usize != metadata_size {
             libc::close(fd);
             return Ok(None);
+        }
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if let Err(e) = check_packet_schema_matches(&meta, schema, &path_str) {
+            libc::close(fd);
+            return Err(e);
         }
         let mut full = Vec::with_capacity(32 + metadata_size);
         full.extend_from_slice(&header_bytes);
@@ -799,6 +807,17 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     let mut full_header_and_meta = Vec::with_capacity(32 + metadata_size);
     full_header_and_meta.extend_from_slice(&header_bytes);
     full_header_and_meta.extend_from_slice(&metadata_bytes);
+
+    // Validate the packet's stored schema against the caller's
+    // requested schema before committing to the (expensive)
+    // decompression + rebase path.
+    if metadata_size > 0 {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if let Err(e) = check_packet_schema_matches(&metadata_bytes, schema, &path_str) {
+            libc::close(fd);
+            return Err(e);
+        }
+    }
 
     let vol_idx_hint: u16 = packet::read_vol_index_from_meta(&full_header_and_meta)
         .ok()
@@ -1896,9 +1915,9 @@ fn fixed_width_scalar_name(elem: &crate::schema::SerialType) -> &'static str {
     use crate::schema::SerialType::*;
     match elem {
         Bool => "Bool",
-        Sint8 => "Int8",   Sint16 => "Int16", Sint32 => "Int32", Sint64 => "Int64",
-        Uint8 => "UInt8",  Uint16 => "UInt16",Uint32 => "UInt32",Uint64 => "UInt64",
-        Float32 => "Float32", Float64 => "Float64",
+        Sint8 => "I8",   Sint16 => "I16", Sint32 => "I32", Sint64 => "I64",
+        Uint8 => "U8",  Uint16 => "U16",Uint32 => "U32",Uint64 => "U64",
+        Float32 => "F32", Float64 => "F64",
         _ => "non-scalar",
     }
 }
@@ -2016,6 +2035,69 @@ unsafe fn try_bytes_hybrid(
         }
     }
     try_bytes_only(data, data_size, schema, errmsg)
+}
+
+// ── Schema-check helper for packet loads ──────────────────────────────────
+
+/// Compare the schema string embedded in a morloc packet's metadata
+/// block to the caller's requested schema. Returns `Ok(())` on match
+/// or when there's nothing to compare against (missing metadata entry,
+/// null requested schema). Returns `Err(MorlocError::UserThrow(_))`
+/// on mismatch so `@catch` can intercept.
+///
+/// Without this check, `load_morloc_data_file`'s format-specific
+/// decoders would silently reinterpret payload bytes under the wrong
+/// schema (e.g. reading a Str-packet's Array header as an Int64),
+/// producing garbage instead of a catchable failure.
+///
+/// Comparison is byte-for-byte on the canonical `schema_to_string`
+/// form. Both sides go through the same renderer, which no longer
+/// emits language-specific `<hint>` prefixes (hints are pool-local
+/// codegen state, not wire data), so cross-language save/load pairs
+/// compare equal for identical wire types.
+unsafe fn check_packet_schema_matches(
+    meta_bytes: &[u8],
+    requested_schema: *const CSchema,
+    path_hint: &str,
+) -> Result<(), MorlocError> {
+    use morloc_runtime_types::packet::{
+        decode_schema_entry, iter_metadata, METADATA_TYPE_SCHEMA_STRING,
+    };
+    use morloc_runtime_types::schema::schema_to_string;
+
+    let stored = iter_metadata(meta_bytes)
+        .find_map(|(kind, data)| {
+            if kind == METADATA_TYPE_SCHEMA_STRING {
+                Some(decode_schema_entry(data))
+            } else {
+                None
+            }
+        });
+
+    let stored = match stored {
+        Some(s) => s,
+        None => return Ok(()), // no schema entry to compare against
+    };
+
+    if requested_schema.is_null() {
+        return Ok(());
+    }
+
+    let requested_rs = CSchema::to_rust(requested_schema);
+    let requested = schema_to_string(&requested_rs);
+
+    if stored != requested {
+        let path_prefix = if path_hint.is_empty() {
+            String::new()
+        } else {
+            format!(" reading '{}'", path_hint)
+        };
+        return Err(MorlocError::UserThrow(format!(
+            "@load: schema mismatch{}: file has schema `{}`, requested `{}`",
+            path_prefix, stored, requested,
+        )));
+    }
+    Ok(())
 }
 
 // ── load_morloc_data_file ──────────────────────────────────────────────────
@@ -2430,6 +2512,18 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 }
                 let offset = { header.offset } as usize;
                 let length = { header.length } as usize;
+                // Compare the packet's stored schema descriptor to the
+                // caller's requested schema. Mismatch is user-attributable
+                // (loading the wrong type from a file) so surface as
+                // UserThrow via errmsg; @catch intercepts.
+                if offset > 0 {
+                    let meta_slice = std::slice::from_raw_parts(data.add(32), offset);
+                    if let Err(e) = check_packet_schema_matches(meta_slice, schema, &path_str) {
+                        libc::free(data as *mut c_void);
+                        set_errmsg(errmsg, &e);
+                        return ptr::null_mut();
+                    }
+                }
                 let payload = data.add(32 + offset);
                 let format = { header.command.data.format };
 
@@ -2951,6 +3045,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     fields: *mut *mut c_char,
     default_fields: *mut *mut c_char,
     schema: *const CSchema,
+    per_field_shapes: Option<&[FieldShape]>,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
@@ -3005,24 +3100,50 @@ unsafe fn parse_cli_data_argument_unrolled(
         }
     };
 
-    // Source 2: per-field user CLI values, each loaded independently
-    // through the standard pipeline (so any format the user provides
-    // works: inline JSON, file path, stdin, mpack file, etc.).
+    // Source 2: per-field user CLI values. Shape-carrying entries route
+    // through the shape-driven decoder; the rest use the classifier.
     let mut user_fields: Vec<Option<shm::AbsPtr>> = vec![None; n];
     for i in 0..n {
         let field_val = *fields.add(i);
         if !field_val.is_null() {
             let elem_cs = *(*schema).parameters.add(i);
             let fs = &rs.parameters[i];
-            let p = match shm::shcalloc(1, fs.width) {
-                Ok(p) => p,
-                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            let field_shape = per_field_shapes.and_then(|s| s.get(i)).copied();
+            let loaded = if let Some(fshape) = field_shape.filter(|s| s.is_non_default()) {
+                let list_cfg = match parse_list_config(fshape.list_config_json) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        set_errmsg(errmsg, &e);
+                        return ptr::null_mut();
+                    }
+                };
+                let voidstar = dispatch_shape_core(
+                    field_val, elem_cs,
+                    fshape.source_code, fshape.form_code, &list_cfg,
+                    &mut err,
+                );
+                if voidstar.is_null() {
+                    if !err.is_null() {
+                        wrap_and_set_errmsg(err, &field_label(i), errmsg);
+                    } else {
+                        set_errmsg(errmsg, &MorlocError::Other(
+                            format!("{}: shape dispatch returned null", field_label(i))));
+                    }
+                    return ptr::null_mut();
+                }
+                voidstar as *mut u8
+            } else {
+                let p = match shm::shcalloc(1, fs.width) {
+                    Ok(p) => p,
+                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+                };
+                let out = parse_cli_data_argument_singular(p, field_val, elem_cs, &mut err);
+                if !err.is_null() {
+                    wrap_and_set_errmsg(err, &field_label(i), errmsg);
+                    return ptr::null_mut();
+                }
+                out
             };
-            let loaded = parse_cli_data_argument_singular(p, field_val, elem_cs, &mut err);
-            if !err.is_null() {
-                wrap_and_set_errmsg(err, &field_label(i), errmsg);
-                return ptr::null_mut();
-            }
             user_fields[i] = Some(loaded);
         }
     }
@@ -3461,57 +3582,19 @@ unsafe fn parse_list_config(json_ptr: *const c_char) -> Result<ListConfig, Morlo
     Ok(ListConfig { source: raw.source, form: raw.form, checks: raw.checks })
 }
 
-/// Shape-aware CLI argument dispatch.
-///
-/// `source_code` selects how the argv string is resolved to bytes:
-///   - 0 (Auto): run the runtime classifier (stdin marker / JSON-shape
-///     sniff / file-exists)
-///   - 1 (Inline): the argv string IS the bytes
-///   - 2 (File): the argv string is a path; open it directly
-///
-/// `form_code` selects how the resolved bytes are interpreted:
-///   - 0 (Auto): structured-format classifier (JSON / MsgPack / packet
-///     / Arrow / Parquet)
-///   - 1 (Packet): strict packet only
-///   - 2 (Bytes): sniff packet magic, fall back to packed raw bytes
-///   - 3 (List): UTF-8 split on newlines; per-element pipeline
-///   - 4 (BytesOnly): packed raw bytes, never sniff
-///
-/// `list_config_json` carries the per-element overrides when
-/// `form_code == 3`; null / empty means defaults.
-#[no_mangle]
-pub unsafe extern "C" fn parse_cli_data_argument_shaped(
-    _dest: *mut u8,
-    arg: *const ArgumentT,
+/// Shape-driven decode: argv -> voidstar. Caller supplies a non-group
+/// `arg_value` and wraps the returned voidstar into a packet if needed.
+/// Stream fast paths are applied by the top-level shaped entry point,
+/// not here. See [`parse_cli_data_argument_shaped`] for the source /
+/// form code vocabulary.
+unsafe fn dispatch_shape_core(
+    arg_value: *mut c_char,
     schema: *const CSchema,
     source_code: u8,
     form_code: u8,
-    list_config_json: *const c_char,
+    list_cfg: &ListConfig,
     errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    clear_errmsg(errmsg);
-
-    if arg.is_null() {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("parse_cli_data_argument_shaped: null arg".into()),
-        );
-        return ptr::null_mut();
-    }
-
-    let list_cfg = match parse_list_config(list_config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-
-    // Group / record args do not flow through the shape pipeline.
-    if !(*arg).fields.is_null() {
-        return parse_cli_data_argument(ptr::null_mut(), arg, schema, errmsg);
-    }
-
+) -> *mut c_void {
     // `form: auto` delegates to the existing classified pipeline,
     // which handles inline JSON literals (NUL-terminated argv strings
     // fed to `read_json_with_schema`), file reads, and stdin -- no
@@ -3519,52 +3602,38 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
     // libc-malloc'd buffer.
     if form_code == 0 {
         let classified = match source_code {
-            1 => Classified { kind: ArgSource::Inline, effective: (*arg).value },
-            2 => Classified { kind: ArgSource::File, effective: (*arg).value },
-            _ => match classify_arg_source((*arg).value) {
+            1 => Classified { kind: ArgSource::Inline, effective: arg_value },
+            2 => Classified { kind: ArgSource::File, effective: arg_value },
+            _ => match classify_arg_source(arg_value) {
                 Ok(c) => c,
                 Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
             },
         };
-        if classified.kind == ArgSource::File {
-            stream_fast_path_or_fallthrough!(classified.effective, schema, errmsg);
-        }
         let result = parse_cli_data_argument_classified(
             ptr::null_mut(), classified, schema, errmsg,
         );
-        if result.is_null() {
-            return ptr::null_mut();
-        }
-        return wrap_voidstar_as_packet(result as *mut c_void, schema, errmsg);
+        return result as *mut c_void;
     }
 
     // Non-Auto forms: resolve bytes per the source code, then
     // dispatch through the appropriate decoder.
     let (data, data_size, source_kind) = if source_code == 1 {
-        let argv_c = (*arg).value;
-        if argv_c.is_null() {
+        if arg_value.is_null() {
             set_errmsg(errmsg, &MorlocError::Other("inline source: null argv".into()));
             return ptr::null_mut();
         }
-        let n = libc::strlen(argv_c);
+        let n = libc::strlen(arg_value);
         let buf = libc::malloc(n.max(1)) as *mut u8;
         if buf.is_null() {
             set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
             return ptr::null_mut();
         }
         if n > 0 {
-            std::ptr::copy_nonoverlapping(argv_c as *const u8, buf, n);
+            std::ptr::copy_nonoverlapping(arg_value as *const u8, buf, n);
         }
         (buf, n, ArgSource::Inline)
     } else if source_code == 2 {
-        // Only `-f packet` (form 1) tries the stream fast path here.
-        // Form 0 (auto) handles it in the branch above; forms 2/3/4
-        // (bytes/list/bytes-only) let their own decoders surface a
-        // natural error on the stream file's binary header.
-        if form_code == 1 {
-            stream_fast_path_or_fallthrough!((*arg).value, schema, errmsg);
-        }
-        match read_path_into_libc((*arg).value) {
+        match read_path_into_libc(arg_value) {
             Ok((buf, sz)) => (buf, sz, ArgSource::File),
             Err(reason) => {
                 set_errmsg(errmsg,
@@ -3573,7 +3642,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
             }
         }
     } else {
-        match read_argv_bytes((*arg).value, errmsg) {
+        match read_argv_bytes(arg_value, errmsg) {
             Some(b) => b,
             None => return ptr::null_mut(),
         }
@@ -3644,7 +3713,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
                 }
                 return ptr::null_mut();
             }
-            return wrap_voidstar_as_packet(voidstar as *mut c_void, schema, errmsg);
+            return voidstar as *mut c_void;
         }
         // Not JSON-shaped -- error with a clearer message than the
         // previous "requires file/stdin" wording. Inline non-`[`
@@ -3668,7 +3737,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
     let voidstar = match form_code {
         1 => try_packet_strict(data, data_size, schema, &mut atom_err),
         2 => try_bytes_hybrid(data, data_size, schema, &mut atom_err),
-        3 => try_list_with_config(data, data_size, schema, &list_cfg, &mut atom_err),
+        3 => try_list_with_config(data, data_size, schema, list_cfg, &mut atom_err),
         4 => try_bytes_only(data, data_size, schema, &mut atom_err),
         other => {
             if !data.is_null() {
@@ -3682,16 +3751,109 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
         }
     };
 
-    if !voidstar.is_null() {
-        return wrap_voidstar_as_packet(voidstar, schema, errmsg);
+    if voidstar.is_null() {
+        if !atom_err.is_null() {
+            *errmsg = atom_err;
+        } else {
+            set_errmsg(errmsg, &MorlocError::Other("shape dispatch returned null".into()));
+        }
+        return ptr::null_mut();
+    }
+    voidstar as *mut c_void
+}
+
+/// Per-field shape config for the unrolled record path. The
+/// `list_config_json` pointer is either null (defaults apply) or a
+/// C-string with the same JSON shape [`parse_list_config`] accepts.
+#[derive(Debug, Clone, Copy)]
+struct FieldShape {
+    source_code: u8,
+    form_code: u8,
+    list_config_json: *const c_char,
+}
+
+impl FieldShape {
+    fn is_non_default(&self) -> bool {
+        self.source_code != 0
+            || self.form_code != 0
+            || !self.list_config_json.is_null()
+    }
+}
+
+/// Shape-aware CLI argument dispatch.
+///
+/// `source_code` selects how the argv string is resolved to bytes:
+///   - 0 (Auto): run the runtime classifier (stdin marker / JSON-shape
+///     sniff / file-exists)
+///   - 1 (Inline): the argv string IS the bytes
+///   - 2 (File): the argv string is a path; open it directly
+///
+/// `form_code` selects how the resolved bytes are interpreted:
+///   - 0 (Auto): structured-format classifier (JSON / MsgPack / packet
+///     / Arrow / Parquet)
+///   - 1 (Packet): strict packet only
+///   - 2 (Bytes): sniff packet magic, fall back to packed raw bytes
+///   - 3 (List): UTF-8 split on newlines; per-element pipeline
+///   - 4 (BytesOnly): packed raw bytes, never sniff
+///
+/// `list_config_json` carries the per-element overrides when
+/// `form_code == 3`; null / empty means defaults.
+#[no_mangle]
+pub unsafe extern "C" fn parse_cli_data_argument_shaped(
+    _dest: *mut u8,
+    arg: *const ArgumentT,
+    schema: *const CSchema,
+    source_code: u8,
+    form_code: u8,
+    list_config_json: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+
+    if arg.is_null() {
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other("parse_cli_data_argument_shaped: null arg".into()),
+        );
+        return ptr::null_mut();
     }
 
-    if !atom_err.is_null() {
-        *errmsg = atom_err;
-    } else {
-        set_errmsg(errmsg, &MorlocError::Other("shape dispatch returned null".into()));
+    let list_cfg = match parse_list_config(list_config_json) {
+        Ok(c) => c,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+
+    // Group / record args do not flow through the shape pipeline.
+    if !(*arg).fields.is_null() {
+        return parse_cli_data_argument(ptr::null_mut(), arg, schema, errmsg);
     }
-    ptr::null_mut()
+
+    // Stream-packet fast path (top-level only; the shape core skips it).
+    if form_code == 0 {
+        let classified_for_fast_path = match source_code {
+            2 => Some(Classified { kind: ArgSource::File, effective: (*arg).value }),
+            1 => None,
+            _ => classify_arg_source((*arg).value).ok(),
+        };
+        if let Some(c) = classified_for_fast_path {
+            if c.kind == ArgSource::File {
+                stream_fast_path_or_fallthrough!(c.effective, schema, errmsg);
+            }
+        }
+    } else if form_code == 1 && source_code == 2 {
+        stream_fast_path_or_fallthrough!((*arg).value, schema, errmsg);
+    }
+
+    let voidstar = dispatch_shape_core(
+        (*arg).value, schema, source_code, form_code, &list_cfg, errmsg,
+    );
+    if voidstar.is_null() {
+        return ptr::null_mut();
+    }
+    wrap_voidstar_as_packet(voidstar, schema, errmsg)
 }
 
 // ── parse_cli_data_argument ──────────────────────────────────────────────────
@@ -3721,7 +3883,8 @@ pub unsafe extern "C" fn parse_cli_data_argument(
         parse_cli_data_argument_singular(dest, (*arg).value, schema, &mut err)
     } else {
         parse_cli_data_argument_unrolled(
-            dest, (*arg).value, (*arg).fields, (*arg).default_fields, schema, &mut err,
+            dest, (*arg).value, (*arg).fields, (*arg).default_fields, schema,
+            None, &mut err,
         )
     };
 
@@ -3761,6 +3924,63 @@ pub unsafe extern "C" fn parse_cli_data_argument(
             errmsg,
         )
     }
+}
+
+// ── parse_cli_data_argument_group_shaped ─────────────────────────────────────
+
+/// Shape-aware `Arg::Group` dispatch. The three parallel arrays are
+/// indexed by entry position (matching `arg->fields[i]`); a field's
+/// shape is "default" when both codes are 0 and the JSON pointer is
+/// NULL, in which case that field falls back to the classifier.
+#[no_mangle]
+pub unsafe extern "C" fn parse_cli_data_argument_group_shaped(
+    dest: *mut u8,
+    arg: *const ArgumentT,
+    schema: *const CSchema,
+    source_codes: *const u8,
+    form_codes: *const u8,
+    list_config_jsons: *const *const c_char,
+    n_fields: usize,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+    let mut err: *mut c_char = ptr::null_mut();
+
+    if arg.is_null() || (*arg).fields.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "parse_cli_data_argument_group_shaped: arg is null or not a group".into()));
+        return ptr::null_mut();
+    }
+    if (*arg).size != n_fields {
+        set_errmsg(errmsg, &MorlocError::Other(format!(
+            "parse_cli_data_argument_group_shaped: n_fields ({}) does not match arg->size ({})",
+            n_fields, (*arg).size,
+        )));
+        return ptr::null_mut();
+    }
+
+    let mut shapes: Vec<FieldShape> = Vec::with_capacity(n_fields);
+    for i in 0..n_fields {
+        shapes.push(FieldShape {
+            source_code: if source_codes.is_null() { 0 } else { *source_codes.add(i) },
+            form_code: if form_codes.is_null() { 0 } else { *form_codes.add(i) },
+            list_config_json: if list_config_jsons.is_null() {
+                ptr::null()
+            } else {
+                *list_config_jsons.add(i)
+            },
+        });
+    }
+
+    let result = parse_cli_data_argument_unrolled(
+        dest, (*arg).value, (*arg).fields, (*arg).default_fields, schema,
+        Some(&shapes), &mut err,
+    );
+    if !err.is_null() {
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+    wrap_voidstar_as_packet(result as *mut c_void, schema, errmsg)
 }
 
 // ── make_call_packet_from_cli ────────────────────────────────────────────────

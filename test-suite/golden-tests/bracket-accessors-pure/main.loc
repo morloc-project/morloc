@@ -8,8 +8,8 @@ module main (
   , sliceStep
   , sliceStepClosed
   , sliceEmpty
-  , indexAnnotInt8
-  , indexAnnotUInt32
+  , indexAnnotI8
+  , indexAnnotU32
   , sliceAnnotBound
   , sliceAnnotNull
   , chainSliceField
@@ -81,22 +81,22 @@ sliceEmpty = .[5:1] ten
 
 -- ----- Annotated bounds (various integer widths + explicit Null) -----------
 
-indexAnnotInt8 :: Int
-indexAnnotInt8 = .[(2 :: Int8)] ten
+indexAnnotI8 :: Int
+indexAnnotI8 = .[(2 :: I8)] ten
 
-indexAnnotUInt32 :: Int
-indexAnnotUInt32 = .[(3 :: UInt32)] ten
+indexAnnotU32 :: Int
+indexAnnotU32 = .[(3 :: U32)] ten
 
 sliceAnnotBound :: [Int]
-sliceAnnotBound = .[(0 :: Int8):3] ten
+sliceAnnotBound = .[(0 :: I8):3] ten
 
--- A bound that is structurally Null with an explicit ?Int64 annotation
+-- A bound that is structurally Null with an explicit ?I64 annotation
 -- is the same shape the desugar produces for an empty slice position
--- (.[:3] -> .[(Null :: ?Int64):3]). Testing it here verifies the
+-- (.[:3] -> .[(Null :: ?I64):3]). Testing it here verifies the
 -- Optional default flow end-to-end without an empty-position desugar
 -- step in between.
 sliceAnnotNull :: [Int]
-sliceAnnotNull = .[(Null :: ?Int64):3] ten
+sliceAnnotNull = .[(Null :: ?I64):3] ten
 
 -- ----- Chained: slice + field (one implicit Map over records) --------------
 

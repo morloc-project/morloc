@@ -12,9 +12,9 @@ import root
 
 -- Emits a stream file whose writer @closes it -- so the on-disk shape
 -- is [stream header, N sub-packets, final footer, tail].
-writeClosed :: Str -> <IO> ()
+writeClosed :: Str -> <IO, Err> ()
 writeClosed path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [10, 20, 30]
   @flush o
   @write 0 o [40, 50]
@@ -23,8 +23,8 @@ writeClosed path = do
 -- Emits a stream file whose writer flushes but never @closes -- the
 -- per-dispatch sweep leaves the file at [stream header, sub-packets,
 -- temp footer, tail]. No SUBPACKET_INDEX, no FOOTER_FINAL flag.
-writeTempFooter :: Str -> <IO> ()
+writeTempFooter :: Str -> <IO, Err> ()
 writeTempFooter path = do
-  o <- @open path :: <IO> OStream Int
+  o <- @open path :: <IO, Err> OStream Int
   @write 0 o [1, 2, 3]
   @flush o

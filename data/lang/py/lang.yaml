@@ -77,7 +77,7 @@ ldBlockEnd: ""
 ldErrorWrapOpen: "try:"
 ldErrorWrapClose:
   - "except Exception as e:"
-  - "    raise RuntimeError(f\"{e!s}\\n  at {{name}} (py)\")"
+  - "    raise RuntimeError(f\"{e!s}\\n  at {{name}} [py] (mid={{mid}}{{srcloc_suffix}})\")"
 ldPatternStyle: fstring
 ldQuoteTerminator: '"""'
 ldQuoteTerminatorEsc: '\"\"\"'

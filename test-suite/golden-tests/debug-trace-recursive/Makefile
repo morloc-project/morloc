@@ -17,7 +17,7 @@ all:
 	  && echo "unlimited_fail_rc: PASS" >> obs.txt \
 	  || echo "unlimited_fail_rc: FAIL" >> obs.txt
 	@dir=$$(ls -d logs_unlimited/*/ 2>/dev/null); \
-	  cnt=$$(grep -o "frame " $$dir/summary.json | wc -l); \
+	  cnt=$$(grep -o "  at " $$dir/summary.json | wc -l); \
 	  test $$cnt -ge 6 \
 	  && echo "unlimited_many_frames: PASS" >> obs.txt \
 	  || echo "unlimited_many_frames: FAIL (got $$cnt)" >> obs.txt
@@ -38,8 +38,8 @@ all:
 	  || echo "capped_fail_rc: FAIL" >> obs.txt
 	@u_dir=$$(ls -d logs_unlimited/*/ 2>/dev/null); \
 	  c_dir=$$(ls -d logs_capped/*/ 2>/dev/null); \
-	  u=$$(grep -o "frame " $$u_dir/summary.json | wc -l); \
-	  c=$$(grep -o "frame " $$c_dir/summary.json | wc -l); \
+	  u=$$(grep -o "  at " $$u_dir/summary.json | wc -l); \
+	  c=$$(grep -o "  at " $$c_dir/summary.json | wc -l); \
 	  test $$c -lt $$u \
 	  && echo "capped_fewer_frames: PASS" >> obs.txt \
 	  || echo "capped_fewer_frames: FAIL (capped=$$c, unlimited=$$u)" >> obs.txt

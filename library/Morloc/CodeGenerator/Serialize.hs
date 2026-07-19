@@ -329,13 +329,19 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- emit it as a plain inline call and let surrounding expressions
     -- consume the value directly.
     nativeExpr m (MonoIntrinsic t intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad,
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
-                     IntrStdin, IntrStdout, IntrStderr] = do
+                     IntrStdin, IntrStdout, IntrStderr, IntrThrow,
+                     IntrCatch] = do
           tf <- inferType t
-          es' <- mapM (nativeExpr m) es
+          esBase <- mapM (nativeExpr m) es
+          -- @catch's args must both reach mlc_catch as no-arg callables;
+          -- see 'thunkifyForCatch' below.
+          let es' = case intr of
+                IntrCatch -> map thunkifyForCatch esBase
+                _         -> esBase
           es'' <- unpackDataArgIfNeeded m intr es'
           msch <- intrinsicSchema m intr tf es''
           let innerTf = case tf of
@@ -343,13 +349,22 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
                 other -> other
           mPacker <- loadResultPacker m intr innerTf
           let rawInnerTf = case mPacker of
-                Just (_, wireTf) -> rebuildOptionalInner innerTf wireTf
+                Just (_, wireTf) -> wireTf
                 Nothing -> innerTf
               raw = IntrinsicN rawInnerTf intr msch es''
           wrapped <- case mPacker of
-            Just (packerSrc, wireTf) -> return $ MapOptionalN innerTf wireTf packerSrc raw
+            Just (packerSrc, _) ->
+              return $ AppExeN innerTf (SrcCallP packerSrc) [NativeArgExpr raw]
             Nothing -> return raw
-          return $ DoBlockN tf wrapped
+          -- Wrap in DoBlockN only when the result still carries an effect
+          -- (needs to be a thunk that EvalN or a language-native catch can
+          -- invoke). @catch fully strips its Err effect when the residual
+          -- row is empty, yielding a plain-typed value; wrapping such a
+          -- value in DoBlockN turns it into a callable that never gets
+          -- forced when passed as a function argument.
+          return $ case tf of
+            EffectF _ _ -> DoBlockN tf wrapped
+            _           -> wrapped
     nativeExpr m (MonoIntrinsic t intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es
@@ -357,11 +372,12 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       msch <- intrinsicSchema m intr tf es''
       mPacker <- loadResultPacker m intr tf
       let rawTf = case mPacker of
-            Just (_, wireTf) -> rebuildOptionalInner tf wireTf
+            Just (_, wireTf) -> wireTf
             Nothing -> tf
           raw = IntrinsicN rawTf intr msch es''
       case mPacker of
-        Just (packerSrc, wireTf) -> return $ MapOptionalN tf wireTf packerSrc raw
+        Just (packerSrc, _) ->
+          return $ AppExeN tf (SrcCallP packerSrc) [NativeArgExpr raw]
         Nothing -> return raw
 
     -- For data-bearing runtime intrinsics (@save/@savej/@savem/@show/@hash),
@@ -370,6 +386,18 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
+    -- Idempotently wrap a NativeExpr in a DoBlockN so it renders as a
+    -- no-arg thunk. Any effect-typed NativeExpr is already thunk-shaped
+    -- via the enclosing DoBlockN-wrap step; a structural pattern-match
+    -- would have to enumerate every pass-through constructor
+    -- (MapOptionalN, CoerceN, ReturnN, ...) and silently misbehave when
+    -- a new one is added, so we dispatch on the type wrapper instead.
+    thunkifyForCatch :: NativeExpr -> NativeExpr
+    thunkifyForCatch e = case typeFof e of
+      EffectF _ _ -> e
+      t           -> DoBlockN t e
+
+
     unpackDataArgIfNeeded ::
       Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
     -- @save's first argument is the compression level, not the data;
@@ -405,34 +433,23 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           return [AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg]]
         _ -> return [dataArg]
 
-    -- Symmetric to unpackDataArgIfNeeded: @load and @read return optional
-    -- values, and the runtime emits the wire form. When the user-facing
-    -- inner type has a Packable instance, expandDeserialize's SerialPack
-    -- arm inserts the packer; we mirror that here for the intrinsic
-    -- result, lifting the packer through the optional via MapOptionalN.
-    -- Returns the packer source + the wire-form inner type so the caller
-    -- can both rebuild the intrinsic's type with the wire form (so the
-    -- runtime call uses the wire-side template) and wrap the result
-    -- with the packer.
+    -- Symmetric to unpackDataArgIfNeeded: @load and @read return the wire
+    -- form of the user's type. When the user-facing inner type has a
+    -- Packable instance, expandDeserialize's SerialPack arm inserts the
+    -- packer; we mirror that here for the intrinsic result. Returns the
+    -- packer source + the wire-form type so the caller can both rebuild
+    -- the intrinsic's type with the wire form (so the runtime call uses
+    -- the wire-side template) and wrap the result with the packer.
     loadResultPacker ::
       Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
     loadResultPacker m intr resultTf
-      | intr `elem` [IntrLoad, IntrRead] = case resultTf of
-          OptionalF innerT -> do
-            ast <- Serial.makeSerialAST m lang innerT
-            case ast of
-              SerialPack _ (packer, _) ->
-                return $ Just (typePackerForward packer, typePackerUnpacked packer)
-              _ -> return Nothing
-          _ -> return Nothing
+      | intr `elem` [IntrLoad, IntrRead] = do
+          ast <- Serial.makeSerialAST m lang resultTf
+          case ast of
+            SerialPack _ (packer, _) ->
+              return $ Just (typePackerForward packer, typePackerUnpacked packer)
+            _ -> return Nothing
       | otherwise = return Nothing
-
-    -- Replace the inner type of an OptionalF wrapper with a new type.
-    -- Used to swap the intrinsic's user-side optional inner for the
-    -- wire-side inner once the packer wrap is hoisted to MapOptionalN.
-    rebuildOptionalInner :: TypeF -> TypeF -> TypeF
-    rebuildOptionalInner (OptionalF _) newInner = OptionalF newInner
-    rebuildOptionalInner other _ = other
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
@@ -455,16 +472,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       -- emitted as a literal by the translator; the argument is erased.
       return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
-      -- For @load, the return type is {?a} or ?a; the schema is for a
+      -- For @load, the return type is <IO, Err> a; the schema is for a.
       let unwrap (EffectF _ inner) = unwrap inner
-          unwrap (OptionalF inner) = inner
           unwrap other = other
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrRead tf _ = do
-      -- For @read, the return type is ?a; the schema is for a
-      let unwrap (OptionalF inner) = inner
+      -- For @read, the return type is <Err> a; the schema is for a.
+      let unwrap (EffectF _ inner) = unwrap inner
           unwrap other = other
           dataType = unwrap tf
       ast <- Serial.makeSerialAST m lang dataType

@@ -49,6 +49,7 @@ restructure s = do
     >>= checkMutualRecursion -- non-trivial SCCs over typedef-references are rejected
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
+    >>= hoistEvals -- hoist user '!' markers into do-block binds
     >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
       |>> handleTypeDeclarations
     >>= doM collectTags
@@ -627,6 +628,181 @@ handleBinops d0 = do
               let lhs' = ExprI outerI $ AppE (ExprI opI (VarE defaultValue op)) [lhs, rhsParsed]
               pratt minPrec lhs' remaining
 
+-- | Hoist user-written '!' (EvalE) markers into fresh do-block binds.
+--
+-- Runs after handleBinops, so BopE has been reassociated into AppE and does
+-- not appear here. Walks every AssE RHS (including where-clause AssEs
+-- recursively). Each EvalE at a non-bind position becomes a fresh '_eval_N'
+-- bind in a wrapping DoBlockE; EvalE inside an existing do-block LetE-chain
+-- becomes a bind inserted immediately before the containing statement,
+-- preserving left-to-right effect order.
+--
+-- Output is the same LetE + EvalE + DoBlockE shape that desugarDo produces,
+-- so typecheck and codegen require no changes.
+hoistEvals :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+hoistEvals = DAG.mapNodeM hoistNode
+  where
+    hoistNode :: ExprI -> MorlocMonad ExprI
+    hoistNode (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM hoistNode es
+    hoistNode (ExprI i (IstE cls ts es)) = ExprI i . IstE cls ts <$> mapM hoistNode es
+    hoistNode (ExprI i (AssE v rhs whereDecls)) = do
+      rhs' <- hoistBoundary rhs
+      whereDecls' <- mapM hoistNode whereDecls
+      return (ExprI i (AssE v rhs' whereDecls'))
+    hoistNode e = return e
+
+    freshEvalVar :: MorlocMonad EVar
+    freshEvalVar = do
+      i <- MM.getCounter
+      return (EV ("_eval_" <> T.pack (show i)))
+
+    wrapBoundary :: Int -> ExprI -> [(EVar, ExprI)] -> MorlocMonad ExprI
+    wrapBoundary _ core [] = return core
+    wrapBoundary parent core bs = do
+      inner <- foldrM (nestLet parent) core bs
+      blockI <- newIndex parent
+      return (ExprI blockI (DoBlockE inner))
+
+    nestLet :: Int -> (EVar, ExprI) -> ExprI -> MorlocMonad ExprI
+    nestLet parent bind acc = do
+      letI <- newIndex parent
+      return (ExprI letI (LetE [bind] acc))
+
+    hoistBoundary :: ExprI -> MorlocMonad ExprI
+    hoistBoundary e@(ExprI parent _) = do
+      (e', bs) <- hoistIn e
+      wrapBoundary parent e' bs
+
+    mapAndCollect ::
+      (a -> MorlocMonad (b, [(EVar, ExprI)])) ->
+      [a] ->
+      MorlocMonad ([b], [(EVar, ExprI)])
+    mapAndCollect f xs = do
+      results <- mapM f xs
+      let (ys, bss) = unzip results
+      return (ys, concat bss)
+
+    hoistIn :: ExprI -> MorlocMonad (ExprI, [(EVar, ExprI)])
+    -- Inner hoists bind first so this bang's forced RHS sees them in scope.
+    hoistIn (ExprI i (EvalE inner)) = do
+      (inner', bs) <- hoistIn inner
+      v <- freshEvalVar
+      refI <- newIndex i
+      return
+        ( ExprI refI (VarE defaultValue v)
+        , bs ++ [(v, ExprI i (EvalE inner'))]
+        )
+    hoistIn (ExprI i (DoBlockE inner)) = do
+      inner' <- hoistDoChain inner
+      return (ExprI i (DoBlockE inner'), [])
+    hoistIn (ExprI i (LamE vs body)) = do
+      body' <- hoistBoundary body
+      return (ExprI i (LamE vs body'), [])
+    hoistIn (ExprI i (IfE c t e)) = do
+      (c', bs) <- hoistIn c
+      t' <- hoistBoundary t
+      e' <- hoistBoundary e
+      return (ExprI i (IfE c' t' e'), bs)
+    hoistIn (ExprI i (AnnE subject ty)) = do
+      subject' <- hoistBoundary subject
+      return (ExprI i (AnnE subject' ty), [])
+    -- LetE is a self-boundary. Desugar rejects any hoistable bang in a
+    -- binding RHS (see 'rejectHoistableBangInLetRhs'), so hoists from
+    -- binding RHSs are always empty here -- we still recurse through
+    -- them so a bang inside a nested boundary (lambda body, nested do,
+    -- guard branch, ann subject, nested let) gets rewritten. Body
+    -- hoists become fresh bindings appended after all original ones,
+    -- and the whole let wraps in a DoBlockE so 'collectDoEffects'
+    -- sees the effect firing point.
+    hoistIn (ExprI i (LetE binds body)) = do
+      binds' <- mapM (\(v, e) -> do (e', _) <- hoistIn e; return (v, e')) binds
+      (body', bodyHoists) <- hoistIn body
+      let letE = ExprI i (LetE (binds' ++ bodyHoists) body')
+      if null bodyHoists
+        then return (letE, [])
+        else do
+          blockI <- newIndex i
+          return (ExprI blockI (DoBlockE letE), [])
+    hoistIn (ExprI i (AppE f args)) = do
+      (f', bs_f) <- hoistIn f
+      (args', bs_args) <- mapAndCollect hoistIn args
+      return (ExprI i (AppE f' args'), bs_f ++ bs_args)
+    hoistIn (ExprI i (TupE es)) = do
+      (es', bs) <- mapAndCollect hoistIn es
+      return (ExprI i (TupE es'), bs)
+    hoistIn (ExprI i (LstE es)) = do
+      (es', bs) <- mapAndCollect hoistIn es
+      return (ExprI i (LstE es'), bs)
+    hoistIn (ExprI i (NamE rs)) = do
+      (rs', bs) <- mapAndCollect
+        (\(k, e) -> do (e', bs) <- hoistIn e; return ((k, e'), bs))
+        rs
+      return (ExprI i (NamE rs'), bs)
+    -- @catch's args are boundaries: '!' inside a fallible or fallback
+    -- seals at the arg site instead of hoisting above the @catch. Without
+    -- this, `@catch !(foo x) fb` would rewrite to `do { v <- foo x; @catch
+    -- v fb }`, evaluating the fallible outside @catch's try/catch scope
+    -- and defeating the catch entirely (and rejecting at typecheck since
+    -- the fallible would then be pure). Both args are sealed because the
+    -- fallback is lazy at runtime -- a bang in fallback that hoisted up
+    -- would fire eagerly even on the happy path.
+    hoistIn (ExprI i (IntrinsicE IntrCatch [fallible, fallback])) = do
+      fallible' <- hoistBoundary fallible
+      fallback' <- hoistBoundary fallback
+      return (ExprI i (IntrinsicE IntrCatch [fallible', fallback']), [])
+    hoistIn (ExprI i (IntrinsicE intr es)) = do
+      (es', bs) <- mapAndCollect hoistIn es
+      return (ExprI i (IntrinsicE intr es'), bs)
+    hoistIn (ExprI i (ParenE inner)) = do
+      (inner', bs) <- hoistIn inner
+      return (ExprI i (ParenE inner'), bs)
+    -- BopE should be eliminated by handleBinops before this pass; handle
+    -- defensively so any surviving BopE still gets its EvalEs hoisted.
+    hoistIn (ExprI i (BopE lhs opI op rhs)) = do
+      (lhs', bs_l) <- hoistIn lhs
+      (rhs', bs_r) <- hoistIn rhs
+      return (ExprI i (BopE lhs' opI op rhs'), bs_l ++ bs_r)
+    hoistIn e = return (e, [])
+
+    -- Walks a LetE-chain produced by desugarDo. Bangs in each binding's
+    -- RHS become fresh binds inserted immediately BEFORE the current LetE
+    -- so per-statement effect order is preserved. The outer EvalE at each
+    -- CstDoBind/CstDoBare RHS is left in place; only its inner is walked.
+    hoistDoChain :: ExprI -> MorlocMonad ExprI
+    hoistDoChain (ExprI i (LetE binds rest)) = do
+      (binds', hoists) <- collectBindHoists binds
+      rest' <- hoistDoChain rest
+      let letE = ExprI i (LetE binds' rest')
+      foldrM (nestLet i) letE hoists
+    hoistDoChain e@(ExprI parent _) = do
+      (e', bs) <- hoistIn e
+      foldrM (nestLet parent) e' bs
+
+    -- Fold builds accBinds in reverse (final 'reverse') and accHoists in
+    -- reverse-of-reverse so the concat at the end is O(N + total hoists)
+    -- rather than O(N * total hoists) that a left-append accumulator would
+    -- produce.
+    collectBindHoists ::
+      [(EVar, ExprI)] ->
+      MorlocMonad ([(EVar, ExprI)], [(EVar, ExprI)])
+    collectBindHoists bs0 = do
+      (accBinds, revHoistLists) <- foldM step ([], []) bs0
+      return (reverse accBinds, concat (reverse revHoistLists))
+      where
+        step (accBinds, revHoistLists) (v, rhs) = do
+          (rhs', bs) <- hoistRhsOfDoBind rhs
+          return ((v, rhs') : accBinds, bs : revHoistLists)
+
+    -- Option A: the RHS of a '<-' bind (or bare non-final do-stmt) is a
+    -- boundary. Bangs seal into a nested DoBlockE inside the RHS instead
+    -- of propagating past the '<-' into the enclosing chain. Keeps
+    -- 'a <- addI !x !y' legal and preserves the lexical firing point.
+    hoistRhsOfDoBind :: ExprI -> MorlocMonad (ExprI, [(EVar, ExprI)])
+    hoistRhsOfDoBind (ExprI i (EvalE inner)) = do
+      inner' <- hoistBoundary inner
+      return (ExprI i (EvalE inner'), [])
+    hoistRhsOfDoBind e = hoistIn e
+
 collectTags :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTags fullDag = do
   _ <- DAG.mapNodeM f fullDag
@@ -1045,7 +1221,7 @@ refineKinds dag = do
     -- typed-position, infer the label's kind from the FunU argument type
     -- at that position and promote any matching VarU mentions throughout
     -- the type (and constraints) to the proper per-kind variable. This
-    -- bridges the gap between the @f:Str@ surface syntax and the
+    -- bridges the gap between the @f\@Str@ surface syntax and the
     -- promotion pass: by the time refineTypeKinds runs, the labels have
     -- already been stripped by Desugar's @extractLabels@, so the
     -- LabeledU wrappers are gone but the labels map still records which
@@ -1441,7 +1617,7 @@ refineKinds dag = do
            in case b' of
                 StrLitU f | isRecLike a' -> RecDiffU a' [f]
                 -- `r - f` where f is a Str variable (introduced by an
-                -- f:Str signature label) drops the single key f from r.
+                -- f@Str signature label) drops the single key f from r.
                 -- Wrapped as a singleton list so RecDiffListU's reducer
                 -- handles the deferred-then-substituted lifecycle: when
                 -- f gets solved at the call site, the list goes ground

@@ -747,13 +747,13 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primiti
                 }
                 break;
             }
-            case MORLOC_SINT8:   *(int8_t*)dest   = check_range_narrow<int8_t>(data, "Int8");    break;
-            case MORLOC_SINT16:  *(int16_t*)dest  = check_range_narrow<int16_t>(data, "Int16");  break;
-            case MORLOC_SINT32:  *(int32_t*)dest  = check_range_narrow<int32_t>(data, "Int32");  break;
+            case MORLOC_SINT8:   *(int8_t*)dest   = check_range_narrow<int8_t>(data, "I8");    break;
+            case MORLOC_SINT16:  *(int16_t*)dest  = check_range_narrow<int16_t>(data, "I16");  break;
+            case MORLOC_SINT32:  *(int32_t*)dest  = check_range_narrow<int32_t>(data, "I32");  break;
             case MORLOC_SINT64:  *(int64_t*)dest  = static_cast<int64_t>(data);   break;
-            case MORLOC_UINT8:   *(uint8_t*)dest  = check_range_narrow<uint8_t>(data, "UInt8");   break;
-            case MORLOC_UINT16:  *(uint16_t*)dest = check_range_narrow<uint16_t>(data, "UInt16"); break;
-            case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "UInt32"); break;
+            case MORLOC_UINT8:   *(uint8_t*)dest  = check_range_narrow<uint8_t>(data, "U8");   break;
+            case MORLOC_UINT16:  *(uint16_t*)dest = check_range_narrow<uint16_t>(data, "U16"); break;
+            case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "U32"); break;
             case MORLOC_UINT64:  *(uint64_t*)dest = static_cast<uint64_t>(data);  break;
             case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;

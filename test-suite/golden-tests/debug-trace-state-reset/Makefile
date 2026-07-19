@@ -25,8 +25,8 @@ all:
 	  || echo "run2_fail_rc: FAIL" >> obs.txt
 	@d1=$$(ls -d logs1/*/ 2>/dev/null); \
 	 d2=$$(ls -d logs2/*/ 2>/dev/null); \
-	 f1=$$(grep -o "frame " $$d1/summary.json | wc -l); \
-	 f2=$$(grep -o "frame " $$d2/summary.json | wc -l); \
+	 f1=$$(grep -o "  at " $$d1/summary.json | wc -l); \
+	 f2=$$(grep -o "  at " $$d2/summary.json | wc -l); \
 	 test $$f1 -gt 0 -a $$f1 -eq $$f2 \
 	   && echo "equal_frame_counts: PASS" >> obs.txt \
 	   || echo "equal_frame_counts: FAIL (run1=$$f1 run2=$$f2)" >> obs.txt

@@ -112,6 +112,11 @@ data Source
   , srcNote :: [Text]
   , srcInline :: !Bool
   , srcOperator :: !Bool
+  -- | True when the source name came from a backtick-quoted form
+  -- (@`and`@). Backtick names are always treated as operators and
+  -- bypass the language-descriptor pattern check in Treeify; the
+  -- enclosed text is emitted verbatim between the two args.
+  , srcBacktick :: !Bool
   }
   deriving (Ord, Eq, Show)
 
@@ -337,10 +342,10 @@ data Pattern
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
-  = IntrSave      -- ^ @save  :: Int -> a -> Str -> <IO>() -- voidstar packet, with zstd level 0-9
-  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO>()         -- raw msgpack file
-  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO>()         -- raw JSON file
-  | IntrLoad      -- ^ @load  :: Str -> <IO> ?a             -- auto-detect format, auto-decompress packets
+  = IntrSave      -- ^ @save  :: Int -> a -> Str -> <IO, Err> () -- voidstar packet, with zstd level 0-9
+  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO, Err> ()         -- raw msgpack file
+  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO, Err> ()         -- raw JSON file
+  | IntrLoad      -- ^ @load  :: Str -> <IO, Err> a               -- auto-detect format, auto-decompress packets; failure raises Err (catch with @catch)
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
@@ -348,11 +353,11 @@ data Intrinsic
   | IntrSchema    -- ^ @schema  :: a -> Str          -- schema string
   | IntrTypeof    -- ^ @typeof  :: a -> Str          -- concrete type name
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
-  | IntrRead      -- ^ @read   :: Str -> ?a          -- deserialize from JSON string
+  | IntrRead      -- ^ @read   :: Str -> <Err> a     -- deserialize from JSON string; parse failure raises Err
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
-  | IntrOpen      -- ^ @open  :: Str -> <IO> a       -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream
+  | IntrOpen      -- ^ @open  :: Str -> <IO, Err> a  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream; failure raises Err
   | IntrClose     -- ^ @close :: a -> <IO> ()        -- close any stream/file handle
-  | IntrFSchema   -- ^ @fschema :: Str -> <IO> Str   -- read a file's element schema without typed open
+  | IntrFSchema   -- ^ @fschema :: Str -> <IO, Err> Str -- read a file's element schema without typed open
   | IntrMap       -- ^ implicit @(a -> b) -> List a -> List b@ map; emitted by
                   -- the desugar's bracket-accessor lowering when a slice is
                   -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
@@ -360,41 +365,53 @@ data Intrinsic
                   -- The pure-runtime evaluator executes this as a direct
                   -- per-element loop over MORLOC_ARRAY; the pool path resolves
                   -- it to the language's @Functor.map@ instance.
-  | IntrFLength     -- ^ @flen :: IFile a -> <IO> Int@ -- file element count.
+  | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
-  | IntrNext        -- ^ @next :: IStream a -> <IO> [a]@ -- materialise the
+  | IntrNext        -- ^ @next :: IStream a -> <IO, Err> [a]@ -- materialise the
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
+                    -- Mid-stream decode failures raise Err.
   | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
-  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> ()@ --
+  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO, Err> ()@ --
                     -- emit one sub-packet of element-list type. The Int is
                     -- the zstd compression level (0 = uncompressed); the
                     -- first @write fixes the level for the file's lifetime.
-  | IntrAppend      -- ^ @append :: Str -> <IO> (OStream a)@ -- open an
+                    -- I/O failure (disk full, broken pipe) raises Err.
+  | IntrAppend      -- ^ @append :: Str -> <IO, Err> (OStream a)@ -- open an
                     -- existing stream file for append. Forward-scan recovers
-                    -- the resume cursor; mismatched element schemas error
+                    -- the resume cursor; mismatched element schemas raise Err
                     -- before any bytes are written.
-  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO> ()@ -- concatenate
+  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO, Err> ()@ -- concatenate
                     -- a sequence of stream files via sendfile, exploiting
                     -- the stream-packet concat invariant.
-  | IntrFlush       -- ^ @flush :: OStream a -> <IO> ()@ -- force buffered
+  | IntrFlush       -- ^ @flush :: OStream a -> <IO, Err> ()@ -- force buffered
                     -- writes to be emitted as a sub-packet immediately,
                     -- without closing the stream. No-op on an empty
                     -- buffer. Useful for tests that need deterministic
                     -- packet boundaries and for user code that wants to
                     -- make progress visible to concurrent readers.
-  | IntrStdin       -- ^ @stdin :: <IO> IStream a@ -- nullary intrinsic
+  | IntrStdin       -- ^ @stdin :: <IO, Err> IStream a@ -- nullary intrinsic
                     -- that opens process stdin as an IStream. The nexus is
                     -- the sole owner of fd 0; @next routes through the
-                    -- pool-nexus RPC socket. At most one @stdin per nexus.
+                    -- pool-nexus RPC socket. At most one @stdin per nexus
+                    -- (the second open raises Err via the CAS-per-kind
+                    -- guard). Read-time failures (EOF, malformed packet)
+                    -- surface at @next, which also carries `<IO, Err>`.
   | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
                     -- process stdout as an OStream. @write routes through
                     -- the nexus. At most one @stdout per nexus.
   | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
                     -- @stdout for stderr.
+  | IntrThrow       -- ^ @throw :: Str -> <Err> a@ -- raise a MorlocException
+                    -- with the given message. Return type is a fresh
+                    -- existential so `@throw` fits in any branch.
+  | IntrCatch       -- ^ @catch :: <e, Err> a -> <e> a -> <e> a@ --
+                    -- intercept a fallible expression, substituting the
+                    -- fallback value when it raises. Effect-strip removes
+                    -- Err; other effects propagate through.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -435,6 +452,8 @@ intrinsicName IntrFlush = "flush"
 intrinsicName IntrStdin = "stdin"
 intrinsicName IntrStdout = "stdout"
 intrinsicName IntrStderr = "stderr"
+intrinsicName IntrThrow = "throw"
+intrinsicName IntrCatch = "catch"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
@@ -468,6 +487,8 @@ parseIntrinsic "flush" = Just IntrFlush
 parseIntrinsic "stdin" = Just IntrStdin
 parseIntrinsic "stdout" = Just IntrStdout
 parseIntrinsic "stderr" = Just IntrStderr
+parseIntrinsic "throw" = Just IntrThrow
+parseIntrinsic "catch" = Just IntrCatch
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -499,6 +520,8 @@ intrinsicArity IntrFlush = 1
 intrinsicArity IntrStdin = 0
 intrinsicArity IntrStdout = 0
 intrinsicArity IntrStderr = 0
+intrinsicArity IntrThrow = 1
+intrinsicArity IntrCatch = 2
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
@@ -1024,7 +1047,7 @@ instance Pretty Expr where
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
-  pretty (SrcE (Source srcname lang file' alias _ rsizes _ _ _)) =
+  pretty (SrcE (Source srcname lang file' alias _ rsizes _ _ _ _)) =
     "source"
       <+> viaShow lang
       <> maybe "" (\f -> "from" <+> pretty f) file'

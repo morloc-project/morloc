@@ -5,8 +5,8 @@ all:
 	./nexus testAliasPy >> obs.txt 2>> obs.err
 	echo "--- testAliasCpp ---" >> obs.txt
 	./nexus testAliasCpp >> obs.txt 2>> obs.err
-	echo "--- testInt32Cpp ---" >> obs.txt
-	./nexus testInt32Cpp >> obs.txt 2>> obs.err
+	echo "--- testI32Cpp ---" >> obs.txt
+	./nexus testI32Cpp >> obs.txt 2>> obs.err
 	echo "--- testDeepChainPy ---" >> obs.txt
 	./nexus testDeepChainPy >> obs.txt 2>> obs.err
 

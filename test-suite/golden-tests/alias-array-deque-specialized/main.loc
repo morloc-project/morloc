@@ -3,8 +3,8 @@
 -- @newtype Deque a = List a@ in the stdlib (with a per-language form
 -- @std::deque<$1>@ on the C++ side and a @Packable (List a) (Deque a)@
 -- instance) combines with specialized integer aliases (e.g. @type
--- Int32 = Int@). A previous bug fully evaluated the type when looking
--- up the outer alias, collapsing the element type from @Int32@ to
+-- I32 = Int@). A previous bug fully evaluated the type when looking
+-- up the outer alias, collapsing the element type from @I32@ to
 -- @Int@ and emitting BigInt schema (16-byte width) instead of @i4@
 -- (4-byte width). The mismatch surfaced only cross-language with
 -- specialized element types -- the older tests used the now-removed
@@ -13,17 +13,17 @@
 --
 -- This test forces the previously-latent code path: a parameterized
 -- newtype-of-list (@Deque@) with element types that themselves alias
--- (@Int32 -> Int@, @Float32 -> Real@, etc.), passed across language
+-- (@I32 -> Int@, @F32 -> Real@, etc.), passed across language
 -- boundaries.
 module main
-  ( testDequeInt32Cp
-  , testDequeInt32Pc
-  , testDequeInt64Cp
-  , testDequeInt64Pc
-  , testDequeFloat32Cp
-  , testDequeFloat32Pc
-  , testDequeFloat64Cp
-  , testDequeFloat64Pc
+  ( testDequeI32Cp
+  , testDequeI32Pc
+  , testDequeI64Cp
+  , testDequeI64Pc
+  , testDequeF32Cp
+  , testDequeF32Pc
+  , testDequeF64Cp
+  , testDequeF64Pc
   )
 
 import root-cpp
@@ -43,46 +43,46 @@ source Py from "src.py"
   , "pyMakeF64" , "pySumF64"
   )
 
-cppMakeI32 :: Deque Int32
-cppSumI32  :: Deque Int32 -> Int
-pyMakeI32  :: Deque Int32
-pySumI32   :: Deque Int32 -> Int
+cppMakeI32 :: Deque I32
+cppSumI32  :: Deque I32 -> Int
+pyMakeI32  :: Deque I32
+pySumI32   :: Deque I32 -> Int
 
-cppMakeI64 :: Deque Int64
-cppSumI64  :: Deque Int64 -> Int
-pyMakeI64  :: Deque Int64
-pySumI64   :: Deque Int64 -> Int
+cppMakeI64 :: Deque I64
+cppSumI64  :: Deque I64 -> Int
+pyMakeI64  :: Deque I64
+pySumI64   :: Deque I64 -> Int
 
-cppMakeF32 :: Deque Float32
-cppSumF32  :: Deque Float32 -> Real
-pyMakeF32  :: Deque Float32
-pySumF32   :: Deque Float32 -> Real
+cppMakeF32 :: Deque F32
+cppSumF32  :: Deque F32 -> Real
+pyMakeF32  :: Deque F32
+pySumF32   :: Deque F32 -> Real
 
-cppMakeF64 :: Deque Float64
-cppSumF64  :: Deque Float64 -> Real
-pyMakeF64  :: Deque Float64
-pySumF64   :: Deque Float64 -> Real
+cppMakeF64 :: Deque F64
+cppSumF64  :: Deque F64 -> Real
+pyMakeF64  :: Deque F64
+pySumF64   :: Deque F64 -> Real
 
 -- Cross-language pairs: writer + reader must agree on element width.
--- Sum of [10..17] = 108 (Int32, Int64).
--- Sum of [1.5, 2.5, 3.5] = 7.5 (Float32, Float64).
+-- Sum of [10..17] = 108 (I32, I64).
+-- Sum of [1.5, 2.5, 3.5] = 7.5 (F32, F64).
 
-testDequeInt32Cp :: Int
-testDequeInt32Cp = pySumI32 cppMakeI32
-testDequeInt32Pc :: Int
-testDequeInt32Pc = cppSumI32 pyMakeI32
+testDequeI32Cp :: Int
+testDequeI32Cp = pySumI32 cppMakeI32
+testDequeI32Pc :: Int
+testDequeI32Pc = cppSumI32 pyMakeI32
 
-testDequeInt64Cp :: Int
-testDequeInt64Cp = pySumI64 cppMakeI64
-testDequeInt64Pc :: Int
-testDequeInt64Pc = cppSumI64 pyMakeI64
+testDequeI64Cp :: Int
+testDequeI64Cp = pySumI64 cppMakeI64
+testDequeI64Pc :: Int
+testDequeI64Pc = cppSumI64 pyMakeI64
 
-testDequeFloat32Cp :: Real
-testDequeFloat32Cp = pySumF32 cppMakeF32
-testDequeFloat32Pc :: Real
-testDequeFloat32Pc = cppSumF32 pyMakeF32
+testDequeF32Cp :: Real
+testDequeF32Cp = pySumF32 cppMakeF32
+testDequeF32Pc :: Real
+testDequeF32Pc = cppSumF32 pyMakeF32
 
-testDequeFloat64Cp :: Real
-testDequeFloat64Cp = pySumF64 cppMakeF64
-testDequeFloat64Pc :: Real
-testDequeFloat64Pc = cppSumF64 pyMakeF64
+testDequeF64Cp :: Real
+testDequeF64Cp = pySumF64 cppMakeF64
+testDequeF64Pc :: Real
+testDequeF64Pc = cppSumF64 pyMakeF64

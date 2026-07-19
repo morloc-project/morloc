@@ -14,25 +14,25 @@ def pySumReal10(v):
 # Each vector packs extremes of its width so any sign/zero-ext bug shows up.
 # ---------------------------------------------------------------------------
 
-# Int8: [-128, -1, 0, 127] -> -2
+# I8: [-128, -1, 0, 127] -> -2
 def pyMakeI8():
     return np.array([-128, -1, 0, 127], dtype=np.int8)
 def pySumI8(v):
     return int(np.sum(v.astype(np.int64)))
 
-# Int16: [-32768, -1, 0, 32767] -> -2
+# I16: [-32768, -1, 0, 32767] -> -2
 def pyMakeI16():
     return np.array([-32768, -1, 0, 32767], dtype=np.int16)
 def pySumI16(v):
     return int(np.sum(v.astype(np.int64)))
 
-# Int32: extremes
+# I32: extremes
 def pyMakeI32():
     return np.array([-2147483648, -1, 0, 2147483647], dtype=np.int32)
 def pySumI32(v):
     return int(np.sum(v.astype(np.int64)))
 
-# Int64: avoid INT64_MIN so we don't overflow morloc's Int (which is 64-bit).
+# I64: avoid INT64_MIN so we don't overflow morloc's Int (which is 64-bit).
 # [-9223372036854775807, -1, 0, 9223372036854775806] -> -2
 def pyMakeI64():
     return np.array([-9223372036854775807, -1, 0, 9223372036854775806],
@@ -41,37 +41,37 @@ def pySumI64(v):
     # numpy sum could overflow; use Python int via tolist.
     return int(sum(int(x) for x in v.tolist()))
 
-# UInt8: [0, 1, 127, 255] -> 383
+# U8: [0, 1, 127, 255] -> 383
 def pyMakeU8():
     return np.array([0, 1, 127, 255], dtype=np.uint8)
 def pySumU8(v):
     return int(np.sum(v.astype(np.int64)))
 
-# UInt16: [0, 1, 32767, 65535] -> 98303
+# U16: [0, 1, 32767, 65535] -> 98303
 def pyMakeU16():
     return np.array([0, 1, 32767, 65535], dtype=np.uint16)
 def pySumU16(v):
     return int(np.sum(v.astype(np.int64)))
 
-# UInt32: [0, 1, 65535, 4294967295] -> 4295032831
+# U32: [0, 1, 65535, 4294967295] -> 4295032831
 def pyMakeU32():
     return np.array([0, 1, 65535, 4294967295], dtype=np.uint32)
 def pySumU32(v):
     return int(np.sum(v.astype(np.int64)))
 
-# UInt64: [0, 1, 65535, 4294967295] -> 4295032831 (Int-safe under 64-bit Int)
+# U64: [0, 1, 65535, 4294967295] -> 4295032831 (Int-safe under 64-bit Int)
 def pyMakeU64():
     return np.array([0, 1, 65535, 4294967295], dtype=np.uint64)
 def pySumU64(v):
     return int(sum(int(x) for x in v.tolist()))
 
-# Float32: [0.5, 1.5, 2.5, 3.5] -> 8.0
+# F32: [0.5, 1.5, 2.5, 3.5] -> 8.0
 def pyMakeF32():
     return np.array([0.5, 1.5, 2.5, 3.5], dtype=np.float32)
 def pySumF32(v):
     return float(np.sum(v))
 
-# Float64: [0.5, 1.5, 2.5, 3.5] -> 8.0
+# F64: [0.5, 1.5, 2.5, 3.5] -> 8.0
 def pyMakeF64():
     return np.array([0.5, 1.5, 2.5, 3.5], dtype=np.float64)
 def pySumF64(v):

@@ -2,7 +2,7 @@
 true
 --- testAliasCpp ---
 true
---- testInt32Cpp ---
+--- testI32Cpp ---
 true
 --- testDeepChainPy ---
 194

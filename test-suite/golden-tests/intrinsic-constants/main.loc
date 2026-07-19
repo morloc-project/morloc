@@ -4,7 +4,10 @@ import root-py (idpy)
 import root-cpp (idcpp)
 import root-r (idr)
 
-langstr :: <IO> (?[Str],?[Str],?[Str],?[Str])
+-- @load raises Err on missing file; @catch substitutes an empty list.
+-- The three round-tripped loads all succeed; the "zany" load is missing
+-- and falls through to the empty-list fallback.
+langstr :: <IO, Err> ([Str],[Str],[Str],[Str])
 langstr = do
   @save  0 (idpy ["hi", @lang]) "z"
   @savem "zp" (idpy ["hi", @lang])
@@ -12,5 +15,5 @@ langstr = do
   xs  <- @load "z"
   ys  <- @load "zp"
   zs  <- @load "zj"
-  bad <- @load "zany"
+  bad <- @catch (@load "zany") []
   (xs, ys, zs, bad)

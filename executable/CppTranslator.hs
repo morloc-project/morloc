@@ -288,7 +288,6 @@ data CppTranslatorState = CppTranslatorState
   , translatorSignatureSet :: Set.Set Int
   , translatorLocalManifoldSet :: Set.Set Int
   , translatorRemoteManifoldSet :: Set.Set Int
-  , translatorCurrentManifold :: Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
   , translatorLogTemplates :: Map.Map Int RenderedTemplate
   -- ^ Per-labeled-midx pre-rendered log templates (see 'LogTemplate').
@@ -309,6 +308,10 @@ data CppTranslatorState = CppTranslatorState
   , translatorDebugInfo :: Int -> (Text, Text)
   -- ^ Snapshot of per-manifold @(name, srcloc)@ metadata (from
   -- 'makeManifoldDebugInfoLookup'); consumed by 'cppDebugWrap'.
+  , translatorDebugMode :: Bool
+  -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
+  -- traceback in 'cppDebugWrap'; the manifold-level catch in
+  -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
   }
 
 instance Defaultable CppTranslatorState where
@@ -319,12 +322,12 @@ instance Defaultable CppTranslatorState where
       , translatorSignatureSet = Set.empty
       , translatorLocalManifoldSet = Set.empty
       , translatorRemoteManifoldSet = Set.empty
-      , translatorCurrentManifold = -1 -- -1 indicates we are not inside a manifold
       , translatorEffectLabels = Map.empty
       , translatorLogTemplates = Map.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
+      , translatorDebugMode = False
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -389,6 +392,7 @@ translate srcs es = do
   templates <- collectRenderedTemplates cppLang
 
   debugInfo <- makeManifoldDebugInfoLookup
+  debugMode <- MM.gets stateDebugTrace
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
         { translatorRecmap = recmap
@@ -396,6 +400,7 @@ translate srcs es = do
         , translatorLogTemplates = templates
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
+        , translatorDebugMode = debugMode
         }
       code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap) translatorState
 
@@ -676,10 +681,8 @@ PROPAGATE_ERROR(errmsg)|]
     , lcDeserialize = \t v s -> do
         typestr <- cppTypeOf t
         deserialize v typestr s
-    , lcMakeFunction = \mname args manifoldType priorLines body headForm -> do
-        callIndex <- CMS.gets translatorCurrentManifold
+    , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm -> do
         state <- CMS.get
-        let effectLabels = Map.findWithDefault Set.empty callIndex (translatorEffectLabels state)
         let alreadyDone = case headForm of
               (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
               _ -> Set.member callIndex (translatorLocalManifoldSet state)
@@ -695,20 +698,41 @@ PROPAGATE_ERROR(errmsg)|]
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
             returnTypeStr <- returnType manifoldType
             typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
-            let fullName = mname <> mnameExt headForm
+            let (userName, srclocStr) = translatorDebugInfo state callIndex
+                nameOut = if T.null userName then "_" else userName
+                srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+                debugMode = translatorDebugMode state
+                -- Raw text with a literal newline; escapeCxxStringLit converts
+                -- '\n' -> "\\n" so the emitted C++ string literal contains the
+                -- escape, not an actual newline byte.
+                frameLine = "\n  at " <> nameOut
+                          <> " [cpp] (mid=" <> T.pack (show callIndex)
+                          <> srclocSuffix <> ")"
+                frameLit :: MDoc
+                frameLit = dquotes (pretty (escapeCxxStringLit frameLine))
+                fullName = mname <> mnameExt headForm
                 decl = returnTypeStr <+> fullName <> tupled typedArgs
-                enrichError = case headForm of
-                  Just HeadManifoldFormRemoteWorker -> True
-                  _ -> Set.member "Error" effectLabels
                 tryBody = block 4 "try" (vsep $ priorLines <> [body])
-                catchBody
-                  | enrichError =
-                    let throwStatement = vsep
-                          [ [idoc|std::string error_message = "Error raised in C++ pool by #{mname}:\n" + std::string(e.what());|]
-                          , [idoc|throw std::runtime_error(error_message);|]
-                          ]
-                     in block 4 "catch (const std::exception& e)" throwStatement
-                  | otherwise = block 4 "catch (...)" "throw;"
+                -- In --debug the drain owns the traceback; appending a
+                -- frame line here would duplicate every frame. The
+                -- normalize-to-std::runtime_error step remains so that
+                -- non-std::exception throws (const char*, std::string)
+                -- surface their message through the outer dispatch's
+                -- 'catch (const std::exception&)'.
+                appendFrame lit e =
+                  if debugMode
+                    then "throw std::runtime_error(" <> e <> ");"
+                    else "throw std::runtime_error(" <> e <> " + " <> lit <> ");"
+                catchBody = vsep
+                  [ block 4 "catch (const std::exception& e)"
+                      (appendFrame frameLit "std::string(e.what())")
+                  , block 4 "catch (const char* e)"
+                      (appendFrame frameLit "std::string(e)")
+                  , block 4 "catch (const std::string& e)"
+                      (appendFrame frameLit "e")
+                  , block 4 "catch (...)"
+                      (appendFrame frameLit "std::string(\"An unknown error occurred\")")
+                  ]
                 innerBlock = tryBody <+> catchBody
             -- Wrap labeled manifolds with a chrono start/pass/fail shim,
             -- using user-supplied templates (from YAML 'log-template').
@@ -966,21 +990,26 @@ cppDebugWrap midx args bodyPool = do
       resultVar = hp <> "dr_" <> suffix
       packetsVar = hp <> "dpk_" <> suffix
       schemasVar = hp <> "dsc_" <> suffix
-      sizesVar = hp <> "dsz_" <> suffix
       n = length args
   preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
   let argRefs = [r | (r, _, _) <- preparedArgs]
       argSchemas = [s | (_, s, _) <- preparedArgs]
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
-      packetsDecl = "const uint8_t*" <+> packetsVar
-        <> brackets (pretty n) <+> "=" <+>
-        encloseSep "{ " " }" ", " argRefs <> ";"
-      schemasDecl = "const char*" <+> schemasVar
-        <> brackets (pretty n) <+> "=" <+>
-        encloseSep "{ " " }" ", "
-          [dquotes (pretty (cppEscapeString s)) | s <- argSchemas]
-        <> ";"
-      sizesDecl = "size_t" <+> sizesVar <> brackets (pretty n) <+> "= { 0 };"
+      -- Zero-arg manifolds (e.g. an @idcpp@ that produced a nullary
+      -- boundary) can't declare zero-length C arrays with initializers
+      -- portably, so pass @nullptr@ directly and skip the temporaries.
+      (packetsExpr, schemasExpr, argDeclLines)
+        | n == 0 = ("nullptr" :: MDoc, "nullptr" :: MDoc, [])
+        | otherwise =
+            let packetsDecl = "const uint8_t*" <+> packetsVar
+                  <> brackets (pretty n) <+> "=" <+>
+                  encloseSep "{ " " }" ", " argRefs <> ";"
+                schemasDecl = "const char*" <+> schemasVar
+                  <> brackets (pretty n) <+> "=" <+>
+                  encloseSep "{ " " }" ", "
+                    [dquotes (pretty (cppEscapeString s)) | s <- argSchemas]
+                  <> ";"
+             in (packetsVar, schemasVar, [packetsDecl, schemasDecl])
       tryBody = poolPriorLines bodyPool
         ++ [ resultVar <+> "=" <+> poolExpr bodyPool <> ";" ]
       -- Inner try/catch in the catch block: a serialization failure
@@ -989,15 +1018,13 @@ cppDebugWrap midx args bodyPool = do
         [ "try {"
         , indent 4 $ vsep
             [ vsep argSetupLines
-            , packetsDecl
-            , schemasDecl
-            , sizesDecl
-            , "(void)" <> sizesVar <> ";"
+            , vsep argDeclLines
             , "morloc_debug_record_frame(" <> pretty midx
                 <> ", " <> nameLit
                 <> ", " <> srclocLit
-                <> ", " <> packetsVar
-                <> ", " <> schemasVar
+                <> ", " <> dquotes "cpp"
+                <> ", " <> packetsExpr
+                <> ", " <> schemasExpr
                 <> ", " <> pretty n <> ");"
             ]
         , "} catch (...) {}"
@@ -1069,13 +1096,8 @@ recordToCppTuple ts = do
 translateSegment :: SerialManifold -> CppTranslator MDoc
 translateSegment m0 = do
   resetCounter
-  e <- surroundFoldSerialManifoldM manifoldIndexer (defaultFoldRules cppLowerConfig) m0
+  e <- foldWithSerialManifoldM (defaultFoldRules cppLowerConfig) m0
   return $ renderPoolDocs e
-  where
-    manifoldIndexer =
-      makeManifoldIndexer
-        (CMS.gets translatorCurrentManifold)
-        (\i -> CMS.modify (\s -> s {translatorCurrentManifold = i}))
 
 -- handle string interpolation
 evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
@@ -1435,7 +1457,7 @@ gccVersionFlag i
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
+flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | srcL == cppLang =
   case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     (".", base, "") -> do
       header <- lookupHeader base
@@ -1475,7 +1497,7 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _) | srcL == cppLang =
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ srcL Nothing _ _ _ _ _ _) | srcL == cppLang = return (src, [], Nothing)
+flagAndPath src@(Source _ srcL Nothing _ _ _ _ _ _ _) | srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)

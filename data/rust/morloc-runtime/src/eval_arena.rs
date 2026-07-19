@@ -254,6 +254,72 @@ pub fn forget_slot_if_active(handle: i64) {
     });
 }
 
+/// A recorded position within the active arena. Used by @catch to
+/// bracket the fallible's evaluation so any SHM the fallible allocated
+/// before failing can be released before the fallback runs. Without this,
+/// a @catch inside a tight loop over failing calls would accumulate SHM
+/// until the top-level arena scope exits.
+#[derive(Debug, Clone, Copy)]
+pub struct ArenaCheckpoint {
+    blocks: usize,
+    files: usize,
+    slots: usize,
+}
+
+/// Snapshot the current arena high-water marks. No-op-shaped (returns a
+/// zero-init checkpoint) if no arena is active.
+pub fn checkpoint() -> ArenaCheckpoint {
+    ARENA.with(|cell| match cell.borrow().as_ref() {
+        Some(s) => ArenaCheckpoint {
+            blocks: s.blocks.len(),
+            files: s.files.len(),
+            slots: s.slots.len(),
+        },
+        None => ArenaCheckpoint { blocks: 0, files: 0, slots: 0 },
+    })
+}
+
+/// Release every arena resource recorded after `cp`. Errors are logged
+/// and swallowed -- the goal is best-effort reclaim before the caller
+/// evaluates a fallback, not to surface diagnostics. No-op if no arena
+/// is active.
+///
+/// Drain the truncated entries out of the RefCell first, THEN release
+/// them: `shm::shfree` and `stream::discard_handle` both call back into
+/// this module's forget_* helpers, which would deadlock the RefCell if
+/// the borrow was still held.
+pub fn rollback_to(cp: ArenaCheckpoint) {
+    let (blocks, files, slots): (Vec<AbsPtr>, Vec<PathBuf>, Vec<i64>) =
+        ARENA.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            match slot.as_mut() {
+                Some(s) => (
+                    if s.blocks.len() > cp.blocks { s.blocks.split_off(cp.blocks) } else { Vec::new() },
+                    if s.files.len() > cp.files { s.files.split_off(cp.files) } else { Vec::new() },
+                    if s.slots.len() > cp.slots { s.slots.split_off(cp.slots) } else { Vec::new() },
+                ),
+                None => (Vec::new(), Vec::new(), Vec::new()),
+            }
+        });
+    for ptr in blocks {
+        if let Err(e) = shm::shfree(ptr) {
+            eprintln!("eval_arena rollback: shfree failed for {:p}: {:?}", ptr, e);
+        }
+    }
+    for path in files {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("eval_arena rollback: remove_file failed for {}: {}", path.display(), e);
+            }
+        }
+    }
+    for handle in slots {
+        if let Err(e) = crate::stream::discard_handle(handle) {
+            eprintln!("eval_arena rollback: discard_handle({}) failed: {:?}", handle, e);
+        }
+    }
+}
+
 /// Returns true if an arena is currently active on this thread.
 pub fn is_active() -> bool {
     ARENA.with(|cell| cell.borrow().is_some())

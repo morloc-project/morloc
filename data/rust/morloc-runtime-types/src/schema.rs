@@ -766,12 +766,13 @@ pub fn schema_to_string(schema: &Schema) -> String {
 }
 
 fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
-    // Write hint if present
-    if let Some(ref hint) = schema.hint {
-        buf.push('<');
-        buf.push_str(hint);
-        buf.push('>');
-    }
+    // `<hint>` prefixes are deliberately NOT emitted: hints are
+    // compile-time state for pool-side native dispatch (numpy /
+    // std::vector / list) and don't belong on the wire. Pools get
+    // hints from parsing the compiler-generated schema strings baked
+    // into pool.cpp / pymorloc, not from any wire round-trip. So
+    // `schema_to_string(parse_schema(s))` is intentionally NOT
+    // identity when `s` contains a hint.
 
     // Emit `&<klen><n>` for a named-schema declaration. Only the
     // declaration site carries `name` on a non-Recur node; `Recur`
@@ -839,9 +840,9 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         }
         SerialType::Table => {
             // Round-trip with the parser: bare `T` for empty constraint
-            // list, `T:K<entries>` otherwise. Hint has already been
-            // written above (Tables emit no hint by default, but the
-            // round-trip preserves whatever was parsed).
+            // list, `T:K<entries>` otherwise. Any parsed hint is
+            // dropped on the way out (see the header comment on
+            // schema_to_string_inner).
             buf.push('T');
             if schema.size > 0 {
                 buf.push(':');

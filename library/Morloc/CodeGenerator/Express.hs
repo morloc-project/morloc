@@ -591,7 +591,7 @@ findInstanceByArgHead pos method lang containerTv = do
 -- always arrive as @?Int64@ (the return shape of @__to_index__@); a
 -- bare @Int64@ never reaches the runtime.
 optI64T :: Type
-optI64T = OptionalT (VarT (TV "Int64"))
+optI64T = OptionalT (VarT BT.i64)
 
 -- | Rewrite an applied @PatternBracketSlice@ into the resolved
 -- per-language @Sliceable.__get_slice__@ instance call, with each

@@ -41,64 +41,64 @@ import root
 --------------
 -- [Int] tests
 
-testIntIndex :: Str -> <IO> Int
+testIntIndex :: Str -> <IO, Err> Int
 testIntIndex path = do
   @save 0 [10, 20, 30, 40, 50] path
-  f <- @open path :: <IO> IFile [Int]
+  f <- @open path :: <IO, Err> IFile [Int]
   .[2] f                                       -- expect 30
 
-testIntSlice :: Str -> <IO> [Int]
+testIntSlice :: Str -> <IO, Err> [Int]
 testIntSlice path = do
   @save 0 [10, 20, 30, 40, 50] path
-  f <- @open path :: <IO> IFile [Int]
+  f <- @open path :: <IO, Err> IFile [Int]
   .[1:4] f                                     -- expect [20, 30, 40]
 
 
 --------------
 -- [Str] tests
 
-testStrIndex :: Str -> <IO> Str
+testStrIndex :: Str -> <IO, Err> Str
 testStrIndex path = do
   @save 0 ["alpha", "beta", "gamma", "delta"] path
-  f <- @open path :: <IO> IFile [Str]
+  f <- @open path :: <IO, Err> IFile [Str]
   .[2] f                                       -- expect "gamma"
 
 
 ---------------------
 -- [(Str, Str)] tests
 
-testTupleSliceField :: Str -> <IO> [Str]
+testTupleSliceField :: Str -> <IO, Err> [Str]
 testTupleSliceField path = do
   @save 0 [("a","X"), ("b","Y"), ("c","Z"), ("d","W")] path
-  f <- @open path :: <IO> IFile [(Str, Str)]
+  f <- @open path :: <IO, Err> IFile [(Str, Str)]
   .[0:3].1 f                                   -- expect ["X","Y","Z"]
 
-testTupleIndexField :: Str -> <IO> Str
+testTupleIndexField :: Str -> <IO, Err> Str
 testTupleIndexField path = do
   @save 0 [("a","X"), ("b","Y"), ("c","Z")] path
-  f <- @open path :: <IO> IFile [(Str, Str)]
+  f <- @open path :: <IO, Err> IFile [(Str, Str)]
   .[1].0 f                                     -- expect "b"
 
 
 -------------------------------------------
 -- (Int, [Str]) tests (non-list IFile root)
 
-testTupleStructField :: Str -> <IO> [Str]
+testTupleStructField :: Str -> <IO, Err> [Str]
 testTupleStructField path = do
   @save 0 (42, ["one", "two", "three", "four"]) path
-  f <- @open path :: <IO> IFile (Int, [Str])
+  f <- @open path :: <IO, Err> IFile (Int, [Str])
   .1 f                                         -- expect ["one","two","three","four"]
 
-testTupleStructIndex :: Str -> <IO> Str
+testTupleStructIndex :: Str -> <IO, Err> Str
 testTupleStructIndex path = do
   @save 0 (42, ["one", "two", "three", "four"]) path
-  f <- @open path :: <IO> IFile (Int, [Str])
+  f <- @open path :: <IO, Err> IFile (Int, [Str])
   .1.[2] f                                     -- expect "three"
 
-testTupleStructSlice :: Str -> <IO> [Str]
+testTupleStructSlice :: Str -> <IO, Err> [Str]
 testTupleStructSlice path = do
   @save 0 (42, ["one", "two", "three", "four", "five"]) path
-  f <- @open path :: <IO> IFile (Int, [Str])
+  f <- @open path :: <IO, Err> IFile (Int, [Str])
   .1.[1:4] f                                   -- expect ["two","three","four"]
 
 
@@ -108,16 +108,16 @@ testTupleStructSlice path = do
 -- Root-level multi-field group on a tuple. The result is a fresh tuple
 -- packing the two selected fields. Exercises the WalkGroup encoding
 -- and the runtime's materialize_group path.
-testTupleGroup :: Str -> <IO> (Int, Str)
+testTupleGroup :: Str -> <IO, Err> (Int, Str)
 testTupleGroup path = do
   @save 0 (42, "skip-me", "hello", 3.14) path
-  f <- @open path :: <IO> IFile (Int, Str, Str, Real)
+  f <- @open path :: <IO, Err> IFile (Int, Str, Str, Real)
   .(.0, .2) f                                  -- expect (42, "hello")
 
 -- Group nested under a struct prefix. Tests that the prefix walk
 -- (`.1`) and the group `.(.0, .1)` compose correctly.
-testNestedTupleGroup :: Str -> <IO> (Int, Str)
+testNestedTupleGroup :: Str -> <IO, Err> (Int, Str)
 testNestedTupleGroup path = do
   @save 0 (1, (42, "hello", 3.14)) path
-  f <- @open path :: <IO> IFile (Int, (Int, Str, Real))
+  f <- @open path :: <IO, Err> IFile (Int, (Int, Str, Real))
   .1.(.0, .1) f                                -- expect (42, "hello")

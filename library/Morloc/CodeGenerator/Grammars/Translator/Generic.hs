@@ -105,9 +105,10 @@ translateBuiltin lang desc srcs es = do
   let preambleDocs = map (substitutePreamble home lib opt homeDir) preambleTemplates
 
   debugInfo <- makeManifoldDebugInfoLookup
+  debugMode <- gets stateDebugTrace
   let allSources = preambleDocs ++ includeDocs
       (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -156,8 +157,9 @@ translateExternal cmd lang desc srcs es = do
           else \src -> pretty (srcName src)
 
   debugInfo <- makeManifoldDebugInfoLookup
+  debugMode <- gets stateDebugTrace
   let (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -368,10 +370,11 @@ translateSegment ::
   LangDescriptor ->
   (Source -> MDoc) ->
   (Int -> (Text, Text)) ->
+  Bool ->
   SerialManifold ->
   IndexM MDoc
-translateSegment desc srcNamer debugInfo m0 =
-  let cfg = genericLowerConfig desc srcNamer debugInfo
+translateSegment desc srcNamer debugInfo debugMode m0 =
+  let cfg = genericLowerConfig desc srcNamer debugInfo debugMode
    in renderPoolDocs <$> foldWithSerialManifoldM (defaultFoldRules cfg) m0
 
 -- | Build a LowerConfig from a LangDescriptor, a source-name function,
@@ -382,8 +385,9 @@ genericLowerConfig ::
   LangDescriptor ->
   (Source -> MDoc) ->
   (Int -> (Text, Text)) ->
+  Bool ->
   LowerConfig IndexM
-genericLowerConfig desc srcNamer debugInfo = cfg
+genericLowerConfig desc srcNamer debugInfo debugMode = cfg
   where
     cfg =
       LowerConfig
@@ -441,7 +445,7 @@ genericLowerConfig desc srcNamer debugInfo = cfg
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
-        , lcMakeFunction = \mname args _ priorLines body headForm ->
+        , lcMakeFunction = \m mname args _ priorLines body headForm ->
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""
                 fullName = render (mname <> makeExt headForm)
@@ -454,25 +458,39 @@ genericLowerConfig desc srcNamer debugInfo = cfg
                       , ("args", argsText)
                       ]
                 wrapError [] = []
-                wrapError xs =
-                  let openLine = ldErrorWrapOpen desc
-                      closeLines = ldErrorWrapClose desc
-                   in if T.null openLine
-                        then xs
-                        else
-                          let tryBlock = nest 4 (vsep (pretty openLine : xs))
-                              exceptBlock =
-                                nest 4 . vsep $
-                                  map (\l -> pretty $ substituteT l [("name", fullName)]) closeLines
-                           in [vsep [tryBlock, exceptBlock]]
+                -- In --debug mode DebugWrapS wraps every manifold body
+                -- and the drain provides the traceback; emitting an
+                -- "at" line here too would double every frame.
+                wrapError xs
+                  | debugMode = xs
+                  | otherwise =
+                      let openLine = ldErrorWrapOpen desc
+                          closeLines = ldErrorWrapClose desc
+                          (userName, srclocStr) = debugInfo m
+                          nameOut = if T.null userName then "_" else userName
+                          srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+                          substs =
+                            [ ("name", nameOut)
+                            , ("mid", MT.pack (show m))
+                            , ("srcloc_suffix", srclocSuffix)
+                            , ("lang", ldName desc)
+                            ]
+                       in if T.null openLine
+                            then xs
+                            else
+                              let tryBlock = nest 4 (vsep (pretty openLine : xs))
+                                  exceptBlock =
+                                    nest 4 . vsep $
+                                      map (\l -> pretty $ substituteT l substs) closeLines
+                               in [vsep [tryBlock, exceptBlock]]
              in return . Just $ case ldBlockStyle desc of
                   IndentBlock ->
-                    nest 4 (vsep [header, vsep (wrapError priorLines), body])
+                    nest 4 (vsep [header, vsep (wrapError (priorLines <> [body]))])
                   BraceBlock ->
-                    block 4 header (vsep $ priorLines <> [body])
+                    block 4 header (vsep $ wrapError (priorLines <> [body]))
                   EndKeywordBlock ->
                     let endKw = ldBlockEnd desc
-                     in vsep [header, indent 4 (vsep $ priorLines <> [body]), pretty endKw]
+                     in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcMakeLambda = \mname contextArgs boundArgs ->
             let tmpl = ldPartialTemplate desc
                 fnText = render mname
@@ -629,6 +647,7 @@ genericDebugWrap desc cfg debugInfo midx args bodyPool = do
       (nameStr, srclocStr) = debugInfo midx
       nameLit = dquotes (pretty (escapeStringLit nameStr))
       srclocLit = dquotes (pretty (escapeStringLit srclocStr))
+      langLit = dquotes (pretty (escapeStringLit (ldName desc)))
   preparedArgs <- mapM (prepareCacheArg desc cfg) args
   let argRefs = [r | (r, _, _) <- preparedArgs]
       schemaRefs = [s | (_, s, _) <- preparedArgs]
@@ -642,7 +661,7 @@ genericDebugWrap desc cfg debugInfo midx args bodyPool = do
       packetList = genericList argRefs
       schemaList = atomicList schemaRefs
       recordCall = intr <> "debug_record_frame"
-        <> tupled [midxLit, nameLit, srclocLit, packetList, schemaList]
+        <> tupled [midxLit, nameLit, srclocLit, langLit, packetList, schemaList]
       catchStmts = catchSerializeStmts ++ [recordCall]
       -- Defensive inner wrap around the dump: a serialization failure
       -- during the catch must NOT replace the original exception. If
@@ -976,6 +995,12 @@ genericPrintExpr desc = go
     go (IIntrinsicStderr sid) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_stderr(" <> schemaRef sid <> ")"
+    go (IIntrinsicThrow msg) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_throw(" <> go msg <> ")"
+    go (IIntrinsicCatch fallible fallback) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_catch(" <> go fallible <> ", " <> go fallback <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R

@@ -21,8 +21,8 @@
 --       form involves nat arithmetic (Vector (d1*d2)) -- not exercised
 --       by the existing intrinsic-load tests.
 --
---   (5) Element types on matrices across Cpp <-> Py (Int32, Int64,
---       Float32).
+--   (5) Element types on matrices across Cpp <-> Py (I32, I64,
+--       F32).
 --
 --   (6) Zero-copy direct assertion. For a Matrix the reshape step
 --       always returns a view (DIRECT=False), so the test reports BOTH
@@ -62,8 +62,6 @@ module main
   , litCliMatInt, litCliT3
   )
 
-effect IO
-
 import root-cpp
 import root-py
 import root-r (Real, Int, Bool)
@@ -95,7 +93,7 @@ source Cpp from "src.hpp"
   , "cppMakeB32"        -- Matrix 3 2 Real, B[i,j] = i*2+j+1, so [[1,2],[3,4],[5,6]]
   , "cppSumMat22"       -- consumer for matmul result (Matrix 2 2 Real)
   , "cppCornersT3"      -- corners at (0,0,0), (1,0,0), (0,2,3), (1,2,3)
-  , "cppMakeMatI32"     -- Matrix 4 4 Int32 with values 1..16, sum=136
+  , "cppMakeMatI32"     -- Matrix 4 4 I32 with values 1..16, sum=136
   , "cppSumMatI32"
   , "cppMakeMatI64"
   , "cppSumMatI64"
@@ -207,20 +205,20 @@ cppCornersT3 :: Tensor3 2 3 4 Real -> [Real]
 pyCornersT3  :: Tensor3 2 3 4 Real -> [Real]
 rCornersT3   :: Tensor3 2 3 4 Real -> [Real]
 
-cppMakeMatI32 :: Matrix 4 4 Int32
-cppSumMatI32  :: Matrix 4 4 Int32 -> Int
-pyMakeMatI32  :: Matrix 4 4 Int32
-pySumMatI32   :: Matrix 4 4 Int32 -> Int
+cppMakeMatI32 :: Matrix 4 4 I32
+cppSumMatI32  :: Matrix 4 4 I32 -> Int
+pyMakeMatI32  :: Matrix 4 4 I32
+pySumMatI32   :: Matrix 4 4 I32 -> Int
 
-cppMakeMatI64 :: Matrix 4 4 Int64
-cppSumMatI64  :: Matrix 4 4 Int64 -> Int
-pyMakeMatI64  :: Matrix 4 4 Int64
-pySumMatI64   :: Matrix 4 4 Int64 -> Int
+cppMakeMatI64 :: Matrix 4 4 I64
+cppSumMatI64  :: Matrix 4 4 I64 -> Int
+pyMakeMatI64  :: Matrix 4 4 I64
+pySumMatI64   :: Matrix 4 4 I64 -> Int
 
-cppMakeMatF32 :: Matrix 4 4 Float32
-cppSumMatF32  :: Matrix 4 4 Float32 -> Real
-pyMakeMatF32  :: Matrix 4 4 Float32
-pySumMatF32   :: Matrix 4 4 Float32 -> Real
+cppMakeMatF32 :: Matrix 4 4 F32
+cppSumMatF32  :: Matrix 4 4 F32 -> Real
+pyMakeMatF32  :: Matrix 4 4 F32
+pySumMatF32   :: Matrix 4 4 F32 -> Real
 
 cppMakeMatBig :: Matrix 200 100 Real
 cppMakeT3Big  :: Tensor3 50 40 30 Real
@@ -248,8 +246,8 @@ pySumUnitT3    :: Tensor3 1 1 1 Real -> Real
 pySumMatPoly    :: Matrix m n Real -> Real
 cppSumMatPoly   :: Matrix m n Real -> Real
 rSumMatPoly     :: Matrix m n Real -> Real
-pySumMatI32Poly :: Matrix m n Int32 -> Int
-cppSumMatI32Poly :: Matrix m n Int32 -> Int
+pySumMatI32Poly :: Matrix m n I32 -> Int
+cppSumMatI32Poly :: Matrix m n I32 -> Int
 pySumT3Poly     :: Tensor3 d1 d2 d3 Real -> Real
 cppSumT3Poly    :: Tensor3 d1 d2 d3 Real -> Real
 
@@ -363,32 +361,32 @@ cornersPyToR = rCornersT3 pyMakeT3
 -- (4) File IO: @save/@savej/@savem of a Matrix. The wire form is
 -- ((Int,Int), Vector (d1*d2) a) which has never been pushed through @save.
 -- =========================================================================
-matFileBin :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileBin :: Str -> <IO, Err> (Matrix 3 4 Real)
 matFileBin path = do
   @save 0 cppMakeMat34 path
   @load path
 
-matFileJson :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileJson :: Str -> <IO, Err> (Matrix 3 4 Real)
 matFileJson path = do
   @savej path cppMakeMat34
   @load path
 
-matFileMsg :: Str -> <IO> ?(Matrix 3 4 Real)
+matFileMsg :: Str -> <IO, Err> (Matrix 3 4 Real)
 matFileMsg path = do
   @savem path cppMakeMat34
   @load path
 
-matFileSumBin :: Str -> <IO> ?Real
+matFileSumBin :: Str -> <IO, Err> Real
 matFileSumBin path = do
   @save 0 cppMakeMat34 path
   m <- @load path
-  mapMaybe pySumMat34 m
+  pySumMat34 m
 
-matFileSumJson :: Str -> <IO> ?Real
+matFileSumJson :: Str -> <IO, Err> Real
 matFileSumJson path = do
   @savej path cppMakeMat34
   m <- @load path
-  mapMaybe pySumMat34 m
+  pySumMat34 m
 
 -- =========================================================================
 -- (5) Element types on Matrix. Values 1..16 packed in 4x4. sum:
@@ -481,10 +479,10 @@ litSrcMatInfer :: Real
 litSrcMatInfer = pySumMatPoly
   (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector n Real)))
 
--- (8c) Int32 source literal.
+-- (8c) I32 source literal.
 litSrcMatIntAnnot :: Int
 litSrcMatIntAnnot = pySumMatI32Poly
-  (pack (((2, 3), [1, 2, 3, 4, 5, 6] :: Vector n Int32)) :: Matrix 2 3 Int32)
+  (pack (((2, 3), [1, 2, 3, 4, 5, 6] :: Vector n I32)) :: Matrix 2 3 I32)
 
 -- (8d, 8e) Tensor3 source literals.
 litSrcT3Annot :: Real
@@ -512,7 +510,7 @@ litCliMatCpp m = cppSumMatPoly m
 litCliMatR :: Matrix m n Real -> Real
 litCliMatR m = rSumMatPoly m
 
-litCliMatInt :: Matrix m n Int32 -> Int
+litCliMatInt :: Matrix m n I32 -> Int
 litCliMatInt m = pySumMatI32Poly m
 
 litCliT3 :: Tensor3 d1 d2 d3 Real -> Real

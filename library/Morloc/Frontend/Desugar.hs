@@ -1546,8 +1546,62 @@ validateIrrefPat p =
 -- Do-notation desugaring
 --------------------------------------------------------------------
 
+-- Look for a '!' (CForceE) at a position that would hoist out of the
+-- containing expression. Recurses through non-boundary constructors
+-- (application, tuple, list, record, binop, paren, interpolation) and
+-- stops at boundaries where the bang would seal locally (lambda,
+-- nested do, guard branches, type-ascription subject, nested let,
+-- operator sections which desugar to lambdas).
+findHoistableBang :: Loc CstExpr -> Maybe Pos
+findHoistableBang le@(Loc _ e) = go e
+  where
+    firstBang :: [Loc CstExpr] -> Maybe Pos
+    firstBang = foldr (\x acc -> findHoistableBang x <|> acc) Nothing
+
+    go (CForceE _) = Just (startPos le)
+    go (CAppE f args) = firstBang (f : args)
+    go (CTupE es) = firstBang es
+    go (CLstE es) = firstBang es
+    go (CNamE rs) = firstBang (map snd rs)
+    go (CBopE lhs _ rhs) = firstBang [lhs, rhs]
+    go (CParenE inner) = findHoistableBang inner
+    go (CInterpE _ es _ _) = firstBang es
+    -- Boundaries: any bang inside stays local, so it does not hoist out
+    go (CLamE _ _) = Nothing
+    go (CDoE _) = Nothing
+    go (CGuardExprE _ _) = Nothing
+    go (CAnnE _ _) = Nothing
+    go (CLetE _ _) = Nothing
+    go (CLeftSecE _ _) = Nothing
+    go (CRightSecE _ _) = Nothing
+    -- Leaves and non-expression constructors: no bang possible here
+    go _ = Nothing
+
+-- Every misplaced-'!' diagnostic shares the same clarification about what
+-- '!' actually does, so keep it in one place.
+bangSemanticsNote :: String
+bangSemanticsNote =
+  " Note: '!' sequences an effect into the enclosing do-block; it does not discharge it."
+
+-- Uniform rejection of hoistable '!' at the RHS of any let binding
+-- (do-block 'let x = ...' or expression-level 'let x = ... in ...').
+-- A bang whose hoist boundary would land above the let makes the surface
+-- 'let x = ...' line read as pure while the effect fires above it; the
+-- uniform fix is to spell the effect as 'x <- expr' inside a do-block.
+-- Bangs sealed by an inner boundary (lambda body, nested do, guard
+-- branch, type ascription, nested let) are unaffected.
+rejectHoistableBangInLetRhs :: Loc CstExpr -> D ()
+rejectHoistableBangInLetRhs e =
+  case findHoistableBang e of
+    Nothing -> return ()
+    Just bangPos ->
+      dfail bangPos $
+        "'!' at the RHS of a let: 'let' binds a pure value, so hoisting the effect above the let would make the binding read misleadingly."
+        <> " Use a do-block with 'x <- expr' for effectful bindings; a bang inside a lambda body, nested do-block, or guard branch is fine because it stays local."
+        <> bangSemanticsNote
+
 -- Desugar a do-block to a let-chain. Non-final bare statements and <- binds
--- are wrapped in EvalE so the typechecker sees them as forced effects (pure
+-- are wrapped in EvalE so the typechecker sees them as sequenced effects (pure
 -- non-finals are therefore rejected). The final bare statement is returned
 -- unwrapped: synthE DoBlockS flattens it when effectful, otherwise the block
 -- type is <collected-effects> (type-of-final) and an empty effect set is a
@@ -1558,11 +1612,16 @@ desugarDo _sp [CstDoBare e] = desugarExpr e
 desugarDo sp [CstDoBind _ _] = dfail (startPos sp) "do block cannot end with a bind (<-)"
 desugarDo sp [CstDoLet _ _] = dfail (startPos sp) "do block cannot end with a let binding"
 desugarDo sp (CstDoLet p e : rest) = do
+  rejectHoistableBangInLetRhs e
   p' <- exprToIrrefPat p
   e' <- desugarExpr e
   bindings <- desugarIrrefPat p' e'
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE bindings restE)
+desugarDo _sp (CstDoBind _ (Loc rsp (CForceE _)) : _) =
+  dfail (startPos rsp) $
+    "redundant '!' on the right-hand side of '<-': the bind already sequences the effect."
+    <> bangSemanticsNote
 desugarDo sp (CstDoBind p e : rest) = do
   p' <- exprToIrrefPat p
   e' <- desugarExpr e
@@ -1570,6 +1629,10 @@ desugarDo sp (CstDoBind p e : rest) = do
   bindings <- desugarIrrefPat p' forceE
   restE <- desugarDo sp rest
   freshExprSpan sp (LetE bindings restE)
+desugarDo _sp (CstDoBare (Loc bsp (CForceE _)) : _) =
+  dfail (startPos bsp) $
+    "redundant '!' on a bare do statement: bare statements already sequence their effect."
+    <> bangSemanticsNote
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
   let discardVar = EV ("_do_" <> T.pack (show idx))
@@ -1603,13 +1666,6 @@ mkImplicitMain es = do
 
 desugarExpr :: Loc CstExpr -> D ExprI
 -- Variables and literals
-desugarExpr (Loc sp (CLabeledVarE label v)) = do
-  moduleConfig <- State.gets dsModuleConfig
-  case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
-    Just config -> freshExprSpan sp (VarE (config { manifoldConfigLabel = Just label }) v)
-    Nothing -> dfail (startPos sp)
-      ("Undefined label '" ++ T.unpack label
-       ++ "': no matching entry in module config labeled-groups")
 desugarExpr (Loc sp (CVarE v)) = freshExprSpan sp (VarE defaultValue v)
 desugarExpr (Loc sp (CIntE n)) = freshExprSpan sp (IntE n)
 desugarExpr (Loc sp (CRealE n)) = freshExprSpan sp (RealE n)
@@ -1617,6 +1673,11 @@ desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
 desugarExpr (Loc sp (CLogE b)) = freshExprSpan sp (LogE b)
 desugarExpr (Loc sp CUniE) = freshExprSpan sp UniE
 desugarExpr (Loc sp CNullE) = freshExprSpan sp NullE
+-- Eval-sugar: '!' e -- pre-hoist marker; the hoistEvals pass rewrites these into
+-- fresh do-block binds. Effect propagates outward; nothing is discharged.
+desugarExpr (Loc sp (CForceE e)) = do
+  e' <- desugarExpr e
+  freshExprSpan sp (EvalE e')
 -- Intrinsics: eta-expand when under-applied so they behave as first-class functions
 desugarExpr (Loc sp (CIntrinsicE name)) = do
   intr <- resolveIntrinsic (startPos sp) name
@@ -1655,6 +1716,7 @@ desugarExpr (Loc sp (CLamE pats body)) = do
   buildLamWithIrrefPats sp pats' body'
 desugarExpr (Loc sp (CLetE bindings body)) = do
   bindings' <- concatMapM (\(p, e) -> do
+    rejectHoistableBangInLetRhs e
     p' <- exprToIrrefPat p
     e' <- desugarExpr e
     desugarIrrefPat p' e') bindings
@@ -1722,6 +1784,17 @@ desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedA
 desugarExpr (Loc _ (CInlineE {})) = error "desugarExpr: unexpected CInlineE in expression position"
 desugarExpr (Loc sp CUnderscoreE) =
   dfail (startPos sp) "'_' is only valid in a binding position (let / do-bind / lambda / function-def arg)"
+-- Hook / labeled variable: `label@name` in expression position. The parser
+-- produces CAsE for `LOWER '@' atom_expr`; a bare-identifier body here means
+-- the user intended a hook (route the call through the labeled manifold
+-- group), not an as-pattern.
+desugarExpr (Loc sp (CAsE (EV label) (Loc _ (CVarE v)))) = do
+  moduleConfig <- State.gets dsModuleConfig
+  case Map.lookup label (moduleConfigLabeledGroups moduleConfig) of
+    Just config -> freshExprSpan sp (VarE (config { manifoldConfigLabel = Just label }) v)
+    Nothing -> dfail (startPos sp)
+      ("Undefined label '" ++ T.unpack label
+       ++ "': no matching entry in module config labeled-groups")
 desugarExpr (Loc sp (CAsE _ _)) =
   dfail (startPos sp) "as-pattern '@' is only valid in a binding position"
 
@@ -2097,8 +2170,8 @@ desugarSigItem (CstSigItem name sigType) = do
 -- Source desugaring
 --------------------------------------------------------------------
 
-mkOldSource :: Span -> Lang -> Maybe Path -> (Text, Maybe Text) -> D ExprI
-mkOldSource sp lang path (name, mayAlias) = do
+mkOldSource :: Span -> Lang -> Maybe Path -> (Bool, Text, Maybe Text) -> D ExprI
+mkOldSource sp lang path (isBacktick, name, mayAlias) = do
   let alias = maybe name id mayAlias
   freshExprSpan
     sp
@@ -2112,14 +2185,15 @@ mkOldSource sp lang path (name, mayAlias) = do
           , srcRsize = []
           , srcNote = []
           , srcInline = False
-          , srcOperator = isOperatorName name
+          , srcOperator = isBacktick || isOperatorName name
+          , srcBacktick = isBacktick
           }
     )
 
-mkNewSource :: Span -> Lang -> Maybe Path -> (Bool, Text, Located) -> D ExprI
-mkNewSource sp lang path (isInline, name, nameTok) = do
+mkNewSource :: Span -> Lang -> Maybe Path -> (Bool, Bool, Text, Located) -> D ExprI
+mkNewSource sp lang path (isInline, isBacktick, name, nameTok) = do
   docLines' <- lookupDocsAt (locPos nameTok)
-  let isOp = isOperatorName name
+  let isOp = isBacktick || isOperatorName name
       baseSrc =
         Source
           { srcName = SrcName name
@@ -2131,6 +2205,7 @@ mkNewSource sp lang path (isInline, name, nameTok) = do
           , srcNote = []
           , srcInline = isInline
           , srcOperator = isOp
+          , srcBacktick = isBacktick
           }
   src <- applySourceDocsD docLines' baseSrc
   freshExprSpan sp (SrcE src)
