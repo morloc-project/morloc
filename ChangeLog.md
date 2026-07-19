@@ -1,6 +1,12 @@
 0.94.0 [2026-07-15]
 -------------------
 
+ * Switch label syntax from ":" to "@"
+ * Add `@catch` and `@throw` intrinsics
+ * Convert from optional returns in intrinsics to `<Err>` effects
+ * Convert fixed size numeric naming convention to Rust style (U8 ... U64 / I8
+   ... I64, F32, and F64)
+ * Reintroduce `!` as eval-sugar for do-blocks
  * Allow arbitrary infix strings in backticks in import statement
  * Allow docstring forms in records
  * Include names, srcloc, and lang in all tracebacks
