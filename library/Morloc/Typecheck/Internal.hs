@@ -2243,7 +2243,7 @@ collectNatVarNames = go
 
 -- | Collect StrVarU variable names from a type. Mirrors collectNatVarNames.
 -- Used by the resolveStrLabels bridge that turns runtime Str-literal args
--- into type-level Str solutions when the function uses f:Str labels.
+-- into type-level Str solutions when the function uses f@Str labels.
 collectStrVarNames :: TypeU -> [TVar]
 collectStrVarNames = go
   where
@@ -2695,7 +2695,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (SizeU c) = "Size" <+> f False c
     f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
-    f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
+    f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v

@@ -52,7 +52,7 @@ source Cpp from "src.hpp"
   )
 
 -- -- This is what `ones` SHOULD be, but this would require dependent types:
--- ones :: i:Int -> j:Int -> Matrix i j Real
+-- ones :: i@Int -> j@Int -> Matrix i j Real
 
 -- Tensor constructors with specific dimensions
 ones34 :: Matrix 3 4 Real

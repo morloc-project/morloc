@@ -5371,14 +5371,14 @@ typedefKindVarTests =
 natLabelTests :: TestTree
 natLabelTests =
   testGroup
-    "nat labeled params (m:Int syntax)"
+    "nat labeled params (m@Int syntax)"
     [ -- === Positive: literal int args resolve nat vars ===
       assertRawType
         "labeled literal resolves dimension: makeVec 5 :: Tensor1 5 Real"
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec 5
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -5387,7 +5387,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec 0
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 0, VarU (TV "Real")])
@@ -5396,7 +5396,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = makeMat 3 4
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
@@ -5405,7 +5405,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       id_ :: Tensor1 n Real -> Tensor1 n Real
       x = id_ (makeVec 7)
         |]
@@ -5416,10 +5416,10 @@ natLabelTests =
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
-      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
-      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
+      makeImg :: h@Int -> w@Int -> Tensor2 h w Real
+      makeK :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
       type Tensor1 (d :: Nat) a = [a]
-      makeB :: k:Int -> Tensor1 k Real
+      makeB :: k@Int -> Tensor1 k Real
       conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
       x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
         |]
@@ -5430,7 +5430,7 @@ natLabelTests =
       module main (x)
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
       type Tensor1 (d :: Nat) a = [a]
-      makeT :: a:Int -> b:Int -> c:Int -> Tensor3 a b c Real
+      makeT :: a@Int -> b@Int -> c@Int -> Tensor3 a b c Real
       flatten :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
       x = flatten (makeT 2 3 3)
         |]
@@ -5440,7 +5440,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      makeT :: m@Int -> n@Int -> Tensor2 m n Real
       scale :: Real -> Tensor2 m n Real -> Tensor2 m n Real
       x = scale 2.0 (makeT 3 4)
         |]
@@ -5450,7 +5450,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      eye :: n:Int -> Tensor2 n n Real
+      eye :: n@Int -> Tensor2 n n Real
       x = eye 4
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 4, NatLitU 4, VarU (TV "Real")])
@@ -5461,7 +5461,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = let n = 5 in makeVec n
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -5470,7 +5470,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = let a = 7 in let b = a in makeVec b
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
@@ -5479,7 +5479,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = let m = 3 in let n = 4 in makeMat m n
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
@@ -5490,7 +5490,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec (.0 (5, 6))
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -5499,7 +5499,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeMat :: m:Int -> n:Int -> Tensor2 m n Real
+      makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = let dims = (3, 4) in makeMat (.0 dims) (.1 dims)
         |]
         (AppU (VarU (TV "Tensor2")) [NatLitU 3, NatLitU 4, VarU (TV "Real")])
@@ -5508,7 +5508,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = let d = (8, 9) in let n = .0 d in makeVec n
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 8, VarU (TV "Real")])
@@ -5519,7 +5519,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\n -> n) 5)
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 5, VarU (TV "Real")])
@@ -5528,7 +5528,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\t -> .1 t) (1, 2, 3))
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 2, VarU (TV "Real")])
@@ -5537,7 +5537,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\a b -> a) 7 99)
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 7, VarU (TV "Real")])
@@ -5548,7 +5548,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-      makeT :: m:Int -> n:Int -> Tensor2 m n Real
+      makeT :: m@Int -> n@Int -> Tensor2 m n Real
       add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
       x = add (makeT 3 4) (makeT 3 5)
         |]
@@ -5557,7 +5557,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       dot :: Tensor1 n Real -> Tensor1 n Real -> Real
       x = dot (makeVec 3) (makeVec 5)
         |]
@@ -5568,9 +5568,9 @@ natLabelTests =
       type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
       type Tensor1 (d :: Nat) a = [a]
-      makeImg :: h:Int -> w:Int -> Tensor2 h w Real
-      makeK :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
-      makeB :: k:Int -> Tensor1 k Real
+      makeImg :: h@Int -> w@Int -> Tensor2 h w Real
+      makeK :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
+      makeB :: k@Int -> Tensor1 k Real
       conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
       x :: Tensor3 2 3 4 Real
       x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
@@ -5580,7 +5580,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> Tensor1 n Real
+      makeVec :: n@Int -> Tensor1 n Real
       x :: Tensor1 99 Real
       x = makeVec 5
         |]
@@ -5601,7 +5601,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor1 (d :: Nat) a = [a]
-      makeFrom :: Real -> n:Int -> Tensor1 n Real
+      makeFrom :: Real -> n@Int -> Tensor1 n Real
       x = makeFrom 1.0 10
         |]
         (AppU (VarU (TV "Tensor1")) [NatLitU 10, VarU (TV "Real")])
@@ -5624,7 +5624,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      makeVec :: n:Int -> T1 n Real
+      makeVec :: n@Int -> T1 n Real
       x = makeVec 5
         |]
         (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")])
@@ -5634,7 +5634,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 d a = [a]
-      makeVec :: n:Int -> T1 n Real
+      makeVec :: n@Int -> T1 n Real
       x = makeVec 5
         |]
         -- Without :: Nat, n is VarU not NatVarU, so resolveNatLabels cannot
@@ -5679,11 +5679,11 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       f :: T1 n Real -> T1 n Real
       g :: T1 n Real -> T1 n Real
       x = g (f (makeVec 9))
-      makeVec :: n:Int -> T1 n Real
+      makeVec :: n@Int -> T1 n Real
       x = g (f (make 9))
         |]
         (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
@@ -5693,7 +5693,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       f :: T1 n Real -> T1 n Real
       x = let a = make 4
           in let b = f a
@@ -5710,7 +5710,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: h:Int -> w:Int -> T1 (h - w + 1) Real
+      make :: h@Int -> w@Int -> T1 (h - w + 1) Real
       x = make 10 3
         |]
         (AppU (VarU (TV "T1")) [NatLitU 8, VarU (TV "Real")])
@@ -5720,7 +5720,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: m:Int -> n:Int -> T1 (m * n) Real
+      make :: m@Int -> n@Int -> T1 (m * n) Real
       x = make 3 4
         |]
         (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
@@ -5730,7 +5730,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> d:Int -> T1 (n / d) Real
+      make :: n@Int -> d@Int -> T1 (n / d) Real
       x = make 12 4
         |]
         (AppU (VarU (TV "T1")) [NatLitU 3, VarU (TV "Real")])
@@ -5740,7 +5740,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: a:Int -> b:Int -> c:Int -> T1 (a * b - c) Real
+      make :: a@Int -> b@Int -> c@Int -> T1 (a * b - c) Real
       x = make 6 2 1
         |]
         (AppU (VarU (TV "T1")) [NatLitU 11, VarU (TV "Real")])
@@ -5754,7 +5754,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: h:Int -> w:Int -> T1 (h - w + 1) Real
+      make :: h@Int -> w@Int -> T1 (h - w + 1) Real
       x :: T1 7 Real
       x = make 10 3
         |]
@@ -5764,7 +5764,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: m:Int -> n:Int -> T1 (m * n) Real
+      make :: m@Int -> n@Int -> T1 (m * n) Real
       consume :: T1 11 Real -> Int
       x = consume (make 3 4)
         |]
@@ -5778,7 +5778,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      tryMake :: n:Int -> ?(T1 n Real)
+      tryMake :: n@Int -> ?(T1 n Real)
       x = tryMake 5
         |]
         (OptionalU (AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]))
@@ -5793,7 +5793,7 @@ natKindPromotionTests =
       module main (x)
       effect IO
       type T1 (d :: Nat) a = [a]
-      ioMake :: n:Int -> <IO> T1 n Real
+      ioMake :: n@Int -> <IO> T1 n Real
       x = ioMake 5
         |]
         (EffectU (EffectSet (Set.singleton "IO"))
@@ -5808,7 +5808,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> [T1 n Real]
+      make :: n@Int -> [T1 n Real]
       x = make 5
         |]
         (AppU (VarU (TV "List")) [AppU (VarU (TV "T1")) [NatLitU 5, VarU (TV "Real")]])
@@ -5818,7 +5818,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: m:Int -> n:Int -> (T1 m Real, T1 n Real)
+      make :: m@Int -> n@Int -> (T1 m Real, T1 n Real)
       x = make 3 7
         |]
         (AppU (VarU (TV "Tuple2"))
@@ -5837,7 +5837,7 @@ natKindPromotionTests =
       type T1 (d :: Nat) a = [a]
       type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       flatten :: T2 m n Real -> T1 (m * n) Real
-      make :: m:Int -> n:Int -> T2 m n Real
+      make :: m@Int -> n@Int -> T2 m n Real
       x = flatten (make 3 4)
         |]
         (AppU (VarU (TV "T1")) [NatLitU 12, VarU (TV "Real")])
@@ -5849,7 +5849,7 @@ natKindPromotionTests =
       type T1 (d :: Nat) a = [a]
       type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       flatten :: T2 m n Real -> T1 (m * n) Real
-      make :: m:Int -> n:Int -> T2 m n Real
+      make :: m@Int -> n@Int -> T2 m n Real
       consume :: T1 11 Real -> Int
       x = consume (flatten (make 3 4))
         |]
@@ -5863,7 +5863,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type Sized (n :: Nat) a = [a]
-      make :: n:Int -> Sized n Int
+      make :: n@Int -> Sized n Int
       x = make 10
         |]
         (AppU (VarU (TV "Sized")) [NatLitU 10, VarU (TV "Int")])
@@ -5880,7 +5880,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 m Real
+      make :: n@Int -> T1 m Real
       x = make 5
         |]
         (AppU (VarU (TV "T1")) [NatVarU (TV "a"), VarU (TV "Real")])
@@ -5894,7 +5894,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 (n - 0) Real
+      make :: n@Int -> T1 (n - 0) Real
       x = make 7
         |]
         (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
@@ -5904,7 +5904,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 (n * 1) Real
+      make :: n@Int -> T1 (n * 1) Real
       x = make 7
         |]
         (AppU (VarU (TV "T1")) [NatLitU 7, VarU (TV "Real")])
@@ -5914,7 +5914,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 (n * 0) Real
+      make :: n@Int -> T1 (n * 0) Real
       x = make 7
         |]
         (AppU (VarU (TV "T1")) [NatLitU 0, VarU (TV "Real")])
@@ -5927,7 +5927,7 @@ natKindPromotionTests =
         result <- runFrontRaw [r|
       module main (x, y)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       x = make 3
       y = make 7
           |]
@@ -5951,7 +5951,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type T1 (d :: Nat) a = [a]
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       x = make 1000000
         |]
         (AppU (VarU (TV "T1")) [NatLitU 1000000, VarU (TV "Real")])
@@ -5966,7 +5966,7 @@ natKindPromotionTests =
       module main (x)
       type T1 (d :: Nat) a = [a]
       combine :: T1 n Real -> T1 n Real -> T1 n Real
-      make :: n:Int -> T1 n Real
+      make :: n@Int -> T1 n Real
       x = combine (make 3) (make 5)
         |]
 
@@ -5979,7 +5979,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type Opaque (d :: Nat) a
-      make :: n:Int -> Opaque n Real
+      make :: n@Int -> Opaque n Real
       x = make 42
         |]
         (AppU (VarU (TV "Opaque")) [NatLitU 42, VarU (TV "Real")])
@@ -5989,7 +5989,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       type Opaque (d :: Nat) a
-      make :: n:Int -> Opaque n Real
+      make :: n@Int -> Opaque n Real
       consume :: Opaque 10 Real -> Int
       x = consume (make 5)
         |]
@@ -7255,7 +7255,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         id_ :: T1 n Real -> T1 n Real
         x = id_ (make 5)
           |]
@@ -7268,7 +7268,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         id :: a -> a
         x = id (make 6)
           |]
@@ -7282,7 +7282,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         x = g (f (make 7))
@@ -7297,7 +7297,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f1 :: T1 n Real -> T1 n Real
         f2 :: T1 n Real -> T1 n Real
         f3 :: T1 n Real -> T1 n Real
@@ -7314,7 +7314,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
-        make :: m:Int -> n:Int -> T2 m n Real
+        make :: m@Int -> n@Int -> T2 m n Real
         id_ :: T2 m n Real -> T2 m n Real
         x = id_ (make 3 4)
           |]
@@ -7327,7 +7327,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         scale :: Real -> T1 n Real -> T1 n Real
         x = scale 2.0 (make 8)
           |]
@@ -7343,7 +7343,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         add :: T1 n Real -> T1 n Real -> T1 n Real
         x = add (make 4) (make 4)
           |]
@@ -7356,7 +7356,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         consume :: T1 5 Real -> Int
@@ -7370,7 +7370,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         add :: T1 n Real -> T1 n Real -> T1 n Real
         x = add (make 3) (make 5)
           |]
@@ -7383,7 +7383,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: m:Int -> n:Int -> T1 (m * n) Real
+        make :: m@Int -> n@Int -> T1 (m * n) Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         x = g (f (make 6 2))
@@ -7398,7 +7398,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         id :: a -> a
         scale :: Real -> T1 n Real -> T1 n Real
         x = scale 1.0 (id (make 9))
@@ -7414,7 +7414,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         fst_ :: (a, Bool) -> a
         x = fst_ (make 5, True)
           |]
@@ -7429,7 +7429,7 @@ postArgPropagationTests =
           [r|
         module main (x)
         type T1 (d :: Nat) a = [a]
-        make :: n:Int -> T1 n Real
+        make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
         x = g (f (make 9))

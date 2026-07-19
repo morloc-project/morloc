@@ -56,7 +56,7 @@ import qualified Morloc.BaseTypes as BT
 --   current atom and the next token is '!', the parser can either reduce
 --   the chain or extend it with a new force_expr atom. Shift is correct
 --   (extend the atom chain, so `bar !x` = `bar (!x)`).
-%expect 97
+%expect 96
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -427,7 +427,7 @@ non_string_atom :: { TypeU }
   | '[' type ']'              { BT.listU $2 }
   | '?' non_string_atom       { OptionalU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { LabeledU (TV (getName $1)) $3 }
+  | LOWER '@' non_fun_type   { LabeledU (TV (getName $1)) $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | INTEGER                   { NatLitU (getInt $1) }
 
@@ -872,7 +872,7 @@ atom_type :: { TypeU }
   -- out the ambiguity.
   | '[' tick_list1 ']'        { ListLitU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER ':' non_fun_type   { $3 }
+  | LOWER '@' non_fun_type   { $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { StrLitU (getString $1) }
   | INTEGER                   { NatLitU (getInt $1) }
@@ -949,7 +949,7 @@ pos_atom_type :: { (Pos, TypeU) }
   | '{' '}'                      { (locPos $1, RecEmptyU) }
   | '{' rec_entries '}'          { (locPos $1, foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU $2) }
   | UPPER                       { (locPos $1, VarU (TV (getName $1))) }
-  | LOWER ':' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
+  | LOWER '@' non_fun_type      { (locPos $1, LabeledU (TV (getName $1)) $3) }
   | LOWER                       { (locPos $1, VarU (TV (getName $1))) }
   | STRING                      { (locPos $1, StrLitU (getString $1)) }
   | INTEGER                     { (locPos $1, NatLitU (getInt $1)) }

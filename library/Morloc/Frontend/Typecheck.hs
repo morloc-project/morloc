@@ -896,7 +896,7 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  -- Resolve nat labels: if the function has labeled nat params (m:Int syntax)
+  -- Resolve nat labels: if the function has labeled nat params (m@Int syntax)
   -- and corresponding args are int literals, inject NatVarU solutions into gamma
   let g1' = resolveNatLabels f funType0 xs0 g1
 
@@ -2183,7 +2183,7 @@ checkE i g UniS t = do
 --      (RecDiff `r - f`, NatArith `m * n`, OptionalU wrappers, etc.)
 --      to invert.
 --   2. For functions with structured return types (e.g.
---      `f :: T1 n Real -> T1 n Real` or `dropF :: f:Str -> r - f`),
+--      `f :: T1 n Real -> T1 n Real` or `dropF :: f@Str -> r - f`),
 --      pre-subtype either defers uselessly (matching NatVar against
 --      NatVar) or over-commits (forcing the row variable to a shape
 --      the actual arg cannot satisfy). The OLD synth+subtype path
@@ -2835,10 +2835,10 @@ tryExtractStrListPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe [Text]
 tryExtractStrListPre g (AnnoS _ _ e) = tryEvalStrList g e
 
 -- | Resolve nat / str labels from literal arguments.
--- When a function has labeled nat params (e.g., m:Int -> Tensor1 m Real)
+-- When a function has labeled nat params (e.g., m@Int -> Tensor1 m Real)
 -- and the corresponding arguments are int literals or let-bound ints,
 -- inject NatVarU solutions into gamma so the return type gets concrete
--- dimensions. Same for Str labels (e.g., f:Str -> Tagged f a) - extract
+-- dimensions. Same for Str labels (e.g., f@Str -> Tagged f a) - extract
 -- string literals from the corresponding args and inject StrVarU solutions
 -- into gammaStrSubs. See plans/tables/05-labels-as-type-vars.md.
 resolveNatLabels ::

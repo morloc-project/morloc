@@ -1221,7 +1221,7 @@ refineKinds dag = do
     -- typed-position, infer the label's kind from the FunU argument type
     -- at that position and promote any matching VarU mentions throughout
     -- the type (and constraints) to the proper per-kind variable. This
-    -- bridges the gap between the @f:Str@ surface syntax and the
+    -- bridges the gap between the @f\@Str@ surface syntax and the
     -- promotion pass: by the time refineTypeKinds runs, the labels have
     -- already been stripped by Desugar's @extractLabels@, so the
     -- LabeledU wrappers are gone but the labels map still records which
@@ -1617,7 +1617,7 @@ refineKinds dag = do
            in case b' of
                 StrLitU f | isRecLike a' -> RecDiffU a' [f]
                 -- `r - f` where f is a Str variable (introduced by an
-                -- f:Str signature label) drops the single key f from r.
+                -- f@Str signature label) drops the single key f from r.
                 -- Wrapped as a singleton list so RecDiffListU's reducer
                 -- handles the deferred-then-substituted lifecycle: when
                 -- f gets solved at the call site, the list goes ground

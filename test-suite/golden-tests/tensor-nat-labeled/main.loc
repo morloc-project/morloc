@@ -1,6 +1,6 @@
 -- Simple CNN inference for character recognition using morloc tensors.
 -- Architecture: conv2d(3x3, 2 filters) -> relu -> flatten -> dense(18->3) -> argmax
--- Tests labeled nat params (m:Int syntax) and generic nat dimensions.
+-- Tests labeled nat params (m@Int syntax) and generic nat dimensions.
 
 module main
   ( predictDigit
@@ -27,9 +27,9 @@ source Cpp from "cnn.hpp"
   )
 
 -- Labeled params: Int args determine tensor dimensions
-makeImage :: h:Int -> w:Int -> Matrix h w Real
-makeKernels :: k:Int -> fh:Int -> fw:Int -> Tensor3 k fh fw Real
-makeBias :: k:Int -> Vector k Real
+makeImage :: h@Int -> w@Int -> Matrix h w Real
+makeKernels :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
+makeBias :: k@Int -> Vector k Real
 
 -- Generic dimensions: ops work for any tensor sizes
 conv2d :: Matrix h w Real -> Tensor3 k fh fw Real -> Vector k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
@@ -37,8 +37,8 @@ reluMap :: Tensor3 a b c Real -> Tensor3 a b c Real
 flatten3d :: Tensor3 a b c Real -> Vector (a * b * c) Real
 
 -- Dense layer with generic dimensions
-makeWeights :: nout:Int -> nin:Int -> Matrix nout nin Real
-makeDenseBias :: n:Int -> Vector n Real
+makeWeights :: nout@Int -> nin@Int -> Matrix nout nin Real
+makeDenseBias :: n@Int -> Vector n Real
 dense :: Matrix m n Real -> Vector m Real -> Vector n Real -> Vector m Real
 
 -- Argmax: find index of maximum value

@@ -15,7 +15,7 @@ attempted. Only literal-vs-literal equality and literal-fold of concat
 chains are solved.
 
 The natural use of Str-kinded variables is for column names: a Stdlib
-function like 'add :: f:Str -> Vector n a -> Table n r -> ...' takes a
+function like 'add :: f@Str -> Vector n a -> Table n r -> ...' takes a
 literal column name at every call site. The constraint 'f = "age"' is
 satisfied by the standard variable-assignment path (handled in the
 typechecker's gamma), not by this solver. The solver only fires when an

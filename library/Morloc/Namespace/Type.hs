@@ -428,7 +428,7 @@ data TypeU
   -- constructors ('mkNatAdd', ...).
   | OpU OpTag [TypeU]
   | LitU TyLit
-  | LabeledU TVar TypeU -- ^ Transient: m:Int -> LabeledU (TV "m") Int, stripped in desugar
+  | LabeledU TVar TypeU -- ^ Transient: m@Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
 -- Pattern synonyms for the migrated Nat-kind constructors. These are
@@ -555,7 +555,7 @@ data EType
   { etype :: TypeU
   , econs :: Set.Set Constraint
   , edocs :: ArgDoc
-  , enatLabels :: Map TVar Int -- ^ Nat var name -> argument position index (from m:Int syntax)
+  , enatLabels :: Map TVar Int -- ^ Nat var name -> argument position index (from m@Int syntax)
   }
   deriving (Show, Eq, Ord)
 
@@ -1472,7 +1472,7 @@ instance Pretty TypeU where
       f _ (LitU (LRec fs)) = braces (hcat (punctuate ", " [pretty k <> "=" <> f False t | (k, t) <- fs]))
       f _ (LitU (LList es)) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
       f _ (LitU (LSet es)) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
-      f _ (LabeledU (TV n) t) = pretty n <> ":" <> f False t
+      f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         "*"
