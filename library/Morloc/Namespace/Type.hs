@@ -909,13 +909,31 @@ instance Typelike TypeU where
          in ForallU q' (substituteTVar v r' t)
       else
         ForallU q (substituteTVar v r t)
-  substituteTVar _ _ t@(NatVarU _) = t
   substituteTVar v0 r0 t0 = sub t0
     where
       sub t@(VarU v)
         | v0 == v = r0
         | otherwise = t
-      sub t@(NatVarU _) = t
+      -- Kind-tagged carriers participate in substitution by name. A
+      -- caller that swaps a NatVarU (or Str/Rec/List/Set var) is
+      -- expected to pass a value of matching kind; a caller that swaps
+      -- a Type var will never match a kind-tagged carrier's name in
+      -- practice because kind namespaces are freshened separately.
+      sub t@(NatVarU v)
+        | v0 == v = r0
+        | otherwise = t
+      sub t@(StrVarU v)
+        | v0 == v = r0
+        | otherwise = t
+      sub t@(RecVarU v)
+        | v0 == v = r0
+        | otherwise = t
+      sub t@(ListVarU v)
+        | v0 == v = r0
+        | otherwise = t
+      sub t@(SetVarU v)
+        | v0 == v = r0
+        | otherwise = t
       sub (ExistU v (map sub -> ps, pc) (map (second sub) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
       sub (ForallU v t)
         | v0 == v = ForallU v t
@@ -926,26 +944,16 @@ instance Typelike TypeU where
       sub (EffectU effs t) = mkEffectU effs (sub t)
       sub (OptionalU t) = OptionalU (sub t)
       sub t@NatVoidU = t
-      -- Str-kinded constructs: substitution does not touch them (parallel to
-      -- NatVarU). Concat recurses inside via the OpU clause below.
-      sub t@(StrVarU _) = t
       sub t@StrVoidU = t
-      -- Rec-kinded constructs: same pattern. Variables and the empty record
-      -- are inert; operators recurse into their operands so type-level vars
-      -- inside Rec field-types still see substitutions.
-      sub t@(RecVarU _) = t
       sub t@RecVoidU = t
-      -- List- and Set-kinded constructs: variables and empty/void are
-      -- inert; operators recurse into their operands.
-      sub t@(ListVarU _) = t
       sub t@ListVoidU = t
-      sub t@(SetVarU _) = t
       sub t@SetVoidU = t
-      -- Kind-generic catch-all: KVarU / VoidU with kinds not covered
-      -- by the specific pattern synonyms above (e.g. VoidU KindType
-      -- from the gradual-desugar pass). Inert w.r.t. Type-var
-      -- substitution.
-      sub t@(KVarU _) = t
+      -- Kind-generic catch-all for KVarU / VoidU with kinds not covered
+      -- by the specific pattern synonyms above (e.g. VoidU KindType from
+      -- the gradual-desugar pass).
+      sub t@(KVarU (v, _))
+        | v0 == v = r0
+        | otherwise = t
       sub t@(VoidU _) = t
       -- Cross-kind functions are pattern synonyms over 'OpU'; their
       -- substitution is handled by the unified 'OpU op args' clause below.
@@ -1049,7 +1057,21 @@ findFirst v = f
     f (VarU v') t2
       | v == v' = Just t2
       | otherwise = Nothing
-    f (NatVarU _) _ = Nothing
+    f (NatVarU v') t2
+      | v == v' = Just t2
+      | otherwise = Nothing
+    f (StrVarU v') t2
+      | v == v' = Just t2
+      | otherwise = Nothing
+    f (RecVarU v') t2
+      | v == v' = Just t2
+      | otherwise = Nothing
+    f (ListVarU v') t2
+      | v == v' = Just t2
+      | otherwise = Nothing
+    f (SetVarU v') t2
+      | v == v' = Just t2
+      | otherwise = Nothing
     f (ForallU v1 t1) (ForallU v2 t2)
       | v == v1 = Nothing
       | otherwise = f t1 (substituteTVar v2 (VarU v1) t2)

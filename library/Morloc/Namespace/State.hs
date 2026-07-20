@@ -331,22 +331,17 @@ data Gamma = Gamma
   , gammaSolved :: Map TVar TypeU
   -- | Nat constraints that could not be solved (deferred)
   , gammaDeferred :: [(TypeU, TypeU)]
-  -- | Solutions for NatVarU variables from nat constraint solving
-  , gammaNatSubs :: Map TVar TypeU
-  -- | Solutions for StrVarU variables from str constraint solving (Stage 2 of
-  -- the tables refactor; literals-only per plans/tables/04-str-solver-scope.md).
-  , gammaStrSubs :: Map TVar TypeU
-  -- | Solutions for RecVarU row variables from rec constraint solving (Stage 3
-  -- of the tables refactor; see plans/tables/10-rec-solver-decidability.md).
-  , gammaRecSubs :: Map TVar TypeU
-  -- | Solutions for ListVarU variables from list constraint solving (Stage 8
-  -- of the tables refactor - foundational kind layer).
-  , gammaListSubs :: Map TVar TypeU
-  -- | Solutions for SetVarU variables from set constraint solving (Stage 8).
-  , gammaSetSubs :: Map TVar TypeU
+  -- | Solutions for kind-tagged variables (KVarU / NatVarU / StrVarU /
+  -- RecVarU / ListVarU / SetVarU) from the per-kind constraint solvers.
+  -- Keyed on (TVar, Kind) so all five previously-parallel gammaXSubs
+  -- maps share a single storage. Str-solver semantics are literals-only
+  -- (see plans/tables/04-str-solver-scope.md); Rec-solver decidability
+  -- notes in plans/tables/10-rec-solver-decidability.md.
+  , gammaKindSubs :: Map (TVar, Kind) TypeU
   -- | Solutions for effect-row tail variables ('EffectVar') from
   -- effect-row unification. A separate namespace for the implicitly
-  -- universally-quantified effect variables, mirroring gammaNatSubs.
+  -- universally-quantified effect variables (values are 'EffectSet'
+  -- rather than 'TypeU', so cannot share 'gammaKindSubs').
   , gammaEffSubs :: Map TVar EffectSet
   -- | Generic primitive constraints (Member / Subset / Disjoint) waiting for
   -- enough information to discharge. Stage 9 of the tables refactor. The

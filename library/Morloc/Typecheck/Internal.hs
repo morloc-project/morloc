@@ -427,7 +427,7 @@ instance Applicable TypeU where
     case lookupU v g of
       (Just t') -> t'
       Nothing -> VarU v
-  apply g (NatVarU v) = case Map.lookup v (gammaNatSubs g) of
+  apply g (NatVarU v) = case Map.lookup (v, KindNat) (gammaKindSubs g) of
     Just t -> t
     Nothing -> NatVarU v
   -- [G](A->B) = ([G]A -> [G]B)
@@ -461,13 +461,13 @@ instance Applicable TypeU where
   apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
   apply _ t@NatVoidU = t
-  apply g (StrVarU v) = case Map.lookup v (gammaStrSubs g) of
+  apply g (StrVarU v) = case Map.lookup (v, KindStr) (gammaKindSubs g) of
     Just t -> t
     Nothing -> StrVarU v
   apply _ t@(StrLitU _) = t
   apply g (StrConcatU a b) = StrConcatU (apply g a) (apply g b)
   apply _ t@StrVoidU = t
-  apply g (RecVarU v) = case Map.lookup v (gammaRecSubs g) of
+  apply g (RecVarU v) = case Map.lookup (v, KindRec) (gammaKindSubs g) of
     Just t -> t
     Nothing -> RecVarU v
   apply _ t@RecEmptyU = t
@@ -478,15 +478,16 @@ instance Applicable TypeU where
   apply g (RecRestrictU a b) = reduceRecRestrict (apply g a) (apply g b)
   apply g (RecDiffListU a b) = reduceRecDiffList (apply g a) (apply g b)
   apply _ t@RecVoidU = t
-  -- List- and Set-kinded constructs: variables look up gammaListSubs /
-  -- gammaSetSubs (parallel to RecVarU); operators recurse into operands.
-  apply g (ListVarU v) = case Map.lookup v (gammaListSubs g) of
+  -- List- and Set-kinded variables look up under (KindList KindStr) and
+  -- (KindSet KindStr) respectively, matching how their solutions are
+  -- inserted by the list/set solvers.
+  apply g (ListVarU v) = case Map.lookup (v, KindList KindStr) (gammaKindSubs g) of
     Just t -> t
     Nothing -> ListVarU v
   apply g (ListLitU es) = ListLitU (map (apply g) es)
   apply g (ListAppU a b) = ListAppU (apply g a) (apply g b)
   apply _ t@ListVoidU = t
-  apply g (SetVarU v) = case Map.lookup v (gammaSetSubs g) of
+  apply g (SetVarU v) = case Map.lookup (v, KindSet KindStr) (gammaKindSubs g) of
     Just t -> t
     Nothing -> SetVarU v
   apply _ t@SetEmptyU = t
@@ -529,11 +530,7 @@ instance Applicable Gamma where
     g2
       { gammaContext = IntMap.map f (gammaContext g2)
       , gammaSolved = Map.map (apply g1) (gammaSolved g2)
-      , gammaNatSubs = Map.map (apply g1) (gammaNatSubs g2)
-      , gammaStrSubs = Map.map (apply g1) (gammaStrSubs g2)
-      , gammaRecSubs = Map.map (apply g1) (gammaRecSubs g2)
-      , gammaListSubs = Map.map (apply g1) (gammaListSubs g2)
-      , gammaSetSubs = Map.map (apply g1) (gammaSetSubs g2)
+      , gammaKindSubs = Map.map (apply g1) (gammaKindSubs g2)
       , gammaEffSubs = Map.map (applyEff g1) (gammaEffSubs g2)
       , gammaConstraints = map (apply g1) (gammaConstraints g2)
       }
@@ -579,7 +576,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty []) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []) of
   (Left _) -> False
   (Right _) -> True
 
@@ -745,13 +742,15 @@ strExprToTypeU (SS.StrLit s) = StrLitU s
 strExprToTypeU (SS.StrVar v) = StrVarU v
 strExprToTypeU (SS.StrConcat a b) = StrConcatU (strExprToTypeU a) (strExprToTypeU b)
 
--- | Insert solved Str-variable assignments into the gamma's gammaStrSubs.
--- Mirrors applyNatSolutions but the StrSolver only ever produces ground
--- assignments (per memo 04), so there is no existential-vs-StrVar dispatch.
+-- | Insert solved Str-variable assignments into the kind-tagged
+-- gamma map. Mirrors applyNatSolutions but the StrSolver only ever
+-- produces ground assignments (per memo 04), so there is no
+-- existential-vs-StrVar dispatch.
 applyStrSolutions :: Map.Map TVar SS.StrExpr -> Gamma -> Gamma
 applyStrSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) = g { gammaStrSubs = Map.insert v (strExprToTypeU se) (gammaStrSubs g) }
+    insertSub g (v, se) =
+      g { gammaKindSubs = Map.insert (v, KindStr) (strExprToTypeU se) (gammaKindSubs g) }
 
 -- | True iff the TypeU is a Rec-kinded expression (variable, empty,
 -- extension, union, difference, intersection). Mirrors isNatExpr/isStrExpr.
@@ -785,11 +784,12 @@ recExprToTypeU (RS.RecUnion a b) = RecUnionU (recExprToTypeU a) (recExprToTypeU 
 recExprToTypeU (RS.RecDiff a ks) = RecDiffU (recExprToTypeU a) ks
 recExprToTypeU (RS.RecIntersect a b) = RecIntersectU (recExprToTypeU a) (recExprToTypeU b)
 
--- | Insert solved Rec-tail variable assignments into the gamma's gammaRecSubs.
+-- | Insert solved Rec-tail variable assignments into the kind-tagged gamma map.
 applyRecSolutions :: Map.Map TVar RS.RecExpr -> Gamma -> Gamma
 applyRecSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, re) = g { gammaRecSubs = Map.insert v (recExprToTypeU re) (gammaRecSubs g) }
+    insertSub g (v, re) =
+      g { gammaKindSubs = Map.insert (v, KindRec) (recExprToTypeU re) (gammaKindSubs g) }
 
 -- | True iff the TypeU is a List-kinded expression. Mirrors isRecExpr.
 isListExpr :: TypeU -> Bool
@@ -810,11 +810,12 @@ listExprToTypeU (LS.ListVar v) = ListVarU v
 listExprToTypeU (LS.ListLit es) = ListLitU es
 listExprToTypeU (LS.ListApp a b) = ListAppU (listExprToTypeU a) (listExprToTypeU b)
 
--- | Insert solved List-tail variable assignments into the gammaListSubs.
+-- | Insert solved List-tail variable assignments into the kind-tagged gamma map.
 applyListSolutions :: Map.Map TVar LS.ListExpr -> Gamma -> Gamma
 applyListSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, le) = g { gammaListSubs = Map.insert v (listExprToTypeU le) (gammaListSubs g) }
+    insertSub g (v, le) =
+      g { gammaKindSubs = Map.insert (v, KindList KindStr) (listExprToTypeU le) (gammaKindSubs g) }
 
 -- | True iff the TypeU is a Set-kinded expression. Mirrors isRecExpr.
 isSetExpr :: TypeU -> Bool
@@ -845,24 +846,24 @@ setExprToTypeU (SetS.SetUnion a b) = SetUnionU (setExprToTypeU a) (setExprToType
 setExprToTypeU (SetS.SetInter a b) = SetInterU (setExprToTypeU a) (setExprToTypeU b)
 setExprToTypeU (SetS.SetDiff a b) = SetDiffU (setExprToTypeU a) (setExprToTypeU b)
 
--- | Insert solved Set-tail variable assignments into the gammaSetSubs.
+-- | Insert solved Set-tail variable assignments into the kind-tagged gamma map.
 applySetSolutions :: Map.Map TVar SetS.SetExpr -> Gamma -> Gamma
 applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) = g { gammaSetSubs = Map.insert v (setExprToTypeU se) (gammaSetSubs g) }
+    insertSub g (v, se) =
+      g { gammaKindSubs = Map.insert (v, KindSet KindStr) (setExprToTypeU se) (gammaKindSubs g) }
 
 applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
 applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
   where
     applySub g (v, ne) =
       let t = natExprToTypeU ne
-      -- Try solving as existential first (for existential nat vars),
-      -- then store in gammaNatSubs (for NatVarU variables)
+      -- Try solving as existential first; fall back to a NatVarU solution
+      -- in the kind-tagged gamma map.
       in case solveExist v t g of
            Right (Just g') -> Right g'
            Right Nothing ->
-             -- Not an existential - store as a NatVarU solution
-             Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
+             Right g { gammaKindSubs = Map.insert (v, KindNat) t (gammaKindSubs g) }
            Left err -> Left err
 
 -- | Re-check deferred kind constraints after all existentials are solved.
