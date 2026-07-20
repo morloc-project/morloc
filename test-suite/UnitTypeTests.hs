@@ -5212,6 +5212,29 @@ gradualDesugarTests =
       g :: Vector n Int -> Int
       g v = f v
         |]
+
+    -- Regression: gradual under-applied type constructor inside a
+    -- type-alias body (e.g. `type Read a = (a, Vector U8)`) must also
+    -- get its missing Nat position padded. Without walking TypE bodies
+    -- through the fillMissingKindArgs pass, the alias would keep the
+    -- unpadded `AppU Vector [U8]` and downstream newtype reduction
+    -- couldn't match the 2-arg Vector definition.
+    , expectPass "gradual `Vector U8` under a type alias reduces cleanly"
+        [r|
+      module main (foo)
+      newtype Vector (n :: Nat) a = List a
+      type Read a = (a, Vector U8)
+      foo :: Read Str -> Read Str
+      foo x = x
+        |]
+    , expectPass "gradual `Vector U8` under a paramless type alias"
+        [r|
+      module main (foo)
+      newtype Vector (n :: Nat) a = List a
+      type Bytes = Vector U8
+      foo :: Bytes -> Bytes
+      foo x = x
+        |]
     ]
   where
     stripForalls (ForallU _ t) = stripForalls t
