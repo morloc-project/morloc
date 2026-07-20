@@ -1385,7 +1385,8 @@ refineKinds dag = do
         bucketByKind = foldr (\a -> Map.insertWith (++) (inferArgKind a) [a]) Map.empty
 
         -- Classify an arg to a kind: literals and kind-specific carriers
-        -- give exact kinds; bare vars default to KindType.
+        -- give exact kinds; operator applications inherit their result
+        -- kind from the operator tag; bare vars default to KindType.
         inferArgKind :: TypeU -> Kind
         inferArgKind (LitU (LNat _))   = KindNat
         inferArgKind (LitU (LStr _))   = KindStr
@@ -1398,7 +1399,34 @@ refineKinds dag = do
         inferArgKind ListVoidU         = KindList KindStr
         inferArgKind (SetVarU _)       = KindSet KindStr
         inferArgKind SetVoidU          = KindSet KindStr
+        inferArgKind (OpU op _)        = opResultKind op
         inferArgKind _                 = KindType
+
+        -- Result kind of each type-level operator, used to classify
+        -- OpU-headed args in @bucketByKind@. Without this the surface
+        -- form @Table {x = Int}@ (which parses as OpU OpRecExtend ...)
+        -- would fall through to KindType and get dropped during the
+        -- gradual-arg fill.
+        opResultKind :: OpTag -> Kind
+        opResultKind OpNatAdd       = KindNat
+        opResultKind OpNatSub       = KindNat
+        opResultKind OpNatMul       = KindNat
+        opResultKind OpNatDiv       = KindNat
+        opResultKind OpStrConcat    = KindStr
+        opResultKind OpRecExtend    = KindRec
+        opResultKind OpRecUnion     = KindRec
+        opResultKind OpRecIntersect = KindRec
+        opResultKind OpRecRestrict  = KindRec
+        opResultKind OpRecDiffList  = KindRec
+        opResultKind OpRecSingleton = KindRec
+        opResultKind OpListApp      = KindList KindStr
+        opResultKind OpSetUnion     = KindSet KindStr
+        opResultKind OpSetInter     = KindSet KindStr
+        opResultKind OpSetDiff      = KindSet KindStr
+        opResultKind OpKeys         = KindSet KindStr
+        opResultKind OpListToSet    = KindSet KindStr
+        opResultKind OpSize         = KindNat
+        opResultKind OpProjectField = KindType
 
     -- | Recognise upper-case names of cross-kind builtins (Keys, Size,
     -- ListToSet) used as function-application heads in a type

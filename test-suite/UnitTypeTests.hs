@@ -5235,6 +5235,42 @@ gradualDesugarTests =
       foo :: Bytes -> Bytes
       foo x = x
         |]
+
+    , expectPass "gradual `Vector U8` in an instance head"
+        [r|
+      module main (foo)
+      newtype Vector (n :: Nat) a = List a
+      class Fooable a where fooOf :: a -> Int
+      instance Fooable (Vector U8) where
+        fooOf _ = 0
+      foo :: Vector U8 -> Int
+      foo v = fooOf v
+        |]
+
+    , expectPass "gradual `Vector U8` in an expression annotation"
+        [r|
+      module main (foo)
+      newtype Vector (n :: Nat) a = List a
+      foo :: Int
+      foo = let v = ([1, 2, 3] :: Vector U8) in 0
+        |]
+
+    , exprTestBad
+        "unknown kind name is rejected with a source-located error"
+        [r|
+      module main (foo)
+      type Vector (n :: Nut) a = [a]
+      foo :: Vector 3 Int -> Int
+      foo _ = 0
+        |]
+
+    , expectPass "partial gradual with Rec literal preserves the schema"
+        [r|
+      module main (foo)
+      newtype Table (n :: Nat) (r :: Rec)
+      foo :: Table {x = Int} -> Int
+      foo _ = 0
+        |]
     ]
   where
     stripForalls (ForallU _ t) = stripForalls t
@@ -5592,6 +5628,20 @@ typedefKindVarTests =
       x = [1, 2, 3, 4, 5]
         |]
         (lst (var "Int"))
+
+    -- Bare VarU classifies as a Nat expression (see typeUToNatExpr's
+    -- VarU case in Typecheck/Internal.hs), so a synthetic pair that
+    -- classifies as NONE of Nat/Str/Rec/List/Set must use a shape no
+    -- classifier accepts: FunU here.
+    , testCase "recheckDeferred rejects an unclassifiable pair" $
+        let bad = FunU [] (VarU (TV "a"))
+            g0 = (listToGamma []) { gammaDeferred = [(bad, bad)] }
+        in case MTI.recheckDeferred g0 of
+             Left msg ->
+               assertBool ("expected 'unclassifiable' in error, got: " ++ show msg)
+                 ("unclassifiable" `MT.isInfixOf` MT.pack (show msg))
+             Right _ ->
+               assertFailure "expected Left, got Right (classifier let unknown-kind pair through)"
     ]
 
 natLabelTests :: TestTree

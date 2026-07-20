@@ -373,7 +373,7 @@ typedef_params :: { [Either (TVar, Kind) TypeU] }
   : {- empty -}                        { [] }
   | typedef_params LOWER               { $1 ++ [Left (TV (getName $2), KindType)] }
   | typedef_params UPPER               { $1 ++ [Right (VarU (TV (getName $2)))] }
-  | typedef_params '(' LOWER '::' UPPER ')'  { $1 ++ [Left (TV (getName $3), parseKind (getName $5))] }
+  | typedef_params '(' LOWER '::' UPPER ')'  {% parseKindE $5 >>= \k -> return ($1 ++ [Left (TV (getName $3), k)]) }
   | typedef_params '(' type ')'        { $1 ++ [Right $3] }
 
 nam_entry :: { (Key, TypeU) }
@@ -1063,16 +1063,24 @@ getBacktick :: Located -> Text
 getBacktick (Located _ (TokBacktickName n) _) = n
 getBacktick _ = ""
 
-parseKind :: Text -> Kind
-parseKind "Nat" = KindNat
-parseKind "Str" = KindStr
-parseKind "Rec" = KindRec
--- The first cut only produces List Str / Set Str. The element kind is
--- defaulted; explicit `(l :: List Nat)` parameterisation is a future
--- extension that will need its own production.
-parseKind "List" = KindList KindStr
-parseKind "Set" = KindSet KindStr
-parseKind _ = KindType
+-- Parse a kind name at a typedef parameter position. Kind identifiers
+-- are a fixed vocabulary (Type/Nat/Str/Rec/List/Set); anything else is
+-- a source-located parse error. `List` and `Set` default their element
+-- kind to Str; the surface form for @(l :: List Nat)@ is not yet
+-- implemented.
+parseKindE :: Located -> P Kind
+parseKindE tok = case getName tok of
+  "Type" -> return KindType
+  "Nat"  -> return KindNat
+  "Str"  -> return KindStr
+  "Rec"  -> return KindRec
+  "List" -> return (KindList KindStr)
+  "Set"  -> return (KindSet KindStr)
+  other  -> do
+    srcLines <- State.gets psSourceLines
+    State.lift (Left (ParseError (locPos tok)
+      ("unknown kind " ++ show other
+        ++ "; expected one of Type, Nat, Str, Rec, List, Set") [] srcLines))
 
 -- Build a Constraint, recognising primitive heads (Member / Subset /
 -- Disjoint) and routing typeclass-shaped constraints to the existing
