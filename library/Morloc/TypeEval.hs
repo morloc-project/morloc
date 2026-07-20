@@ -374,6 +374,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f _ t@ListVoidU = return t
     f _ t@(SetVarU _) = return t
     f _ t@SetVoidU = return t
+    -- KVarU / VoidU carriers of kinds not covered above are inert w.r.t.
+    -- alias resolution (they have no aliases to expand).
+    f _ t@(KVarU _) = return t
+    f _ t@(VoidU _) = return t
     -- Unified carriers: uniform recursion across all operators and literal
     -- payloads.
     f bnd (OpU op args) = OpU op <$> mapM (recurse bnd) args
@@ -414,6 +418,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate _ t@ListVoidU = return t
     terminate _ t@(SetVarU _) = return t
     terminate _ t@SetVoidU = return t
+    -- KVarU / VoidU carriers of kinds not covered above are inert.
+    terminate _ t@(KVarU _) = return t
+    terminate _ t@(VoidU _) = return t
     -- Unified carriers: uniform recursion.
     terminate bnd (OpU op args) = OpU op <$> mapM (recurse bnd) args
     terminate _ t@(LitU (LNat _)) = return t
@@ -595,6 +602,13 @@ parsub _ t@StrVoidU = t
 parsub _ t@RecVoidU = t
 parsub _ t@ListVoidU = t
 parsub _ t@SetVoidU = t
+-- KVarU / VoidU carriers of kinds not covered above. KVarU matches the
+-- parametric substitution the same way as the per-kind NatVarU/StrVarU/
+-- RecVarU/ListVarU/SetVarU cases above; VoidU is inert.
+parsub (v, t2) t1@(KVarU (v0, _))
+  | v0 == v = t2
+  | otherwise = t1
+parsub _ t@(VoidU _) = t
 -- Unified carriers: uniform recursion across all operators and literal payloads.
 parsub pair (OpU op args) = OpU op (map (parsub pair) args)
 parsub _ t@(LitU (LNat _)) = t

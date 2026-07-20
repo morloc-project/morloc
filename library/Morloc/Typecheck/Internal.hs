@@ -43,6 +43,7 @@ module Morloc.Typecheck.Internal
   , renameEType
   , cleanTypeName
   , prettyTypeU
+  , prettyTypeUPair
   , isNatExpr
   , isStrExpr
   , isRecExpr
@@ -864,11 +865,13 @@ applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
              Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
            Left err -> Left err
 
--- | Re-check deferred Nat / Str constraints after all existentials are
--- solved. Applies the final gamma to each deferred pair, converts to the
--- appropriate kind-specific expression, and re-solves. Returns Left on
--- contradiction, Right with remaining still-deferred constraints (now
--- truly unsolvable).
+-- | Re-check deferred kind constraints after all existentials are solved.
+-- Applies the final gamma to each deferred pair, classifies as a Nat, Str,
+-- Rec, List, or Set expression, and re-solves via the appropriate solver.
+--
+-- Returns 'Left' on contradiction (or on a constraint that classifies as
+-- none of the recognised kinds -- a compiler-side classifier bug), and
+-- 'Right' with the still-deferred pairs the solver could not decide.
 recheckDeferred :: Gamma -> Either MDoc [(TypeU, TypeU)]
 recheckDeferred g = foldM check [] (gammaDeferred g)
   where
@@ -880,8 +883,9 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
              case NS.solveNat ne1 ne2 of
                Right _ -> Right acc
                Left NS.Contradiction ->
-                 Left $ "Nat constraint mismatch (deferred):"
-                   <+> prettyTypeU t1' <+> "~" <+> prettyTypeU t2'
+                 let (d1, d2) = prettyTypeUPair t1' t2'
+                 in Left $ "Nat constraint mismatch (deferred):"
+                      <+> d1 <+> "~" <+> d2
                Left (NS.Deferred _) -> Right ((t1', t2') : acc)
            _ -> case (typeUToStrExpr t1', typeUToStrExpr t2') of
              (Just se1, Just se2) ->
@@ -900,7 +904,27 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
                    Left (RS.RecMalformed msg) ->
                      Left $ "Rec malformed (deferred):" <+> pretty msg
                    Left RS.RecDeferred -> Right ((t1', t2') : acc)
-               _ -> Right acc  -- not a kind we can solve, skip
+               _ -> case (typeUToListExpr t1', typeUToListExpr t2') of
+                 (Just le1, Just le2) ->
+                   case LS.solveList le1 le2 of
+                     Right _ -> Right acc
+                     Left (LS.ListContradiction msg) ->
+                       Left $ "List constraint mismatch (deferred):" <+> pretty msg
+                     Left LS.ListDeferred -> Right ((t1', t2') : acc)
+                 _ -> case (typeUToSetExpr t1', typeUToSetExpr t2') of
+                   (Just xe1, Just xe2) ->
+                     case SetS.solveSet xe1 xe2 of
+                       Right _ -> Right acc
+                       Left (SetS.SetContradiction msg) ->
+                         Left $ "Set constraint mismatch (deferred):" <+> pretty msg
+                       Left SetS.SetDeferred -> Right ((t1', t2') : acc)
+                   -- Neither side classifies as any recognised kind
+                   -- expression; this is a classifier bug.
+                   _ -> let (d1, d2) = prettyTypeUPair t1' t2' in
+                        Left $ vsep
+                          [ "unclassifiable deferred constraint:" <+> d1 <+> "~" <+> d2
+                          , "  neither side reduces to a Nat, Str, Rec, List, or Set expression."
+                          ]
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
@@ -2710,6 +2734,16 @@ prettyTypeU = renderClean . cleanTypeName
                    then mempty
                    else space <> hsep (map (f False) ps)
       in pretty n <> params
+
+-- | Render two TypeUs with a shared rename pool so distinct freshened
+-- variables get distinct clean names. Without this, calling
+-- 'prettyTypeU' on each side independently would grab the pool's
+-- first letter twice and render as e.g. @a ~ a@.
+prettyTypeUPair :: TypeU -> TypeU -> (MDoc, MDoc)
+prettyTypeUPair t1 t2 =
+  case unqualify (cleanTypeName (FunU [t1] t2)) of
+    (_, FunU [t1'] t2') -> (pretty t1', pretty t2')
+    _                   -> (pretty t1,  pretty t2)
 
 tvarname :: Gamma -> Text -> (Gamma, TVar)
 tvarname g prefix =

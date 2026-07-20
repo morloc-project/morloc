@@ -145,13 +145,20 @@ typecheck = mapM run
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
 
-      -- re-check deferred Nat constraints now that existentials are solved
+      -- Re-check deferred kind constraints now that existentials are solved.
       case recheckDeferred g3 of
         Left err -> MM.throwSystemError err
+        Right [] -> return ()
         Right remaining ->
-          mapM_ (\(t1, t2) ->
-            MM.sayV $ "Warning: unresolved Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
-            ) remaining
+          MM.throwSystemError $ vsep
+            [ "unsolvable deferred kind constraints (solver could not decide):"
+            , vsep [ let (d1, d2) = prettyTypeUPair t1 t2
+                     in "  " <> d1 <+> "~" <+> d2
+                   | (t1, t2) <- remaining ]
+            , "  Annotate the site with a concrete kind value, or extend the"
+            , "  relevant solver (NatSolver / StrSolver / RecSolver / ListSolver"
+            , "  / SetSolver) to handle this equation shape."
+            ]
 
       -- discharge primitive set-theoretic constraints (Member / Subset /
       -- Disjoint) accumulated through subtype calls. Each constraint

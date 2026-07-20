@@ -56,7 +56,7 @@ module main
     -- (7) edge case: 1x1 matrix and 1x1x1 tensor
   , unitMatCross, unitT3Cross
     -- (8) literal inputs: source literals + CLI literals for Matrix / Tensor3
-  , litSrcMatAnnot, litSrcMatInfer, litSrcMatIntAnnot
+  , litSrcMatAnnot , litSrcMatInfer, litSrcMatIntAnnot
   , litSrcT3Annot, litSrcT3Infer
   , litCliMat, litCliMatCpp, litCliMatR
   , litCliMatInt, litCliT3
@@ -470,14 +470,16 @@ unitT3Cross = pySumUnitT3 cppMakeUnitT3
 
 -- (8a) Source literal, input annotated with explicit Vector size.
 litSrcMatAnnot :: Real
-litSrcMatAnnot = pySumMatPoly
-  (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector 6 Real)))
+litSrcMatAnnot = pySumMatPoly mat where
+  mat :: Matrix 2 3 Real
+  mat = (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector 6 Real)))
 
 -- (8b) Same literal but input Vector size is a type variable: asks
 -- whether morloc can infer the size from the literal's length.
 litSrcMatInfer :: Real
-litSrcMatInfer = pySumMatPoly
-  (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector n Real)))
+litSrcMatInfer = pySumMatPoly mat where
+  mat :: Matrix 2 3 Real 
+  mat = (pack (((2, 3), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]) :: ((Int, Int), Vector n Real)))
 
 -- (8c) I32 source literal.
 litSrcMatIntAnnot :: Int
@@ -486,14 +488,16 @@ litSrcMatIntAnnot = pySumMatI32Poly
 
 -- (8d, 8e) Tensor3 source literals.
 litSrcT3Annot :: Real
-litSrcT3Annot = pySumT3Poly
-  (pack (((2, 2, 2), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
-         :: ((Int, Int, Int), Vector 8 Real)))
+litSrcT3Annot = pySumT3Poly x where
+  x :: Tensor3 2 2 2 Real
+  x = pack (((2, 2, 2), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+            :: ((Int, Int, Int), Vector 8 Real))
 
 litSrcT3Infer :: Real
-litSrcT3Infer = pySumT3Poly
-  (pack (((2, 2, 2), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
-         :: ((Int, Int, Int), Vector n Real)))
+litSrcT3Infer = pySumT3Poly x where
+  x :: Tensor3 2 2 2 Real
+  x = pack (((2, 2, 2), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+             :: ((Int, Int, Int), Vector n Real))
 
 -- (8f-8j) CLI literals -- the wire form arrives as JSON.
 --   ./nexus litCliMat     '[[2,3],[1.5,2.5,3.5,4.5,5.5,6.5]]'  -> 24

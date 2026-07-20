@@ -26,6 +26,12 @@ module Morloc.Namespace.Type
     -- were real constructors.
   , TypeU
       ( ..
+      , NatVarU
+      , StrVarU
+      , RecVarU
+      , NatVoidU
+      , StrVoidU
+      , RecVoidU
       , NatLitU
       , NatAddU
       , NatSubU
@@ -369,7 +375,11 @@ variables. This is the primary type representation during typechecking.
 -}
 data TypeU
   = VarU TVar
-  | NatVarU TVar -- ^ Nat-kinded variable, never quantified by ForallU
+  -- | Kind-tagged variable. Nat/Str/Rec variants are surfaced via the
+  -- 'NatVarU' / 'StrVarU' / 'RecVarU' pattern synonyms below. Bare
+  -- 'VarU TVar' represents Type-kinded variables. ListVarU / SetVarU
+  -- remain standalone because their element kind is not tracked here.
+  | KVarU (TVar, Kind)
   | ExistU
       TVar
       ([TypeU], OpenOrClosed)
@@ -380,42 +390,23 @@ data TypeU
   | NamU NamType TVar [TypeU] [(Key, TypeU)]
   | EffectU EffectSet TypeU
   | OptionalU TypeU
-  -- Nat-kind operators and literal are now pattern synonyms over 'OpU' /
-  -- 'LitU' (see below).
-  | NatVoidU  -- ^ Erased phantom Nat slot. Substituted in for missing
-              -- Nat-kinded args (kind realignment in expandHeadOnly), or
-              -- when a NatVar / NatAdd / unresolved variable is reduced
-              -- to ground form during weaving. Distinct from `NatLitU 0`
-              -- (a real empty-dim measurement) so downstream consumers
-              -- (pretty printer, dim reification in Serial.hs, equality)
-              -- can tell phantoms apart from real measurements.
-  | StrVarU TVar -- ^ Str-kinded variable, never quantified by ForallU.
-                 -- Mirrors NatVarU. See plans/tables/04-str-solver-scope.md.
-  -- Str-kind literal and concat are now pattern synonyms over 'LitU' /
-  -- 'OpU' (see below).
-  | StrVoidU -- ^ Erased phantom Str slot. Mirrors NatVoidU.
-  -- Rec-kinded constructs (Stage 3 of the tables refactor). See
-  -- plans/tables/10-rec-solver-decidability.md.
-  | RecVarU TVar -- ^ Rec-kinded row variable, never quantified by ForallU.
-  -- All Rec operators (empty, extend, union, intersect, restrict,
-  -- diff-list, diff-by-Text-list) are now pattern synonyms over 'LitU' /
-  -- 'OpU' (see below).
-  | RecVoidU -- ^ Erased phantom Rec slot. Mirrors NatVoidU / StrVoidU.
-  -- List-kinded constructs (Stage 8 of the tables refactor). Lists are
-  -- ordered, position-preserving sequences; equality is element-wise.
-  -- Element kind is fixed at the carrier (e.g. KindList KindStr); the
-  -- TypeU level does not track it.
+  -- | Kind-tagged erased phantom slot. Nat/Str/Rec variants are surfaced
+  -- via 'NatVoidU' / 'StrVoidU' / 'RecVoidU' pattern synonyms. Filled in
+  -- for missing kind-arg positions during weave/eval and for kind
+  -- realignment in 'expandHeadOnly'. Distinct from a literal empty
+  -- value at the corresponding kind (e.g. @NatLitU 0@) so downstream
+  -- consumers (pretty printer, dim reification, equality) can tell
+  -- phantoms apart from real measurements.
+  | VoidU Kind
+  -- List-kinded constructs. Ordered, position-preserving sequences;
+  -- equality is element-wise. Element kind is fixed at the carrier
+  -- (e.g. KindList KindStr); the TypeU level does not track it.
   | ListVarU TVar -- ^ List-kinded variable, never quantified by ForallU.
-                  -- Mirrors NatVarU / StrVarU / RecVarU.
-  -- List-kind literal and append are now pattern synonyms over 'LitU' /
-  -- 'OpU' (see below).
-  | ListVoidU -- ^ Erased phantom List slot. Mirrors NatVoidU / RecVoidU.
-  -- Set-kinded constructs (Stage 8 of the tables refactor). Sets are
-  -- order/duplicate-insensitive; canonical form is sorted dedup.
+  | ListVoidU -- ^ Erased phantom List slot.
+  -- Set-kinded constructs. Order/duplicate-insensitive; canonical form
+  -- is sorted dedup.
   | SetVarU TVar -- ^ Set-kinded variable, never quantified by ForallU.
-  -- Set-kind empty/literal and union/inter/diff are now pattern synonyms
-  -- over 'LitU' / 'OpU' (see below).
-  | SetVoidU -- ^ Erased phantom Set slot. Distinct from empty set literal.
+  | SetVoidU -- ^ Erased phantom Set slot.
   -- Cross-kind functions (KeysU, ListToSetU, SizeU, ProjectFieldU,
   -- RecSingletonU) are now pattern synonyms over 'OpU' (see below).
   -- Rec/List operators 'RecRestrictU' and 'RecDiffListU' are also pattern
@@ -423,18 +414,35 @@ data TypeU
   -- Unified carriers (kind-system cleanup, Stage 1). 'OpU' subsumes every
   -- kind-arithmetic operator above (NatAdd/NatSub/.../KeysU/.../etc); 'LitU'
   -- subsumes every kind literal (NatLit/StrLit/RecEmpty+RecExtend/ListLit/
-  -- SetLit). Both coexist with the per-kind constructors until migration
-  -- finishes; arity for 'OpU' is fixed by 'opArity' and enforced by smart
+  -- SetLit). Arity for 'OpU' is fixed by 'opArity' and enforced by smart
   -- constructors ('mkNatAdd', ...).
   | OpU OpTag [TypeU]
   | LitU TyLit
   | LabeledU TVar TypeU -- ^ Transient: m@Int -> LabeledU (TV "m") Int, stripped in desugar
   deriving (Show, Ord, Eq)
 
--- Pattern synonyms for the migrated Nat-kind constructors. These are
--- drop-in replacements for the removed 'NatLitU' / 'NatAddU' / ...
--- constructors: every existing call site (in this module or any other)
--- continues to work in both pattern and expression position.
+-- Pattern synonyms surfacing kind-specific views of 'KVarU' / 'VoidU'
+-- and the unified 'OpU' / 'LitU' carriers. Bidirectional; usable in
+-- both expression and pattern position. List/Set kept as standalone
+-- constructors because their element kind is not tracked on 'KVarU'.
+pattern NatVarU :: TVar -> TypeU
+pattern NatVarU v = KVarU (v, KindNat)
+
+pattern StrVarU :: TVar -> TypeU
+pattern StrVarU v = KVarU (v, KindStr)
+
+pattern RecVarU :: TVar -> TypeU
+pattern RecVarU v = KVarU (v, KindRec)
+
+pattern NatVoidU :: TypeU
+pattern NatVoidU = VoidU KindNat
+
+pattern StrVoidU :: TypeU
+pattern StrVoidU = VoidU KindStr
+
+pattern RecVoidU :: TypeU
+pattern RecVoidU = VoidU KindRec
+
 pattern NatLitU :: Integer -> TypeU
 pattern NatLitU n = LitU (LNat n)
 
@@ -534,6 +542,10 @@ pattern RecSingletonU k v = OpU OpRecSingleton [k, v]
 -- this on its own (especially because 'RecDiffU' uses a view pattern and
 -- 'RecExtendU' requires a specific shape in slot 0), so we assert it
 -- explicitly.
+-- Two COMPLETE pragmas: one for code that pattern-matches through the
+-- kind-specific synonyms (NatVarU / StrVarU / RecVarU / NatVoidU / ...),
+-- and one for code that pattern-matches on the underlying KVarU / VoidU
+-- carriers directly. GHC accepts either as exhaustive.
 {-# COMPLETE
     VarU, NatVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
     NatVoidU, StrVarU, StrVoidU, RecVarU, RecVoidU,
@@ -545,6 +557,12 @@ pattern RecSingletonU k v = OpU OpRecSingleton [k, v]
     RecEmptyU, RecExtendU, RecUnionU, RecIntersectU,
     RecRestrictU, RecDiffListU, RecDiffU, RecSingletonU,
     KeysU, ListToSetU, SizeU, ProjectFieldU
+  #-}
+
+{-# COMPLETE
+    VarU, KVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
+    VoidU, ListVarU, ListVoidU, SetVarU, SetVoidU, LabeledU,
+    OpU, LitU
   #-}
 
 {- | Extended Type that may represent a language specific type as well as sets
@@ -814,6 +832,13 @@ instance Typelike TypeU where
   typeOf ListVoidU = NatVoidT
   typeOf (SetVarU _) = NatVoidT
   typeOf SetVoidU = NatVoidT
+  -- Kind-generic catch-all: KVarU / VoidU with kinds not covered above.
+  -- Nat kind -> NatVoidT, Str kind -> StrVoidT, others -> NatVoidT (there is
+  -- no per-kind void Type for List/Set/Rec; they all erase to NatVoidT).
+  typeOf (KVarU (_, KindStr)) = StrVoidT
+  typeOf (KVarU _) = NatVoidT
+  typeOf (VoidU KindStr) = StrVoidT
+  typeOf (VoidU _) = NatVoidT
   -- Cross-kind functions are now pattern synonyms over 'OpU'; their
   -- typeOf is dispatched via the unified 'OpU _ _' fallback below
   -- (erase to NatVoidT). The Nat / Str cases reduce to ground forms
@@ -857,6 +882,12 @@ instance Typelike TypeU where
   free ListVoidU = Set.empty
   free (SetVarU _) = Set.empty
   free SetVoidU = Set.empty
+  -- Kind-generic catch-all for KVarU / VoidU carriers of kinds not covered
+  -- by the specific pattern synonyms above (e.g. VoidU KindType inserted
+  -- by the gradual-desugar pass at 'fillMissingKindArgs'). All kind-tagged
+  -- variables and voids are inert w.r.t. Type-kinded free variables.
+  free (KVarU _) = Set.empty
+  free (VoidU _) = Set.empty
   -- Cross-kind functions are pattern synonyms over 'OpU'; their
   -- recursion is handled by the unified 'OpU _ args' clause below.
   -- Unified carriers: 'OpU' is uniform structural recursion across all
@@ -910,6 +941,12 @@ instance Typelike TypeU where
       sub t@ListVoidU = t
       sub t@(SetVarU _) = t
       sub t@SetVoidU = t
+      -- Kind-generic catch-all: KVarU / VoidU with kinds not covered
+      -- by the specific pattern synonyms above (e.g. VoidU KindType
+      -- from the gradual-desugar pass). Inert w.r.t. Type-var
+      -- substitution.
+      sub t@(KVarU _) = t
+      sub t@(VoidU _) = t
       -- Cross-kind functions are pattern synonyms over 'OpU'; their
       -- substitution is handled by the unified 'OpU op args' clause below.
       -- Unified carriers: uniform structural recursion. Lit payloads recurse
@@ -1106,6 +1143,15 @@ extractKey (ListVarU _) = TV "List"
 extractKey ListVoidU = TV "List"
 extractKey (SetVarU _) = TV "Set"
 extractKey SetVoidU = TV "Set"
+-- Kind-generic catch-all for KVarU / VoidU carriers of kinds not covered
+-- by the specific pattern synonyms above.
+extractKey (KVarU (v, _)) = v
+extractKey (VoidU KindNat) = TV "Nat"
+extractKey (VoidU KindStr) = TV "Str"
+extractKey (VoidU KindRec) = TV "Rec"
+extractKey (VoidU (KindList _)) = TV "List"
+extractKey (VoidU (KindSet _)) = TV "Set"
+extractKey (VoidU KindType) = TV "Type"
 extractKey (OpU op _) = opKeyTag op
 extractKey (LitU (LNat _)) = TV "Nat"
 extractKey (LitU (LStr _)) = TV "Str"
@@ -1271,6 +1317,13 @@ unresolvedType2type (ListVarU _) = NatVoidT
 unresolvedType2type ListVoidU = NatVoidT
 unresolvedType2type (SetVarU _) = NatVoidT
 unresolvedType2type SetVoidU = NatVoidT
+-- Kind-generic catch-all: KVarU / VoidU carriers not covered by the
+-- specific per-kind synonyms above. Str-kinded erases to StrVoidT (the
+-- only per-kind void Type); everything else erases to NatVoidT.
+unresolvedType2type (KVarU (_, KindStr)) = StrVoidT
+unresolvedType2type (KVarU _) = NatVoidT
+unresolvedType2type (VoidU KindStr) = StrVoidT
+unresolvedType2type (VoidU _) = NatVoidT
 -- Cross-kind functions are pattern synonyms over 'OpU'; their lowering
 -- is handled by the unified 'OpU _ _' clause below (erase to NatVoidT).
 -- Unified carriers: mirror typeOf above. Only Nat-op forms have ground
@@ -1443,6 +1496,11 @@ instance Pretty TypeU where
       f _ ListVoidU = "_"
       f _ (SetVarU v) = pretty v
       f _ SetVoidU = "_"
+      -- Kind-generic catch-all: KVarU / VoidU carriers not covered by
+      -- the specific per-kind synonyms above. Render as the underlying
+      -- name / underscore.
+      f _ (KVarU (v, _)) = pretty v
+      f _ (VoidU _) = "_"
       -- Cross-kind functions are pattern synonyms over 'OpU'; rendering
       -- is dispatched by the unified 'OpU OpKeys / OpListToSet / OpSize /
       -- OpProjectField / OpRecSingleton' clauses below.

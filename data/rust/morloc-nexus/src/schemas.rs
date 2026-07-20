@@ -32,7 +32,19 @@ struct TypeLayout<'a> {
 
 /// Pretty-render a parsed `Schema` as a morloc-flavored type string,
 /// suitable for the field-type column in the schemas block.
-fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
+///
+/// `self_ref`, when set, is a `(short_name, full_name)` pair for the
+/// record currently being rendered. Any `Recur` back-reference whose
+/// short name matches `short_name` is expanded to `full_name` so the
+/// parameterization of the outer type (`Container Int`) surfaces on
+/// self-referential fields, rather than collapsing to the bare
+/// constructor name (`Container`). Parens are added when the
+/// parameterized name contains a space so the surrounding context
+/// (e.g. an `?` wrapper) binds correctly.
+fn render_schema_type(
+    s: &morloc_runtime_types::schema::Schema,
+    self_ref: Option<(&str, &str)>,
+) -> String {
     use morloc_runtime_types::schema::SerialType::*;
     match s.serial_type {
         Nil => "()".into(),
@@ -52,15 +64,18 @@ fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
             "[{}]",
             s.parameters
                 .first()
-                .map(render_schema_type)
+                .map(|p| render_schema_type(p, self_ref))
                 .unwrap_or_else(|| "?".into())
         ),
         Tuple => {
             // `String` here is fully qualified because the surrounding
             // match brings `SerialType::String` into scope as a variant,
             // shadowing the std `String` type.
-            let inner: Vec<std::string::String> =
-                s.parameters.iter().map(render_schema_type).collect();
+            let inner: Vec<std::string::String> = s
+                .parameters
+                .iter()
+                .map(|p| render_schema_type(p, self_ref))
+                .collect();
             format!("({})", inner.join(", "))
         }
         Map => {
@@ -71,13 +86,18 @@ fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
             // schema block if its name appears as another arg's type.
             s.hint.clone().unwrap_or_else(|| "{..}".into())
         }
-        Optional => format!(
-            "?{}",
-            s.parameters
+        Optional => {
+            let inner = s
+                .parameters
                 .first()
-                .map(render_schema_type)
-                .unwrap_or_else(|| "?".into())
-        ),
+                .map(|p| render_schema_type(p, self_ref))
+                .unwrap_or_else(|| "?".into());
+            if inner.contains(' ') {
+                format!("?({})", inner)
+            } else {
+                format!("?{}", inner)
+            }
+        }
         Int => "Int".into(),
         Table => {
             // Table primitive: bare `T` renders as `Table` (any
@@ -93,16 +113,23 @@ fn render_schema_type(s: &morloc_runtime_types::schema::Schema) -> String {
                     .enumerate()
                     .map(|(i, p)| {
                         let key = s.keys.get(i).cloned().unwrap_or_default();
-                        format!("{}={}", key, render_schema_type(p))
+                        format!("{}={}", key, render_schema_type(p, self_ref))
                     })
                     .collect();
                 format!("Table {{{}}}", cols.join(", "))
             }
         }
-        // Recursive back-reference. Render as the declared name so
-        // help text shows e.g. `Tree` where the body would otherwise
-        // recurse.
-        Recur => s.name.clone().unwrap_or_else(|| "?".into()),
+        // Recursive back-reference. Wire schemas carry only the bare
+        // constructor name here (parameter applications are not
+        // encoded), so substitute the outer record's full parameterized
+        // display name when the reference points back at it.
+        Recur => {
+            let raw = s.name.clone().unwrap_or_else(|| "?".into());
+            match self_ref {
+                Some((short, full)) if raw == short => full.into(),
+                _ => raw,
+            }
+        }
         // Cross-pool stream handles: surface as their user-facing morloc
         // type. The wire is a tagged union of path / handle; help text
         // shows only the type layer.
@@ -133,6 +160,11 @@ fn extract_named_layout<'a>(
     // For a table, every field's wire schema is an Array -- peel one
     // layer so the user sees `name :: Str` not `name :: [Str]`.
     let strip_array = kind == "table";
+    // If the outer schema declares a name (the record's constructor,
+    // sans parameters), pair it with the layout's parameterized
+    // display name so `Recur` back-refs on self-referential fields
+    // can be re-parameterized on the way out.
+    let self_ref: Option<(&str, &str)> = parsed.name.as_deref().map(|short| (short, name));
     let fields = parsed
         .keys
         .iter()
@@ -143,7 +175,7 @@ fn extract_named_layout<'a>(
             } else {
                 p
             };
-            (k.clone(), render_schema_type(inner))
+            (k.clone(), render_schema_type(inner, self_ref))
         })
         .collect();
     Some(TypeLayout { name, kind, fields })

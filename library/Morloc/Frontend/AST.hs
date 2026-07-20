@@ -123,6 +123,9 @@ findTypeTerms (ListVarU _) = []
 findTypeTerms ListVoidU = []
 findTypeTerms (SetVarU _) = []
 findTypeTerms SetVoidU = []
+-- KVarU / VoidU carriers of kinds not covered above hold no type-terms.
+findTypeTerms (KVarU _) = []
+findTypeTerms (VoidU _) = []
 -- Unified carriers: uniform recursion across all operators and literal payloads.
 findTypeTerms (OpU _ args) = concatMap findTypeTerms args
 findTypeTerms (LitU (LNat _)) = []

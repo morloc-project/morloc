@@ -52,6 +52,7 @@ main = do
       , natLabelTests
       , natKindPromotionTests
       , natDimTests
+      , gradualDesugarTests
       , typedefKindVarTests
       , letBindingTests
       , irrefutablePatternTests
@@ -79,6 +80,9 @@ main = do
       -- , golden "specialization-1-py - numpy" "specialization-1-py"
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
+
+      , golden "vector-gradual-desugar-py" "vector-gradual-desugar-py"
+      , golden "vector-gradual-desugar-c" "vector-gradual-desugar-c"
 
       , golden "intrinsic-catch-chained-fallible-py" "intrinsic-catch-chained-fallible-py"
       , golden "intrinsic-io-catch" "intrinsic-io-catch"

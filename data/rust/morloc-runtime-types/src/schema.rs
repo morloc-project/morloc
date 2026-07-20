@@ -765,6 +765,47 @@ pub fn schema_to_string(schema: &Schema) -> String {
     buf
 }
 
+/// Structural compatibility with a wildcard rule for Array length:
+/// two Array schemas match if their lengths are equal or if either is
+/// `0` (unconstrained). Everything else -- serial type, size, keys,
+/// sub-schemas, declared/recur names -- must match exactly.
+pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
+    if a.serial_type != b.serial_type
+        || a.size != b.size
+        || a.keys != b.keys
+        || a.name != b.name
+        || a.parameters.len() != b.parameters.len()
+    {
+        return false;
+    }
+    // Array length compatibility: zero is wildcard on either side.
+    if a.serial_type == SerialType::Array {
+        let la = a.offsets.first().copied().unwrap_or(0);
+        let lb = b.offsets.first().copied().unwrap_or(0);
+        if la != 0 && lb != 0 && la != lb {
+            return false;
+        }
+    } else if a.offsets != b.offsets {
+        return false;
+    }
+    a.parameters.iter().zip(b.parameters.iter())
+        .all(|(pa, pb)| schemas_compatible(pa, pb))
+}
+
+/// String-form entry point for the wire-boundary comparator. Parses both
+/// operands via `parse_schema` and structurally compares. Returns true iff
+/// the two schemas describe compatible wire forms under the gradual-typing
+/// subtype rule (see `schemas_compatible`).
+pub fn schema_strings_compatible(stored: &str, requested: &str) -> bool {
+    match (parse_schema(stored), parse_schema(requested)) {
+        (Ok(a), Ok(b)) => schemas_compatible(&a, &b),
+        // If either side fails to parse, fall back to strict string equality.
+        // This preserves the previous behavior for malformed schemas rather
+        // than silently accepting them as compatible.
+        _ => stored == requested,
+    }
+}
+
 fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
     // `<hint>` prefixes are deliberately NOT emitted: hints are
     // compile-time state for pool-side native dispatch (numpy /

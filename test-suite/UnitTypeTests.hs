@@ -39,6 +39,7 @@ module UnitTypeTests
   , natLabelTests
   , natKindPromotionTests
   , natDimTests
+  , gradualDesugarTests
   , letBindingTests
   , irrefutablePatternTests
   , aliasConstructorTests
@@ -5057,6 +5058,169 @@ natDimTests =
           Left e -> assertFailure $ "Expected success, got: " <> show e
     ]
 
+gradualDesugarTests :: TestTree
+gradualDesugarTests =
+  testGroup
+    "gradual desugar of missing kind arguments"
+    [ -- Baseline: pre-existing annotation forms still typecheck.
+      expectPass "concrete-Nat: `Vector 3 Int`"
+        [r|
+      module main (foo)
+      type Vector (n :: Nat) a = [a]
+      foo :: Vector 3 Int -> Int
+      foo _ = 0
+        |]
+    , expectPass "polymorphic-Nat: `Vector n Int`"
+        [r|
+      module main (foo)
+      type Vector (n :: Nat) a = [a]
+      foo :: Vector n Int -> Int
+      foo _ = 0
+        |]
+    , expectPass "Nat arithmetic: `Vector (2+3) Int`"
+        [r|
+      module main (foo)
+      type Vector (n :: Nat) a = [a]
+      foo :: Vector (2+3) Int -> Int
+      foo _ = 0
+        |]
+
+    -- Single-Nat gradual form.
+    , expectPass "gradual `Vector Int` typechecks"
+        [r|
+      module main (foo)
+      type Vector (n :: Nat) a = [a]
+      foo :: Vector Int -> Int
+      foo _ = 0
+        |]
+    , expectPass "gradual `Vector Int` accepts list literal of any length"
+        [r|
+      module main (xs)
+      type Vector (n :: Nat) a = [a]
+      xs :: Vector Int
+      xs = [1, 2, 3, 4, 5]
+        |]
+    , expectPass "gradual `[Vector Int]` accepts het-length elements"
+        [r|
+      module main (xs)
+      type Vector (n :: Nat) a = [a]
+      xs :: [Vector Int]
+      xs = [[1, 2], [3, 4, 5], [6]]
+        |]
+
+    -- Structural check on the desugar output. After alias reduction
+    -- `Vector NatVoidU Int` may collapse to `[Int]`; both encode the
+    -- same runtime shape.
+    , testCase "gradual `Vector Int` desugars to `AppU Vector [NatVoidU, Int]`" $ do
+        result <- runFrontRaw [r|
+          module main (foo)
+          type Vector (n :: Nat) a = [a]
+          foo :: Vector Int -> Int
+          foo _ = 0
+            |]
+        case result of
+          Right [x] -> case stripForalls (gtypeof x) of
+            FunU [AppU (VarU (TV "Vector")) [NatVoidU, VarU (TV "Int")]] _ -> return ()
+            FunU [AppU (VarU (TV "List")) [VarU (TV "Int")]] _ -> return ()
+            t -> assertFailure $
+                   "Expected `Vector NatVoidU Int -> _` or `[Int] -> _`, got: " <> show t
+          Right _ -> assertFailure "Expected exactly one export"
+          Left e  -> assertFailure $ "Expected success, got: " <> show e
+
+    -- Concrete <-> gradual subtype flows in both directions.
+    , expectPass "concrete `Vector 3 Int` flows into `Vector Int` arg"
+        [r|
+      module main (result)
+      type Vector (n :: Nat) a = [a]
+      f :: Vector Int -> Int
+      f _ = 0
+      xs :: Vector 3 Int
+      xs = [1, 2, 3]
+      result :: Int
+      result = f xs
+        |]
+    , expectPass "gradual `Vector Int` flows into `Vector 3 Int` arg"
+        [r|
+      module main (result)
+      type Vector (n :: Nat) a = [a]
+      f :: Vector 3 Int -> Int
+      f _ = 0
+      xs :: Vector Int
+      xs = [1, 2, 3]
+      result :: Int
+      result = f xs
+        |]
+
+    -- Multi-Nat: Tensor3-style with 3 Nat params + 1 Type.
+    , expectPass "gradual `Tensor3 Int` (3 Nat positions missing)"
+        [r|
+      module main (foo)
+      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      foo :: Tensor3 Int -> Int
+      foo _ = 0
+        |]
+    , expectPass "gradual `Tensor3 h Int` (2 Nat positions missing)"
+        [r|
+      module main (foo)
+      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      foo :: Tensor3 h Int -> Int
+      foo _ = 0
+        |]
+    , expectPass "gradual `Tensor3 h w Int` (1 Nat position missing)"
+        [r|
+      module main (foo)
+      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      foo :: Tensor3 h w Int -> Int
+      foo _ = 0
+        |]
+    , expectPass "fully-specified `Tensor3 2 3 5 Int` (no desugar)"
+        [r|
+      module main (foo)
+      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      foo :: Tensor3 2 3 5 Int -> Int
+      foo _ = 0
+        |]
+
+    -- Multi-kind: Table with Nat + Rec params.
+    , expectPass "gradual `Table` (both Nat and Rec missing)"
+        [r|
+      module main (foo)
+      type Table (n :: Nat) (r :: Rec) = Int
+      foo :: Table -> Int
+      foo _ = 0
+        |]
+    , expectPass "partial `Table 100` (only Rec missing)"
+        [r|
+      module main (foo)
+      type Table (n :: Nat) (r :: Rec) = Int
+      foo :: Table 100 -> Int
+      foo _ = 0
+        |]
+
+    -- Type-position under-application is a normal arity error.
+    , expectError "bare `Vector` (missing Type arg) is rejected"
+        [r|
+      module main (foo)
+      type Vector (n :: Nat) a = [a]
+      foo :: Vector -> Int
+      foo _ = 0
+        |]
+
+    -- Regression: polymorphic-Nat call-through via NatSolver's poly extractor.
+    , expectPass "`g v = f v` with `Vector n Int` on both sides"
+        [r|
+      module main (g)
+      type Vector (n :: Nat) a = [a]
+      f :: Vector n Int -> Int
+      f _ = 0
+      g :: Vector n Int -> Int
+      g v = f v
+        |]
+    ]
+  where
+    stripForalls (ForallU _ t) = stripForalls t
+    stripForalls t = t
+
 natArithTests :: TestTree
 natArithTests =
   testGroup
@@ -5098,14 +5262,31 @@ natArithTests =
         in case NS.solveNat e1 e2 of
              Right subs -> assertEqual "" subs Map.empty
              Left err -> assertFailure $ "Expected success, got: " ++ show err
-    -- extractLinearVar soundness fix: i*j ~ n must be Deferred, not n=0
-    , testCase "extractLinearVar fix: i*j ~ n is Deferred" $
-        let e1 = NS.NatMul (NS.NatVar (TV "i")) (NS.NatVar (TV "j"))
-            e2 = NS.NatVar (TV "n")
-        in case NS.solveNat e1 e2 of
-             Left (NS.Deferred _) -> return ()
-             Right subs -> assertFailure $ "Expected Deferred, got solved: " ++ show subs
-             Left NS.Contradiction -> assertFailure "Expected Deferred, got Contradiction"
+    -- Polynomial substitution. When the caller passes a @(v, rhs)@ the
+    -- assertion also checks that @v@ is the chosen substituted variable;
+    -- passing @Nothing@ checks only correctness (satisfaction), useful
+    -- when the direction depends on sort-order tie-breaking.
+    , testCase "polynomial: i*j ~ n => n = i*j" $
+        assertSolvesTo (nMul (nVar "i") (nVar "j")) (nVar "n")
+                       (Just (TV "n", nMul (nVar "i") (nVar "j")))
+    , testCase "polynomial: n ~ i + j => n = i + j" $
+        assertSolvesTo (nVar "n") (nAdd (nVar "i") (nVar "j"))
+                       (Just (TV "n", nAdd (nVar "i") (nVar "j")))
+    , testCase "polynomial: n ~ 2*i + 3 => n = 2*i + 3" $
+        assertSolvesTo (nVar "n") (nAdd (nMul (nLit 2) (nVar "i")) (nLit 3))
+                       (Just (TV "n", nAdd (nMul (nLit 2) (nVar "i")) (nLit 3)))
+    , testCase "asymmetric: 2*n ~ i => i = 2*n (only division-exact direction)" $
+        assertSolvesTo (nMul (nLit 2) (nVar "n")) (nVar "i")
+                       (Just (TV "i", nMul (nLit 2) (nVar "n")))
+    , testCase "variable unify: n1 ~ n2 (correctness only; direction ties)" $
+        assertSolvesTo (nVar "n1") (nVar "n2") Nothing
+    , testCase "divisible: 2*n ~ 2*i (correctness only; direction ties)" $
+        assertSolvesTo (nMul (nLit 2) (nVar "n")) (nMul (nLit 2) (nVar "i")) Nothing
+    -- Genuinely undecidable cases: no linear substitution captures them.
+    , testCase "undecidable: n*m ~ 5 is Deferred" $
+        assertDeferred (nMul (nVar "n") (nVar "m")) (nLit 5)
+    , testCase "undecidable Diophantine: 2*n + 3*m ~ 5 is Deferred" $
+        assertDeferred (nAdd (nMul (nLit 2) (nVar "n")) (nMul (nLit 3) (nVar "m"))) (nLit 5)
     , testCase "linear solving still works: n + 3 ~ 8 => n = 5" $
         let e1 = NS.NatAdd (NS.NatVar (TV "n")) (NS.NatLit 3)
             e2 = NS.NatLit 8
@@ -5160,6 +5341,32 @@ natArithTests =
       x = split a
         |]
     ]
+  where
+    nVar s = NS.NatVar (TV s)
+    nLit  = NS.NatLit
+    nAdd  = NS.NatAdd
+    nMul  = NS.NatMul
+
+    assertSolvesTo :: NS.NatExpr -> NS.NatExpr -> Maybe (TVar, NS.NatExpr) -> Assertion
+    assertSolvesTo e1 e2 mExpected = case NS.solveNat e1 e2 of
+      Left err -> assertFailure $ "Expected solve, got: " ++ show err
+      Right subs -> do
+        assertBool ("Substitution does not satisfy: " ++ show subs)
+          (NS.natEqual (NS.substituteNat subs e1) (NS.substituteNat subs e2))
+        case mExpected of
+          Nothing -> return ()
+          Just (v, rhs) -> case Map.lookup v subs of
+            Just e | NS.natEqual e rhs -> return ()
+            Just e  -> assertFailure $ "Direction: expected " ++ show v ++ " = "
+                                     ++ show rhs ++ ", got " ++ show e
+            Nothing -> assertFailure $ "Direction: expected " ++ show v
+                                     ++ " in subs, got: " ++ show subs
+
+    assertDeferred :: NS.NatExpr -> NS.NatExpr -> Assertion
+    assertDeferred e1 e2 = case NS.solveNat e1 e2 of
+      Left (NS.Deferred _) -> return ()
+      Right subs -> assertFailure $ "Expected Deferred, got solved: " ++ show subs
+      Left NS.Contradiction -> assertFailure "Expected Deferred, got Contradiction"
 
 -- | Tests that typedef expansion correctly substitutes kind-specific
 -- variables (NatVarU/StrVarU/RecVarU/ListVarU/SetVarU) into the body.
