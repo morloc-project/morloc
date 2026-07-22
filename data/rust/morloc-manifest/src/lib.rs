@@ -351,6 +351,11 @@ pub struct Terminal {
     /// docstring.
     #[serde(default)]
     pub description: String,
+    /// True for `render`/`render.buffer` terminals: the handler emits the
+    /// final bytes, so the nexus defaults this flag's output format to
+    /// `raw` (verbatim) instead of `-f`-rendered. `-f` still overrides.
+    #[serde(default)]
+    pub render: bool,
 }
 
 impl Command {

@@ -1,0 +1,9 @@
+module main (g)
+
+import vector-cpp
+
+source Cpp from "impl.hpp" ("toBytes" as toBytes)
+
+toBytes :: [Int] -> Vector U8
+g :: [Int] -> Vector U8
+g = toBytes

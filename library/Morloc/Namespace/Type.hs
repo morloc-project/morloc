@@ -634,9 +634,13 @@ data Check
 -- (see Frontend/Desugar.hs). The term's type discipline is enforced by
 -- the normal typechecker.
 data WithSpec = WithSpec
-  { wsShort :: Maybe Char
-  , wsLong  :: Text
-  , wsTerm  :: EVar
+  { wsShort  :: Maybe Char
+  , wsLong   :: Text
+  , wsTerm   :: EVar
+  , wsRender :: Bool  -- ^ framing: False = `with`   (typed output, rendered by -f)
+                      --            True  = `render` (final bytes, emitted verbatim)
+  , wsBuffer :: Bool  -- ^ buffering: False = batch (per-chunk, streaming)
+                      --              True  = `.buffer` (materialize the whole stream)
   }
   deriving (Show, Ord, Eq)
 

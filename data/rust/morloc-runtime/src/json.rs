@@ -90,6 +90,12 @@ impl ShmReader {
         }
     }
 
+    /// Raw bytes with no UTF-8 validation -- for `Vector U8` / `[U8]` bodies,
+    /// which may be arbitrary binary (a `render` handler's raw output).
+    fn read_bytes(&self, offset: usize, len: usize) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.add(offset), len) }
+    }
+
     fn at(&self, offset: usize) -> ShmReader {
         unsafe { ShmReader::new(self.ptr.add(offset)) }
     }
@@ -559,6 +565,85 @@ pub fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocEr
             map_io(w.write_all(b"\n"))?;
             map_io(w.flush())
         }
+    }
+}
+
+/// Write the raw byte body of a `String` voidstar (an `Array<u1>`) with no
+/// quoting or escaping.
+fn write_str_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocError> {
+    let arr = r.read_array(0);
+    if arr.size > 0 && arr.data != RELNULL {
+        let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
+        map_io(w.write_all(dr.read_str(0, arr.size).as_bytes()))?;
+    }
+    Ok(())
+}
+
+/// Write the raw bytes of a `Vector U8` / `[U8]` voidstar (an `Array<u8>`),
+/// with no interpretation -- the bytes are emitted exactly, so a `render`
+/// handler can produce arbitrary binary output.
+fn write_u8_array_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocError> {
+    let arr = r.read_array(0);
+    if arr.size > 0 && arr.data != RELNULL {
+        let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
+        map_io(w.write_all(dr.read_bytes(0, arr.size)))?;
+    }
+    Ok(())
+}
+
+/// Verbatim output for the `-f raw` format -- the output path for `render`
+/// terminal handlers (which produce the final bytes). Supported shapes:
+///   * `Str`         -- the body, unquoted (whole-list textual render)
+///   * `[Str]`       -- concatenated bodies (streaming textual render)
+///   * `Vector U8`   -- the raw bytes (whole-list binary render)
+///   * `[Vector U8]` -- concatenated byte blocks (streaming binary render)
+/// Any other shape is a clear error.
+pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+    match schema.serial_type {
+        SerialType::String => {
+            let r = unsafe { ShmReader::new(ptr) };
+            write_str_body(&r, &mut w)?;
+            map_io(w.flush())
+        }
+        SerialType::Array => {
+            let es = schema.parameters.first().ok_or_else(|| {
+                err("-f raw: array output has no element schema")
+            })?;
+            let r = unsafe { ShmReader::new(ptr) };
+            let arr = r.read_array(0);
+            if arr.size == 0 || arr.data == RELNULL {
+                return map_io(w.flush());
+            }
+            // `Vector U8` / `[U8]`: the array data IS the byte body.
+            if es.serial_type == SerialType::Uint8 {
+                write_u8_array_body(&r, &mut w)?;
+                return map_io(w.flush());
+            }
+            // `[Str]` / `[Vector U8]`: emit each element's body in turn.
+            let elem_is_u8_vec = es.serial_type == SerialType::Array
+                && es.parameters.first().map_or(false, |i| i.serial_type == SerialType::Uint8);
+            if es.serial_type != SerialType::String && !elem_is_u8_vec {
+                return Err(err(
+                    "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
+                     (a `render` handler's bytes)",
+                ));
+            }
+            let data = shm::rel2abs(arr.data)?;
+            for i in 0..arr.size {
+                let er = unsafe { ShmReader::new(data.add(i * es.width)) };
+                if elem_is_u8_vec {
+                    write_u8_array_body(&er, &mut w)?;
+                } else {
+                    write_str_body(&er, &mut w)?;
+                }
+            }
+            map_io(w.flush())
+        }
+        _ => Err(err(
+            "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
+             (a `render` handler's bytes)",
+        )),
     }
 }
 

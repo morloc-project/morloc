@@ -1,0 +1,31 @@
+module main (stream)
+
+-- Exercises the whole-form `render:` quadrant (gather the complete stream,
+-- then apply the handler once and emit its result verbatim). Covers both a
+-- text render (`[Int] -> Str`) and a BINARY render (`[Int] -> Vector U8`,
+-- emitted as raw bytes with no framing). The `with`/`with.buffer`/
+-- `render.buffer` quadrants are covered by collect-formatters; this fills the
+-- last cell of the 2x2 matrix and the binary-output path.
+
+import vector-cpp
+
+source Cpp from "impl.hpp"
+  ( "mk"      as mk
+  , "joinAll" as joinAll
+  , "toBytes" as toBytes
+  )
+
+mk :: Int -> [Int]
+joinAll :: [Int] -> Str
+toBytes :: [Int] -> Vector U8
+
+produce :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' Stream integer batches
+--' render: -j/--joined=joinAll
+--' render: -b/--bytes=toBytes
+stream :: <IO, Err> ()
+stream = @collect produce

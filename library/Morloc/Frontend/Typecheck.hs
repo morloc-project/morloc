@@ -1430,6 +1430,8 @@ intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
 intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
 intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
+intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
+intrinsicType IntrTmpfile = EffectU ioErrEffectSet BT.strU
 intrinsicType IntrNext =
   error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
 intrinsicType IntrStream =
@@ -1454,6 +1456,8 @@ intrinsicType IntrThrow =
   error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
 intrinsicType IntrCatch =
   error "intrinsicType: IntrCatch must be typed via synthE's dedicated clause"
+intrinsicType IntrCollect =
+  error "intrinsicType: IntrCollect is expanded at desugar and never reaches typecheck"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
 -- it never appears as a user-facing intrinsic so no type rule is needed.
 intrinsicType IntrIFileWalk =

@@ -718,6 +718,33 @@ inline void _mlc_flush(int64_t handle) {
     }
 }
 
+// @tell: elements written to @stdout so far (its element_count). Never fails.
+inline uint64_t _mlc_tell() {
+    char* errmsg = NULL;
+    uint64_t n = mlc_tell(&errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return n;
+}
+
+// @tmpfile: create a fresh temp file (removed when the pool call ends) and
+// return its path. Used by the whole-list with:/render: gather.
+inline std::string _mlc_tmpfile() {
+    char* errmsg = NULL;
+    char* path = mlc_tmpfile(&errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    std::string result(path);
+    free(path);
+    return result;
+}
+
+// @close on a Str path: unlink a registered temp file. Errors if the path
+// was not created by _mlc_tmpfile in this call.
+inline void _mlc_unlink_tmp(const std::string& path) {
+    char* errmsg = NULL;
+    mlc_unlink_tmp(path.c_str(), &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+}
+
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     char* errmsg = NULL;
     va_list args;

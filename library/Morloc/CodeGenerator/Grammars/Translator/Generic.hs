@@ -953,6 +953,9 @@ genericPrintExpr desc = go
     go (IIntrinsicClose h) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_close(" <> go h <> ")"
+    go (IIntrinsicUnlinkTemp path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_unlink_tmp(" <> go path <> ")"
     go (IIntrinsicFSchema path) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_fschema(" <> go path <> ")"
@@ -986,6 +989,12 @@ genericPrintExpr desc = go
     go (IIntrinsicFlush handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_flush(" <> go handle <> ")"
+    go IIntrinsicTell =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_tell()"
+    go IIntrinsicTmpfile =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_tmpfile()"
     go (IIntrinsicStdin sid) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_stdin(" <> schemaRef sid <> ")"

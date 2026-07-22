@@ -114,6 +114,8 @@ printExpr (IIntrinsicOpen kind path) =
   [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
 printExpr (IIntrinsicClose h) =
   [idoc|_mlc_close(#{printExpr h})|]
+printExpr (IIntrinsicUnlinkTemp path) =
+  [idoc|_mlc_unlink_tmp(#{printExpr path})|]
 printExpr (IIntrinsicFSchema path) =
   [idoc|_mlc_fschema(#{printExpr path})|]
 printExpr (IIntrinsicFLength h) =
@@ -140,6 +142,10 @@ printExpr (IIntrinsicConcat paths dest) =
   [idoc|_mlc_concat(#{printExpr paths}, #{printExpr dest})|]
 printExpr (IIntrinsicFlush h) =
   [idoc|_mlc_flush(#{printExpr h})|]
+printExpr IIntrinsicTell =
+  [idoc|_mlc_tell()|]
+printExpr IIntrinsicTmpfile =
+  [idoc|_mlc_tmpfile()|]
 printExpr (IIntrinsicStdin sid) =
   [idoc|_mlc_open_stdin(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicStdout sid) =

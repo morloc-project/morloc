@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.LambdaEval
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
+import Morloc.Frontend.Namespace (newIndex)
 
 -- {- | Remove lambdas introduced through substitution
 --
@@ -153,8 +154,8 @@ applyLambdas
           (e1 : es)
         )
     ) =
-    let e2' = substituteAnnoS v e1 e2
-     in applyLambdas
+    do e2' <- substituteAnnoS v e1 e2
+       applyLambdas
           ( AnnoS
               i1
               tb1
@@ -172,7 +173,7 @@ applyLambdas
 -- beta-reduce.
 applyLambdas (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2)) = do
   e1' <- applyLambdas e1
-  let e2' = substituteAnnoS v e1' e2
+  e2' <- substituteAnnoS v e1' e2
   inner <- applyLambdas e2'
   let AnnoS _ _ innerExpr = inner
   return (AnnoS g c innerExpr)
@@ -186,15 +187,36 @@ applyLambdas (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
 -- Every other node: recurse structurally.
 applyLambdas (AnnoS g c e) = AnnoS g c <$> mapExprSM applyLambdas e
 
+-- | Substitute every free reference to @v@ in the target with the replacement
+-- @r@. Each inserted copy of @r@ is REINDEXED with fresh indices (source
+-- positions preserved via 'getCounterWithPos'). This is essential: a single
+-- definition or lambda parameter can be referenced multiple times (e.g. a
+-- producer @\\sink -> do { sink a; sink b }@ that invokes its function argument
+-- more than once), and without fresh indices the copies collapse to a single
+-- manifold at codegen -- so all call sites would share the first site's bound
+-- value. See the module header ("Substitution requires reindexing").
 substituteAnnoS ::
   EVar ->
   AnnoS (Indexed Type) One a ->
   AnnoS (Indexed Type) One a ->
-  AnnoS (Indexed Type) One a
+  MorlocMonad (AnnoS (Indexed Type) One a)
 substituteAnnoS v r = f
   where
-    f (AnnoS _ _ (BndS v'))            | v == v'     = r
-    f (AnnoS _ _ (LetBndS v'))         | v == v'     = r
-    f e0@(AnnoS _ _ (LamS vs _))       | v `elem` vs = e0  -- shadowed
-    f e0@(AnnoS _ _ (LetS v' _ _))     | v == v'     = e0  -- shadowed
-    f (AnnoS g c e)                    = AnnoS g c (mapExprS f e)
+    f (AnnoS _ _ (BndS v'))            | v == v'     = reindexAnnoS r
+    f (AnnoS _ _ (LetBndS v'))         | v == v'     = reindexAnnoS r
+    f e0@(AnnoS _ _ (LamS vs _))       | v `elem` vs = return e0  -- shadowed
+    f e0@(AnnoS _ _ (LetS v' _ _))     | v == v'     = return e0  -- shadowed
+    f (AnnoS g c e)                    = AnnoS g c <$> mapExprSM f e
+
+-- | Assign fresh indices to every node of an 'AnnoS' subtree, preserving each
+-- node's type annotation. Uses 'newIndex', which copies ALL index-keyed state
+-- (source map, manifold config/label, name, signatures, ...) from the old
+-- index to the fresh one -- so an inserted copy keeps its log label, cache
+-- config, and diagnostics, not just its srcloc. Used by 'substituteAnnoS' so
+-- each inserted copy of a definition/lambda gets distinct manifold ids while
+-- retaining its per-manifold metadata.
+reindexAnnoS :: AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+reindexAnnoS (AnnoS (Idx i t) c e) = do
+  i' <- newIndex i
+  e' <- mapExprSM reindexAnnoS e
+  return (AnnoS (Idx i' t) c e')

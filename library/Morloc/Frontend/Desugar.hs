@@ -16,6 +16,8 @@ main wrapping.
 module Morloc.Frontend.Desugar
   ( desugarProgram
   , desugarExpr
+  , injectTerminalActionsWithSigs
+  , expandCollectE
   , DState (..)
   , D
   , ParseError (..)
@@ -340,8 +342,11 @@ parseFormAtom raw = case T.strip raw of
 -- `<flag-spec>` is either `--long` or `-x/--long`; short-only (`-x`)
 -- is rejected because the long form is required for a stable descriptor
 -- in `--help`. `<term-name>` is a plain morloc identifier.
-parseWithSpec :: Text -> Either Text WithSpec
-parseWithSpec raw =
+-- The 'render' flag selects verbatim output ('render'/'render.buffer') over
+-- `-f`-formatted output ('with'/'with.buffer'); 'buffer' selects whole-stream
+-- materialization ('.buffer') over per-batch streaming.
+parseWithSpec :: Bool -> Bool -> Text -> Either Text WithSpec
+parseWithSpec render buffer raw =
   case T.breakOn "=" (T.strip raw) of
     (_, "") ->
       Left "expected `<flag-spec>=<term-name>` (missing `=`)."
@@ -351,7 +356,7 @@ parseWithSpec raw =
            then Left "term name is empty after `=`."
            else case parseWithFlagSpec flagPart of
              Left e -> Left e
-             Right (short, long) -> Right (WithSpec short long (EV termPart))
+             Right (short, long) -> Right (WithSpec short long (EV termPart) render buffer)
 
 parseWithFlagSpec :: Text -> Either Text (Maybe Char, Text)
 parseWithFlagSpec txt = case parseCliOpt txt of
@@ -503,13 +508,21 @@ processArgDocLines = foldl step ([], [], defaultValue)
         ["list", "check", kind] -> case parseCheck kind v of
           Right c -> (errs, ws, d {docListChecks = docListChecks d <> [c]})
           Left e  -> (errs <> ["in `list.check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
-        ["with"] -> case parseWithSpec v of
-          Right ws' -> (errs, ws, d {docWith = docWith d <> [ws']})
-          Left e -> (errs <> ["in `with: " <> v <> "`: " <> e], ws, d)
+        ["with"] -> withCase errs ws d False False "with" v
+        ["with", "buffer"] -> withCase errs ws d False True "with.buffer" v
+        ["render"] -> withCase errs ws d True False "render" v
+        ["render", "buffer"] -> withCase errs ws d True True "render.buffer" v
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k
               desc = k <> ": " <> v
            in (errs, ws <> [w], d {docLines = docLines d <> [desc]})
+
+    -- Parse one `with`/`with.buffer`/`render`/`render.buffer` directive into a
+    -- WithSpec, appending it to docWith (or an error to errs).
+    withCase errs ws d render buffer kw v =
+      case parseWithSpec render buffer v of
+        Right ws' -> (errs, ws, d {docWith = docWith d <> [ws']})
+        Left e -> (errs <> ["in `" <> kw <> ": " <> v <> "`: " <> e], ws, d)
 
 parseDocBool :: Text -> Bool
 parseDocBool v = v == "true" || v == "True"
@@ -652,9 +665,9 @@ rejectWithHere pos ctx v =
       <> renderWithSpec s <> "`."
 
 renderWithSpec :: WithSpec -> Text
-renderWithSpec (WithSpec (Just c) l (EV t)) =
+renderWithSpec (WithSpec (Just c) l (EV t) _ _) =
   "-" <> T.singleton c <> "/--" <> l <> "=" <> t
-renderWithSpec (WithSpec Nothing l (EV t)) =
+renderWithSpec (WithSpec Nothing l (EV t) _ _) =
   "--" <> l <> "=" <> t
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
@@ -1799,7 +1812,9 @@ desugarExpr (Loc sp (CAsE _ _)) =
   dfail (startPos sp) "as-pattern '@' is only valid in a binding position"
 
 -- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
--- Fully applied intrinsics pass through as IntrinsicE nodes.
+-- Fully applied intrinsics pass through as IntrinsicE nodes. @collect passes
+-- through unchanged here (arity 1) so the terminal-action synthesis can see
+-- and rewrite it; it is expanded later by 'expandCollectE'.
 etaExpandIntrinsic :: Span -> Intrinsic -> [ExprI] -> D ExprI
 etaExpandIntrinsic sp intr args = do
   let arity = intrinsicArity intr
@@ -1813,6 +1828,78 @@ etaExpandIntrinsic sp intr args = do
       varExprs <- mapM (\v -> freshExprSpan sp (VarE defaultValue v)) vars
       intrExpr <- freshExprSpan sp (IntrinsicE intr (args ++ varExprs))
       freshExprSpan sp (LamE vars intrExpr)
+
+-- | Late pass (after terminal-action synthesis): expand every @collect node
+-- to the default stdout-sink producer pattern:
+--
+-- >  do
+-- >    o <- @stdout
+-- >    body (@write 0 o)
+-- >    @close o
+--
+-- Runs AFTER 'injectTerminalActions' so the synthesis can rewrite the
+-- @collect argument (the producer) per `--' with:` flag before it is
+-- expanded. Fully recursive over 'Expr' so a @collect nested inside a
+-- guarded do-block (the mosm idiom) is still reached. The @stdout element
+-- type is left to inference (fixed by the body's sink parameter type).
+expandCollectE :: ExprI -> D ExprI
+expandCollectE self@(ExprI i e) = case e of
+  IntrinsicE IntrCollect [body] -> do
+    body' <- expandCollectE body
+    expandCollectBody self body'
+  ModE v xs -> ExprI i . ModE v <$> mapM expandCollectE xs
+  AssE v b ws -> (\b' ws' -> ExprI i (AssE v b' ws')) <$> expandCollectE b <*> mapM expandCollectE ws
+  IstE cn ts b -> ExprI i . IstE cn ts <$> mapM expandCollectE b
+  LstE es -> ExprI i . LstE <$> mapM expandCollectE es
+  TupE es -> ExprI i . TupE <$> mapM expandCollectE es
+  NamE kes -> ExprI i . NamE <$> mapM (\(k, x) -> (,) k <$> expandCollectE x) kes
+  AppE f xs -> (\f' xs' -> ExprI i (AppE f' xs')) <$> expandCollectE f <*> mapM expandCollectE xs
+  LamE ps b -> ExprI i . LamE ps <$> expandCollectE b
+  AnnE b t -> (\b' -> ExprI i (AnnE b' t)) <$> expandCollectE b
+  LetE bs b -> (\bs' b' -> ExprI i (LetE bs' b'))
+                 <$> mapM (\(v, x) -> (,) v <$> expandCollectE x) bs <*> expandCollectE b
+  IfE c t f -> (\c' t' f' -> ExprI i (IfE c' t' f'))
+                 <$> expandCollectE c <*> expandCollectE t <*> expandCollectE f
+  DoBlockE b -> ExprI i . DoBlockE <$> expandCollectE b
+  EvalE b -> ExprI i . EvalE <$> expandCollectE b
+  IntrinsicE intr es -> ExprI i . IntrinsicE intr <$> mapM expandCollectE es
+  ParenE b -> ExprI i . ParenE <$> expandCollectE b
+  BopE l p v r -> (\l' r' -> ExprI i (BopE l' p v r')) <$> expandCollectE l <*> expandCollectE r
+  _ -> return self
+
+-- | Build the @collect do-block, inheriting source positions from @ref@ (the
+-- original @collect node). @body@ is the (already-expanded) producer.
+expandCollectBody :: ExprI -> ExprI -> D ExprI
+expandCollectBody ref body = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let oVar = EV ("_collect_o_" <> T.pack (show idx))
+      dVar = EV ("_do_collect_" <> T.pack (show idx))
+  -- o <- @stdout
+  stdoutE <- freshExprFrom ref (IntrinsicE IntrStdout [])
+  bindStdout <- freshExprFrom ref (EvalE stdoutE)
+  -- the sink: @write 0 o  (eta-expanded to \v -> @write 0 o v :: [a] -> <IO> ())
+  oRef1 <- freshExprFrom ref (VarE defaultValue oVar)
+  zeroE <- freshExprFrom ref (IntE 0)
+  sinkE <- mkWriteSink ref zeroE oRef1
+  -- body (@write 0 o)  -- bare statement, forced
+  bodyApp <- freshExprFrom ref (AppE body [sinkE])
+  forceBody <- freshExprFrom ref (EvalE bodyApp)
+  -- @close o  -- final statement / value
+  oRef2 <- freshExprFrom ref (VarE defaultValue oVar)
+  closeE <- freshExprFrom ref (IntrinsicE IntrClose [oRef2])
+  -- assemble: DoBlockE (LetE o=@stdout (LetE _=body(sink) (@close o)))
+  inner2 <- freshExprFrom ref (LetE [(dVar, forceBody)] closeE)
+  inner1 <- freshExprFrom ref (LetE [(oVar, bindStdout)] inner2)
+  freshExprFrom ref (DoBlockE inner1)
+
+-- | @write 0 o@ eta-expanded to a sink @\\v -> @write 0 o v@.
+mkWriteSink :: ExprI -> ExprI -> ExprI -> D ExprI
+mkWriteSink ref zeroE oRef = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let vVar = EV ("_collect_v_" <> T.pack (show idx))
+  vRef <- freshExprFrom ref (VarE defaultValue vVar)
+  writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, vRef])
+  freshExprFrom ref (LamE [vVar] writeE)
 
 
 --------------------------------------------------------------------
@@ -2228,7 +2315,12 @@ desugarProgram isImplicitMain cstNodes = do
   exprIs' <- if isImplicitMain
                then mkImplicitMain exprIs
                else return exprIs
-  mapM injectTerminalActions exprIs'
+  -- Terminal-action synthesis (`--' with:`) and @collect expansion are
+  -- deferred to a post-parse DAG pass ('Frontend.API.finalizeCollectActions').
+  -- The synthesis must detect offset (`U64 -> ...`) and IFile handlers from
+  -- the handler's SIGNATURE, which may be imported from another module; those
+  -- signatures are not available until the whole import DAG is parsed.
+  return exprIs'
 
 --------------------------------------------------------------------
 -- Terminal-action synthesis (`--' with:` docstring atom)
@@ -2241,12 +2333,16 @@ desugarProgram isImplicitMain cstNodes = do
 -- codegen handle the composed binding as an ordinary export.
 --------------------------------------------------------------------
 
-injectTerminalActions :: ExprI -> D ExprI
-injectTerminalActions (ExprI i (ModE mv body)) = do
+-- | Synthesize `--' with:` terminal-action commands for one module. The
+-- @importedSigs@ map carries term signatures visible to this module through
+-- its imports (built from the full DAG post-parse); it lets offset/IFile
+-- handler detection see a handler defined in another module.
+injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
+injectTerminalActionsWithSigs importedSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
-  body' <- expandWithBindings body
+  body' <- expandWithBindings importedSigs body
   return (ExprI i (ModE mv body'))
-injectTerminalActions e = return e
+injectTerminalActionsWithSigs _ e = return e
 
 -- | Reject any user-declared top-level identifier whose name starts
 -- with the reserved `mlcp_` prefix. That prefix is compiler-owned
@@ -2284,8 +2380,8 @@ rejectReservedMlcpPrefix body =
     pick e@(ExprI _ (SrcE src)) = [(e, srcAlias src)]
     pick _ = []
 
-expandWithBindings :: [ExprI] -> D [ExprI]
-expandWithBindings body =
+expandWithBindings :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
+expandWithBindings importedSigs body =
   case collectWithSpecs body of
     [] -> return body
     specs -> do
@@ -2295,7 +2391,15 @@ expandWithBindings body =
             , w <- ws
             ]
       checkMangledCollisions body plan
-      synthesized <- concat <$> mapM emitFor specs
+      -- name -> its AssE node, so the synthesis can inspect/rewrite the
+      -- parent body (needed for @collect streaming commands); and
+      -- name -> declared type, so the synthesis can detect an offset-form
+      -- handler (`U64 -> [a] -> ...`) or an IFile handler. Local signatures
+      -- shadow imported ones (a handler defined here wins over an import).
+      let assMap = Map.fromList [ (n, e) | e@(ExprI _ (AssE n _ _)) <- body ]
+          localSigMap = Map.fromList [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
+          sigMap = Map.union localSigMap importedSigs
+      synthesized <- concat <$> mapM (emitFor assMap sigMap) specs
       let mangleds = [ m | (_, _, m, _) <- plan ]
       body' <- mapM (addToExport mangleds) body
       return (body' ++ synthesized)
@@ -2367,13 +2471,325 @@ collectWithSpecs = foldr pick []
         _ -> rest
     pick _ rest = rest
 
-emitFor :: (ExprI, EVar, EType, [WithSpec]) -> D [ExprI]
-emitFor (sigExprI, parentName, parentEt, specs) = do
+emitFor :: Map.Map EVar ExprI -> Map.Map EVar TypeU -> (ExprI, EVar, EType, [WithSpec]) -> D [ExprI]
+emitFor assMap sigMap (sigExprI, parentName, parentEt, specs) = do
   sp <- posOfExprI sigExprI
   let pt = etype parentEt
       arity = sigArity pt
       isEff = returnIsEffectful pt
-  mapM (synthWithBinding sp parentName arity isEff) specs
+  case Map.lookup parentName assMap of
+    Just assI@(ExprI _ (AssE _ b _)) | containsCollect b ->
+      -- Streaming command (body produces via @collect): compose the handler
+      -- into the @collect sink rather than onto a return value.
+      mapM (synthStreamingBinding sp parentName assI sigMap) specs
+    _ -> mapM (synthWithBinding sp parentName arity isEff) specs
+
+-- | True iff the declared handler type is offset-form (`U64 -> [a] -> ...`):
+-- its first parameter is @U64@. Peels leading @ForallU@ quantifiers.
+firstParamIsU64 :: TypeU -> Bool
+firstParamIsU64 = go
+  where
+    go (ForallU _ t) = go t
+    go (FunU (arg : _) _) = arg == BT.u64U
+    go _ = False
+
+-- | True iff the declared whole-form handler takes an @IFile [a]@ receiver
+-- (its first parameter's head is @IFile@). Selects random-access presentation
+-- over a materialized @[a]@ list. Peels leading @ForallU@ quantifiers.
+firstParamIsIFile :: TypeU -> Bool
+firstParamIsIFile = go
+  where
+    go (ForallU _ t) = go t
+    go (FunU (arg : _) _) = isIFileHead arg
+    go _ = False
+    isIFileHead (AppU (VarU v) _) = v == BT.ifileVar
+    isIFileHead _ = False
+
+-- | True iff an expression contains a @collect node (i.e. the command
+-- streams its output). Fully recursive over 'Expr'.
+containsCollect :: ExprI -> Bool
+containsCollect (ExprI _ e) = case e of
+  IntrinsicE IntrCollect _ -> True
+  ModE _ xs -> any containsCollect xs
+  AssE _ b ws -> containsCollect b || any containsCollect ws
+  IstE _ _ b -> any containsCollect b
+  LstE es -> any containsCollect es
+  TupE es -> any containsCollect es
+  NamE kes -> any (containsCollect . snd) kes
+  AppE f xs -> containsCollect f || any containsCollect xs
+  LamE _ b -> containsCollect b
+  AnnE b _ -> containsCollect b
+  LetE bs b -> any (containsCollect . snd) bs || containsCollect b
+  IfE c t f -> containsCollect c || containsCollect t || containsCollect f
+  DoBlockE b -> containsCollect b
+  EvalE b -> containsCollect b
+  IntrinsicE _ es -> any containsCollect es
+  ParenE b -> containsCollect b
+  BopE l _ _ r -> containsCollect l || containsCollect r
+  _ -> False
+
+-- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
+-- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
+-- collisions), rewriting every @collect node per flag:
+--
+--   * `.buffer` (streaming, constant memory): compose the handler into the
+--     @collect sink so it runs once per batch --
+--     @@collect producer ==> @collect (\\sink -> producer (\\c -> sink (t c)))@.
+--     The stream element type becomes the handler's per-batch output.
+--
+--   * no-suffix `with`/`render` (whole list): gather the producer's stream to a
+--     temp file, then apply the handler once to the complete data -- as a
+--     materialized `[a]` (via @load) or, when the handler takes `IFile [a]`, as
+--     a random-access IFile. The command returns the handler's result, which
+--     the nexus formats per `-f` (or emits verbatim for `render`).
+synthStreamingBinding :: Span -> EVar -> ExprI -> Map.Map EVar TypeU -> WithSpec -> D ExprI
+synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render buffer)
+  | buffer =
+      -- `with.buffer` : handler `[a] -> [b]` -> sink (handler c)  (nexus formats `[b]`)
+      -- `render.buffer`: handler `[a] -> Str` -> sink [handler c] (one Str per batch,
+      --                  emitted verbatim as the render flag forces `-f raw`)
+      -- Offset-form handler (`U64 -> ...`): sink (handler (@tell) c).
+      let offset = maybe False firstParamIsU64 (Map.lookup tTerm sigMap)
+      in withParentBody $ \bodyExpr wheres -> do
+          bodyExpr' <- composeHandlerIntoCollect render offset tTerm bodyExpr
+          wheres' <- mapM (composeHandlerIntoCollect render offset tTerm) wheres
+          return (bodyExpr', wheres')
+  | otherwise =
+      -- no-suffix `with`/`render`: whole-list gather-then-apply. `IFile [a] -> b`
+      -- handlers get random access; `[a] -> b` handlers get a materialized list.
+      -- `with` returns a typed value the nexus formats per `-f`; `render`
+      -- returns the handler's final bytes (Str / Vector U8), which the nexus
+      -- emits verbatim (`render` terminals force `-f raw`). The synthesis is
+      -- identical for both -- only the manifest's `render` flag differs.
+      let useIFile = maybe False firstParamIsIFile (Map.lookup tTerm sigMap)
+      in withParentBody $ \bodyExpr wheres -> do
+          bodyExpr' <- composeWholeIntoCollect useIFile tTerm bodyExpr
+          wheres' <- mapM (composeWholeIntoCollect useIFile tTerm) wheres
+          return (bodyExpr', wheres')
+  where
+    withParentBody k = case assI of
+      ExprI _ (AssE _ bodyExpr wheres) -> do
+        (bodyExpr', wheres') <- k bodyExpr wheres
+        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr' wheres')
+      _ -> dfail (startPos sp) "internal: streaming `with:` parent is not an AssE"
+
+-- | Deep-copy an expression with fresh ids (each synthesized command is
+-- typechecked independently of the parent), rewriting every @collect node's
+-- argument via @wrap self expandedArg@. Both the per-batch and whole-list
+-- handler synthesis share this traversal, differing only in @wrap@.
+rewriteCollectWith :: (ExprI -> ExprI -> D ExprI) -> ExprI -> D ExprI
+rewriteCollectWith wrap = go
+  where
+    go self@(ExprI _ e) = case e of
+      IntrinsicE IntrCollect [arg] -> do
+        arg' <- go arg
+        wrap self arg'
+      ModE v xs -> mapM go xs >>= freshExprFrom self . ModE v
+      AssE v b ws -> do { b' <- go b; ws' <- mapM go ws; freshExprFrom self (AssE v b' ws') }
+      IstE cn ts b -> mapM go b >>= freshExprFrom self . IstE cn ts
+      LstE es -> mapM go es >>= freshExprFrom self . LstE
+      TupE es -> mapM go es >>= freshExprFrom self . TupE
+      NamE kes -> mapM (\(k, x) -> (,) k <$> go x) kes >>= freshExprFrom self . NamE
+      AppE f xs -> do { f' <- go f; xs' <- mapM go xs; freshExprFrom self (AppE f' xs') }
+      LamE ps b -> go b >>= freshExprFrom self . LamE ps
+      AnnE b t -> do { b' <- go b; freshExprFrom self (AnnE b' t) }
+      LetE bs b -> do
+        bs' <- mapM (\(v, x) -> (,) v <$> go x) bs
+        b' <- go b
+        freshExprFrom self (LetE bs' b')
+      IfE c t f -> do { c' <- go c; t' <- go t; f' <- go f; freshExprFrom self (IfE c' t' f') }
+      DoBlockE b -> go b >>= freshExprFrom self . DoBlockE
+      EvalE b -> go b >>= freshExprFrom self . EvalE
+      IntrinsicE intr es -> mapM go es >>= freshExprFrom self . IntrinsicE intr
+      ParenE b -> go b >>= freshExprFrom self . ParenE
+      BopE l p v r -> do { l' <- go l; r' <- go r; freshExprFrom self (BopE l' p v r') }
+      _ -> freshExprFrom self e
+
+-- | Rewrite every @collect node into a per-batch streaming do-block that
+-- applies @handler@ to each batch before writing it to @stdout, in constant
+-- memory. The handler is baked directly into the @write call rather than
+-- routed through a wrapping sink lambda: a bare @@write@ intrinsic application
+-- performs its effect in tail position, whereas @\\c -> sink (handler c)@
+-- (an applied sink /variable/) does not typecheck as an effectful sink.
+composeHandlerIntoCollect :: Bool -> Bool -> EVar -> ExprI -> D ExprI
+composeHandlerIntoCollect singletonWrap offset handler =
+  rewriteCollectWith $ \self arg' -> wrapPerBatchCollect singletonWrap offset handler self arg'
+
+-- | Rewrite every @collect node into a whole-list gather-then-apply: gather the
+-- producer's stream to a temp file, then apply the handler once to the complete
+-- data. When @useIFile@ the handler receives a random-access @IFile [a]@;
+-- otherwise it receives a materialized @[a]@ (via @load).
+composeWholeIntoCollect :: Bool -> EVar -> ExprI -> D ExprI
+composeWholeIntoCollect useIFile handler =
+  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile self handler arg'
+
+-- | Build the whole-list gather-and-apply do-block for one @collect arg@:
+--
+-- > do  path <- @tmpfile          -- registered for removal at end of call
+-- >     o    <- @open path         -- OStream a
+-- >     _    <- arg (@write 0 o)   -- gather the producer's stream to the file
+-- >     _    <- @close o           -- final footer -> IFile/@load-readable
+-- >     <present>
+--
+-- with @<present>@ applying @handler@ once to the complete data:
+--
+-- >     f  <- @open path           -- IFile [a]           (useIFile)
+-- >     r  <- handler f
+-- >     _  <- @close f
+-- >     _  <- @close path          -- unlink the temp file
+-- >     r
+--
+-- or, for a @[a] -> b@ handler:
+--
+-- >     xs <- @load path           -- materialize the whole list
+-- >     _  <- @close path          -- unlink the temp file
+-- >     handler xs
+wrapWholeCollect :: Bool -> ExprI -> EVar -> ExprI -> D ExprI
+wrapWholeCollect useIFile ref handler collectArg = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let nm base = EV (base <> T.pack (show idx))
+      pathV = nm "_whole_path_"
+      oV    = nm "_whole_o_"
+      fV    = nm "_whole_f_"
+      rV    = nm "_whole_r_"
+      xsV   = nm "_whole_xs_"
+      g1    = nm "_whole_g1_"
+      g2    = nm "_whole_g2_"
+      g3    = nm "_whole_g3_"
+      g4    = nm "_whole_g4_"
+  handlerRef <- freshExprFrom ref (VarE defaultValue handler)
+  -- path <- @tmpfile
+  tmpBind <- do
+    t <- freshExprFrom ref (IntrinsicE IntrTmpfile [])
+    freshExprFrom ref (EvalE t)
+  -- o <- @open path
+  openOBind <- do
+    p <- freshExprFrom ref (VarE defaultValue pathV)
+    o <- freshExprFrom ref (IntrinsicE IntrOpen [p])
+    freshExprFrom ref (EvalE o)
+  -- _ <- arg (@write 0 o)
+  gatherBare <- do
+    oref <- freshExprFrom ref (VarE defaultValue oV)
+    zeroE <- freshExprFrom ref (IntE 0)
+    sinkE <- mkWriteSink ref zeroE oref
+    app <- freshExprFrom ref (AppE collectArg [sinkE])
+    freshExprFrom ref (EvalE app)
+  -- _ <- @close o
+  closeOBare <- do
+    oref <- freshExprFrom ref (VarE defaultValue oV)
+    c <- freshExprFrom ref (IntrinsicE IntrClose [oref])
+    freshExprFrom ref (EvalE c)
+  -- _ <- @close path  (unlink the registered temp file)
+  let unlinkBare = do
+        p <- freshExprFrom ref (VarE defaultValue pathV)
+        u <- freshExprFrom ref (IntrinsicE IntrClose [p])
+        freshExprFrom ref (EvalE u)
+  tailE <-
+    if useIFile
+      then do
+        openFBind <- do
+          p <- freshExprFrom ref (VarE defaultValue pathV)
+          o <- freshExprFrom ref (IntrinsicE IntrOpen [p])
+          freshExprFrom ref (EvalE o)
+        handlerBind <- do
+          fref <- freshExprFrom ref (VarE defaultValue fV)
+          app <- freshExprFrom ref (AppE handlerRef [fref])
+          freshExprFrom ref (EvalE app)
+        closeFBare <- do
+          fref <- freshExprFrom ref (VarE defaultValue fV)
+          c <- freshExprFrom ref (IntrinsicE IntrClose [fref])
+          freshExprFrom ref (EvalE c)
+        unlink <- unlinkBare
+        rRef <- freshExprFrom ref (VarE defaultValue rV)
+        t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
+        t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
+        t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
+        freshExprFrom ref (LetE [(fV, openFBind)] t3)
+      else do
+        loadBind <- do
+          p <- freshExprFrom ref (VarE defaultValue pathV)
+          l <- freshExprFrom ref (IntrinsicE IntrLoad [p])
+          freshExprFrom ref (EvalE l)
+        unlink <- unlinkBare
+        xsRef <- freshExprFrom ref (VarE defaultValue xsV)
+        handlerApp <- freshExprFrom ref (AppE handlerRef [xsRef])
+        t1 <- freshExprFrom ref (LetE [(g3, unlink)] handlerApp)
+        freshExprFrom ref (LetE [(xsV, loadBind)] t1)
+  b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
+  b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
+  b3 <- freshExprFrom ref (LetE [(oV, openOBind)] b2)
+  b4 <- freshExprFrom ref (LetE [(pathV, tmpBind)] b3)
+  freshExprFrom ref (DoBlockE b4)
+
+-- | Build the per-batch streaming do-block that replaces a @collect arg@:
+--
+-- > do  o <- @stdout
+-- >     _ <- arg (\c -> @write 0 o (emit (handler c)))
+-- >     @close o
+--
+-- @emit v@ is @v@ (`with`) or @[v]@ (`render`, so a per-batch @Str@ becomes a
+-- @[Str]@ stream element). When @offset@, the handler additionally receives
+-- the current element offset (via @tell) as its first argument, and the write
+-- becomes the tail of a per-batch do-block:
+-- @\\c -> do { off <- @tell; @write 0 o (emit (handler off c)) }@.
+-- The @write is baked directly into the inner sink (not routed through a sink
+-- lambda parameter) so its effect performs in tail position.
+wrapPerBatchCollect :: Bool -> Bool -> EVar -> ExprI -> ExprI -> D ExprI
+wrapPerBatchCollect singletonWrap offset handler ref collectArg = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let oVar = EV ("_pb_o_" <> T.pack (show idx))
+      cVar = EV ("_pb_c_" <> T.pack (show idx))
+      dVar = EV ("_pb_d_" <> T.pack (show idx))
+  handlerRef <- freshExprFrom ref (VarE defaultValue handler)
+  cRef <- freshExprFrom ref (VarE defaultValue cVar)
+  -- o <- @stdout
+  bindStdout <- do
+    s <- freshExprFrom ref (IntrinsicE IntrStdout [])
+    freshExprFrom ref (EvalE s)
+  -- the per-batch write of the emitted handler output
+  (writeE, offBind) <-
+    if offset
+      then do
+        offidx <- freshIdPos (Pos 0 0 "")
+        let offVar = EV ("_pb_off_" <> T.pack (show offidx))
+        tellE <- freshExprFrom ref (IntrinsicE IntrTell [])
+        forceTell <- freshExprFrom ref (EvalE tellE)
+        offRef <- freshExprFrom ref (VarE defaultValue offVar)
+        app <- freshExprFrom ref (AppE handlerRef [offRef, cRef])   -- handler off c
+        w <- mkEmitWrite singletonWrap ref oVar app
+        return (w, Just (offVar, forceTell))
+      else do
+        app <- freshExprFrom ref (AppE handlerRef [cRef])           -- handler c
+        w <- mkEmitWrite singletonWrap ref oVar app
+        return (w, Nothing)
+  innerBody <- case offBind of
+    Just (offVar, forceTell) -> do
+      letE <- freshExprFrom ref (LetE [(offVar, forceTell)] writeE)  -- off <- @tell; @write ..
+      freshExprFrom ref (DoBlockE letE)
+    Nothing -> return writeE
+  innerSink <- freshExprFrom ref (LamE [cVar] innerBody)            -- \c -> ...
+  -- _ <- arg (\c -> ...)
+  prodBare <- do
+    app <- freshExprFrom ref (AppE collectArg [innerSink])
+    freshExprFrom ref (EvalE app)
+  -- @close o
+  closeE <- do
+    oRef <- freshExprFrom ref (VarE defaultValue oVar)
+    freshExprFrom ref (IntrinsicE IntrClose [oRef])
+  inner2 <- freshExprFrom ref (LetE [(dVar, prodBare)] closeE)
+  inner1 <- freshExprFrom ref (LetE [(oVar, bindStdout)] inner2)
+  freshExprFrom ref (DoBlockE inner1)
+
+-- | @@write 0 o emit@, where @emit@ is @value@ (`with`) or @[value]@ (`render`,
+-- boxing a per-batch @Str@ into a @[Str]@ stream element).
+mkEmitWrite :: Bool -> ExprI -> EVar -> ExprI -> D ExprI
+mkEmitWrite singletonWrap ref oVar value = do
+  emitted <- if singletonWrap
+               then freshExprFrom ref (LstE [value])
+               else return value
+  oRef <- freshExprFrom ref (VarE defaultValue oVar)
+  zeroE <- freshExprFrom ref (IntE 0)
+  freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, emitted])
 
 -- | Synthesize the composed internal command for one `--' with:`
 -- atom on a parent signature. Emits only an @AssE@; parent per-arg
@@ -2381,7 +2797,7 @@ emitFor (sigExprI, parentName, parentEt, specs) = do
 -- 'CodeGenerator/Nexus.inheritParentArgDocs'. A @SigE@ here would
 -- need a return type not knowable at desugar time.
 synthWithBinding :: Span -> EVar -> Int -> Bool -> WithSpec -> D ExprI
-synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm) = do
+synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm _ _) = do
   let mangled = mangleTerminalName parentName long
       lamVars = [EV ("mlcp_x_" <> T.pack (show idx)) | idx <- [1..arity]]
   fooRef <- freshExprSpan sp (VarE defaultValue parentName)

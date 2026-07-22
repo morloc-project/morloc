@@ -140,6 +140,10 @@ data IExpr
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
+  | IIntrinsicUnlinkTemp IExpr
+      -- ^ @close given a Str path: unlink a registered temp file (created
+      --   by @tmpfile) and drop it from the registry. Errors if the path
+      --   was not registered -- @close is not a general file-removal tool.
   | IIntrinsicFSchema IExpr -- path -> schema string
   | IIntrinsicFLength IExpr
       -- ^ handle -> Int element count (read from cached StreamDiag)
@@ -173,6 +177,13 @@ data IExpr
   | IIntrinsicFlush IExpr
       -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
       --   to be emitted as a sub-packet. Single-argument: handle expr.
+  | IIntrinsicTell
+      -- ^ @tell :: <IO> U64: nullary. Number of elements written to the
+      --   process's @stdout OStream so far (its element_count).
+  | IIntrinsicTmpfile
+      -- ^ @tmpfile :: <IO> Str: nullary. Create a fresh empty file in the
+      --   morloc tmpdir, register it for removal at end-of-call, and return
+      --   its path. Used by the whole-form with:/render: gather.
   | IIntrinsicStdin Int
       -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStdout Int
@@ -790,11 +801,13 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
       error $ "@open: result type must be IFile/IStream/OStream, got " <> T.unpack t
     Nothing ->
       error "@open: unsupported handle type"
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose _ [handleDocs]) =
-  return $ handleDocs
-    { poolExpr = lcPrintExpr cfg
-        (IIntrinsicClose (IRawExpr (render (poolExpr handleDocs))))
-    }
+-- @close: a Str-path arg (marked by Serialize.hs) unlinks a registered temp
+-- file; a handle arg closes the stream/file handle.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
+  let raw = IRawExpr (render (poolExpr handleDocs))
+      node | maySchema == Just BT.closeTmpUnlinkMarker = IIntrinsicUnlinkTemp raw
+           | otherwise                                 = IIntrinsicClose raw
+  in return $ handleDocs { poolExpr = lcPrintExpr cfg node }
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg
@@ -869,6 +882,12 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
     }
+-- @tell: nullary; read the @stdout stream's element_count.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTell _ []) =
+  return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTell }
+-- @tmpfile: nullary; create + register a temp file, return its path.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
+  return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
   return $ msgDocs
     { poolExpr = lcPrintExpr cfg

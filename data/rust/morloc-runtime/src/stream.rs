@@ -409,6 +409,23 @@ pub(crate) fn stdio_claim_slot(
     })
 }
 
+/// Element count of the process's @stdout OStream (its cumulative
+/// `element_count`), or 0 if no @stdout is open. Read by @tell so the
+/// offset-aware `with:`/`render:` synthesis can pass the per-batch element
+/// offset to a handler. The count is already maintained for the stream
+/// footers, so this is a plain field read.
+pub fn stdout_element_count() -> u64 {
+    use std::sync::atomic::Ordering;
+    let handle = match stdio_claim_slot(STDIO_KIND_STDOUT) {
+        Some(a) => a.load(Ordering::Acquire),
+        None => return 0,
+    };
+    if handle <= 0 {
+        return 0;
+    }
+    with_process_local_slot(handle, |_local, slot| Ok(slot.element_count)).unwrap_or(0)
+}
+
 /// Return the registry's per-nexus generation-increment salt. The salt
 /// is set by the bootstrap winner and is the same value seen by every
 /// attached process. Used by the slot-close path to bump the generation
@@ -3178,17 +3195,25 @@ pub fn shared_write_subpacket(
 
         // Pin compression level on first @write into this slot
         // (across all pools); subsequent writes must match.
-        if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
-            unsafe {
-                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-                (*mp).compression_level = level;
+        //
+        // stdio-bound streams ignore the `@write` level entirely: the
+        // pool ships uncompressed sub-packets over the local RPC and the
+        // nexus applies `-z` when it re-encodes the terminal output. So
+        // the level stays pinned at 0 (from `open_stdio`) and no
+        // per-write mismatch check applies.
+        if slot.is_stdio == 0 {
+            if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
+                unsafe {
+                    let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                    (*mp).compression_level = level;
+                }
+            } else if slot.compression_level != level {
+                return Err(MorlocError::Other(format!(
+                    "@write level mismatch: stream was opened/written at level {} \
+                     but this call passed {}. All sub-packets must share a level.",
+                    slot.compression_level, level,
+                )));
             }
-        } else if slot.compression_level != level {
-            return Err(MorlocError::Other(format!(
-                "@write level mismatch: stream was opened/written at level {} \
-                 but this call passed {}. All sub-packets must share a level.",
-                slot.compression_level, level,
-            )));
         }
 
         // Walk the elements and append each. element_count updates
@@ -3341,6 +3366,150 @@ fn empty_shm_array() -> Result<AbsPtr, MorlocError> {
     arr.size = 0;
     arr.data = shm::RELNULL;
     Ok(arr_ptr)
+}
+
+/// Materialise an entire STREAM_PACKET file into a single self-contained
+/// SHM `Array<a>` voidstar (the `[a]` list value).
+///
+/// `@load` on a stream file needs the whole list in one value, but a
+/// constant-memory gather writes the list across MANY sub-packets. This
+/// opens the file as an IStream, drains every sub-packet, and deep-copies
+/// every element into one fresh element buffer. Because each element is
+/// deep-copied (its variable-length sub-allocations are re-allocated in
+/// fresh SHM blocks), the returned value is self-contained: the
+/// per-sub-packet chunk buffers are freed before returning and nothing in
+/// the result points back into them.
+pub fn shared_load_stream_file_as_array(path: &str) -> Result<AbsPtr, MorlocError> {
+    let handle = shared_open_istream(path)?;
+    let result = collect_istream_into_array(handle, path);
+    // The stream is fully consumed here; release the slot and munmap the
+    // backing file regardless of success so the handle never leaks.
+    let _ = shared_discard_handle(handle);
+    result
+}
+
+/// Drain every sub-packet of an open IStream `handle` into one combined
+/// SHM `Array<a>`. Split out from `shared_load_stream_file_as_array` so
+/// the handle cleanup runs on every exit path.
+fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocError> {
+    // The slot caches the file's full list schema `[a]`; its element
+    // schema drives the per-element deep copy of each sub-packet chunk.
+    // Using the file's own schema (not the caller's) is what keeps the
+    // element width and layout consistent with the bytes the sub-packet
+    // materialiser wrote.
+    let schema_str = shared_handle_schema_str(handle)?;
+    let parsed = parse_schema(&schema_str).map_err(|e| {
+        MorlocError::Schema(format!(
+            "@load: stream file '{}' has unparseable schema '{}': {}",
+            path, schema_str, e,
+        ))
+    })?;
+    let (_value_schema, elem_schema) = derive_stream_schemas(&parsed);
+    let elem_width = elem_schema.width;
+
+    // Drain every sub-packet, holding each chunk's SHM `Array` alive until
+    // its elements have been deep-copied into the combined buffer. Each
+    // tuple is (chunk Array header, resolved element-data base, count).
+    let mut chunks: Vec<(AbsPtr, AbsPtr, usize)> = Vec::new();
+    let mut total: usize = 0;
+
+    let free_chunks = |chunks: &Vec<(AbsPtr, AbsPtr, usize)>| {
+        // shfree is shallow (refcount decrement), so freeing a chunk's
+        // data block does not touch the fresh sub-allocations deep_copy
+        // has already made for the combined value.
+        for &(arr_ptr, data_abs, _) in chunks {
+            let _ = shm::shfree(data_abs);
+            let _ = shm::shfree(arr_ptr);
+        }
+    };
+
+    loop {
+        let arr_ptr = match shared_next_subpacket(handle) {
+            Ok(p) => p,
+            Err(e) => {
+                free_chunks(&chunks);
+                return Err(e);
+            }
+        };
+        let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
+        let sz = arr.size;
+        if sz == 0 {
+            // Size-0 Array is the EOF sentinel (`shared_next_subpacket`
+            // returns it once the footer or file end is reached). Free the
+            // sentinel header and stop.
+            let _ = shm::shfree(arr_ptr);
+            break;
+        }
+        let data_abs = match shm::rel2abs(arr.data) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = shm::shfree(arr_ptr);
+                free_chunks(&chunks);
+                return Err(e);
+            }
+        };
+        chunks.push((arr_ptr, data_abs, sz));
+        total += sz;
+    }
+
+    // Allocate the combined Array header up front; its `data` relptr is
+    // filled in once the element buffer is populated.
+    let out_arr = match shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>()) {
+        Ok(p) => p,
+        Err(e) => {
+            free_chunks(&chunks);
+            return Err(e);
+        }
+    };
+    if total == 0 {
+        let a = unsafe { &mut *(out_arr as *mut shm_types_crate::Array) };
+        a.size = 0;
+        a.data = shm_types_crate::RELNULL;
+        free_chunks(&chunks);
+        return Ok(out_arr);
+    }
+
+    // One buffer for all elements; deep_copy fills each fixed-width slot
+    // and allocates fresh SHM sub-blocks for any variable-length fields.
+    let buf = match shm::shcalloc(total, elem_width) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = shm::shfree(out_arr);
+            free_chunks(&chunks);
+            return Err(e);
+        }
+    };
+
+    let mut out_i = 0usize;
+    for &(_, data_abs, sz) in &chunks {
+        for k in 0..sz {
+            let elem_src = unsafe { (data_abs as *const u8).add(k * elem_width) };
+            let dst = unsafe { (buf as *mut u8).add(out_i * elem_width) };
+            if let Err(e) = unsafe { voidstar::deep_copy(elem_src, dst, &elem_schema) } {
+                let _ = shm::shfree(buf);
+                let _ = shm::shfree(out_arr);
+                free_chunks(&chunks);
+                return Err(e);
+            }
+            out_i += 1;
+        }
+    }
+
+    // The combined value is self-contained now; drop every chunk buffer.
+    free_chunks(&chunks);
+
+    let buf_rel = match shm::abs2rel(buf) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shm::shfree(buf);
+            let _ = shm::shfree(out_arr);
+            return Err(e);
+        }
+    };
+    let a = unsafe { &mut *(out_arr as *mut shm_types_crate::Array) };
+    a.size = total;
+    a.data = buf_rel;
+    Ok(out_arr)
 }
 
 /// `@flen handle`: return the element_count from the slot. Works on

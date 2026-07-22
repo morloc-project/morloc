@@ -412,6 +412,23 @@ data Intrinsic
                     -- intercept a fallible expression, substituting the
                     -- fallback value when it raises. Effect-strip removes
                     -- Err; other effects propagate through.
+  | IntrTell        -- ^ @tell :: <IO> U64@ -- the number of elements written
+                    -- to the process's @stdout OStream so far (its
+                    -- element_count). Used by the offset-aware `with:`/
+                    -- `render:` synthesis to thread the per-batch element
+                    -- offset into a handler; also user-callable.
+  | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> ()@
+                    -- Provide the default stdout sink to a producer body and
+                    -- manage its lifecycle. Desugar-expands to
+                    -- `do { o <- @stdout; body (@write 0 o); @close o }`. The
+                    -- sink type `[a] -> ...` carries the stream element type,
+                    -- which the `with:`/`render:` handler synthesis reads off
+                    -- to type the flag handlers.
+  | IntrTmpfile     -- ^ @tmpfile :: <IO> Str@ -- create a fresh empty file in
+                    -- the morloc tmpdir, register it for removal when the pool
+                    -- call ends, and return its path. NOT user-facing;
+                    -- synthesized by the whole-form `with:`/`render:` handler
+                    -- to gather a stream to disk before applying the handler.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -454,6 +471,9 @@ intrinsicName IntrStdout = "stdout"
 intrinsicName IntrStderr = "stderr"
 intrinsicName IntrThrow = "throw"
 intrinsicName IntrCatch = "catch"
+intrinsicName IntrTell = "tell"
+intrinsicName IntrCollect = "collect"
+intrinsicName IntrTmpfile = "tmpfile"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
@@ -489,6 +509,8 @@ parseIntrinsic "stdout" = Just IntrStdout
 parseIntrinsic "stderr" = Just IntrStderr
 parseIntrinsic "throw" = Just IntrThrow
 parseIntrinsic "catch" = Just IntrCatch
+parseIntrinsic "tell" = Just IntrTell
+parseIntrinsic "collect" = Just IntrCollect
 parseIntrinsic _ = Nothing
 
 -- | Expected number of arguments for each intrinsic
@@ -522,6 +544,9 @@ intrinsicArity IntrStdout = 0
 intrinsicArity IntrStderr = 0
 intrinsicArity IntrThrow = 1
 intrinsicArity IntrCatch = 2
+intrinsicArity IntrTell = 0
+intrinsicArity IntrCollect = 1
+intrinsicArity IntrTmpfile = 0
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

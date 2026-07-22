@@ -1872,6 +1872,41 @@ SEXP morloc_mlc_fschema(SEXP path_r) { MAYFAIL
     return result;
 }
 
+// @tmpfile: create a temp file (removed when the pool call ends), return path.
+SEXP morloc_mlc_tmpfile(void) { MAYFAIL
+    char* path = R_TRY(mlc_tmpfile);
+    if (path == NULL) {
+        MORLOC_INTERNAL_ABORT("mlc_tmpfile returned NULL (libmorloc contract violation)");
+    }
+    SEXP result = PROTECT(mkString(path));
+    free(path);
+    UNPROTECT(1);
+    return result;
+}
+
+// @close on a Str path: unlink a registered temp file. Errors if the path was
+// not created by mlc_tmpfile in this call.
+SEXP morloc_mlc_unlink_tmp(SEXP path_r) { MAYFAIL
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_unlink_tmp: path must be a single string");
+    }
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    R_TRY(mlc_unlink_tmp, path);
+    return R_NilValue;
+}
+
+// @tell: elements written to @stdout so far. Returned as R numeric (double);
+// U64 maps to "numeric" in root-r and is exact up to 2^53 (matching the
+// ifile_length / list-slice indexing convention). Never fails (returns 0 when
+// no @stdout is open).
+SEXP morloc_mlc_tell(void) { MAYFAIL
+    uint64_t n = R_TRY(mlc_tell);
+    SEXP result = PROTECT(allocVector(REALSXP, 1));
+    REAL(result)[0] = (double)n;
+    UNPROTECT(1);
+    return result;
+}
+
 // Shared scaffold for the @save family. The three formats (voidstar,
 // msgpack, JSON) share the same R-side shape: pack value -> SHM voidstar,
 // hand off to the corresponding libmorloc save function, free the SHM
@@ -2203,10 +2238,7 @@ SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
     int64_t h = R_TRY(mlc_open_ostream, schema_str, path);
-    SEXP result = PROTECT(allocVector(REALSXP, 1));
-    REAL(result)[0] = (double)h;
-    UNPROTECT(1);
-    return result;
+    return make_integer64_scalar(h);
 }
 
 // @stdin / @stdout / @stderr :: <IO> Handle T -- nullary intrinsics.
@@ -2218,10 +2250,7 @@ SEXP morloc_mlc_open_stdin(SEXP schema_str_r) { MAYFAIL
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t h = R_TRY(mlc_open_stdin, schema_str);
-    SEXP result = PROTECT(allocVector(REALSXP, 1));
-    REAL(result)[0] = (double)h;
-    UNPROTECT(1);
-    return result;
+    return make_integer64_scalar(h);
 }
 
 SEXP morloc_mlc_open_stdout(SEXP schema_str_r) { MAYFAIL
@@ -2230,10 +2259,7 @@ SEXP morloc_mlc_open_stdout(SEXP schema_str_r) { MAYFAIL
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t h = R_TRY(mlc_open_stdout, schema_str);
-    SEXP result = PROTECT(allocVector(REALSXP, 1));
-    REAL(result)[0] = (double)h;
-    UNPROTECT(1);
-    return result;
+    return make_integer64_scalar(h);
 }
 
 SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
@@ -2242,10 +2268,7 @@ SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t h = R_TRY(mlc_open_stderr, schema_str);
-    SEXP result = PROTECT(allocVector(REALSXP, 1));
-    REAL(result)[0] = (double)h;
-    UNPROTECT(1);
-    return result;
+    return make_integer64_scalar(h);
 }
 
 // @write: serialise value to voidstar, emit one sub-packet.
@@ -2289,10 +2312,7 @@ SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
     int64_t h = R_TRY(mlc_append, schema_str, path);
-    SEXP result = PROTECT(allocVector(REALSXP, 1));
-    REAL(result)[0] = (double)h;
-    UNPROTECT(1);
-    return result;
+    return make_integer64_scalar(h);
 }
 
 SEXP morloc_mlc_concat(SEXP paths_r, SEXP dest_r) { MAYFAIL
@@ -3528,6 +3548,9 @@ static void _r_init_impl(DllInfo *info) {
         {"r_morloc_cache_record_store", (DL_FUNC) &morloc_cache_record_store_r, 0},
         {"morloc_mlc_open", (DL_FUNC) &morloc_mlc_open, 2},
         {"morloc_mlc_close", (DL_FUNC) &morloc_mlc_close, 1},
+        {"morloc_mlc_tmpfile", (DL_FUNC) &morloc_mlc_tmpfile, 0},
+        {"morloc_mlc_unlink_tmp", (DL_FUNC) &morloc_mlc_unlink_tmp, 1},
+        {"morloc_mlc_tell", (DL_FUNC) &morloc_mlc_tell, 0},
         {"morloc_mlc_fschema", (DL_FUNC) &morloc_mlc_fschema, 1},
         {"morloc_mlc_ifile_walk", (DL_FUNC) &morloc_mlc_ifile_walk, 4},
         {"morloc_mlc_ifile_length", (DL_FUNC) &morloc_mlc_ifile_length, 1},

@@ -39,6 +39,10 @@ pub struct ParsedCommand {
     pub cmd_index: usize,
     /// Per-arg parsed values, index-aligned with `cmd.args`.
     pub values: Vec<ArgValue>,
+    /// True when a `render` terminal flag was chosen: the dispatcher forces
+    /// the streamed-stdout output format to `raw` (verbatim). `render`
+    /// handlers emit the final bytes, so `-f` does not apply.
+    pub render: bool,
 }
 
 /// Prefix used on clap arg-ids for terminal-action flags. Distinct
@@ -107,8 +111,8 @@ pub fn parse_run(
     if single {
         let (cmd_index0, cmd) = visible[0];
         let values = extract_values(cmd, &matches);
-        let cmd_index = redirect_via_terminal(manifest, cmd_index0, cmd, &matches);
-        return ParsedCommand { cmd_index, values };
+        let (cmd_index, render) = redirect_via_terminal(manifest, cmd_index0, cmd, &matches);
+        return ParsedCommand { cmd_index, values, render };
     }
 
     // Walk down through the optional group layer to reach the
@@ -133,8 +137,8 @@ pub fn parse_run(
         .expect("clap-chosen command must be in manifest");
     let cmd = &manifest.commands[cmd_index];
     let values = extract_values(cmd, chosen_matches);
-    let cmd_index = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
-    ParsedCommand { cmd_index, values }
+    let (cmd_index, render) = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
+    ParsedCommand { cmd_index, values, render }
 }
 
 /// One-line "did you mean to place this left of `@`" hint when a
@@ -177,7 +181,7 @@ fn redirect_via_terminal(
     default_index: usize,
     cmd: &ManifestCommand,
     matches: &ArgMatches,
-) -> usize {
+) -> (usize, bool) {
     for (i, t) in cmd.terminals.iter().enumerate() {
         let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
         if matches.get_flag(id) {
@@ -186,11 +190,11 @@ fn redirect_via_terminal(
                 .iter()
                 .position(|c| c.name == t.entry)
             {
-                return idx;
+                return (idx, t.render);
             }
         }
     }
-    default_index
+    (default_index, false)
 }
 
 /// Build the root `clap::Command` for a Run-mode invocation. In

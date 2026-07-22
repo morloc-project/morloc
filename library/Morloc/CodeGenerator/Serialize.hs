@@ -334,6 +334,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
                      IntrFLength, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
+                     IntrTell, IntrTmpfile,
                      IntrCatch] = do
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
@@ -526,6 +527,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           case unwrapHandleHead tf of
             Just (v, a) -> Just <$> renderStorageSchema m v a
             Nothing     -> return Nothing
+    -- @close on a Str path (not a handle) is a registered-temp-file unlink.
+    -- Mark it so the translator emits mlc_unlink_tmp; handle closes carry no
+    -- schema and fall through to the generic close.
+    intrinsicSchema _ IntrClose _ (argNE : _)
+      | isStrHead (typeFof argNE) = return (Just BT.closeTmpUnlinkMarker)
+      where
+        isStrHead (EffectF _ t) = isStrHead t
+        isStrHead (VarF (FV v _)) = v == BT.str
+        isStrHead _ = False
     intrinsicSchema _ _ _ _ = return Nothing
 
     renderStorageSchema :: Int -> TVar -> TypeF -> MorlocMonad Text

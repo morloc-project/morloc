@@ -27,39 +27,94 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Mutex;
 
+use morloc_runtime_types::packet::PacketHeader;
 use morloc_runtime_types::stdio_proto::{
     OP_NEXT_STDIO, OP_WRITE_STDIO,
     STATUS_OK, STATUS_ERR, STATUS_EOF,
     STDIO_KIND_STDOUT, STDIO_KIND_STDERR,
 };
 
+use crate::dispatch::OutputFormat;
+
 /// State for one stdio kind. Serialises access to the underlying fd,
 /// tracks whether the stream-packet header has been consumed (stdin) /
-/// emitted (stdout / stderr).
+/// emitted (stdout / stderr), and (stdout `-f json` only) whether the
+/// opening `[` and any array element have been written.
 struct StdioSlot {
     fd: i32,
     header_done: bool,
+    json_open: bool,
+    json_any: bool,
 }
 
 static STDIN_SLOT:  Mutex<StdioSlot> =
-    Mutex::new(StdioSlot { fd: 0, header_done: false });
+    Mutex::new(StdioSlot { fd: 0, header_done: false, json_open: false, json_any: false });
 static STDOUT_SLOT: Mutex<StdioSlot> =
-    Mutex::new(StdioSlot { fd: 1, header_done: false });
+    Mutex::new(StdioSlot { fd: 1, header_done: false, json_open: false, json_any: false });
 static STDERR_SLOT: Mutex<StdioSlot> =
-    Mutex::new(StdioSlot { fd: 2, header_done: false });
+    Mutex::new(StdioSlot { fd: 2, header_done: false, json_open: false, json_any: false });
 
 static NEXUS_PID: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(0);
+
+/// Render configuration for streamed stdout, captured from the nexus
+/// `NexusConfig` at server start. Streamed `@stdout` output is
+/// re-encoded per `format` (and recompressed at `level` for the packet
+/// formats) so it honours `-f`/`-z` exactly like a returned value.
+/// stderr is unaffected (it stays raw stream-packet framing).
+#[derive(Clone, Copy)]
+struct RenderCfg {
+    format: OutputFormat,
+    level: u8,
+}
+
+// Mutable (not OnceLock) because a `render` terminal flag is resolved AFTER
+// `start` runs, and must retarget streamed stdout to the raw format before the
+// pool begins streaming (which happens later still, during dispatch).
+static RENDER_CFG: Mutex<RenderCfg> =
+    Mutex::new(RenderCfg { format: OutputFormat::Json, level: 0 });
+
+fn render_cfg() -> RenderCfg {
+    RENDER_CFG
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(RenderCfg { format: OutputFormat::Json, level: 0 })
+}
+
+/// Retarget the streamed-stdout output format. Used by the dispatcher to
+/// force `raw` when a `render` terminal flag is chosen (see phase2/main).
+pub fn set_output_format(format: OutputFormat) {
+    if let Ok(mut g) = RENDER_CFG.lock() {
+        g.format = format;
+    }
+}
+
+fn format_name(f: OutputFormat) -> &'static str {
+    match f {
+        OutputFormat::Json => "json",
+        OutputFormat::Jsonl => "jsonl",
+        OutputFormat::MessagePack => "mpk",
+        OutputFormat::VoidStar => "voidstar",
+        OutputFormat::Packet => "packet",
+        OutputFormat::Arrow => "arrow",
+        OutputFormat::Parquet => "parquet",
+        OutputFormat::Csv => "csv",
+        OutputFormat::Raw => "raw",
+    }
+}
 
 /// Start the stdio server. Binds a Unix socket in `$TMPDIR`, exports
 /// its path via `MORLOC_NEXUS_STDIO_SOCK`, spawns an accept-loop
 /// thread. Idempotent: subsequent calls no-op. SIGPIPE is set to
 /// `SIG_IGN` here so a downstream consumer closing the pipe surfaces
 /// as `EPIPE` on `write(2)` instead of a nexus signal death.
-pub fn start(tmpdir: &str) {
+pub fn start(tmpdir: &str, output_format: OutputFormat, compression_level: u8) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        if let Ok(mut g) = RENDER_CFG.lock() {
+            *g = RenderCfg { format: output_format, level: compression_level };
+        }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
 
         // SIGPIPE ignore. One-liner but easy to miss; without it a
@@ -225,12 +280,23 @@ fn do_next(slot_id: i64) -> Resp {
     }
 }
 
-/// Handle a `WRITE_STDIO` request. First call emits the stream-packet
-/// header derived from the slot's stored element schema. Subsequent
-/// calls append the sub-packet bytes verbatim.
+/// Handle a `WRITE_STDIO` request.
+///
+/// **stderr** stays the raw diagnostic channel: the first call emits the
+/// stream-packet header, subsequent calls append sub-packet/footer bytes
+/// verbatim.
+///
+/// **stdout** is transcoded per the nexus `-f`/`-z`. Each incoming blob
+/// is a self-contained voidstar `MORLOC_DATA_PACKET` sub-packet (or the
+/// stream footer). Depending on the output format it is emitted
+/// immediately (jsonl / json array / packet / voidstar -- constant
+/// memory) or, for the table/msgpack formats which cannot be produced
+/// chunk-by-chunk, rejected with an actionable error.
 fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
+    use crate::stdio_bridge as br;
+
     // Which stdio kind? Read from the SHM registry via the runtime.
-    let stdio_kind = match unsafe { crate::stdio_bridge::stdio_kind_of(slot_id) } {
+    let stdio_kind = match unsafe { br::stdio_kind_of(slot_id) } {
         Ok(Some(k)) => k,
         Ok(None) => return Resp::Err(format!(
             "WRITE_STDIO: slot {:#x} is not stdio-bound", slot_id,
@@ -250,13 +316,119 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
         Ok(s) => s,
         Err(e) => return Resp::Err(format!("stdio write mutex poisoned: {}", e)),
     };
-    if !slot.header_done {
-        match unsafe { crate::stdio_bridge::write_stream_header_for_slot(slot.fd, slot_id) } {
-            Ok(()) => { slot.header_done = true; }
-            Err(e) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
+
+    // stderr: unchanged verbatim pass-through (raw stream-packet framing).
+    if stdio_kind == STDIO_KIND_STDERR {
+        if !slot.header_done {
+            match unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) } {
+                Ok(()) => { slot.header_done = true; }
+                Err(e) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
+            }
         }
+        return match unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) } {
+            Ok(()) => Resp::Ack,
+            Err(e) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
+        };
     }
-    match unsafe { crate::stdio_bridge::write_shm_bytes_to_fd(slot.fd, relptr, size) } {
+
+    // stdout: transcode per -f. Classify from the 32-byte header only;
+    // the transcoding branches read the full sub-packet lazily so the
+    // packet pass-through path stays zero-copy for large streams.
+    let cfg = render_cfg();
+    let hdr_vec = match unsafe { br::read_shm_bytes(relptr, 32) } {
+        Ok(h) => h,
+        Err(e) => return Resp::Err(format!("WRITE_STDIO read: {}", e)),
+    };
+    if hdr_vec.len() < 32 {
+        return Resp::Err(format!(
+            "WRITE_STDIO: blob is {} bytes, smaller than a packet header", hdr_vec.len(),
+        ));
+    }
+    let mut hdr = [0u8; 32];
+    hdr.copy_from_slice(&hdr_vec[..32]);
+    let header = match PacketHeader::from_bytes(&hdr) {
+        Ok(h) => h,
+        Err(e) => return Resp::Err(format!("WRITE_STDIO header parse: {}", e)),
+    };
+    let is_footer = header.is_footer();
+    let is_data = header.is_data();
+
+    let result: Result<(), String> = (|| -> Result<(), String> {
+        match cfg.format {
+            OutputFormat::Packet | OutputFormat::VoidStar => {
+                if !slot.header_done {
+                    unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
+                    slot.header_done = true;
+                }
+                // At level 0 (the packet default) pass every frame through
+                // byte-for-byte: the stream -- and its footer's sub-packet
+                // index, which records the pool's exact offsets -- stays
+                // identical to what the pool emitted. Only recompress data
+                // frames when `-z > 0`; the footer always passes through.
+                if is_data && cfg.level > 0 {
+                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
+                    unsafe { br::emit_subpacket_as_packet(slot.fd, &bytes, cfg.level) }
+                } else {
+                    unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }
+                }
+            }
+            OutputFormat::Jsonl => {
+                if is_data {
+                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    unsafe { br::emit_subpacket_jsonl(&bytes, &schema) }
+                } else {
+                    Ok(()) // footer: jsonl has no closing frame
+                }
+            }
+            OutputFormat::Raw => {
+                if is_data {
+                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    unsafe { br::emit_subpacket_raw(&bytes, &schema) }
+                } else {
+                    Ok(()) // footer: raw has no closing frame
+                }
+            }
+            OutputFormat::Json => {
+                if is_data {
+                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    let inner = unsafe { br::subpacket_json_inner(&bytes, &schema) }?;
+                    if !slot.json_open {
+                        unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
+                        slot.json_open = true;
+                    }
+                    if !inner.is_empty() {
+                        if slot.json_any {
+                            unsafe { br::write_bytes_to_fd(slot.fd, b",") }?;
+                        }
+                        unsafe { br::write_bytes_to_fd(slot.fd, inner.as_bytes()) }?;
+                        slot.json_any = true;
+                    }
+                    Ok(())
+                } else if is_footer {
+                    if !slot.json_open {
+                        unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
+                        slot.json_open = true;
+                    }
+                    unsafe { br::write_bytes_to_fd(slot.fd, b"]\n") }
+                } else {
+                    Ok(())
+                }
+            }
+            OutputFormat::MessagePack
+            | OutputFormat::Arrow
+            | OutputFormat::Parquet
+            | OutputFormat::Csv => Err(format!(
+                "streamed stdout output does not support -f {}; \
+                 use -f json, -f jsonl, or -f packet",
+                format_name(cfg.format),
+            )),
+        }
+    })();
+
+    match result {
         Ok(()) => Resp::Ack,
         Err(e) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
     }

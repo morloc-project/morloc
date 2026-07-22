@@ -1,0 +1,209 @@
+=== cpp: whole-form with (list, @load) under -f matrix ===
+[1,2,3,11,12,13,21,22,23]
+1
+2
+3
+11
+12
+13
+21
+22
+23
+[1,2,3,11,12,13,21,22,23]
+[1,2,3,11,12,13,21,22,23]
+mpk bytes: 10
+=== cpp: whole-form with (IFile, @flen) ===
+9
+=== cpp: with.buffer (per-batch) json/jsonl ===
+[3,1,2,3,13,11,12,3,23,21,22,3]
+3
+1
+2
+3
+13
+11
+12
+3
+23
+21
+22
+3
+=== cpp: with.buffer + offset (continuity 0,3,6) ===
+0
+3
+1
+2
+4
+13
+11
+12
+8
+23
+21
+22
+=== cpp: render.buffer (verbatim text) ===
+3 1 2 
+13 11 12 
+23 21 22 
+=== cpp: render.buffer + offset ===
+[0] 3 1 2
+[1] 13 11 12
+[2] 23 21 22
+=== cpp: string element stream (sorted / count / join) ===
+["a0","a1","a2","b0","b1","b2"]
+6
+b0;a0;
+b1;a1;
+b2;a2;
+=== cpp: default @collect (no formatter) ===
+3
+1
+2
+13
+11
+12
+23
+21
+22
+=== py: whole-form with (list, @load) under -f matrix ===
+[1,2,3,11,12,13,21,22,23]
+1
+2
+3
+11
+12
+13
+21
+22
+23
+[1,2,3,11,12,13,21,22,23]
+[1,2,3,11,12,13,21,22,23]
+mpk bytes: 10
+=== py: whole-form with (IFile, @flen) ===
+9
+=== py: with.buffer (per-batch) json/jsonl ===
+[3,1,2,3,13,11,12,3,23,21,22,3]
+3
+1
+2
+3
+13
+11
+12
+3
+23
+21
+22
+3
+=== py: with.buffer + offset (continuity 0,3,6) ===
+0
+3
+1
+2
+4
+13
+11
+12
+8
+23
+21
+22
+=== py: render.buffer (verbatim text) ===
+3 1 2 
+13 11 12 
+23 21 22 
+=== py: render.buffer + offset ===
+[0] 3 1 2
+[1] 13 11 12
+[2] 23 21 22
+=== py: string element stream (sorted / count / join) ===
+["a0","a1","a2","b0","b1","b2"]
+6
+b0;a0;
+b1;a1;
+b2;a2;
+=== py: default @collect (no formatter) ===
+3
+1
+2
+13
+11
+12
+23
+21
+22
+=== r: whole-form with (list, @load) under -f matrix ===
+[1,2,3,11,12,13,21,22,23]
+1
+2
+3
+11
+12
+13
+21
+22
+23
+[1,2,3,11,12,13,21,22,23]
+[1,2,3,11,12,13,21,22,23]
+mpk bytes: 10
+=== r: whole-form with (IFile, @flen) ===
+9
+=== r: with.buffer (per-batch) json/jsonl ===
+[3,1,2,3,13,11,12,3,23,21,22,3]
+3
+1
+2
+3
+13
+11
+12
+3
+23
+21
+22
+3
+=== r: with.buffer + offset (continuity 0,3,6) ===
+0
+3
+1
+2
+4
+13
+11
+12
+8
+23
+21
+22
+=== r: render.buffer (verbatim text) ===
+3 1 2 
+13 11 12 
+23 21 22 
+=== r: render.buffer + offset ===
+[0] 3 1 2
+[1] 13 11 12
+[2] 23 21 22
+=== r: string element stream (sorted / count / join) ===
+["a0","a1","a2","b0","b1","b2"]
+6
+b0;a0;
+b1;a1;
+b2;a2;
+=== r: default @collect (no formatter) ===
+3
+1
+2
+13
+11
+12
+23
+21
+22
+=== IFile==list: summary vs json array length ===
+9
+=== badClose (must error, not rm) ===
+OK: @close on non-temp path rejected
+=== cleanup: gather temps after 5 whole-form calls ===
+leftover morloc-gather files: 0
+=== mlcp_ hidden from top-level --help (expect 0) ===
+0

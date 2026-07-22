@@ -1,0 +1,2 @@
+--- Vector U8 return (json array) ---
+[65,66,67]

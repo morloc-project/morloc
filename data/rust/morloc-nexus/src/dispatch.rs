@@ -35,6 +35,9 @@ pub enum OutputFormat {
     /// CSV (comma-separated). Header row from the column schema. Only
     /// valid for commands whose return type is a Table.
     Csv,
+    /// Verbatim bytes: `Str`/`[Str]` element bodies emitted with no framing
+    /// or JSON quoting. The default output format for `render` terminals.
+    Raw,
 }
 
 /// Nexus configuration parsed from CLI options.
@@ -1329,6 +1332,16 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::VoidStar => {
+            // A top-level Unit/None return carries no data. Suppress it
+            // (as JSON and Packet already do) so a command that streams
+            // its output through @stdout and returns () doesn't get a
+            // trailing Unit packet appended past the stream. --keep-null
+            // opts back in.
+            if !config.keep_null
+                && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
+            {
+                return;
+            }
             extern "C" {
                 fn print_morloc_data_packet(
                     packet: *const u8,
@@ -1417,6 +1430,16 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Jsonl => {
+            // A top-level Unit/None return carries no data. Suppress it
+            // (as JSON and Packet already do) so a command that streams
+            // its output through @stdout and returns () doesn't get a
+            // spurious `null` line appended after the streamed jsonl.
+            // --keep-null opts back in.
+            if !config.keep_null
+                && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
+            {
+                return;
+            }
             // JSON-lines: one element per line for list schemas, one
             // line total for scalars. Streams element-by-element via
             // the runtime's `print_voidstar_jsonl` -- peak memory is
@@ -1434,6 +1457,39 @@ pub(crate) fn print_result_c(
                     schema,
                     &mut errmsg,
                 )
+            };
+            match rc {
+                PRINT_RESULT_OK => {}
+                PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                _ => {
+                    let msg = process::take_c_errmsg(errmsg)
+                        .unwrap_or_else(|| "unknown error".into());
+                    eprintln!("Error: {}", msg);
+                    process::clean_exit(1);
+                }
+            }
+        }
+        OutputFormat::Raw => {
+            // Verbatim bytes: emit a Str / [Str] / Vector U8 / [Vector U8] body
+            // with no framing -- the output path for `render` handlers.
+            // `render.buffer` streams its output and returns (); suppress that
+            // top-level Unit so it isn't fed to print_voidstar_raw (which would
+            // reject it). Whole-list `render` returns a real Str/Vector U8 value
+            // and prints normally. --keep-null opts back in.
+            if !config.keep_null
+                && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
+            {
+                return;
+            }
+            extern "C" {
+                fn print_voidstar_raw(
+                    data: *const std::ffi::c_void,
+                    schema: *const morloc_runtime_types::cschema::CSchema,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
+            }
+            let rc = unsafe {
+                print_voidstar_raw(ptr as *const std::ffi::c_void, schema, &mut errmsg)
             };
             match rc {
                 PRINT_RESULT_OK => {}

@@ -1576,16 +1576,29 @@ unsafe fn morloc_eval_r(
         MorlocExpressionType::Close => {
             extern "C" {
                 fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
+                fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
             }
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
-            let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
             let mut err: *mut c_char = ptr::null_mut();
-            let rc = mlc_close(handle_i, &mut err);
-            if rc != 0 {
-                let msg = take_c_errmsg_or(err, "mlc_close returned non-zero with no error message");
-                return Err(MorlocError::Other(msg));
+            // A Str argument is a registered-temp-file unlink (same as the pool
+            // path via mlc_unlink_tmp); a handle argument closes the stream/file.
+            if (*handle_schema).serial_type == crate::schema::SerialType::String as u32 {
+                let path_cstr = path_voidstar_to_cstr(handle_ptr, "@close")?;
+                let rc = mlc_unlink_tmp(path_cstr, &mut err);
+                libc::free(path_cstr as *mut c_void);
+                if rc != 0 {
+                    let msg = take_c_errmsg_or(err, "@close: mlc_unlink_tmp returned non-zero with no error message");
+                    return Err(MorlocError::UserThrow(msg));
+                }
+            } else {
+                let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
+                let rc = mlc_close(handle_i, &mut err);
+                if rc != 0 {
+                    let msg = take_c_errmsg_or(err, "mlc_close returned non-zero with no error message");
+                    return Err(MorlocError::Other(msg));
+                }
             }
             // Return unit (zero-fill dest).
             ptr::write_bytes(dest, 0, width);

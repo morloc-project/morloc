@@ -3107,6 +3107,38 @@ error:
     return NULL;
 }
 
+// mlc_tell() -> int. Elements written to the @stdout OStream so far. Never
+// fails (returns 0 when no @stdout is open).
+static PyObject* pybinding__mlc_tell(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    char* errmsg = NULL;
+    uint64_t n = mlc_tell(&errmsg);
+    return PyLong_FromUnsignedLongLong((unsigned long long)n);
+}
+
+// mlc_tmpfile() -> str. Create a temp file (removed when the pool call ends)
+// and return its path.
+static PyObject* pybinding__mlc_tmpfile(PyObject* self, PyObject* args) { MAYFAIL
+    (void)self; (void)args;
+    char* path = PyTRY(mlc_tmpfile);
+    PyObject* result = PyUnicode_FromString(path);
+    free(path);
+    return result;
+error:
+    return NULL;
+}
+
+// mlc_unlink_tmp(path) -> None. Unlink a registered temp file; errors if the
+// path was not created by mlc_tmpfile in this call.
+static PyObject* pybinding__mlc_unlink_tmp(PyObject* self, PyObject* args) { MAYFAIL
+    const char* path;
+    PARSE_ARGS_OR_ABORT(args, "s", &path);
+    PyTRY(mlc_unlink_tmp, path);
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
@@ -3163,6 +3195,9 @@ static PyMethodDef Methods[] = {
     {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
+    {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},
+    {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
+    {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_catch", pybinding__mlc_catch, METH_VARARGS, "Evaluate fallible; on exception, evaluate fallback"},
     {NULL, NULL, 0, NULL} // this is a sentinel value

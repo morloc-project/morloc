@@ -1,0 +1,78 @@
+module mainc (streamInts, streamStrs, badClose)
+
+-- Self-contained per-language module: the signatures, producers, and commands
+-- live here; only the handler BODIES are language-specific (impl.hpp). The morloc
+-- shell is identical across main-{cpp,py,r}.loc. Imported handlers work too
+-- (terminal-action synthesis consults imported signatures -- see the
+-- detect-imported-handler test); keeping each language self-contained just
+-- makes this test one file per language.
+
+import root-cpp
+
+source Cpp from "impl.hpp"
+  ( "make_ints"       as makeInts
+  , "sort_ints"       as sortInts
+  , "tag_ints"        as tagInts
+  , "tag_ints_off"    as tagIntsOff
+  , "render_ints"     as renderInts
+  , "render_ints_off" as renderIntsOff
+  , "make_strs"       as makeStrs
+  , "sort_strs"       as sortStrs
+  , "join_strs"       as joinStrs
+  )
+
+makeInts :: Int -> [Int]
+makeStrs :: Int -> [Str]
+sortInts :: [Int] -> [Int]
+sortStrs :: [Str] -> [Str]
+tagInts :: [Int] -> [Int]
+tagIntsOff :: U64 -> [Int] -> [Int]
+renderInts :: [Int] -> Str
+renderIntsOff :: U64 -> [Int] -> Str
+joinStrs :: [Str] -> Str
+
+-- morloc-native whole-list IFile handlers (need no per-language binding)
+sumIntsFile :: IFile [Int] -> <IO, Err> Int
+sumIntsFile f = @flen f
+
+countStrsFile :: IFile [Str] -> <IO, Err> Int
+countStrsFile f = @flen f
+
+notATemp :: Str
+notATemp = "collect-formatters-not-a-temp.txt"
+
+produceInts :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceInts sink = do
+  _ <- sink (makeInts 0)
+  _ <- sink (makeInts 1)
+  sink (makeInts 2)
+
+--' Stream three batches of integers
+--' with: -s/--sorted=sortInts
+--' with: -m/--summary=sumIntsFile
+--' with.buffer: -t/--tagged=tagInts
+--' with.buffer: -T/--tag-off=tagIntsOff
+--' render.buffer: -r/--text=renderInts
+--' render.buffer: -R/--text-off=renderIntsOff
+streamInts :: <IO, Err> ()
+streamInts = @collect produceInts
+
+produceStrs :: ([Str] -> <IO, Err> ()) -> <IO, Err> ()
+produceStrs sink = do
+  _ <- sink (makeStrs 0)
+  _ <- sink (makeStrs 1)
+  sink (makeStrs 2)
+
+--' Stream three batches of strings
+--' with: -s/--sorted=sortStrs
+--' with: -m/--count=countStrsFile
+--' render.buffer: -r/--text=joinStrs
+streamStrs :: <IO, Err> ()
+streamStrs = @collect produceStrs
+
+--' Attempt to @close a non-temp path: must fail (not silently remove a file).
+--' The pure command runs in the nexus interpreter, whose @close(Str) path
+--' routes to the registered-temp guard and rejects an unregistered path with a
+--' clean "not a registered temp file" error. The test asserts it fails.
+badClose :: <IO, Err> ()
+badClose = @close notATemp

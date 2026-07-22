@@ -126,6 +126,22 @@ pub unsafe extern "C" fn print_voidstar_jsonl(
     }
 }
 
+/// Emit a `Str`/`[Str]` voidstar as verbatim bytes (the `-f raw` format).
+#[no_mangle]
+pub unsafe extern "C" fn print_voidstar_raw(
+    data: *const c_void,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let rs = CSchema::to_rust(schema);
+    match crate::json::print_voidstar_raw(data as *mut u8, &rs) {
+        Ok(()) => PRINT_RESULT_OK,
+        Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
+        Err(e) => { set_errmsg(errmsg, &e); PRINT_RESULT_ERR }
+    }
+}
+
 unsafe fn print_dispatch(
     data: *const c_void,
     schema: *const CSchema,

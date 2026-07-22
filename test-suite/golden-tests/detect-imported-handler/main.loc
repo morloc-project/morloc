@@ -1,0 +1,16 @@
+module main (streamNums)
+
+import root
+
+import .hmod (mk, tagOff, sumFile)
+
+produce :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' Stream, with an IMPORTED offset handler and IMPORTED IFile handler
+--' with.buffer: -t/--tag-off=tagOff
+--' with: -m/--summary=sumFile
+streamNums :: <IO, Err> ()
+streamNums = @collect produce

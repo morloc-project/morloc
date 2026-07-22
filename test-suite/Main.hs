@@ -81,6 +81,14 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
+      , golden "lambda-reindex" "lambda-reindex"
+      , golden "collect-formatters" "collect-formatters"
+      , golden "detect-imported-handler" "detect-imported-handler"
+      , golden "vector-u8-cpp" "vector-u8-cpp"
+      , golden "close-nontemp-error" "close-nontemp-error"
+      , golden "whole-render-cpp" "whole-render-cpp"
+      , golden "stdout-stream-format" "stdout-stream-format"
+
       , golden "vector-gradual-desugar-py" "vector-gradual-desugar-py"
       , golden "vector-gradual-desugar-c" "vector-gradual-desugar-c"
 

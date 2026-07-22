@@ -827,6 +827,17 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrDatafile [pathExpr])) = do
       resolved <- resolveDatafilePath pathExpr
       StrX <$> type2schema t <*> pure resolved
+    -- @tmpfile is synthesized only by the whole-list with:/render: handler.
+    -- The nexus interpreter has no gather-to-tempfile evaluator yet, so a
+    -- pure (all-morloc) whole-form command is rejected with a clear message.
+    -- Foreign-dispatched whole-form commands go through the pool path and are
+    -- unaffected.
+    toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
+      MM.throwSourcedError iTmp $
+        "the whole-list `with:`/`render:` handler currently requires a command"
+          <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
+          <+> "command is not yet supported. Use `.buffer` for streaming, or"
+          <+> "involve a foreign function in the command body."
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -2351,7 +2362,7 @@ buildManifest ManifestInputs{..} =
       jsonArr (map (oneTerminal parentName) specs)
 
     oneTerminal :: Text -> WithSpec -> Text
-    oneTerminal parentName (WithSpec mShort long (EV tName)) =
+    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _) =
       let EV mangled = mangleTerminalName (EV parentName) long
           desc = case Map.lookup (EV tName) miTermDocs of
             Just (firstLine : _) -> firstLine
@@ -2363,6 +2374,9 @@ buildManifest ManifestInputs{..} =
             , ("long", jsonStr long)
             , ("entry", jsonStr mangled)
             , ("description", jsonStr desc)
+            -- `render` terminals emit their handler's bytes verbatim, so the
+            -- nexus defaults their output format to `raw` (see phase2.rs).
+            , ("render", jsonBool isRender)
             ]
 
     -- Render the @args@ JSON array. 'makeSerialASTs' produces one

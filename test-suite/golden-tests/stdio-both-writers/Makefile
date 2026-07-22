@@ -10,7 +10,7 @@ all:
 	# dataAndLog: @stdout and @stderr each carry their own stream
 	# file. Independent SHM claim slots per stdio kind + independent
 	# nexus-side mutexes.
-	./nexus dataAndLog > data.tmp 2> log.tmp
+	./nexus -f packet @ dataAndLog > data.tmp 2> log.tmp
 	@echo "=== data_nonempty ===" >> obs.txt
 	@if [ -s data.tmp ]; then echo "yes" >> obs.txt; else echo "no" >> obs.txt; fi
 	@echo "=== log_nonempty ===" >> obs.txt
