@@ -40,6 +40,18 @@ int(42)
 --- describe --help lines (grep --say) ---
       --say
           Human-readable form of an integer
+  --say:   Unit
+--- fhead --help Return block (per-formatter return types) ---
+Return:
+  default:    [Str]
+  -l/--lines: Unit
+  -c/--csv:   Unit
+  -s/--sum:   Str
+  -p/--plain: Str
+--- describe --help Return block (single terminal) ---
+Return:
+  default: Int
+  --say:   Unit
 --- fhead -l -c (should error) ---
 OK: sibling terminals rejected
 --- ./nexus mlcp_fhead_lines (should error) ---

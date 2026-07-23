@@ -221,7 +221,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         // section sorts before the command's positional/optional args
         // (clap orders sections by first-arg-added).
         let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
-        let root = build_command_args(root, cmd)
+        let root = build_command_args(root, cmd, manifest)
             .about(leak(first_desc(&cmd.desc)))
             .arg_required_else_help(false);
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
@@ -259,7 +259,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                     ClapCommand::new(leak(&cmd.name))
                         .about(leak(first_desc(&cmd.desc))),
                 );
-                let sub = build_command_args(sub, cmd);
+                let sub = build_command_args(sub, cmd, manifest);
                 let sub = crate::help::finalize(
                     sub,
                     crate::help::usage_multi_sub(
@@ -282,7 +282,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                 ClapCommand::new(leak(&cmd.name))
                     .about(leak(first_desc(&cmd.desc))),
             );
-            let sub = build_command_args(sub, cmd);
+            let sub = build_command_args(sub, cmd, manifest);
             let sub = crate::help::finalize(
                 sub,
                 crate::help::usage_multi_sub(prog_name, None, &cmd.name),
@@ -293,6 +293,62 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
     root
 }
 
+
+/// Render the `Return:` help block for a command.
+///
+/// With no terminal-action flags this is the single line
+/// `Return: <type>` (followed by any `--' return:` description lines),
+/// preserving the historical layout.
+///
+/// When the command carries `--' with:`/`render:` terminal actions,
+/// each flag selects a different output formatter with its own return
+/// type, so the block becomes a small table listing the return type
+/// per formatter -- `default:` for the bare command plus one aligned
+/// row per flag. Each terminal's return type is read from its
+/// synthesized `entry` command (resolved by name against the manifest).
+fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
+    if mcmd.terminals.is_empty() {
+        if mcmd.ret.type_desc.is_empty() {
+            return String::new();
+        }
+        let mut block = format!("Return: {}", mcmd.ret.type_desc);
+        for line in &mcmd.ret.desc {
+            block.push_str(&format!("\n  {}", line));
+        }
+        return block;
+    }
+
+    // (flag-label, return-type) rows: the bare command first, then one
+    // per terminal flag. A terminal whose entry can't be resolved (a
+    // malformed manifest) contributes an empty type rather than being
+    // dropped, so the row still documents the flag.
+    let mut rows: Vec<(String, String)> = Vec::with_capacity(mcmd.terminals.len() + 1);
+    rows.push(("default".to_string(), mcmd.ret.type_desc.clone()));
+    for t in &mcmd.terminals {
+        let label = match t.short {
+            Some(c) => format!("-{}/--{}", c, t.long),
+            None => format!("--{}", t.long),
+        };
+        let ret = manifest
+            .commands
+            .iter()
+            .find(|c| c.name == t.entry)
+            .map(|c| c.ret.type_desc.clone())
+            .unwrap_or_default();
+        rows.push((label, ret));
+    }
+
+    // Align the type column one space past the widest `label:`.
+    let width = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 1;
+    let mut block = String::from("Return:");
+    for (label, ret) in &rows {
+        block.push_str(&format!("\n  {:<width$} {}", format!("{}:", label), ret, width = width));
+    }
+    for line in &mcmd.ret.desc {
+        block.push_str(&format!("\n  {}", line));
+    }
+    block
+}
 
 /// Add every manifest [`Arg`] to a [`ClapCommand`] under stable ids
 /// (`arg<index>` plus `<arg_id>_neg` for flag negations and
@@ -305,7 +361,11 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 /// a letter; the compiler is expected to reject digit-prefixed
 /// short flag declarations in user docstrings, making this
 /// unambiguous.
-fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
+fn build_command_args(
+    mut cmd: ClapCommand,
+    mcmd: &ManifestCommand,
+    manifest: &Manifest,
+) -> ClapCommand {
     cmd = cmd
         .allow_negative_numbers(true)
         // User-declared flag-style args inherit this heading;
@@ -330,14 +390,12 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     if !pos_block.is_empty() {
         after.push_str(&pos_block);
     }
-    if !mcmd.ret.type_desc.is_empty() {
+    let ret_block = render_return_block(mcmd, manifest);
+    if !ret_block.is_empty() {
         if !after.is_empty() {
             after.push_str("\n\n");
         }
-        after.push_str(&format!("Return: {}", mcmd.ret.type_desc));
-        for line in &mcmd.ret.desc {
-            after.push_str(&format!("\n  {}", line));
-        }
+        after.push_str(&ret_block);
     }
     if let Some(block) = crate::schemas::render_command_schemas(mcmd) {
         if !after.is_empty() {

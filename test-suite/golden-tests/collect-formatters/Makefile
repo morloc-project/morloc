@@ -74,6 +74,11 @@ assertions:
 	for n in 1 2 3 4 5 ; do MORLOC_TMPDIR=$(TMP) ./nexus-cpp -f json streamInts --sorted >/dev/null 2>> obs.err ; done
 	printf 'leftover morloc-gather files: ' >> obs.txt
 	find $(TMP) -name 'morloc-gather-*' 2>/dev/null | wc -l >> obs.txt
+	# Return block lists each formatter's wire return type: whole-gather
+	# `with:` handlers return their reshaped value, buffered/streaming
+	# formatters return Unit (their data leaves via the stream).
+	printf -- '=== streamInts --help Return block (per-formatter return types) ===\n' >> obs.txt
+	./nexus-cpp streamInts --help 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
 	# Internal mlcp_* entries must stay hidden.
 	printf -- '=== mlcp_ hidden from top-level --help (expect 0) ===\n' >> obs.txt
 	./nexus-cpp --help 2>> obs.err | grep -c 'mlcp_' >> obs.txt ; true
