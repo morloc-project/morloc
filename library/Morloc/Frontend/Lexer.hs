@@ -568,6 +568,7 @@ classifyOp "=" = TokEquals
 classifyOp ":" = TokColon
 classifyOp "*" = TokStar
 classifyOp "-" = TokMinus
+classifyOp "|" = TokPipe
 -- < and > are also operators but we need them as angle brackets in some contexts
 -- The parser handles disambiguation
 classifyOp "<" = TokLAngle

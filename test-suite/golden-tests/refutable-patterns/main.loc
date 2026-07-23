@@ -1,0 +1,42 @@
+module main
+  ( fib, classify, sign, notB, nand, ack, firstZero, pointName )
+
+import root-py
+
+record Point = Point { x :: Int, y :: Int }
+
+fib :: Int -> Int
+fib | 0 = 1
+    | 1 = 1
+    | n = fib (n - 1) + fib (n - 2)
+
+classify :: Int -> Str
+classify | 0 = "zero"
+         | _ = "nonzero"
+
+sign :: Str -> Int
+sign | "pos" = 1
+     | "neg" = 0 - 1
+     | _     = 0
+
+notB :: Bool -> Bool
+notB | True  = False
+     | False = True
+
+nand :: Bool -> Bool -> Bool
+nand | True True = False
+     | _    _    = True
+
+ack :: Int -> Int -> Int
+ack | 0 n = n + 1
+    | m 0 = ack (m - 1) 1
+    | m n = ack (m - 1) (ack m (n - 1))
+
+firstZero :: (Int, Int) -> Int
+firstZero | (0, n) = n
+          | (m, n) = m + n
+
+pointName :: Point -> Str
+pointName | {x = 0, y = 0} = "origin"
+          | {x = 0, y = b} = "y-axis"
+          | p              = "elsewhere"

@@ -1555,6 +1555,44 @@ unitTypeTests =
         foo 42
         |]
           (existP "e0" [] [(Key "x", int), (Key "y", str)])
+      , testGroup
+          "anonymous record row-form vs NamU-form reconciliation"
+          [ expectPass
+              "field accessor on an anonymous-record-typed argument"
+              [r|
+        f :: {x = Int} -> Int
+        f r = .x r
+        f
+        |]
+          , expectPass
+              "record construction checked against an anonymous-record annotation"
+              [r|
+        f :: Int -> {x = Int}
+        f n = {x = n}
+        f
+        |]
+          , expectPass
+              "constructed record passed to an anonymous-record-typed parameter"
+              [r|
+        g :: {x = Int} -> Int
+        g r = 0
+        g {x = 5}
+        |]
+          , expectPass
+              "irrefutable record pattern binding an anonymous-record field"
+              [r|
+        f :: {x = Int} -> Int
+        f r = let ({x = a}) = r in a
+        f
+        |]
+          , expectPass
+              "refutable `|`-pattern destructuring an anonymous record"
+              [r|
+        f :: {x = Int} -> Int
+        f | {x = a} = a
+        f
+        |]
+          ]
       , -- functions
         assertGeneralType
           "1-arg function declaration without signature"

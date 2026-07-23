@@ -1,0 +1,29 @@
+-- Interaction between refutable `|`-pattern matching and the `?`/`:`
+-- boolean-guard feature. A clause body may be a guard instead of a plain
+-- `= body`, occupying the same syntactic slot. Pattern-bound variables are
+-- in scope inside the guard, and the guard's mandatory `:` default is
+-- internal to the clause -- it does not make a refutable pattern exhaustive.
+
+module main (foo, cmp, sign)
+
+import root-py
+
+-- A literal-pattern clause, then a variable-pattern clause whose body is a
+-- guard. `foo 0` -> 0; otherwise x is bound and the guard decides.
+foo :: Int -> Int
+foo | 0 = 0
+    | x ? x < 10 = 1
+        : 2
+
+-- A destructuring pattern feeds a multi-clause guard.
+cmp :: (Int, Int) -> Str
+cmp | (a, b) ? a < b  = "lt"
+             ? a == b = "eq"
+             : "gt"
+
+-- A single variable clause with several `?`-clauses.
+sign :: Int -> Str
+sign | 0 = "zero"
+     | x ? x < 0  = "neg"
+         ? x < 10 = "small"
+         : "large"

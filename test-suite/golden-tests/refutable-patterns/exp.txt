@@ -1,0 +1,38 @@
+--- fib0 ---
+1
+--- fib10 ---
+89
+--- fib20 ---
+10946
+--- classifyZero ---
+"zero"
+--- classifyOther ---
+"nonzero"
+--- signPos ---
+1
+--- signNeg ---
+-1
+--- signOther ---
+0
+--- notBTrue ---
+false
+--- notBFalse ---
+true
+--- nandTT ---
+false
+--- nandTF ---
+true
+--- ack22 ---
+7
+--- ack33 ---
+61
+--- firstZeroHead ---
+9
+--- firstZeroSum ---
+9
+--- pointOrigin ---
+"origin"
+--- pointYAxis ---
+"y-axis"
+--- pointElse ---
+"elsewhere"

@@ -1389,19 +1389,20 @@ walkIrrefPat (Loc _ (CIPatTup ps))  sel = concat
 walkIrrefPat (Loc _ (CIPatRec kps)) sel = concat
   [ walkIrrefPat p (extendSelKey k sel) | (Key k, p) <- kps ]
 
--- | Emit one LetE-style binding per leaf, projecting from 'receiver'.
--- A SelectorEnd chain (as-pattern binding the entire receiver) is
--- realized as a bare VarE reference rather than a PatE application on
--- an empty chain.
-materializeIrrefLeaves :: Span -> EVar -> [(EVar, Selector)] -> D [(EVar, ExprI)]
-materializeIrrefLeaves sp recv = mapM $ \(v, sel) -> do
+-- | Apply a selector chain to a receiver variable. A SelectorEnd chain
+-- (as-pattern binding the entire receiver) is realized as a bare VarE
+-- reference rather than a PatE application on an empty chain. Shared by
+-- irrefutable-leaf projection and refutable-clause equality tests.
+selectorApp :: Span -> EVar -> Selector -> D ExprI
+selectorApp sp recv SelectorEnd = freshExprSpan sp (VarE defaultValue recv)
+selectorApp sp recv sel = do
   subj <- freshExprSpan sp (VarE defaultValue recv)
-  rhs <- case sel of
-    SelectorEnd -> return subj
-    _ -> do
-      pat <- freshExprSpan sp (PatE (PatternStruct sel))
-      freshExprSpan sp (AppE pat [subj])
-  return (v, rhs)
+  patE <- freshExprSpan sp (PatE (PatternStruct sel))
+  freshExprSpan sp (AppE patE [subj])
+
+-- | Emit one LetE-style binding per leaf, projecting from 'receiver'.
+materializeIrrefLeaves :: Span -> EVar -> [(EVar, Selector)] -> D [(EVar, ExprI)]
+materializeIrrefLeaves sp recv = mapM $ \(v, sel) -> (,) v <$> selectorApp sp recv sel
 
 -- | If the desugared expression is a bare VarE, return its name so callers
 -- can chain accessors directly on the variable instead of introducing a
@@ -1427,10 +1428,6 @@ freshIrrefLamParam sp = do
   idx <- freshIdSpan sp
   return (EV ("mlcp_x_" <> T.pack (show idx)))
 
--- | Extract the span of a Loc-wrapped value.
-irrefPatSpan :: Loc CstIrrefPat -> Span
-irrefPatSpan (Loc s _) = s
-
 -- | Given an irrefutable pattern and its already-desugared RHS, produce a
 -- flat list of (name, expr) bindings suitable for a LetE. Introduces one
 -- fresh temp when the receiver is not already a bare variable. A pattern
@@ -1443,7 +1440,7 @@ desugarIrrefPat (Loc _ (CIPatVar v)) rhs = return [(v, rhs)]
 desugarIrrefPat p rhs = do
   validateIrrefPat p
   let leaves = walkIrrefPat p SelectorEnd
-      sp = irrefPatSpan p
+      sp = spanOf p
   case leaves of
     [] -> do
       throwaway <- freshIrrefVar sp
@@ -1474,7 +1471,7 @@ desugarIrrefLamParam :: Set.Set EVar -> Loc CstIrrefPat -> D (EVar, [(EVar, Expr
 desugarIrrefLamParam _ (Loc _ (CIPatVar v)) = return (v, [])
 desugarIrrefLamParam usedNames p = do
   validateIrrefPat p
-  let sp = irrefPatSpan p
+  let sp = spanOf p
   v <- freshIrrefLamParam sp
   let leaves = walkIrrefPat p SelectorEnd
       usedLeaves = filter (\(n, _) -> Set.member n usedNames) leaves
@@ -1543,17 +1540,227 @@ irrefPatBoundNames (Loc _  (CIPatRec kps))     = concatMap (irrefPatBoundNames .
 -- | Reject an irrefutable pattern that binds the same name twice, e.g.
 -- (x, x) = e or {a=x, b=x} = r or x@(x, _) = e. Carets at the second
 -- occurrence's source position.
+-- | The first name that occurs more than once in a bound-name list,
+-- reported at its duplicating position (positions differ per occurrence, so
+-- the generic 'firstDuplicate' cannot key on the whole pair). Shared by the
+-- irrefutable- and refutable-pattern binder-duplication checks.
+firstRepeatedName :: [(Text, Pos)] -> Maybe (Text, Pos)
+firstRepeatedName = go Set.empty
+  where
+    go _ [] = Nothing
+    go seen ((x, pos) : xs)
+      | Set.member x seen = Just (x, pos)
+      | otherwise = go (Set.insert x seen) xs
+
 validateIrrefPat :: Loc CstIrrefPat -> D ()
 validateIrrefPat p =
-  case findFirstDup Set.empty (irrefPatBoundNames p) of
+  case firstRepeatedName (irrefPatBoundNames p) of
     Nothing -> return ()
     Just (n, pos) -> dfail pos ("duplicate binder in pattern: " ++ T.unpack n)
+
+--------------------------------------------------------------------
+-- Refutable-pattern desugaring (`|`-clauses)
+--------------------------------------------------------------------
+--
+-- A `|`-guarded definition packs every clause into one term (implementation
+-- polymorphism forbids Haskell-style per-clause dispatch) and lowers to a
+-- lambda over fresh formals whose body is a nested IfE cascade: the first
+-- clause whose per-argument tests all pass wins. Literal patterns become
+-- Eq's '==' tests (like the '? x == 0' guards); structural patterns reuse
+-- the irrefutable-pattern Selector projections. The final clause is the
+-- unconditional else and must be a valid catch-all (see checkRefutCoverage).
+
+-- | Convert a `|`-clause argument expression into a refutable pattern,
+-- enforcing the pattern subset. Literals are permitted (unlike
+-- 'exprToIrrefPat'); constructor patterns are deferred until sum types
+-- introduce term-level constructors.
+exprToRefutPat :: Loc CstExpr -> D (Loc CstRefutPat)
+exprToRefutPat (Loc sp (CVarE v))       = return (Loc sp (CRPatVar v))
+exprToRefutPat (Loc sp CUnderscoreE)    = return (Loc sp CRPatWild)
+exprToRefutPat lit@(Loc sp (CIntE _))   = return (Loc sp (CRPatLit lit))
+exprToRefutPat lit@(Loc sp (CRealE _))  = return (Loc sp (CRPatLit lit))
+exprToRefutPat lit@(Loc sp (CStrE _))   = return (Loc sp (CRPatLit lit))
+exprToRefutPat lit@(Loc sp (CLogE _))   = return (Loc sp (CRPatLit lit))
+exprToRefutPat (Loc sp (CAsE v inner))  = do
+  inner' <- exprToRefutPat inner
+  return (Loc sp (CRPatAs v inner'))
+exprToRefutPat (Loc _ (CParenE inner))  = exprToRefutPat inner
+exprToRefutPat (Loc sp (CTupE es))
+  | length es < 2 =
+      dfail (startPos sp) "tuple pattern requires at least two components"
+  | otherwise = do
+      ps <- mapM exprToRefutPat es
+      return (Loc sp (CRPatTup ps))
+exprToRefutPat (Loc sp (CNamE entries)) = do
+  ps <- mapM (\(k, e) -> do p <- exprToRefutPat e; return (k, p)) entries
+  return (Loc sp (CRPatRec ps))
+exprToRefutPat (Loc sp _) =
+  dfail (startPos sp)
+    "expected a pattern (variable, '_', literal, tuple, record, or label@pattern) in a `|` clause"
+
+-- | A leaf of a refutable-pattern walk: either a variable bound at a
+-- selector chain from the receiver, or a literal to test for equality at
+-- a selector chain.
+data RefutLeaf
+  = RBind EVar Selector
+  | RTest (Loc CstExpr) Selector
+
+-- | Walk a refutable pattern to its leaves, accumulating a selector chain.
+-- Mirrors 'walkIrrefPat' but also collects literal tests.
+walkRefutPat :: Loc CstRefutPat -> Selector -> [RefutLeaf]
+walkRefutPat (Loc _ (CRPatVar v))   sel = [RBind v sel]
+walkRefutPat (Loc _ CRPatWild)      _   = []
+walkRefutPat (Loc _ (CRPatLit e))   sel = [RTest e sel]
+walkRefutPat (Loc _ (CRPatAs v p))  sel = RBind v sel : walkRefutPat p sel
+walkRefutPat (Loc _ (CRPatTup ps))  sel = concat
+  [ walkRefutPat p (extendSelIdx i sel) | (i, p) <- zip [0 ..] ps ]
+walkRefutPat (Loc _ (CRPatRec kps)) sel = concat
+  [ walkRefutPat p (extendSelKey k sel) | (Key k, p) <- kps ]
+
+-- | Names bound by a refutable pattern, paired with the binding position.
+refutPatBoundNames :: Loc CstRefutPat -> [(Text, Pos)]
+refutPatBoundNames (Loc sp (CRPatVar (EV n)))  = [(n, startPos sp)]
+refutPatBoundNames (Loc _  CRPatWild)          = []
+refutPatBoundNames (Loc _  (CRPatLit _))       = []
+refutPatBoundNames (Loc sp (CRPatAs (EV n) p)) = (n, startPos sp) : refutPatBoundNames p
+refutPatBoundNames (Loc _  (CRPatTup ps))      = concatMap refutPatBoundNames ps
+refutPatBoundNames (Loc _  (CRPatRec kps))     = concatMap (refutPatBoundNames . snd) kps
+
+-- | The boolean value of a single bare-literal Bool pattern, if it is one.
+refutPatBoolLit :: Loc CstRefutPat -> Maybe Bool
+refutPatBoolLit (Loc _ (CRPatLit (Loc _ (CLogE b)))) = Just b
+refutPatBoolLit _ = Nothing
+
+-- | Does a refutable pattern contain a literal anywhere? A clause with no
+-- literals is irrefutable and always matches (a valid catch-all).
+refutPatHasLit :: Loc CstRefutPat -> Bool
+refutPatHasLit (Loc _ (CRPatLit _))   = True
+refutPatHasLit (Loc _ (CRPatVar _))   = False
+refutPatHasLit (Loc _ CRPatWild)      = False
+refutPatHasLit (Loc _ (CRPatAs _ p))  = refutPatHasLit p
+refutPatHasLit (Loc _ (CRPatTup ps))  = any refutPatHasLit ps
+refutPatHasLit (Loc _ (CRPatRec kps)) = any (refutPatHasLit . snd) kps
+
+-- | Reject a single clause that binds the same name twice (across its
+-- several argument patterns), e.g. @f | x x = ...@.
+validateRefutClause :: [Loc CstRefutPat] -> D ()
+validateRefutClause pats =
+  case firstRepeatedName (concatMap refutPatBoundNames pats) of
+    Nothing -> return ()
+    Just (n, pos) -> dfail pos ("duplicate binder in `|` clause: " ++ T.unpack n)
+
+-- | Build @formal.selector == literal@ as a BopE, exactly as a
+-- user-written '==' desugars, so it flows through the standard binop
+-- reassociation and Eq-instance resolution.
+buildRefutTest :: EVar -> (Loc CstExpr, Selector) -> D ExprI
+buildRefutTest formal (litLoc, sel) = do
+  let Loc lsp _ = litLoc
+  lhs <- selectorApp lsp formal sel
+  rhs <- desugarExpr litLoc
+  opI <- freshIdSpan lsp
+  freshExprSpan lsp (BopE lhs opI (EV "==") rhs)
+
+-- | Equality-test and projection-binding contributions of one clause
+-- argument pattern against its lambda formal. Dead binders (not free in
+-- the clause body) are dropped to avoid leaking an unresolved existential
+-- projection off the formal (see 'desugarIrrefLamParam').
+refutClauseArg
+  :: Set.Set EVar -> EVar -> Loc CstRefutPat -> D ([ExprI], [(EVar, ExprI)])
+refutClauseArg usedNames formal p = do
+  let leaves = walkRefutPat p SelectorEnd
+      binds  = [(v, sel) | RBind v sel <- leaves, Set.member v usedNames]
+      tests  = [(e, sel) | RTest e sel <- leaves]
+  bindings  <- materializeIrrefLeaves (spanOf p) formal binds
+  testExprs <- mapM (buildRefutTest formal) tests
+  return (testExprs, bindings)
+
+-- | Conjoin per-argument tests into one Bool without duplicating the
+-- clause body: @t1 && ... && tn@ as nested IfE returning True/False.
+conjoinTests :: Span -> [ExprI] -> D ExprI
+conjoinTests sp []       = freshExprSpan sp (LogE True)
+conjoinTests _  [t]      = return t
+conjoinTests sp (t : ts) = do
+  rest  <- conjoinTests sp ts
+  false <- freshExprSpan sp (LogE False)
+  freshExprSpan sp (IfE t rest false)
+
+-- | Build one clause into (condition, body). The body is wrapped in a
+-- LetE of its projection bindings.
+buildRefutClause
+  :: [EVar] -> ([Loc CstRefutPat], Loc CstExpr) -> D (ExprI, ExprI)
+buildRefutClause formals (pats, bodyLoc) = do
+  body' <- desugarExpr bodyLoc
+  let usedNames = freeVarsE body'
+      Loc bsp _ = bodyLoc
+  contribs <- mapM (\(f, p) -> refutClauseArg usedNames f p) (zip formals pats)
+  let allTests = concatMap fst contribs
+      allBinds = concatMap snd contribs
+  cond <- conjoinTests bsp allTests
+  clauseBody <- case allBinds of
+    [] -> return body'
+    _  -> freshExprSpan bsp (LetE allBinds body')
+  return (cond, clauseBody)
+
+-- | Reject a non-exhaustive clause set. The final clause is the
+-- unconditional else, so it must be a genuine catch-all: either
+-- irrefutable, or -- for a single Bool argument -- the clauses together
+-- cover {True, False}.
+checkRefutCoverage :: Span -> EVar -> [[Loc CstRefutPat]] -> D ()
+checkRefutCoverage sp name clausePatLists
+  | lastIrrefutable                 = return ()
+  | boolExhaustive clausePatLists   = return ()
+  | otherwise = dfail (startPos sp)
+      ("`|` patterns for '" ++ T.unpack (unEVar name)
+       ++ "' are not exhaustive; add a final catch-all clause (a variable or '_')")
   where
-    findFirstDup :: Set.Set Text -> [(Text, Pos)] -> Maybe (Text, Pos)
-    findFirstDup _ [] = Nothing
-    findFirstDup seen ((x, pos) : xs)
-      | Set.member x seen = Just (x, pos)
-      | otherwise = findFirstDup (Set.insert x seen) xs
+    lastIrrefutable = case clausePatLists of
+      [] -> False
+      _  -> not (any refutPatHasLit (last clausePatLists))
+
+-- | True when every clause is a single Bool-literal argument and the
+-- clauses cover both True and False.
+boolExhaustive :: [[Loc CstRefutPat]] -> Bool
+boolExhaustive clausePatLists =
+  case mapM singlePat clausePatLists >>= mapM refutPatBoolLit of
+    Just bs -> elem True bs && elem False bs
+    Nothing -> False
+  where
+    singlePat [p] = Just p
+    singlePat _   = Nothing
+
+-- | Fold clauses into a right-nested IfE cascade; the last clause's body
+-- is the base else (its condition is dropped -- soundness is guaranteed by
+-- 'checkRefutCoverage').
+assembleCascade :: Span -> [(ExprI, ExprI)] -> D ExprI
+assembleCascade sp built = go (init built) (snd (last built))
+  where
+    go [] acc = return acc
+    go ((cond, body) : rest) acc = do
+      acc' <- go rest acc
+      freshExprSpan sp (IfE cond body acc')
+
+-- | Lower `|`-clauses into a LamE over fresh formals. Callers wrap the
+-- result in an AssE with the definition's where-declarations.
+desugarRefutClauses
+  :: Span -> EVar -> [([Loc CstExpr], Loc CstExpr)] -> D ExprI
+desugarRefutClauses sp name clauses = do
+  clausePats <- mapM (\(args, body) -> do
+                        ps <- mapM exprToRefutPat args
+                        return (ps, body)) clauses
+  arity <- checkArity (map (length . fst) clausePats)
+  mapM_ (validateRefutClause . fst) clausePats
+  formals <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
+  built <- mapM (buildRefutClause formals) clausePats
+  checkRefutCoverage sp name (map fst clausePats)
+  cascade <- assembleCascade sp built
+  freshExprSpan sp (LamE formals cascade)
+  where
+    checkArity [] = dfail (startPos sp) "empty `|` definition"
+    checkArity (a : rest)
+      | all (== a) rest = return a
+      | otherwise = dfail (startPos sp)
+          ("all `|` clauses of '" ++ T.unpack (unEVar name)
+           ++ "' must bind the same number of arguments")
 
 --------------------------------------------------------------------
 -- Do-notation desugaring
@@ -1794,6 +2001,7 @@ desugarExpr (Loc _ (CFixE {})) = error "desugarExpr: unexpected CFixE in express
 desugarExpr (Loc _ (CSrcOldE {})) = error "desugarExpr: unexpected CSrcOldE in expression position"
 desugarExpr (Loc _ (CSrcNewE {})) = error "desugarExpr: unexpected CSrcNewE in expression position"
 desugarExpr (Loc _ (CGuardedAssE {})) = error "desugarExpr: unexpected CGuardedAssE in expression position"
+desugarExpr (Loc _ (CRefutAssE {})) = error "desugarExpr: unexpected CRefutAssE in expression position"
 desugarExpr (Loc _ (CInlineE {})) = error "desugarExpr: unexpected CInlineE in expression position"
 desugarExpr (Loc sp CUnderscoreE) =
   dfail (startPos sp) "'_' is only valid in a binding position (let / do-bind / lambda / function-def arg)"
@@ -1983,6 +2191,13 @@ desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)
       lam <- buildLamWithIrrefPats sp ps body'
       freshExprSpan sp (AssE name lam whereDecls')
   return [e]
+desugarTopLevel (Loc sp (CRefutAssE name clauses whereDecls)) = do
+  checkWhereScope [] whereDecls
+  captureDeclDocs (startPos sp) name
+  lam <- desugarRefutClauses sp name clauses
+  whereDecls' <- concatMapM desugarTopLevel whereDecls
+  e <- freshExprSpan sp (AssE name lam whereDecls')
+  return [e]
 desugarTopLevel (Loc sp (CTypE td)) = desugarTypeDef sp td
 desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
   (cs, cn, vs) <- desugarClassHead classHead
@@ -2058,6 +2273,7 @@ checkWhereScope params decls =
     bindingName :: Loc CstExpr -> Maybe (Text, Pos)
     bindingName d@(Loc _ (CAssE (EV n) _ _ _)) = Just (n, startPos d)
     bindingName d@(Loc _ (CGuardedAssE (EV n) _ _ _ _)) = Just (n, startPos d)
+    bindingName d@(Loc _ (CRefutAssE (EV n) _ _)) = Just (n, startPos d)
     bindingName _ = Nothing
 
 --------------------------------------------------------------------

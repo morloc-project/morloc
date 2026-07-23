@@ -927,8 +927,44 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
                           , "  neither side reduces to a Nat, Str, Rec, List, or Set expression."
                           ]
 
+-- | Recognize a closed anonymous record type in either representation it
+-- reaches subtyping in: the ground @RecExtendU@ chain built by the
+-- @{k = T}@ type syntax (an unreduced @OpU OpRecExtend@), or the reduced
+-- @LitU (LRec ...)@ literal. Returns the flat field list, or Nothing for
+-- an open row (RecExtendU chain ending in a row variable) or any non-record.
+asClosedRec :: TypeU -> Maybe [(Text, TypeU)]
+asClosedRec (LitU (LRec fs))     = Just fs
+asClosedRec r@(RecExtendU _ _ _) = collectGroundRec r
+asClosedRec _                    = Nothing
+
+-- | A closed anonymous record rendered in the @NamU NamRecord@ form that
+-- record construction, field accessors, and nominal @record@/@object@ types
+-- all use. Mirrors the ground-level @typeOf@ bridge (LRec -> NamT NamRecord
+-- "Rec").
+closedRecToNamU :: [(Text, TypeU)] -> TypeU
+closedRecToNamU fs = NamU NamRecord (TV "Rec") [] [(Key k, t) | (k, t) <- fs]
+
+-- | The two forms an anonymous closed record is bridged against: a nominal
+-- record (@NamU@) or a record-key existential (@ExistU@, from construction
+-- or a @.field@ accessor). @asClosedRec@ never matches either, so a bridge
+-- arm can never re-fire on the type it just normalized to.
+isNamOrExist :: TypeU -> Bool
+isNamOrExist NamU{}   = True
+isNamOrExist ExistU{} = True
+isNamOrExist _        = False
+
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+-- A closed anonymous record meeting a NamU record or a record-key
+-- existential (from construction / a `.field` accessor) is the same record
+-- in a different representation. Normalize it to the NamU form so the
+-- existing record and instantiate arms unify it exactly as they do a
+-- nominal record. Only bridges against NamU/ExistU; record-vs-record,
+-- row variables (RecVarU), and the row algebra keep their existing paths.
+-- Must precede the generic InstantiateL/R arms, which would otherwise hand
+-- a raw row record to 'instantiate' (which only understands NamU records).
+subtype scope t1 t2 g | isNamOrExist t2, Just fs <- asClosedRec t1 = subtype scope (closedRecToNamU fs) t2 g
+subtype scope t1 t2 g | isNamOrExist t1, Just fs <- asClosedRec t2 = subtype scope t1 (closedRecToNamU fs) g
 -- NatVarU: identical nat variables are equal; different ones fall to isNatExpr path
 subtype _ (NatVarU v1) (NatVarU v2) g
   | v1 == v2 = return g

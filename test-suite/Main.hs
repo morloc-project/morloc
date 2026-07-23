@@ -10,6 +10,7 @@ import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
+import RefutablePatternTests (refutablePatternTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import UnitTypeTests
@@ -67,6 +68,7 @@ main = do
       , sizeParseTests
       , patternChainTests
       , irrefutablePatternLexerTests
+      , refutablePatternTests
       , effectBoundaryTests
       , schemaHintTests
 
@@ -132,6 +134,8 @@ main = do
       , golden "nexus-file-footerless" "nexus-file-footerless"
       , golden "pattern-corpus" "pattern-corpus"
       , golden "irrefutable-patterns" "irrefutable-patterns"
+      , golden "refutable-patterns" "refutable-patterns"
+      , golden "refutable-guards" "refutable-guards"
       , golden "intrmap-tuple-broadcast" "intrmap-tuple-broadcast"
       , golden "ifile-data-patterns" "ifile-data-patterns"
       , golden "ostream-write-roundtrip" "ostream-write-roundtrip"

@@ -56,6 +56,9 @@ import qualified Morloc.BaseTypes as BT
 --   current atom and the next token is '!', the parser can either reduce
 --   the chain or extend it with a new force_expr atom. Shift is correct
 --   (extend the atom chain, so `bar !x` = `bar (!x)`).
+-- refut_clauses (`|`-pattern definitions) add no new conflicts: '|' is a
+--   reserved token, so `evar_or_op refut_clauses` does not overlap the
+--   `evar_or_op atom_exprs` (CAssE) or guard_clauses alternatives.
 %expect 96
 
 %token
@@ -87,6 +90,7 @@ import qualified Morloc.BaseTypes as BT
   '<-'       { Located _ TokBind _ }
   '*'        { Located _ TokStar _ }
   '-'        { Located _ TokMinus _ }
+  '|'        { Located _ TokPipe _ }
   ':'        { Located _ TokColon _ }
   'module'   { Located _ TokModule _ }
   'import'   { Located _ TokImport _ }
@@ -193,6 +197,34 @@ sig_or_ass :: { [Loc CstExpr] }
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
   | evar_or_op atom_exprs guard_clauses ':' expr opt_where_decls
       { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $5 $6)] }
+  | evar_or_op refut_clauses opt_where_decls
+      { [at $1 (CRefutAssE (toEVar $1) $2 $3)] }
+
+-- Refutable-pattern clauses: `| p1 ... pn = body`, one or more, patterns
+-- parsed as expressions (narrowed to patterns in Desugar). Clauses are
+-- gathered without a VSEMI separator: the conventional multi-line layout
+-- indents continuation clauses deeper than the function name, so the
+-- layout processor inserts no VSEMI between them, and the VSEMI that
+-- terminates the whole definition separates it from the next top-level
+-- declaration (unlike guard_clauses, this list has no `:` terminator, so
+-- absorbing a VSEMI here would greedily swallow that separator).
+refut_clauses :: { [([Loc CstExpr], Loc CstExpr)] }
+  : refut_clause                          { [$1] }
+  | refut_clauses refut_clause            { $1 ++ [$2] }
+
+-- A clause body is either a plain expression (`= body`) or a `?`-guard with
+-- a mandatory `:` default (`? c1 = b1 ... : default`), mirroring the plain
+-- vs guarded function-definition forms above. The guarded body is built as
+-- a CGuardExprE -- the same node the standalone `guard_expr` produces -- so
+-- desugaring reuses `desugarGuards` unchanged; pattern-bound variables reach
+-- the guard through the clause's projection LetE. The VSEMI variant absorbs
+-- a layout separator inserted before an aligned `:` (as `guard_expr` does).
+refut_clause :: { ([Loc CstExpr], Loc CstExpr) }
+  : '|' atom_exprs1 '=' expr              { ($2, $4) }
+  | '|' atom_exprs1 guard_clauses ':' expr
+      { ($2, Loc (fst (head $3) <-> $5) (CGuardExprE $3 $5)) }
+  | '|' atom_exprs1 guard_clauses VSEMI ':' expr
+      { ($2, Loc (fst (head $3) <-> $6) (CGuardExprE $3 $6)) }
 
 guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
   : guard_clause                          { [$1] }
