@@ -2241,6 +2241,19 @@ SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     return make_integer64_scalar(h);
 }
 
+SEXP morloc_mlc_open_istream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_open_istream: schema must be a single string");
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_open_istream: path must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    int64_t h = R_TRY(mlc_open_istream, schema_str, path);
+    return make_integer64_scalar(h);
+}
+
 // @stdin / @stdout / @stderr :: <IO> Handle T -- nullary intrinsics.
 // Nexus owns fd 0/1/2; the runtime routes @next / @write through the
 // pool-nexus RPC socket.
@@ -3557,6 +3570,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_next", (DL_FUNC) &morloc_mlc_next, 2},
         {"morloc_mlc_stream", (DL_FUNC) &morloc_mlc_stream, 1},
         {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},
+        {"morloc_mlc_open_istream", (DL_FUNC) &morloc_mlc_open_istream, 2},
         {"morloc_mlc_open_stdin",   (DL_FUNC) &morloc_mlc_open_stdin,   1},
         {"morloc_mlc_open_stdout",  (DL_FUNC) &morloc_mlc_open_stdout,  1},
         {"morloc_mlc_open_stderr",  (DL_FUNC) &morloc_mlc_open_stderr,  1},

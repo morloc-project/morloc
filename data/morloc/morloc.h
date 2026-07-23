@@ -1507,6 +1507,13 @@ int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 // files via sendfile, exploiting the stream-packet concat invariant.
 // The dest file is created with a merged final footer.
 int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
+// `mlc_open_istream(schema_str, path)` is the typed-open path for
+// `@open path :: <IO> (IStream T)`. Like the OStream entry the codegen
+// threads the element schema for T. A real file reads its schema off
+// disk; the `/dev/stdin` sentinel routes to the nexus stdin RPC channel,
+// declaring the schema so the nexus guards the incoming stream, and
+// rejecting an IFile open of stdin (a pipe is not seekable).
+int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
 // @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
 // sole owner of fd 0/1/2; these register slots that route mlc_next /
 // mlc_write through the pool-nexus RPC socket. At most one open per

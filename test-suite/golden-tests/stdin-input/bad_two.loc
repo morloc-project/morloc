@@ -1,0 +1,11 @@
+module main (two)
+import root-cpp
+type RFile = Str
+-- two stdin positionals: rejected at compile time (at most one per command)
+two ::
+  --' stdin: true
+  RFile ->
+  --' stdin: true
+  RFile ->
+  <IO, Err> ()
+two _ _ = @throw "unused"

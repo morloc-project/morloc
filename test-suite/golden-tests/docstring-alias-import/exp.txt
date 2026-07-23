@@ -1,0 +1,9 @@
+--- readCmd --help carries the alias description + check.path ---
+  1:  A readable filename
+      format: path to a readable file
+--- readCmd STDIN (arg omitted) ---
+[0,1,2,3,4]
+--- readCmd FILE ---
+[0,1,2,3,4]
+--- streamCmd (render.buffer) with RFile omitted ---
+OK: terminal-action RFile arg is optional

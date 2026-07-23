@@ -33,7 +33,7 @@ all:
 	$(call check_err,twoStderr,already open)
 	$(call check_ok,reopenAfterClose)
 	$(call check_ok,allThreeAtOnce)
-	$(call check_err,openDevStdin,refused)
+	$(call check_err,openDevStdin,evaluated directly by the nexus)
 	$(call check_err,openDevStdout,refused)
 	$(call check_err,openDevStderr,refused)
 

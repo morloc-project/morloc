@@ -816,6 +816,51 @@ pub unsafe extern "C" fn mlc_open_ostream(
     }
 }
 
+/// `@open path :: <IO> (IStream T)` -- typed open. Like `mlc_open_ostream`
+/// the codegen threads the element schema string for `T`. For a real file
+/// the schema is read off disk; for the `/dev/stdin` sentinel the schema
+/// declares the opener's type to the nexus (which guards the incoming
+/// stream) and routes reads through the pool-nexus RPC channel.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_istream(
+    schema_str: *const c_char,
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_open_istream: null path or schema".into(),
+        ));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open_istream: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    let s_str = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open_istream: schema is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::open_dispatch_istream(path_str, s_str) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 /// `@stdin :: <IO> IStream a` -- typed intrinsic. Element schema is
 /// passed by the codegen from `T`. Nexus owns fd 0; this call
 /// registers a slot that routes `mlc_next` through the pool-nexus

@@ -653,8 +653,15 @@ pub fn preprocess_cli_value(
     error_prefix: &str,
 ) -> String {
     let v = substitute_stdio_dash(&val, checks).unwrap_or(val);
-    if let Err(e) = apply_checks(&v, checks) {
-        crate::runlog::die_with_error(&format!("{}: {}", error_prefix, e));
+    // The stdio sentinels are opened by the runtime (stdin via the nexus
+    // RPC channel, stdout as a device); "read from stdin" is not
+    // "validate a user-named path", and `access("/dev/stdin", R_OK)` can
+    // spuriously fail, so skip the value-invariant checks on them.
+    let is_stdio_sentinel = v == "/dev/stdin" || v == "/dev/stdout";
+    if !is_stdio_sentinel {
+        if let Err(e) = apply_checks(&v, checks) {
+            crate::runlog::die_with_error(&format!("{}: {}", error_prefix, e));
+        }
     }
     if quoted_flag { quoted(&v) } else { v }
 }

@@ -1,0 +1,5 @@
+module main (produce, readCmd, streamCmd)
+
+-- Root imports only the COMMANDS from the submodule, never the RFile / Slice
+-- type aliases. The aliases' docstrings must still reach the command args.
+import .sub (produce, readCmd, streamCmd)

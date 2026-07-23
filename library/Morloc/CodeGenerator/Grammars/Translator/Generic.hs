@@ -973,6 +973,10 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_ostream("
             <> schemaRef sid <> ", " <> go path <> ")"
+    go (IIntrinsicOpenIStream sid path) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_istream("
+            <> schemaRef sid <> ", " <> go path <> ")"
     go (IIntrinsicWrite sid level value handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_write("

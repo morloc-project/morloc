@@ -412,13 +412,17 @@ fn build_command_args(
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { many, .. } => {
+            ManifestArg::Positional { many, stdin, .. } => {
                 // Positionals are rendered by `render_positional_block`
                 // (above, via `after_help`) so clap's bracketed
                 // `<argN>` default doesn't appear in help. They still
                 // need `required`/`index` here for clap to parse them.
+                // A `stdin: true` positional is optional (the compiler
+                // guarantees it is the last positional, so an optional
+                // trailing positional is unambiguous for clap); when
+                // omitted the nexus injects the `/dev/stdin` sentinel.
                 let mut a = ClapArg::new(id)
-                    .required(true)
+                    .required(!stdin)
                     .index(pos_idx as usize)
                     .hide(true);
                 // Variadic positional: accept one or more tokens.
@@ -671,7 +675,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, many, checks, .. } => {
+            ManifestArg::Positional { quoted: q, many, checks, stdin, .. } => {
                 if *many {
                     // Variadic positional: clap collects 1..N tokens
                     // via Append action; pull them all and forward as
@@ -684,6 +688,28 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .map(|it| it.cloned().collect())
                         .unwrap_or_default();
                     out.push(ArgValue::Many { tokens: toks, literal: *q });
+                } else if *stdin {
+                    // Optional stdin positional. A supplied value (a path or
+                    // an explicit `-`) is used directly; when omitted the
+                    // source is stdin, injected as the `/dev/stdin` sentinel.
+                    // Refuse to hang on an interactive terminal: with no value
+                    // and stdin a TTY there is nothing to read, so error
+                    // rather than block forever.
+                    let raw = match matches.get_one::<String>(&id).cloned() {
+                        Some(val) => val,
+                        None => {
+                            if unsafe { libc::isatty(0) } == 1 {
+                                crate::runlog::die_with_error(&format!(
+                                    "argument #{}: no input given and stdin is a terminal; \
+                                     pass a file path, `-` for stdin, or pipe data in",
+                                    i
+                                ));
+                            }
+                            "/dev/stdin".to_string()
+                        }
+                    };
+                    let v = preprocess_cli_value(raw, checks, *q, &format!("argument #{}", i));
+                    out.push(ArgValue::Value(v));
                 } else {
                     // Required positional: clap guaranteed a value.
                     let val = matches

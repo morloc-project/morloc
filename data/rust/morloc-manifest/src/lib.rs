@@ -552,6 +552,12 @@ pub enum Arg {
         /// in the morloc signature.
         #[serde(default)]
         many: bool,
+        /// If true, the positional is optional (`--' stdin: true`) and
+        /// reads from stdin when omitted: the nexus injects the
+        /// `/dev/stdin` sentinel as its value. At most one per command,
+        /// must be the last positional.
+        #[serde(default)]
+        stdin: bool,
         /// Description lines from `--' desc:` docstrings.
         #[serde(default)]
         desc: Vec<String>,

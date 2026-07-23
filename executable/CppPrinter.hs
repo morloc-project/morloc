@@ -134,6 +134,8 @@ printExpr (IIntrinsicStream h) =
   [idoc|_mlc_stream(#{printExpr h})|]
 printExpr (IIntrinsicOpenOStream sid path) =
   [idoc|_mlc_open_ostream(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
+printExpr (IIntrinsicOpenIStream sid path) =
+  [idoc|_mlc_open_istream(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicWrite sid level value handle) =
   [idoc|_mlc_write(mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr value}, #{printExpr handle})|]
 printExpr (IIntrinsicAppend sid path) =

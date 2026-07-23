@@ -294,7 +294,7 @@ parseCliOpt txt = case T.unpack (T.strip txt) of
 -- unknown-key warning even though full keys are dotted.
 argDocDirectiveKeys :: [Text]
 argDocDirectiveKeys =
-  [ "name", "literal", "many", "unroll", "default", "metavar"
+  [ "name", "literal", "many", "stdin", "unroll", "default", "metavar"
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
@@ -477,6 +477,7 @@ processArgDocLines = foldl step ([], [], defaultValue)
                   else []
            in (errs, ws <> warn, d {docLiteral = Just parsed})
         ["many"] -> (errs, ws, d {docMany = Just (parseDocBool v)})
+        ["stdin"] -> (errs, ws, d {docStdin = Just (parseDocBool v)})
         ["unroll"] -> (errs, ws, d {docUnroll = Just (parseDocBool v)})
         ["default"] -> (errs, ws, d {docDefault = Just v})
         ["metavar"] -> (errs, ws, d {docMetavar = Just v})

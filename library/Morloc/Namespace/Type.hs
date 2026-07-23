@@ -671,6 +671,7 @@ data ArgDocVars = ArgDocVars
   , docName :: Maybe Text
   , docLiteral :: Maybe Bool
   , docMany :: Maybe Bool
+  , docStdin :: Maybe Bool
   , docUnroll :: Maybe Bool
   , docDefault :: Maybe Text
   , docMetavar :: Maybe Text
@@ -732,6 +733,7 @@ instance Defaultable ArgDocVars where
       , docName = Nothing
       , docLiteral = Nothing
       , docMany = Nothing
+      , docStdin = Nothing
       , docUnroll = Nothing
       , docDefault = Nothing
       , docMetavar = Nothing

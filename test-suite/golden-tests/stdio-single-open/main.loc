@@ -5,9 +5,13 @@
 --   * `reopenAfterClose` -- @close releases the claim, so a subsequent
 --     open of the same kind succeeds.
 --   * `allThreeAtOnce` -- the three claim slots are independent.
---   * `openDev{Stdin,Stdout,Stderr}` -- `@open` on the `/dev/std*`
---     paths is refused with an error pointing at the intrinsic
---     (otherwise a naive user would race the nexus's own fd 0/1/2).
+--   * `openDevStdout`, `openDevStderr` -- `@open` on `/dev/stdout` /
+--     `/dev/stderr` is refused (a naive user would otherwise race the
+--     nexus's own fd 1/2); use `@stdout` / `@stderr` instead.
+--   * `openDevStdin` -- `/dev/stdin` is a supported input, not a refused
+--     path: `@open :: IStream` routes to the stdin channel. In a pure
+--     (nexus-evaluated) command like this one -- no language pool to read
+--     stdin -- it errors cleanly instead.
 
 module main
   ( twoStdin

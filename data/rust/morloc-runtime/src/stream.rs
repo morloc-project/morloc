@@ -2061,6 +2061,14 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
     }
 }
 
+/// True for the stdin fd-0 aliases. `@open` on stdin routes an IStream
+/// through the nexus RPC channel (the pool does not own fd 0) and rejects
+/// IFile (a pipe is not seekable). The nexus only ever emits the
+/// `/dev/stdin` sentinel, but a user may type any alias, so recognize all.
+fn is_stdin_device(path: &str) -> bool {
+    matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
+}
+
 /// Refuse `@open` on the `/dev/std{in,out,err}` paths. Opening them
 /// as a regular file would race the nexus's own reads/writes on
 /// fd 0/1/2. The user must route through `@stdin` / `@stdout` /
@@ -7655,6 +7663,33 @@ fn sendfile_range(
 /// through `mlc_open(path, kind)` would create a Nil-schema header on
 /// disk, breaking the receiving IStream/IFile reader's schema parse.
 pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
+    if is_stdin_device(path) {
+        // stdin is forward-only and lives on the nexus's fd 0. IFile
+        // (random access) is impossible; the error is catchable, so the
+        // `@catch (@open :: IFile) (@open :: IStream)` idiom falls back to
+        // IStream. The reject reads NO bytes, so the fallback consumes the
+        // pipe from byte 0. IStream must arrive via the typed
+        // `mlc_open_istream` entry (which carries the schema); a bare
+        // generic open of stdin as IStream is a codegen/interpreter gap.
+        return match kind {
+            MLC_KIND_IFILE => Err(MorlocError::Other(
+                "@open '/dev/stdin' :: IFile is not seekable; stdin is \
+                 forward-only. Open it as IStream (e.g. try IFile first and \
+                 fall back to IStream with @catch).".into(),
+            )),
+            MLC_KIND_ISTREAM => Err(MorlocError::Other(
+                "reading stdin as an IStream is not supported in a command \
+                 evaluated directly by the nexus (a pure command with no \
+                 foreign function calls). Add a call to a sourced function so \
+                 the command runs in a language pool, which can read stdin."
+                    .into(),
+            )),
+            _ => Err(MorlocError::Other(format!(
+                "mlc_open: stdin device with unsupported kind {} ({})",
+                kind, handle_kind_name(kind),
+            ))),
+        };
+    }
     match kind {
         MLC_KIND_IFILE => shared_open_ifile(path),
         MLC_KIND_ISTREAM => shared_open_istream(path),
@@ -7668,6 +7703,20 @@ pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
             kind, handle_kind_name(kind),
         ))),
     }
+}
+
+/// Dispatch entry for the typed `mlc_open_istream(schema_str, path)`.
+///
+/// A real file seeds its element schema from the on-disk stream header
+/// (the `schema_str` arg is consulted only for the stdin sentinel). The
+/// stdin sentinel routes to the nexus stdin channel via `open_stdio`,
+/// declaring the ascribed `[a]` schema so the nexus can guard the
+/// incoming stream against the opener's type.
+pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if is_stdin_device(path) {
+        return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
+    }
+    shared_open_istream(path)
 }
 
 // ── `morloc-nexus view` conversion helpers ────────────────────────────────

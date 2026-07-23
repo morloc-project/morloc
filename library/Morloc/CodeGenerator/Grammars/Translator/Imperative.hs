@@ -168,6 +168,12 @@ data IExpr
       --   `[a]` (streams are list-shaped) and the path expression. The
       --   runtime creates the file and writes the stream header with
       --   the schema metadata block.
+  | IIntrinsicOpenIStream Int IExpr
+      -- ^ @open :: <IO> (IStream a): schemaId of the list-of-element
+      --   `[a]` and the path expression. The declared schema lets the
+      --   runtime open the stdin sentinel (routing to the nexus stdin
+      --   channel and guarding the incoming stream schema); for a real
+      --   file the schema is still read from disk.
   | IIntrinsicWrite Int IExpr IExpr IExpr
       -- ^ @write: schemaId of the [a] value type, level, value, handle.
   | IIntrinsicAppend Int IExpr
@@ -779,24 +785,24 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
       unwrapHead (VarF (FV v _)) = Just v
       unwrapHead _ = Nothing
   let headVar = unwrapHead (typeFof origExpr)
+      rawPath = IRawExpr (render (poolExpr pathDocs))
+      -- Typed open (OStream/IStream): thread the ascribed `[a]` schema through
+      -- lcRegisterSchema into the given IExpr constructor. OStream needs it to
+      -- write the stream header; IStream to open the stdin sentinel and guard
+      -- the incoming stream.
+      openTyped mkExpr what = do
+        schemaText <- case maySchema of
+          Just s  -> return s
+          Nothing -> error ("@open :: " ++ what ++ " a -- schema not synthesized (Serialize.hs bug)")
+        sid <- lcRegisterSchema cfg schemaText
+        return pathDocs { poolExpr = lcPrintExpr cfg (mkExpr sid rawPath) }
   case headVar of
-    Just v | v == BT.ostreamVar -> do
-      schemaText <- case maySchema of
-        Just s  -> return s
-        Nothing -> error "@open :: OStream a -- schema not synthesized (Serialize.hs bug)"
-      sid <- lcRegisterSchema cfg schemaText
-      return $ pathDocs
-        { poolExpr = lcPrintExpr cfg
-            (IIntrinsicOpenOStream sid (IRawExpr (render (poolExpr pathDocs))))
-        }
-    Just v | v == BT.ifileVar || v == BT.istreamVar -> do
-      let kind | v == BT.ifileVar   = BT.mlcKindIFile
-               | v == BT.istreamVar = BT.mlcKindIStream
-               | otherwise          = BT.mlcKindIFile  -- unreachable
-      return $ pathDocs
-        { poolExpr = lcPrintExpr cfg
-            (IIntrinsicOpen kind (IRawExpr (render (poolExpr pathDocs))))
-        }
+    Just v | v == BT.ostreamVar -> openTyped IIntrinsicOpenOStream "OStream"
+    Just v | v == BT.istreamVar -> openTyped IIntrinsicOpenIStream "IStream"
+    Just v | v == BT.ifileVar ->
+      -- IFile reads its schema off disk (no ascription schema needed); an
+      -- IFile open of the stdin sentinel is a catchable runtime error.
+      return pathDocs { poolExpr = lcPrintExpr cfg (IIntrinsicOpen BT.mlcKindIFile rawPath) }
     Just (TV t) ->
       error $ "@open: result type must be IFile/IStream/OStream, got " <> T.unpack t
     Nothing ->

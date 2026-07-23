@@ -2974,6 +2974,17 @@ error:
     return NULL;
 }
 
+// _mlc_open_istream(schema_str, path) -> handle
+static PyObject* pybinding__mlc_open_istream(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    const char* path;
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
+    int64_t h = PyTRY(mlc_open_istream, schema_str, path);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
 // _mlc_open_stdin/stdout/stderr(schema_str) -> handle
 // Nullary intrinsics that bind stdio to a typed stream handle. The
 // nexus is the sole owner of fd 0/1/2; these register a slot in the
@@ -3188,6 +3199,7 @@ static PyMethodDef Methods[] = {
     {"mlc_next", pybinding__mlc_next, METH_VARARGS, "Materialise an IStream's current sub-packet and advance the cursor"},
     {"mlc_stream", pybinding__mlc_stream, METH_VARARGS, "Derive an IStream handle from an open IFile handle"},
     {"mlc_open_ostream", pybinding__mlc_open_ostream, METH_VARARGS, "Open a fresh OStream handle for the given schema + path"},
+    {"mlc_open_istream", pybinding__mlc_open_istream, METH_VARARGS, "Open an IStream handle for the given schema + path (file or stdin sentinel)"},
     {"mlc_open_stdin",  pybinding__mlc_open_stdin,  METH_VARARGS, "Open @stdin :: IStream a as a typed handle (nullary)"},
     {"mlc_open_stdout", pybinding__mlc_open_stdout, METH_VARARGS, "Open @stdout :: OStream a as a typed handle (nullary)"},
     {"mlc_open_stderr", pybinding__mlc_open_stderr, METH_VARARGS, "Open @stderr :: OStream a as a typed handle (nullary)"},

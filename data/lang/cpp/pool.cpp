@@ -624,6 +624,22 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
     return h;
 }
 
+// Typed IStream open. The element schema declares the opener's type so
+// the runtime can route the /dev/stdin sentinel through the nexus stdin
+// channel (guarding the incoming stream); for a real file it is read off
+// disk.
+inline int64_t _mlc_open_istream(Schema* schema, const std::string& path) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) {
+        MLC_INTERNAL_ABORT("_mlc_open_istream: schema_to_string returned NULL (invalid compile-time schema table entry)");
+    }
+    int64_t h = mlc_open_istream(s, path.c_str(), &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
 // @stdin / @stdout / @stderr: nullary intrinsics. Element schema is
 // rendered from the parsed Schema and passed to the runtime; the nexus
 // owns fd 0/1/2 and services @next / @write over the RPC socket.

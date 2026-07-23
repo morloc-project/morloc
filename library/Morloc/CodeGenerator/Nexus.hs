@@ -1136,6 +1136,7 @@ argToJson mEmit mShape _ (CmdArgPos r) =
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
        , ("many", jsonBool (argPosDocMany r))
+       , ("stdin", jsonBool (argPosDocStdin r))
        , ("desc", jsonStrArr (argPosDocDesc r))
        , ("constraints", constraintsJsonFor (argPosDocType r))
        , ("metadata", metadataEmpty)

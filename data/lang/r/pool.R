@@ -36,6 +36,7 @@ morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_l
 morloc_mlc_next                      <- function(...){ .Call("morloc_mlc_next",                      ...) }
 morloc_mlc_stream                    <- function(...){ .Call("morloc_mlc_stream",                    ...) }
 morloc_mlc_open_ostream              <- function(...){ .Call("morloc_mlc_open_ostream",              ...) }
+morloc_mlc_open_istream              <- function(...){ .Call("morloc_mlc_open_istream",              ...) }
 morloc_mlc_open_stdout               <- function(...){ .Call("morloc_mlc_open_stdout",               ...) }
 morloc_mlc_open_stdin                <- function(...){ .Call("morloc_mlc_open_stdin",                ...) }
 morloc_mlc_open_stderr               <- function(...){ .Call("morloc_mlc_open_stderr",               ...) }
