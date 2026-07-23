@@ -1,0 +1,12 @@
+--- default (untagged): 1 0 11 10 ---
+1
+0
+11
+10
+--- tagged (batch size appended): 1 0 2 11 10 2 ---
+1
+0
+2
+11
+10
+2

@@ -86,6 +86,7 @@ main = do
       , golden "lambda-reindex" "lambda-reindex"
       , golden "collect-formatters" "collect-formatters"
       , golden "detect-imported-handler" "detect-imported-handler"
+      , golden "collect-cross-module" "collect-cross-module"
       , golden "vector-u8-cpp" "vector-u8-cpp"
       , golden "close-nontemp-error" "close-nontemp-error"
       , golden "whole-render-cpp" "whole-render-cpp"

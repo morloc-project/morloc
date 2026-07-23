@@ -1,0 +1,23 @@
+module (streamNums)
+
+import root-cpp
+
+source Cpp from "handlers.hpp" ("mk" as mk, "tag" as tag)
+mk :: Int -> [Int]
+tag :: [Int] -> [Int]
+
+produce :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+-- The streaming command lives HERE, in a submodule, and is imported by name
+-- into the root module. Terminal-action synthesis exports the handler in THIS
+-- module, but program roots come only from the root's export list -- so codegen
+-- prunes the handler unless terminal-action entries are rooted alongside their
+-- parent command. Without the fix, --tagged silently falls back to the default
+-- (untagged) output.
+--' Stream two batches of integers
+--' with.buffer: -t/--tagged=tag
+streamNums :: <IO, Err> ()
+streamNums = @collect produce
