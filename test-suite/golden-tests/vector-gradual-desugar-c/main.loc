@@ -1,0 +1,36 @@
+-- End-to-end golden for the gradual `Vector T` form on the C++ side.
+-- Distinct from the Python variant because C++ codegen builds pool
+-- type names via macro expansion (@std::vector<$1>@ where @$1@ counts
+-- type-kinded args only); the gradual desugar inserts a kind arg that
+-- must be stripped by the macro-index accounting.
+
+module main
+  ( sizeSingle
+  , sizeMany
+  , sizeConcrete
+  , sizeAfterRoundTrip
+  )
+
+import root-cpp
+import vector-cpp
+
+source Cpp from "src.hpp" ("mk_vec" as mkVec)
+mkVec :: Int -> Vector U8
+
+source Cpp from "src.hpp" ("mk_three" as mkThree)
+mkThree :: Vector 3 U8
+
+sizeSingle :: Int -> U64
+sizeSingle n = size (mkVec n)
+
+sizeMany :: [Int] -> [U64]
+sizeMany ns = map size (map mkVec ns)
+
+sizeConcrete :: U64
+sizeConcrete = takeGradual mkThree
+
+takeGradual :: Vector U8 -> U64
+takeGradual = size
+
+sizeAfterRoundTrip :: U64
+sizeAfterRoundTrip = size (mkVec 5)

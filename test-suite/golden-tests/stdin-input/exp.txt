@@ -1,0 +1,20 @@
+--- readStream FILE ---
+[0,1,2,3,4]
+--- readStream STDIN omitted ---
+[0,1,2,3,4]
+--- readStream STDIN dash ---
+[0,1,2,3,4]
+--- readAny FILE (IFile count) ---
+5
+--- readAny STDIN (IFile fails, IStream fallback) ---
+0
+--- schema guard ([Int] pkt -> IStream Str) ---
+OK: schema mismatch rejected
+--- foreign stdin (>=32 bytes of text) ---
+OK: foreign input rejected
+--- truncated stdin (8 bytes) ---
+OK: truncated input rejected
+--- empty stdin ---
+[]
+--- compile rejection: two stdin args ---
+OK: two stdin args rejected

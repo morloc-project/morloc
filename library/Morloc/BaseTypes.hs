@@ -39,6 +39,7 @@ module Morloc.BaseTypes
   , ifileVar
   , istreamVar
   , ostreamVar
+  , closeTmpUnlinkMarker
   , isIFileHead
   , mlcKindIFile
   , mlcKindIStream
@@ -128,6 +129,13 @@ bool = TV "Bool"
 
 str :: TVar
 str = TV "Str"
+
+-- | Sentinel stored in an @close@ intrinsic's schema slot when its argument is
+-- a @Str@ path rather than a stream handle. Codegen sees this marker and emits
+-- the registered-temp-file unlink (mlc_unlink_tmp) instead of a handle close.
+-- Not a real msgpack schema; only ever compared, never parsed.
+closeTmpUnlinkMarker :: Text
+closeTmpUnlinkMarker = "@close-unlink-tmp"
 
 list :: TVar
 list = TV "List"

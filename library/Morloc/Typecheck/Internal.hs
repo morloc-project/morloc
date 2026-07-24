@@ -43,6 +43,7 @@ module Morloc.Typecheck.Internal
   , renameEType
   , cleanTypeName
   , prettyTypeU
+  , prettyTypeUPair
   , isNatExpr
   , isStrExpr
   , isRecExpr
@@ -426,7 +427,7 @@ instance Applicable TypeU where
     case lookupU v g of
       (Just t') -> t'
       Nothing -> VarU v
-  apply g (NatVarU v) = case Map.lookup v (gammaNatSubs g) of
+  apply g (NatVarU v) = case Map.lookup (v, KindNat) (gammaKindSubs g) of
     Just t -> t
     Nothing -> NatVarU v
   -- [G](A->B) = ([G]A -> [G]B)
@@ -460,13 +461,13 @@ instance Applicable TypeU where
   apply g (NatSubU a b) = NatSubU (apply g a) (apply g b)
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
   apply _ t@NatVoidU = t
-  apply g (StrVarU v) = case Map.lookup v (gammaStrSubs g) of
+  apply g (StrVarU v) = case Map.lookup (v, KindStr) (gammaKindSubs g) of
     Just t -> t
     Nothing -> StrVarU v
   apply _ t@(StrLitU _) = t
   apply g (StrConcatU a b) = StrConcatU (apply g a) (apply g b)
   apply _ t@StrVoidU = t
-  apply g (RecVarU v) = case Map.lookup v (gammaRecSubs g) of
+  apply g (RecVarU v) = case Map.lookup (v, KindRec) (gammaKindSubs g) of
     Just t -> t
     Nothing -> RecVarU v
   apply _ t@RecEmptyU = t
@@ -477,15 +478,16 @@ instance Applicable TypeU where
   apply g (RecRestrictU a b) = reduceRecRestrict (apply g a) (apply g b)
   apply g (RecDiffListU a b) = reduceRecDiffList (apply g a) (apply g b)
   apply _ t@RecVoidU = t
-  -- List- and Set-kinded constructs: variables look up gammaListSubs /
-  -- gammaSetSubs (parallel to RecVarU); operators recurse into operands.
-  apply g (ListVarU v) = case Map.lookup v (gammaListSubs g) of
+  -- List- and Set-kinded variables look up under (KindList KindStr) and
+  -- (KindSet KindStr) respectively, matching how their solutions are
+  -- inserted by the list/set solvers.
+  apply g (ListVarU v) = case Map.lookup (v, KindList KindStr) (gammaKindSubs g) of
     Just t -> t
     Nothing -> ListVarU v
   apply g (ListLitU es) = ListLitU (map (apply g) es)
   apply g (ListAppU a b) = ListAppU (apply g a) (apply g b)
   apply _ t@ListVoidU = t
-  apply g (SetVarU v) = case Map.lookup v (gammaSetSubs g) of
+  apply g (SetVarU v) = case Map.lookup (v, KindSet KindStr) (gammaKindSubs g) of
     Just t -> t
     Nothing -> SetVarU v
   apply _ t@SetEmptyU = t
@@ -528,11 +530,7 @@ instance Applicable Gamma where
     g2
       { gammaContext = IntMap.map f (gammaContext g2)
       , gammaSolved = Map.map (apply g1) (gammaSolved g2)
-      , gammaNatSubs = Map.map (apply g1) (gammaNatSubs g2)
-      , gammaStrSubs = Map.map (apply g1) (gammaStrSubs g2)
-      , gammaRecSubs = Map.map (apply g1) (gammaRecSubs g2)
-      , gammaListSubs = Map.map (apply g1) (gammaListSubs g2)
-      , gammaSetSubs = Map.map (apply g1) (gammaSetSubs g2)
+      , gammaKindSubs = Map.map (apply g1) (gammaKindSubs g2)
       , gammaEffSubs = Map.map (applyEff g1) (gammaEffSubs g2)
       , gammaConstraints = map (apply g1) (gammaConstraints g2)
       }
@@ -578,7 +576,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty [] Nothing Map.empty []) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []) of
   (Left _) -> False
   (Right _) -> True
 
@@ -744,13 +742,15 @@ strExprToTypeU (SS.StrLit s) = StrLitU s
 strExprToTypeU (SS.StrVar v) = StrVarU v
 strExprToTypeU (SS.StrConcat a b) = StrConcatU (strExprToTypeU a) (strExprToTypeU b)
 
--- | Insert solved Str-variable assignments into the gamma's gammaStrSubs.
--- Mirrors applyNatSolutions but the StrSolver only ever produces ground
--- assignments (per memo 04), so there is no existential-vs-StrVar dispatch.
+-- | Insert solved Str-variable assignments into the kind-tagged
+-- gamma map. Mirrors applyNatSolutions but the StrSolver only ever
+-- produces ground assignments (per memo 04), so there is no
+-- existential-vs-StrVar dispatch.
 applyStrSolutions :: Map.Map TVar SS.StrExpr -> Gamma -> Gamma
 applyStrSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) = g { gammaStrSubs = Map.insert v (strExprToTypeU se) (gammaStrSubs g) }
+    insertSub g (v, se) =
+      g { gammaKindSubs = Map.insert (v, KindStr) (strExprToTypeU se) (gammaKindSubs g) }
 
 -- | True iff the TypeU is a Rec-kinded expression (variable, empty,
 -- extension, union, difference, intersection). Mirrors isNatExpr/isStrExpr.
@@ -784,11 +784,12 @@ recExprToTypeU (RS.RecUnion a b) = RecUnionU (recExprToTypeU a) (recExprToTypeU 
 recExprToTypeU (RS.RecDiff a ks) = RecDiffU (recExprToTypeU a) ks
 recExprToTypeU (RS.RecIntersect a b) = RecIntersectU (recExprToTypeU a) (recExprToTypeU b)
 
--- | Insert solved Rec-tail variable assignments into the gamma's gammaRecSubs.
+-- | Insert solved Rec-tail variable assignments into the kind-tagged gamma map.
 applyRecSolutions :: Map.Map TVar RS.RecExpr -> Gamma -> Gamma
 applyRecSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, re) = g { gammaRecSubs = Map.insert v (recExprToTypeU re) (gammaRecSubs g) }
+    insertSub g (v, re) =
+      g { gammaKindSubs = Map.insert (v, KindRec) (recExprToTypeU re) (gammaKindSubs g) }
 
 -- | True iff the TypeU is a List-kinded expression. Mirrors isRecExpr.
 isListExpr :: TypeU -> Bool
@@ -809,11 +810,12 @@ listExprToTypeU (LS.ListVar v) = ListVarU v
 listExprToTypeU (LS.ListLit es) = ListLitU es
 listExprToTypeU (LS.ListApp a b) = ListAppU (listExprToTypeU a) (listExprToTypeU b)
 
--- | Insert solved List-tail variable assignments into the gammaListSubs.
+-- | Insert solved List-tail variable assignments into the kind-tagged gamma map.
 applyListSolutions :: Map.Map TVar LS.ListExpr -> Gamma -> Gamma
 applyListSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, le) = g { gammaListSubs = Map.insert v (listExprToTypeU le) (gammaListSubs g) }
+    insertSub g (v, le) =
+      g { gammaKindSubs = Map.insert (v, KindList KindStr) (listExprToTypeU le) (gammaKindSubs g) }
 
 -- | True iff the TypeU is a Set-kinded expression. Mirrors isRecExpr.
 isSetExpr :: TypeU -> Bool
@@ -844,31 +846,33 @@ setExprToTypeU (SetS.SetUnion a b) = SetUnionU (setExprToTypeU a) (setExprToType
 setExprToTypeU (SetS.SetInter a b) = SetInterU (setExprToTypeU a) (setExprToTypeU b)
 setExprToTypeU (SetS.SetDiff a b) = SetDiffU (setExprToTypeU a) (setExprToTypeU b)
 
--- | Insert solved Set-tail variable assignments into the gammaSetSubs.
+-- | Insert solved Set-tail variable assignments into the kind-tagged gamma map.
 applySetSolutions :: Map.Map TVar SetS.SetExpr -> Gamma -> Gamma
 applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) = g { gammaSetSubs = Map.insert v (setExprToTypeU se) (gammaSetSubs g) }
+    insertSub g (v, se) =
+      g { gammaKindSubs = Map.insert (v, KindSet KindStr) (setExprToTypeU se) (gammaKindSubs g) }
 
 applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
 applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
   where
     applySub g (v, ne) =
       let t = natExprToTypeU ne
-      -- Try solving as existential first (for existential nat vars),
-      -- then store in gammaNatSubs (for NatVarU variables)
+      -- Try solving as existential first; fall back to a NatVarU solution
+      -- in the kind-tagged gamma map.
       in case solveExist v t g of
            Right (Just g') -> Right g'
            Right Nothing ->
-             -- Not an existential - store as a NatVarU solution
-             Right g { gammaNatSubs = Map.insert v t (gammaNatSubs g) }
+             Right g { gammaKindSubs = Map.insert (v, KindNat) t (gammaKindSubs g) }
            Left err -> Left err
 
--- | Re-check deferred Nat / Str constraints after all existentials are
--- solved. Applies the final gamma to each deferred pair, converts to the
--- appropriate kind-specific expression, and re-solves. Returns Left on
--- contradiction, Right with remaining still-deferred constraints (now
--- truly unsolvable).
+-- | Re-check deferred kind constraints after all existentials are solved.
+-- Applies the final gamma to each deferred pair, classifies as a Nat, Str,
+-- Rec, List, or Set expression, and re-solves via the appropriate solver.
+--
+-- Returns 'Left' on contradiction (or on a constraint that classifies as
+-- none of the recognised kinds -- a compiler-side classifier bug), and
+-- 'Right' with the still-deferred pairs the solver could not decide.
 recheckDeferred :: Gamma -> Either MDoc [(TypeU, TypeU)]
 recheckDeferred g = foldM check [] (gammaDeferred g)
   where
@@ -880,8 +884,9 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
              case NS.solveNat ne1 ne2 of
                Right _ -> Right acc
                Left NS.Contradiction ->
-                 Left $ "Nat constraint mismatch (deferred):"
-                   <+> prettyTypeU t1' <+> "~" <+> prettyTypeU t2'
+                 let (d1, d2) = prettyTypeUPair t1' t2'
+                 in Left $ "Nat constraint mismatch (deferred):"
+                      <+> d1 <+> "~" <+> d2
                Left (NS.Deferred _) -> Right ((t1', t2') : acc)
            _ -> case (typeUToStrExpr t1', typeUToStrExpr t2') of
              (Just se1, Just se2) ->
@@ -900,10 +905,66 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
                    Left (RS.RecMalformed msg) ->
                      Left $ "Rec malformed (deferred):" <+> pretty msg
                    Left RS.RecDeferred -> Right ((t1', t2') : acc)
-               _ -> Right acc  -- not a kind we can solve, skip
+               _ -> case (typeUToListExpr t1', typeUToListExpr t2') of
+                 (Just le1, Just le2) ->
+                   case LS.solveList le1 le2 of
+                     Right _ -> Right acc
+                     Left (LS.ListContradiction msg) ->
+                       Left $ "List constraint mismatch (deferred):" <+> pretty msg
+                     Left LS.ListDeferred -> Right ((t1', t2') : acc)
+                 _ -> case (typeUToSetExpr t1', typeUToSetExpr t2') of
+                   (Just xe1, Just xe2) ->
+                     case SetS.solveSet xe1 xe2 of
+                       Right _ -> Right acc
+                       Left (SetS.SetContradiction msg) ->
+                         Left $ "Set constraint mismatch (deferred):" <+> pretty msg
+                       Left SetS.SetDeferred -> Right ((t1', t2') : acc)
+                   -- Neither side classifies as any recognised kind
+                   -- expression; this is a classifier bug.
+                   _ -> let (d1, d2) = prettyTypeUPair t1' t2' in
+                        Left $ vsep
+                          [ "unclassifiable deferred constraint:" <+> d1 <+> "~" <+> d2
+                          , "  neither side reduces to a Nat, Str, Rec, List, or Set expression."
+                          ]
+
+-- | Recognize a closed anonymous record type in either representation it
+-- reaches subtyping in: the ground @RecExtendU@ chain built by the
+-- @{k = T}@ type syntax (an unreduced @OpU OpRecExtend@), or the reduced
+-- @LitU (LRec ...)@ literal. Returns the flat field list, or Nothing for
+-- an open row (RecExtendU chain ending in a row variable) or any non-record.
+asClosedRec :: TypeU -> Maybe [(Text, TypeU)]
+asClosedRec (LitU (LRec fs))     = Just fs
+asClosedRec r@(RecExtendU _ _ _) = collectGroundRec r
+asClosedRec _                    = Nothing
+
+-- | A closed anonymous record rendered in the @NamU NamRecord@ form that
+-- record construction, field accessors, and nominal @record@/@object@ types
+-- all use. Mirrors the ground-level @typeOf@ bridge (LRec -> NamT NamRecord
+-- "Rec").
+closedRecToNamU :: [(Text, TypeU)] -> TypeU
+closedRecToNamU fs = NamU NamRecord (TV "Rec") [] [(Key k, t) | (k, t) <- fs]
+
+-- | The two forms an anonymous closed record is bridged against: a nominal
+-- record (@NamU@) or a record-key existential (@ExistU@, from construction
+-- or a @.field@ accessor). @asClosedRec@ never matches either, so a bridge
+-- arm can never re-fire on the type it just normalized to.
+isNamOrExist :: TypeU -> Bool
+isNamOrExist NamU{}   = True
+isNamOrExist ExistU{} = True
+isNamOrExist _        = False
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+-- A closed anonymous record meeting a NamU record or a record-key
+-- existential (from construction / a `.field` accessor) is the same record
+-- in a different representation. Normalize it to the NamU form so the
+-- existing record and instantiate arms unify it exactly as they do a
+-- nominal record. Only bridges against NamU/ExistU; record-vs-record,
+-- row variables (RecVarU), and the row algebra keep their existing paths.
+-- Must precede the generic InstantiateL/R arms, which would otherwise hand
+-- a raw row record to 'instantiate' (which only understands NamU records).
+subtype scope t1 t2 g | isNamOrExist t2, Just fs <- asClosedRec t1 = subtype scope (closedRecToNamU fs) t2 g
+subtype scope t1 t2 g | isNamOrExist t1, Just fs <- asClosedRec t2 = subtype scope t1 (closedRecToNamU fs) g
 -- NatVarU: identical nat variables are equal; different ones fall to isNatExpr path
 subtype _ (NatVarU v1) (NatVarU v2) g
   | v1 == v2 = return g
@@ -2710,6 +2771,16 @@ prettyTypeU = renderClean . cleanTypeName
                    then mempty
                    else space <> hsep (map (f False) ps)
       in pretty n <> params
+
+-- | Render two TypeUs with a shared rename pool so distinct freshened
+-- variables get distinct clean names. Without this, calling
+-- 'prettyTypeU' on each side independently would grab the pool's
+-- first letter twice and render as e.g. @a ~ a@.
+prettyTypeUPair :: TypeU -> TypeU -> (MDoc, MDoc)
+prettyTypeUPair t1 t2 =
+  case unqualify (cleanTypeName (FunU [t1] t2)) of
+    (_, FunU [t1'] t2') -> (pretty t1', pretty t2')
+    _                   -> (pretty t1,  pretty t2)
 
 tvarname :: Gamma -> Text -> (Gamma, TVar)
 tvarname g prefix =

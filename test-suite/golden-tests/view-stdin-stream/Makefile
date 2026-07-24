@@ -14,18 +14,18 @@ all:
 	# === -f jsonl: one element per line, streamed sub-packet by
 	#     sub-packet. Expected count = 3+4+2+1 = 10 lines.
 	printf 'jsonl line count: ' >> obs.txt
-	./prog emit | $(NEXUS) view - -f jsonl | wc -l >> obs.txt 2>> obs.err
+	./prog -f packet @ emit | $(NEXUS) view - -f jsonl | wc -l >> obs.txt 2>> obs.err
 	printf 'jsonl first line: ' >> obs.txt
-	./prog emit | $(NEXUS) view - -f jsonl | head -n 1 >> obs.txt 2>> obs.err
+	./prog -f packet @ emit | $(NEXUS) view - -f jsonl | head -n 1 >> obs.txt 2>> obs.err
 	printf 'jsonl last line: '  >> obs.txt
-	./prog emit | $(NEXUS) view - -f jsonl | tail -n 1 >> obs.txt 2>> obs.err
+	./prog -f packet @ emit | $(NEXUS) view - -f jsonl | tail -n 1 >> obs.txt 2>> obs.err
 	printf 'jsonl sum: '        >> obs.txt
-	./prog emit | $(NEXUS) view - -f jsonl \
+	./prog -f packet @ emit | $(NEXUS) view - -f jsonl \
 	  | awk '{s+=$$1} END {print s}' >> obs.txt 2>> obs.err
 
 	# === -s: stream-preserving copy. The output stream should be
 	#     a well-formed stream-packet with the same 10 elements.
-	./prog emit | $(NEXUS) view - -s -o out.stream 2>> obs.err
+	./prog -f packet @ emit | $(NEXUS) view - -s -o out.stream 2>> obs.err
 	printf 'stream file kind: ' >> obs.txt
 	$(NEXUS) file -FD out.stream >> obs.txt 2>> obs.err
 	printf 'stream state: '     >> obs.txt

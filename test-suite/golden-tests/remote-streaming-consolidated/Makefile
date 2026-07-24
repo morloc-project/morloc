@@ -17,23 +17,25 @@ all:
 	rm -f *.err obs.txt build.err
 	morloc make -o nexus main.loc 2> build.err
 	@echo "=== tuples ===" >> obs.txt
-	./nexus prodTuples 2>> obs.err | ./nexus consTuples >> obs.txt 2>> obs.err
+	./nexus -f packet @ prodTuples 2>> obs.err | ./nexus consTuples >> obs.txt 2>> obs.err
 	@echo "=== optional ===" >> obs.txt
-	./nexus prodOpt 2>> obs.err | ./nexus consOpt >> obs.txt 2>> obs.err
+	./nexus -f packet @ prodOpt 2>> obs.err | ./nexus consOpt >> obs.txt 2>> obs.err
 	@echo "=== empty ===" >> obs.txt
-	./nexus prodEmpty 2>> obs.err | ./nexus consEmpty >> obs.txt 2>> obs.err
+	./nexus -f packet @ prodEmpty 2>> obs.err | ./nexus consEmpty >> obs.txt 2>> obs.err
+	# @stdout ignores @write's compression arg; the nexus applies -z to
+	# the recompressed stream, so drive compression with -z here.
 	@echo "=== compression L1 ===" >> obs.txt
-	./nexus prodComp1 2>> obs.err | ./nexus consComp1 >> obs.txt 2>> obs.err
+	./nexus -f packet -z 1 @ prodComp1 2>> obs.err | ./nexus consComp1 >> obs.txt 2>> obs.err
 	@echo "=== compression L3 ===" >> obs.txt
-	./nexus prodComp3 2>> obs.err | ./nexus consComp3 >> obs.txt 2>> obs.err
+	./nexus -f packet -z 3 @ prodComp3 2>> obs.err | ./nexus consComp3 >> obs.txt 2>> obs.err
 	@echo "=== compression L7 ===" >> obs.txt
-	./nexus prodComp7 2>> obs.err | ./nexus consComp7 >> obs.txt 2>> obs.err
+	./nexus -f packet -z 7 @ prodComp7 2>> obs.err | ./nexus consComp7 >> obs.txt 2>> obs.err
 	@echo "=== handles ===" >> obs.txt
 	./nexus prodHandles "$(SCRATCH)/handles.stream" \
 	  "$(SCRATCH)/a.dat" "$(SCRATCH)/b.dat" "$(SCRATCH)/c.dat" 2>> obs.err
 	./nexus consHandles "$(SCRATCH)/handles.stream" >> obs.txt 2>> obs.err
 	@echo "=== oversize ===" >> obs.txt
-	MORLOC_WRITE_BUFFER_BYTES=$(SMALL_BUF) ./nexus prodOversize 2>> obs.err \
+	MORLOC_WRITE_BUFFER_BYTES=$(SMALL_BUF) ./nexus -f packet @ prodOversize 2>> obs.err \
 	  | MORLOC_WRITE_BUFFER_BYTES=$(SMALL_BUF) ./nexus consOversize >> obs.txt 2>> obs.err
 	@echo "=== file cross-invocation ===" >> obs.txt
 	./nexus fileWrite "$(SCRATCH)/stream.dat" 2>> obs.err

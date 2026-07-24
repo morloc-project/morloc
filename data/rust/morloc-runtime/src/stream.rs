@@ -409,6 +409,23 @@ pub(crate) fn stdio_claim_slot(
     })
 }
 
+/// Element count of the process's @stdout OStream (its cumulative
+/// `element_count`), or 0 if no @stdout is open. Read by @tell so the
+/// offset-aware `with:`/`render:` synthesis can pass the per-batch element
+/// offset to a handler. The count is already maintained for the stream
+/// footers, so this is a plain field read.
+pub fn stdout_element_count() -> u64 {
+    use std::sync::atomic::Ordering;
+    let handle = match stdio_claim_slot(STDIO_KIND_STDOUT) {
+        Some(a) => a.load(Ordering::Acquire),
+        None => return 0,
+    };
+    if handle <= 0 {
+        return 0;
+    }
+    with_process_local_slot(handle, |_local, slot| Ok(slot.element_count)).unwrap_or(0)
+}
+
 /// Return the registry's per-nexus generation-increment salt. The salt
 /// is set by the bootstrap winner and is the same value seen by every
 /// attached process. Used by the slot-close path to bump the generation
@@ -2044,6 +2061,14 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
     }
 }
 
+/// True for the stdin fd-0 aliases. `@open` on stdin routes an IStream
+/// through the nexus RPC channel (the pool does not own fd 0) and rejects
+/// IFile (a pipe is not seekable). The nexus only ever emits the
+/// `/dev/stdin` sentinel, but a user may type any alias, so recognize all.
+fn is_stdin_device(path: &str) -> bool {
+    matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
+}
+
 /// Refuse `@open` on the `/dev/std{in,out,err}` paths. Opening them
 /// as a regular file would race the nexus's own reads/writes on
 /// fd 0/1/2. The user must route through `@stdin` / `@stdout` /
@@ -3178,17 +3203,25 @@ pub fn shared_write_subpacket(
 
         // Pin compression level on first @write into this slot
         // (across all pools); subsequent writes must match.
-        if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
-            unsafe {
-                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-                (*mp).compression_level = level;
+        //
+        // stdio-bound streams ignore the `@write` level entirely: the
+        // pool ships uncompressed sub-packets over the local RPC and the
+        // nexus applies `-z` when it re-encodes the terminal output. So
+        // the level stays pinned at 0 (from `open_stdio`) and no
+        // per-write mismatch check applies.
+        if slot.is_stdio == 0 {
+            if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
+                unsafe {
+                    let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                    (*mp).compression_level = level;
+                }
+            } else if slot.compression_level != level {
+                return Err(MorlocError::Other(format!(
+                    "@write level mismatch: stream was opened/written at level {} \
+                     but this call passed {}. All sub-packets must share a level.",
+                    slot.compression_level, level,
+                )));
             }
-        } else if slot.compression_level != level {
-            return Err(MorlocError::Other(format!(
-                "@write level mismatch: stream was opened/written at level {} \
-                 but this call passed {}. All sub-packets must share a level.",
-                slot.compression_level, level,
-            )));
         }
 
         // Walk the elements and append each. element_count updates
@@ -3341,6 +3374,150 @@ fn empty_shm_array() -> Result<AbsPtr, MorlocError> {
     arr.size = 0;
     arr.data = shm::RELNULL;
     Ok(arr_ptr)
+}
+
+/// Materialise an entire STREAM_PACKET file into a single self-contained
+/// SHM `Array<a>` voidstar (the `[a]` list value).
+///
+/// `@load` on a stream file needs the whole list in one value, but a
+/// constant-memory gather writes the list across MANY sub-packets. This
+/// opens the file as an IStream, drains every sub-packet, and deep-copies
+/// every element into one fresh element buffer. Because each element is
+/// deep-copied (its variable-length sub-allocations are re-allocated in
+/// fresh SHM blocks), the returned value is self-contained: the
+/// per-sub-packet chunk buffers are freed before returning and nothing in
+/// the result points back into them.
+pub fn shared_load_stream_file_as_array(path: &str) -> Result<AbsPtr, MorlocError> {
+    let handle = shared_open_istream(path)?;
+    let result = collect_istream_into_array(handle, path);
+    // The stream is fully consumed here; release the slot and munmap the
+    // backing file regardless of success so the handle never leaks.
+    let _ = shared_discard_handle(handle);
+    result
+}
+
+/// Drain every sub-packet of an open IStream `handle` into one combined
+/// SHM `Array<a>`. Split out from `shared_load_stream_file_as_array` so
+/// the handle cleanup runs on every exit path.
+fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocError> {
+    // The slot caches the file's full list schema `[a]`; its element
+    // schema drives the per-element deep copy of each sub-packet chunk.
+    // Using the file's own schema (not the caller's) is what keeps the
+    // element width and layout consistent with the bytes the sub-packet
+    // materialiser wrote.
+    let schema_str = shared_handle_schema_str(handle)?;
+    let parsed = parse_schema(&schema_str).map_err(|e| {
+        MorlocError::Schema(format!(
+            "@load: stream file '{}' has unparseable schema '{}': {}",
+            path, schema_str, e,
+        ))
+    })?;
+    let (_value_schema, elem_schema) = derive_stream_schemas(&parsed);
+    let elem_width = elem_schema.width;
+
+    // Drain every sub-packet, holding each chunk's SHM `Array` alive until
+    // its elements have been deep-copied into the combined buffer. Each
+    // tuple is (chunk Array header, resolved element-data base, count).
+    let mut chunks: Vec<(AbsPtr, AbsPtr, usize)> = Vec::new();
+    let mut total: usize = 0;
+
+    let free_chunks = |chunks: &Vec<(AbsPtr, AbsPtr, usize)>| {
+        // shfree is shallow (refcount decrement), so freeing a chunk's
+        // data block does not touch the fresh sub-allocations deep_copy
+        // has already made for the combined value.
+        for &(arr_ptr, data_abs, _) in chunks {
+            let _ = shm::shfree(data_abs);
+            let _ = shm::shfree(arr_ptr);
+        }
+    };
+
+    loop {
+        let arr_ptr = match shared_next_subpacket(handle) {
+            Ok(p) => p,
+            Err(e) => {
+                free_chunks(&chunks);
+                return Err(e);
+            }
+        };
+        let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
+        let sz = arr.size;
+        if sz == 0 {
+            // Size-0 Array is the EOF sentinel (`shared_next_subpacket`
+            // returns it once the footer or file end is reached). Free the
+            // sentinel header and stop.
+            let _ = shm::shfree(arr_ptr);
+            break;
+        }
+        let data_abs = match shm::rel2abs(arr.data) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = shm::shfree(arr_ptr);
+                free_chunks(&chunks);
+                return Err(e);
+            }
+        };
+        chunks.push((arr_ptr, data_abs, sz));
+        total += sz;
+    }
+
+    // Allocate the combined Array header up front; its `data` relptr is
+    // filled in once the element buffer is populated.
+    let out_arr = match shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>()) {
+        Ok(p) => p,
+        Err(e) => {
+            free_chunks(&chunks);
+            return Err(e);
+        }
+    };
+    if total == 0 {
+        let a = unsafe { &mut *(out_arr as *mut shm_types_crate::Array) };
+        a.size = 0;
+        a.data = shm_types_crate::RELNULL;
+        free_chunks(&chunks);
+        return Ok(out_arr);
+    }
+
+    // One buffer for all elements; deep_copy fills each fixed-width slot
+    // and allocates fresh SHM sub-blocks for any variable-length fields.
+    let buf = match shm::shcalloc(total, elem_width) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = shm::shfree(out_arr);
+            free_chunks(&chunks);
+            return Err(e);
+        }
+    };
+
+    let mut out_i = 0usize;
+    for &(_, data_abs, sz) in &chunks {
+        for k in 0..sz {
+            let elem_src = unsafe { (data_abs as *const u8).add(k * elem_width) };
+            let dst = unsafe { (buf as *mut u8).add(out_i * elem_width) };
+            if let Err(e) = unsafe { voidstar::deep_copy(elem_src, dst, &elem_schema) } {
+                let _ = shm::shfree(buf);
+                let _ = shm::shfree(out_arr);
+                free_chunks(&chunks);
+                return Err(e);
+            }
+            out_i += 1;
+        }
+    }
+
+    // The combined value is self-contained now; drop every chunk buffer.
+    free_chunks(&chunks);
+
+    let buf_rel = match shm::abs2rel(buf) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shm::shfree(buf);
+            let _ = shm::shfree(out_arr);
+            return Err(e);
+        }
+    };
+    let a = unsafe { &mut *(out_arr as *mut shm_types_crate::Array) };
+    a.size = total;
+    a.data = buf_rel;
+    Ok(out_arr)
 }
 
 /// `@flen handle`: return the element_count from the slot. Works on
@@ -7486,6 +7663,33 @@ fn sendfile_range(
 /// through `mlc_open(path, kind)` would create a Nil-schema header on
 /// disk, breaking the receiving IStream/IFile reader's schema parse.
 pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
+    if is_stdin_device(path) {
+        // stdin is forward-only and lives on the nexus's fd 0. IFile
+        // (random access) is impossible; the error is catchable, so the
+        // `@catch (@open :: IFile) (@open :: IStream)` idiom falls back to
+        // IStream. The reject reads NO bytes, so the fallback consumes the
+        // pipe from byte 0. IStream must arrive via the typed
+        // `mlc_open_istream` entry (which carries the schema); a bare
+        // generic open of stdin as IStream is a codegen/interpreter gap.
+        return match kind {
+            MLC_KIND_IFILE => Err(MorlocError::Other(
+                "@open '/dev/stdin' :: IFile is not seekable; stdin is \
+                 forward-only. Open it as IStream (e.g. try IFile first and \
+                 fall back to IStream with @catch).".into(),
+            )),
+            MLC_KIND_ISTREAM => Err(MorlocError::Other(
+                "reading stdin as an IStream is not supported in a command \
+                 evaluated directly by the nexus (a pure command with no \
+                 foreign function calls). Add a call to a sourced function so \
+                 the command runs in a language pool, which can read stdin."
+                    .into(),
+            )),
+            _ => Err(MorlocError::Other(format!(
+                "mlc_open: stdin device with unsupported kind {} ({})",
+                kind, handle_kind_name(kind),
+            ))),
+        };
+    }
     match kind {
         MLC_KIND_IFILE => shared_open_ifile(path),
         MLC_KIND_ISTREAM => shared_open_istream(path),
@@ -7499,6 +7703,20 @@ pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
             kind, handle_kind_name(kind),
         ))),
     }
+}
+
+/// Dispatch entry for the typed `mlc_open_istream(schema_str, path)`.
+///
+/// A real file seeds its element schema from the on-disk stream header
+/// (the `schema_str` arg is consulted only for the stdin sentinel). The
+/// stdin sentinel routes to the nexus stdin channel via `open_stdio`,
+/// declaring the ascribed `[a]` schema so the nexus can guard the
+/// incoming stream against the opener's type.
+pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if is_stdin_device(path) {
+        return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
+    }
+    shared_open_istream(path)
 }
 
 // ── `morloc-nexus view` conversion helpers ────────────────────────────────

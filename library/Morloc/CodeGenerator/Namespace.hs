@@ -1735,6 +1735,9 @@ data ArgPosDocSet = ArgPosDocSet
     -- if True, the positional accepts many tokens that are assembled into a
     -- List; only legal when the argument type is List a and the positional
     -- is the last in its subcommand signature.
+  , argPosDocStdin :: Bool
+    -- if True, the positional is optional and reads from stdin when omitted;
+    -- at most one per command, must be the last positional.
   , argPosDocSource :: Maybe SourceAtom
   , argPosDocForm :: Maybe FormAtom
   , argPosDocChecks :: [Check]

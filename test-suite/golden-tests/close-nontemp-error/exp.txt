@@ -1,0 +1,2 @@
+--- @close on non-temp path: clean rejection ---
+OK: clean "not a registered temp file" error

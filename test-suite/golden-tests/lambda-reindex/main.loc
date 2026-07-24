@@ -1,0 +1,69 @@
+module main (effProd, pureMap, twiceProd, pureTwice)
+
+import root
+import root-cpp
+
+source Cpp from "helpers.hpp"
+  ( "mk"     as mk
+  , "tr"     as tr
+  , "pairUp" as pairUp
+  , "emit"   as emit
+  )
+
+mk :: Int -> Int          -- i -> i*10
+tr :: Int -> Int          -- c -> c+100
+pairUp :: Int -> (Int, Int)  -- c -> (c+100, c*2)
+emit :: Int -> <IO> ()
+
+-- Regression coverage for the beta-reduction reindexing bug (LambdaEval.hs).
+--
+-- A higher-order function / producer that invokes its function argument more
+-- than once is inlined by beta-reduction, which substitutes the passed lambda
+-- at every use site. Before the fix, `substituteAnnoS` inserted the lambda
+-- VERBATIM (shared indices), so a nested call on the lambda parameter (e.g.
+-- `tr c`) collapsed to a single manifold at codegen -- every call site then
+-- saw the FIRST site's bound value. Each of the exports below produces WRONG
+-- output (all sites equal to the first) if reindexing regresses.
+
+-- Effectful producer: invokes its sink three times with distinct arguments.
+produce :: (Int -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 0)
+  _ <- sink (mk 1)
+  sink (mk 2)
+
+--' Effectful producer + lambda whose body has a nested call on its parameter.
+--' Correct: tr(mk 0), tr(mk 1), tr(mk 2) = 100, 110, 120. Bug: 100, 100, 100.
+effProd :: <IO> ()
+effProd = produce (\c -> emit (tr c))
+
+-- The lambda parameter used TWICE within one body (two nested calls), across
+-- multiple sites: both nested calls must see this site's binding, and distinct
+-- sites must stay distinct.
+produce2 :: (Int -> <IO> ()) -> <IO> ()
+produce2 sink = do
+  _ <- sink (mk 0)
+  sink (mk 3)
+
+--' Correct: emit(tr c + mk c) for c in {0, 30}
+--'   c=0  -> tr 0  + mk 0  = 100 + 0   = 100
+--'   c=30 -> tr 30 + mk 30 = 130 + 300 = 430
+--' Bug (param collapses to first site): 100, 100.
+twiceProd :: <IO> ()
+twiceProd = produce2 (\c -> emit (tr c + mk c))
+
+-- Pure higher-order function calling its argument three times.
+apply3 :: (Int -> Int) -> [Int]
+apply3 g = [g (mk 0), g (mk 1), g (mk 2)]
+
+--' Pure HOF + lambda with a nested call. Correct: [100, 110, 120].
+pureMap :: [Int]
+pureMap = apply3 (\c -> tr c)
+
+-- Pure, lambda parameter used in a nested foreign call returning a tuple.
+apply2 :: (Int -> (Int, Int)) -> [(Int, Int)]
+apply2 g = [g (mk 0), g (mk 1)]
+
+--' Correct: [pairUp(mk 0), pairUp(mk 1)] = [(100,0), (110,20)].
+pureTwice :: [(Int, Int)]
+pureTwice = apply2 (\c -> pairUp c)

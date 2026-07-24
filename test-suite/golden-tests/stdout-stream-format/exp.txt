@@ -1,0 +1,24 @@
+=== json equivalence (Int) ===
+MATCH
+=== jsonl equivalence (Int) ===
+MATCH
+=== json equivalence (Str) ===
+MATCH
+=== jsonl equivalence (Str) ===
+MATCH
+=== json equivalence (pairs) ===
+MATCH
+=== jsonl equivalence (pairs) ===
+MATCH
+=== json equivalence (empty) ===
+MATCH
+=== jsonl equivalence (empty) ===
+MATCH
+=== streamEmpty json ===
+[]
+=== streamInts jsonl line count ===
+5
+=== streamInts jsonl sum ===
+15
+=== streamInts csv rejected ===
+REJECTED

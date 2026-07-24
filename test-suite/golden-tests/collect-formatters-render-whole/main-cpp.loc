@@ -1,0 +1,9 @@
+module main (streamRW)
+
+import .collect (streamRW)
+import root-cpp
+
+source Cpp from "impl.hpp"
+  ( "make_ints"     as makeInts
+  , "render_whole"  as renderWhole
+  )

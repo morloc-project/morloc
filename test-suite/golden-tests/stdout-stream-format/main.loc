@@ -1,0 +1,73 @@
+-- Invariant: streaming a list to @stdout is byte-for-byte identical to
+-- RETURNING that same list, under every rendered output format the
+-- nexus applies. Streamed output is transcoded by the nexus exactly
+-- like a returned value, so the wire path (@stdout / @write / @close)
+-- is invisible in the result: `stream* == return*` under -f json and
+-- -f jsonl.
+--
+-- Each `stream*` command writes the same logical list its `return*`
+-- twin returns, split across two sub-packets (with a @flush between)
+-- to prove sub-packet boundaries do not leak into the rendered output.
+--
+-- The msgpack / table formats can't be produced chunk-by-chunk and are
+-- rejected at the stdout boundary with an actionable error.
+--
+-- (Byte equivalence is asserted only for the rendered text formats.
+-- Under -f packet a returned list is a DATA_PACKET while a streamed
+-- list is a STREAM_PACKET -- same data, different container by design,
+-- so it is not part of this equivalence.)
+
+module main
+  ( streamInts, returnInts
+  , streamStrs, returnStrs
+  , streamPairs, returnPairs
+  , streamEmpty, returnEmpty
+  )
+
+import root-py
+
+streamInts :: <IO, Err> ()
+streamInts = do
+  o <- @stdout :: <IO, Err> OStream Int
+  @write 0 o [1, 2, 3]
+  @flush o
+  @write 0 o [4, 5]
+  @close o
+
+returnInts :: [Int]
+returnInts = [1, 2, 3, 4, 5]
+
+streamStrs :: <IO, Err> ()
+streamStrs = do
+  o <- @stdout :: <IO, Err> OStream Str
+  @write 0 o ["alpha", "beta"]
+  @flush o
+  @write 0 o ["gamma"]
+  @close o
+
+returnStrs :: [Str]
+returnStrs = ["alpha", "beta", "gamma"]
+
+-- Elements that themselves contain JSON brackets/commas: stresses the
+-- incremental-array assembly (only the outer list `[` / `]` per
+-- sub-packet is stripped; the tuple's own delimiters must survive).
+streamPairs :: <IO, Err> ()
+streamPairs = do
+  o <- @stdout :: <IO, Err> OStream (Str, Int)
+  @write 0 o [("a", 1), ("bb", 2)]
+  @flush o
+  @write 0 o [("ccc", 3)]
+  @close o
+
+returnPairs :: [(Str, Int)]
+returnPairs = [("a", 1), ("bb", 2), ("ccc", 3)]
+
+-- Empty stream: open + close with no @write. Under -f json this must
+-- render as `[]` (one empty array), under -f jsonl as no output.
+streamEmpty :: <IO, Err> ()
+streamEmpty = do
+  o <- @stdout :: <IO, Err> OStream Int
+  @close o
+
+returnEmpty :: [Int]
+returnEmpty = []

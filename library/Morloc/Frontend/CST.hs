@@ -26,9 +26,11 @@ module Morloc.Frontend.CST
   , CstBracketAxis (..)
   , CstAccessorTail (..)
   , CstIrrefPat (..)
+  , CstRefutPat (..)
   , at
   , (<->)
   , valOf
+  , spanOf
   ) where
 
 import Data.Text (Text)
@@ -47,6 +49,9 @@ data Loc a = Loc !Span a
 
 valOf :: Loc a -> a
 valOf (Loc _ x) = x
+
+spanOf :: Loc a -> Span
+spanOf (Loc s _) = s
 
 -- | Wrap a value at a single token's position
 at :: Located -> a -> Loc a
@@ -88,6 +93,10 @@ data CstExpr
   | CSigE EVar CstSigType
   | CAssE EVar [Loc CstExpr] (Loc CstExpr) [Loc CstExpr]
   | CGuardedAssE EVar [Loc CstExpr] [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr) [Loc CstExpr]
+  -- Refutable-pattern definition: name, one clause per `|` (each a list of
+  -- argument-pattern expressions and a body), shared where-decls. The
+  -- patterns are parsed as expressions and narrowed by 'exprToRefutPat'.
+  | CRefutAssE EVar [([Loc CstExpr], Loc CstExpr)] [Loc CstExpr]
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
   | CIstE ClassName [TypeU] [Loc CstExpr]
@@ -175,6 +184,21 @@ data CstIrrefPat
   | CIPatTup [Loc CstIrrefPat]               -- ^ (p1, ..., pn), n >= 2
   | CIPatRec [(Key, Loc CstIrrefPat)]        -- ^ {a=p1, b=p2}
   | CIPatAs EVar (Loc CstIrrefPat)           -- ^ label@pat
+  deriving (Show, Eq)
+
+-- | Concrete-syntax refutable pattern. Unlike 'CstIrrefPat', it may
+-- contain literals, so a well-typed receiver need not match -- hence
+-- "refutable". Built by 'Morloc.Frontend.Desugar.exprToRefutPat' from an
+-- expression in a `|`-clause, then lowered into a nested 'IfE' cascade of
+-- equality tests (Eq's '==') and 'Selector' projections. Constructor
+-- patterns are deferred until sum types introduce term-level constructors.
+data CstRefutPat
+  = CRPatVar EVar                            -- ^ x
+  | CRPatWild                                -- ^ _
+  | CRPatLit (Loc CstExpr)                   -- ^ literal: 0, 1.5, "s", True
+  | CRPatTup [Loc CstRefutPat]               -- ^ (p1, ..., pn), n >= 2
+  | CRPatRec [(Key, Loc CstRefutPat)]        -- ^ {a=p1, b=p2}
+  | CRPatAs EVar (Loc CstRefutPat)           -- ^ label@pat
   deriving (Show, Eq)
 
 data CstAccessorBody

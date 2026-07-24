@@ -1,0 +1,8 @@
+module hmod (mk, tagOff, sumFile)
+import root-cpp
+source Cpp from "handlers.hpp" ("mk" as mk, "tagOff" as tagOff)
+mk :: Int -> [Int]
+tagOff :: U64 -> [Int] -> [Int]
+-- morloc-native IFile handler (still detection-relevant: IFile receiver)
+sumFile :: IFile [Int] -> <IO, Err> Int
+sumFile f = @flen f

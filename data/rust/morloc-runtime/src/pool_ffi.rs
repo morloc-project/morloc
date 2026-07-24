@@ -130,6 +130,11 @@ pub unsafe extern "C" fn pool_dispatch_packet(
 
         free_morloc_call(call);
 
+        // Remove any whole-form gather temp files this call left registered
+        // (e.g. a handler that raised before its @close(path)). Success-path
+        // temps are already gone via @close(path).
+        crate::intrinsics::sweep_call_temps();
+
         if result.is_null() {
             return make_fail_packet(b"dispatch callback returned NULL\0".as_ptr() as *const c_char);
         }

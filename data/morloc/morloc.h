@@ -1507,6 +1507,13 @@ int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 // files via sendfile, exploiting the stream-packet concat invariant.
 // The dest file is created with a merged final footer.
 int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
+// `mlc_open_istream(schema_str, path)` is the typed-open path for
+// `@open path :: <IO> (IStream T)`. Like the OStream entry the codegen
+// threads the element schema for T. A real file reads its schema off
+// disk; the `/dev/stdin` sentinel routes to the nexus stdin RPC channel,
+// declaring the schema so the nexus guards the incoming stream, and
+// rejecting an IFile open of stdin (a pipe is not seekable).
+int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
 // @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
 // sole owner of fd 0/1/2; these register slots that route mlc_next /
 // mlc_write through the pool-nexus RPC socket. At most one open per
@@ -1523,6 +1530,22 @@ int32_t mlc_concat(const char* const* paths, size_t n_paths,
 // be written as a sub-packet now (instead of waiting for the buffer
 // to fill or for @close). No-op when the buffer is empty.
 int32_t mlc_flush(int64_t handle, ERRMSG);
+
+// `mlc_tell()` returns the number of elements written to the process's
+// @stdout OStream so far (its element_count), or 0 if none is open. Used by
+// @tell to thread the per-batch element offset into a with:/render: handler.
+uint64_t mlc_tell(ERRMSG);
+
+// `mlc_tmpfile()` creates a fresh empty file in the morloc tmpdir, registers
+// it for removal when the pool call ends, and returns its path (caller frees
+// the returned string). Used by the whole-list with:/render: gather.
+char* mlc_tmpfile(ERRMSG);
+
+// `mlc_unlink_tmp(path)` unlinks a temp file created by mlc_tmpfile in this
+// call and drops it from the registry. Errors (returns non-zero, sets errmsg)
+// if the path was not a registered temp file -- @close is not a general
+// file-removal tool.
+int32_t mlc_unlink_tmp(const char* path, ERRMSG);
 
 // ========================================================================
 // Section 26: Function declarations -- Slurm

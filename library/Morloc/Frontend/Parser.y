@@ -56,6 +56,9 @@ import qualified Morloc.BaseTypes as BT
 --   current atom and the next token is '!', the parser can either reduce
 --   the chain or extend it with a new force_expr atom. Shift is correct
 --   (extend the atom chain, so `bar !x` = `bar (!x)`).
+-- refut_clauses (`|`-pattern definitions) add no new conflicts: '|' is a
+--   reserved token, so `evar_or_op refut_clauses` does not overlap the
+--   `evar_or_op atom_exprs` (CAssE) or guard_clauses alternatives.
 %expect 96
 
 %token
@@ -87,6 +90,7 @@ import qualified Morloc.BaseTypes as BT
   '<-'       { Located _ TokBind _ }
   '*'        { Located _ TokStar _ }
   '-'        { Located _ TokMinus _ }
+  '|'        { Located _ TokPipe _ }
   ':'        { Located _ TokColon _ }
   'module'   { Located _ TokModule _ }
   'import'   { Located _ TokImport _ }
@@ -193,6 +197,34 @@ sig_or_ass :: { [Loc CstExpr] }
       { [at $1 (CAssE (toEVar $1) $2 $4 $5)] }
   | evar_or_op atom_exprs guard_clauses ':' expr opt_where_decls
       { [at $1 (CGuardedAssE (toEVar $1) $2 $3 $5 $6)] }
+  | evar_or_op refut_clauses opt_where_decls
+      { [at $1 (CRefutAssE (toEVar $1) $2 $3)] }
+
+-- Refutable-pattern clauses: `| p1 ... pn = body`, one or more, patterns
+-- parsed as expressions (narrowed to patterns in Desugar). Clauses are
+-- gathered without a VSEMI separator: the conventional multi-line layout
+-- indents continuation clauses deeper than the function name, so the
+-- layout processor inserts no VSEMI between them, and the VSEMI that
+-- terminates the whole definition separates it from the next top-level
+-- declaration (unlike guard_clauses, this list has no `:` terminator, so
+-- absorbing a VSEMI here would greedily swallow that separator).
+refut_clauses :: { [([Loc CstExpr], Loc CstExpr)] }
+  : refut_clause                          { [$1] }
+  | refut_clauses refut_clause            { $1 ++ [$2] }
+
+-- A clause body is either a plain expression (`= body`) or a `?`-guard with
+-- a mandatory `:` default (`? c1 = b1 ... : default`), mirroring the plain
+-- vs guarded function-definition forms above. The guarded body is built as
+-- a CGuardExprE -- the same node the standalone `guard_expr` produces -- so
+-- desugaring reuses `desugarGuards` unchanged; pattern-bound variables reach
+-- the guard through the clause's projection LetE. The VSEMI variant absorbs
+-- a layout separator inserted before an aligned `:` (as `guard_expr` does).
+refut_clause :: { ([Loc CstExpr], Loc CstExpr) }
+  : '|' atom_exprs1 '=' expr              { ($2, $4) }
+  | '|' atom_exprs1 guard_clauses ':' expr
+      { ($2, Loc (fst (head $3) <-> $5) (CGuardExprE $3 $5)) }
+  | '|' atom_exprs1 guard_clauses VSEMI ':' expr
+      { ($2, Loc (fst (head $3) <-> $6) (CGuardExprE $3 $6)) }
 
 guard_clauses :: { [(Loc CstExpr, Loc CstExpr)] }
   : guard_clause                          { [$1] }
@@ -373,7 +405,7 @@ typedef_params :: { [Either (TVar, Kind) TypeU] }
   : {- empty -}                        { [] }
   | typedef_params LOWER               { $1 ++ [Left (TV (getName $2), KindType)] }
   | typedef_params UPPER               { $1 ++ [Right (VarU (TV (getName $2)))] }
-  | typedef_params '(' LOWER '::' UPPER ')'  { $1 ++ [Left (TV (getName $3), parseKind (getName $5))] }
+  | typedef_params '(' LOWER '::' UPPER ')'  {% parseKindE $5 >>= \k -> return ($1 ++ [Left (TV (getName $3), k)]) }
   | typedef_params '(' type ')'        { $1 ++ [Right $3] }
 
 nam_entry :: { (Key, TypeU) }
@@ -1063,16 +1095,24 @@ getBacktick :: Located -> Text
 getBacktick (Located _ (TokBacktickName n) _) = n
 getBacktick _ = ""
 
-parseKind :: Text -> Kind
-parseKind "Nat" = KindNat
-parseKind "Str" = KindStr
-parseKind "Rec" = KindRec
--- The first cut only produces List Str / Set Str. The element kind is
--- defaulted; explicit `(l :: List Nat)` parameterisation is a future
--- extension that will need its own production.
-parseKind "List" = KindList KindStr
-parseKind "Set" = KindSet KindStr
-parseKind _ = KindType
+-- Parse a kind name at a typedef parameter position. Kind identifiers
+-- are a fixed vocabulary (Type/Nat/Str/Rec/List/Set); anything else is
+-- a source-located parse error. `List` and `Set` default their element
+-- kind to Str; the surface form for @(l :: List Nat)@ is not yet
+-- implemented.
+parseKindE :: Located -> P Kind
+parseKindE tok = case getName tok of
+  "Type" -> return KindType
+  "Nat"  -> return KindNat
+  "Str"  -> return KindStr
+  "Rec"  -> return KindRec
+  "List" -> return (KindList KindStr)
+  "Set"  -> return (KindSet KindStr)
+  other  -> do
+    srcLines <- State.gets psSourceLines
+    State.lift (Left (ParseError (locPos tok)
+      ("unknown kind " ++ show other
+        ++ "; expected one of Type, Nat, Str, Rec, List, Set") [] srcLines))
 
 -- Build a Constraint, recognising primitive heads (Member / Subset /
 -- Disjoint) and routing typeclass-shaped constraints to the existing

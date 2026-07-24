@@ -624,6 +624,22 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
     return h;
 }
 
+// Typed IStream open. The element schema declares the opener's type so
+// the runtime can route the /dev/stdin sentinel through the nexus stdin
+// channel (guarding the incoming stream); for a real file it is read off
+// disk.
+inline int64_t _mlc_open_istream(Schema* schema, const std::string& path) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) {
+        MLC_INTERNAL_ABORT("_mlc_open_istream: schema_to_string returned NULL (invalid compile-time schema table entry)");
+    }
+    int64_t h = mlc_open_istream(s, path.c_str(), &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
 // @stdin / @stdout / @stderr: nullary intrinsics. Element schema is
 // rendered from the parsed Schema and passed to the runtime; the nexus
 // owns fd 0/1/2 and services @next / @write over the RPC socket.
@@ -716,6 +732,33 @@ inline void _mlc_flush(int64_t handle) {
     if (rc != 0) {
         MLC_INTERNAL_ABORT("mlc_flush returned non-zero without setting errmsg (libmorloc contract violation)");
     }
+}
+
+// @tell: elements written to @stdout so far (its element_count). Never fails.
+inline uint64_t _mlc_tell() {
+    char* errmsg = NULL;
+    uint64_t n = mlc_tell(&errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return n;
+}
+
+// @tmpfile: create a fresh temp file (removed when the pool call ends) and
+// return its path. Used by the whole-list with:/render: gather.
+inline std::string _mlc_tmpfile() {
+    char* errmsg = NULL;
+    char* path = mlc_tmpfile(&errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    std::string result(path);
+    free(path);
+    return result;
+}
+
+// @close on a Str path: unlink a registered temp file. Errors if the path
+// was not created by _mlc_tmpfile in this call.
+inline void _mlc_unlink_tmp(const std::string& path) {
+    char* errmsg = NULL;
+    mlc_unlink_tmp(path.c_str(), &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
 }
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {

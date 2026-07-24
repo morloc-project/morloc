@@ -39,6 +39,10 @@ pub struct ParsedCommand {
     pub cmd_index: usize,
     /// Per-arg parsed values, index-aligned with `cmd.args`.
     pub values: Vec<ArgValue>,
+    /// True when a `render` terminal flag was chosen: the dispatcher forces
+    /// the streamed-stdout output format to `raw` (verbatim). `render`
+    /// handlers emit the final bytes, so `-f` does not apply.
+    pub render: bool,
 }
 
 /// Prefix used on clap arg-ids for terminal-action flags. Distinct
@@ -107,8 +111,8 @@ pub fn parse_run(
     if single {
         let (cmd_index0, cmd) = visible[0];
         let values = extract_values(cmd, &matches);
-        let cmd_index = redirect_via_terminal(manifest, cmd_index0, cmd, &matches);
-        return ParsedCommand { cmd_index, values };
+        let (cmd_index, render) = redirect_via_terminal(manifest, cmd_index0, cmd, &matches);
+        return ParsedCommand { cmd_index, values, render };
     }
 
     // Walk down through the optional group layer to reach the
@@ -133,8 +137,8 @@ pub fn parse_run(
         .expect("clap-chosen command must be in manifest");
     let cmd = &manifest.commands[cmd_index];
     let values = extract_values(cmd, chosen_matches);
-    let cmd_index = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
-    ParsedCommand { cmd_index, values }
+    let (cmd_index, render) = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
+    ParsedCommand { cmd_index, values, render }
 }
 
 /// One-line "did you mean to place this left of `@`" hint when a
@@ -177,7 +181,7 @@ fn redirect_via_terminal(
     default_index: usize,
     cmd: &ManifestCommand,
     matches: &ArgMatches,
-) -> usize {
+) -> (usize, bool) {
     for (i, t) in cmd.terminals.iter().enumerate() {
         let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
         if matches.get_flag(id) {
@@ -186,11 +190,11 @@ fn redirect_via_terminal(
                 .iter()
                 .position(|c| c.name == t.entry)
             {
-                return idx;
+                return (idx, t.render);
             }
         }
     }
-    default_index
+    (default_index, false)
 }
 
 /// Build the root `clap::Command` for a Run-mode invocation. In
@@ -217,7 +221,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         // section sorts before the command's positional/optional args
         // (clap orders sections by first-arg-added).
         let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
-        let root = build_command_args(root, cmd)
+        let root = build_command_args(root, cmd, manifest)
             .about(leak(first_desc(&cmd.desc)))
             .arg_required_else_help(false);
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
@@ -255,7 +259,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                     ClapCommand::new(leak(&cmd.name))
                         .about(leak(first_desc(&cmd.desc))),
                 );
-                let sub = build_command_args(sub, cmd);
+                let sub = build_command_args(sub, cmd, manifest);
                 let sub = crate::help::finalize(
                     sub,
                     crate::help::usage_multi_sub(
@@ -278,7 +282,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                 ClapCommand::new(leak(&cmd.name))
                     .about(leak(first_desc(&cmd.desc))),
             );
-            let sub = build_command_args(sub, cmd);
+            let sub = build_command_args(sub, cmd, manifest);
             let sub = crate::help::finalize(
                 sub,
                 crate::help::usage_multi_sub(prog_name, None, &cmd.name),
@@ -289,6 +293,62 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
     root
 }
 
+
+/// Render the `Return:` help block for a command.
+///
+/// With no terminal-action flags this is the single line
+/// `Return: <type>` (followed by any `--' return:` description lines),
+/// preserving the historical layout.
+///
+/// When the command carries `--' with:`/`render:` terminal actions,
+/// each flag selects a different output formatter with its own return
+/// type, so the block becomes a small table listing the return type
+/// per formatter -- `default:` for the bare command plus one aligned
+/// row per flag. Each terminal's return type is read from its
+/// synthesized `entry` command (resolved by name against the manifest).
+fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
+    if mcmd.terminals.is_empty() {
+        if mcmd.ret.type_desc.is_empty() {
+            return String::new();
+        }
+        let mut block = format!("Return: {}", mcmd.ret.type_desc);
+        for line in &mcmd.ret.desc {
+            block.push_str(&format!("\n  {}", line));
+        }
+        return block;
+    }
+
+    // (flag-label, return-type) rows: the bare command first, then one
+    // per terminal flag. A terminal whose entry can't be resolved (a
+    // malformed manifest) contributes an empty type rather than being
+    // dropped, so the row still documents the flag.
+    let mut rows: Vec<(String, String)> = Vec::with_capacity(mcmd.terminals.len() + 1);
+    rows.push(("default".to_string(), mcmd.ret.type_desc.clone()));
+    for t in &mcmd.terminals {
+        let label = match t.short {
+            Some(c) => format!("-{}/--{}", c, t.long),
+            None => format!("--{}", t.long),
+        };
+        let ret = manifest
+            .commands
+            .iter()
+            .find(|c| c.name == t.entry)
+            .map(|c| c.ret.type_desc.clone())
+            .unwrap_or_default();
+        rows.push((label, ret));
+    }
+
+    // Align the type column one space past the widest `label:`.
+    let width = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 1;
+    let mut block = String::from("Return:");
+    for (label, ret) in &rows {
+        block.push_str(&format!("\n  {:<width$} {}", format!("{}:", label), ret, width = width));
+    }
+    for line in &mcmd.ret.desc {
+        block.push_str(&format!("\n  {}", line));
+    }
+    block
+}
 
 /// Add every manifest [`Arg`] to a [`ClapCommand`] under stable ids
 /// (`arg<index>` plus `<arg_id>_neg` for flag negations and
@@ -301,7 +361,11 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 /// a letter; the compiler is expected to reject digit-prefixed
 /// short flag declarations in user docstrings, making this
 /// unambiguous.
-fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
+fn build_command_args(
+    mut cmd: ClapCommand,
+    mcmd: &ManifestCommand,
+    manifest: &Manifest,
+) -> ClapCommand {
     cmd = cmd
         .allow_negative_numbers(true)
         // User-declared flag-style args inherit this heading;
@@ -326,14 +390,12 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     if !pos_block.is_empty() {
         after.push_str(&pos_block);
     }
-    if !mcmd.ret.type_desc.is_empty() {
+    let ret_block = render_return_block(mcmd, manifest);
+    if !ret_block.is_empty() {
         if !after.is_empty() {
             after.push_str("\n\n");
         }
-        after.push_str(&format!("Return: {}", mcmd.ret.type_desc));
-        for line in &mcmd.ret.desc {
-            after.push_str(&format!("\n  {}", line));
-        }
+        after.push_str(&ret_block);
     }
     if let Some(block) = crate::schemas::render_command_schemas(mcmd) {
         if !after.is_empty() {
@@ -350,13 +412,17 @@ fn build_command_args(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { many, .. } => {
+            ManifestArg::Positional { many, stdin, .. } => {
                 // Positionals are rendered by `render_positional_block`
                 // (above, via `after_help`) so clap's bracketed
                 // `<argN>` default doesn't appear in help. They still
                 // need `required`/`index` here for clap to parse them.
+                // A `stdin: true` positional is optional (the compiler
+                // guarantees it is the last positional, so an optional
+                // trailing positional is unambiguous for clap); when
+                // omitted the nexus injects the `/dev/stdin` sentinel.
                 let mut a = ClapArg::new(id)
-                    .required(true)
+                    .required(!stdin)
                     .index(pos_idx as usize)
                     .hide(true);
                 // Variadic positional: accept one or more tokens.
@@ -609,7 +675,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, many, checks, .. } => {
+            ManifestArg::Positional { quoted: q, many, checks, stdin, .. } => {
                 if *many {
                     // Variadic positional: clap collects 1..N tokens
                     // via Append action; pull them all and forward as
@@ -622,6 +688,28 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .map(|it| it.cloned().collect())
                         .unwrap_or_default();
                     out.push(ArgValue::Many { tokens: toks, literal: *q });
+                } else if *stdin {
+                    // Optional stdin positional. A supplied value (a path or
+                    // an explicit `-`) is used directly; when omitted the
+                    // source is stdin, injected as the `/dev/stdin` sentinel.
+                    // Refuse to hang on an interactive terminal: with no value
+                    // and stdin a TTY there is nothing to read, so error
+                    // rather than block forever.
+                    let raw = match matches.get_one::<String>(&id).cloned() {
+                        Some(val) => val,
+                        None => {
+                            if unsafe { libc::isatty(0) } == 1 {
+                                crate::runlog::die_with_error(&format!(
+                                    "argument #{}: no input given and stdin is a terminal; \
+                                     pass a file path, `-` for stdin, or pipe data in",
+                                    i
+                                ));
+                            }
+                            "/dev/stdin".to_string()
+                        }
+                    };
+                    let v = preprocess_cli_value(raw, checks, *q, &format!("argument #{}", i));
+                    out.push(ArgValue::Value(v));
                 } else {
                     // Required positional: clap guaranteed a value.
                     let val = matches

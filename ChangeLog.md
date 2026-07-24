@@ -1,3 +1,20 @@
+0.95.0 [2026-07-23]
+-------------------
+ 
+ * Add `stdin: true` docstring field to let positional optionally use STDIN
+ * Let `@open` read morloc packets from STDIN
+ * Refutable patterns with '|' syntax
+ * Streamed output now honors nexus formatting and compression directives
+ * New `@collect` intrinsic for marshalling data to stdout
+ * New reformatting handles:
+   - `with:`
+   - `with-buffer:`
+   - `render:`
+   - `render-buffer:`
+ * Allow auto-detected offset to handlers
+ * Gradual kinds - allows `Vector a` to be used in place of `Vector n a`. Allows
+   `[Vector a]` where each vector may have a different length
+
 0.94.0 [2026-07-15]
 -------------------
 

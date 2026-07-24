@@ -123,6 +123,9 @@ findTypeTerms (ListVarU _) = []
 findTypeTerms ListVoidU = []
 findTypeTerms (SetVarU _) = []
 findTypeTerms SetVoidU = []
+-- KVarU / VoidU carriers of kinds not covered above hold no type-terms.
+findTypeTerms (KVarU _) = []
+findTypeTerms (VoidU _) = []
 -- Unified carriers: uniform recursion across all operators and literal payloads.
 findTypeTerms (OpU _ args) = concatMap findTypeTerms args
 findTypeTerms (LitU (LNat _)) = []
@@ -252,6 +255,15 @@ mapTypeInExprI f = go
     go (ExprI i (SigE (Signature v l (EType t cs doc labels)))) =
       let cs' = Set.map (mapConstraint f) cs
       in return $ ExprI i (SigE (Signature v l (EType (f t) cs' doc labels)))
+    -- Walk the body and any specialization-arg TypeU of a type/newtype
+    -- declaration. Without this, per-typedef-body passes (e.g. the
+    -- gradual desugar's fillMissingKindArgs) never see the RHS, so a
+    -- declaration like `type Foo = Vector U8` leaves the under-applied
+    -- Vector unpatched and downstream alias reduction cannot unify it
+    -- with the newtype's 2-arg pattern.
+    go (ExprI i (TypE (ExprTypeE form v ps t d k))) =
+      let ps' = map (fmap f) ps
+      in return $ ExprI i (TypE (ExprTypeE form v ps' (f t) d k))
     go (ExprI i (AnnE e t)) = do
       e' <- go e
       return $ ExprI i (AnnE e' (f t))

@@ -52,7 +52,7 @@ fn main() {
     // capability flags filtered by the manifest's advertised
     // capabilities. Routes through the static `Nexus` derive for
     // router mode and top-level help.
-    let config: NexusConfig;
+    let mut config: NexusConfig;
     let manifest_path: String;
     let user_zone: Vec<String>;
 
@@ -252,7 +252,7 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
-    stdio_server::start(&tmpdir);
+    stdio_server::start(&tmpdir, config.output_format, config.compression_level);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -304,6 +304,15 @@ fn main() {
         // place them left of `@` or left of the subcommand.
         let parsed =
             phase2::parse_run(&manifest, &user_zone, &prog_name);
+        // A `render` terminal emits its handler's bytes verbatim. Force raw for
+        // BOTH output paths: the streamed-stdout path (`render.buffer`, whose
+        // () return is suppressed by the Raw arm's top-null guard) and the
+        // return path (whole-list `render`, which returns a Str/Vector U8 value
+        // formatted by `print_result_c`).
+        if parsed.render {
+            stdio_server::set_output_format(dispatch::OutputFormat::Raw);
+            config.output_format = dispatch::OutputFormat::Raw;
+        }
         let cmd = &manifest.commands[parsed.cmd_index];
         dispatch::dispatch_command_parsed(
             parsed.values,

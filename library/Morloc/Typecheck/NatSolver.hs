@@ -28,7 +28,7 @@ module Morloc.Typecheck.NatSolver
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.List (sortBy, groupBy)
+import Data.List (partition, sortBy, groupBy)
 import Data.Ord (comparing)
 import Data.Function (on)
 import Morloc.Namespace.Prim (TVar(..))
@@ -168,7 +168,38 @@ solveSOP (NatSOP prods)
       if b `mod` a == 0
         then Right (Map.singleton v (NatLit (negate b `div` a)))
         else Left Contradiction
+  | Just (v, e) <- extractLinearVarPoly prods =
+      Right (Map.singleton v e)
   | otherwise = Left (Deferred (NatSOP prods))
+
+-- | Solve @c*v + P(others) = 0@ as @v := -P/c@ when @c@ divides every
+-- coefficient in @P@. Distinct from 'extractLinearVar', which requires
+-- @P@ to be a constant. Prefers candidates whose scaled substitution
+-- has all non-negative coefficients (Nat-hygienic; avoids introducing
+-- subtractions that the receiver cannot statically verify).
+extractLinearVarPoly :: [NatProduct] -> Maybe (TVar, NatExpr)
+extractLinearVarPoly prods =
+  let linearSingles = [ (v, npCoeff p)
+                      | p <- prods
+                      , Map.size (npVars p) == 1
+                      , [(v, 1)] <- [Map.toList (npVars p)]
+                      ]
+      candidates = [ (v, c, others, allNonNeg)
+                   | (v, c) <- linearSingles
+                   , c /= 0
+                   , length [() | p <- prods, Map.member v (npVars p)] == 1
+                   , let others = [p | p <- prods, not (Map.member v (npVars p))]
+                   , all (\p -> npCoeff p `mod` c == 0) others
+                   , let allNonNeg = all (\p -> negate (npCoeff p) `div` c >= 0) others
+                   ]
+      (preferred, rest) = partition (\(_,_,_,ok) -> ok) candidates
+      picked = case preferred ++ rest of
+                 ((v, c, others, _) : _) -> Just (v, c, others)
+                 _                       -> Nothing
+      buildSolution (v, c, others) =
+        let scaled = NatSOP [NatProduct (negate (npCoeff p) `div` c) (npVars p) | p <- others]
+        in (v, sopToNatExpr scaled)
+  in fmap buildSolution picked
 
 -- | Find a variable that appears linearly (exponent 1, alone in its product)
 -- Returns (variable, coefficient, sum of constant terms)

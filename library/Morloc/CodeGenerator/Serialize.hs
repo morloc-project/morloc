@@ -334,6 +334,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
                      IntrFLength, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
+                     IntrTell, IntrTmpfile,
                      IntrCatch] = do
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
@@ -511,11 +512,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @open on IFile/IStream reads its schema off disk; codegen routes
-    -- through the generic `_mlc_open(path, kind)` entry so we return
-    -- Nothing. @open on OStream needs the storage schema at open time.
+    -- @open on IFile reads its schema off disk; codegen routes through the
+    -- generic `_mlc_open(path, kind)` entry so we return Nothing. @open on
+    -- OStream/IStream needs the storage schema at open time (the typed
+    -- `_mlc_open_ostream`/`_mlc_open_istream` entries): OStream to write the
+    -- stream header, IStream to declare the schema for the stdin sentinel.
     intrinsicSchema m IntrOpen tf _ = case unwrapHandleHead tf of
-      Just (v, a) | v == BT.ostreamVar ->
+      Just (v, a) | v == BT.ostreamVar || v == BT.istreamVar ->
         Just <$> renderStorageSchema m v a
       _ -> return Nothing
     intrinsicSchema m IntrAppend tf _ = case unwrapHandleHead tf of
@@ -526,6 +529,15 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           case unwrapHandleHead tf of
             Just (v, a) -> Just <$> renderStorageSchema m v a
             Nothing     -> return Nothing
+    -- @close on a Str path (not a handle) is a registered-temp-file unlink.
+    -- Mark it so the translator emits mlc_unlink_tmp; handle closes carry no
+    -- schema and fall through to the generic close.
+    intrinsicSchema _ IntrClose _ (argNE : _)
+      | isStrHead (typeFof argNE) = return (Just BT.closeTmpUnlinkMarker)
+      where
+        isStrHead (EffectF _ t) = isStrHead t
+        isStrHead (VarF (FV v _)) = v == BT.str
+        isStrHead _ = False
     intrinsicSchema _ _ _ _ = return Nothing
 
     renderStorageSchema :: Int -> TVar -> TypeF -> MorlocMonad Text

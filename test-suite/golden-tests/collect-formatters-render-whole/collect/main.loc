@@ -1,0 +1,26 @@
+module collect (streamRW)
+
+import root
+
+-- Whole-list `render:` (verbatim value return). This currently fails to
+-- COMPILE -- the synthesis rejects it with a clean dfail because the raw
+-- return path is not yet wired through the nexus return formatter (only the
+-- streamed stdio path, used by `render.buffer`, is). This test encodes the
+-- INTENDED behavior (renderWhole's Str emitted verbatim) and is therefore RED
+-- until whole-list render is wired; then it turns green. Isolated in its own
+-- directory so its compile failure does not poison the runnable
+-- collect-formatters suite.
+
+makeInts :: Int -> [Int]
+
+renderWhole :: [Int] -> Str
+
+produceRW :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceRW sink = do
+  _ <- sink (makeInts 0)
+  sink (makeInts 1)
+
+--' Render the whole gathered list as one verbatim block
+--' render: -w/--whole=renderWhole
+streamRW :: <IO, Err> ()
+streamRW = @collect produceRW

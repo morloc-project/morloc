@@ -280,6 +280,105 @@ unsafe fn write_data_packet_parts_to_fd(
     Ok(())
 }
 
+// ── Temp-file gather (whole-form with:/render:) ────────────────────────────
+//
+// @tmpfile creates a fresh empty file in the morloc tmpdir and registers it
+// in a per-call (thread-local) list. The whole-form handler synthesis gathers
+// a stream into this file, applies the handler, then removes it with
+// @close(path) (mlc_unlink_tmp). Any temp left registered at the end of the
+// pool call is swept by sweep_call_temps (called from pool_dispatch_packet),
+// so a handler that raises mid-call cannot leak the file. The list is
+// thread-local: each pool worker sees only the temps of the call it is running,
+// so concurrent dispatches never unlink each other's files.
+
+thread_local! {
+    static CALL_TEMPS: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// @tmpfile :: <IO, Err> Str. Create a fresh empty file in the morloc tmpdir,
+/// register it for removal at end-of-call, and return its path.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
+    clear_errmsg(errmsg);
+    let dir = crate::packet::file_packet_tmpdir()
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
+    let _ = std::fs::create_dir_all(&dir);
+    let template = format!("{}/morloc-gather-XXXXXX\0", dir);
+    let mut buf: Vec<u8> = template.into_bytes();
+    let fd = libc::mkstemp(buf.as_mut_ptr() as *mut c_char);
+    if fd < 0 {
+        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+        return ptr::null_mut();
+    }
+    libc::close(fd);
+    buf.pop(); // drop the NUL mkstemp left in place
+    let path = String::from_utf8_lossy(&buf).into_owned();
+    CALL_TEMPS.with(|t| t.borrow_mut().push(std::path::PathBuf::from(&path)));
+    match CString::new(path) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other("mlc_tmpfile: path contained NUL".into()));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// @close on a Str path: unlink a registered temp file and drop it from the
+/// call list. Errors if the path was not created by @tmpfile in this call --
+/// @close is not a general file-removal tool.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_unlink_tmp(
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let path_str = match cstr_arg(path, "mlc_unlink_tmp", "path") {
+        Ok(s) => s,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return 1;
+        }
+    };
+    let pb = std::path::PathBuf::from(path_str);
+    let registered = CALL_TEMPS.with(|t| {
+        let mut v = t.borrow_mut();
+        match v.iter().position(|p| p == &pb) {
+            Some(i) => {
+                v.remove(i);
+                true
+            }
+            None => false,
+        }
+    });
+    if !registered {
+        set_errmsg(errmsg, &MorlocError::Other(format!(
+            "@close: '{}' is not a registered temp file; @close only removes \
+             files created by the whole-list with:/render: gather",
+            path_str
+        )));
+        return 1;
+    }
+    if let Err(e) = std::fs::remove_file(&pb) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            set_errmsg(errmsg, &MorlocError::Io(e));
+            return 1;
+        }
+    }
+    0
+}
+
+/// Remove any temp files still registered for the current call. Called from
+/// pool_dispatch_packet after each dispatch returns, so a raising handler that
+/// skipped its @close(path) cannot leak the gather file.
+pub fn sweep_call_temps() {
+    CALL_TEMPS.with(|t| {
+        for p in t.borrow_mut().drain(..) {
+            let _ = std::fs::remove_file(&p);
+        }
+    });
+}
+
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_voidstar(
@@ -383,6 +482,26 @@ pub unsafe extern "C" fn mlc_load(
 
     if !file_exists(path) {
         return ptr::null_mut();
+    }
+
+    // Stream-packet path: a MORLOC_STREAM_PACKET file holds its `[a]`
+    // list value across many sub-packets (constant-memory gathers write
+    // one sub-packet per flush). The data-packet loaders below only
+    // understand single self-contained packets, so detect the stream
+    // shape first and materialise every sub-packet into one voidstar
+    // `[a]` list. Non-stream files fall through to the existing paths.
+    match crate::cli::peek_packet_header_via_pread(path) {
+        Some(h) if h.is_stream() => {
+            let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
+            match crate::stream::shared_load_stream_file_as_array(&path_str) {
+                Ok(ptr) => return ptr as *mut c_void,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
+                }
+            }
+        }
+        _ => { /* not a stream packet; fall through */ }
     }
 
     // Layer 2 fast path: large MESG+VOIDSTAR packets `pread` straight
@@ -697,6 +816,51 @@ pub unsafe extern "C" fn mlc_open_ostream(
     }
 }
 
+/// `@open path :: <IO> (IStream T)` -- typed open. Like `mlc_open_ostream`
+/// the codegen threads the element schema string for `T`. For a real file
+/// the schema is read off disk; for the `/dev/stdin` sentinel the schema
+/// declares the opener's type to the nexus (which guards the incoming
+/// stream) and routes reads through the pool-nexus RPC channel.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_istream(
+    schema_str: *const c_char,
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "mlc_open_istream: null path or schema".into(),
+        ));
+        return -1;
+    }
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open_istream: path is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    let s_str = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "mlc_open_istream: schema is not valid UTF-8".into(),
+            ));
+            return -1;
+        }
+    };
+    match crate::stream::open_dispatch_istream(path_str, s_str) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 /// `@stdin :: <IO> IStream a` -- typed intrinsic. Element schema is
 /// passed by the codegen from `T`. Nexus owns fd 0; this call
 /// registers a slot that routes `mlc_next` through the pool-nexus
@@ -967,6 +1131,14 @@ pub unsafe extern "C" fn mlc_flush(
             1
         }
     }
+}
+
+/// @tell: number of elements written to the process's @stdout OStream so far
+/// (0 if none open). Never fails.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
+    clear_errmsg(errmsg);
+    crate::stream::stdout_element_count()
 }
 
 /// `@append schema_str path`: open an existing stream file for append.

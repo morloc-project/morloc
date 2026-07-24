@@ -35,6 +35,11 @@ all:
 	./nexus fhead --help 2>> obs.err | grep -E '(-l, --lines|-c, --csv|-s, --sum|-p, --plain|Print each string|Join all|Pure semicolon|comma-separated)' >> obs.txt
 	printf -- '--- describe --help lines (grep --say) ---\n' >> obs.txt
 	./nexus describe --help 2>> obs.err | grep -E '(--say|Human-readable)' >> obs.txt
+	# --- Return block lists the return type per formatter flag ---
+	printf -- '--- fhead --help Return block (per-formatter return types) ---\n' >> obs.txt
+	./nexus fhead --help 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
+	printf -- '--- describe --help Return block (single terminal) ---\n' >> obs.txt
+	./nexus describe --help 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
 	# --- Sibling mutual exclusion: -l -c must error (nonzero exit) ---
 	printf -- '--- fhead -l -c (should error) ---\n' >> obs.txt
 	if ./nexus fhead -l -c lines.txt >> obs.txt 2>> obs.err; then \

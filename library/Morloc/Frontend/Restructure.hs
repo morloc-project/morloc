@@ -1315,7 +1315,118 @@ refineKinds dag = do
     refineTypeKinds :: Map TVar [Kind] -> TypeU -> TypeU
     refineTypeKinds km t0 =
       let kindedVars = collectKindedVarsFromScope km t0
-       in rewriteCrossKindBuiltins (promoteKindedVarsR kindedVars t0)
+       in fillMissingKindArgs km (rewriteCrossKindBuiltins (promoteKindedVarsR kindedVars t0))
+
+    -- | Pad missing kind-arg positions with 'VoidU' of the corresponding
+    -- kind when a typedef'd constructor is under-applied. Args are
+    -- placed by kind-aware partitioning (literals give exact kinds;
+    -- bare vars default to KindType). Type-kind positions are never
+    -- padded -- a missing type arg is an arity error, not gradual.
+    --
+    --   Vector T                   -->  Vector NatVoidU T
+    --   Tensor3 h T                -->  Tensor3 h NatVoidU NatVoidU T
+    --   Table 100                  -->  Table 100 RecVoidU
+    --   Table { name :: Str }      -->  Table NatVoidU { name :: Str }
+    --   Table                      -->  Table NatVoidU RecVoidU
+    fillMissingKindArgs :: Map TVar [Kind] -> TypeU -> TypeU
+    fillMissingKindArgs km = go
+      where
+        -- AppU-VarU-head does not recurse via 'go h': the bare-Var
+        -- case below would fire on it and produce nested AppUs.
+        go (AppU h@(VarU v) args) = case Map.lookup v km of
+          Just paramKinds
+            | length args < length paramKinds ->
+                let args' = map go args
+                    buckets = bucketByKind args'
+                    typeParamCount = length [() | KindType <- paramKinds]
+                    typeArgsProvided = length (Map.findWithDefault [] KindType buckets)
+                in if typeArgsProvided < typeParamCount
+                   then AppU h args'  -- arity error surfaces downstream
+                   else AppU h (fillByBucket paramKinds buckets)
+          _ -> AppU h (map go args)
+        go (AppU h args) = AppU (go h) (map go args)
+        -- Bare 'VarU v' for a typedef with only kind params expands to
+        -- a full AppU with VoidU args (e.g. bare 'Table' becomes
+        -- 'Table NatVoidU RecVoidU'). Typedefs with any Type param
+        -- stay bare so the missing Type arg surfaces as arity error.
+        go (VarU v)
+          | Just paramKinds <- Map.lookup v km
+          , not (null paramKinds)
+          , all (/= KindType) paramKinds
+          = AppU (VarU v) [VoidU k | k <- paramKinds]
+          | otherwise = VarU v
+        go (FunU ts t) = FunU (map go ts) (go t)
+        go (ForallU v t) = ForallU v (go t)
+        go (NamU r v ps rs) = NamU r v (map go ps) [(k, go t) | (k, t) <- rs]
+        go (ExistU v (ts, tc) (rs, rc)) =
+          ExistU v (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
+        go (EffectU effs t) = EffectU effs (go t)
+        go (OptionalU t) = OptionalU (go t)
+        go (OpU op args) = OpU op (map go args)
+        go (LitU (LRec fs)) = LitU (LRec [(k, go v) | (k, v) <- fs])
+        go (LitU (LList es)) = LitU (LList (map go es))
+        go (LitU (LSet es)) = LitU (LSet (map go es))
+        go (LabeledU n t) = LabeledU n (go t)
+        go t = t
+
+        -- Fill each parameter position by consuming from a bucket of
+        -- args grouped by inferred kind. Positions with an empty bucket
+        -- get VoidU of that kind.
+        fillByBucket :: [Kind] -> Map Kind [TypeU] -> [TypeU]
+        fillByBucket paramKinds buckets0 = go' paramKinds buckets0
+          where
+            go' []       _ = []
+            go' (pk:pks) bs = case Map.lookup pk bs of
+              Just (a:rest) -> a       : go' pks (Map.insert pk rest bs)
+              _             -> VoidU pk : go' pks bs
+
+        -- Group args by their inferred kind, preserving arg order.
+        bucketByKind :: [TypeU] -> Map Kind [TypeU]
+        bucketByKind = foldr (\a -> Map.insertWith (++) (inferArgKind a) [a]) Map.empty
+
+        -- Classify an arg to a kind: literals and kind-specific carriers
+        -- give exact kinds; operator applications inherit their result
+        -- kind from the operator tag; bare vars default to KindType.
+        inferArgKind :: TypeU -> Kind
+        inferArgKind (LitU (LNat _))   = KindNat
+        inferArgKind (LitU (LStr _))   = KindStr
+        inferArgKind (LitU (LRec _))   = KindRec
+        inferArgKind (LitU (LList _))  = KindList KindStr
+        inferArgKind (LitU (LSet _))   = KindSet KindStr
+        inferArgKind (KVarU (_, k))    = k
+        inferArgKind (VoidU k)         = k
+        inferArgKind (ListVarU _)      = KindList KindStr
+        inferArgKind ListVoidU         = KindList KindStr
+        inferArgKind (SetVarU _)       = KindSet KindStr
+        inferArgKind SetVoidU          = KindSet KindStr
+        inferArgKind (OpU op _)        = opResultKind op
+        inferArgKind _                 = KindType
+
+        -- Result kind of each type-level operator, used to classify
+        -- OpU-headed args in @bucketByKind@. Without this the surface
+        -- form @Table {x = Int}@ (which parses as OpU OpRecExtend ...)
+        -- would fall through to KindType and get dropped during the
+        -- gradual-arg fill.
+        opResultKind :: OpTag -> Kind
+        opResultKind OpNatAdd       = KindNat
+        opResultKind OpNatSub       = KindNat
+        opResultKind OpNatMul       = KindNat
+        opResultKind OpNatDiv       = KindNat
+        opResultKind OpStrConcat    = KindStr
+        opResultKind OpRecExtend    = KindRec
+        opResultKind OpRecUnion     = KindRec
+        opResultKind OpRecIntersect = KindRec
+        opResultKind OpRecRestrict  = KindRec
+        opResultKind OpRecDiffList  = KindRec
+        opResultKind OpRecSingleton = KindRec
+        opResultKind OpListApp      = KindList KindStr
+        opResultKind OpSetUnion     = KindSet KindStr
+        opResultKind OpSetInter     = KindSet KindStr
+        opResultKind OpSetDiff      = KindSet KindStr
+        opResultKind OpKeys         = KindSet KindStr
+        opResultKind OpListToSet    = KindSet KindStr
+        opResultKind OpSize         = KindNat
+        opResultKind OpProjectField = KindType
 
     -- | Recognise upper-case names of cross-kind builtins (Keys, Size,
     -- ListToSet) used as function-application heads in a type

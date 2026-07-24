@@ -113,6 +113,8 @@ data Token
     TokBind
   | -- | * (only in export context)
     TokStar
+  | -- | | (pattern-clause delimiter in `|`-guarded definitions)
+    TokPipe
   | -- Keywords
     TokModule
   | TokImport
@@ -258,6 +260,7 @@ showToken (TokLowerName n) = "identifier '" ++ T.unpack n ++ "'"
 showToken (TokUpperName n) = "type name '" ++ T.unpack n ++ "'"
 showToken (TokOperator n) = "operator '" ++ T.unpack n ++ "'"
 showToken TokMinus = "'-'"
+showToken TokPipe = "'|'"
 showToken (TokInteger _) = "integer literal"
 showToken (TokFloat _) = "float literal"
 showToken (TokString _) = "string literal"

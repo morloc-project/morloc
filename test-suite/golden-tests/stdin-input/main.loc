@@ -1,0 +1,69 @@
+module main (produce, readStream, readStr, readAny)
+
+-- stdin input for CLI filters. A `--' stdin: true` positional is optional and
+-- reads stdin when omitted (or given `-`). @open on the injected `/dev/stdin`
+-- sentinel routes an IStream through the nexus stdin channel and rejects an
+-- IFile open (a pipe is not seekable) catchably, so the IFile-first / IStream-
+-- fallback idiom works. The trailing sourced `echo`/`identI` calls force each
+-- reader into the C++ pool (the real, pool-bound path -- like mosm's cut).
+
+import root-cpp
+
+source Cpp from "impl.hpp"
+  ( "mk"      as mk
+  , "echo"    as echo
+  , "echoStr" as echoStr
+  , "identI"  as identI
+  )
+
+mk      :: Int -> [Int]
+echo    :: [Int] -> [Int]
+echoStr :: [Str] -> [Str]
+identI  :: Int -> Int
+
+--' A readable filename
+--' check.path: r
+type RFile = Str
+
+--' Produce the first n integers as a morloc value (pipe with -f packet)
+produce :: Int -> [Int]
+produce n = mk n
+
+--' Read integers as an IStream (file OR stdin); return the first batch.
+readStream ::
+  --' stdin: true
+  RFile ->
+  <IO, Err> [Int]
+readStream f = do
+  fi <- @open f :: <IO, Err> (IStream Int)
+  xs <- @next fi
+  echo xs
+
+--' Read STRINGS as an IStream. Feeding an [Int] packet must fail the schema
+--' guard at the boundary rather than mis-decode.
+readStr ::
+  --' stdin: true
+  RFile ->
+  <IO, Err> [Str]
+readStr f = do
+  fi <- @open f :: <IO, Err> (IStream Str)
+  xs <- @next fi
+  echoStr xs
+
+--' IFile-first with IStream fallback (the filter idiom). A real file takes the
+--' IFile fast path; stdin fails the IFile open catchably and the IStream
+--' fallback runs (its @flen has no footer count on a pipe, hence 0).
+readAny ::
+  --' stdin: true
+  RFile ->
+  <IO, Err> Int
+readAny f =
+  @catch
+    ( do fi <- @open f :: <IO, Err> (IFile [Int])
+         n <- @flen fi
+         identI n
+    )
+    ( do fi <- @open f :: <IO, Err> (IStream Int)
+         n <- @flen fi
+         identI n
+    )

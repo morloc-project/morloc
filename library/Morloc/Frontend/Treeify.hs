@@ -100,6 +100,21 @@ treeify d
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
                 exports = [(i, v) | (i, TermSymbol v) <- Set.toList allSymbols]
+                -- Root the terminal-action handlers of every command the root
+                -- exports. When a formatter command is defined in a submodule
+                -- and imported by name, its handlers are exported by that
+                -- submodule, not the root, so they must be rooted explicitly or
+                -- codegen prunes them (see the collect-cross-module golden). A
+                -- name already in `exports` (the self-contained case, where
+                -- `addToExport` put the handler in the root's own exports) is
+                -- skipped to avoid a duplicate root.
+                exportedNames = Set.fromList [v | (_, v) <- exports]
+                terminalExports =
+                  [ e
+                  | e@(_, m) <- terminalActionRoots d exportedNames
+                  , not (Set.member m exportedNames)
+                  ]
+                exports' = exports ++ terminalExports
 
             -- Build export group info for the state
             let exportGroupInfo =
@@ -129,14 +144,14 @@ treeify d
             MM.modify
               ( \s ->
                   s
-                    { stateExports = map fst exports
-                    , stateName = Map.union (stateName s) (Map.fromList exports)
+                    { stateExports = map fst exports'
+                    , stateName = Map.union (stateName s) (Map.fromList exports')
                     , stateExportGroups = exportGroupInfo
                     }
               )
 
             -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-            statefulMapM collect (Namer Map.empty 0 Set.empty) exports |>> snd
+            statefulMapM collect (Namer Map.empty 0 Set.empty) exports' |>> snd
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -149,6 +164,55 @@ treeify d
         MM.throwCompilerBug $
           "unsupported multi-rooted module DAG:"
             <+> tupled (map pretty roots)
+
+-- | The terminal-action handler bindings (`--' with:`/`render:` synthesis, e.g.
+-- @mlcp_cut_fasta@) for every command the root module exports.
+--
+-- Program roots come only from the root module's export list, but a
+-- terminal-action binding is exported by the module that DEFINES its parent
+-- command (via 'Desugar.addToExport'), not by the root. So when a formatter
+-- command is imported by name from a submodule, its handlers are not among the
+-- root's exports and codegen prunes them -- the flag still appears in the nexus
+-- (its terminal record rides the command's docstring across the import) but
+-- dispatches to a manifold that was never lowered. Rooting these entries here
+-- makes the imported case behave exactly like a self-contained root module.
+--
+-- The mangled names are re-derived from each root command's @with@/@render@
+-- docstrings (the same source 'Desugar.collectWithSpecs' and the nexus use) and
+-- resolved against every module's export symbols to recover the linked index
+-- ('MFL.link' links all modules' exports, so a submodule's terminal-action
+-- export index is a valid root). A command re-exported under an alias is not
+-- handled (its submodule signature name would not match the root export name);
+-- that matches the nexus, which also keys the terminal entry off the command's
+-- own name.
+terminalActionRoots :: DAG MVar e ExprI -> Set.Set EVar -> [(Int, EVar)]
+terminalActionRoots d rootCmds =
+  [ (i, m)
+  | m <- Set.toList mangledNames
+  , Just i <- [Map.lookup m exportIndex]
+  ]
+  where
+    ns = DAG.nodes d
+    mangledNames =
+      Set.fromList
+        [ mangleTerminalName name (wsLong w)
+        | node <- ns
+        , (name, _, et) <- AST.findSignatures node
+        , Set.member name rootCmds
+        , ArgDocSig cmdDoc _ _ <- [edocs et]
+        , w <- docWith cmdDoc
+        ]
+    exportIndex =
+      Map.fromList
+        [ (v, i)
+        | node <- ns
+        , (i, v) <- moduleExportTerms node
+        ]
+    moduleExportTerms node = case AST.findExport node of
+      ExportMany symbols groups ->
+        let allSs = Set.toList symbols ++ concatMap (Set.toList . exportGroupMembers) groups
+         in [(i, v) | (i, TermSymbol v) <- allSs]
+      _ -> []
 
 -- | Two signature-level effect checks, run after 'MFL.link' has
 -- populated 'stateEffects':

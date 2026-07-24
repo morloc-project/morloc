@@ -1,0 +1,4 @@
+--- whole render: text (joined verbatim) ---
+0,1,10,11
+--- whole render: binary (Vector U8 as byte values) ---
+0 1 10 11

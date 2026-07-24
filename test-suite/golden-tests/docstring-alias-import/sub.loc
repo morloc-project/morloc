@@ -1,0 +1,54 @@
+module (produce, readCmd, streamCmd)
+
+-- A type alias's docstrings (description, check.path, stdin) must reach a
+-- command's argument even when only the COMMAND is imported into the root
+-- module and the alias itself is not re-exported. The alias is resolved in
+-- its defining module's scope (here, this submodule), not the importing root.
+-- This mirrors mosm's `cut`: RFile/Slice live beside cutCommand and are never
+-- exported. `streamCmd` additionally carries a `render.buffer` terminal action
+-- (the exact mosm shape that regressed).
+
+import root-cpp
+
+source Cpp from "impl.hpp"
+  ( "mk"         as mk
+  , "echo"       as echo
+  , "renderInts" as renderInts
+  )
+
+mk         :: Int -> [Int]
+echo       :: [Int] -> [Int]
+renderInts :: [Int] -> Str
+
+--' A pythonic slice
+type Slice = Str
+
+--' A readable filename
+--' check.path: r
+--' stdin: true
+type RFile = Str
+
+--' Produce the first n integers (pipe with -f packet)
+produce :: Int -> [Int]
+produce n = mk n
+
+producer :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+producer sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' Plain reader whose only arg is the imported `RFile` alias. If the alias
+--' docstrings propagate, this arg is optional (stdin) and check.path'd.
+readCmd :: RFile -> <IO, Err> [Int]
+readCmd f = do
+  fi <- @open f :: <IO, Err> (IStream Int)
+  xs <- @next fi
+  echo xs
+
+--' Terminal-action command (mosm `cut` shape): a render.buffer terminal plus a
+--' `Slice` first arg and the imported `RFile` last arg. The RFile arg must be
+--' optional (stdin) here too.
+--' name: streamcmd
+--' render.buffer: -r/--text=renderInts
+streamCmd :: Slice -> RFile -> <IO, Err> ()
+streamCmd s f = @collect producer

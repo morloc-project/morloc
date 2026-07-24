@@ -2063,7 +2063,7 @@ unsafe fn check_packet_schema_matches(
     use morloc_runtime_types::packet::{
         decode_schema_entry, iter_metadata, METADATA_TYPE_SCHEMA_STRING,
     };
-    use morloc_runtime_types::schema::schema_to_string;
+    use morloc_runtime_types::schema::{schema_strings_compatible, schema_to_string};
 
     let stored = iter_metadata(meta_bytes)
         .find_map(|(kind, data)| {
@@ -2086,7 +2086,7 @@ unsafe fn check_packet_schema_matches(
     let requested_rs = CSchema::to_rust(requested_schema);
     let requested = schema_to_string(&requested_rs);
 
-    if stored != requested {
+    if !schema_strings_compatible(&stored, &requested) {
         let path_prefix = if path_hint.is_empty() {
             String::new()
         } else {

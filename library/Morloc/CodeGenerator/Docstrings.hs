@@ -127,6 +127,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
       ]
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
+  validateStdinArg loc cmdargs
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
     CmdDocSet
@@ -222,7 +223,16 @@ getReturnDesc (ArgDocAlias r) _ = docLines r
 reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
 reduceArgDoc i t@(VarT v) arg = do
   scope <- MM.getGeneralScope i
-  case Map.lookup v scope of
+  -- The doc-processing index for an imported command carries the *importing*
+  -- module's typedef scope (empty for a bare re-export into the root), while
+  -- the argument's type alias is resolved in the command's OWN module. Fall
+  -- back to the universal scope (the union of every module's typedefs) so an
+  -- alias's docstrings -- description, check.path, stdin, arg/metavar/default
+  -- -- reach the use site even when the alias itself is not re-exported and
+  -- imported into the root. Local scope wins when present, so this only
+  -- rescues the otherwise-lost case.
+  uni <- MM.gets stateUniversalGeneralTypedefs
+  case Map.lookup v scope <|> Map.lookup v uni of
     -- Record-newtype: declared via @record Foo where { ... }@. The body
     -- is a 'NamU' carrying the record-level and field-level
     -- docstrings; non-record newtypes are opaque (their docstring is
@@ -252,6 +262,7 @@ reduceArgDoc i t@(VarT v) arg = do
         , docName = docName r1 <|> docName r2
         , docLiteral = docLiteral r1 <|> docLiteral r2
         , docMany = docMany r1 <|> docMany r2
+        , docStdin = docStdin r1 <|> docStdin r2
         , docUnroll = docUnroll r1 <|> docUnroll r2
         , docDefault = docDefault r1 <|> docDefault r2
         , docMetavar = docMetavar r1 <|> docMetavar r2
@@ -286,6 +297,27 @@ makeCmdArg _ _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI p
 
 resolveArgDocVars :: MDoc -> [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
 resolveArgDocVars loc rs t r
+  -- `stdin: true` marks an optional positional that reads stdin when
+  -- omitted. It is positional-only and cannot double as an option/flag
+  -- or carry a default; those combinations are rejected here so the
+  -- error points at the directive rather than a downstream shape clash.
+  | isStdin
+      && (isJust (docArg r) || isJust (docTrue r) || isJust (docFalse r)) =
+      MM.throwSystemError $
+        loc <> " has `stdin: true`, which marks a positional argument; it"
+          <> " cannot also carry `arg:`/`true:`/`false:` (those make it an"
+          <> " option or flag)."
+  | isStdin && docMany r == Just True =
+      MM.throwSystemError $
+        loc <> " cannot combine `stdin: true` with `many: true`."
+  | isStdin && isJust (docDefault r) =
+      MM.throwSystemError $
+        loc <> " cannot combine `stdin: true` with `default:`; a stdin"
+          <> " positional already defaults to reading stdin when omitted."
+  | isStdin && t == VarT MBT.bool =
+      MM.throwSystemError $
+        loc <> " has `stdin: true` on a Bool argument; a stdin positional"
+          <> " reads a path or the stdin sentinel and must be Str-shaped."
   -- `default:` only makes sense on a flag (true:/false:) or an
   -- option (arg:). On a bare positional it is rejected. An
   -- unrolled record group is exempt: each field carries its own
@@ -313,6 +345,8 @@ resolveArgDocVars loc rs t r
   -- `resolveOpt` errors if no `default:` accompanies it.
   | isJust (docArg r) = resolveOpt loc t r |>> CmdArgOpt
   | otherwise = resolvePos t r |>> CmdArgPos
+  where
+    isStdin = docStdin r == Just True
 
 resolveGrp :: MDoc -> Type -> ArgDocVars -> [(Key, (Type, ArgDocVars))] -> MorlocMonad CmdArg
 resolveGrp loc recType@(NamT _ v _ _) arg argEntries = do
@@ -398,6 +432,7 @@ resolveFlag loc r = do
           , argPosDocMetavar = docMetavar r <|> Just "BOOL"
           , argPosDocLiteral = docLiteral r
           , argPosDocMany = False
+          , argPosDocStdin = False
           , argPosDocSource = docSource r
           , argPosDocForm = docForm r
           , argPosDocChecks = docChecks r
@@ -503,6 +538,15 @@ makeOptMeta StrVoidT = "STR"
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do
   let many = docMany r == Just True
+      stdin = docStdin r == Just True
+      -- A stdin positional reads a path (or the stdin sentinel); it is a
+      -- readable file, so imply `check.path: r` when the user gave no explicit
+      -- path check. An explicit user check wins. The Str-shape requirement is
+      -- enforced by the check.path validation.
+      hasPathCheck = any isPathCheck (docChecks r)
+      checks
+        | stdin && not hasPathCheck = docChecks r <> [CheckPath (PathPerm "r")]
+        | otherwise = docChecks r
   return $
     ArgPosDocSet
       { argPosDocType = t
@@ -510,13 +554,16 @@ resolvePos t r = do
       , argPosDocMetavar = docMetavar r
       , argPosDocLiteral = docLiteral r
       , argPosDocMany = many
+      , argPosDocStdin = stdin
       , argPosDocSource = docSource r
       , argPosDocForm = docForm r
-      , argPosDocChecks = docChecks r
+      , argPosDocChecks = checks
       , argPosDocListSource = docListSource r
       , argPosDocListForm = docListForm r
       , argPosDocListChecks = docListChecks r
       }
+  where
+    isPathCheck (CheckPath _) = True
 
 -- Validate that within a function's argument list, at most one
 -- positional carries `many: true`, and it is the LAST positional
@@ -538,6 +585,31 @@ validateManyOrdering loc = go False
               <> " variadic positionals must occupy the final positional slot."
       | otherwise = go (argPosDocMany r) rest
     go seenMany (_ : rest) = go seenMany rest
+
+-- Validate that within a function's argument list, at most one
+-- positional carries `stdin: true`, and it is the LAST positional
+-- (options and flags may follow). clap forbids an optional positional
+-- preceding a required one, and the stdin sentinel is injected only for
+-- a trailing omission, so a stdin positional must occupy the final
+-- positional slot.
+validateStdinArg :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateStdinArg loc cmdargs = do
+  let stdinCount = length [() | CmdArgPos r <- cmdargs, argPosDocStdin r]
+  when (stdinCount > 1) $
+    MM.throwSystemError $
+      loc <> " has more than one positional with `stdin: true`; at most one"
+        <> " argument may read from stdin."
+  go False cmdargs
+  where
+    go :: Bool -> [CmdArg] -> MorlocMonad ()
+    go _ [] = return ()
+    go seenStdin (CmdArgPos r : rest)
+      | seenStdin =
+          MM.throwSystemError $
+            loc <> " has a positional after the `stdin: true` positional;"
+              <> " the stdin argument must be the last positional."
+      | otherwise = go (argPosDocStdin r) rest
+    go seenStdin (_ : rest) = go seenStdin rest
 
 -- Reject collisions between option / flag long-form names within a
 -- single subcommand. Without this check, two flags that happen to

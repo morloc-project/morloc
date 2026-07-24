@@ -1,0 +1,12 @@
+0
+1
+1
+2
+2
+"lt"
+"eq"
+"gt"
+"neg"
+"zero"
+"small"
+"large"

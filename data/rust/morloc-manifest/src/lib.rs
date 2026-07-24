@@ -351,6 +351,11 @@ pub struct Terminal {
     /// docstring.
     #[serde(default)]
     pub description: String,
+    /// True for `render`/`render.buffer` terminals: the handler emits the
+    /// final bytes, so the nexus defaults this flag's output format to
+    /// `raw` (verbatim) instead of `-f`-rendered. `-f` still overrides.
+    #[serde(default)]
+    pub render: bool,
 }
 
 impl Command {
@@ -547,6 +552,12 @@ pub enum Arg {
         /// in the morloc signature.
         #[serde(default)]
         many: bool,
+        /// If true, the positional is optional (`--' stdin: true`) and
+        /// reads from stdin when omitted: the nexus injects the
+        /// `/dev/stdin` sentinel as its value. At most one per command,
+        /// must be the last positional.
+        #[serde(default)]
+        stdin: bool,
         /// Description lines from `--' desc:` docstrings.
         #[serde(default)]
         desc: Vec<String>,

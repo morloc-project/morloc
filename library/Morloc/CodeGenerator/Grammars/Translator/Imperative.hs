@@ -140,6 +140,10 @@ data IExpr
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
+  | IIntrinsicUnlinkTemp IExpr
+      -- ^ @close given a Str path: unlink a registered temp file (created
+      --   by @tmpfile) and drop it from the registry. Errors if the path
+      --   was not registered -- @close is not a general file-removal tool.
   | IIntrinsicFSchema IExpr -- path -> schema string
   | IIntrinsicFLength IExpr
       -- ^ handle -> Int element count (read from cached StreamDiag)
@@ -164,6 +168,12 @@ data IExpr
       --   `[a]` (streams are list-shaped) and the path expression. The
       --   runtime creates the file and writes the stream header with
       --   the schema metadata block.
+  | IIntrinsicOpenIStream Int IExpr
+      -- ^ @open :: <IO> (IStream a): schemaId of the list-of-element
+      --   `[a]` and the path expression. The declared schema lets the
+      --   runtime open the stdin sentinel (routing to the nexus stdin
+      --   channel and guarding the incoming stream schema); for a real
+      --   file the schema is still read from disk.
   | IIntrinsicWrite Int IExpr IExpr IExpr
       -- ^ @write: schemaId of the [a] value type, level, value, handle.
   | IIntrinsicAppend Int IExpr
@@ -173,6 +183,13 @@ data IExpr
   | IIntrinsicFlush IExpr
       -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
       --   to be emitted as a sub-packet. Single-argument: handle expr.
+  | IIntrinsicTell
+      -- ^ @tell :: <IO> U64: nullary. Number of elements written to the
+      --   process's @stdout OStream so far (its element_count).
+  | IIntrinsicTmpfile
+      -- ^ @tmpfile :: <IO> Str: nullary. Create a fresh empty file in the
+      --   morloc tmpdir, register it for removal at end-of-call, and return
+      --   its path. Used by the whole-form with:/render: gather.
   | IIntrinsicStdin Int
       -- ^ @stdin :: <IO> IStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStdout Int
@@ -768,33 +785,35 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
       unwrapHead (VarF (FV v _)) = Just v
       unwrapHead _ = Nothing
   let headVar = unwrapHead (typeFof origExpr)
+      rawPath = IRawExpr (render (poolExpr pathDocs))
+      -- Typed open (OStream/IStream): thread the ascribed `[a]` schema through
+      -- lcRegisterSchema into the given IExpr constructor. OStream needs it to
+      -- write the stream header; IStream to open the stdin sentinel and guard
+      -- the incoming stream.
+      openTyped mkExpr what = do
+        schemaText <- case maySchema of
+          Just s  -> return s
+          Nothing -> error ("@open :: " ++ what ++ " a -- schema not synthesized (Serialize.hs bug)")
+        sid <- lcRegisterSchema cfg schemaText
+        return pathDocs { poolExpr = lcPrintExpr cfg (mkExpr sid rawPath) }
   case headVar of
-    Just v | v == BT.ostreamVar -> do
-      schemaText <- case maySchema of
-        Just s  -> return s
-        Nothing -> error "@open :: OStream a -- schema not synthesized (Serialize.hs bug)"
-      sid <- lcRegisterSchema cfg schemaText
-      return $ pathDocs
-        { poolExpr = lcPrintExpr cfg
-            (IIntrinsicOpenOStream sid (IRawExpr (render (poolExpr pathDocs))))
-        }
-    Just v | v == BT.ifileVar || v == BT.istreamVar -> do
-      let kind | v == BT.ifileVar   = BT.mlcKindIFile
-               | v == BT.istreamVar = BT.mlcKindIStream
-               | otherwise          = BT.mlcKindIFile  -- unreachable
-      return $ pathDocs
-        { poolExpr = lcPrintExpr cfg
-            (IIntrinsicOpen kind (IRawExpr (render (poolExpr pathDocs))))
-        }
+    Just v | v == BT.ostreamVar -> openTyped IIntrinsicOpenOStream "OStream"
+    Just v | v == BT.istreamVar -> openTyped IIntrinsicOpenIStream "IStream"
+    Just v | v == BT.ifileVar ->
+      -- IFile reads its schema off disk (no ascription schema needed); an
+      -- IFile open of the stdin sentinel is a catchable runtime error.
+      return pathDocs { poolExpr = lcPrintExpr cfg (IIntrinsicOpen BT.mlcKindIFile rawPath) }
     Just (TV t) ->
       error $ "@open: result type must be IFile/IStream/OStream, got " <> T.unpack t
     Nothing ->
       error "@open: unsupported handle type"
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose _ [handleDocs]) =
-  return $ handleDocs
-    { poolExpr = lcPrintExpr cfg
-        (IIntrinsicClose (IRawExpr (render (poolExpr handleDocs))))
-    }
+-- @close: a Str-path arg (marked by Serialize.hs) unlinks a registered temp
+-- file; a handle arg closes the stream/file handle.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
+  let raw = IRawExpr (render (poolExpr handleDocs))
+      node | maySchema == Just BT.closeTmpUnlinkMarker = IIntrinsicUnlinkTemp raw
+           | otherwise                                 = IIntrinsicClose raw
+  in return $ handleDocs { poolExpr = lcPrintExpr cfg node }
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg
@@ -869,6 +888,12 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
     }
+-- @tell: nullary; read the @stdout stream's element_count.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTell _ []) =
+  return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTell }
+-- @tmpfile: nullary; create + register a temp file, return its path.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
+  return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
   return $ msgDocs
     { poolExpr = lcPrintExpr cfg

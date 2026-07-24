@@ -10,6 +10,7 @@ import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
+import RefutablePatternTests (refutablePatternTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import UnitTypeTests
@@ -52,6 +53,7 @@ main = do
       , natLabelTests
       , natKindPromotionTests
       , natDimTests
+      , gradualDesugarTests
       , typedefKindVarTests
       , letBindingTests
       , irrefutablePatternTests
@@ -66,6 +68,7 @@ main = do
       , sizeParseTests
       , patternChainTests
       , irrefutablePatternLexerTests
+      , refutablePatternTests
       , effectBoundaryTests
       , schemaHintTests
 
@@ -79,6 +82,20 @@ main = do
       -- , golden "specialization-1-py - numpy" "specialization-1-py"
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
+
+      , golden "lambda-reindex" "lambda-reindex"
+      , golden "collect-formatters" "collect-formatters"
+      , golden "detect-imported-handler" "detect-imported-handler"
+      , golden "collect-cross-module" "collect-cross-module"
+      , golden "vector-u8-cpp" "vector-u8-cpp"
+      , golden "close-nontemp-error" "close-nontemp-error"
+      , golden "whole-render-cpp" "whole-render-cpp"
+      , golden "stdin-input" "stdin-input"
+      , golden "docstring-alias-import" "docstring-alias-import"
+      , golden "stdout-stream-format" "stdout-stream-format"
+
+      , golden "vector-gradual-desugar-py" "vector-gradual-desugar-py"
+      , golden "vector-gradual-desugar-c" "vector-gradual-desugar-c"
 
       , golden "intrinsic-catch-chained-fallible-py" "intrinsic-catch-chained-fallible-py"
       , golden "intrinsic-io-catch" "intrinsic-io-catch"
@@ -120,6 +137,8 @@ main = do
       , golden "nexus-file-footerless" "nexus-file-footerless"
       , golden "pattern-corpus" "pattern-corpus"
       , golden "irrefutable-patterns" "irrefutable-patterns"
+      , golden "refutable-patterns" "refutable-patterns"
+      , golden "refutable-guards" "refutable-guards"
       , golden "intrmap-tuple-broadcast" "intrmap-tuple-broadcast"
       , golden "ifile-data-patterns" "ifile-data-patterns"
       , golden "ostream-write-roundtrip" "ostream-write-roundtrip"
