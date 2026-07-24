@@ -2435,6 +2435,16 @@ checkListNatDims g _ _ = return g
 -- Returns a list of coercions (inside-out) and the resulting gamma.
 -- Recursion terminates when the target is not OptionalU.
 tryCoerce :: Scope -> TypeU -> TypeU -> Gamma -> Maybe ([Coercion], Gamma)
+-- Widen through matching effect wrappers: @<E> T@ coerces to @<E> ?T@ by
+-- widening the inner value type. Mirrors subtype's effect handling
+-- (Morloc.Typecheck.Internal, the EffectU <: EffectU rule). This is what
+-- lets a do-block or @catch result (always @<E> T@) satisfy a declared
+-- @<E> ?T@ return. The rows must already agree after substitution -- they
+-- do for a synthesized result checked against a concrete declared type;
+-- open-row tails simply decline (no widening, unchanged behaviour). The
+-- inner OptionalU is placed under the EffectU by 'applyCoercion'.
+tryCoerce scope (EffectU e1 i1) (EffectU e2 i2) g
+  | applyEff g e1 == applyEff g e2 = tryCoerce scope i1 i2 g
 tryCoerce scope a (OptionalU b) g =
   case subtype scope a b g of
     Right g' -> Just ([CoerceToOptional], g')

@@ -798,6 +798,9 @@ instance Typelike Type where
   normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
   normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
+  -- An optional never wraps an effect: <E> ?T is the canonical form, so
+  -- push an OptionalT under a directly-nested EffectT.
+  normalizeType (OptionalT (EffectT effs t)) = mkEffectT effs (OptionalT (normalizeType t))
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
   normalizeType (NatAddT a b) = NatAddT (normalizeType a) (normalizeType b)
   normalizeType (NatMulT a b) = NatMulT (normalizeType a) (normalizeType b)
@@ -986,6 +989,9 @@ instance Typelike TypeU where
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v (map normalizeType -> ps, pc) (map (second normalizeType) -> rs, rc)) = ExistU v (ps, pc) (rs, rc)
   normalizeType (EffectU effs t) = mkEffectU effs (normalizeType t)
+  -- An optional never wraps an effect: <E> ?T is the canonical form, so
+  -- push an OptionalU under a directly-nested EffectU.
+  normalizeType (OptionalU (EffectU effs t)) = mkEffectU effs (OptionalU (normalizeType t))
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t@(NatVarU _) = t
   -- Unified carriers: recurse into payload so nested forms are normalized.

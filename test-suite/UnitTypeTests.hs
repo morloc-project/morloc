@@ -7477,6 +7477,56 @@ bidirectionalAppCheckTests =
         foo :: [a] -> ?a
         foo xs = f xs
         |]
+      , -- Widening under an effect wrapper: a do-block always synthesizes
+        -- <E> T, so a bare-value final checked against a declared <E> ?T
+        -- return must coerce the inner T to ?T. tryCoerce now traverses the
+        -- matching EffectU wrapper; without that, <Err> Int <: <Err> ?Int
+        -- fell through.
+        expectPass
+          "do-block bare final coerces to optional under effect"
+          [r|
+        module main (foo)
+        escapable effect Err
+        source Py ("act")
+        act :: Int -> <Err> Int
+        foo :: Int -> <Err> ?Int
+        foo x = do
+          y <- act x
+          y
+        |]
+      , -- The exact shape from mosm's parseComposition: a `?:` whose Null
+        -- branch is optional and whose other branch is an effectful do-block
+        -- yielding a bare value. checkE pushes the <Err> ?Int expectation
+        -- into both branches; the do-block branch coerces via the effect
+        -- traversal.
+        expectPass
+          "null-guarded effectful do-block branch coerces to optional"
+          [r|
+        module main (foo)
+        escapable effect Err
+        source Py ("act", "isZero")
+        act :: Int -> <Err> Int
+        isZero :: Int -> Bool
+        foo :: Int -> <Err> ?Int
+        foo x
+          ? isZero x = Null
+          : do y <- act x
+               y
+        |]
+      , -- Guard against over-firing: the effect traversal must still reject
+        -- a wrong inner type. <Err> Int cannot widen to <Err> ?Str.
+        exprTestBad
+          "effectful do-block final at wrong optional inner type rejected"
+          [r|
+        module main (foo)
+        escapable effect Err
+        source Py ("act")
+        act :: Int -> <Err> Int
+        foo :: Int -> <Err> ?Str
+        foo x = do
+          y <- act x
+          y
+        |]
       ]
 
 -- | Build a morloc source program with a depth-N recursive literal

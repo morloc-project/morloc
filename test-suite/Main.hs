@@ -625,6 +625,9 @@ main = do
       , golden "optional-coerce-interop" "optional-coerce-interop"
       , golden "optional-coerce-return-py" "optional-coerce-return-py"
       , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
+      , -- optional widening under an effect wrapper (<Err> ?Int): do-block
+        -- final coerces to optional, placed under the effect
+        golden "optional-coerce-effect-py" "optional-coerce-effect-py"
       , -- eval-sugar ('!' prefix) end-to-end: '!' form must produce the
         -- same output as the equivalent explicit do-block form.
         golden "eval-sugar-py" "eval-sugar-py"

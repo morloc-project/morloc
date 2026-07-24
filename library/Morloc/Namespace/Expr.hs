@@ -679,11 +679,16 @@ data Coercion
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.
+-- CoerceToOptional widens the RESULT type; under an effect wrapper the
+-- result is the inner type, so the OptionalU is placed under the EffectU
+-- (yielding @<E> ?T@, never @?(<E> T)@).
 applyCoercion :: Coercion -> TypeU -> TypeU
+applyCoercion CoerceToOptional (EffectU e t) = EffectU e (OptionalU t)
 applyCoercion CoerceToOptional t = OptionalU t
 
 -- | Invert a coercion on a resolved Type.
 unapplyCoercion :: Coercion -> Type -> Type
+unapplyCoercion CoerceToOptional (EffectT e (OptionalT t)) = EffectT e t
 unapplyCoercion CoerceToOptional (OptionalT t) = t
 unapplyCoercion CoerceToOptional t = t  -- defensive fallback
 
