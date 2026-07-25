@@ -1,0 +1,28 @@
+-- A closure produced by an effect crosses the boundary and is applied TWICE by
+-- the foreign higher-order function. The effect (tick) fires exactly once, at
+-- closure creation in the home pool; only `mul` re-runs per application. This
+-- exercises reuse of a crossed closure and effect-at-creation semantics.
+
+module main (crossApply)
+
+import root-py
+import root-cpp
+
+source Py from "producer.py" ("tick", "mul")
+source Cpp from "consumer.hpp" ("applyTwice")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+applyTwice :: (Int -> Int) -> Int -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+crossApply :: Int -> <IO> Int
+crossApply base = do
+  f <- mkMul base
+  applyTwice f 10 20

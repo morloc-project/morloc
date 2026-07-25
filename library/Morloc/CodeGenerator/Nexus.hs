@@ -1660,6 +1660,7 @@ expectedJsonShape = go
     go (SerialIFile _)               = "IFile path (Str)"
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
+    go (SerialClosure _ _)           = "function value"
     go (SerialReal _)                = "Real"
     go (SerialFloat32 _)             = "F32"
     go (SerialFloat64 _)             = "F64"

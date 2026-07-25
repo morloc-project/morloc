@@ -113,7 +113,8 @@ translateBuiltin lang desc srcs es = do
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  let program = buildProgram labels templates allSources mDocs es schemas
+  closureTable <- computeClosureSchemas lang es
+  let program = buildProgram labels templates allSources mDocs es schemas closureTable
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -164,7 +165,8 @@ translateExternal cmd lang desc srcs es = do
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  let program = buildProgram labels templates includeDocs mDocs es schemas
+  closureTable <- computeClosureSchemas lang es
+  let program = buildProgram labels templates includeDocs mDocs es schemas closureTable
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -445,6 +447,21 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
+        , lcReifyClosure = \v ->
+            return $ "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
+        , lcReflectClosure = \pkt s ->
+            case s of
+              SerialClosure ins out ->
+                let tupleSchema = render (Serial.serialAstToMsgpackSchema s)
+                    argSchemas = map (dquotes . pretty . render . Serial.serialAstToMsgpackSchema) ins
+                    resSchema = render (Serial.serialAstToMsgpackSchema out)
+                    argListDoc = case ldListStyle desc of
+                      BracketList -> list argSchemas
+                      _ -> pretty (ldGenericListFn desc) <> tupled argSchemas
+                 in return $
+                      "mlc_reflect"
+                        <> tupled [pkt, dquotes (pretty tupleSchema), argListDoc, dquotes (pretty resSchema)]
+              _ -> error "lcReflectClosure: expected SerialClosure"
         , lcMakeFunction = \m mname args _ priorLines body headForm ->
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""
@@ -491,7 +508,8 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                   EndKeywordBlock ->
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
-        , lcMakeLambda = \mname contextArgs boundArgs ->
+        , lcClosureSig = \_ -> return ""
+        , lcMakeLambda = \_sig mname contextArgs boundArgs ->
             let tmpl = ldPartialTemplate desc
                 fnText = render mname
                 allArgsList = contextArgs <> boundArgs
@@ -499,6 +517,14 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
                 allArgs = render (hsep (punctuate "," allArgsList))
                 boundArgsText = render (hsep (punctuate "," boundArgs))
+                -- manNamer is "m<mid>", so the mid is the name minus its leading
+                -- "m". {{mid}} and {{captured_list}} let a language that cannot
+                -- introspect its closures (R) tag them with their manifold id and
+                -- captured values at construction, for later reification.
+                midText = T.drop 1 (render mname)
+                capturedList = render $ case ldListStyle desc of
+                  BracketList -> list contextArgs
+                  _ -> pretty (ldGenericListFn desc) <> tupled contextArgs
              in pretty $
                   substituteT
                     tmpl
@@ -506,6 +532,8 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     , ("fn_with_context", fnWithCtx)
                     , ("all_args", allArgs)
                     , ("bound_args", boundArgsText)
+                    , ("mid", midText)
+                    , ("captured_list", capturedList)
                     ]
         , lcRegisterSchema = registerSchemaIndex
         }
@@ -1177,10 +1205,55 @@ printProgram desc prog =
     sections
   where
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit])
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
       ]
+
+    -- Per-closure captured-argument schemas, keyed by manifold id. Consulted by
+    -- the pool's reify helper to serialize each captured value when a closure
+    -- crosses a language boundary. Emitted only for languages that support
+    -- producing crossing closures (a non-empty 'ldClosureRegisterEntry').
+    closureTableInit
+      | T.null (ldClosureRegisterEntry desc) = mempty
+      | Map.null (ipClosureTable prog) = mempty
+      | otherwise =
+          vsep $
+            pretty (ldClosureTableHeader desc)
+              : [ pretty $
+                    substituteT
+                      (ldClosureTableEntry desc)
+                      [ ("mid", T.pack (show mid))
+                      , ("caps", render (closureLangList [dquotes (pretty c) | c <- caps]))
+                      ]
+                | (mid, (caps, _, _)) <- Map.toAscList (ipClosureTable prog)
+                ]
+
+    -- Render a list literal of schema strings in the language's own style
+    -- (Python brackets vs the generic list function), for the closure table and
+    -- registration entries.
+    closureLangList xs = case ldListStyle desc of
+      BracketList -> list xs
+      _ -> pretty (ldGenericListFn desc) <> tupled xs
+
+    -- Force-register each closure manifold in the local dispatch table so a
+    -- boundary-crossing closure can be applied by a foreign pool via
+    -- foreign_call on its manifold id. Emitted after the dispatch table is
+    -- defined (in 'templateDispatch') so the entries are available.
+    closureRegistrations
+      | T.null (ldClosureRegisterEntry desc) = mempty
+      | Map.null (ipClosureTable prog) = mempty
+      | otherwise =
+          vsep
+            [ pretty $
+                substituteT
+                  (ldClosureRegisterEntry desc)
+                  [ ("mid", T.pack (show mid))
+                  , ("args", render (closureLangList [dquotes (pretty s) | s <- caps <> bnds]))
+                  , ("res", render (dquotes (pretty res)))
+                  ]
+            | (mid, (caps, bnds, res)) <- Map.toAscList (ipClosureTable prog)
+            ]
 
     -- Rebind each labeled manifold function name to a logging shim. Placed
     -- immediately after the manifold definitions so any later reference
@@ -1230,7 +1303,7 @@ printProgram desc prog =
                 _ -> pretty (ldGenericListFn desc) <> tupled entries
            in "mlc_schema_table = " <> listExpr
 
-    templateDispatch = vsep [localD, remoteD]
+    templateDispatch = vsep [localD, remoteD, closureRegistrations]
       where
         renderEntry :: Text -> DispatchEntry -> MDoc
         renderEntry entryTmpl (DispatchEntry i _ _) =

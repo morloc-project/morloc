@@ -156,6 +156,45 @@ morloc_foreign_call <- function(...) {
   }
 }
 
+# Defunctionalized-closure support. An R closure produced by this pool carries
+# its manifold id and captured values as attributes (attached at construction);
+# when it crosses a language boundary it travels as the wire tuple
+# (home_language, manifold_id, captured_packets) and is applied on the far side
+# by calling back to this pool.
+
+mlc_reify <- function(f, home_lang) {
+  mid <- attr(f, "morloc_mid")
+  captured <- attr(f, "morloc_captured")
+  if (is.null(captured)) captured <- list()
+  cap_schemas <- mlc_closure_table[[as.character(mid)]]
+  if (is.null(cap_schemas)) cap_schemas <- list()
+  packets <- lapply(seq_along(captured), function(i) morloc_put_value(captured[[i]], cap_schemas[[i]]))
+  list(home_lang, as.integer(mid), packets)
+}
+
+mlc_reflect <- function(pkt, tuple_schema, arg_schemas, res_schema) {
+  tup <- morloc_get_value(pkt, tuple_schema)
+  home_lang <- tup[[1]]
+  mid <- tup[[2]]
+  captured <- tup[[3]]
+  sock <- paste0(global_state$tmpdir, "/pipe-", home_lang)
+  function(...) {
+    args <- list(...)
+    arg_packets <- lapply(seq_along(args), function(i) morloc_put_value(args[[i]], arg_schemas[[i]]))
+    packets <- c(captured, arg_packets)
+    morloc_get_value(morloc_foreign_call(sock, as.integer(mid), packets), res_schema)
+  }
+}
+
+mlc_make_closure_dispatch <- function(mid, arg_schemas, res_schema) {
+  fn <- get(paste0("m", mid))
+  function(...) {
+    sargs <- list(...)
+    args <- lapply(seq_along(sargs), function(i) morloc_get_value(sargs[[i]], arg_schemas[[i]]))
+    morloc_put_value(do.call(fn, args), res_schema)
+  }
+}
+
 # AUTO include manifolds start
 # <<<BREAK>>>
 # AUTO include manifolds end

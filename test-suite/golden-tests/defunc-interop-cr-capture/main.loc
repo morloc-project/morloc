@@ -1,0 +1,30 @@
+-- A closure produced in C++ captures a RUNTIME (non-literal) base and
+-- crosses to a higher-order function sourced in R, which invokes it back in
+-- its home language (C++). Because `base` is a runtime CLI argument it is NOT
+-- constant-folded, so the C++ producer must serialize a genuinely captured
+-- value into the closure wire form (the base defunc-interop-cr folds its
+-- capture to empty, never exercising this).
+
+module main (crossApply)
+
+import root-cpp
+import root-r
+
+source Cpp from "producer.hpp" ("tick", "mul")
+source R from "consumer.R" ("applyIt")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+crossApply :: Int -> <IO> Int
+crossApply base = do
+  f <- mkMul base
+  applyIt f 10

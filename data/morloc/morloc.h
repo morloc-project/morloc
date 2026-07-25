@@ -167,7 +167,12 @@ typedef enum {
                           // is `^<klen><name>`.
     MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
     MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
-    MORLOC_ISTREAM  = 23  // Sequential stream-file reader handle.
+    MORLOC_ISTREAM  = 23, // Sequential stream-file reader handle.
+    MORLOC_CLOSURE  = 24  // Function value: home language, manifold id, and
+                          // captured argument packets. Wire form is
+                          // `[u32 home][u32 mid][u32 n][ (u32 len, bytes) x n ]`;
+                          // the captured packets are opaque (serialized by the
+                          // home language, deserialized by its dispatch table).
     // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
     // form. The schema code selects the morloc-level type; the tag byte
     // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
@@ -196,6 +201,7 @@ typedef enum {
 #define SCHEMA_IFILE    'F'
 #define SCHEMA_OSTREAM  'O'
 #define SCHEMA_ISTREAM  'I'
+#define SCHEMA_CLOSURE  'C'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //

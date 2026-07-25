@@ -1,0 +1,42 @@
+-- Stress test for function-value sharing. A chain of let-bound
+-- lambdas where each references the previous binding TWICE. Under
+-- inline-by-duplication this expands to 2^N copies and blows up the
+-- compiler; with shared function values it stays linear. Each level
+-- doubles (mod 100), so result(x) = (2^N * x) mod 100.
+
+module main (result)
+
+import root-py
+
+source Py from "helpers.py" ("capped")
+
+capped :: Int -> Int -> Int
+
+result :: Int -> Int
+result x =
+  let f0 = (\y -> capped y y) in
+  let f1 = (\y -> capped (f0 y) (f0 y)) in
+  let f2 = (\y -> capped (f1 y) (f1 y)) in
+  let f3 = (\y -> capped (f2 y) (f2 y)) in
+  let f4 = (\y -> capped (f3 y) (f3 y)) in
+  let f5 = (\y -> capped (f4 y) (f4 y)) in
+  let f6 = (\y -> capped (f5 y) (f5 y)) in
+  let f7 = (\y -> capped (f6 y) (f6 y)) in
+  let f8 = (\y -> capped (f7 y) (f7 y)) in
+  let f9 = (\y -> capped (f8 y) (f8 y)) in
+  let f10 = (\y -> capped (f9 y) (f9 y)) in
+  let f11 = (\y -> capped (f10 y) (f10 y)) in
+  let f12 = (\y -> capped (f11 y) (f11 y)) in
+  let f13 = (\y -> capped (f12 y) (f12 y)) in
+  let f14 = (\y -> capped (f13 y) (f13 y)) in
+  let f15 = (\y -> capped (f14 y) (f14 y)) in
+  let f16 = (\y -> capped (f15 y) (f15 y)) in
+  let f17 = (\y -> capped (f16 y) (f16 y)) in
+  let f18 = (\y -> capped (f17 y) (f17 y)) in
+  let f19 = (\y -> capped (f18 y) (f18 y)) in
+  let f20 = (\y -> capped (f19 y) (f19 y)) in
+  let f21 = (\y -> capped (f20 y) (f20 y)) in
+  let f22 = (\y -> capped (f21 y) (f21 y)) in
+  let f23 = (\y -> capped (f22 y) (f22 y)) in
+  let f24 = (\y -> capped (f23 y) (f23 y)) in
+  f24 x

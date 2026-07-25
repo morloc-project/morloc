@@ -1,0 +1,55 @@
+-- Passing a first-class closure VALUE (not a named source function) to a
+-- higher-order function sourced in the same language, with RUNTIME captures
+-- (CLI arguments) so the environment genuinely crosses into the HOF. Covers a
+-- bare lambda, an effect-bound closure over one and over two runtime values, an
+-- under-applied multi-argument closure, and a reused closure.
+
+module main (applyLambda, applyRuntimeCap, applyMultiVar, applyUnder, applyReuse)
+
+import root-r
+
+source R from "helpers.R" ("tick", "mul", "add3", "applyIt", "applyTwice")
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+add3 :: Int -> Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+applyTwice :: (Int -> Int) -> Int -> Int
+
+mkMulE :: Int -> <IO> (Int -> Int)
+mkMulE base = do
+  _ <- tick
+  (\y -> mul base y)
+
+mkAffineE :: Int -> Int -> <IO> (Int -> Int)
+mkAffineE a b = do
+  _ <- tick
+  (\y -> add3 a (mul b y) 0)
+
+mkAdderE :: Int -> <IO> (Int -> Int -> Int)
+mkAdderE base = do
+  _ <- tick
+  (\a b -> add3 base a b)
+
+applyLambda :: Int -> Int
+applyLambda x = applyIt (\y -> mul 3 y) x
+
+applyRuntimeCap :: Int -> <IO> Int
+applyRuntimeCap base = do
+  f <- mkMulE base
+  applyIt f 10
+
+applyMultiVar :: Int -> Int -> <IO> Int
+applyMultiVar a b = do
+  f <- mkAffineE a b
+  applyIt f 10
+
+applyUnder :: Int -> <IO> Int
+applyUnder base = do
+  f <- mkAdderE base
+  applyIt (f 10) 20
+
+applyReuse :: Int -> <IO> Int
+applyReuse base = do
+  f <- mkMulE base
+  applyTwice f 10

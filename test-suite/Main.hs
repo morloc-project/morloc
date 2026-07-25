@@ -286,6 +286,53 @@ main = do
       , golden "functional-data-3d-r" "functional-data-3d-r"
       , golden "functional-data-3e" "functional-data-3e"
       , golden "functional-data-3f" "functional-data-3f"
+      , -- a function whose body is an explicit lambda (a returned function
+        -- capturing the outer parameter), used by over-application, binding,
+        -- a higher-order function, and deeper currying
+        golden "lambda-return-py" "lambda-return-py"
+      , -- a deep chain of let-bound lambdas each referencing the previous
+        -- binding twice: inline-by-duplication expands this to 2^N copies and
+        -- exhausts memory, while shared function values keep it linear
+        golden "let-lambda-sharing-py" "let-lambda-sharing-py"
+      , -- a function value produced by an effect (bound with `<-`) and then
+        -- applied: intra-language in each backend, and cross-language where the
+        -- closure crosses a pool boundary carrying its captured environment
+        golden "defunc-py" "defunc-py"
+      , golden "defunc-cpp" "defunc-cpp"
+      , golden "defunc-r" "defunc-r"
+      , -- a closure VALUE (bare lambda / effect-bound over runtime captures /
+        -- multi-variable / under-applied / reused) passed to a same-language
+        -- higher-order function, then applied by it
+        golden "defunc-hof-py" "defunc-hof-py"
+      , golden "defunc-hof-cpp" "defunc-hof-cpp"
+      , golden "defunc-hof-r" "defunc-hof-r"
+      , -- RED: a function-returning-function passed to a HOF with a curried
+        -- function-type parameter; rejected by the arity checker (should work)
+        golden "defunc-hof-return" "defunc-hof-return"
+      , -- a closure produced in one language, passed across a pool boundary,
+        -- and applied by a higher-order function in another (Python producer)
+        golden "defunc-interop-pc" "defunc-interop-pc"
+      , -- C++ producer (fat-closure reify) and R producer (construction-time
+        -- attribute reify); cr-capture crosses a genuinely captured runtime
+        -- value out of the C++ producer
+        golden "defunc-interop-cr" "defunc-interop-cr"
+      , golden "defunc-interop-cr-capture" "defunc-interop-cr-capture"
+      , golden "defunc-interop-cr-vectorcap" "defunc-interop-cr-vectorcap"
+      , golden "defunc-interop-rp" "defunc-interop-rp"
+      , golden "defunc-interop-rp-vectorcap" "defunc-interop-rp-vectorcap"
+      , -- cross-language closures whose captures are NON-LITERAL runtime values:
+        -- a captured runtime base, a runtime-chosen closure, reuse, and a
+        -- Vector capture (Python producer)
+        golden "defunc-interop-capture" "defunc-interop-capture"
+      , golden "defunc-interop-dynamic" "defunc-interop-dynamic"
+      , golden "defunc-interop-reuse" "defunc-interop-reuse"
+      , golden "defunc-interop-vectorcap" "defunc-interop-vectorcap"
+      , -- multi-argument closure, two-variable capture, and a list of closures
+        -- all crossing a boundary (Python producer, C++ higher-order functions)
+        golden "defunc-interop-multiarg" "defunc-interop-multiarg"
+      , -- a crossed closure partially applied at the morloc level before a
+        -- foreign HOF supplies the rest: under-application saturates by currying
+        golden "defunc-interop-underapply" "defunc-interop-underapply"
       , golden "functional-data-4" "functional-data-4"
       , golden "functional-data-5" "functional-data-5"
       , golden "pattern-getters" "pattern-getters"

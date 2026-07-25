@@ -112,18 +112,34 @@ import Morloc.Frontend.Namespace (newIndex)
 -- are resolved.
 -- -}
 applyLambdas ::
+  -- | @alwaysInline@: on the nexus (gAST) path this is True. The pure nexus
+  -- evaluator has no pool to hold a native closure and cannot serialize a
+  -- function value, so every let-bound lambda MUST be inlined there,
+  -- regardless of how many times it is used. On the pool (rAST) path it is
+  -- False, so a multiply-referenced lambda is kept shared (see the LetS-of-LamS
+  -- clause) to avoid exponential inlining.
+  Bool ->
   AnnoS (Indexed Type) One a ->
   MorlocMonad (AnnoS (Indexed Type) One a)
 -- Beta-reduce empty lambdas and empty applications. The discarded head
 -- AnnoS may carry a user label (e.g. a labeled pointfree reference like
 -- @big:sum@ whose body was eta-expanded by typecheck); transfer the
 -- label to the surviving outer index so codegen still sees it.
-applyLambdas (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
+applyLambdas ai (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
   void (propagateManifoldLabel g1Idx lamIdx)
-  applyLambdas $ AnnoS g1 c2 e
-applyLambdas (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
+  applyLambdas ai $ AnnoS g1 c2 e
+-- Over-applied curried lambda. Beta-reducing `(\base -> \y -> ..) 3 x`
+-- consumes `base`, leaving `AppS (LamS [] (\y -> ..)) [x]` -- an empty
+-- lambda layer still standing between the remaining args and the function
+-- it returns. Unwrap it so the inner lambda meets the leftover args (the
+-- empty-args clause above only fires when no args remain, so without this
+-- the LamS survives to codegen and errors with "unexpected LamS").
+applyLambdas ai (AnnoS g1@(Idx g1Idx _) c1 (AppS (AnnoS (Idx lamIdx _) _ (LamS [] body)) es@(_ : _))) = do
+  void (propagateManifoldLabel g1Idx lamIdx)
+  applyLambdas ai $ AnnoS g1 c1 (AppS body es)
+applyLambdas ai (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
   void (propagateManifoldLabel g1Idx headIdx)
-  applyLambdas $ AnnoS g1 c2 e
+  applyLambdas ai $ AnnoS g1 c2 e
 -- Push an application through a let in function position. A let-expression
 -- whose body evaluates to a function (e.g. a top-level binding written as
 -- `f = let v = ... in <function>`) ends up in function position when f is
@@ -136,12 +152,12 @@ applyLambdas (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) =
 -- The new inner AppS keeps the outer application's index and contextual
 -- annotation (g1, c1) since it computes the same value as the original.
 -- The outer let keeps its own annotations.
-applyLambdas (AnnoS g1 c1 (AppS (AnnoS gLet cLet (LetS v e1 body)) es)) =
-  applyLambdas $
+applyLambdas ai (AnnoS g1 c1 (AppS (AnnoS gLet cLet (LetS v e1 body)) es)) =
+  applyLambdas ai $
     AnnoS gLet cLet $
       LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- substitute applied lambdas
-applyLambdas
+applyLambdas ai
   ( AnnoS
       i1
       tb1
@@ -155,7 +171,7 @@ applyLambdas
         )
     ) =
     do e2' <- substituteAnnoS v e1 e2
-       applyLambdas
+       applyLambdas ai
           ( AnnoS
               i1
               tb1
@@ -168,24 +184,70 @@ applyLambdas
                   es
               )
           )
--- Inline let-bound lambdas: the nexus evaluator cannot serialize function
--- types, so substitute the lambda for all references and re-process to
--- beta-reduce.
-applyLambdas (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2)) = do
-  e1' <- applyLambdas e1
-  e2' <- substituteAnnoS v e1' e2
-  inner <- applyLambdas e2'
-  let AnnoS _ _ innerExpr = inner
-  return (AnnoS g c innerExpr)
+-- Normalize a computed-function head before applying. The head may reduce to a
+-- 'LetS' or 'LamS' only AFTER its own lambda-evaluation -- e.g. forcing an
+-- effectful do-block, @!{ _ <- eff; \\y -> .. }@ applied, cancels
+-- @EvalS (DoBlockS ..)@ (below) to @let _ = !eff in \\y -> ..@. The structural
+-- recursion at the bottom would process such a head but not re-examine the
+-- application, leaving a 'LetS'/'LamS' in function position that codegen
+-- rejects. Process the head first; if it became a let or lambda, re-dispatch so
+-- push-through / beta-reduction fires. Heads that stay a bound variable, a
+-- source call, or a forced non-do-block ('LetBndS', 'BndS', 'EvalS' of a plain
+-- value) fall through unchanged and are handled at codegen.
+applyLambdas ai (AnnoS g c (AppS headA es)) = do
+  headA' <- applyLambdas ai headA
+  case headA' of
+    AnnoS _ _ (LetS {}) -> applyLambdas ai (AnnoS g c (AppS headA' es))
+    AnnoS _ _ (LamS {}) -> applyLambdas ai (AnnoS g c (AppS headA' es))
+    -- Forcing an effectful generator whose result is a function --
+    -- @!(let v = !eff in \\y -> ..) x@ -- leaves an @EvalS (LetS ..)@ head
+    -- whose body is a lambda. Push the application through the let so the
+    -- lambda meets its arguments (and beta-reduces); the effect stays forced by
+    -- the let's own bound @!eff@. Without this the function-typed let reaches
+    -- the eta path in 'express', which re-applies it and rejects the LetS head.
+    AnnoS _ _ (EvalS (AnnoS gLet cLet (LetS v e1 body))) ->
+      applyLambdas ai $ AnnoS gLet cLet $ LetS v e1 (AnnoS g c (AppS body es))
+    _ -> AnnoS g c . AppS headA' <$> mapM (applyLambdas ai) es
+-- Inline let-bound lambdas. A singly-used lambda is always beta-reduced away
+-- (substitute at its single use and re-process). A multiply-used lambda is kept
+-- shared on the pool path -- duplicating it at every reference compounds
+-- multiplicatively through a chain of such bindings (2^depth copies); each
+-- reference becomes a 'LetBndS' that codegen lowers to a native closure call
+-- ('LocalCallP'). On the nexus path (@ai@) it is always inlined instead, since
+-- the pure evaluator has no native closure to share.
+applyLambdas ai (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2))
+  | ai || countRefs v e2 <= 1 = do
+      e1' <- applyLambdas ai e1
+      e2' <- substituteAnnoS v e1' e2
+      inner <- applyLambdas ai e2'
+      let AnnoS _ _ innerExpr = inner
+      return (AnnoS g c innerExpr)
+  | otherwise = do
+      e1' <- applyLambdas ai e1
+      e2' <- applyLambdas ai e2
+      return (AnnoS g c (LetS v e1' e2'))
 -- Cancel force-suspend: !{e} --> e. Keep the OUTER general type (the
 -- EvalS already strips the effect wrapper) but the INNER concrete
 -- annotation, so the chain's chosen language survives fusion.
-applyLambdas (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
-  e' <- applyLambdas e
+applyLambdas ai (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
+  e' <- applyLambdas ai e
   let AnnoS _ _ inner = e'
   return (AnnoS g cInner inner)
 -- Every other node: recurse structurally.
-applyLambdas (AnnoS g c e) = AnnoS g c <$> mapExprSM applyLambdas e
+applyLambdas ai (AnnoS g c e) = AnnoS g c <$> mapExprSM (applyLambdas ai) e
+
+-- | Count free references to @v@, using the same shadowing rules as
+-- 'substituteAnnoS' -- i.e. the number of sites 'substituteAnnoS' would
+-- replace. Recursion stops at any binder that shadows @v@ (a lambda binding
+-- @v@, or an inner let of @v@), matching the substitution's shadow handling.
+countRefs :: EVar -> AnnoS (Indexed Type) One a -> Int
+countRefs v = go
+  where
+    go (AnnoS _ _ (BndS v'))     | v == v'     = 1
+    go (AnnoS _ _ (LetBndS v'))  | v == v'     = 1
+    go (AnnoS _ _ (LamS vs _))   | v `elem` vs = 0
+    go (AnnoS _ _ (LetS v' _ _)) | v == v'     = 0
+    go (AnnoS _ _ e)                           = getSum (foldExprS (Sum . go) e)
 
 -- | Substitute every free reference to @v@ in the target with the replacement
 -- @r@. Each inserted copy of @r@ is REINDEXED with fresh indices (source

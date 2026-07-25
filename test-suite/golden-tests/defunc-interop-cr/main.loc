@@ -1,0 +1,28 @@
+-- A function value is produced by an effectful computation in one
+-- language and applied by a higher-order function sourced in another.
+-- The closure crosses the language boundary carrying its captured base
+-- and is invoked back in its home language.
+
+module main (crossApply)
+
+import root-cpp
+import root-r
+
+source Cpp from "producer.hpp" ("tick", "mul")
+source R from "consumer.R" ("applyIt")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+crossApply :: <IO> Int
+crossApply = do
+  f <- mkMul 7
+  applyIt f 10

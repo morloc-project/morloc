@@ -53,24 +53,38 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Nothing -> return $ Arg i (L PassthroughS)
       (Just (Right t)) -> do
         t' <- inferType t
-        return $ Arg i (L (typeSof t'))
+        return $ Arg i (L (serialArgType t'))
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at prepareArg"
         t' <- inferTypeUniversal t
-        return $ Arg i (L (typeSof t'))
+        return $ Arg i (L (serialArgType t'))
+      where
+        -- A function-typed top-level argument is a closure that arrived
+        -- serialized (a closure wire tuple), not a manifold signature. Give it
+        -- a plain serial type ('SerialS') so the standard serial->native path
+        -- reflects it into a native callable, rather than 'typeSof''s
+        -- 'FunctionS' (native args, serial return) which would leave the arg
+        -- half-serialized and unreflected.
+        serialArgType tf@(FunF {}) = SerialS tf
+        serialArgType tf = typeSof tf
 
     contextArg ::
       Int ->
       MorlocMonad (Or TypeS TypeF)
     contextArg i = case Map.lookup i typemap of
-      (Just (Right t)) -> do
-        t' <- inferType t
-        return $ LR (typeSof t') t'
+      (Just (Right t)) -> funcAwareOr <$> inferType t
       Nothing -> return $ L PassthroughS
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at contextArg"
-        t' <- inferTypeUniversal t
-        return $ LR (typeSof t') t'
+        funcAwareOr <$> inferTypeUniversal t
+      where
+        -- A function value (a captured closure) has no wire form, so it is
+        -- native-only: advertising a serial side ('LR') would let the caller
+        -- serialize the closure -- 'put_value' of a partial fails at runtime.
+        -- Non-function context args keep both forms.
+        funcAwareOr t' = case t' of
+          FunF {} -> R t'
+          _       -> LR (typeSof t') t'
 
     boundArg :: Int -> MorlocMonad TypeF
     boundArg i = case Map.lookup i typemap of
@@ -84,7 +98,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialExpr
-    serialExpr currentM orig@(MonoManifold m _ kind inner)
+    serialExpr currentM orig@(MonoManifold m form kind inner)
       -- 'Preserved' manifolds carry observability hooks (logging etc.) and
       -- must survive into codegen as real function definitions. Route
       -- through 'nativeExpr' (which preserves the structure as
@@ -104,6 +118,21 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           -- 'ensurePolyReturn'), the inner 'ReturnN' lives inside the
           -- NativeManifold function; surface 'ReturnS' here so the
           -- enclosing manifold emits its own 'return' statement.
+          case inner of
+            MonoReturn _ -> return (ReturnS se)
+            _ -> return se
+      -- A function-valued manifold (a closure: a 'ManifoldPart'/'ManifoldPass'
+      -- with remaining bound parameters) is a first-class VALUE, not a
+      -- computation to inline. Stripping it ('serialExpr m inner') would splice
+      -- its body and drop its parameters -- corrupting a closure that crosses a
+      -- boundary as a serialized RETURN (the mirror of the function-valued
+      -- ARGUMENT path at 'serialArgType'). Route it through 'nativeExpr' +
+      -- 'serializeS' so its 'typeFof' (a function) serializes as a
+      -- 'SerialClosure' (reify), exactly as 'unwrapLetDef' keeps a let-bound
+      -- closure whole.
+      | not (null (manifoldBound form)) = do
+          ne <- nativeExpr m orig
+          se <- serializeS "closure value" m (forceSerializedThunk ne)
           case inner of
             MonoReturn _ -> return (ReturnS se)
             _ -> return se
@@ -690,6 +719,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoIntrinsic _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) es)
     makeTypemap parentIdx (MonoIf cond thenE elseE) =
       Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
+    -- A locally-defined function value (a closure) applied via 'LocalCallP j':
+    -- record j's FUNCTION type from the head annotation. Without this the
+    -- closure index has no typemap entry, so the arg machinery treats it as a
+    -- serializable scalar and tries to serialize the closure (functions have no
+    -- wire form). The head's 'Idx' carries the function type 'FunT ins out'.
+    makeTypemap _ (MonoApp (MonoExe hg@(Idx idx _) (LocalCallP j)) es) =
+      Map.unionsWith mergeTypes (Map.singleton j (Right hg) : map (makeTypemap idx) es)
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap parentIdx (MonoCacheBody _ _ _ e) = makeTypemap parentIdx e
@@ -728,10 +764,20 @@ Manifolds tagged 'Preserved' carry observability hooks and survive the
 strip -- the kind was set once at 'PolyManifold' construction in
 'Express.hs' and threaded through 'Segment.hs'. The 'm /= currentM'
 guard is the same self-wrap collision guard used in 'serialExpr'.
+
+A function-valued manifold ('ManifoldPart'/'ManifoldPass' -- non-empty
+bound args) is a first-class closure and also survives the strip: it must
+reach 'lowerManifold' so the manifold becomes a standalone def and the
+let-binding is materialized as its native partial (functools.partial /
+std::bind / R closure). Stripping it would splice the lambda body inline
+with its parameters unbound. 'ManifoldFull' (empty bound -- a saturated
+call producing a value) keeps the strip.
 -}
 unwrapLetDef :: Int -> MonoExpr -> (Int, MonoExpr)
 unwrapLetDef currentM orig@(MonoManifold m _ kind _)
   | kind == Preserved && m /= currentM = (m, orig)
+unwrapLetDef currentM orig@(MonoManifold m form _ _)
+  | not (null (manifoldBound form)) && m /= currentM = (m, orig)
 unwrapLetDef _ (MonoManifold m _ _ (MonoReturn e)) = (m, e)
 unwrapLetDef _ (MonoManifold m _ _ e) = (m, e)
 unwrapLetDef m (MonoReturn e) = (m, e)
@@ -881,6 +927,11 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
 
     specialize :: Map.Map Int Request -> Int -> Or TypeS TypeF -> Or TypeS TypeF
     specialize req i r = case (Map.lookup i req, r) of
+      -- A native-only arg (no serial side) -- e.g. a captured function value,
+      -- which has no wire form -- must stay native regardless of the request.
+      -- Downgrading it to Passthrough would make a later pass try to serialize
+      -- the closure.
+      (_, R t) -> R t
       (Nothing, _) -> L PassthroughS
       (Just SerialContent, LR t _) -> L t
       (Just NativeContent, LR _ t) -> R t

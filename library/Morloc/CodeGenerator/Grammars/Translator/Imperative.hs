@@ -280,6 +280,11 @@ data IProgram = IProgram
   , ipSchemaTable :: [Text]  -- ordered list of schema strings; index = schema ID
   , ipLogTemplates :: Map.Map Int RenderedTemplate
     -- ^ Per-labeled-midx pre-rendered log templates. See 'LogTemplate'.
+  , ipClosureTable :: Map.Map Int ([Text], [Text], Text)
+    -- ^ Per-closure-mid wire schemas: (captured-arg schemas, bound-arg schemas,
+    -- result schema). Drives the home-pool serial dispatch wrapper and the reify
+    -- path for defunctionalized closures that cross a language boundary. Empty
+    -- for pools that produce no crossing closures.
   }
   deriving (Generic)
 
@@ -298,8 +303,9 @@ buildProgram ::
   [MDoc] ->
   [SerialManifold] ->
   [Text] ->
+  Map.Map Int ([Text], [Text], Text) ->
   IProgram
-buildProgram labels templates sources manifolds es schemas =
+buildProgram labels templates sources manifolds es schemas closureTable =
   let definedIds = collectManifoldIds es
       foreignCalleeIds =
         Set.fromList [i | SerialManifold i _ _ f _ <- es, isForeignCalleeForm (Just f)]
@@ -314,6 +320,7 @@ buildProgram labels templates sources manifolds es schemas =
         , ipRemoteDispatch = extractRemoteDispatch labels' es
         , ipSchemaTable = schemas
         , ipLogTemplates = templates'
+        , ipClosureTable = closureTable
         }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
@@ -325,11 +332,12 @@ buildProgramM ::
   [SerialManifold] ->
   (SerialManifold -> m MDoc) ->
   m [Text] ->
+  Map.Map Int ([Text], [Text], Text) ->
   m IProgram
-buildProgramM labels templates sources es translateSeg getSchemas = do
+buildProgramM labels templates sources es translateSeg getSchemas closureTable = do
   manifolds <- mapM translateSeg es
   schemas <- getSchemas
-  return $ buildProgram labels templates sources manifolds es schemas
+  return $ buildProgram labels templates sources manifolds es schemas closureTable
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
@@ -410,6 +418,19 @@ data LowerConfig m = LowerConfig
   -- for a hoisted def-thunk.
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
+  , lcReifyClosure :: MDoc -> m MDoc
+  -- ^ Reify a defunctionalized closure value into its wire form: given the
+  -- native closure expression, produce an expression yielding the tuple
+  -- @(home_language, manifold_id, captured_packets)@ that the generic tuple
+  -- codec then serializes. Called at the serialize boundary for a
+  -- 'SerialClosure'. See 'computeClosureSchemas'.
+  , lcReflectClosure :: MDoc -> SerialAST -> m MDoc
+  -- ^ Reflect an incoming closure wire form into a native callable: given the
+  -- serialized packet expression and the 'SerialClosure' type, produce an
+  -- expression yielding a callable that, on application, serializes its
+  -- arguments, calls back to the home pool via @foreign_call@ on the closure's
+  -- manifold id, and deserializes the result. Called at the deserialize
+  -- boundary for a 'SerialClosure'.
   , -- manifold lowering fields
     lcMakeFunction ::
       Int ->
@@ -424,8 +445,15 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
-  -- ^ name, contextArgs, boundArgs - partial application expression
+  , lcMakeLambda :: MDoc -> MDoc -> [MDoc] -> [MDoc] -> MDoc
+  -- ^ closureSig, name, contextArgs, boundArgs - partial application
+  -- expression. @closureSig@ is the language's rendering of the closure's own
+  -- callable signature (from 'lcClosureSig'); languages that do not need it
+  -- (Python, R) ignore it.
+  , lcClosureSig :: TypeM -> m MDoc
+  -- ^ Render a closure manifold's callable signature (e.g. C++ @int(int)@ for a
+  -- @ManifoldPart@ that takes an int and returns an int). Empty for languages
+  -- whose closures need no static signature.
   , lcRegisterSchema :: Text -> m Int
   -- ^ Register a schema string and return its unique ID (index into schema table)
   }
@@ -434,6 +462,12 @@ data LowerConfig m = LowerConfig
 Returns (final expression representing the serialized value, prior statements).
 -}
 expandSerialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
+-- A closure has no msgpack leaf form: reify it into its wire tuple first, then
+-- let the generic tuple codec serialize that tuple.
+expandSerialize cfg v0 s0@(SerialClosure _ _) = do
+  reified <- lcReifyClosure cfg v0
+  schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
+  return (ISerCall schemaId (IRawExpr (render reified)), [])
 expandSerialize cfg v0 s0 = do
   (stmts, vExpr) <- go v0 s0
   schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
@@ -495,6 +529,11 @@ expandSerialize cfg v0 s0 = do
 Returns (final expression representing the deserialized value, prior statements).
 -}
 expandDeserialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
+-- A closure arrives as its wire tuple: reflect it into a native callable that
+-- calls back to the producing pool on apply.
+expandDeserialize cfg v0 s0@(SerialClosure _ _) = do
+  reflected <- lcReflectClosure cfg v0 s0
+  return (IRawExpr (render reflected), [])
 expandDeserialize cfg v0 s0
   | isSerializable s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
@@ -1021,15 +1060,25 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
       args = typeMofForm form
       mname = manNamer m
   maybeNewManifold <- lcMakeFunction cfg m mname args manifoldType priorLines body headForm
-  let call = case form of
-        (ManifoldPass _) -> mname
-        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
-        (ManifoldPart rs vs) ->
-          lcMakeLambda
-            cfg
-            mname
-            (map argNamer (typeMofRs rs))
-            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+  call <- case form of
+        (ManifoldPass _) -> return mname
+        (ManifoldFull rs) -> return $ mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldPart rs vs) -> do
+          -- The closure's callable signature is result(bound...) -- only the
+          -- REMAINING parameters, never the captured context args. Build it
+          -- from the bound args and the manifold's result type.
+          let resultType = case manifoldType of
+                Function _ o -> o
+                o -> o
+              sigType = Function [typeMof t | Arg _ t <- vs] resultType
+          sig <- lcClosureSig cfg sigType
+          return $
+            lcMakeLambda
+              cfg
+              sig
+              mname
+              (map argNamer (typeMofRs rs))
+              [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
   return $
     PoolDocs
       { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold

@@ -1153,7 +1153,6 @@ expressPolyExpr
         mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) call
     | not isLocal = do
         propagateScope gidxCall midx
-
         xsInfo <- mapM partialExpress xs
 
         let xs' = map (\(_, _, e) -> e) xsInfo
@@ -1221,8 +1220,11 @@ expressPolyExpr
 expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArguments) (LamS vs body)) = do
   body' <- expressPolyExprWrap lang lambdaType body
 
+  -- Only the leading @length vs@ inputs belong to THIS lambda; when the body
+  -- returns a function (a curried type flattened by 'normalizeType'), the
+  -- surplus inputs belong to the returned closure, expressed within @body@.
   inputTypes <- case val lambdaType of
-    (FunT ts _) -> return ts
+    (FunT ts _) -> return (take (length vs) ts)
     _ -> return []
 
   let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
@@ -1372,20 +1374,35 @@ expressPolyExpr
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
+-- Implicit eta-abstraction of a bare function value passed where a function is
+-- expected. Skipped for a function-typed COMPUTED THUNK ('LetS'/'EvalS'/
+-- 'DoBlockS' -- e.g. a forced effectful generator's result): those are handled
+-- by their own value clauses (below), which bind the native closure and let it
+-- be applied via 'LocalCallP'. Eta-expanding them instead re-applies the thunk
+-- through 'expressPolyApp', which cannot invoke a raw 'LetS'/'EvalS' head.
 expressPolyExpr
   findRemote
   parentLang
   (val -> FunT pinputs poutput)
-  e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) _)
-    | isLocal = do
+  e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) inner)
+    | not (isComputedThunk inner), isLocal = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
         retapp <- expressPolyApp parentLang e lambdaVals
-        -- Implicit eta-abstraction of a function value. Callback-return
-        -- force lifted to Poly-stage 'EffectBoundary'.
-        mkPolyManifold callLang midx (ManifoldPass lambdaTypedArgs) retapp
-    | otherwise = do
+        -- Implicit eta-abstraction of a function value. Any variables the
+        -- wrapped value closes over (e.g. a let-bound closure `f <- ...;
+        -- applyIt f 10`) are captured as CONTEXT args so the trampoline
+        -- manifold receives them through its partial rather than referencing
+        -- them as undefined free variables. When it captures nothing (a
+        -- top-level function value) the wrapper stays a bare 'ManifoldPass'.
+        -- Callback-return force lifted to Poly-stage 'EffectBoundary'.
+        let ctxIds = Set.toList (polyFreeVars retapp `Set.difference` Set.fromList ids)
+            form = case ctxIds of
+              [] -> ManifoldPass lambdaTypedArgs
+              _ -> ManifoldPart [Arg i None | i <- ctxIds] lambdaTypedArgs
+        mkPolyManifold callLang midx form retapp
+    | not (isComputedThunk inner) = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
@@ -1761,6 +1778,32 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
+-- A let-bound function value applied in head position. A multiply-referenced
+-- let lambda is kept shared (not inlined) by 'applyLambdas'; each use reaches
+-- here as a 'LetBndS' head and lowers to a native closure call, exactly as the
+-- 'BndS' (lambda-argument) case above.
+expressPolyApp _ (AnnoS g (_, args) (LetBndS v)) xs = do
+  case [j | (Arg j u) <- args, u == v] of
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    _ -> error "Unreachable? LetBndS value should have been wired uniquely to args previously"
+-- A function value produced by a runtime effect and applied. A `<-` bind
+-- leaves a forced function value ('EvalS') -- or an inline effectful block
+-- ('DoBlockS') -- in head position. Force/evaluate it, bind the resulting
+-- native closure, and call it via 'PolyLetVar' -> 'LocalCallP', mirroring the
+-- 'AppS'-head (computed-function) case below. We peel the wrapper and express
+-- its INNER (effect-typed) expression directly, rather than re-expressing the
+-- function-typed wrapper node: the latter re-enters the eta-abstraction path
+-- ('expressPolyExpr' on a bare @FunT@ value), which calls back into
+-- 'expressPolyApp' and loops.
+expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (EvalS x)) es = do
+  x' <- expressPolyExprWrap lang (Idx cidx t) x
+  return . PolyLet i (PolyEval (Idx cidx t) x') . PolyReturn
+    $ PolyApp (PolyLetVar (Idx cidx t) i) es
+expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
+  let innerT = case t of EffectT _ inner -> inner; _ -> t
+  x' <- expressPolyExprWrap lang (mkIdx x innerT) x
+  return . PolyLet i (PolyDoBlock (Idx cidx t) x') . PolyReturn
+    $ PolyApp (PolyLetVar (Idx cidx t) i) es
 expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
   -- Serial manifolds force thunks before serializing, so strip EffectT from the
@@ -1909,6 +1952,31 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
 
+-- | Free variable indices a PolyExpr references from its enclosing scope. Used
+-- to capture the closure variables of an eta-abstracted function value as
+-- context args. A nested PolyManifold contributes only its own context-arg
+-- indices (the variables IT captures from this scope); its bound args and body
+-- locals belong to it. A PolyLet binder is removed from its body's free set.
+polyFreeVars :: PolyExpr -> Set.Set Int
+polyFreeVars = go
+  where
+    go (PolyBndVar _ i) = Set.singleton i
+    go (PolyLetVar _ i) = Set.singleton i
+    -- A locally-bound function value applied via 'LocalCallP j' references
+    -- the closure bound at index @j@ in the enclosing scope; other executable
+    -- forms (source / pattern / recursive calls) name no enclosing variable.
+    go (PolyExe _ (LocalCallP j)) = Set.singleton j
+    go (PolyApp e es) = Set.unions (map go (e : es))
+    go (PolyReturn e) = go e
+    go (PolyLet i e1 e2) = Set.union (go e1) (Set.delete i (go e2))
+    go (PolyManifold _ _ form _ _) = Set.fromList [i | Arg i _ <- manifoldContext form]
+    go (PolyList _ _ es) = Set.unions (map go es)
+    go (PolyTuple _ xs) = Set.unions (map (go . snd) xs)
+    go (PolyRecord _ _ _ rs) = Set.unions (map (go . snd . snd) rs)
+    go (PolyCacheBody _ _ _ e) = go e
+    go (PolyDebugWrap _ _ e) = go e
+    go _ = Set.empty
+
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
 -- Searches all manifolds in stateName, not just exports, to support non-exported recursive helpers.
@@ -1932,3 +2000,13 @@ bindVarIds [] [] = []
 bindVarIds (i : args) (t : types) = PolyBndVar t i : bindVarIds args types
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
 bindVarIds _ [] = error "bindVarIds: too few types"
+
+-- A computed function value that produces its result through evaluation rather
+-- than being a bare callable: a let, a forced thunk, or an inline effectful
+-- block. Such values are bound and applied via 'LocalCallP', never
+-- eta-abstracted (see the eta clause in 'expressPolyExpr').
+isComputedThunk :: ExprS g One c -> Bool
+isComputedThunk (LetS {}) = True
+isComputedThunk (EvalS {}) = True
+isComputedThunk (DoBlockS {}) = True
+isComputedThunk _ = False

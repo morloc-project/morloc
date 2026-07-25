@@ -1,0 +1,25 @@
+-- A function value produced by an effectful computation is bound with
+-- `<-` and applied at a later point. Each binding captures its own base,
+-- so the two closures multiply by different values.
+
+module main (genPair)
+
+import root-cpp
+
+source Cpp from "helpers.hpp" ("tick", "mul")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+genPair :: <IO> (Int, Int)
+genPair = do
+  f <- mkMul 3
+  g <- mkMul 4
+  (f 10, g 10)

@@ -1,0 +1,64 @@
+-- Passing a closure VALUE (not a named source function) to a higher-order
+-- function sourced in the same language. Unlike the hofs-* tests, which pass
+-- named source functions, every argument here is a first-class closure. The
+-- captures are RUNTIME values (CLI arguments), not literals, so the closure
+-- genuinely carries an environment into the HOF rather than folding it away.
+-- Covers: a bare lambda, an effect-bound closure over a runtime value, a
+-- closure over TWO runtime values, an under-applied multi-argument closure, and
+-- a reused closure.
+
+module main (applyLambda, applyRuntimeCap, applyMultiVar, applyUnder, applyReuse)
+
+import root-py
+
+source Py from "helpers.py" ("tick", "mul", "add3", "applyIt", "applyTwice")
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+add3 :: Int -> Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+applyTwice :: (Int -> Int) -> Int -> Int
+
+mkMulE :: Int -> <IO> (Int -> Int)
+mkMulE base = do
+  _ <- tick
+  (\y -> mul base y)
+
+mkAffineE :: Int -> Int -> <IO> (Int -> Int)
+mkAffineE a b = do
+  _ <- tick
+  (\y -> add3 a (mul b y) 0)
+
+mkAdderE :: Int -> <IO> (Int -> Int -> Int)
+mkAdderE base = do
+  _ <- tick
+  (\a b -> add3 base a b)
+
+-- a bare lambda literal passed to a HOF (baseline, no capture)
+applyLambda :: Int -> Int
+applyLambda x = applyIt (\y -> mul 3 y) x
+
+-- an effect-bound closure over a RUNTIME value passed to a HOF
+applyRuntimeCap :: Int -> <IO> Int
+applyRuntimeCap base = do
+  f <- mkMulE base
+  applyIt f 10
+
+-- a closure capturing TWO runtime values passed to a HOF
+applyMultiVar :: Int -> Int -> <IO> Int
+applyMultiVar a b = do
+  f <- mkAffineE a b
+  applyIt f 10
+
+-- UNDER-APPLICATION: a 2-argument closure applied to one argument, the
+-- resulting partial passed to a HOF
+applyUnder :: Int -> <IO> Int
+applyUnder base = do
+  f <- mkAdderE base
+  applyIt (f 10) 20
+
+-- a closure reused twice inside a HOF
+applyReuse :: Int -> <IO> Int
+applyReuse base = do
+  f <- mkMulE base
+  applyTwice f 10

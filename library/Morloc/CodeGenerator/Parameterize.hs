@@ -74,8 +74,12 @@ parameterize' args (AnnoS g c (NamS entries)) = do
   xs' <- mapM (parameterize' args . snd) entries
   let args' = pruneArgs args xs'
   return $ AnnoS g (c, args') (NamS (zip (map fst entries) xs'))
-parameterize' args (AnnoS g@(Idx _ (FunT inputs _)) c (LamS vs x)) = do
-  ids <- MM.takeFromCounter (length inputs)
+parameterize' args (AnnoS g@(Idx _ (FunT _ _)) c (LamS vs x)) = do
+  -- Bind exactly the lambda's own parameters. A lambda may bind FEWER params
+  -- than its (right-flattened) function type has inputs when its body returns a
+  -- function, e.g. @\y -> mul base y@ at type @Int -> Int -> Int@ -- the surplus
+  -- inputs belong to the nested returned closure, not to this lambda.
+  ids <- MM.takeFromCounter (length vs)
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
       boundArgs = fromJust $ safeZipWith Arg ids vs
   x' <- parameterize' (contextArgs <> boundArgs) x

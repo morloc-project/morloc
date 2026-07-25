@@ -1028,7 +1028,19 @@ subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 -- forall-bound variable appears in multiple argument positions (e.g.,
 -- (==) :: c -> c -> Bool passed to fold).
 subtype scope t1@(FunU as1 ret1) t2@(FunU as2 ret2) g0
-  | length as1 /= length as2 = subtypeError t1 t2 "function arity mismatch"
+  -- @A -> (B -> C)@ and @A -> B -> C@ are the same curried type. The parser
+  -- right-flattens arrows, but a function value inferred from a lambda in
+  -- return position (@f x = \y -> ...@) can reach here still nested, giving a
+  -- different argument count than a flattened annotation. Re-nest the longer
+  -- argument list's surplus into its return so the arities line up, then
+  -- recurse; a genuine arity error still surfaces because the re-nested return
+  -- fails to subtype (a function vs a non-function).
+  | length as1 > length as2 =
+      let (pre, rest) = splitAt (length as2) as1
+       in subtype scope (FunU pre (FunU rest ret1)) t2 g0
+  | length as1 < length as2 =
+      let (pre, rest) = splitAt (length as1) as2
+       in subtype scope t1 (FunU pre (FunU rest ret2)) g0
   | null as1 = subtype scope ret1 ret2 g0
   | otherwise = do
       -- Process all arguments (contravariant: b <: a), applying context between each

@@ -84,6 +84,7 @@ serialAstToType (SerialString x) = VarF x
 serialAstToType (SerialIFile x) = VarF x
 serialAstToType (SerialOStream x) = VarF x
 serialAstToType (SerialIStream x) = VarF x
+serialAstToType (SerialClosure ins out) = FunF (map serialAstToType ins) (serialAstToType out)
 serialAstToType (SerialNull x) = VarF x
 serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
 -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
@@ -179,6 +180,24 @@ serialAstToMsgpackSchema ast = emit ast
     emit (SerialIFile v) = addHint v <> "F"
     emit (SerialOStream v) = addHint v <> "O"
     emit (SerialIStream v) = addHint v <> "I"
+    -- A defunctionalized closure travels as a fixed-shape tuple, independent of
+    -- the closure's signature: (home_language:str, manifold_id:int,
+    -- captured_arg_packets:[bytes]). The language is a string (its lang name)
+    -- so the receiver builds the callback socket "pipe-<name>" directly, with
+    -- no integer language enum synchronized across pools. Captured packets are
+    -- opaque pre-serialized bytes (an array of uint8 arrays). Reified/reflected
+    -- by the pool at the serialize boundary; the reified value IS this tuple, so
+    -- the existing generic tuple/string/int/array codec carries it with no
+    -- runtime changes.
+    -- This literal MUST equal the schema of the wire tuple
+    -- (String, Int, [[UInt8]]) as the other 'emit' clauses would render it:
+    -- tuple-of-3 ("t" <> encode64D 3), then String ("s"), Int ("j"), and a
+    -- variable-length list-of-list-of-UInt8 ("a" <> "a" <> "u1", empty dims).
+    -- The pool reifies a real such tuple through the generic codec, so this
+    -- string and the runtime bytes must stay in lockstep; keep it in sync if
+    -- any tuple/list/leaf code below changes.
+    emit (SerialClosure _ _) =
+      "t" <> encode64D (3 :: Int) <> "s" <> "j" <> "a" <> "a" <> "u1"
     emit (SerialNull v) = addHint v <> "z"
     emit (SerialOptional v s) = addHint v <> "?" <> emit s
     emit (SerialUnknown v) = addHint v <> "*"
@@ -270,6 +289,7 @@ shallowType (SerialString x) = VarF x
 shallowType (SerialIFile x) = VarF x
 shallowType (SerialOStream x) = VarF x
 shallowType (SerialIStream x) = VarF x
+shallowType (SerialClosure ins out) = FunF (map shallowType ins) (shallowType out)
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- A back-reference re-uses the ancestor's NamF identity; downstream
@@ -507,11 +527,15 @@ makeSerialAST m lang t0 = do
         selectPacker [] = MM.throwSourcedError m $ "Cannot find constructor for" <+> pretty cv <+> "in selectPacker"
         selectPacker [x] = return x
         selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
-    makeSerialAST' _ _ t@(FunF _ _) =
-      MM.throwCompilerBugAt m $
-        "Function-type serialization reached codegen backstop -- the higher-order"
-        <+> "export guard at Nexus.hs (see 'checkExportedHigherOrder') should have"
-        <+> "caught this at the export boundary. Type dump:" <+> pretty t
+    -- A function value crossing a pool boundary is defunctionalized: it travels
+    -- as a closure datum (home language, manifold id, captured argument packets).
+    -- The argument and result schemas shape only the native callable on each
+    -- side; the wire form itself is signature-independent (a tuple emitted by
+    -- 'SerialClosure'). Recurse so the arg/result native types are available.
+    makeSerialAST' gscope typepackers (FunF ins out) =
+      SerialClosure
+        <$> mapM (makeSerialAST' gscope typepackers) ins
+        <*> makeSerialAST' gscope typepackers out
     -- Wire-form construction for an applied type `Foo a b ...`.
     --
     -- Two pieces of information drive dispatch here:
@@ -1050,6 +1074,7 @@ isSerializable (SerialString _) = True
 isSerializable (SerialIFile _) = True
 isSerializable (SerialOStream _) = True
 isSerializable (SerialIStream _) = True
+isSerializable (SerialClosure _ _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
 -- A back-reference is serializable iff its referenced object is.
@@ -1085,6 +1110,7 @@ prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialIFile _) = "SerialIFile"
 prettySerialOne (SerialOStream _) = "SerialOStream"
 prettySerialOne (SerialIStream _) = "SerialIStream"
+prettySerialOne (SerialClosure _ _) = "SerialClosure"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
 prettySerialOne (SerialRec v) = "SerialRec" <> angles (pretty v)

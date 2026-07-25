@@ -393,6 +393,7 @@ translate srcs es = do
 
   debugInfo <- makeManifoldDebugInfoLookup
   debugMode <- MM.gets stateDebugTrace
+  closureTable <- computeClosureSchemas cppLang es
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
         { translatorRecmap = recmap
@@ -402,7 +403,7 @@ translate srcs es = do
         , translatorDebugInfo = debugInfo
         , translatorDebugMode = debugMode
         }
-      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap) translatorState
+      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable) translatorState
 
   maker <- makeTheMaker srcs'
 
@@ -422,8 +423,9 @@ makeCppCode ::
   [SerialManifold] ->
   Map.Map Lang Scope ->
   GMap Int MVar (Map.Map Lang Scope) ->
+  Map.Map Int ([Text], [Text], Text) ->
   CppTranslator MDoc
-makeCppCode labels srcs es univeralScopeMap scopeMap = do
+makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   templates <- CMS.gets translatorLogTemplates
   (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
@@ -435,11 +437,121 @@ makeCppCode labels srcs es univeralScopeMap scopeMap = do
   (autoDecl, autoSerial) <- generateAnonymousStructs
   let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
+  -- Restrict the closure machinery to closures that actually CROSS a boundary
+  -- (their signature appears at a SerialClosure serialize site). Purely-local
+  -- closures need no reify thunk or dispatch wrapper and are lowered as a plain
+  -- native std::bind (no fat MorlocClosure, no second copy of the captures).
+  closureTable <- restrictToCrossingClosures es closureTable0
+
+  -- Serial dispatch wrappers for defunctionalized closures (registered BEFORE
+  -- getCppSchemaTable so their schemas land in the table) plus the per-closure
+  -- reify thunks spliced into each closure's constructor during lowering.
+  (closureWrappers, reifyThunks) <- makeClosureDispatch closureTable es
+
   -- build the program (translates each manifold tree)
-  program <- buildProgramM labels templates includeDocs es translateSegment getCppSchemaTable
+  program <- buildProgramM labels templates includeDocs es (translateSegment reifyThunks) getCppSchemaTable closureTable
 
   -- create and return complete pool script
-  return $ CP.printProgram serializationCode signatures program
+  return $ CP.printProgram serializationCode signatures closureWrappers program
+
+-- | A closure's C++ callable signature "Ret(Arg...)" -- the same string
+-- 'lcClosureSig' produces and 'MorlocClosure<Sig>' is keyed on. Rendered from
+-- the bound (remaining) argument types and the result type.
+closureCppSig :: [TypeF] -> TypeF -> CppTranslator Text
+closureCppSig ins out = do
+  rt <- cppTypeOf out
+  ats <- mapM cppTypeOf ins
+  return (render (rt <> tupled ats))
+
+-- | The signature of a closure manifold's value, matching the signature seen at
+-- a serialize site for the same closure.
+manifoldCppSig :: NativeManifold -> CppTranslator Text
+manifoldCppSig nm@(NativeManifold _ _ form _) =
+  closureCppSig [t | Arg _ t <- manifoldBound form] resultType
+  where
+    resultType = case typeFof nm of
+      FunF _ o -> o
+      o -> o
+
+-- | Signatures of all closures that are reified (cross a boundary) anywhere in
+-- these manifolds, i.e. that reach a 'SerialClosure' serialize site.
+crossingClosureSigs :: [SerialManifold] -> CppTranslator (Set.Set Text)
+crossingClosureSigs es = Set.fromList <$> mapM astSig (concatMap collectSerializedClosures es)
+  where
+    astSig (SerialClosure ins out) = closureCppSig (map serialAstToType ins) (serialAstToType out)
+    astSig _ = return "" -- collectSerializedClosures returns only SerialClosure
+
+-- | Keep in the closure table only closures whose signature can cross a
+-- boundary. Everything else is a purely-local closure that needs no reify or
+-- dispatch machinery.
+restrictToCrossingClosures ::
+  [SerialManifold] ->
+  Map.Map Int ([Text], [Text], Text) ->
+  CppTranslator (Map.Map Int ([Text], [Text], Text))
+restrictToCrossingClosures es closureTable = do
+  crossingSigs <- crossingClosureSigs es
+  let candidates =
+        [ nm | nm@(NativeManifold i _ _ _) <- concatMap collectClosureManifolds es
+             , Map.member i closureTable ]
+  crossing <-
+    Set.fromList . map fst . filter (\(_, sig) -> Set.member sig crossingSigs)
+      <$> mapM (\nm@(NativeManifold i _ _ _) -> (,) i <$> manifoldCppSig nm) candidates
+  return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
+
+-- | For each defunctionalized closure manifold, emit a serial dispatch wrapper
+-- so the home pool can apply the closure when a foreign pool calls back on its
+-- manifold id: deserialize the captured ++ bound argument packets, call the
+-- native closure body, and serialize the result. The argument/result schemas
+-- are the ones 'computeClosureSchemas' already computed (threaded in via
+-- @closureTable@); their C++ types come from the manifold's own form.
+-- Produce the serial dispatch wrappers for cross-registrable closures AND, per
+-- closure, the reify thunk that serializes its captured native values into the
+-- closure wire form. The thunk is keyed by manifold name so 'lcMakeLambda' can
+-- splice it into that closure's 'MorlocClosure' constructor.
+makeClosureDispatch ::
+  Map.Map Int ([Text], [Text], Text) -> [SerialManifold] -> CppTranslator ([MDoc], Map.Map Text MDoc)
+makeClosureDispatch closureTable es = do
+  results <- mapM one (filter inTable (concatMap collectClosureManifolds es))
+  return (map fst results, Map.fromList (map snd results))
+  where
+    -- Only closures the schema pass kept (all-native captured context) get a
+    -- dispatch wrapper; the rest are handled by the pre-existing serial path.
+    inTable (NativeManifold i _ _ _) = Map.member i closureTable
+    one (NativeManifold i _ form _) = do
+      let ctxTs = [t | Arg _ o <- manifoldContext form, Just t <- [orNativeType o]]
+          bndTs = [t | Arg _ t <- manifoldBound form]
+          ctxNames = map argNamer (typeMofRs (manifoldContext form))
+          -- inTable already guaranteed membership, so this key is present.
+          (capScs, bndScs, resSc) = closureTable Map.! i
+      argTypes <- mapM cppTypeOf (ctxTs <> bndTs)
+      argSids <- mapM cppRegisterSchema (capScs <> bndScs)
+      resSid <- cppRegisterSchema resSc
+      let capSids = take (length capScs) argSids
+          getVals =
+            [ "_get_value<" <> t <> ">(args[" <> pretty j <> "], mlc_schema_table[" <> pretty sid <> "])"
+            | (j, (t, sid)) <- zip [(0 :: Int) ..] (zip argTypes argSids)
+            ]
+          call = manNamer i <> tupled getVals
+          dispatchDoc =
+            [idoc|uint8_t* mlc_closure_dispatch_#{pretty i}(const uint8_t** args) {
+    return _put_value(#{call}, mlc_schema_table[#{pretty resSid}]);
+}|]
+      return (dispatchDoc, (render (manNamer i), closureReifyThunk ctxNames capSids))
+
+-- The reify thunk stored inside a 'MorlocClosure'. When the closure crosses a
+-- language boundary it serializes each captured native value (by value, so the
+-- thunk owns a copy) into a self-contained wire packet via '_mlc_reify_capture'.
+-- Empty capture yields an empty vector. Built once per closure by
+-- 'makeClosureDispatch' and looked up by 'lcMakeLambda'.
+closureReifyThunk :: [MDoc] -> [Int] -> MDoc
+closureReifyThunk names sids
+  | null names = "[]() { return std::vector<std::vector<uint8_t>>{}; }"
+  | otherwise =
+      [idoc|[#{cat (punctuate ", " names)}]() -> std::vector<std::vector<uint8_t>> {
+    return { #{cat (punctuate ", " (map cap (zip names sids)))} };
+}|]
+  where
+    cap (nm, sid) = [idoc|_mlc_reify_capture(#{nm}, mlc_schema_table[#{pretty sid}])|]
 
 metaTypedefs ::
   GMap Int MVar (Map.Map Lang Scope) ->
@@ -538,8 +650,8 @@ tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
 
-cppLowerConfig :: LowerConfig CppTranslatorM
-cppLowerConfig =
+cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
+cppLowerConfig reifyThunks =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
@@ -681,6 +793,42 @@ PROPAGATE_ERROR(errmsg)|]
     , lcDeserialize = \t v s -> do
         typestr <- cppTypeOf t
         deserialize v typestr s
+    , lcReifyClosure = \v ->
+        -- C++ reification (producing a crossing closure from C++) recovers the
+        -- manifold id and captured values from the fat MorlocClosure functor
+        -- stored in the std::function (see '_mlc_reify' in pool.cpp).
+        return $ "_mlc_reify" <> parens v
+    , lcReflectClosure = \pkt s ->
+        case s of
+          SerialClosure ins out -> do
+            argTypes <- mapM (cppTypeOf . serialAstToType) ins
+            resType <- cppTypeOf (serialAstToType out)
+            tupSid <- cppRegisterSchema (render (serialAstToMsgpackSchema s))
+            argSids <- mapM (cppRegisterSchema . render . serialAstToMsgpackSchema) ins
+            resSid <- cppRegisterSchema (render (serialAstToMsgpackSchema out))
+            let tupleT = "std::tuple<std::string, int64_t, std::vector<std::vector<uint8_t>>>" :: MDoc
+                paramDocs = [ t <+> ("__a" <> pretty i) | (i, t) <- zip [(0 :: Int) ..] argTypes ]
+                pushDocs =
+                  [ "__pkts.push_back(_put_value(__a" <> pretty i <> ", mlc_schema_table[" <> pretty sid <> "]));"
+                  | (i, sid) <- zip [(0 :: Int) ..] argSids
+                  ]
+                bodyDocs =
+                  [ "std::vector<const uint8_t*> __pkts;"
+                  , "for (const auto& __c : std::get<2>(__clo)) { __pkts.push_back(__c.data()); }"
+                  ]
+                    <> pushDocs
+                    <> [ "std::string __sock = std::string(\"pipe-\") + std::get<0>(__clo);"
+                       , "return _get_value<" <> resType <> ">(foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size()), mlc_schema_table[" <> pretty resSid <> "]);"
+                       ]
+                lam =
+                  vsep
+                    [ "[__clo = _get_value<" <> tupleT <> ">(" <> pkt <> ", mlc_schema_table[" <> pretty tupSid <> "])]"
+                        <> parens (hsep (punctuate "," paramDocs)) <+> "->" <+> resType <+> "{"
+                    , indent 4 (vsep bodyDocs)
+                    , "}"
+                    ]
+            return lam
+          _ -> error "lcReflectClosure: expected SerialClosure"
     , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm -> do
         state <- CMS.get
         let alreadyDone = case headForm of
@@ -776,9 +924,30 @@ PROPAGATE_ERROR(errmsg)|]
                           ]
                   _ -> innerBlock
             return . Just . block 4 decl $ bodyDoc
-    , lcMakeLambda = \mname contextArgs boundArgs ->
+    , lcClosureSig = \tm -> case tm of
+        Function ins out -> do
+          argTypes <- mapM cppTypeOf ins
+          resType <- cppTypeOf out
+          return $ resType <> tupled argTypes
+        _ -> return ""
+    , lcMakeLambda = \sig mname contextArgs boundArgs ->
         let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-         in [idoc|std::bind(#{cat (punctuate "," (mname : (contextArgs ++ vs')))})|]
+            bindArgs = cat (punctuate "," (mname : (contextArgs ++ vs')))
+            -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
+            -- name minus its leading "m".
+            midDoc = pretty (MT.drop 1 (render mname))
+         in case Map.lookup (render mname) reifyThunks of
+              -- A closure that can cross a boundary: the fat MorlocClosure
+              -- carries its mid and a reify thunk so the far side can call back.
+              -- (Both are stored inside a std::function<Ret(Arg...)>, so this has
+              -- the same C++ type as the thin form below.)
+              Just reifyThunk ->
+                [idoc|MorlocClosure<#{sig}>{ std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk} }|]
+              -- A purely-local closure: a plain std::bind (identical to the
+              -- pre-defunctionalization form), so captured values are copied
+              -- once -- no fat wrapper, no reify thunk, no second copy.
+              Nothing ->
+                [idoc|std::bind(#{bindArgs})|]
     , lcRegisterSchema = cppRegisterSchema
     }
   where
@@ -845,7 +1014,7 @@ translateSource path = "#include" <+> (dquotes . pretty) path
 
 serialize :: MDoc -> SerialAST -> CppTranslator PoolDocs
 serialize v s = do
-  (expr, stmts) <- expandSerialize cppLowerConfig v s
+  (expr, stmts) <- expandSerialize (cppLowerConfig Map.empty) v s
   return $
     PoolDocs
       { poolCompleteManifolds = []
@@ -1079,7 +1248,7 @@ cppEscapeString = T.concatMap esc
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
 deserialize varname0 typestr0 s0 = do
-  (expr, stmts) <- expandDeserialize cppLowerConfig varname0 s0
+  (expr, stmts) <- expandDeserialize (cppLowerConfig Map.empty) varname0 s0
   let rendered = CP.printExpr expr
   if null stmts
     then return (rendered, [])
@@ -1093,10 +1262,10 @@ recordToCppTuple ts = do
   tsDocs <- mapM (cppTypeOf . serialAstToType) ts
   return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
 
-translateSegment :: SerialManifold -> CppTranslator MDoc
-translateSegment m0 = do
+translateSegment :: Map.Map Text MDoc -> SerialManifold -> CppTranslator MDoc
+translateSegment reifyThunks m0 = do
   resetCounter
-  e <- foldWithSerialManifoldM (defaultFoldRules cppLowerConfig) m0
+  e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig reifyThunks)) m0
   return $ renderPoolDocs e
 
 -- handle string interpolation

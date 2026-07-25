@@ -38,6 +38,10 @@ module Morloc.CodeGenerator.Grammars.Common
   , DispatchEntry (..)
   , extractLocalDispatch
   , extractRemoteDispatch
+  , collectClosureManifolds
+  , collectSerializedClosures
+  , computeClosureSchemas
+  , orNativeType
   , collectLogLabels
   , collectManifoldIds
   , propagateManifoldLabel
@@ -57,7 +61,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (serialAstToType)
+import Morloc.CodeGenerator.Serial (serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
@@ -725,6 +729,103 @@ extractRemoteDispatch labels =
       Identity [(Int, Int)]
     getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
     getRemoteSE x = return $ foldlSE mappend mempty x
+
+-- | Collect every NESTED closure manifold (a 'ManifoldPart'/'ManifoldPass'
+-- with non-empty bound args) from a manifold tree. Such closures are
+-- materialized as standalone defs but live inside a parent manifold's body, so
+-- they never appear in the top-level '[SerialManifold]' list. Used to give each
+-- closure a cross-language dispatch entry (a defunctionalized closure applied in
+-- another pool calls back home via @foreign_call(mid)@). The custom fold keeps
+-- the ORIGINAL 'NativeManifold' (not just the folded body) so callers can read
+-- its form and 'typeFof'.
+collectClosureManifolds :: SerialManifold -> [NativeManifold]
+collectClosureManifolds = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [NativeManifold] [NativeManifold] [NativeManifold] [NativeManifold] [NativeManifold] [NativeManifold]
+    fw =
+      defaultValue
+        { opFoldWithNativeManifoldM = \orig folded ->
+            let NativeManifold_ _ _ form child = folded
+             in return $
+                  if not (null (manifoldBound form)) then orig : child else child
+        }
+
+-- | Every 'SerialClosure' AST that is serialized (reified across a language
+-- boundary) anywhere in the given manifold. A closure value only needs its
+-- reify machinery when it actually crosses -- i.e. when it reaches a
+-- 'SerializeS' site as (or containing) a 'SerialClosure'. Collecting these lets
+-- a translator give the fat/registered closure representation only to closures
+-- that can cross, and leave purely-local closures in their cheap native form.
+collectSerializedClosures :: SerialManifold -> [SerialAST]
+collectSerializedClosures = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST]
+    fw =
+      defaultValue
+        { opFoldWithSerialExprM = \_ folded ->
+            return $ case folded of
+              SerializeS_ s child -> serialClosuresOf s <> child
+              _ -> foldlSE (<>) mempty folded
+        }
+
+-- | All 'SerialClosure' nodes reachable within a 'SerialAST' (e.g. a list or
+-- record of closures crossing together, not only a bare closure).
+serialClosuresOf :: SerialAST -> [SerialAST]
+serialClosuresOf = go
+  where
+    go c@(SerialClosure ins out) = c : concatMap go ins <> go out
+    go (SerialPack _ (_, s)) = go s
+    go (SerialList _ _ s) = go s
+    go (SerialTuple _ ss) = concatMap go ss
+    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialOptional _ s) = go s
+    go _ = []
+
+-- | For each nested closure in the given manifolds, compute its serial wire
+-- schemas: the captured (context) arg schemas, the bound (remaining) arg
+-- schemas, and the result schema. Keyed by the closure's manifold id. The
+-- native def takes @captured ++ bound@ in that order. These drive both the
+-- home-pool serial dispatch wrapper (deserialize captured ++ bound -> call the
+-- native closure -> serialize result) and the reify path (serialize only the
+-- captured values into the wire tuple).
+computeClosureSchemas ::
+  Lang -> [SerialManifold] -> MorlocMonad (Map.Map Int ([Text], [Text], Text))
+computeClosureSchemas lang sms =
+  Map.fromList <$> mapM one (filter isNativeContext (concatMap collectClosureManifolds sms))
+  where
+    -- Only closures whose ENTIRE rendered signature is native are the
+    -- reify/reflect kind this machinery serializes: the closure-body dispatch
+    -- wrapper deserializes each argument packet and calls the native manifold.
+    -- Any non-native parameter -- a 'Serial'/'Passthrough' arg (rendered as a
+    -- raw packet pointer), including the serial half of an 'LR' arg that
+    -- 'typeMofForm' expands into a serial+native pair -- means the manifold is a
+    -- cross-language HOF argument handled by the pre-existing serial path, not a
+    -- native closure to reify; a wrapper for it would mismatch those parameters.
+    isNativeContext (NativeManifold _ _ form _) = all isNativeArg (typeMofForm form)
+    isNativeArg (Arg _ (Native _)) = True
+    isNativeArg _ = False
+
+    one nm@(NativeManifold i _ form _) = do
+      let ctxTs = [t | Arg _ o <- manifoldContext form, Just t <- [orNativeType o]]
+          bndTs = [t | Arg _ t <- manifoldBound form]
+          resT = case typeFof nm of
+            FunF _ out -> out
+            other -> other
+      capSchemas <- mapM (schemaOf i) ctxTs
+      bndSchemas <- mapM (schemaOf i) bndTs
+      resSchema <- schemaOf i resT
+      return (i, (capSchemas, bndSchemas, resSchema))
+
+    schemaOf :: Int -> TypeF -> MorlocMonad Text
+    schemaOf i t = render . serialAstToMsgpackSchema <$> makeSerialAST i lang t
+
+-- | The native ('R'/'LR') type carried by a context arg, or 'Nothing' for a
+-- serial-only ('L') arg. Used by the closure passes to pull the captured
+-- values' native types out of a manifold's context.
+orNativeType :: Or TypeS TypeF -> Maybe TypeF
+orNativeType (R t) = Just t
+orNativeType (LR _ t) = Just t
+orNativeType (L _) = Nothing
 
 {- | Build a pure @midx -> (name, srcloc)@ closure by snapshotting
 'stateName' and 'stateSourceMap' from the monad. Each translator

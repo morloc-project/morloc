@@ -1,0 +1,38 @@
+-- A function whose body is an explicit lambda returns a function that
+-- captures the outer parameter. The returned function is exercised four
+-- ways: over-applied directly, bound to a name and applied, passed to a
+-- higher-order function, and through deeper (three-level) currying.
+
+module main
+  ( direct
+  , bound
+  , viaHof
+  , deep
+  )
+
+import root-py
+
+source Py from "helpers.py" ("mul", "add", "apply1")
+
+mul :: Int -> Int -> Int
+add :: Int -> Int -> Int
+apply1 :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> (Int -> Int)
+mkMul base = (\y -> mul base y)
+
+direct :: Int -> Int
+direct x = mkMul 3 x
+
+bound :: Int -> Int
+bound x = let f = mkMul 3
+          in f x
+
+viaHof :: Int -> Int
+viaHof x = apply1 (mkMul 3) x
+
+mkAdd3 :: Int -> (Int -> (Int -> Int))
+mkAdd3 a = (\b -> (\c -> add a (add b c)))
+
+deep :: Int -> Int
+deep x = mkAdd3 1 2 x

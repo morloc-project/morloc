@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <functional>
+#include <tuple>
 #include <vector>
 #include <algorithm>
 #include <iterator>
@@ -31,6 +32,7 @@
 char* g_tmpdir;
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
+uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs);
 
 // AUTO include statements start
 // <<<BREAK>>>
@@ -761,13 +763,68 @@ inline void _mlc_unlink_tmp(const std::string& path) {
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
 }
 
-uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
+// Array-based foreign call: send a local-call packet carrying a runtime-sized
+// list of argument packets to the pool listening on `socket_filename`. Used by
+// the variadic `foreign_call` below and by defunctionalized-closure reflection,
+// where the captured-argument count is only known at runtime. The caller owns
+// `args_array`; on an error this throws (via PROPAGATE_ERROR), so the caller's
+// container unwinds normally.
+uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs) {
     char* errmsg = NULL;
-    va_list args;
-    size_t nargs = 0;
 
     char socket_path[128];
     snprintf(socket_path, sizeof(socket_path), "%s/%s", g_tmpdir, socket_filename);
+
+    uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
+    PROPAGATE_ERROR(errmsg)
+
+    pool_mark_busy();
+    uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
+    pool_mark_idle();
+
+    free(packet);
+    PROPAGATE_ERROR(errmsg)
+
+    {
+        char* fail_check_err = NULL;
+        char* fail_msg = get_morloc_data_packet_error_message(
+            (const uint8_t*)result, &fail_check_err);
+        if (fail_check_err != NULL) { free(fail_check_err); }
+        if (fail_msg != NULL) {
+            std::string msg(fail_msg);
+            free(fail_msg);
+            free(result);
+            throw MorlocException(msg);
+        }
+    }
+
+    // Incref the result's SHM so the callee's tracker flush won't destroy
+    // data we may still need (mirrors the variadic foreign_call).
+    {
+        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
+        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
+            size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
+            char* resolve_err = NULL;
+            void* res_voidstar = rel2abs(relptr, &resolve_err);
+            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            if (res_voidstar) {
+                char* incref_err = NULL;
+                shincref((absptr_t)res_voidstar, &incref_err);
+                if (incref_err) { free(incref_err); }
+                _shm_tracker.push_back({(absptr_t)res_voidstar, nullptr});
+            }
+        }
+    }
+
+    return result;
+}
+
+// Variadic wrapper over foreign_call_v: gather a compile-time NULL-terminated
+// argument list into an array and delegate. The array is freed on both the
+// normal-return and the throw path so no ownership leaks across foreign_call_v.
+uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
+    va_list args;
+    size_t nargs = 0;
 
     // Count arguments (must be NULL-terminated)
     va_start(args, mid);
@@ -785,62 +842,73 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
     args_array[nargs] = NULL;  // Sentinel
     va_end(args);
 
-    // Original logic with variadic args converted to array
-    uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
-    if (errmsg != NULL) {
+    uint8_t* result;
+    try {
+        result = foreign_call_v(socket_filename, mid, args_array, nargs);
+    } catch (...) {
         free(args_array);
-        PROPAGATE_ERROR(errmsg)
+        throw;
     }
-
-    pool_mark_busy();
-    uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
-    pool_mark_idle();
-
-    free(packet);
-
-    if (errmsg != NULL) {
-        free(args_array);
-        PROPAGATE_ERROR(errmsg)
-    }
-
-    // If the foreign pool returned a fail packet, surface it as a C++
-    // exception. Without this the raw fail-packet bytes get returned to
-    // the autogen caller which then tries to deserialize them as data,
-    // producing a confusing downstream error or crashing the worker.
-    {
-        char* fail_check_err = NULL;
-        char* fail_msg = get_morloc_data_packet_error_message(
-            (const uint8_t*)result, &fail_check_err);
-        if (fail_check_err != NULL) { free(fail_check_err); }
-        if (fail_msg != NULL) {
-            std::string msg(fail_msg);
-            free(fail_msg);
-            free(result);
-            free(args_array);
-            throw MorlocException(msg);
-        }
-    }
-
-    // Incref the result's SHM so the callee's tracker flush won't destroy
-    // data we may still need (e.g. forwarded result packets).
-    {
-        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-            if (res_voidstar) {
-                char* incref_err = NULL;
-                shincref((absptr_t)res_voidstar, &incref_err);
-                if (incref_err) { free(incref_err); }
-                _shm_tracker.push_back({(absptr_t)res_voidstar, nullptr});
-            }
-        }
-    }
-
     free(args_array);
     return result;
+}
+
+
+// Defunctionalized-closure support (C++ producer side). A morloc function value
+// is a std::function that actually holds a MorlocClosure functor carrying the
+// manifold id and a reifier for its captured values. Applying it forwards to
+// the wrapped native call (intra-language cost unchanged); reifying it (when it
+// crosses a language boundary) recovers (home_language, mid, captured_packets)
+// so the far side can call back via foreign_call on the mid. The value is stored
+// through std::function so cppTypeOf is unchanged -- recovery is via target<>.
+// A closure value has the concrete signature 'R(A...)'. It is callable
+// (operator() forwards to the wrapped native bind -- intra-language cost is one
+// extra indirection, no different from a std::function) so it works both when
+// stored in a std::function<R(A...)> and when a template HOF deduces its type
+// directly; and it carries the manifold id + captured-value reifier so that,
+// when it crosses a boundary, reify can recover (home_language, mid, captured).
+template <class Sig> struct MorlocClosure;
+template <class R, class... A>
+struct MorlocClosure<R(A...)> {
+    std::function<R(A...)> fn;
+    int64_t mid;
+    std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
+    R operator()(A... args) const { return fn(args...); }
+};
+
+// Serialize one captured native value into a SELF-CONTAINED packet for the
+// closure wire form. The inline threshold is forced to max so the value is
+// embedded in the packet (PACKET_SOURCE_MESG) rather than left as a shared-
+// memory relptr (PACKET_SOURCE_RPTR): a relptr packet dangles once the
+// producing manifold's SHM is reclaimed, which happens before the crossed
+// closure is applied back, silently losing the captured data. The returned
+// byte vector owns its bytes and is portable across pools (and --no-shm).
+template <typename T>
+std::vector<uint8_t> _mlc_reify_capture(const T& value, Schema* schema) {
+    uint64_t saved = morloc_get_inline_threshold();
+    morloc_set_inline_threshold(INT64_MAX);
+    uint8_t* packet;
+    try {
+        packet = _put_value(value, schema);
+    } catch (...) {
+        morloc_set_inline_threshold((int64_t)saved);
+        throw;
+    }
+    morloc_set_inline_threshold((int64_t)saved);
+    const morloc_packet_header_t* h = (const morloc_packet_header_t*)packet;
+    size_t n = sizeof(morloc_packet_header_t) + h->offset + h->length;
+    return std::vector<uint8_t>(packet, packet + n);
+}
+
+// Reify a crossing closure into its wire tuple (home_language, mid, captured).
+template <class R, class... A>
+std::tuple<std::string, int64_t, std::vector<std::vector<uint8_t>>>
+_mlc_reify(const std::function<R(A...)>& f) {
+    const auto* clo = f.template target<MorlocClosure<R(A...)>>();
+    if (clo == nullptr) {
+        throw MorlocException("cannot reify a non-morloc C++ closure");
+    }
+    return std::make_tuple(std::string("cpp"), clo->mid, clo->reify_captured());
 }
 
 

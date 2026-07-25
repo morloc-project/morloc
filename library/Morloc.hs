@@ -115,8 +115,11 @@ writeProgram ::
   MorlocMonad ()
 writeProgram translateFn path code = do
   typecheck path code
-    -- evaluate all applied lambdas in rasts and gasts
-    >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
+    -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
+    -- cannot hold a native closure, so let-bound lambdas are always inlined
+    -- there (True); rASTs become pools, where a multiply-used lambda is kept
+    -- as a shared native closure to avoid exponential inlining (False).
+    >>= bimapM (mapM (applyLambdas True)) (mapM (applyLambdas False))
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools

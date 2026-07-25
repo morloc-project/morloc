@@ -92,6 +92,9 @@ ldDispatchRemoteHeader: "remote_dispatch = {"
 ldDispatchRemoteEntry: "    {{mid}}: {{name}}_remote,"
 ldDispatchRemoteFooter: "}"
 ldLogWrap: "__mlc_wrap_log"
+ldClosureRegisterEntry: "dispatch[{{mid}}] = mlc_make_closure_dispatch({{mid}}, {{args}}, {{res}})"
+ldClosureTableHeader: "mlc_closure_table = {}"
+ldClosureTableEntry: "mlc_closure_table[{{mid}}] = {{caps}}"
 
 # Pool template (loaded from pool.py, left empty here)
 ldPoolTemplate: ""

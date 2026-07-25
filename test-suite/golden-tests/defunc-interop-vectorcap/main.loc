@@ -1,0 +1,29 @@
+-- The closure captures a NON-SCALAR runtime value (a list), not an inline
+-- scalar. A scalar capture serializes inline and is trivially safe; a list may
+-- be shared-memory-backed, so this is the test that exercises copying a
+-- captured aggregate into a self-contained wire packet across the boundary.
+
+module main (crossApply)
+
+import root-py
+import root-cpp
+
+source Py from "producer.py" ("tick", "add", "vsum")
+source Cpp from "consumer.hpp" ("applyIt")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+vsum :: [Int] -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkSummer :: [Int] -> <IO> (Int -> Int)
+mkSummer xs = do
+  _ <- tick
+  (\y -> add (vsum xs) y)
+
+crossApply :: [Int] -> <IO> Int
+crossApply xs = do
+  f <- mkSummer xs
+  applyIt f 10

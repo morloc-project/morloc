@@ -328,6 +328,11 @@ data SerialAST
   | SerialIFile FVar
   | SerialOStream FVar
   | SerialIStream FVar
+  -- A function value. Carries the signature (argument schemas and the
+  -- result schema) so the native type is a callable of the right shape;
+  -- the wire form is signature-independent -- home language, manifold id,
+  -- and the captured argument packets.
+  | SerialClosure [SerialAST] SerialAST
   | SerialNull FVar
   | SerialOptional FVar SerialAST
   | -- | Back-reference to an ancestor 'SerialObject' with this FVar in
@@ -375,6 +380,7 @@ instance Pretty SerialAST where
   pretty (SerialIFile v) = parens ("SerialIFile" <+> pretty v)
   pretty (SerialOStream v) = parens ("SerialOStream" <+> pretty v)
   pretty (SerialIStream v) = parens ("SerialIStream" <+> pretty v)
+  pretty (SerialClosure ins out) = parens ("SerialClosure" <+> list (map pretty ins) <+> pretty out)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
@@ -1345,10 +1351,16 @@ instance HasTypeS (Maybe TypeF) where
   typeSof (Just t) = typeSof t
   typeSof Nothing = PassthroughS
 
--- TODO: fix this - the type of a native manifold should be the full function
--- type, but the manifold function type may not be entirely native
+-- The type of a manifold accounts for its remaining (bound) parameters: a
+-- partially-applied / unapplied manifold (a closure) is a function
+-- @bound-types -> return-type@, while a saturated manifold (no bound args) is
+-- just its return type. Mirrors 'typeMof'/'typeSof', which build the function
+-- type from the form; without this a closure reports its result type and the
+-- serialization machinery mistakes it for a serializable value.
 instance HasTypeF NativeManifold where
-  typeFof (NativeManifold _ _ _ ne) = typeFof ne
+  typeFof (NativeManifold _ _ form ne) = case map val (manifoldBound form) of
+    [] -> typeFof ne
+    bts -> FunF bts (typeFof ne)
 
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm
