@@ -1,0 +1,37 @@
+module main (report)
+
+import vector-cpp
+import maybe-cpp (isNull, require)
+
+source Cpp from "impl.hpp"
+  ( "mk"      as mk
+  , "joinAll" as joinAll
+  , "dbl"     as dbl
+  , "total"   as total
+  )
+mk :: Int -> [Int]
+joinAll :: [Int] -> Str
+dbl :: [Int] -> [Int]
+total :: [Int] -> Int
+
+record Opts where
+  --' arg: --lo
+  --' default: null
+  lo :: ?Int
+record Cpp => Opts = "struct"
+
+produce :: (Int -> Bool) -> ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce keep sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' with: -t/--total=total
+--' with.buffer: -d/--doubled=dbl
+--' render: -j/--joined=joinAll
+--' render.buffer: -b/--buffered=joinAll
+report :: Opts -> <IO, Err> ()
+report opts = do
+  let keep = ? isNull (.lo opts) = const True
+             : let limit = require (.lo opts)
+               in (\x -> x > limit)
+  @collect (produce keep)

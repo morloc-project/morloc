@@ -90,6 +90,7 @@ main = do
       , golden "vector-u8-cpp" "vector-u8-cpp"
       , golden "close-nontemp-error" "close-nontemp-error"
       , golden "whole-render-cpp" "whole-render-cpp"
+      , golden "render-record-arg-cpp" "render-record-arg-cpp"
       , golden "stdin-input" "stdin-input"
       , golden "docstring-alias-import" "docstring-alias-import"
       , golden "stdout-stream-format" "stdout-stream-format"

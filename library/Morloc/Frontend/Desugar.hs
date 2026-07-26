@@ -2787,8 +2787,60 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render bu
     withParentBody k = case assI of
       ExprI _ (AssE _ bodyExpr wheres) -> do
         (bodyExpr', wheres') <- k bodyExpr wheres
-        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr' wheres')
+        bodyExpr'' <- pinParentArgTypes bodyExpr'
+        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr'' wheres')
       _ -> dfail (startPos sp) "internal: streaming `with:` parent is not an AssE"
+
+    -- The synthesized command duplicates the parent body rather than calling the
+    -- parent (the @collect sink must be rewritten in place), so it carries no
+    -- signature and the parent's argument types would be re-inferred from use.
+    -- A record argument then infers to an anonymous structural record, and
+    -- codegen emits the generic `Record` type instead of the declared named type
+    -- (e.g. a `record Cpp => Opts = "struct"` argument becomes an undefined
+    -- `Record`, failing to compile). Pin each concrete argument to its declared
+    -- type with an inline annotation (`let p = (p :: T) in ..`), supplying the
+    -- type the parent signature would have. Polymorphic arguments are left
+    -- unpinned (nothing to resolve, and a rigid annotation would over-constrain).
+    pinParentArgTypes (ExprI i (LamE params inner)) = do
+      let argTys = maybe [] funArgTypesU (Map.lookup parentName sigMap)
+          pins = [(p, t) | (p, t) <- zip params argTys, isConcreteType t]
+      inner' <- foldr pin (return inner) pins
+      return (ExprI i (LamE params inner'))
+      where
+        pin (p, t) mBody = do
+          body <- mBody
+          pRef <- freshExprSpan sp (VarE defaultValue p)
+          annP <- freshExprSpan sp (AnnE pRef t)
+          freshExprSpan sp (LetE [(p, annP)] body)
+    pinParentArgTypes other = return other
+
+-- | The argument types of a (possibly quantified) function type, in order.
+-- Flattens nested arrows so a curried @A -> B -> C@ yields @[A, B]@ whether the
+-- parser produced @FunU [A,B] C@ or @FunU [A] (FunU [B] C)@.
+funArgTypesU :: TypeU -> [TypeU]
+funArgTypesU (ForallU _ t) = funArgTypesU t
+funArgTypesU (FunU args ret) = args ++ funArgTypesU ret
+funArgTypesU _ = []
+
+-- | True iff a type mentions no generic (lowercase) type variable, i.e. it is a
+-- fully concrete monotype that can be pinned with an inline annotation. Used by
+-- the terminal-action synthesis to decide which duplicated-body arguments to
+-- re-annotate with their declared types.
+isConcreteType :: TypeU -> Bool
+isConcreteType = go
+  where
+    go (VarU (TV name)) = T.null name || not (isLower (T.head name))
+    go (ForallU _ _) = False
+    go ExistU {} = False
+    go (NatVarU _) = False
+    go (AppU f args) = go f && all go args
+    go (FunU args ret) = all go args && go ret
+    go (NamU _ _ ts es) = all go ts && all (go . snd) es
+    go (EffectU _ inner) = go inner
+    go (OptionalU inner) = go inner
+    go (OpU _ args) = all go args
+    go (LabeledU _ inner) = go inner
+    go _ = True
 
 -- | Deep-copy an expression with fresh ids (each synthesized command is
 -- typechecked independently of the parent), rewriting every @collect node's
