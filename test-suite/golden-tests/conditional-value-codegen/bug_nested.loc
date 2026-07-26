@@ -1,0 +1,20 @@
+-- FAILING (Bug D). A NESTED function-valued conditional (a branch is itself a
+-- conditional selecting a function), realized in C++. The inner conditional's
+-- captured variable (`threshold`) is not threaded into the C++ closure, so
+-- codegen references an undeclared variable ("n#### was not declared in this
+-- scope"). The Python realization works. This file must build (and run) once
+-- the nested capture is threaded in C++.
+module main (nestpick)
+
+import root-py
+import root-cpp
+
+source Py from "helpers.py" ("gt", "lt")
+gt :: Int -> Int -> Bool
+lt :: Int -> Int -> Bool
+
+nestpick :: Int -> Int -> Int -> Bool
+nestpick mode threshold x =
+  let pick = ? mode > 0 = gt threshold
+             : (? mode < 0 = lt threshold : (\_ -> True))
+  in pick x

@@ -2026,6 +2026,32 @@ unsafe fn morloc_eval_r(
             }
         }
 
+        MorlocExpressionType::If => {
+            // Evaluate the condition (a Bool) into a fresh buffer and read
+            // its byte (0 = false), then materialize the taken branch into
+            // the caller's dest.
+            let ifx = (*expr).expr.if_expr;
+            let cond_ptr = morloc_eval_r((*ifx).cond, ptr::null_mut(), 0, bndvars)?;
+            let taken = if *(cond_ptr as *const u8) != 0 {
+                (*ifx).then_branch
+            } else {
+                (*ifx).else_branch
+            };
+            // Pass the taken arm's OWN schema width to the recursive eval's
+            // dest/width consistency check (cf. @catch): an @throw arm carries
+            // a Unit "z" sentinel schema (width 0), not the result width, and
+            // never writes to dest anyway (it always raises). A value arm has
+            // the same width as the If node (same type), so dest is fully
+            // populated and taken_width == width for the copy below.
+            let taken_width = (*(*taken).schema).width;
+            let src = morloc_eval_r(taken, dest, taken_width, bndvars)?;
+            // Some handlers return a pointer other than dest (e.g. a voidstar
+            // Dat); copy through so the value lands in the caller's slot.
+            if !src.is_null() && src != dest && width > 0 {
+                ptr::copy_nonoverlapping(src as *const u8, dest, width);
+            }
+        }
+
         other => {
             // Catch-all: the manifest carried an expression type that
             // this eval handler doesn't recognise. Include the

@@ -2445,6 +2445,19 @@ tryCoerce :: Scope -> TypeU -> TypeU -> Gamma -> Maybe ([Coercion], Gamma)
 -- inner OptionalU is placed under the EffectU by 'applyCoercion'.
 tryCoerce scope (EffectU e1 i1) (EffectU e2 i2) g
   | applyEff g e1 == applyEff g e2 = tryCoerce scope i1 i2 g
+-- Pure source into an effectful target: a pure value inhabits any effect
+-- slot (effects are capabilities), so peel the target effect and coerce the
+-- inner value. Mirrors subtype's Pure-into-EffectU rule
+-- (Morloc.Typecheck.Internal). This is what lets a bare value arm of an
+-- effect-typed conditional widen to the declared optional inner, e.g.
+-- @? c = @throw : x@ against @<Err> ?Int@ where @x :: Int@. An effectful
+-- source is excluded (the both-effectful clause above handles a matching
+-- pair; a mismatched effectful source must not silently drop its effects).
+tryCoerce scope a (EffectU _ i2) g
+  | not (isEffectful a) = tryCoerce scope a i2 g
+  where
+    isEffectful EffectU{} = True
+    isEffectful _         = False
 tryCoerce scope a (OptionalU b) g =
   case subtype scope a b g of
     Right g' -> Just ([CoerceToOptional], g')

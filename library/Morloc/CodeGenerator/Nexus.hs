@@ -226,6 +226,11 @@ data NexusExpr
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
   | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
   | CatchX    NexusExpr NexusExpr   -- fallible, fallback -- try/catch
+  | IfX       Text NexusExpr NexusExpr NexusExpr
+    -- ^ result schema, condition (Bool), then-branch, else-branch. The
+    -- pure-nexus conditional: evaluate the condition and materialize the
+    -- taken branch. The condition is currently a Bool literal or a bound
+    -- Bool argument -- the pure evaluator has no comparison operators yet.
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -681,7 +686,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       bodyX <- toNexusExpr body
       e1X <- toNexusExpr e1
       return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
-    toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
+    toNexusExpr (AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) =
+      IfX <$> type2schema ift
+          <*> toNexusExpr cond
+          <*> toNexusExpr thenB
+          <*> toNexusExpr elseB
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     -- CoerceToOptional changes the value's runtime layout: the voidstar
@@ -2083,6 +2092,14 @@ exprToJson (CatchX fallible fallback) =
     [ ("tag", jsonStr "catch")
     , ("fallible", exprToJson fallible)
     , ("fallback", exprToJson fallback)
+    ]
+exprToJson (IfX schema cond thenX elseX) =
+  jsonObj
+    [ ("tag", jsonStr "if")
+    , ("schema", jsonStr schema)
+    , ("cond", exprToJson cond)
+    , ("then", exprToJson thenX)
+    , ("else", exprToJson elseX)
     ]
 exprToJson (OptX schema child) =
   jsonObj

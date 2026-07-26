@@ -1,0 +1,172 @@
+module main
+  ( classify, classifyAll, validate, validateCpp, purePick, pureLit, pureThrow
+  , tupArm, listArm, recArm, litArm, strArm, optArm, optArmCpp, nvArm
+  , letArm, letArmCpp
+  , validateR, optArmR, nvArmR, letArmR, listArmR, recArmR )
+
+import root-py
+import root-cpp
+import root-r
+
+source Py from "helpers.py" ("gt", "lt")
+gt :: Int -> Int -> Bool
+lt :: Int -> Int -> Bool
+
+source Cpp from "helpers.hpp" ("idc")
+idc :: Int -> Int
+
+-- The `idr` identity forces R realization of the arm (as `idc` forces C++),
+-- so the R translator's effect/optional conditional codegen is exercised too.
+source R from "helpers.R" ("idr")
+idr :: Int -> Int
+
+-- PASSING. A conditional selects between two function values, then the
+-- selection is applied in head position. The single-use `pick` binding is
+-- inlined, leaving the conditional itself in the callee slot. Both branches
+-- close over `threshold`, which must be captured into the conditional closure.
+classify :: Bool -> Int -> Int -> Bool
+classify useGt threshold x =
+  let pick = ? useGt = gt threshold
+             : (\n -> lt threshold n)
+  in pick x
+
+-- PASSING. The same function-valued conditional passed to a higher-order
+-- function rather than applied directly: the eta-abstraction path over a
+-- function-typed conditional plus its variable capture.
+classifyAll :: Bool -> Int -> [Int] -> [Bool]
+classifyAll useGt threshold xs =
+  let pick = ? useGt = gt threshold
+             : (\n -> lt threshold n)
+  in map pick xs
+
+-- PASSING. An effect-typed guard chain whose arms @throw and whose final arm
+-- is a plain value (Python realization).
+validate :: Int -> <Err> Int
+validate x =
+  ? x > 100 = @throw "too big"
+  ? x < 0   = @throw "negative"
+  : x
+
+-- PASSING. The same guard chain realized in C++ (the value arm shares the
+-- thunk representation of the throwing arms).
+validateCpp :: Int -> <Err> Int
+validateCpp x =
+  ? x > 100 = @throw "too big"
+  ? x < 0   = @throw "negative"
+  : idc x
+
+-- A call-free conditional is evaluated by the nexus pure path via an IfX node.
+-- The condition (a Bool arg) selects the arm; there is no comparison, so this
+-- stays a pure command rather than a pool call.
+purePick :: Bool -> Int -> Int -> Int
+purePick c a b = ? c = a : b
+
+-- Pure conditional with literal arms.
+pureLit :: Bool -> Int
+pureLit c = ? c = 111 : 222
+
+-- Pure conditional with an @throw arm (value-first). The IfX eval uses the
+-- taken arm's own width; a @throw arm carries a Unit "z" sentinel (width 0).
+pureThrow :: Bool -> <Err> Int
+pureThrow c = ? c = 42 : @throw "nope"
+
+record Pair where
+  a :: Int
+  b :: Int
+record Py => Pair = "dict"
+record Cpp => Pair = "struct"
+record R => Pair = "list"
+
+-- Container VALUE arms of an effect-typed conditional (`@throw` in the other
+-- arm). The arm is pure data whose type carries the effect wrapper, which
+-- codegen must strip before the tuple/list/record clauses accept it. `? x > N`
+-- is a comparison, so these realize in a pool (not the pure IfX path).
+tupArm :: Int -> <Err> (Int, Int)
+tupArm x = ? x > 100 = @throw "too big" : (x, x)
+
+listArm :: Int -> <Err> [Int]
+listArm x = ? x > 100 = @throw "too big" : [x, x, x]
+
+recArm :: Int -> <Err> Pair
+recArm x = ? x > 100 = @throw "too big" : {a = x, b = x}
+
+-- Scalar-literal arms with a @throw sibling in the THEN position, evaluated by
+-- the pure IfX (the condition is a plain Bool arg). Throw-first exercises the
+-- IfX result-schema path: the node must be sized from its own schema, not the
+-- @throw then-arm's Unit sentinel.
+litArm :: Bool -> <Err> Int
+litArm c = ? c = @throw "no" : 42
+
+strArm :: Bool -> <Err> Str
+strArm c = ? c = @throw "no" : "hello"
+
+-- A bare value arm of an effect-typed conditional that must WIDEN to the
+-- declared optional inner: `x :: Int` used where `<Err> ?Int` is expected.
+-- The frontend must coerce the pure value into the optional under the effect
+-- (tryCoerce's pure-into-effect rule), and codegen must then thunk the
+-- coercion-wrapped arm to match the @throw sibling. Build-only checks miss
+-- the Python runtime crash, so this arm is actually run.
+optArm :: Int -> <Err> ?Int
+optArm x = ? x > 100 = @throw "too big" : x
+
+-- The same optional-widening arm realized in C++ (via idc): the value flows
+-- through a CoerceToOptional and must still share the thunk representation.
+optArmCpp :: Int -> <Err> ?Int
+optArmCpp x = ? x > 100 = @throw "too big" : idc x
+
+-- An effect-typed conditional whose non-@throw arm is itself a value-producing
+-- conditional (`? b > 0 = 1 : 2` yields a value, not a thunk). The arm-thunking
+-- must recurse into the nested conditional so it matches the @throw sibling.
+-- Python realization crashes at runtime if the nested value arm stays unwrapped.
+nvArm :: Int -> Int -> <Err> Int
+nvArm a b =
+  ? a > 0 = @throw "outer"
+  : (? b > 0 = 1 : 2)
+
+-- An effect-typed conditional whose non-@throw arm is a `let ... in <value>`.
+-- The let lowers to a NativeLetN/SerialLetN whose tail is a plain value, so the
+-- arm-thunking must recurse THROUGH the let wrapper to match the @throw sibling
+-- -- the wrapper's own type would otherwise leave the value bare. Python
+-- realization crashes at runtime if the let-value arm stays unwrapped.
+letArm :: Int -> <Err> [Int]
+letArm x =
+  ? x > 100 = @throw "too big"
+  : (let y = x in [y, y])
+
+-- The same let-value arm realized in C++ (via idc), where the unwrapped arm is a
+-- static compile error (a std::vector assigned to a std::function result var).
+letArmCpp :: Int -> <Err> [Int]
+letArmCpp x =
+  ? x > 100 = @throw "too big"
+  : (let y = idc x in [y, y])
+
+-- R variants (via idr, forcing R realization) of the effect/optional conditional
+-- forms above. The arm-thunking lives in the shared IR (Serialize.hs), so R goes
+-- through the same wrapArm/producesValue logic as Python; these pin the R
+-- translator (Generic.hs) path -- an effect guard chain, an optional widening, a
+-- nested value-conditional, a let-value arm, and container (list / R-"list"
+-- record) value arms, each sibling to a thunk-representable @throw arm.
+validateR :: Int -> <Err> Int
+validateR x =
+  ? x > 100 = @throw "too big"
+  ? x < 0   = @throw "negative"
+  : idr x
+
+optArmR :: Int -> <Err> ?Int
+optArmR x = ? x > 100 = @throw "too big" : idr x
+
+nvArmR :: Int -> Int -> <Err> Int
+nvArmR a b =
+  ? a > 0 = @throw "outer"
+  : (? b > 0 = idr 1 : idr 2)
+
+letArmR :: Int -> <Err> [Int]
+letArmR x =
+  ? x > 100 = @throw "too big"
+  : (let y = idr x in [y, y])
+
+listArmR :: Int -> <Err> [Int]
+listArmR x = ? x > 100 = @throw "too big" : [idr x, idr x, idr x]
+
+recArmR :: Int -> <Err> Pair
+recArmR x = ? x > 100 = @throw "too big" : {a = idr x, b = idr x}

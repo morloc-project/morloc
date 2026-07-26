@@ -175,6 +175,15 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyEval _ e) = hasCacheWrapAt m e
     hasCacheWrapAt m (PolyCoerce _ _ e) = hasCacheWrapAt m e
     hasCacheWrapAt m (PolyIf a b c) = hasCacheWrapAt m a || hasCacheWrapAt m b || hasCacheWrapAt m c
+    -- Kept symmetric with 'cacheWrapExpr', which recurses into (and may insert a
+    -- PolyCacheBody within) each of these; missing one lets a same-midx wrap
+    -- hide from the head-wrap dedup and be double-memoized.
+    hasCacheWrapAt m (PolyList _ _ xs) = any (hasCacheWrapAt m) xs
+    hasCacheWrapAt m (PolyTuple _ xs) = any (hasCacheWrapAt m . snd) xs
+    hasCacheWrapAt m (PolyRecord _ _ _ rs) = any (hasCacheWrapAt m . snd . snd) rs
+    hasCacheWrapAt m (PolyIntrinsic _ _ xs) = any (hasCacheWrapAt m) xs
+    hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
+    hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
 
 cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
@@ -253,6 +262,12 @@ hasDebugWrapAt m (PolyDoBlock _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyEval _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyCoerce _ _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyIf a b c) = hasDebugWrapAt m a || hasDebugWrapAt m b || hasDebugWrapAt m c
+-- Kept symmetric with 'debugWrapExpr', which recurses into each of these.
+hasDebugWrapAt m (PolyList _ _ xs) = any (hasDebugWrapAt m) xs
+hasDebugWrapAt m (PolyTuple _ xs) = any (hasDebugWrapAt m . snd) xs
+hasDebugWrapAt m (PolyRecord _ _ _ rs) = any (hasDebugWrapAt m . snd . snd) rs
+hasDebugWrapAt m (PolyIntrinsic _ _ xs) = any (hasDebugWrapAt m) xs
+hasDebugWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasDebugWrapAt m inner
 hasDebugWrapAt _ _ = False
 
 debugWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
@@ -1460,6 +1475,23 @@ expressPolyExpr
     e2' <- expressPolyExprWrap lang pc e2
     let e = PolyLet letId e1' e2'
     expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+-- A pure-data literal whose recorded type was coerced to an effect type by an
+-- effect-typed conditional arm (e.g. @? c = @throw : (x, x)@, @: [x]@, @: 42@).
+-- The literal carries no effect, so strip the EffectT wrapper and express the
+-- plain data -- the same stripping a do-block tail gets via its own clause.
+-- Without this the container clauses reject the EffectT-headed type ("Expected
+-- a tuple/list/record type").
+expressPolyExpr fr pl pc (AnnoS (Idx midx (EffectT _ innerT)) c e)
+  | isPureDataLit e = expressPolyExpr fr pl pc (AnnoS (Idx midx innerT) c e)
+  where
+    isPureDataLit LstS{}  = True
+    isPureDataLit TupS{}  = True
+    isPureDataLit NamS{}  = True
+    isPureDataLit IntS{}  = True
+    isPureDataLit RealS{} = True
+    isPureDataLit StrS{}  = True
+    isPureDataLit LogS{}  = True
+    isPureDataLit _       = False
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (RealS _ x)) =
   dispatchPrimLit midx lang t v (\tv -> PolyReal (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (IntS _ x)) =
@@ -1804,6 +1836,21 @@ expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
   return . PolyLet i (PolyDoBlock (Idx cidx t) x') . PolyReturn
     $ PolyApp (PolyLetVar (Idx cidx t) i) es
+-- A conditional that yields a function value, applied in head position (e.g. a
+-- let-bound @? c = f : g@ inlined at its single call site). Express each branch
+-- as a function value, bind the resulting conditional closure, and call it via
+-- 'PolyLetVar' -> 'LocalCallP', mirroring the 'EvalS' / 'DoBlockS' clauses
+-- above. Expressing the branches individually (rather than routing the whole
+-- 'IfS' through 'expressPolyExprWrap', as the 'AppS'-head case does) avoids the
+-- eta-abstraction clause, which would re-enter 'expressPolyApp' on the 'IfS'
+-- and loop.
+expressPolyApp _lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE)) es = do
+  let boolType = VarT (TV "Bool")
+  cond' <- expressPolyExprWrap clang (mkIdx cond boolType) cond
+  thenE' <- expressPolyExprWrap clang (mkIdx thenE t) thenE
+  elseE' <- expressPolyExprWrap clang (mkIdx elseE t) elseE
+  return . PolyLet i (PolyIf cond' thenE' elseE') . PolyReturn
+    $ PolyApp (PolyLetVar (Idx cidx t) i) es
 expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
   -- Serial manifolds force thunks before serializing, so strip EffectT from the
@@ -1975,6 +2022,15 @@ polyFreeVars = go
     go (PolyRecord _ _ _ rs) = Set.unions (map (go . snd . snd) rs)
     go (PolyCacheBody _ _ _ e) = go e
     go (PolyDebugWrap _ _ e) = go e
+    -- Value-wrapper forms carry sub-expressions in the SAME scope, so their
+    -- free variables must flow through. Omitting any of these silently drops
+    -- the captures of an eta-abstracted value that contains it, producing a
+    -- closure that references undefined enclosing variables.
+    go (PolyIf c t e) = Set.unions [go c, go t, go e]
+    go (PolyDoBlock _ e) = go e
+    go (PolyEval _ e) = go e
+    go (PolyCoerce _ _ e) = go e
+    go (PolyIntrinsic _ _ es) = Set.unions (map go es)
     go _ = Set.empty
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.

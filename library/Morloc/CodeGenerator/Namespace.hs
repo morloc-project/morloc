@@ -42,6 +42,8 @@ module Morloc.CodeGenerator.Namespace
   , partitionKindArgsT
   , partitionKindArgsU
   , mkEffectF
+  , isEffectF
+  , stripEffectF
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -208,6 +210,19 @@ mkEffectF ls t
   | otherwise = case t of
       EffectF ls2 t2 -> mkEffectF (Set.union ls ls2) t2
       _ -> EffectF ls t
+
+-- | True iff the outermost constructor is an effect wrapper (@<E> T@).
+isEffectF :: TypeF -> Bool
+isEffectF (EffectF _ _) = True
+isEffectF _ = False
+
+-- | Strip all outer effect wrappers to recover the bare value type. An
+-- effect-typed value and the value it wraps have the same runtime
+-- representation (effects are erased); this recovers the eager type when a
+-- thunk-valued effect expression is forced.
+stripEffectF :: TypeF -> TypeF
+stripEffectF (EffectF _ t) = stripEffectF t
+stripEffectF t = t
 
 -- | True iff a TypeF entry is kind-kinded (Nat or Str): a kind literal
 -- or the erased-phantom sentinel. These positions are structural

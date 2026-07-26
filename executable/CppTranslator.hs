@@ -66,6 +66,13 @@ import qualified Morloc.TypeEval as TE
 cppLang :: ML.Lang
 cppLang = ML.Lang "cpp" "cpp"
 
+-- | True when a conditional arm is a bare @throw. Used by 'lcMakeIf' to emit
+-- the arm as a statement rather than an assignment (see the comment there).
+isNativeThrow :: NativeExpr -> Bool
+isNativeThrow (IntrinsicN _ IntrThrow _ _) = True
+isNativeThrow (DoBlockN _ e) = isNativeThrow e
+isNativeThrow _ = False
+
 serialType :: MDoc
 serialType = "uint8_t*"
 
@@ -755,8 +762,18 @@ PROPAGATE_ERROR(errmsg)|]
         let condE = poolExpr condDocs
             thenE = poolExpr thenDocs
             elseE = poolExpr elseDocs
-            thenBlock = poolPriorLines thenDocs <> [v <+> "=" <+> thenE <> ";"]
-            elseBlock = poolPriorLines elseDocs <> [v <+> "=" <+> elseE <> ";"]
+            -- A @throw arm never returns, so emit it as a bare statement rather
+            -- than an assignment. Assigning the universal-conversion
+            -- `_mlc_throw` helper into a container-typed result var is an
+            -- ambiguous C++ `operator=` (a scalar result resolves; a
+            -- std::vector, whose initializer_list overload also matches, does
+            -- not). The dead assignment is unnecessary anyway.
+            (thenThrow, elseThrow) = case origExpr of
+              IfN _ _ tn en -> (isNativeThrow tn, isNativeThrow en)
+              _ -> (False, False)
+            armStmt isThrow e = if isThrow then e <> ";" else v <+> "=" <+> e <> ";"
+            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenE]
+            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseE]
             decl = typeStr <+> v <> ";"
             ifStmt = vsep
               [ decl

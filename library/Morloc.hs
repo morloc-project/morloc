@@ -83,8 +83,15 @@ typecheck path code =
     >>= realityCheck
 
 -- | Do everything except language specific code generation.
+--
+-- Runs 'applyLambdas' first, matching the pool path in 'writeProgram': the
+-- 'express' pipeline assumes lambdas have been reduced/lifted, so skipping it
+-- lets a lambda reach 'expressPolyApp' as an un-handled head ("unexpected
+-- LamS"). 'False' keeps a multiply-used lambda as a shared native closure
+-- (rASTs become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = do
+generatePools rASTs0 = do
+  rASTs <- mapM (applyLambdas False) rASTs0
   paramRASTs <- mapM parameterize rASTs
   let langMap = Map.fromList
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]

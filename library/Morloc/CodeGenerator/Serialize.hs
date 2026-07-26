@@ -342,8 +342,82 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       let ifType = case (thenNe, elseNe) of
             (NullN _, _) -> typeFof elseNe
             (_, NullN _) -> typeFof thenNe
-            _ -> typeFof thenNe
-      return $ IfN ifType condNe thenNe elseNe
+            -- Prefer an effect-typed arm: the arms unify to one type, but a
+            -- pure value arm carries the bare (non-Effect) type while its
+            -- sibling carries the effect wrapper. Taking the then arm's type
+            -- unconditionally would type an @throw guard chain by its value arm
+            -- when that arm is first, so the arm-wrapping below (which fires on
+            -- an EffectF ifType) would not run and the value arm would stay
+            -- bare against the throwing arm's thunk.
+            _ -> case (typeFof thenNe, typeFof elseNe) of
+                   (tt@(EffectF _ _), _) -> tt
+                   (_, te@(EffectF _ _)) -> te
+                   (tt, _) -> tt
+          -- An effect-typed conditional is represented as a thunk (forced by an
+          -- enclosing DoBlock/EvalN or at the serialize sink), so every arm must
+          -- itself yield a thunk. Computations (a source call, a do-block, an
+          -- @throw, a nested guard chain whose own arms are thunks) already
+          -- lower to a thunk when effect-typed; a VALUE-producing arm lowers to
+          -- a plain value, which is then assigned or forced as if it were a
+          -- thunk and crashes (C++: a value assigned to a std::function;
+          -- Python: a value called as `n()`). A value-producing arm is a bare
+          -- value (variable, literal, container coerced into the effect slot)
+          -- OR a nested conditional whose own arms are all value-producing
+          -- (`? b>0 = 1 : 2` yields a value, not a thunk) -- so the check
+          -- recurses through IfN. Wrap those arms in a DoBlockN. NullN arms keep
+          -- the optional-handling shape.
+          producesValue e = case e of
+            BndVarN {} -> True
+            LetVarN {} -> True
+            IntN {} -> True
+            RealN {} -> True
+            StrN {} -> True
+            LogN {} -> True
+            ListN {} -> True
+            TupleN {} -> True
+            RecordN {} -> True
+            DeserializeN {} -> True
+            IfN _ _ a b -> producesValue a && producesValue b
+            -- Value-passthrough wrappers: the value flows out of the tail /
+            -- inner expression, whose shape -- not this wrapper's own
+            -- (possibly effect-annotated) type -- decides. A coercion whose
+            -- inner is a value stays a value (a coerced pure call whose effect
+            -- was stripped by the optional widening); a `let .. in <value>`
+            -- (NativeLetN/SerialLetN) or a returned value is a value too. A
+            -- coercion / let over an effectful computation (the do-block /
+            -- @catch widening) recurses to that computation and is NOT a value.
+            CoerceN _ _ a -> producesValue a
+            NativeLetN _ _ a -> producesValue a
+            SerialLetN _ _ a -> producesValue a
+            ReturnN a -> producesValue a
+            -- A PURE computation (a foreign source call, a local manifold, an
+            -- intrinsic, an optional-lift) yields a plain value; an effect-typed
+            -- one already lowers to a thunk-producer upstream (it reaches the
+            -- arm wrapped in a DoBlockN) and must not be re-wrapped. So gate on
+            -- the node's own type. This distinguishes a value arm widened to an
+            -- effect slot (e.g. `? x>N = @throw : idc x` :: <Err> ?Int, where
+            -- the widening leaves the call pure) from a genuinely effectful one.
+            AppExeN t _ _ -> not (isEffectF t)
+            ExeN t _ -> not (isEffectF t)
+            ManN nm -> not (isEffectF (typeFof nm))
+            IntrinsicN t _ _ _ -> not (isEffectF t)
+            MapOptionalN t _ _ _ -> not (isEffectF t)
+            _ -> False
+          wrapArm e = if producesValue e then DoBlockN (typeFof e) e else e
+          isNull NullN{} = True
+          isNull _       = False
+          -- The single gate the whole effect-conditional invariant hinges on:
+          -- wrap both arms into thunks exactly when the conditional is
+          -- effect-typed and is NOT the optional (Null-bearing) shape. 'ifType'
+          -- above prefers the EffectF arm precisely so this fires, and the
+          -- DoBlockN arms produced here are what the EvalN/IfN peephole in
+          -- Reduce.hs recognises and collapses back to eager form when the
+          -- conditional is immediately forced.
+          wrapEffectArms = isEffectF ifType && not (isNull thenNe || isNull elseNe)
+          (thenNe', elseNe')
+            | wrapEffectArms = (wrapArm thenNe, wrapArm elseNe)
+            | otherwise      = (thenNe, elseNe)
+      return $ IfN ifType condNe thenNe' elseNe'
     nativeExpr m (MonoDoBlock t e) = DoBlockN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoEval t e) = EvalN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
@@ -503,16 +577,12 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is <IO, Err> a; the schema is for a.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the return type is <Err> a; the schema is for a.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
@@ -521,18 +591,14 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       -- from_voidstar<T>). For bracket-index/struct chains the result
       -- is a single element type; for bracket-slice it is a list type.
       -- Either way, the post-EffectF type carries the right shape.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrNext tf _ = do
       -- @next returns the sub-packet as `[a]`. The wrapper drops the
       -- EffectF wrap and serialises the list type so the per-language
       -- from_voidstar call materialises it correctly.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
@@ -750,7 +816,16 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState (MonoApp (MonoManifold _ _ _ e) _) = inferState e
     inferState (MonoLet _ _ e) = inferState e
     inferState (MonoReturn e) = inferState e
-    inferState (MonoManifold _ _ _ e) = inferState e
+    -- A function-valued manifold (non-empty bound args) is a first-class
+    -- closure -- a NATIVE value, whatever its body does internally. Following
+    -- into the body (as the saturated 'ManifoldFull' case must) would report
+    -- 'Serialized' whenever an arm crosses a language boundary, driving a
+    -- spurious closure reify at the let binding even though the closure is
+    -- consumed locally. Agrees with 'unwrapLetDef', which keeps such a manifold
+    -- whole for native-partial lowering.
+    inferState (MonoManifold _ form _ e)
+      | not (null (manifoldBound form)) = Unserialized
+      | otherwise = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE
     inferState MonoPoolCall {} = Unserialized
     inferState MonoBndVar {} = Unserialized
