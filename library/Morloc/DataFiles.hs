@@ -121,6 +121,7 @@ langRegistryFiles =
   , ("py", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/py/lang.yaml")))
   , ("r", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/lang.yaml")))
   , ("jl", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml")))
+  , ("futhark", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/futhark/lang.yaml")))
   ]
 
 -- | Shared languages.yaml with pairwise costs

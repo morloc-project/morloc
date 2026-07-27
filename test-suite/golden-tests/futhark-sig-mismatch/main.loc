@@ -1,0 +1,16 @@
+module main (result)
+
+import root
+import root-cpp
+import tensor
+import tensor-cpp
+
+-- Intentional mismatch: the futhark `matmul` entry is f32, but this signature
+-- declares F64. guestCheck must reject it at compile time (the golden asserts
+-- rejection, not a specific message).
+source Futhark from "kernels.fut" ("matmul" as fmatmul)
+
+fmatmul :: Matrix m k F64 -> Matrix k n F64 -> Matrix m n F64
+
+result :: Matrix 2 2 F64
+result = fmatmul (ones2 2 2) (ones2 2 2)

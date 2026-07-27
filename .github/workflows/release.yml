@@ -137,6 +137,12 @@ jobs:
             python3-numpy g++ gcc make libgsl-dev
           python3 -m pip install --break-system-packages --upgrade setuptools pyarrow
 
+      - name: Install Futhark (hosted-guest toolchain; not in apt)
+        run: |
+          curl -sSL https://futhark-lang.org/releases/futhark-0.26.4-linux-x86_64.tar.xz -o /tmp/futhark.tar.xz
+          tar -xf /tmp/futhark.tar.xz -C /tmp
+          make -C /tmp/futhark-0.26.4-linux-x86_64 install PREFIX="$HOME/.local"
+
       - name: Cache R packages
         uses: actions/cache@v4
         id: r-cache

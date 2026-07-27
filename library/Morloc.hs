@@ -36,6 +36,7 @@ import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
+import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Reduce (reduce)
@@ -75,6 +76,8 @@ typecheck ::
     )
 typecheck path code =
   typecheckFrontend path code
+    -- lower guest-language sources (e.g. Futhark) into host glue
+    >>= lowerGuests
     -- resolve all TypeU types to Type
     |>> map F.resolveTypes
     -- resolve all TypeU types to Type
