@@ -19,6 +19,7 @@ module Morloc.DataFiles
   , LangSetup (..)
   , libmorlocHeader
   , poolTemplate
+  , poolHostTemplate
   , poolTemplateGeneric
   , langSetups
   , langRegistryFiles
@@ -52,6 +53,12 @@ libmorlocHeader = decodeUtf8 $(embedFileRelative "data/morloc/morloc.h")
 poolTemplate :: Text -> EmbededFile
 poolTemplate "cpp" = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool.cpp"))
 poolTemplate name = error $ "No embedded pool template for " <> T.unpack name
+
+-- | Member-agnostic pool host translation unit for the CAbi family. Owns
+-- main()/pool_main; the member (pool.cpp) provides the registration hook it calls.
+poolHostTemplate :: Text -> EmbededFile
+poolHostTemplate "cpp" = EmbededFile "pool_host.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool_host.cpp"))
+poolHostTemplate name = error $ "No embedded pool host template for " <> T.unpack name
 
 -- | 3-section pool templates for the generic translator (sources, manifolds, dispatch)
 poolTemplateGeneric :: Text -> EmbededFile

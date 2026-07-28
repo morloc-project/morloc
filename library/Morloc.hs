@@ -94,6 +94,7 @@ typecheck path code =
 -- (rASTs become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
 generatePools rASTs0 = do
+  reg <- MM.gets stateLangRegistry
   rASTs <- mapM (applyLambdas False) rASTs0
   paramRASTs <- mapM parameterize rASTs
   let langMap = Map.fromList
@@ -112,7 +113,7 @@ generatePools rASTs0 = do
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
-      |>> pool
+      |>> pool reg
 
 -- | Build a program as a local executable
 writeProgram ::
@@ -161,6 +162,7 @@ writeProgram translateFn path code = do
         let langMap = Map.fromList
               [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
         MM.modify (\s -> s { stateManifoldLang = langMap })
+        reg <- MM.gets stateLangRegistry
         pools <-
           mapM express paramRASTs
             -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
@@ -176,7 +178,7 @@ writeProgram translateFn path code = do
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce
-              |>> pool
+              |>> pool reg
             >>= mapM (uncurry (emit translateFn))
         -- Fingerprint each pool's emitted source and substitute the
         -- hex hashes into the @<MORLOC_POOL_HASH:lang>@ placeholders

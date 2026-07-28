@@ -970,8 +970,9 @@ static uint8_t* make_fail_packet_with_trace(const char* msg) {
 }
 
 // Wrappers to adapt compiler-generated dispatch functions to pool_dispatch_fn_t.
-// These catch C++ exceptions so the C pool_main never sees them.
-static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
+// These catch C++ exceptions so the C pool_main never sees them. External
+// linkage so the (member-agnostic) host translation unit can register them.
+uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
     // Free SHM from previous dispatch (result packet consumed by caller)
@@ -993,7 +994,7 @@ static uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     }
 }
 
-static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
+uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
                                      size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
     morloc_debug_flush_dispatch();
@@ -1011,43 +1012,18 @@ static uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
 }
 
 
-int main(int argc, char* argv[]) {
-    // Line-buffer stderr so diagnostic output is not lost on pool shutdown.
-    // stdout is left fully buffered for performance (genome-scale piping)
-    // and flushed after each job by pool.c.
-    setvbuf(stderr, NULL, _IOLBF, 0);
-
-    // Request SIGTERM when the parent (nexus) dies. Without this,
-    // SIGKILL on the nexus leaves pool processes orphaned with
-    // leaked SHM segments in /dev/shm.
-#ifdef __linux__
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
-#endif
-
-    // Health check: confirm binary links and print version
-    if (argc == 2 && std::string(argv[1]) == "--health") {
-        std::cout << "{\"status\":\"ok\",\"version\":\"__MORLOC_VERSION__\"}" << std::endl;
-        return 0;
-    }
-
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <socket_path> <tmpdir> <shm_basename>\n";
-        return 1;
-    }
-
-    g_tmpdir = strdup(argv[2]);
-
-    pool_config_t config = {};
-    config.local_dispatch = cpp_local_dispatch;
-    config.remote_dispatch = cpp_remote_dispatch;
-    config.dispatch_ctx = NULL;
-    config.concurrency = POOL_THREADS;
-    config.initial_workers = 1;
-    config.dynamic_scaling = true;
-
+// Registration entry called by the member-agnostic host translation unit.
+// The host owns main() and the pool_main loop; this hook wires the C++
+// member's dispatchers, concurrency policy, tmpdir, and schema table into the
+// pool config. cpp_local_dispatch/cpp_remote_dispatch, g_tmpdir, POOL_THREADS,
+// and _init_schemas all live in this (member) translation unit.
+void cpp_register(pool_config_t* config, const char* tmpdir) {
+    g_tmpdir = strdup(tmpdir);
+    config->local_dispatch = cpp_local_dispatch;
+    config->remote_dispatch = cpp_remote_dispatch;
+    config->dispatch_ctx = NULL;
+    config->concurrency = POOL_THREADS;
+    config->initial_workers = 1;
+    config->dynamic_scaling = true;
     _init_schemas();
-    int result = pool_main(argc, argv, &config);
-
-    free(g_tmpdir);
-    return result;
 }

@@ -138,8 +138,12 @@ setupServerAndSocket ::
   LangRegistry ->
   Lang ->
   Socket
-setupServerAndSocket c reg lang = Socket lang args socket
+setupServerAndSocket c reg lang0 = Socket lang args socket
   where
+    -- A guest member (e.g. futhark) has no pool of its own; its socket/exec
+    -- resolve to its host pool (cpp). Centralised here so no caller can emit a
+    -- phantom guest socket by forgetting to map. Identity for non-members.
+    lang = LR.poolOf reg lang0
     name = ML.langName lang
     -- Look up run command: config overrides take precedence over registry defaults
     runCmd = case Map.lookup name (configLangOverrides c) of

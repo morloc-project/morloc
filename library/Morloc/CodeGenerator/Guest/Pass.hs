@@ -33,6 +33,7 @@ import Morloc.CodeGenerator.Guest
 import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (render)
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 
 -- | Lower every guest source in the typed AST to host glue. A no-op when there
@@ -67,7 +68,25 @@ lowerFuthark asts futSrcs = do
   MM.liftIO $ writeFile (hgHeader hg) (T.unpack (render (hgCode hg)))
   injectBuild products
   let bindings = Map.fromList [(alias, (hgHeader hg, fn)) | (alias, fn) <- hgBindings hg]
+  -- Rewrite the source table too, so downstream include-collection
+  -- (metaSources / lookupConstructors) sees the C++ glue header rather than
+  -- the raw .fut (which is compiled separately to kernels.o, not #included).
+  MM.modify $ \s -> s {stateSources = GMap.mapVals (map (rewriteFutSource bindings)) (stateSources s)}
   return (map (rewriteSrc bindings) asts)
+
+-- Point a futhark Source at its generated glue (header path + function name),
+-- keeping srcLang = futhark. Since the lang is not flipped to cpp, the Source
+-- is internally inconsistent (lang says futhark, path points at a C++ header),
+-- so every store that holds futhark Sources must apply this rewrite or it will
+-- try to #include the raw .fut. Currently applied to both the call-site ASTs
+-- and stateSources.
+rewriteFutSource :: Map EVar (Path, SrcName) -> Source -> Source
+rewriteFutSource bindings src
+  | langName (srcLang src) == futharkLangName =
+      case Map.lookup (srcAlias src) bindings of
+        Just (gluePath, glueFn) -> src {srcPath = Just gluePath, srcName = glueFn}
+        Nothing -> src
+  | otherwise = src
 
 -- build a GlueEntry by rendering the host (C++) arg/return types from the sig
 toGlueEntry :: (SourcedSig, FutharkEntry) -> GlueEntry FutharkEntry
@@ -89,7 +108,11 @@ collectLang lang = go
         | langName (srcLang src) == lang -> [(src, t)]
       _ -> execWriter (mapExprSM (\c -> tell (go c) >> pure c) e)
 
--- rewrite each futhark SrcCall to a cpp SrcCall against the generated glue
+-- Point each futhark SrcCall at the generated C++ glue function, but KEEP
+-- srcLang = futhark. The call then realizes as its own (futhark) language and
+-- co-locates into the host (cpp) pool via 'poolOf' (see Emit.pool /
+-- decideRemoteness), rather than being rewritten to a cpp source. The glue is
+-- C++, so the cpp translator emits an ordinary in-process call to it.
 rewriteSrc ::
   Map EVar (Path, SrcName) ->
   AnnoS (Indexed TypeU) Many Int ->
@@ -100,15 +123,9 @@ rewriteSrc bindings = runIdentity . go
       e' <- case e of
         ExeS (SrcCall src)
           | langName (srcLang src) == futharkLangName ->
-              pure $ case Map.lookup (srcAlias src) bindings of
-                Just (gluePath, glueFn) ->
-                  ExeS (SrcCall src {srcLang = cppLang, srcPath = Just gluePath, srcName = glueFn})
-                Nothing -> e
+              pure $ ExeS (SrcCall (rewriteFutSource bindings src))
         _ -> mapExprSM go e
       pure (AnnoS g c e')
-
-cppLang :: Lang
-cppLang = Lang "cpp" "cpp"
 
 -- ---------------------------------------------------------------------------
 -- build environment + product injection

@@ -108,6 +108,7 @@ main = do
       , golden "conditional-value-codegen" "conditional-value-codegen"
       , golden "futhark-basic" "futhark-basic"
       , golden "futhark-sig-mismatch" "futhark-sig-mismatch"
+      , golden "futhark-py-crosspool" "futhark-py-crosspool"
       , golden "intrinsic-catch-cpp" "intrinsic-catch-cpp"
       , golden "intrinsic-catch-py" "intrinsic-catch-py"
       , golden "intrinsic-catch-r" "intrinsic-catch-r"

@@ -13,7 +13,7 @@ Converts 'IStmt' and 'IExpr' IR nodes into C++ source text. Handles
 type rendering, struct definitions, forward declarations, and C++
 idioms (templates, shared_ptr, std::variant).
 -}
-module CppPrinter
+module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   ( printExpr
   , printStmt
   , printStmts

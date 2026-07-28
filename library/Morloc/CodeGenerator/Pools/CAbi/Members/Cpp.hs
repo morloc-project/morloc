@@ -18,14 +18,14 @@ Stateful C++ translator using the two-phase IR architecture: lower the
 via 'CppPrinter'. Handles C++-specific concerns like compilation flags,
 include paths, struct generation, and template instantiation.
 -}
-module CppTranslator
+module Morloc.CodeGenerator.Pools.CAbi.Members.Cpp
   ( translate
   , cppLang
   ) where
 
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
-import qualified CppPrinter as CP
+import qualified Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter as CP
 import qualified Data.Char as DC
 import Data.Ord (comparing)
 import qualified Data.Set as Set
@@ -44,6 +44,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.DataFiles as DF
+import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -420,9 +422,16 @@ translate srcs es = do
     Script
       { scriptBase = "pool"
       , scriptLang = cppLang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File "pool.cpp" (Code (T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)))]]
+      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir
+          [ File "pool.cpp" (Code (subVersion (render code)))
+          , File "pool_host.cpp" (Code (subVersion (DF.embededFileText (DF.poolHostTemplate "cpp"))))
+          ]]
       , scriptMake = maker
       }
+
+-- Substitute the version placeholder shared by the member and host templates.
+subVersion :: Text -> Text
+subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 
 makeCppCode ::
   Map.Map Int Text ->
@@ -606,6 +615,9 @@ makeTheMaker srcs = do
   poolSubdir <- MM.getModuleName
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
+  -- The member-agnostic host translation unit (owns main()/pool_main); the C++
+  -- member (pool.cpp) provides cpp_register. Compiled as a second TU and linked.
+  let hostSrc = pretty $ "pools" </> poolSubdir </> "pool_host.cpp"
 
   (_, flags, includes) <- handleFlagsAndPaths srcs
 
@@ -619,7 +631,7 @@ makeTheMaker srcs = do
 
   let cmd =
         SysRun . Code . render $
-          [idoc|${CXX:-g++} -O2 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+          [idoc|${CXX:-g++} -O2 -o #{outfile} #{src} #{hostSrc} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 
@@ -1620,11 +1632,14 @@ handleFlagsAndPaths srcs = do
   let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
   let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
   let userCxxFlags = unique . concatMap packageCxxFlags $ statePackageMeta state
+  -- Collect sources belonging to this pool: cpp sources and any guest member
+  -- whose pool host is cpp (e.g. futhark glue headers, srcLang=futhark). Their
+  -- includes/-I flags must reach the cpp pool build.
   (srcs', libflags, paths) <-
     fmap unzip3
-      . mapM flagAndPath
+      . mapM (flagAndPath (stateLangRegistry state))
       . unique
-      $ [s | s <- srcs, srcLang s == cppLang]
+      $ [s | s <- srcs, LR.poolOf (stateLangRegistry state) (srcLang s) == cppLang]
 
   home <- MM.asks configHome
   let mlcInclude = ["-I" <> home <> "/include"]
@@ -1642,8 +1657,8 @@ gccVersionFlag i
   | i <= 20 = "-std=c++20"
   | otherwise = "-std=c++" <> MT.show' i
 
-flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | srcL == cppLang =
+flagAndPath :: LR.LangRegistry -> Source -> MorlocMonad (Source, [String], Maybe Path)
+flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang =
   case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     (".", base, "") -> do
       header <- lookupHeader base
@@ -1683,8 +1698,8 @@ flagAndPath src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | srcL == cppLang =
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ srcL Nothing _ _ _ _ _ _ _) | srcL == cppLang = return (src, [], Nothing)
-flagAndPath _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
+flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
+flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do

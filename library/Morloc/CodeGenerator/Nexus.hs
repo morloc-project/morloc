@@ -249,7 +249,9 @@ findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
 findSockets rAST = do
   config <- MM.ask
   registry <- MM.gets stateLangRegistry
-  return . map (MC.setupServerAndSocket config registry) . unique $ findAllLangsSAnno rAST
+  -- Collapse guest members onto their pool host (futhark -> cpp) so a
+  -- co-located member never enumerates its own socket/pool in the manifest.
+  return . map (MC.setupServerAndSocket config registry) . unique . map (LR.poolOf registry) $ findAllLangsSAnno rAST
 
 findAllLangsSAnno :: (Foldable f) => AnnoS e f (Indexed Lang) -> [Lang]
 findAllLangsSAnno = foldAnnoS (\(AnnoS _ (Idx _ lang) _) -> [lang])
@@ -2507,12 +2509,15 @@ generate cs rASTs helperRASTs = do
         return installDir
       else liftIO Dir.getCurrentDirectory
 
+  poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
       daemonSets = uniqueFst [(socketLang s, s) | s <- allSockets]
 
+      -- A guest member's manifolds live in its host's pool; map its lang to
+      -- the host pool index (futhark -> cpp). Identity for non-members.
       langToPoolIndex :: Lang -> Int
       langToPoolIndex lang =
-        case findIndex ((== lang) . fst) daemonSets of
+        case findIndex ((== LR.poolOf poolRegistry lang) . fst) daemonSets of
           Just idx -> idx
           Nothing -> error $ "Pool not found for language: " <> show lang
 

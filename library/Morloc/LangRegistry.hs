@@ -20,6 +20,8 @@ module Morloc.LangRegistry
   , lookupLang
   , lookupByAlias
   , buildLangMap
+  , poolOf
+  , coLocated
   , registryPairwiseCost
   , registryLanguageCost
   , registrySerialType
@@ -66,6 +68,12 @@ data LangRegistryEntry = LangRegistryEntry
   -- boundary into a pool of this language. Defaults to True so older
   -- lang.yaml files without the key keep their permissive behaviour.
   , lreAllowStringNull :: !Bool
+  -- | The pool host language for a co-located "member" language. When set
+  -- (e.g. futhark's @host: cpp@), this language has no pool of its own; its
+  -- manifolds are compiled into the host language's pool binary and a call
+  -- across the boundary is in-process, not a socket foreign call. Nothing for
+  -- ordinary languages, which host their own pool. See 'poolOf'.
+  , lreHost :: !(Maybe Text)
   }
   deriving (Show)
 
@@ -115,6 +123,22 @@ buildLangMap reg =
     | (alias, canonical) <- Map.toList (lrAliases reg)
     , Just entry <- [Map.lookup canonical (lrEntries reg)]
     ]
+
+-- | The pool a language's manifolds compile into. A "member" language with a
+-- @host:@ (e.g. futhark -> cpp) shares the host's pool binary; every other
+-- language hosts its own pool (identity). Used to collapse co-located members
+-- into one pool so a cross-member call is in-process, not a socket call.
+poolOf :: LangRegistry -> Lang -> Lang
+poolOf reg l =
+  case Map.lookup (langName l) (lrEntries reg) >>= lreHost of
+    Just hostName -> case Map.lookup hostName (lrEntries reg) of
+      Just entry -> Lang hostName (lreExtension entry)
+      Nothing -> l
+    Nothing -> l
+
+-- | True when two languages compile into the same pool binary.
+coLocated :: LangRegistry -> Lang -> Lang -> Bool
+coLocated reg a b = poolOf reg a == poolOf reg b
 
 registryPairwiseCost :: LangRegistry -> Text -> Text -> Int
 registryPairwiseCost reg from to
@@ -183,6 +207,7 @@ data LangYamlMeta = LangYamlMeta
   , lymCost :: Int
   , lymPreamble :: [Text]
   , lymAllowStringNull :: Bool
+  , lymHost :: Maybe Text
   }
   deriving (Show)
 
@@ -198,6 +223,7 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "cost" .!= 5
       <*> o .:? "preamble" .!= []
       <*> o .:? "allow_string_null" .!= True
+      <*> o .:? "host"
 
 data LanguagesYaml = LanguagesYaml
   { lysSameLangCosts :: Map Text Int
@@ -231,6 +257,7 @@ entryFromYaml ly =
     , lreCost = lymCost ly
     , lrePreamble = lymPreamble ly
     , lreAllowStringNull = lymAllowStringNull ly
+    , lreHost = lymHost ly
     }
 
 -- | Parse a lang.yaml file from the filesystem, returning (canonical name, extension)

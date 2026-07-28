@@ -38,6 +38,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
@@ -446,23 +447,29 @@ expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ _) = do
 expressPolyExprWrapCommon ::
   Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
 expressPolyExprWrapCommon l t e@(AnnoS _ _ (AppS (AnnoS (Idx gidxCall _) _ _) _)) = do
+  reg <- MM.gets stateLangRegistry
   bconf <- MM.gets stateBuildConfig
   mconMap <- MM.gets stateManifoldConfig
-  expressPolyExpr (decideRemoteness bconf (Map.lookup gidxCall mconMap)) l t e
+  expressPolyExpr (decideRemoteness reg bconf (Map.lookup gidxCall mconMap)) l t e
 expressPolyExprWrapCommon l t e@(AnnoS (Idx midx _) _ _) = do
+  reg <- MM.gets stateLangRegistry
   bconf <- MM.gets stateBuildConfig
   mconMap <- MM.gets stateManifoldConfig
-  expressPolyExpr (decideRemoteness bconf (Map.lookup midx mconMap)) l t e
+  expressPolyExpr (decideRemoteness reg bconf (Map.lookup midx mconMap)) l t e
 
-decideRemoteness :: BuildConfig -> Maybe ManifoldConfig -> Lang -> Lang -> Maybe RemoteForm
-decideRemoteness _ Nothing l1 l2
-  | l1 == l2 = Nothing
+-- A call between two languages is a remote (socket) call unless they are
+-- co-located members of one pool (e.g. cpp and its guest futhark), in which
+-- case it stays an in-process call. For non-member languages 'coLocated'
+-- reduces to '==', so this is unchanged for cpp/py/r.
+decideRemoteness :: LR.LangRegistry -> BuildConfig -> Maybe ManifoldConfig -> Lang -> Lang -> Maybe RemoteForm
+decideRemoteness reg _ Nothing l1 l2
+  | LR.coLocated reg l1 l2 = Nothing
   | otherwise = Just ForeignCall
-decideRemoteness bconf (Just mconfig) l1 l2 = case manifoldConfigRemote mconfig of
+decideRemoteness reg bconf (Just mconfig) l1 l2 = case manifoldConfigRemote mconfig of
   Nothing
-    | l1 == l2 -> Nothing
+    | LR.coLocated reg l1 l2 -> Nothing
     | otherwise -> Just ForeignCall
-  Just res -> case (buildConfigSlurmSupport bconf, l1 /= l2) of
+  Just res -> case (buildConfigSlurmSupport bconf, not (LR.coLocated reg l1 l2)) of
     (Just True, _) -> Just $ RemoteCall res
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
@@ -2040,13 +2047,16 @@ lookupRecursiveTarget :: Lang -> EVar -> MorlocMonad (Int, Maybe Lang)
 lookupRecursiveTarget parentLang v = do
   nameMap <- MM.gets stateName
   langMap <- MM.gets stateManifoldLang
+  reg <- MM.gets stateLangRegistry
   -- Filter to concrete manifolds only (those in langMap) to avoid picking up
   -- general/polymorphic indices that don't have serial manifold definitions
   let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
   case Map.lookup v reverseMap of
     (Just mid) -> do
+      -- A cross-language recursive call only when the target is NOT co-located
+      -- with the caller; a co-located member (futhark in cpp) is an in-process call.
       let crossLang = case Map.lookup mid langMap of
-            Just tl | tl /= parentLang -> Just tl
+            Just tl | not (LR.coLocated reg parentLang tl) -> Just tl
             _ -> Nothing
       return (mid, crossLang)
     Nothing -> MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v

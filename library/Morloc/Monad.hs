@@ -501,7 +501,10 @@ getDocStrings i = do
     _ -> error "Compiler bug: No entry found for index in stateSignatures"
 
 getConcreteScope :: Int -> Lang -> MorlocMonad Scope
-getConcreteScope i lang = do
+getConcreteScope i lang0 = do
+  -- A guest member (e.g. futhark) has no concrete scope of its own; resolve
+  -- against its pool host's scope (cpp). Identity for non-members.
+  lang <- LR.poolOf <$> gets stateLangRegistry <*> pure lang0
   p <- gets stateConcreteTypedefs
   return $ case GMap.lookup i p of
     (GMapJust langmap) -> case Map.lookup lang langmap of
@@ -517,7 +520,8 @@ getGeneralScope i = do
     _ -> Map.empty
 
 getConcreteUniversalScope :: Lang -> MorlocMonad Scope
-getConcreteUniversalScope lang = do
+getConcreteUniversalScope lang0 = do
+  lang <- LR.poolOf <$> gets stateLangRegistry <*> pure lang0
   scopeMap <- gets stateUniversalConcreteTypedefs
   case Map.lookup lang scopeMap of
     (Just scope) -> return scope

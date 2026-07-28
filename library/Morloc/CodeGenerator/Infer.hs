@@ -198,7 +198,7 @@ inferConcreteTypeUniversalStructural lang gscopeUni t g c = case (g, c) of
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-  cscopeUni <- CMS.gets stateUniversalConcreteTypedefs |>> fromMaybe Map.empty . Map.lookup lang
+  cscopeUni <- MM.getConcreteUniversalScope lang
   let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t

@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Emit
 import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 
 {- | Callback type for language-specific translation.
@@ -25,9 +26,12 @@ The executable provides concrete implementations for each language.
 type TranslateFn = Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 
 -- | Sort manifolds into pools. Within pools, group manifolds into call sets.
-pool :: [SerialManifold] -> [(Lang, [SerialManifold])]
-pool es =
-  let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _ _) -> (lang, (i, x))) $ es
+-- Manifolds are grouped by their POOL language ('poolOf'), so a guest member
+-- (e.g. futhark) folds into its host's pool (cpp) rather than forming its own.
+-- For non-member languages 'poolOf' is identity, so this is unchanged.
+pool :: LR.LangRegistry -> [SerialManifold] -> [(Lang, [SerialManifold])]
+pool reg es =
+  let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _ _) -> (LR.poolOf reg lang, (i, x))) $ es
       uniqueSegments = map (Map.elems . Map.fromList) indexedSegments
    in zip langs uniqueSegments
 
