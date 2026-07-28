@@ -63,6 +63,7 @@ main = do
       , recursiveRecordTests
       , bidirectionalAppCheckTests
       , postArgPropagationTests
+      , tuplePatternLambdaTests
       , withDocstringTests
       , morlocDepsTests
       , sizeParseTests
@@ -420,6 +421,7 @@ main = do
       , golden "edge-cases-2" "edge-cases-2"
       , golden "type-synthesis-1" "type-synthesis-1"
       , golden "type-synthesis-2" "type-synthesis-2"
+      , golden "tuple-pattern-lambda-inference" "tuple-pattern-lambda-inference"
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"
       , golden "argument-form-1-r" "argument-form-1-r"

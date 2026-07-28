@@ -1568,18 +1568,20 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1 =
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
 instantiate scope ta (ExistU v ([], _) ([], _)) g1 = do
   g1' <- propagateExistGRecords scope v ta g1
-  case lookupU v g1' of
-    Just t  -> subtype scope ta t g1' >>= specializeExist scope v t ta
-    Nothing -> solveExist v ta g1' >>= maybe (return g1') return
+  g1'' <- propagateExistGPositional scope v ta g1'
+  case lookupU v g1'' of
+    Just t  -> subtype scope ta t g1'' >>= specializeExist scope v t ta
+    Nothing -> solveExist v ta g1'' >>= maybe (return g1'') return
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
 instantiate scope (ExistU v ([], _) ([], _)) tb g1 = do
   g1' <- propagateExistGRecords scope v tb g1
-  case lookupU v g1' of
-    Just t  -> subtype scope t tb g1' >>= specializeExist scope v t tb
-    Nothing -> solveExist v tb g1' >>= maybe (return g1') return
+  g1'' <- propagateExistGPositional scope v tb g1'
+  case lookupU v g1'' of
+    Just t  -> subtype scope t tb g1'' >>= specializeExist scope v t tb
+    Nothing -> solveExist v tb g1'' >>= maybe (return g1'') return
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
@@ -1640,6 +1642,92 @@ propagateExistGRecords scope v t g = case t of
       g
       (accumulatedRecords v g)
   _ -> Right g
+
+-- | Positional (tuple) counterpart of 'accumulatedRecords': the field-slot
+-- constraint lists attached to a bare existential @v@ through solved
+-- structural existential aliases in gammaSolved -- the @[slot]@ list a
+-- tuple-index getter @.0 v@ or field setter @(.0 = e) v@ leaves behind.
+-- Each element is one alias's slot list, indexed by tuple position. Unlike
+-- the record case, the ExistU/ExistU merge does not copy these onto @v@'s
+-- own ExistG entry, so the solved aliases are the only place they live.
+--
+-- A getter's alias is keyed by its @_pattern_@ var, but a setter's chains
+-- through an unrelated var (e.g. a caller's forall), so we cannot filter on
+-- the alias key. We instead require at least one slot to be a getter/setter
+-- structural slot (@_pattern_@ / @set_slot_@), which both identifies the
+-- alias as accessor-derived and excludes the positional existentials that
+-- ordinary @AppU@ (list/vector/user-type) unification produces. Callers
+-- only invoke this once @v@ is solved to a ground type, keeping the
+-- gammaSolved walk off the hot path.
+accumulatedPositionalSets :: TVar -> Gamma -> [[TypeU]]
+accumulatedPositionalSets v g =
+  [ ps
+  | (_, ExistU v' (ps, _) _) <- Map.toList (gammaSolved g)
+  , v' == v
+  , any isStructuralSlot ps
+  ]
+  where
+    isStructuralSlot (ExistU (TV nm) _ _) =
+      MT.isPrefixOf "_pattern_" nm || MT.isPrefixOf "set_slot_" nm
+    isStructuralSlot _ = False
+
+-- | Whether a ground type is a tuple (@IsTuple args@), definitely not a
+-- tuple (@NotTuple@ -- a record, primitive, or non-tuple type constructor),
+-- or not yet decided (@UndecidedTuple@ -- an existential, forall, or other
+-- not-yet-ground form). Type aliases are reduced before deciding, so a
+-- @type Pair a b = (a, b)@ resolves to @IsTuple@.
+data TupleShape = IsTuple [TypeU] | NotTuple | UndecidedTuple
+
+classifyTupleShape :: Scope -> TypeU -> TupleShape
+classifyTupleShape scope = go (0 :: Int)
+  where
+    go fuel t
+      | fuel > 100 = UndecidedTuple
+      | otherwise = case t of
+          AppU (VarU (TV nm)) args
+            | MT.isPrefixOf "Tuple" nm -> IsTuple args
+            | Map.member (TV nm) scope -> reduced fuel t
+            | otherwise -> NotTuple
+          VarU (TV nm)
+            | Map.member (TV nm) scope -> reduced fuel t
+            | otherwise -> NotTuple
+          NamU {} -> NotTuple
+          _ -> UndecidedTuple
+    reduced fuel t = maybe NotTuple (go (fuel + 1)) (TE.reduceType scope t)
+
+-- | When a bare existential @v@ is solved to a ground type, reconcile it
+-- with any positional field-slot constraints accumulated on @v@ (see
+-- 'accumulatedPositionalSets'). If @v@ is solved to a tuple, push each
+-- tuple element into the corresponding slot: this pins a getter's
+-- result-slot (a projection @.0 v@ whose type would otherwise surface as an
+-- unresolved generic once @v@ is solved wholesale) and a setter's set-value
+-- slot (so @(.0 = e) v@ enforces the field type just as it does on a
+-- concrete receiver). If @v@ carries a positional constraint but is solved
+-- to a non-tuple, a destructuring pattern was applied to a value that is not
+-- a tuple -- reject it here rather than deferring to a codegen crash on the
+-- projection. Mirrors 'propagateExistGRecords' for positional slots. The
+-- shape classification skips the gammaSolved walk for not-yet-ground solves.
+propagateExistGPositional :: Scope -> TVar -> TypeU -> Gamma -> Either MDoc Gamma
+propagateExistGPositional scope v t g = case classifyTupleShape scope t of
+  UndecidedTuple -> Right g
+  IsTuple tupleArgs ->
+    foldM
+      (\gAcc ps ->
+         if length ps > length tupleArgs
+           then subtypeError t t $
+             "tuple arity" <+> pretty (length tupleArgs)
+               <+> "required, index" <+> pretty (length ps - 1) <+> "given"
+           else foldM
+                  (\g' (slot, elemT) -> subtype scope elemT slot g')
+                  gAcc
+                  (zip ps tupleArgs))
+      g
+      (accumulatedPositionalSets v g)
+  NotTuple -> case accumulatedPositionalSets v g of
+    [] -> Right g
+    _  -> subtypeError t t $
+      "a destructuring pattern requires a tuple, but the value has type"
+        <+> parens (pretty t)
 
 -- | After a subtype check succeeds between a solved existential's current
 -- value and a new type, check if the new type is more specialized (a

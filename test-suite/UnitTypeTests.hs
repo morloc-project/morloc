@@ -49,6 +49,7 @@ module UnitTypeTests
   , recursiveRecordTests
   , bidirectionalAppCheckTests
   , postArgPropagationTests
+  , tuplePatternLambdaTests
   , withDocstringTests
   ) where
 
@@ -7799,6 +7800,154 @@ postArgPropagationTests =
         x = g (f (make 9))
           |]
           (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
+      ]
+
+-- Shared abstract environment for the destructuring-propagation tests.
+-- Every case exports a single binding `r`; it references only the
+-- signatures/data it needs and ignores the rest.
+tplEnv :: MT.Text
+tplEnv =
+  [r|
+map :: (a -> b) -> [a] -> [b]
+dbl :: Int -> Int
+proj :: (Str, Int) -> Str
+proj (k, v) = k
+ys :: [Int]
+ys = [1, 2, 3]
+n :: Int
+n = 5
+t :: (Str, Int)
+t = ("a", 1)
+xs :: [(Str, Int)]
+xs = [("a", 1)]
+sxs :: [(Str, Str)]
+sxs = [("a", "b")]
+ts :: [(Str, Int, Bool)]
+ts = [("a", 1, True)]
+us :: [((Str, Int), Bool)]
+us = [(("a", 1), True)]
+|]
+
+tplProg :: MT.Text -> MT.Text
+tplProg body = "module main (r)\n" <> tplEnv <> "\nr = " <> body <> "\n"
+
+-- | When a function argument has a concrete type, each variable pulled
+-- out by a destructuring pattern (a tuple pattern in a lambda parameter
+-- or a let binding) must receive the corresponding component type --
+-- even when that component is passed straight through to the result
+-- without any other constraint. Axes covered: lambda-param vs let
+-- destructuring; argument pinned by a binding vs an inline literal;
+-- pass-through of the first / second / both / swapped / three-wide /
+-- nested components; a component pinned by a same-application function
+-- as a control; plain-variable lambdas and annotated/checked forms as
+-- controls that must keep working; and negative cases where consuming a
+-- destructured component at a contradictory type must be rejected.
+tuplePatternLambdaTests :: TestTree
+tuplePatternLambdaTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "Destructuring-pattern argument-type propagation"
+      [ -- Controls: plain-variable lambdas already flow the argument
+        -- type in, including a pass-through into a constructed tuple.
+        assertGeneralType
+          "plain-var lambda, argument pinned by a binding"
+          (tplProg "map (\\x -> dbl x) ys")
+          (lst int)
+      , assertGeneralType
+          "plain-var lambda constructing a tuple (pass-through)"
+          (tplProg "map (\\x -> (x, x)) ys")
+          (lst (tuple [int, int]))
+      , assertGeneralType
+          "plain-var lambda, direct application"
+          (tplProg "(\\x -> dbl x) n")
+          int
+      , -- Core: a tuple-pattern parameter must receive each component
+        -- type from the argument. The pass-through first component is
+        -- the one with no other constraint.
+        assertGeneralType
+          "tuple-pattern lambda, pass-through first component"
+          (tplProg "map (\\(k, v) -> (k, dbl v)) xs")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "tuple-pattern lambda over an inline literal argument"
+          (tplProg "map (\\(k, v) -> (k, dbl v)) [(\"a\", 1)]")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "tuple-pattern lambda, project the first component"
+          (tplProg "map (\\(k, v) -> k) xs")
+          (lst str)
+      , assertGeneralType
+          "tuple-pattern lambda, project the second component"
+          (tplProg "map (\\(k, v) -> v) xs")
+          (lst int)
+      , assertGeneralType
+          "tuple-pattern lambda, both components (identity)"
+          (tplProg "map (\\(k, v) -> (k, v)) xs")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "tuple-pattern lambda, swapped components"
+          (tplProg "map (\\(k, v) -> (v, k)) xs")
+          (lst (tuple [int, str]))
+      , assertGeneralType
+          "tuple-pattern lambda, component pinned by a function (control)"
+          (tplProg "map (\\(k, v) -> dbl v) xs")
+          (lst int)
+      , assertGeneralType
+          "three-wide tuple-pattern lambda"
+          (tplProg "map (\\(a, b, c) -> (a, c)) ts")
+          (lst (tuple [str, bool]))
+      , assertGeneralType
+          "nested tuple-pattern lambda"
+          (tplProg "map (\\((a, b), c) -> a) us")
+          (lst str)
+      , assertGeneralType
+          "direct application of a tuple-pattern lambda"
+          (tplProg "(\\(k, v) -> k) t")
+          str
+      , assertGeneralType
+          "let-bound tuple destructuring inside a lambda"
+          (tplProg "map (\\p -> let (k, v) = p in k) xs")
+          (lst str)
+      , -- Controls in checking mode: an annotated result and a named
+        -- helper with an explicit signature must keep resolving.
+        assertGeneralType
+          "annotated result (checking mode control)"
+          (tplProg "map (\\(k, v) -> (k, dbl v)) xs :: [(Str, Int)]")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "named helper with an explicit signature (control)"
+          (tplProg "map proj xs")
+          (lst str)
+      , -- Negative: a destructured component consumed at a type that
+        -- contradicts the argument must be rejected. A component whose
+        -- type is dropped would silently accept these.
+        exprTestBad
+          "destructured first component used at a wrong type is rejected"
+          (tplProg "map (\\(k, v) -> dbl k) xs")
+      , exprTestBad
+          "wrong-typed destructured component under direct application is rejected"
+          (tplProg "(\\(k, v) -> dbl k) t")
+      , exprTestBad
+          "destructured second component used at a wrong type is rejected"
+          (tplProg "map (\\(k, v) -> dbl v) sxs")
+      , -- A destructuring pattern pins its parameter to a tuple shape, so
+        -- applying such a lambda to a non-tuple must be rejected up front,
+        -- not deferred to a codegen crash on the projection.
+        exprTestBad
+          "tuple-pattern lambda mapped over non-tuples is rejected"
+          (tplProg "map (\\(k, v) -> k) ys")
+      , exprTestBad
+          "tuple-pattern lambda applied to a scalar is rejected"
+          (tplProg "(\\(k, v) -> k) n")
+      , -- A field setter reached through a lambda parameter must enforce the
+        -- field's type just as it does on a concrete receiver: setting the
+        -- Str field .0 to an Int literal must fail.
+        exprTestBad
+          "wrong-typed field setter through a lambda parameter is rejected"
+          (tplProg "map (\\p -> (.0 = 7) p) xs")
+      , exprTestBad
+          "wrong-typed field setter under direct application is rejected"
+          (tplProg "(\\p -> (.0 = 7) p) t")
       ]
 
 -- | Frontend validation of `--' with:` docstring atoms (terminal
