@@ -52,6 +52,7 @@ libmorlocHeader = decodeUtf8 $(embedFileRelative "data/morloc/morloc.h")
 -- | Pool template lookup by canonical language name
 poolTemplate :: Text -> EmbededFile
 poolTemplate "cpp" = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool.cpp"))
+poolTemplate "rust" = EmbededFile "pool.rs" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/pool.rs"))
 poolTemplate name = error $ "No embedded pool template for " <> T.unpack name
 
 -- | Member-agnostic pool host translation unit for the CAbi family. Owns
@@ -129,6 +130,7 @@ langRegistryFiles =
   , ("r", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/lang.yaml")))
   , ("jl", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml")))
   , ("futhark", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/futhark/lang.yaml")))
+  , ("rust", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/lang.yaml")))
   ]
 
 -- | Shared languages.yaml with pairwise costs

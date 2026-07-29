@@ -59,6 +59,7 @@ makeExecutableName :: Lang -> String -> String
 makeExecutableName lang base
   | langName lang == "c" = base <> "-c.out"
   | langName lang == "cpp" = base <> "-cpp.out"
+  | langName lang == "rust" = base <> "-rust.out"
   | otherwise = makeSourceName lang base
 
 makeExecutablePoolName :: Lang -> String

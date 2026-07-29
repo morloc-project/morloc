@@ -117,7 +117,29 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- (see the MORLOC_BIN_LINK_DIR handling below).
   userHome <- getHomeDirectory
 
+  -- Resolve the Rust workspace source + cargo up front. Needed by the
+  -- from-source libmorloc build AND -- unconditionally -- by the rustmorloc
+  -- build below: rustmorloc is an rlib locked to the LOCAL rustc that
+  -- `morloc make` uses, so it can never come from a prebuilt bundle (unlike
+  -- the C-ABI libmorloc.so) and must be compiled locally in every init path.
+  -- Search order: MORLOC_RUST_DIR; the prebuilt bundle's `rust/` subdir; the
+  -- persisted copy at $MORLOC_HOME/rust; then next to the morloc binary.
   rustBinEnv <- lookupEnv "MORLOC_RUST_BIN"
+  rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
+  rustDir <- case rustDirEnv of
+    Just d -> return d
+    Nothing -> do
+      morlocBin <- findExecutable "morloc"
+      let bundleCandidate = case rustBinEnv of Just b -> [b </> "rust"]; Nothing -> []
+          homeCandidate = [homeDir </> "rust"]
+          binCandidates = case morlocBin of
+            Just binPath ->
+              [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "rust"
+              , takeDirectory (takeDirectory binPath) </> "data" </> "rust"
+              ]
+            Nothing -> []
+      findRustDir (bundleCandidate ++ homeCandidate ++ binCandidates)
+  hasCargo <- findExecutable "cargo"
   case rustBinEnv of
     Just binDir -> do
       -- Pre-built binaries (release path)
@@ -137,22 +159,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         run verbose "cp" [prebuiltManager, managerBinPath]
         run verbose "chmod" ["+x", managerBinPath]
     Nothing -> do
-      -- Try to build from source: need both cargo and the Rust workspace
-      rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
-      rustDir <- case rustDirEnv of
-        Just d -> return d
-        Nothing -> do
-          morlocBin <- findExecutable "morloc"
-          let searchDirs = case morlocBin of
-                Just binPath ->
-                  [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "rust"
-                  , takeDirectory (takeDirectory binPath) </> "data" </> "rust"
-                  ]
-                Nothing -> []
-          findRustDir searchDirs
-
-      hasCargo <- findExecutable "cargo"
-
+      -- Build libmorloc.so + morloc-nexus/manager from source (needs cargo +
+      -- the Rust workspace, resolved above).
       when (null rustDir || hasCargo == Nothing) $
         ioError . userError $ unlines
           [ "morloc init requires pre-built libmorloc.so and morloc-nexus binaries."
@@ -218,6 +226,39 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         Just stripPath -> run verbose stripPath [managerBinPath]
         Nothing -> return ()
 
+      return ()
+
+  -- Build the rustmorloc pool marshaller (an rlib) into a DEDICATED target dir
+  -- under $MORLOC_HOME/lib. This runs in EVERY init path (prebuilt or
+  -- from-source libmorloc): unlike the C-ABI libmorloc.so, rustmorloc is an
+  -- rlib locked to the LOCAL rustc that `morloc make` uses, so it can never be
+  -- a prebuilt bundle artifact -- it must be compiled here with the local
+  -- toolchain. The isolated target dir keeps the dependency closure unambiguous
+  -- for the bare-rustc pool build (Members/Rust.hs::makeTheMaker):
+  --   --extern rustmorloc=<rust-build>/release/librustmorloc.rlib
+  --   -L dependency=<rust-build>/release/deps
+  -- so rustmorloc's transitive deps (morloc_runtime_types, ...) resolve by
+  -- exact hash. Mirrors cpp/init.sh's libcppmorloc.a install.
+  case (null rustDir, hasCargo) of
+    (False, Just _) -> do
+      sayInfo verbose "Compiling rustmorloc (Rust pool marshaller)"
+      let rustBuildDir = libDir </> "rust-build"
+      run verbose "cargo"
+        [ "build", "--release"
+        , "--manifest-path", rustDir </> "Cargo.toml"
+        , "-p", "rustmorloc"
+        , "--target-dir", rustBuildDir
+        ]
+    (True, _) ->
+      sayWarning $
+        "rustmorloc not built (Rust pools will not compile): the Rust workspace "
+          <> "was not found. Set MORLOC_RUST_DIR to the compiler's data/rust/ "
+          <> "directory (or symlink it to $MORLOC_HOME/rust), then re-run `morloc init -f`."
+    (_, Nothing) ->
+      sayWarning $
+        "rustmorloc not built (Rust pools will not compile): `cargo` was not found "
+          <> "on PATH. Install Rust (https://rustup.rs) or add cargo to PATH, then "
+          <> "re-run `morloc init -f`."
 
   -- Symlink the newly installed binaries into a "user bin" directory so
   -- they end up on PATH. The directory is selected by the

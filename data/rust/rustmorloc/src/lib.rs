@@ -25,10 +25,24 @@
 //!  * I6  Multi-limb `Int` is rejected on consume (i64 cap).
 //!  * I8  All scalar pokes through the byte cursor use unaligned access.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
-use morloc_runtime_types::schema::{Schema, SerialType};
+use morloc_runtime_types::cschema::CSchema;
+use morloc_runtime_types::packet::{
+    PACKET_FORMAT_VOIDSTAR as PKT_FORMAT_VOIDSTAR,
+    PACKET_SOURCE_MESG as PKT_SOURCE_MESG,
+    PACKET_SOURCE_RPTR as PKT_SOURCE_RPTR,
+};
 use morloc_runtime_types::shm_types::{align_up, encode_relptr, relptr_offset, Array, RelPtr, RELNULL};
+
+// Re-export the schema surface a generated pool needs (also brings Schema/
+// SerialType into scope here), so pool.rs has exactly one direct rlib
+// dependency: rustmorloc, pinned by path in the bare-rustc build.
+// morloc_runtime_types then resolves as rustmorloc's transitive dep by exact
+// metadata hash, sidestepping crate-name ambiguity across rust-deps.
+pub use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
+
 
 // ---------------------------------------------------------------------------
 // C ABI (resolved at final link of the pool binary against libmorloc.so).
@@ -41,40 +55,54 @@ extern "C" {
     fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> isize;
     fn rel2abs(ptr: isize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn make_data_packet_auto(voidstar: *mut c_void, relptr: isize,
-                             schema: *const CSchemaOpaque, errmsg: *mut *mut c_char) -> *mut u8;
-    fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchemaOpaque,
+                             schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
+    fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema,
                                     errmsg: *mut *mut c_char) -> *mut u8;
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
+    // Cross-pool foreign call primitives (see `foreign_call`).
+    fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
+                                     nargs: usize, errmsg: *mut *mut c_char) -> *mut u8;
+    fn send_and_receive_over_socket(socket_path: *const c_char, packet: *const u8,
+                                    errmsg: *mut *mut c_char) -> *mut u8;
+    fn get_morloc_data_packet_error_message(data: *const u8, errmsg: *mut *mut c_char) -> *mut c_char;
+    fn pool_mark_busy();
+    fn pool_mark_idle();
 }
 
 // The C-ABI functions take a `const Schema*` (C struct). We bridge our Rust
 // `Schema` to it via `morloc_runtime_types::cschema::CSchema`. Treated opaquely
 // at the extern boundary; the real layout lives in the rlib.
-#[repr(C)]
-struct CSchemaOpaque {
-    _private: [u8; 0],
+// The C-ABI packet functions take an immutable, read-only CSchema tree. The
+// schema is fixed for the process lifetime (parsed once into the pool's schema
+// table), so its CSchema conversion is cached per schema -- keyed by the stable
+// &'static Schema address -- instead of being rebuilt and freed on every
+// dispatch. Built once per thread per schema and intentionally never freed
+// (bounded: one entry per distinct schema). This removes a full CSchema-tree
+// allocate + free from the per-manifold-call hot path (put_value always; the
+// get_value SHM path).
+thread_local! {
+    static CSCHEMA_CACHE: RefCell<HashMap<usize, *mut CSchema>> = RefCell::new(HashMap::new());
 }
 
-use morloc_runtime_types::cschema::CSchema;
-
 #[inline]
-fn cschema_of(schema: &Schema) -> *mut CSchemaOpaque {
-    CSchema::from_rust(schema) as *mut CSchemaOpaque
-}
-#[inline]
-unsafe fn cschema_free(cs: *mut CSchemaOpaque) {
-    CSchema::free(cs as *mut CSchema);
+fn cschema_of(schema: &Schema) -> *mut CSchema {
+    let key = schema as *const Schema as usize;
+    CSCHEMA_CACHE.with(|c| {
+        *c.borrow_mut()
+            .entry(key)
+            .or_insert_with(|| CSchema::from_rust(schema))
+    })
 }
 
 // Packet header byte offsets (wire format is locked; see
 // morloc-runtime-types::packet PacketHeader, `#[repr(C, packed)]`, 32 bytes).
+// The source/format tag *values* are imported from morloc-runtime-types::packet
+// (single source of truth for the wire format). These byte *offsets* are not
+// exported as named constants there, so they stay local.
 const PKT_HEADER_SIZE: usize = 32;
 const PKT_SOURCE_OFF: usize = 12; // command.data.source
 const PKT_FORMAT_OFF: usize = 13; // command.data.format
 const PKT_OFFSET_OFF: usize = 20; // u32 metadata-block length
-const PKT_SOURCE_MESG: u8 = 0x00;
-const PKT_SOURCE_RPTR: u8 = 0x02;
-const PKT_FORMAT_VOIDSTAR: u8 = 0x04;
 
 // ---------------------------------------------------------------------------
 // Error carrier for @throw (I2 typed panic payload). The pool host's dispatch
@@ -86,6 +114,30 @@ pub struct MorlocThrow(pub String);
 /// Raise a catchable morloc error from generated code (`@throw`).
 pub fn morloc_throw(msg: impl Into<String>) -> ! {
     std::panic::panic_any(MorlocThrow(msg.into()));
+}
+
+/// `@catch fallible fallback`: run `fallible`; on a catchable morloc throw,
+/// discard its partial manifold trace and run `fallback`. A non-throw panic (a
+/// genuine bug) propagates unchanged (mirrors the C++ MorlocException vs
+/// internal-abort split). Both arguments arrive pre-thunked (do-block closures).
+pub fn mlc_catch<T, F, G>(fallible: F, fallback: G) -> T
+where
+    F: FnOnce() -> T,
+    G: FnOnce() -> T,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(fallible)) {
+        Ok(v) => v,
+        Err(payload) => {
+            if payload.downcast_ref::<MorlocThrow>().is_some() {
+                // The caught throw's partial trace must not leak into a later
+                // error's traceback.
+                TRACEBACK.with(|t| t.borrow_mut().clear());
+                fallback()
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,13 +264,51 @@ pub fn dispatch_flush() {
         let v = t.take();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
-            unsafe { shfree(*ptr, &mut err); }
-            if !err.is_null() {
-                unsafe { libc::free(err as *mut c_void); }
+            unsafe {
+                shfree(*ptr, &mut err);
+                discard_err(err);
             }
         }
         t.set(Vec::new());
     });
+    // Reset any stale traceback frames from a prior dispatch (defensive; the
+    // guard normally drains them when it forms the fail packet).
+    TRACEBACK.with(|t| t.borrow_mut().clear());
+}
+
+// ---------------------------------------------------------------------------
+// Error traceback. Each manifold holds a `FrameGuard` bound to its precomputed
+// frame line (`\n  at <name> [rust] (mid=N, file:line:col)`). On a panic
+// unwind the guard appends the line to a thread-local buffer -- innermost
+// manifold first, matching the C++ member's catch-append-rethrow chain (which
+// accumulates the same lines onto the exception message). `dispatch_guard`
+// drains the buffer onto the throw message when it forms the fail packet, so
+// the message + full manifold trace crosses the pool boundary as one string.
+// ---------------------------------------------------------------------------
+thread_local! {
+    static TRACEBACK: RefCell<String> = RefCell::new(String::new());
+}
+
+/// RAII manifold-frame marker. A no-op on normal return and on the happy path;
+/// on a panic unwind it records its frame line to the thread-local traceback.
+pub struct FrameGuard {
+    frame: &'static str,
+}
+
+impl FrameGuard {
+    #[inline]
+    pub fn new(frame: &'static str) -> FrameGuard {
+        FrameGuard { frame }
+    }
+}
+
+impl Drop for FrameGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            TRACEBACK.with(|t| t.borrow_mut().push_str(self.frame));
+        }
+    }
 }
 
 struct ShmGuard(Option<*mut c_void>);
@@ -231,9 +321,9 @@ impl Drop for ShmGuard {
     fn drop(&mut self) {
         if let Some(ptr) = self.0 {
             let mut err: *mut c_char = std::ptr::null_mut();
-            unsafe { shfree(ptr, &mut err); }
-            if !err.is_null() {
-                unsafe { libc::free(err as *mut c_void); }
+            unsafe {
+                shfree(ptr, &mut err);
+                discard_err(err);
             }
         }
     }
@@ -351,6 +441,20 @@ impl FromVoidstar for bool {
     unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {
         core::ptr::read_unaligned(data) == 1
     }
+}
+
+// ---- Unit () (NIL, the value of `<E> ()` effect results) -------------------
+// NIL occupies a 1-byte inline slot (schema.width) with no variable region;
+// nothing meaningful is written or read.
+impl ToVoidstar for () {
+    #[inline]
+    fn shm_size(&self, _schema: &Schema) -> usize { 0 }
+    #[inline]
+    unsafe fn write(&self, _dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {}
+}
+impl FromVoidstar for () {
+    #[inline]
+    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {}
 }
 
 // ---- String (Str, I5: UTF-8 text by contract) -----------------------------
@@ -550,7 +654,6 @@ pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
     let relptr = abs2rel(root as *mut c_void, &mut err);
     let cs = cschema_of(schema);
     let packet = make_data_packet_auto(root as *mut c_void, relptr, cs, &mut err);
-    cschema_free(cs);
     if packet.is_null() {
         return fail_packet_from_c(err, "make_data_packet_auto failed"); // guard shfree
     }
@@ -580,7 +683,6 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let cs = cschema_of(schema);
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = get_morloc_data_packet_value(packet, cs, &mut err);
-    cschema_free(cs);
     if !err.is_null() {
         let msg = cstr_take(err);
         morloc_throw(msg);
@@ -597,7 +699,88 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
 }
 
+// ---------------------------------------------------------------------------
+// Cross-pool foreign call. Port of the C++ pool's `foreign_call_v`: build a
+// local-call packet, round-trip it over the peer pool's socket, surface a
+// fail-packet result as a catchable throw (I2), and incref/track a returned
+// RPTR result so the peer pool's next dispatch flush cannot reclaim data this
+// pool still references (I3).
+// ---------------------------------------------------------------------------
+
+// The pool tmpdir (argv[2]); socket filenames resolve against it. Set once at
+// startup by the generated pool's main() before any dispatch.
+static TMPDIR: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+
+/// Record the pool tmpdir (argv[2]) for foreign-call socket resolution.
+pub fn set_tmpdir(dir: &str) {
+    let _ = TMPDIR.set(CString::new(dir).unwrap_or_default());
+}
+
+/// # Safety
+/// `args` must be valid argument packets for manifold `mid` on the peer pool
+/// served at `socket_filename` (relative to the pool tmpdir).
+pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) -> *mut u8 {
+    let tmpdir = TMPDIR
+        .get()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let socket_path = match CString::new(format!("{}/{}", tmpdir, socket_filename)) {
+        Ok(s) => s,
+        Err(_) => morloc_throw("foreign_call: socket path contains an interior NUL"),
+    };
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let packet = make_morloc_local_call_packet(mid, args.as_ptr(), args.len(), &mut err);
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
+
+    pool_mark_busy();
+    let result = send_and_receive_over_socket(socket_path.as_ptr(), packet, &mut err);
+    pool_mark_idle();
+    libc::free(packet as *mut c_void);
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
+
+    // A fail-packet result is a peer-side error -> catchable throw.
+    let mut fail_err: *mut c_char = std::ptr::null_mut();
+    let fail_msg = get_morloc_data_packet_error_message(result, &mut fail_err);
+    discard_err(fail_err);
+    if !fail_msg.is_null() {
+        let msg = cstr_take(fail_msg);
+        libc::free(result as *mut c_void);
+        morloc_throw(msg);
+    }
+
+    // Incref + track a returned SHM-backed (RPTR) result.
+    if *result.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
+        let meta = core::ptr::read_unaligned(result.add(PKT_OFFSET_OFF) as *const u32) as usize;
+        let rel = core::ptr::read_unaligned(result.add(PKT_HEADER_SIZE + meta) as *const RelPtr);
+        let mut rerr: *mut c_char = std::ptr::null_mut();
+        let voidstar = rel2abs(rel, &mut rerr);
+        discard_err(rerr);
+        if !voidstar.is_null() {
+            let mut ierr: *mut c_char = std::ptr::null_mut();
+            shincref(voidstar, &mut ierr);
+            discard_err(ierr);
+            track(voidstar);
+        }
+    }
+
+    result
+}
+
 // ---- fail packets (I1: always C-allocated via make_fail_packet) -----------
+
+/// Free a C-allocated error string whose message we intend to ignore.
+#[inline]
+unsafe fn discard_err(err: *mut c_char) {
+    if !err.is_null() {
+        libc::free(err as *mut c_void);
+    }
+}
+
 unsafe fn cstr_take(err: *mut c_char) -> String {
     if err.is_null() {
         return String::new();
@@ -636,7 +819,15 @@ where
         Ok(p) => p,
         Err(payload) => {
             if let Some(MorlocThrow(msg)) = payload.downcast_ref::<MorlocThrow>() {
-                unsafe { fail_packet(msg) }
+                // Append the manifold trace accumulated during unwind, so the
+                // message + traceback crosses the pool boundary as one string.
+                let full = TRACEBACK.with(|t| {
+                    let mut tb = t.borrow_mut();
+                    let s = format!("{}{}", msg, tb);
+                    tb.clear();
+                    s
+                });
+                unsafe { fail_packet(&full) }
             } else {
                 eprintln!("MORLOC_INTERNAL_ABORT: Rust pool panicked (non-throw payload)");
                 std::process::abort();

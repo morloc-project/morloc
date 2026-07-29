@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Pool
   ) where
 
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.Cpp as Cpp
+import qualified Morloc.CodeGenerator.Pools.CAbi.Members.Rust as Rust
 import Morloc.CodeGenerator.Namespace (Lang)
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
 import qualified Morloc.CodeGenerator.Grammars.Translator.Generic as Generic
@@ -23,6 +24,10 @@ import qualified Morloc.CodeGenerator.Grammars.Translator.Generic as Generic
 -- | The C++ member of the CAbi pool.
 cppMember :: Member
 cppMember = Member Cpp.translate
+
+-- | The Rust member of the CAbi pool (own-pool: its own marshaller + dispatch).
+rustMember :: Member
+rustMember = Member Rust.translate
 
 -- | A generic member for an interpreted language. Transitional: these become
 -- their own single-member pools later.
@@ -34,4 +39,5 @@ genericMember lang = Member (Generic.translate lang)
 memberFor :: Lang -> Member
 memberFor lang
   | lang == Cpp.cppLang = cppMember
+  | lang == Rust.rustLang = rustMember
   | otherwise = genericMember lang

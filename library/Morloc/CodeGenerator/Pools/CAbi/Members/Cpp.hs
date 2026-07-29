@@ -673,6 +673,7 @@ cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
 cppLowerConfig reifyThunks =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
+    , lcSourcedArg = \_ _ x -> x
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf
     , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
@@ -959,13 +960,15 @@ PROPAGATE_ERROR(errmsg)|]
           resType <- cppTypeOf out
           return $ resType <> tupled argTypes
         _ -> return ""
+    , lcMakePass = \mname _ -> return mname
     , lcMakeLambda = \sig mname contextArgs boundArgs ->
-        let vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-            bindArgs = cat (punctuate "," (mname : (contextArgs ++ vs')))
+        let ctxNames = map argNamer contextArgs
+            vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
+            bindArgs = cat (punctuate "," (mname : (ctxNames ++ vs')))
             -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
             -- name minus its leading "m".
             midDoc = pretty (MT.drop 1 (render mname))
-         in case Map.lookup (render mname) reifyThunks of
+         in return $ case Map.lookup (render mname) reifyThunks of
               -- A closure that can cross a boundary: the fat MorlocClosure
               -- carries its mid and a reify thunk so the far side can call back.
               -- (Both are stored inside a std::function<Ret(Arg...)>, so this has

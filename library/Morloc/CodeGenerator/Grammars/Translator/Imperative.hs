@@ -342,6 +342,13 @@ buildProgramM labels templates sources es translateSeg getSchemas closureTable =
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
+  , lcSourcedArg :: Maybe (Source, Int) -> TypeM -> MDoc -> MDoc
+  -- ^ How to pass one argument at a call, given the arg's 'TypeM' and rendered
+  -- expression. @Just (src, i)@ identifies the i-th parameter of sourced
+  -- function @src@ (so a member can consult the declared signature -- e.g. to
+  -- pass a type-variable parameter by reference); @Nothing@ at manifold-call
+  -- sites. Default is identity (C++/Generic pass args unchanged); Rust borrows
+  -- non-'Copy' native args so a value fanned out to several consumers is shared.
   , lcTypeOf :: TypeF -> m (Maybe IType)
   , lcSerialAstType :: SerialAST -> m (Maybe IType)
   -- ^ type of a SerialAST for serialization (used for C++ typed declarations)
@@ -445,7 +452,14 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakeLambda :: MDoc -> MDoc -> [MDoc] -> [MDoc] -> MDoc
+  , lcMakePass :: MDoc -> [Arg TypeM] -> m MDoc
+  -- ^ Render a whole function/operator passed to a higher-order function
+  -- (@ManifoldPass@), given the manifold name and its parameters. Most
+  -- languages pass the manifold by name; the Rust member wraps it in a safe
+  -- closure that adapts each argument to the manifold's parameter convention
+  -- (deref a Copy scalar, forward a reference) since a bare @unsafe fn@ does
+  -- not implement @Fn@.
+  , lcMakeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
   -- ^ closureSig, name, contextArgs, boundArgs - partial application
   -- expression. @closureSig@ is the language's rendering of the closure's own
   -- callable signature (from 'lcClosureSig'); languages that do not need it
@@ -650,13 +664,15 @@ lowerNativeExpr ::
 lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> es)) = do
-  let handleFunctionArgs =
+lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) es) = do
+  let argTypes = map fst es
+      handleFunctionArgs exprs =
         (<>) (lcSrcName cfg src)
           . hsep
           . map tupled
           . provideClosure src
-  return $ mergePoolDocs handleFunctionArgs es
+          $ zipWith3 (\i t e -> lcSourcedArg cfg (Just (src, i)) t e) [0 ..] argTypes exprs
+  return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs
   patResult <- lcEvalPattern cfg t p (map poolExpr es)
@@ -668,10 +684,15 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
       , poolPriorExprs = concatMap poolPriorExprs es
       , poolReturnFlag = any poolReturnFlag es
       }
-lowerNativeExpr _ _ (AppExeN_ _ (LocalCallP idx) (map snd -> es)) = do
-  return $ mergePoolDocs ((<>) (nvarNamer idx) . tupled) es
-lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid _) (map snd -> es)) = do
-  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
+-- Manifold-call arguments go through lcSourcedArg too (identity for most
+-- languages; the Rust member borrows every native arg so a value can fan out to
+-- several manifold calls as shared borrows instead of a move-after-move).
+lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) xs) = do
+  let argTypes = map fst xs
+  return $ mergePoolDocs (\es -> nvarNamer idx <> tupled (zipWith (lcSourcedArg cfg Nothing) argTypes es)) (map snd xs)
+lowerNativeExpr cfg _ (AppExeN_ _ (RecCallP mid _) xs) = do
+  let argTypes = map fst xs
+  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith (lcSourcedArg cfg Nothing) argTypes es)) (map snd xs)
 lowerNativeExpr _ _ (ManN_ call) = return call
 lowerNativeExpr _ _ (ReturnN_ x) =
   return $ x {poolReturnFlag = True}
@@ -1061,8 +1082,13 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
       mname = manNamer m
   maybeNewManifold <- lcMakeFunction cfg m mname args manifoldType priorLines body headForm
   call <- case form of
-        (ManifoldPass _) -> return mname
-        (ManifoldFull rs) -> return $ mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldPass _) -> lcMakePass cfg mname args
+        -- Wrap each manifold-call argument through lcSourcedArg (identity for
+        -- most languages; the Rust member borrows every native arg). Manifold
+        -- callees are concretely typed, so a borrowed param (already `&T`) that
+        -- becomes `&&T` here deref-coerces back to `&T` at the call boundary.
+        (ManifoldFull rs) ->
+          return $ mname <> tupled [lcSourcedArg cfg Nothing t (argNamer a) | a@(Arg _ t) <- typeMofRs rs]
         (ManifoldPart rs vs) -> do
           -- The closure's callable signature is result(bound...) -- only the
           -- REMAINING parameters, never the captured context args. Build it
@@ -1072,13 +1098,7 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
                 o -> o
               sigType = Function [typeMof t | Arg _ t <- vs] resultType
           sig <- lcClosureSig cfg sigType
-          return $
-            lcMakeLambda
-              cfg
-              sig
-              mname
-              (map argNamer (typeMofRs rs))
-              [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+          lcMakeLambda cfg sig mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
   return $
     PoolDocs
       { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold

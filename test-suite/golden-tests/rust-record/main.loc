@@ -1,0 +1,38 @@
+module main (makePair, buildLL, sumLL, sumTree)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => (List a) = "Vec<$1>" a
+
+-- non-recursive, morloc-generated struct
+record Pair where
+  a :: Int
+  b :: Int
+record Rust => Pair = "struct"
+
+-- self-recursive via ?self (cycle broken by Box), user struct
+record LL where
+  head :: Int
+  tail :: ?LL
+record Rust => LL = "LL"
+
+-- self-recursive via [self] (cycle broken by Vec), user struct
+record Tree where
+  value :: Int
+  children :: [Tree]
+record Rust => Tree = "Tree"
+
+source Rust from "recs.rs"
+  ( "rust_double" as rustDouble
+  , "build_ll" as buildLL
+  , "sum_ll" as sumLL
+  , "sum_tree" as sumTree
+  )
+
+rustDouble :: Int -> Int
+makePair :: Int -> Pair
+makePair x = {a = rustDouble x, b = x}
+buildLL :: Int -> LL
+sumLL :: LL -> Int
+sumTree :: Tree -> Int

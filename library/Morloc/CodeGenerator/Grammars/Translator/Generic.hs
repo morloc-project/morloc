@@ -394,6 +394,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
+        , lcSourcedArg = \_ _ x -> x
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing
         , lcDeserialAstType = \_ -> return Nothing
@@ -509,23 +510,26 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
+        , lcMakePass = \mname _ -> return mname
         , lcMakeLambda = \_sig mname contextArgs boundArgs ->
-            let tmpl = ldPartialTemplate desc
+            let ctxNames = map argNamer contextArgs
+                bndNames = map argNamer boundArgs
+                tmpl = ldPartialTemplate desc
                 fnText = render mname
-                allArgsList = contextArgs <> boundArgs
-                fnWithCtxList = mname : contextArgs
+                allArgsList = ctxNames <> bndNames
+                fnWithCtxList = mname : ctxNames
                 fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
                 allArgs = render (hsep (punctuate "," allArgsList))
-                boundArgsText = render (hsep (punctuate "," boundArgs))
+                boundArgsText = render (hsep (punctuate "," bndNames))
                 -- manNamer is "m<mid>", so the mid is the name minus its leading
                 -- "m". {{mid}} and {{captured_list}} let a language that cannot
                 -- introspect its closures (R) tag them with their manifold id and
                 -- captured values at construction, for later reification.
                 midText = T.drop 1 (render mname)
                 capturedList = render $ case ldListStyle desc of
-                  BracketList -> list contextArgs
-                  _ -> pretty (ldGenericListFn desc) <> tupled contextArgs
-             in pretty $
+                  BracketList -> list ctxNames
+                  _ -> pretty (ldGenericListFn desc) <> tupled ctxNames
+             in return . pretty $
                   substituteT
                     tmpl
                     [ ("fn", fnText)

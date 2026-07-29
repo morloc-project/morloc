@@ -4,6 +4,7 @@
 same_language_costs:
   c: 2
   cpp: 2
+  rust: 2
   futhark: 1
   py: 20
   r:  40
@@ -12,6 +13,7 @@ same_language_costs:
 cross_language_costs:
   c: 1001
   cpp: 1000
+  rust: 1000
   futhark: 999
   py: 10000
   r: 40000

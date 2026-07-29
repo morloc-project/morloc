@@ -1,0 +1,31 @@
+module main (addI, meanReal, minmax, safeHead, selfCat)
+
+import root
+
+-- Rust concrete type mappings (a root-rust stdlib module is a follow-on;
+-- declared inline here so the golden is self-contained).
+type Rust => Int = "i64"
+type Rust => Real = "f64"
+type Rust => Str = "String"
+type Rust => Bool = "bool"
+type Rust => (List a) = "Vec<$1>" a
+type Rust => (Tuple2 a b) = "($1, $2)" a b
+
+source Rust from "add.rs"
+  ( "add_i" as addI
+  , "mean_real" as meanReal
+  , "minmax" as minmax
+  , "safe_head" as safeHead
+  , "append" as append
+  )
+
+addI :: Int -> Int -> Int
+meanReal :: [Real] -> Real
+minmax :: [Int] -> (Int, Int)
+safeHead :: [Int] -> ?Int
+append :: [Int] -> [Int] -> [Int]
+
+-- fan-out of a non-Copy Vec: `xs` is used twice; borrow-by-default makes this
+-- `append(&n, &n)` (two shared borrows), not a move or a clone.
+selfCat :: [Int] -> [Int]
+selfCat xs = append xs xs

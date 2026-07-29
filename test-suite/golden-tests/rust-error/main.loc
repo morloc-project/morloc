@@ -1,0 +1,38 @@
+module main (checkLen, catchBare, safeCheck, crossThrow)
+
+import root
+import root-py
+
+type Rust => Int = "i64"
+type Rust => Str = "String"
+type Rust => Bool = "bool"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "h.rs" ("rust_len" as rustLen, "rust_lt2" as rustLt2)
+source Py from "p.py" ("py_id" as pyId)
+
+rustLen :: [Int] -> Int
+rustLt2 :: Int -> Bool
+pyId :: Int -> Int
+
+-- @throw inside a manifold: raises with the message; unwinding through the
+-- manifold appends its traceback frame.
+checkLen :: [Int] -> <Err> Int
+checkLen xs = do
+  let n = rustLen xs
+  ? rustLt2 n = @throw "checkLen: list too short"
+  : n
+
+-- @catch of a bare throw, and of a real manifold throw (fallback recovers).
+catchBare :: Int
+catchBare = @catch (@throw "boom") 42
+
+safeCheck :: [Int] -> Int
+safeCheck xs = @catch (checkLen xs) 0
+
+-- cross-pool: the rust throw crosses into the py-hosted caller; the traceback
+-- carries frames from BOTH pools.
+crossThrow :: [Int] -> <Err> Int
+crossThrow xs = do
+  n <- checkLen xs
+  pyId n

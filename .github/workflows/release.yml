@@ -114,6 +114,9 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
     steps:
       - uses: actions/checkout@v4
+      # rustc/cargo: morloc make compiles Rust pools, and morloc init builds the
+      # rustmorloc rlib from the bundled sources (prebuilt/rust) with this toolchain.
+      - uses: dtolnay/rust-toolchain@stable
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: '9.6.7'
@@ -169,6 +172,8 @@ jobs:
           mv rust-bin/libmorloc-linux-x86_64.so prebuilt/libmorloc.so
           mv rust-bin/morloc-nexus-linux-x86_64 prebuilt/morloc-nexus
           mv rust-bin/morloc-manager-linux-x86_64 prebuilt/morloc-manager
+          # bundled crate sources: morloc init compiles rustmorloc from these
+          mv rust-bin/rust prebuilt/rust
           chmod +x prebuilt/libmorloc.so prebuilt/morloc-nexus prebuilt/morloc-manager
 
       - name: Add morloc to PATH
@@ -246,6 +251,13 @@ jobs:
       - name: List artifacts
         run: ls -lh
 
+      # rustmorloc is an rlib locked to the consumer's rustc, so it ships as
+      # source (platform-independent) rather than a prebuilt binary; `morloc
+      # init` compiles it locally. Consumers unpack this into their
+      # MORLOC_RUST_BIN directory as `rust/`.
+      - name: Package Rust sources
+        run: tar czf morloc-rust-src.tar.gz rust
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -253,4 +265,5 @@ jobs:
             morloc-manager-*
             libmorloc-*
             morloc-nexus-*
+            morloc-rust-src.tar.gz
           generate_release_notes: true

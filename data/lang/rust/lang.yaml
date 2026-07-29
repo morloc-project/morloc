@@ -1,0 +1,15 @@
+# Rust language metadata for the morloc compiler.
+# Rust is a full CAbi pool member with its own native marshaller (rustmorloc)
+# and dispatch. No `host:` key, so poolOf is identity: Rust forms its own pool.
+name: rust
+extension: rs
+aliases: ["rs"]
+is_compiled: true
+run_command: []
+serial_type: "uint8_t*"
+cost: 0
+# String maps to Rust `String` (UTF-8, length-prefixed, interior NULs allowed).
+allow_string_null: true
+# A sourced symbol is a Rust path identifier (allowing ::).
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_:]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"

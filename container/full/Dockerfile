@@ -15,7 +15,8 @@ WORKDIR $HOME
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/root/.local/bin:/root/.local/share/morloc/bin:${PATH}"
-# Pre-built Rust binaries: morloc init uses these directly (no cargo needed)
+# Prebuilt Rust binaries (libmorloc.so/nexus/manager) + bundled crate sources
+# (rust/) that `morloc init` compiles rustmorloc from with the local toolchain.
 ENV MORLOC_RUST_BIN=/opt/morloc-rust-bin
 
 RUN apt-get update
@@ -34,7 +35,16 @@ RUN python3 -m pip install --break-system-packages --upgrade setuptools
 # available at runtime.
 RUN Rscript -e 'install.packages("bit64", repos = "https://cloud.r-project.org")'
 
-# Setup the morloc home (uses pre-built Rust binaries, no cargo needed)
+# Rust toolchain. Required because (1) `morloc make` compiles Rust pools by
+# shelling out to rustc at RUNTIME, and (2) `morloc init` builds the rustmorloc
+# marshaller -- an rlib locked to this exact rustc, so unlike the prebuilt
+# C-ABI libmorloc.so it cannot be a bundle artifact -- from the crate sources
+# bundled at $MORLOC_RUST_BIN/rust.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Setup the morloc home: installs the prebuilt libmorloc.so/nexus/manager and
+# compiles rustmorloc locally from the bundled sources.
 RUN morloc init
 # Copy morloc-nexus to a system path so it remains on PATH even when
 # morloc-manager bind-mounts over ~/.local/bin with a host directory
