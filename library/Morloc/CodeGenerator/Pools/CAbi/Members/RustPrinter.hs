@@ -81,6 +81,12 @@ printExpr (ILambda args body) =
 printExpr (IRawExpr d) = pretty d
 printExpr (IDoBlock e) = "move || { " <> printExpr e <> " }"
 printExpr (IEval e) = parens (printExpr e) <> "()"
+printExpr (IIntrinsicShow sid e) =
+  "rustmorloc::show(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (IIntrinsicRead sid (Just t) e) =
+  "rustmorloc::read::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (IIntrinsicRead sid Nothing e) =
+  "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 printExpr (IIntrinsicThrow msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
 printExpr (IIntrinsicCatch fallible fallback) =
   "rustmorloc::mlc_catch(" <> printExpr fallible <> ", " <> printExpr fallback <> ")"

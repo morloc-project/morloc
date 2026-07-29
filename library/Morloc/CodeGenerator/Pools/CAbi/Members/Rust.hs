@@ -248,6 +248,30 @@ closureParamType :: TypeM -> RustM MDoc
 closureParamType (Native tf) = ("&" <>) <$> rustTypeOf tf
 closureParamType _ = return "_"
 
+-- | Render a getter/bracket pattern. A getter (@.0@/@.field@, possibly chained
+-- or multi-sibling) becomes native field access; a bracket index/slice calls
+-- the sourced @__access_index__@/@__get_slice__@ (@morloc_at@/@morloc_slice@),
+-- borrowing the list receiver. Setters, string interpolation, and brackets
+-- nested inside a getter chain are not yet supported (unused by the stdlib).
+rustEvalPattern :: TypeF -> Pattern -> [MDoc] -> RustM MDoc
+rustEvalPattern _ (PatternStruct sel) [m] =
+  return $ case ungroup sel of
+    [ss] -> writeSelectorRust m ss
+    sss -> tupled (map (writeSelectorRust m) sss)
+rustEvalPattern _ PatternBracketIndex [i, m] =
+  return $ "morloc_at" <> tupled [i, "&(" <> m <> ")"]
+rustEvalPattern _ PatternBracketSlice [start, stop, step, m] =
+  return $ "morloc_slice" <> tupled [start, stop, step, "&(" <> m <> ")"]
+rustEvalPattern _ p args =
+  error $ "Rust v1: unsupported pattern " <> show p <> " with " <> show (length args) <> " args"
+
+-- | Walk an (ungrouped) selector, emitting Rust field access: @.i@ for a tuple
+-- index, @.field@ for a record key (keyword-escaped to match the struct).
+writeSelectorRust :: MDoc -> [Either Int Text] -> MDoc
+writeSelectorRust d [] = d
+writeSelectorRust d (Right k : rs) = writeSelectorRust (d <> "." <> rustFieldIdent (Key k)) rs
+writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
+
 -- | Adapt a partial application's captured context argument (an owned value in
 -- the enclosing scope) to a manifold parameter (see 'rustBorrow').
 rustBridgeContext :: TypeM -> MDoc -> MDoc
@@ -514,7 +538,7 @@ rustLowerConfig mask =
     , lcNewIndex = getCounter
     , lcPrintExpr = RP.printExpr
     , lcPrintStmt = RP.printStmt
-    , lcEvalPattern = \_ _ _ -> error "Rust v1: pattern evaluation is unsupported"
+    , lcEvalPattern = rustEvalPattern
     , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
     , lcTupleConstructor = \_ _ es -> tupled es
     , lcRecordConstructor = \recType _ _ _ rs -> do

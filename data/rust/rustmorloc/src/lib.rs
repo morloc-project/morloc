@@ -67,6 +67,9 @@ extern "C" {
     fn get_morloc_data_packet_error_message(data: *const u8, errmsg: *mut *mut c_char) -> *mut c_char;
     fn pool_mark_busy();
     fn pool_mark_idle();
+    // @show / @read : voidstar <-> JSON text.
+    fn mlc_show(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
 }
 
 // The C-ABI functions take a `const Schema*` (C struct). We bridge our Rust
@@ -768,6 +771,64 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
         }
     }
 
+    result
+}
+
+// ---- @show / @read : value <-> JSON text via the C ABI --------------------
+
+// Build `value` into a freshly SHM-allocated voidstar, hand it to `f`, then
+// free the voidstar. Mirrors cppmorloc's `to_voidstar(...)` + `shfree` pattern.
+unsafe fn with_voidstar<T: ToVoidstar, R>(
+    value: &T,
+    schema: &Schema,
+    f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
+) -> R {
+    let _recur = RecurScope::enter(schema);
+    let total = value.shm_size(schema).max(1);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let root = shmalloc(total, &mut err) as *mut u8;
+    if root.is_null() {
+        morloc_throw(cstr_take(err));
+    }
+    let guard = ShmGuard::new(root as *mut c_void);
+    let mut cursor = root.add(schema.width);
+    value.write(root, &mut cursor, schema); // panic -> guard shfree
+    let r = f(root as *mut c_void, cschema_of(schema), &mut err);
+    drop(guard); // the C call has consumed the voidstar; free it now
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
+    r
+}
+
+/// @show: serialize a value to its JSON text representation.
+pub unsafe fn show<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
+    let json = with_voidstar(value, schema, |vs, cs, err| mlc_show(vs, cs, err));
+    let s = std::ffi::CStr::from_ptr(json).to_string_lossy().into_owned();
+    libc::free(json as *mut c_void);
+    s
+}
+
+/// @read: parse JSON text into a typed value; a parse failure is a catchable
+/// morloc error (so `@catch` can recover it).
+pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
+    let _recur = RecurScope::enter(schema);
+    let json = match CString::new(s) {
+        Ok(c) => c,
+        Err(_) => morloc_throw("@read: input contains an interior NUL byte"),
+    };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_read(json.as_ptr(), cschema_of(schema), &mut err);
+    if !err.is_null() {
+        morloc_throw(format!("@read: {}", cstr_take(err)));
+    }
+    if voidstar.is_null() {
+        morloc_throw(format!("@read: could not parse \"{}\"", s));
+    }
+    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, std::ptr::null());
+    let mut e2: *mut c_char = std::ptr::null_mut();
+    shfree(voidstar, &mut e2);
+    discard_err(e2);
     result
 }
 
