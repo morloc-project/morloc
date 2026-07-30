@@ -1,0 +1,6 @@
+--- nestedLambdas ---
+15
+--- nestedBare ---
+14
+--- nestedMulti ---
+12

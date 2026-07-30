@@ -402,7 +402,35 @@ suspendMixedIfBranches m cond thenB elseB =
 maybeForceCallbackArg :: PolyExpr -> PolyExpr
 maybeForceCallbackArg e@(PolyManifold _ m form _ _)
   | isLambdaForm form = forceReturnPosition m e
+-- A callback nested inside a structured argument (a list/tuple/record of
+-- closures passed to the source call) is invoked exactly the same way by the
+-- foreign code, so descend into the structure and force those too. The
+-- container's element TYPE is peeled in lock-step ('peelCallbackType'): forcing
+-- a closure element makes its value render the plain @T@, so the container that
+-- holds it must be declared with the peeled element type or the two disagree.
+-- Non-closure elements fall through unchanged (both the value and the type
+-- peel are no-ops on a non-effectful element).
+maybeForceCallbackArg (PolyList v ts es) =
+  PolyList v (map peelCallbackType ts) (map maybeForceCallbackArg es)
+maybeForceCallbackArg (PolyTuple v xs) =
+  PolyTuple v [(peelCallbackType t, maybeForceCallbackArg x) | (t, x) <- xs]
+maybeForceCallbackArg (PolyRecord nt v ts fs) =
+  PolyRecord nt v (map peelCallbackType ts)
+    [(k, (peelCallbackType t, maybeForceCallbackArg x)) | (k, (t, x)) <- fs]
 maybeForceCallbackArg e = e
+
+-- | Peel every 'EffectT' layer off the RETURN of a function-typed element, so
+-- @Int -> \<E\> ()@ becomes @Int -> ()@. Mirrors the value-level force of a
+-- callback ('forceReturnPosition' / 'forceLayers'): once the closure value is
+-- forced, the slot that holds it must carry the plain (peeled) type. A no-op on
+-- any non-effectful or non-function type.
+peelCallbackType :: Indexed Type -> Indexed Type
+peelCallbackType (Idx i t) = Idx i (peel t)
+  where
+    peel (FunT ins ret) = FunT ins (peelEff ret)
+    peel other = other
+    peelEff (EffectT _ inner) = peelEff inner
+    peelEff other = other
 
 -- | A lambda-shaped manifold form (an unapplied or partially-applied
 -- function value), as opposed to a saturated 'ManifoldFull' call.

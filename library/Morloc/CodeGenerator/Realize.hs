@@ -21,7 +21,6 @@ module Morloc.CodeGenerator.Realize
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
-import Data.IORef
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
@@ -77,38 +76,6 @@ emptyRState =
     , rLetVars = Map.empty
     }
 
--- | Per-tree memo cache for the scoring pass. 'scoreAnnoS' is a pure function
--- of (RState, node), but the BndS-function re-score and VarS-alternative
--- scoring recompute the same (context, node) pairs an exponential number of
--- times over only polynomially-many DISTINCT pairs; caching on the context and
--- the node's identity collapses the cost to that distinct-pair count. Fresh per
--- 'realizeWithRegistry' call, since node indices are tree-local.
-type ScoreCache =
-  IORef (Map String (AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])))
-
--- | The memo key: node identity plus every RState field a 'scoreExpr' clause
--- reads. The node is identified by (constructor tag, index) -- non-'CallS'
--- indices are globally unique, and the tag keeps a 'CallS' back-edge (which
--- reuses its helper's index) distinct from the helper node. Bound/applied
--- subtrees are identified the same way; Maps serialize in ascending key order.
-scoreMemoKey :: RState -> Int -> ExprS (Indexed Type) Many Int -> String
-scoreMemoKey rstat ci nodeE = show
-  ( conTag nodeE, ci
-  , map langName (rLangs rstat)
-  , [ (conTag e, c) | AnnoS _ c e <- rApplied rstat ]
-  , [ (k, conTag e, c) | (k, AnnoS _ c e) <- Map.toList (rBndVars rstat) ]
-  , [ (k, map (\(l, s) -> (langName l, s)) v) | (k, v) <- Map.toList (rLetVars rstat) ]
-  )
-
--- | A coarse constructor tag, enough to keep a 'CallS' leaf distinct from a
--- structurally-scored node that happens to reuse its index.
-conTag :: ExprS a b c -> String
-conTag e = case e of
-  AppS{} -> "A"; LamS{} -> "L"; BndS{} -> "B"; VarS{} -> "V"
-  LetS{} -> "E"; LetBndS{} -> "e"; CallS{} -> "C"; ExeS{} -> "X"
-  LstS{} -> "["; TupS{} -> "("; NamS{} -> "{"; IfS{} -> "?"
-  _ -> "o"
-
 {- | Choose a single concrete implementation. In the future, this component
 may be one of the more complex components of the morloc compiler. It will
 probably need to be implemented using an optimizing SMT solver. It will
@@ -135,9 +102,7 @@ realizeWithRegistry ::
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
 realizeWithRegistry registry s0 = do
-  cache <- MM.liftIO (newIORef Map.empty)
-  scored <- scoreAnnoS cache emptyRState s0
-  e@(AnnoS _ li _) <- collapseAnnoS Nothing scored
+  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> propagateDown e |>> Right
@@ -159,53 +124,44 @@ realizeWithRegistry registry s0 = do
     -- \| Depth first pass calculating scores for each language. Alternates with
     -- scoresSExpr.
     scoreAnnoS ::
-      ScoreCache ->
       RState ->
       AnnoS (Indexed Type) Many Int ->
       MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Int)]))
-    scoreAnnoS cache rstat (AnnoS gi ci e) = do
-      let key = scoreMemoKey rstat ci e
-      m <- MM.liftIO (readIORef cache)
-      case Map.lookup key m of
-        Just result -> return result
-        Nothing -> do
-          (e', ci') <- scoreExpr cache rstat (e, ci)
-          let result = AnnoS gi ci' e'
-          MM.liftIO (modifyIORef' cache (Map.insert key result))
-          return result
+    scoreAnnoS rstat (AnnoS gi ci e) = do
+      (e', ci') <- scoreExpr rstat (e, ci)
+      return $ AnnoS gi ci' e'
 
     -- \| Alternates with scoresAnnoS, finds the best score for each language at
     -- application nodes.
     scoreExpr ::
-      ScoreCache ->
       RState ->
       (ExprS (Indexed Type) Many Int, Int) ->
       MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
-    scoreExpr cache rstat (LstS xs, i) = do
-      (xs', best) <- scoreMany cache rstat xs
+    scoreExpr rstat (LstS xs, i) = do
+      (xs', best) <- scoreMany rstat xs
       return (LstS xs', Idx i best)
-    scoreExpr cache rstat (TupS xs, i) = do
-      (xs', best) <- scoreMany cache rstat xs
+    scoreExpr rstat (TupS xs, i) = do
+      (xs', best) <- scoreMany rstat xs
       return (TupS xs', Idx i best)
-    scoreExpr cache rstat (NamS rs, i) = do
-      (xs, best) <- scoreMany cache rstat (map snd rs)
+    scoreExpr rstat (NamS rs, i) = do
+      (xs, best) <- scoreMany rstat (map snd rs)
       return (NamS (zip (map fst rs) xs), Idx i best)
-    scoreExpr cache rstat (LamS vs x, i) = do
-      x' <- scoreAnnoS cache (updateRState vs rstat) x
+    scoreExpr rstat (LamS vs x, i) = do
+      x' <- scoreAnnoS (updateRState vs rstat) x
       return (LamS vs x', Idx i (scoresOf x'))
-    scoreExpr cache rstat (AppS f xs, i) = do
+    scoreExpr rstat (AppS f xs, i) = do
       -- store all applied arguments
       -- these may be bound to lambdas within f
       -- they are required for resolving the application language
       let rstat' = rstat {rLangs = [], rApplied = xs}
 
-      f' <- scoreAnnoS cache rstat' f
+      f' <- scoreAnnoS rstat' f
 
       -- best scores for each language for f
       let scores = scoresOf f'
           rstat'' = emptyRState {rLangs = unique $ map fst scores}
 
-      xs' <- mapM (scoreAnnoS cache rstat'') xs
+      xs' <- mapM (scoreAnnoS rstat'') xs
 
       -- [[(Lang, Int)]] : where Lang is unique within each list and Int is minimized
       let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
@@ -213,59 +169,59 @@ realizeWithRegistry registry s0 = do
 
       return (AppS f' xs', Idx i best)
     -- non-recursive expressions
-    scoreExpr _cache rstat (UniS, i) = return (UniS, zipLang i rstat)
-    scoreExpr _cache rstat (NullS, i) = return (NullS, zipLang i rstat)
-    scoreExpr cache rstat (VarS v (Many xs), i) = do
-      (xs', best) <- scoreMany cache rstat xs
+    scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
+    scoreExpr rstat (NullS, i) = return (NullS, zipLang i rstat)
+    scoreExpr rstat (VarS v (Many xs), i) = do
+      (xs', best) <- scoreMany rstat xs
       return (VarS v (Many xs'), Idx i best)
-    scoreExpr cache rstat (BndS v, i) = do
+    scoreExpr rstat (BndS v, i) = do
       case Map.lookup v (rBndVars rstat) of
         (Just e@(AnnoS (Idx _ (FunT _ _)) _ _)) -> do
-          scores <- scoreAnnoS cache rstat e |>> scoresOf
+          scores <- scoreAnnoS rstat e |>> scoresOf
           return (BndS v, Idx i scores)
         _ -> return (BndS v, zipLang i rstat)
-    scoreExpr _ _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callCost src)])
-    scoreExpr _cache rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
-    scoreExpr _cache rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
-    scoreExpr _cache rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
-    scoreExpr _cache rstat (LogS x, i) = return (LogS x, zipLang i rstat)
-    scoreExpr _cache rstat (StrS x, i) = return (StrS x, zipLang i rstat)
-    scoreExpr cache rstat (LetS v e1 e2, i) = do
-      e1' <- scoreAnnoS cache rstat e1
+    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callCost src)])
+    scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
+    scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
+    scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
+    scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
+    scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+    scoreExpr rstat (LetS v e1 e2, i) = do
+      e1' <- scoreAnnoS rstat e1
       -- Make the let-bound variable's RHS scores available to LetBndS
       -- references in the body. Without this, LetBndS would fall back to
       -- the calling context's lang preferences (zipLang on rstat.rLangs)
       -- and miss the binding's actual language requirement.
       let rstat' = rstat { rLetVars = Map.insert v (scoresOf e1') (rLetVars rstat) }
-      e2' <- scoreAnnoS cache rstat' e2
+      e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
       -- both contribute, with cross-language penalties applied per-lang.
       let best = scoreApp [] [ minPairs (scoresOf e1')
                              , minPairs (scoresOf e2')
                              ]
       return (LetS v e1' e2', Idx i best)
-    scoreExpr _cache rstat (LetBndS v, i) =
+    scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
         Just scs -> return (LetBndS v, Idx i scs)
         Nothing -> return (LetBndS v, zipLang i rstat)
-    scoreExpr _cache rstat (CallS v, i) = return (CallS v, zipLang i rstat)
-    scoreExpr cache rstat (IfS c t e, i) = do
-      c' <- scoreAnnoS cache rstat c
-      t' <- scoreAnnoS cache rstat t
-      e' <- scoreAnnoS cache rstat e
+    scoreExpr rstat (CallS v, i) = return (CallS v, zipLang i rstat)
+    scoreExpr rstat (IfS c t e, i) = do
+      c' <- scoreAnnoS rstat c
+      t' <- scoreAnnoS rstat t
+      e' <- scoreAnnoS rstat e
       let best = minPairs (scoresOf c' ++ scoresOf t' ++ scoresOf e')
       return (IfS c' t' e', Idx i best)
-    scoreExpr cache rstat (DoBlockS x, i) = do
-      x' <- scoreAnnoS cache rstat x
+    scoreExpr rstat (DoBlockS x, i) = do
+      x' <- scoreAnnoS rstat x
       return (DoBlockS x', Idx i (scoresOf x'))
-    scoreExpr cache rstat (EvalS x, i) = do
-      x' <- scoreAnnoS cache rstat x
+    scoreExpr rstat (EvalS x, i) = do
+      x' <- scoreAnnoS rstat x
       return (EvalS x', Idx i (scoresOf x'))
-    scoreExpr cache rstat (CoerceS c x, i) = do
-      x' <- scoreAnnoS cache rstat x
+    scoreExpr rstat (CoerceS c x, i) = do
+      x' <- scoreAnnoS rstat x
       return (CoerceS c x', Idx i (scoresOf x'))
-    scoreExpr cache rstat (IntrinsicS intr xs, i) = do
-      xs' <- mapM (scoreAnnoS cache rstat) xs
+    scoreExpr rstat (IntrinsicS intr xs, i) = do
+      xs' <- mapM (scoreAnnoS rstat) xs
       let Idx _ langScores = zipLang i rstat
           best = case xs' of
             [] -> langScores
@@ -323,12 +279,11 @@ realizeWithRegistry registry s0 = do
 
     -- find the scores of all implementations from all possible language contexts
     scoreMany ::
-      ScoreCache ->
       RState ->
       [AnnoS (Indexed Type) Many Int] ->
       MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
-    scoreMany cache rstat xs0 = do
-      xs1 <- mapM (scoreAnnoS cache rstat) xs0
+    scoreMany rstat xs0 = do
+      xs1 <- mapM (scoreAnnoS rstat) xs0
       return (xs1, scoreMany' xs1)
       where
         scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
