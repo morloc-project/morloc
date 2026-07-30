@@ -215,6 +215,7 @@ data NexusExpr
       -- string (e.g. ".1.[]"), runtime args in DFS order. Each bracket
       -- step in the path consumes args (1 for `.[]`, 3 for `.[:]`).
   | NextX     Text NexusExpr        -- result schema ([a]), IStream handle expr
+  | StreamLayoutX Text NexusExpr    -- result schema ([(U64,U64,U64)]), IFile handle expr
   | StreamX   Text NexusExpr        -- result schema (IStream a), IFile handle expr
   | OpenOStreamX Text NexusExpr     -- element schema, path expr (typed OStream open)
   | WriteX    Text NexusExpr NexusExpr NexusExpr -- value [a] schema, level, value, handle
@@ -779,6 +780,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       FLengthX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
       NextX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStreamLayout [handle])) =
+      StreamLayoutX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
@@ -2029,6 +2032,12 @@ exprToJson (IFileWalkX schema handle path runtimeArgs) =
 exprToJson (NextX schema handle) =
   jsonObj
     [ ("tag", jsonStr "next")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
+exprToJson (StreamLayoutX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "streamlayout")
     , ("schema", jsonStr schema)
     , ("handle", exprToJson handle)
     ]

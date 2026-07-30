@@ -147,6 +147,11 @@ data IExpr
   | IIntrinsicFSchema IExpr -- path -> schema string
   | IIntrinsicFLength IExpr
       -- ^ handle -> Int element count (read from cached StreamDiag)
+  | IIntrinsicStreamLayout Int (Maybe IType) IExpr
+      -- ^ @streamLayout on an IFile: schemaId of the [(U64,U64,U64)] result,
+      --   return type (for C++ template), handle expression. Per-language
+      --   wrappers call mlc_stream_layout and deserialise via
+      --   from_voidstar<List<Tuple3<...>>>.
   | IIntrinsicIFileWalk Int (Maybe IType) IExpr IExpr [IExpr]
       -- ^ Unified IFile pattern walker.
       --   schemaId of the result type, return type (for C++ template),
@@ -897,6 +902,20 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs])
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicNext sid resultType
+          (IRawExpr (render (poolExpr handleDocs))))
+    }
+-- @streamLayout: IFile handle -> <IO> [(U64,U64,U64)]. The wrapper
+-- deserialises the materialised voidstar layout into a typed list of
+-- triples.
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrStreamLayout (Just schema) [handleDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  let resultTf = case typeFof origExpr of
+        EffectF _ inner -> inner
+        other -> other
+  resultType <- lcTypeOf cfg resultTf
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicStreamLayout sid resultType
           (IRawExpr (render (poolExpr handleDocs))))
     }
 -- @stream: derive an IStream handle from an IFile. The runtime opens

@@ -81,6 +81,9 @@ pub enum MorlocExpressionType {
                       // on Err, evaluate fallback into the caller's dest.
     If = 29,          // (cond, then, else) -> value. Evaluate cond (a Bool);
                       // materialize the taken branch into the caller's dest.
+    StreamLayout = 30, // IFile handle -> [(U64,U64,U64)]. Per-sub-packet layout
+                       // (element_offset, element_count, uncompressed_size);
+                       // DATA packet -> single triple; empty stream -> [].
 }
 
 #[repr(C)]
@@ -1084,6 +1087,23 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Next;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
+        "streamlayout" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::StreamLayout;
             (*expr).schema = schema;
             (*expr).expr.unary_expr = handle;
             Ok(expr)

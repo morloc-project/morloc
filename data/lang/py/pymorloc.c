@@ -2954,6 +2954,43 @@ error:
     return NULL;
 }
 
+// _mlc_stream_layout(schema_str, handle) -> list of (element_offset,
+// element_count, uncompressed_size) tuples. Mirrors _mlc_next's
+// shfree-deferred pattern.
+static PyObject* pybinding__mlc_stream_layout(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = PyTRY(mlc_stream_layout, (int64_t)handle_ll);
+    if (voidstar == NULL) {
+        free_schema(schema);
+        Py_RETURN_NONE;
+    }
+    {
+        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        if (obj == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        return obj;
+    }
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_stream(PyObject* self, PyObject* args) { MAYFAIL
     long long ifile_handle_ll;
     PARSE_ARGS_OR_ABORT(args, "L", &ifile_handle_ll);
@@ -3197,6 +3234,7 @@ static PyMethodDef Methods[] = {
     {"mlc_ifile_walk", pybinding__mlc_ifile_walk, METH_VARARGS, "Unified IFile pattern walker"},
     {"mlc_ifile_length", pybinding__mlc_ifile_length, METH_VARARGS, "Total element count of an IFile handle"},
     {"mlc_next", pybinding__mlc_next, METH_VARARGS, "Materialise an IStream's current sub-packet and advance the cursor"},
+    {"mlc_stream_layout", pybinding__mlc_stream_layout, METH_VARARGS, "Per-sub-packet layout of an IFile as (element_offset, element_count, uncompressed_size) triples"},
     {"mlc_stream", pybinding__mlc_stream, METH_VARARGS, "Derive an IStream handle from an open IFile handle"},
     {"mlc_open_ostream", pybinding__mlc_open_ostream, METH_VARARGS, "Open a fresh OStream handle for the given schema + path"},
     {"mlc_open_istream", pybinding__mlc_open_istream, METH_VARARGS, "Open an IStream handle for the given schema + path (file or stdin sentinel)"},

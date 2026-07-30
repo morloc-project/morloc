@@ -131,6 +131,10 @@ printExpr (IIntrinsicNext sid (Just t) h) =
   [idoc|_mlc_next<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
 printExpr (IIntrinsicNext sid Nothing h) =
   [idoc|_mlc_next(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicStreamLayout sid (Just t) h) =
+  [idoc|_mlc_stream_layout<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicStreamLayout sid Nothing h) =
+  [idoc|_mlc_stream_layout(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
 printExpr (IIntrinsicStream h) =
   [idoc|_mlc_stream(#{printExpr h})|]
 printExpr (IIntrinsicOpenOStream sid path) =

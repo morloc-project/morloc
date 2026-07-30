@@ -1487,6 +1487,13 @@ int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
 void* mlc_next(int64_t handle, ERRMSG);
 int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 
+// `mlc_stream_layout(handle)` returns the per-sub-packet layout of an IFile
+// as a fresh SHM voidstar `Array<Tuple3<U64,U64,U64>>`: one
+// (element_offset, element_count, uncompressed_size) triple per sub-packet.
+// A DATA packet yields a single triple; an empty stream an empty Array.
+// The per-language wrapper deserialises via from_voidstar. Error -> NULL.
+void* mlc_stream_layout(int64_t handle, ERRMSG);
+
 // OStream: forward-only file writers.
 //
 // `mlc_open_ostream(schema_str, path)` is the typed-open path for

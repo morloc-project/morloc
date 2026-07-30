@@ -1,0 +1,9 @@
+-- @streamLayout requires a list-shaped IFile ([a]); IFile Int must be rejected.
+module main (bad)
+
+import root
+
+bad :: Str -> <IO, Err> [(U64, U64, U64)]
+bad path = do
+  f <- @open path :: <IO, Err> IFile Int
+  @streamLayout f

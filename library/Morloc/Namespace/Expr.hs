@@ -368,6 +368,14 @@ data Intrinsic
   | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
+  | IntrStreamLayout -- ^ @streamLayout :: IFile [a] -> <IO, Err> [(U64,U64,U64)]@
+                    -- -- per-sub-packet layout for parallel planning: one triple
+                    -- @(elementOffset, elementCount, uncompressedSize)@ per
+                    -- sub-packet, in file order. A DATA packet is the degenerate
+                    -- single-chunk case (one triple @(0, count, size)@); an empty
+                    -- stream yields @[]@. Derived at read time from the existing
+                    -- sub-packet index + per-sub-packet headers (no wire change,
+                    -- no payload decompression). Malformed packets raise Err.
   | IntrNext        -- ^ @next :: IStream a -> <IO, Err> [a]@ -- materialise the
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
@@ -460,6 +468,7 @@ intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
 intrinsicName IntrFLength = "flen"
+intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
 intrinsicName IntrStream = "stream"
 intrinsicName IntrWrite = "write"
@@ -498,6 +507,7 @@ parseIntrinsic "fschema" = Just IntrFSchema
 -- IntrIFileWalk is compiler-internal (synthesized from `.[i] f`, `.foo f`,
 -- etc. by Express.hs and Nexus.hs); no entry here.
 parseIntrinsic "flen" = Just IntrFLength
+parseIntrinsic "streamLayout" = Just IntrStreamLayout
 parseIntrinsic "next" = Just IntrNext
 parseIntrinsic "stream" = Just IntrStream
 parseIntrinsic "write" = Just IntrWrite
@@ -533,6 +543,7 @@ intrinsicArity IntrClose = 1
 intrinsicArity IntrFSchema = 1
 intrinsicArity IntrMap = 2
 intrinsicArity IntrFLength = 1
+intrinsicArity IntrStreamLayout = 1
 intrinsicArity IntrNext = 1
 intrinsicArity IntrStream = 1
 intrinsicArity IntrWrite = 3

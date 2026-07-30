@@ -1430,6 +1430,8 @@ intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
 intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
 intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
+intrinsicType IntrStreamLayout =
+  EffectU ioErrEffectSet (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U]))
 intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
 intrinsicType IntrTmpfile = EffectU ioErrEffectSet BT.strU
 intrinsicType IntrNext =
@@ -1520,6 +1522,13 @@ checkIntrinsicArgs i g intr argTypes = do
         -- @flen: IFile a -> <IO> Int. Receiver is any handle type;
         -- the runtime enforces kind == IFILE.
         (IntrFLength, [_]) -> return g
+        -- @streamLayout: IFile [a] -> <IO> [(U64,U64,U64)]. Pin the receiver to
+        -- a list-shaped IFile so both a wrong handle kind and non-list content
+        -- are rejected at compile time. Runtime enforces kind == IFILE.
+        (IntrStreamLayout, [argT]) ->
+          let (g'a, a) = newvar "streamlayout_a_" g
+              expectedT = AppU (VarU BT.ifileVar) [BT.listU a]
+           in subtype' i argT expectedT g'a
         -- @next: IStream a -> <IO> [a]. Pin the receiver shape so the
         -- result type's [a] is constrained to the same `a`. Runtime
         -- enforces kind == ISTREAM.

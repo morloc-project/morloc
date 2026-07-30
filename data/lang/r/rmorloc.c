@@ -2214,6 +2214,31 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     return result;
 }
 
+SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_stream_layout: schema must be a single string");
+    }
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_stream_layout: handle must be a single number");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t handle = i64_from_sexp(handle_r);
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    void* voidstar = R_TRY(mlc_stream_layout, handle);
+    if (voidstar == NULL) {
+        free_schema(schema);
+        return R_NilValue;
+    }
+    SEXP result = from_voidstar(voidstar, schema, NULL);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return result;
+}
+
 SEXP morloc_mlc_stream(SEXP ifile_handle_r) { MAYFAIL
     if ((TYPEOF(ifile_handle_r) != INTSXP && TYPEOF(ifile_handle_r) != REALSXP)
         || LENGTH(ifile_handle_r) != 1) {
@@ -3568,6 +3593,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_ifile_walk", (DL_FUNC) &morloc_mlc_ifile_walk, 4},
         {"morloc_mlc_ifile_length", (DL_FUNC) &morloc_mlc_ifile_length, 1},
         {"morloc_mlc_next", (DL_FUNC) &morloc_mlc_next, 2},
+        {"morloc_mlc_stream_layout", (DL_FUNC) &morloc_mlc_stream_layout, 2},
         {"morloc_mlc_stream", (DL_FUNC) &morloc_mlc_stream, 1},
         {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},
         {"morloc_mlc_open_istream", (DL_FUNC) &morloc_mlc_open_istream, 2},

@@ -998,6 +998,10 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_next("
             <> schemaRef sid <> ", " <> go handle <> ")"
+    go (IIntrinsicStreamLayout sid _ handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_stream_layout("
+            <> schemaRef sid <> ", " <> go handle <> ")"
     go (IIntrinsicStream handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_stream(" <> go handle <> ")"

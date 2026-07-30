@@ -153,6 +153,7 @@ main = do
       , golden "intrmap-tuple-broadcast" "intrmap-tuple-broadcast"
       , golden "ifile-data-patterns" "ifile-data-patterns"
       , golden "ostream-write-roundtrip" "ostream-write-roundtrip"
+      , golden "stream-layout" "stream-layout"
       , golden "ostream-implicit-close" "ostream-implicit-close"
       , golden "istream-multi-subpacket-roundtrip" "istream-multi-subpacket-roundtrip"
       , golden "istream-compressed-subpacket" "istream-compressed-subpacket"

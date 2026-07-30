@@ -602,6 +602,20 @@ T _mlc_next(Schema* schema, int64_t handle) {
     return result;
 }
 
+// @streamLayout: per-sub-packet layout of an IFile as `[(U64,U64,U64)]`.
+// Each triple is (element_offset, element_count, uncompressed_size). T is
+// the materialized result type (e.g. std::vector<std::tuple<...>>).
+template <typename T>
+T _mlc_stream_layout(Schema* schema, int64_t handle) {
+    char* errmsg = NULL;
+    void* voidstar = mlc_stream_layout(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    T* dummy = nullptr;
+    T result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
 // @stream: derive an IStream handle from an open IFile handle.
 inline int64_t _mlc_stream(int64_t ifile_handle) {
     char* errmsg = NULL;

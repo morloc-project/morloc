@@ -1667,6 +1667,25 @@ unsafe fn morloc_eval_r(
             let _ = shm::shfree(voidstar as shm::AbsPtr);
         }
 
+        MorlocExpressionType::StreamLayout => {
+            extern "C" {
+                fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+            }
+            let handle_expr = (*expr).expr.unary_expr;
+            let handle_schema = (*handle_expr).schema;
+            let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
+            let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
+            let mut err: *mut c_char = ptr::null_mut();
+            let voidstar = mlc_stream_layout(handle_i, &mut err);
+            if voidstar.is_null() {
+                let msg = take_c_errmsg_or(err, "@streamLayout: mlc_stream_layout returned NULL");
+                return Err(MorlocError::UserThrow(msg));
+            }
+            let result_rs = crate::cschema::CSchema::to_rust(schema);
+            crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
+            let _ = shm::shfree(voidstar as shm::AbsPtr);
+        }
+
         MorlocExpressionType::Stream => {
             extern "C" {
                 fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;

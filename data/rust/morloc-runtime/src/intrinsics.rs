@@ -1086,6 +1086,55 @@ pub unsafe extern "C" fn mlc_next(
     }
 }
 
+/// `@streamLayout` on an IFile handle: return an AbsPtr to a freshly
+/// allocated SHM voidstar `Array<Tuple3<U64,U64,U64>>` holding one
+/// `(element_offset, element_count, uncompressed_size)` triple per
+/// sub-packet, ready for the per-language `from_voidstar`. A DATA packet
+/// yields a single triple; an empty stream yields an empty array. The only
+/// failure is a malformed packet.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_stream_layout(
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    clear_errmsg(errmsg);
+    let triples = match crate::stream::shared_stream_layout(handle) {
+        Ok(v) => v,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+    // Materialise the triples into a voidstar `Array<(U64,U64,U64)>` through
+    // the canonical eval-pipeline reader (the same multi-block SHM layout the
+    // per-language `from_voidstar` and the eval `deep_copy`/`shfree` expect).
+    // N is the sub-packet count (small), so the JSON round-trip is cheap.
+    use std::fmt::Write as _;
+    let mut json = String::with_capacity(triples.len() * 24 + 2);
+    json.push('[');
+    for (i, (eo, ec, us)) in triples.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        let _ = write!(json, "[{},{},{}]", eo, ec, us);
+    }
+    json.push(']');
+    let schema = match morloc_runtime_types::schema::parse_schema("at3u8u8u8") {
+        Ok(s) => s,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+    match crate::json::read_json_with_schema(&json, &schema) {
+        Ok(p) => p as *mut c_void,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// `@write level value handle`: append the elements of `value`
 /// (a SHM voidstar `Array<T>`) to the OStream's internal SHM buffer.
 /// The buffer flushes as one sub-packet when it fills (default 16

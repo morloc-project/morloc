@@ -434,7 +434,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr m (MonoIntrinsic t intr es)
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
                      IntrOpen, IntrClose, IntrFSchema,
-                     IntrFLength, IntrNext, IntrStream,
+                     IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
@@ -598,6 +598,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       -- @next returns the sub-packet as `[a]`. The wrapper drops the
       -- EffectF wrap and serialises the list type so the per-language
       -- from_voidstar call materialises it correctly.
+      let dataType = stripEffectF tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrStreamLayout tf _ = do
+      -- @streamLayout returns `[(U64,U64,U64)]`. Drop the EffectF wrap and
+      -- serialise the list-of-triple type so the per-language from_voidstar
+      -- call materialises it (an ordinary composite, as for @next).
       let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
