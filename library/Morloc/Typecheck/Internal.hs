@@ -576,7 +576,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -1660,16 +1660,22 @@ propagateExistGRecords scope v t g = case t of
 -- only invoke this once @v@ is solved to a ground type, keeping the
 -- gammaSolved walk off the hot path.
 accumulatedPositionalSets :: TVar -> Gamma -> [[TypeU]]
-accumulatedPositionalSets v g =
-  [ ps
-  | (_, ExistU v' (ps, _) _) <- Map.toList (gammaSolved g)
-  , v' == v
-  , any isStructuralSlot ps
-  ]
-  where
-    isStructuralSlot (ExistU (TV nm) _ _) =
-      MT.isPrefixOf "_pattern_" nm || MT.isPrefixOf "set_slot_" nm
-    isStructuralSlot _ = False
+accumulatedPositionalSets v g
+  -- Cheap gate: a structural alias for @v@ is only ever written through
+  -- 'cacheSolved', which records @v@ in 'gammaPositionalReceivers'. When
+  -- @v@ is absent there are no aliases to harvest, so skip the
+  -- O(|gammaSolved|) walk. This keeps the walk off the hot ground-solve
+  -- path, where almost every existential has no positional constraint.
+  -- INVARIANT: 'cacheSolved' must stay the sole writer of structural
+  -- aliases into 'gammaSolved'; a bypass would make this gate silently
+  -- return [] and drop the constraint.
+  | not (Set.member v (gammaPositionalReceivers g)) = []
+  | otherwise =
+      [ ps
+      | (_, ExistU v' (ps, _) _) <- Map.toList (gammaSolved g)
+      , v' == v
+      , any isStructuralSlot ps
+      ]
 
 -- | Whether a ground type is a tuple (@IsTuple args@), definitely not a
 -- tuple (@NotTuple@ -- a record, primitive, or non-tuple type constructor),
@@ -1814,9 +1820,29 @@ solve v t
     occursIn v' (RecSingletonU k vt) = occursIn v' k || occursIn v' vt
     occursIn v' (LabeledU _ t') = occursIn v' t'
 
--- | Record a solved variable in the gamma map cache
+-- | Record a solved variable in the gamma map cache. When the solution is
+-- a structural alias @ExistU rv (ps, _) _@ whose slots came from a tuple
+-- getter/setter (see 'isStructuralSlot'), also record the receiver @rv@ in
+-- 'gammaPositionalReceivers'. This is the only site that writes such an
+-- alias into 'gammaSolved', so it is a complete (grow-only) index of the
+-- receivers 'accumulatedPositionalSets' would otherwise scan for.
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
-cacheSolved v t g = g {gammaSolved = Map.insert v t (gammaSolved g)}
+cacheSolved v t g =
+  let g' = g {gammaSolved = Map.insert v t (gammaSolved g)}
+   in case t of
+        ExistU rv (ps, _) _
+          | any isStructuralSlot ps ->
+              g' {gammaPositionalReceivers = Set.insert rv (gammaPositionalReceivers g')}
+        _ -> g'
+
+-- | A positional slot introduced by a tuple-index getter (@_pattern_@) or a
+-- field setter (@set_slot_@). Distinguishes accessor-derived slots from the
+-- positional existentials ordinary @AppU@ (list/vector/user-type)
+-- unification produces.
+isStructuralSlot :: TypeU -> Bool
+isStructuralSlot (ExistU (TV nm) _ _) =
+  MT.isPrefixOf "_pattern_" nm || MT.isPrefixOf "set_slot_" nm
+isStructuralSlot _ = False
 
 occursCheck :: TypeU -> TypeU -> Text -> Either MDoc ()
 occursCheck t1 t2 place =

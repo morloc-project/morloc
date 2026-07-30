@@ -376,6 +376,15 @@ data Gamma = Gamma
   -- numeric-literal polymorphism in argument positions like
   -- @fold (+) 0 (xs :: Vector n Int8)@.
   , gammaPendingNumLits :: [(Int, TVar, NumLitKind)]
+  -- | Reverse index of receiver existentials that carry positional
+  -- (tuple) field-slot constraints through a solved structural alias
+  -- (a @_pattern_@ getter or @set_slot_@ setter). Populated at the
+  -- single 'cacheSolved' choke point. Grow-only and over-approximating:
+  -- membership gates the O(|gammaSolved|) scan in
+  -- 'accumulatedPositionalSets' so the common ground-solve, which has no
+  -- positional constraint, pays only an O(log n) lookup. Mirrors the
+  -- cheap own-entry pre-check that 'accumulatedRecords' uses for records.
+  , gammaPositionalReceivers :: Set.Set TVar
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str

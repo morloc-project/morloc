@@ -230,12 +230,19 @@ rewrite :: Int -> PolyExpr -> MorlocMonad PolyExpr
 rewrite m (PolyApp fn xs) = do
   fn'  <- rewrite m fn
   xs'  <- mapM (rewrite m) xs
+  -- A closure passed directly to a foreign source call is invoked as
+  -- @f(x)@ by the source implementation, which discards the thunk, so its
+  -- effect must be forced eagerly here (the 'CallbackReturn' boundary).
+  -- Every other consumer -- a local 'LocalCallP', an export, a wire
+  -- crossing -- forces the closure's result at its own consumption site,
+  -- so intra-pool closures are left as thunks.
+  let xs'' = if isSrcCallHead fn' then map maybeForceCallbackArg xs' else xs'
   return
     . maybeSuspendRemoteReceive
-    $ maybeSuspendSourceCall fn' xs'
+    $ maybeSuspendSourceCall fn' xs''
 rewrite _ (PolyManifold l m' f k e) = do
   e' <- rewrite m' e
-  return $ PolyManifold l m' f k (maybeForceCallbackReturn m' f e')
+  return $ PolyManifold l m' f k e'
 rewrite m (PolyRemoteInterface l ti is rf e) = do
   e' <- rewrite m e
   return $ PolyRemoteInterface l ti is rf (forceCalleeBody e')
@@ -376,22 +383,38 @@ suspendMixedIfBranches m cond thenB elseB =
         Just t | not (hasOuterEffect t) -> PolyDoBlock (Idx m' guardT) branch
         _                               -> branch
 
--- | 'CallbackReturn' Force. A lambda passed as an argument to a foreign
--- consumer will be invoked as @f(x)@; the consumer discards the return
--- value's outer structure and cares only about the side effect. If the
--- lambda's declared return is '<E> T', @f(x)@ merely materialises the
--- thunk and drops it, so the effect never fires. 'ManifoldPart' and
--- 'ManifoldPass' are the two lambda-shaped 'ManifoldForm's; either with
--- an 'EffectT' return must be forced. One 'PolyEval' per 'EffectT'
--- layer.
-maybeForceCallbackReturn :: Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> PolyExpr
-maybeForceCallbackReturn midx form body
-  | isLambdaForm form = forceReturnPosition midx body
-  | otherwise = body
-  where
-    isLambdaForm (ManifoldPart _ _) = True
-    isLambdaForm (ManifoldPass _)   = True
-    isLambdaForm _                  = False
+-- | 'CallbackReturn' Force. A closure passed as an argument to a foreign
+-- source call is invoked as @f(x)@ by the source implementation, which
+-- discards the return's outer structure and cares only about the side
+-- effect. If the closure's return is '<E> T', @f(x)@ merely materialises
+-- the thunk and drops it, so the effect never fires -- force it here (one
+-- 'PolyEval' per 'EffectT' layer). Only lambda-shaped manifolds
+-- ('ManifoldPart'/'ManifoldPass') are closures, and 'forceReturnPosition'
+-- is a no-op unless the return carries an effect, so pure callbacks are
+-- untouched.
+--
+-- This is the ONLY place a closure's return is force-adjusted. Intra-pool
+-- closures called via 'LocalCallP' are deliberately left as thunks: their
+-- result is forced by the caller's own consumption boundary (a do-bind, a
+-- return, a wire crossing), and leaving the closure body a thunk keeps its
+-- rendered type consistent between its definition and its use sites (a
+-- forced body renders @T@ but an argument slot is typed @<E> T@).
+maybeForceCallbackArg :: PolyExpr -> PolyExpr
+maybeForceCallbackArg e@(PolyManifold _ m form _ _)
+  | isLambdaForm form = forceReturnPosition m e
+maybeForceCallbackArg e = e
+
+-- | A lambda-shaped manifold form (an unapplied or partially-applied
+-- function value), as opposed to a saturated 'ManifoldFull' call.
+isLambdaForm :: ManifoldForm c b -> Bool
+isLambdaForm (ManifoldPart _ _) = True
+isLambdaForm (ManifoldPass _)   = True
+isLambdaForm _                  = False
+
+-- | The head of a direct foreign source-call application.
+isSrcCallHead :: PolyExpr -> Bool
+isSrcCallHead (PolyExe _ (SrcCallP _)) = True
+isSrcCallHead _                        = False
 
 -- | Walk to the return position of a manifold body (through 'PolyReturn'
 -- and 'PolyLet' tails), and if the value there has an outer 'EffectT',

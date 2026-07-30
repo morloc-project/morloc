@@ -156,34 +156,53 @@ applyLambdas ai (AnnoS g1 c1 (AppS (AnnoS gLet cLet (LetS v e1 body)) es)) =
   applyLambdas ai $
     AnnoS gLet cLet $
       LetS v e1 (AnnoS g1 c1 (AppS body es))
--- substitute applied lambdas
+-- Beta-reduce an applied lambda. A singly-used parameter is moved into the body
+-- (inline branch); a multiply-used one is bound once as a shared @let@ (share
+-- branch, each use a distinct 'LocalCallP'). Inlining a multiply-used parameter
+-- would duplicate its argument at every occurrence, compounding multiplicatively
+-- (2^depth) through a reduction chain; the @countRefs@ guard avoids that. The
+-- 'usedAsForeignCallback' exception keeps only a function-typed argument to a
+-- foreign source call on the (multi-copy) inline path, where 'EffectBoundary'
+-- can force its effect at each callback site.
 applyLambdas ai
   ( AnnoS
-      i1
+      i1@(Idx i1n i1t)
       tb1
       ( AppS
           ( AnnoS
-              (Idx i2 (FunT (_ : tas) tb2))
+              (Idx i2 (FunT (_tv : tas) tb2))
               c
               (LamS (v : vs) e2)
             )
           (e1 : es)
         )
-    ) =
-    do e2' <- substituteAnnoS v e1 e2
-       applyLambdas ai
-          ( AnnoS
-              i1
-              tb1
-              ( AppS
-                  ( AnnoS
-                      (Idx i2 (FunT tas tb2))
-                      c
-                      (LamS vs e2')
-                  )
-                  es
-              )
-          )
+    )
+    -- A singly-used (or unused) parameter is MOVED, not cloned: reindexing only
+    -- disambiguates multiple inserted copies, and there is at most one. Cloning
+    -- would re-copy the whole (growing) argument at every step of a reduction
+    -- chain -- O(depth * size) -- while moving keeps it linear. Testing
+    -- @nrefs <= 1@ before 'usedAsForeignCallback' short-circuits the common
+    -- single-use case without its extra traversal.
+  | ai || nrefs <= 1 || usedAsForeignCallback v e2 = do
+      let subst = if nrefs > 1 then substituteAnnoS else moveAnnoS
+      subst v e1 e2 >>= applyLambdas ai . rebuild
+  -- Share: bind the argument once as @let v = e1 in e2@ (references rebound to
+  -- let-form; see 'rebindBndToLet'). Effect-equivalent, not effect-changing:
+  -- @!@ / @<-@ forces are hoisted into their own let bindings upstream
+  -- (Restructure.hoistEvals, Desugar.desugarDo), so @e1@ is never a raw forced
+  -- effect -- only pure data, a thunk-constructing call, or a lambda -- and
+  -- constructing it once versus many times is unobservable.
+  | otherwise = do
+      e1' <- applyLambdas ai e1
+      e2r <- rebindBndToLet v e2
+      inner <- applyLambdas ai (rebuild e2r)
+      letIx <- newIndex i1n
+      return (AnnoS (Idx letIx i1t) tb1 (LetS v e1' inner))
+  where
+    nrefs = countRefs v e2
+    -- The residual application with one parameter/argument pair consumed.
+    rebuild body =
+      AnnoS i1 tb1 (AppS (AnnoS (Idx i2 (FunT tas tb2)) c (LamS vs body)) es)
 -- Normalize a computed-function head before applying. The head may reduce to a
 -- 'LetS' or 'LamS' only AFTER its own lambda-evaluation -- e.g. forcing an
 -- effectful do-block, @!{ _ <- eff; \\y -> .. }@ applied, cancels
@@ -208,13 +227,11 @@ applyLambdas ai (AnnoS g c (AppS headA es)) = do
     AnnoS _ _ (EvalS (AnnoS gLet cLet (LetS v e1 body))) ->
       applyLambdas ai $ AnnoS gLet cLet $ LetS v e1 (AnnoS g c (AppS body es))
     _ -> AnnoS g c . AppS headA' <$> mapM (applyLambdas ai) es
--- Inline let-bound lambdas. A singly-used lambda is always beta-reduced away
--- (substitute at its single use and re-process). A multiply-used lambda is kept
--- shared on the pool path -- duplicating it at every reference compounds
--- multiplicatively through a chain of such bindings (2^depth copies); each
--- reference becomes a 'LetBndS' that codegen lowers to a native closure call
--- ('LocalCallP'). On the nexus path (@ai@) it is always inlined instead, since
--- the pure evaluator has no native closure to share.
+-- Inline let-bound lambdas, using the same inline-vs-share @countRefs@ guard as
+-- the beta-redex clause above. A singly-used lambda is beta-reduced away; a
+-- multiply-used one is kept shared (each reference a 'LetBndS' lowered to a
+-- native closure call, 'LocalCallP'). On the nexus path (@ai@) it is always
+-- inlined, since the pure evaluator has no native closure to share.
 applyLambdas ai (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2))
   | ai || countRefs v e2 <= 1 = do
       e1' <- applyLambdas ai e1
@@ -249,26 +266,84 @@ countRefs v = go
     go (AnnoS _ _ (LetS v' _ _)) | v == v'     = 0
     go (AnnoS _ _ e)                           = getSum (foldExprS (Sum . go) e)
 
--- | Substitute every free reference to @v@ in the target with the replacement
--- @r@. Each inserted copy of @r@ is REINDEXED with fresh indices (source
--- positions preserved via 'getCounterWithPos'). This is essential: a single
--- definition or lambda parameter can be referenced multiple times (e.g. a
--- producer @\\sink -> do { sink a; sink b }@ that invokes its function argument
--- more than once), and without fresh indices the copies collapse to a single
--- manifold at codegen -- so all call sites would share the first site's bound
--- value. See the module header ("Substitution requires reindexing").
+-- | Traverse every FREE reference to @v@ (as 'BndS' or 'LetBndS'), applying
+-- @act@ to each such node; stop at any binder that shadows @v@ (a 'LamS'
+-- binding @v@, or an inner 'LetS' of @v@). This is the shared "free occurrence
+-- of @v@" rule behind 'substituteAnnoS' and 'rebindBndToLet' (and, as a fold,
+-- 'countRefs') -- keeping it in one place guarantees they agree on exactly
+-- which references they touch, the correctness precondition of the
+-- 'applyLambdas' share branch.
+onFreeRef ::
+  EVar ->
+  (AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)) ->
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad (AnnoS (Indexed Type) One a)
+onFreeRef v act = f
+  where
+    f e0@(AnnoS _ _ (BndS v'))     | v == v'     = act e0
+    f e0@(AnnoS _ _ (LetBndS v'))  | v == v'     = act e0
+    f e0@(AnnoS _ _ (LamS vs _))   | v `elem` vs = return e0  -- shadowed
+    f e0@(AnnoS _ _ (LetS v' _ _)) | v == v'     = return e0  -- shadowed
+    f (AnnoS g c e)                              = AnnoS g c <$> mapExprSM f e
+
+-- | Substitute every free reference to @v@ with a fresh copy of @r@. Copies are
+-- REINDEXED so each inserted use gets distinct manifold ids; without that a
+-- parameter referenced at several sites (e.g. @\\sink -> do { sink a; sink b }@)
+-- would collapse to one manifold at codegen and every site would see the first
+-- site's value. See the module header ("Substitution requires reindexing").
 substituteAnnoS ::
   EVar ->
   AnnoS (Indexed Type) One a ->
   AnnoS (Indexed Type) One a ->
   MorlocMonad (AnnoS (Indexed Type) One a)
-substituteAnnoS v r = f
+substituteAnnoS v r = onFreeRef v (const (reindexAnnoS r))
+
+-- | Substitute a SINGLY-used (or unused) reference to @v@ with @r@ WITHOUT
+-- copying: the argument is moved to its one use site, keeping its original
+-- indices. Reindexing (a deep copy that mints fresh manifold ids) exists only
+-- to keep several inserted copies from collapsing to one manifold at codegen --
+-- with a single occurrence there is nothing to disambiguate, so the copy is
+-- pure waste. Cloning here instead is what makes a chain of reductions
+-- re-copy its growing accumulator at every level (O(depth * size) blowup);
+-- moving keeps it linear. MUST only be used when @countRefs v e <= 1@ (the
+-- caller's guard): placing the same @r@ at two sites would alias it into a DAG.
+moveAnnoS ::
+  EVar ->
+  AnnoS (Indexed Type) One a ->
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad (AnnoS (Indexed Type) One a)
+moveAnnoS v r = onFreeRef v (const (return r))
+
+-- | Rebind @v@ from lambda-form to let-form: rewrite each free reference to
+-- @LetBndS v@, keeping its index and type. Used by the 'applyLambdas' share
+-- branch when it turns @(\\v -> e2) e1@ into @let v = e1 in e2@: @v@ was a
+-- lambda parameter, but a let variable is lowered through 'express''s
+-- 'LetBndS' clause.
+rebindBndToLet ::
+  EVar ->
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad (AnnoS (Indexed Type) One a)
+rebindBndToLet v = onFreeRef v (\(AnnoS g c _) -> return (AnnoS g c (LetBndS v)))
+
+-- | Is @v@ passed directly as a FUNCTION-typed argument to a foreign source
+-- call anywhere in the body? Such a closure is invoked as @f(x)@ inside the
+-- foreign source implementation, which discards the effect thunk, so its effect
+-- must be forced eagerly at the callback boundary
+-- ('EffectBoundary.maybeForceCallbackArg') -- which cannot be done at a shared
+-- use site. So these stay on the clone path (each clone becomes a direct
+-- callback argument); every other multiply-used parameter is shared.
+-- Conservatively over-approximating among function-typed args (shadowing is not
+-- tracked): a false positive merely clones, which is safe.
+usedAsForeignCallback :: EVar -> AnnoS (Indexed Type) One a -> Bool
+usedAsForeignCallback v = go
   where
-    f (AnnoS _ _ (BndS v'))            | v == v'     = reindexAnnoS r
-    f (AnnoS _ _ (LetBndS v'))         | v == v'     = reindexAnnoS r
-    f e0@(AnnoS _ _ (LamS vs _))       | v `elem` vs = return e0  -- shadowed
-    f e0@(AnnoS _ _ (LetS v' _ _))     | v == v'     = return e0  -- shadowed
-    f (AnnoS g c e)                    = AnnoS g c <$> mapExprSM f e
+    go (AnnoS _ _ (AppS (AnnoS _ _ (ExeS (SrcCall _))) args)) | any isRef args = True
+    go (AnnoS _ _ e) = getAny (foldExprS (Any . go) e)
+    -- a FUNCTION-typed ref only: a data argument to a source call is never
+    -- invoked, so it must not be diverted onto the clone path.
+    isRef (AnnoS (Idx _ (FunT _ _)) _ (BndS v'))    = v == v'
+    isRef (AnnoS (Idx _ (FunT _ _)) _ (LetBndS v')) = v == v'
+    isRef _ = False
 
 -- | Assign fresh indices to every node of an 'AnnoS' subtree, preserving each
 -- node's type annotation. Uses 'newIndex', which copies ALL index-keyed state

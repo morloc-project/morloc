@@ -123,7 +123,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty, gammaPendingNumLits = []}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty}
       (g1raw, _, e1) <- synthG g0 e0
 
       -- Resolve numeric literals that were checked against unsolved
@@ -279,7 +279,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]

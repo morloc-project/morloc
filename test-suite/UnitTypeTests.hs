@@ -53,7 +53,7 @@ module UnitTypeTests
   , withDocstringTests
   ) where
 
-import Morloc (typecheck, typecheckFrontend)
+import Morloc (typecheck, typecheckFrontend, generatePools)
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
@@ -112,6 +112,30 @@ runMiddle code = do
   config <- emptyConfig
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 config defaultValue (typecheck Nothing (Code code))
   return x
+
+-- | Run the full code-generation pipeline ('typecheck' then 'generatePools',
+-- which is where 'applyLambdas' runs) and force the result to a manifold
+-- count. Used by the complexity guard to catch 'applyLambdas' rebuilding an
+-- exponentially large tree: a divergent/blowup run overruns the group's
+-- 'mkTimeout' (or exhausts memory) rather than returning.
+runGen :: MT.Text -> IO (Either MorlocError Int)
+runGen code = do
+  config <- emptyConfig
+  ((x, _), _) <-
+    MM.runMorlocMonad Nothing 0 config defaultValue $ do
+      (_, rasts) <- typecheck Nothing (Code code)
+      pools <- generatePools rasts
+      return (sum (map (length . snd) pools))
+  return x
+
+-- | Assert that a program lowers all the way to pools without diverging (the
+-- complexity guards only care that 'runGen' returns before the timeout).
+assertGenerates :: MT.Text -> Assertion
+assertGenerates code = do
+  result <- runGen code
+  case result of
+    Right _ -> return ()
+    Left e -> assertFailure ("expected pool generation to succeed: " <> show e)
 
 emptyConfig :: IO Config
 emptyConfig = do
@@ -310,6 +334,7 @@ listToGamma gs =
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
     , gammaPendingNumLits = []
+    , gammaPositionalReceivers = Set.empty
     }
 
 exprTestBad :: String -> MT.Text -> TestTree
@@ -3311,7 +3336,123 @@ complexityRegressionTests =
           test
         |]
           bool
+      , -- A long composition chain with no tuples at all: the positional
+        -- (tuple-slot) reconciliation runs on every bare-existential solve,
+        -- so if it scans the whole solved-context map unconditionally the
+        -- cost is quadratic in the chain length and this times out. With the
+        -- receiver index gating the scan, a chain that has no destructuring
+        -- receivers pays only a set membership test per solve and stays
+        -- linear. This mirrors the standard-library `root` test, whose
+        -- `test` value is one large composition of mostly non-tuple groups.
+        localOption (mkTimeout 1000000) $
+          assertGeneralType
+            "long non-tuple composition chain stays linear"
+            (deepIdComposition 200)
+            int
+      , -- The companion positive case: a long chain that *does* destructure
+        -- tuples still typechecks promptly, confirming the gate admits the
+        -- scan when destructuring receivers are present.
+        localOption (mkTimeout 1000000) $
+          assertGeneralType
+            "long tuple-pattern composition chain typechecks"
+            (tuplePatternComposition 40)
+            (lst (tuple [str, int]))
+      , -- 'applyLambdas' must SHARE, not clone, a multiply-used lambda
+        -- parameter when it beta-reduces on the pool path. Beta-reducing
+        -- @(\\a -> add a a) arg@ by substitution inserts a fresh copy of @arg@
+        -- at each of @a@'s occurrences; through a chain of such reductions the
+        -- argument doubles per step (2^depth copies) and exhausts memory. The
+        -- fix binds the argument once as a @let@. This must run the full
+        -- codegen path ('generatePools', where 'applyLambdas' lives), not just
+        -- the frontend, so it uses 'runGen'. With the fix this finishes
+        -- instantly; without it, 30 levels is ~10^9 nodes and overruns the
+        -- timeout / memory. Mirrors the standard-library 'root' test, whose
+        -- pool AST feeds such a chain into 'applyLambdas False'.
+        localOption (mkTimeout 10000000) $
+          testCase "deep multiply-used-parameter chain shares instead of cloning"
+            (assertGenerates (dupParamChain 30))
+      , -- 'applyLambdas' must MOVE, not clone, a SINGLY-used lambda parameter.
+        -- Beta-reducing @(\\a -> inc a) arg@ needs no copy at all: @a@ occurs
+        -- once, so the argument is placed at that site with its own indices
+        -- (reindexing exists only to disambiguate several copies). Cloning it
+        -- instead re-copies the whole rest-of-chain at every level of a deep
+        -- reduction chain -- @arg@ at level k has size O(k), so the total is
+        -- O(depth^2) copies and a deep chain exhausts memory. This is the shape
+        -- of the standard-library 'root' test's pool AST (a long composition
+        -- threading one value), which OOMed before the move fix. First-order
+        -- @Int -> Int@ throughout so realize stays cheap and this isolates
+        -- 'applyLambdas'. With the fix it is linear and finishes instantly.
+        localOption (mkTimeout 20000000) $
+          testCase "deep singly-used-parameter chain moves instead of cloning"
+            (assertGenerates (singleUseChain 2000))
       ]
+
+-- | @id . id . ... . id@ applied to an @Int@, @k@ compositions deep, with
+-- no tuple/destructuring anywhere. Used to catch a per-solve full scan of
+-- the solved context reintroducing quadratic typechecking on plain
+-- composition chains.
+deepIdComposition :: Int -> MT.Text
+deepIdComposition k =
+  "module main (r)\n"
+    <> "id :: a -> a\n"
+    <> "(.) :: (b -> c) -> (a -> b) -> a -> c\n"
+    <> "r = (" <> MT.intercalate " . " (replicate k "id") <> ") 42\n"
+
+-- | @map (\\(k, v) -> (k, dbl v)) . ... @ applied to @[(Str, Int)]@, @k@
+-- compositions deep. Exercises a long chain in which every stage
+-- destructures a tuple, so the receiver index is populated and the scan is
+-- actually taken.
+tuplePatternComposition :: Int -> MT.Text
+tuplePatternComposition k =
+  "module main (r)\n"
+    <> "map :: (a -> b) -> [a] -> [b]\n"
+    <> "dbl :: Int -> Int\n"
+    <> "(.) :: (b -> c) -> (a -> b) -> a -> c\n"
+    <> "xs :: [(Str, Int)]\n"
+    <> "xs = [(\"a\", 1)]\n"
+    <> "r = (" <> MT.intercalate " . " (replicate k stage) <> ") xs\n"
+  where
+    stage = "map (\\(k, v) -> (k, dbl v))"
+
+-- | @dd (dd (... (big x)))@, @k@ deep, where @dd a = add a a@ uses its
+-- parameter twice. Each application is a beta-redex @(\\a -> add a a) arg@
+-- whose parameter is multiply-used, so substitution would clone @arg@ twice
+-- and a chain doubles it (2^k). Sourced so it lands on the pool path. Used to
+-- verify 'applyLambdas' shares such a parameter rather than cloning it.
+dupParamChain :: Int -> MT.Text
+dupParamChain k =
+  "module main (run)\n"
+    <> "type Py => Int = \"int\"\n"
+    <> "source Py from \"dup.py\" (\"add\", \"big\")\n"
+    <> "add :: Int -> Int -> Int\n"
+    <> "big :: Int -> Int\n"
+    <> "dd :: Int -> Int\n"
+    <> "dd a = add a a\n"
+    <> "run :: Int -> Int\n"
+    <> "run x = " <> nest <> "\n"
+  where
+    nest = foldr (\_ acc -> "dd (" <> acc <> ")") "big x" [1 .. k]
+
+-- | @mid (mid (... (seed x)))@, @k@ deep, where @mid a = inc a@ uses its
+-- parameter exactly ONCE. Each application is a beta-redex @(\\a -> inc a) arg@
+-- whose parameter is singly-used: the fix MOVES @arg@ (no copy), so the chain
+-- is linear. Cloning instead re-copies the growing rest-of-chain at every
+-- level -- O(k^2) -- and a deep chain blows up. First-order @Int -> Int@ only,
+-- so realize does no function-argument re-scoring and this isolates the
+-- 'applyLambdas' move/clone decision. Sourced so it lands on the pool path.
+singleUseChain :: Int -> MT.Text
+singleUseChain k =
+  "module main (run)\n"
+    <> "type Py => Int = \"int\"\n"
+    <> "source Py from \"m.py\" (\"inc\", \"seed\")\n"
+    <> "inc :: Int -> Int\n"
+    <> "seed :: Int -> Int\n"
+    <> "mid :: Int -> Int\n"
+    <> "mid a = inc a\n"
+    <> "run :: Int -> Int\n"
+    <> "run x = " <> nest <> "\n"
+  where
+    nest = foldr (\_ acc -> "mid (" <> acc <> ")") "seed x" [1 .. k]
 
 -- Effect type helpers used throughout the effect test groups.
 ioEff :: TypeU -> TypeU

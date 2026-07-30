@@ -32,8 +32,8 @@ produce sink = do
   _ <- sink (mk 1)
   sink (mk 2)
 
---' Effectful producer + lambda whose body has a nested call on its parameter.
---' Correct: tr(mk 0), tr(mk 1), tr(mk 2) = 100, 110, 120. Bug: 100, 100, 100.
+-- Effectful producer + lambda whose body has a nested call on its parameter.
+-- Correct: tr(mk 0), tr(mk 1), tr(mk 2) = 100, 110, 120. Bug: 100, 100, 100.
 effProd :: <IO> ()
 effProd = produce (\c -> emit (tr c))
 
@@ -45,10 +45,10 @@ produce2 sink = do
   _ <- sink (mk 0)
   sink (mk 3)
 
---' Correct: emit(tr c + mk c) for c in {0, 30}
---'   c=0  -> tr 0  + mk 0  = 100 + 0   = 100
---'   c=30 -> tr 30 + mk 30 = 130 + 300 = 430
---' Bug (param collapses to first site): 100, 100.
+-- Correct: emit(tr c + mk c) for c in {0, 30}
+--   c=0  -> tr 0  + mk 0  = 100 + 0   = 100
+--   c=30 -> tr 30 + mk 30 = 130 + 300 = 430
+-- Bug (param collapses to first site): 100, 100.
 twiceProd :: <IO> ()
 twiceProd = produce2 (\c -> emit (tr c + mk c))
 
@@ -56,7 +56,7 @@ twiceProd = produce2 (\c -> emit (tr c + mk c))
 apply3 :: (Int -> Int) -> [Int]
 apply3 g = [g (mk 0), g (mk 1), g (mk 2)]
 
---' Pure HOF + lambda with a nested call. Correct: [100, 110, 120].
+-- Pure HOF + lambda with a nested call. Correct: [100, 110, 120].
 pureMap :: [Int]
 pureMap = apply3 (\c -> tr c)
 
@@ -64,6 +64,6 @@ pureMap = apply3 (\c -> tr c)
 apply2 :: (Int -> (Int, Int)) -> [(Int, Int)]
 apply2 g = [g (mk 0), g (mk 1)]
 
---' Correct: [pairUp(mk 0), pairUp(mk 1)] = [(100,0), (110,20)].
+-- Correct: [pairUp(mk 0), pairUp(mk 1)] = [(100,0), (110,20)].
 pureTwice :: [(Int, Int)]
 pureTwice = apply2 (\c -> pairUp c)

@@ -132,6 +132,7 @@ main = do
       , golden "terminal-polymorphic-py" "terminal-polymorphic-py"
       , golden "effect-boundary-cross" "effect-boundary-cross"
       , golden "effect-interaction" "effect-interaction"
+      , golden "applylambdas-share" "applylambdas-share"
       , golden "recursive-where-capture-multi" "recursive-where-capture-multi"
       , golden "recursive-where-capture-py" "recursive-where-capture-py"
       , golden "recursive-where-capture-effect-py" "recursive-where-capture-effect-py"
