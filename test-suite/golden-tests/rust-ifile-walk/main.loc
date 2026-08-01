@@ -1,0 +1,70 @@
+-- Rust pool member: IFile pattern-access walker (@ifile_walk).
+--
+-- Bracket and field accessors applied to an open IFile lower to the
+-- @ifile_walk intrinsic: the runtime seeks into the on-disk packet and
+-- materialises only the requested slice/element, converting it to the
+-- result type via the Rust FromVoidstar impls. `path` encodes the
+-- walk-step chain; the runtime bracket bounds are passed as optional
+-- ints (the Option<i64> args the Rust bridge packs into IFileWalkArg).
+--
+-- Coverage:
+--   * .[i]    on [Int]  (fixed-width element)
+--   * .[i]    on [Str]  (variable-width element)
+--   * .[i:j]  on [Int]  (bounded slice)
+--   * .[i:]   on [Int]  (open-ended slice -> absent upper bound = None arg)
+--   * .field  on a record (struct field select through the IFile)
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main
+  ( testIntIndex
+  , testStrIndex
+  , testIntSlice
+  , testIntTail
+  , testRecordField
+  )
+
+import root-rust
+
+record Point where
+  x :: Int
+  y :: Int
+record Rust => Point = "struct"
+
+mkPoint :: Int -> Int -> Point
+mkPoint a b = {x = a, y = b}
+
+-- .[i] on a fixed-width element list.
+testIntIndex :: Str -> <IO, Err> Int
+testIntIndex path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO, Err> IFile [Int]
+  .[2] f                                       -- expect 30
+
+-- .[i] on a variable-width element list.
+testStrIndex :: Str -> <IO, Err> Str
+testStrIndex path = do
+  @save 0 ["alpha", "beta", "gamma", "delta"] path
+  f <- @open path :: <IO, Err> IFile [Str]
+  .[2] f                                       -- expect "gamma"
+
+-- .[i:j] bounded slice.
+testIntSlice :: Str -> <IO, Err> [Int]
+testIntSlice path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO, Err> IFile [Int]
+  .[1:4] f                                      -- expect [20, 30, 40]
+
+-- .[i:] open-ended slice (absent upper bound -> a None walk arg).
+testIntTail :: Str -> <IO, Err> [Int]
+testIntTail path = do
+  @save 0 [10, 20, 30, 40, 50] path
+  f <- @open path :: <IO, Err> IFile [Int]
+  .[3:] f                                       -- expect [40, 50]
+
+-- Field select on a record through the IFile.
+testRecordField :: Str -> <IO, Err> Int
+testRecordField path = do
+  @save 0 (mkPoint 7 9) path
+  f <- @open path :: <IO, Err> IFile Point
+  .y f                                          -- expect 9

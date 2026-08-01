@@ -75,6 +75,57 @@ extern "C" {
     // @show / @read : voidstar <-> JSON text.
     fn mlc_show(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+    // File / stream / IO intrinsics. Signatures mirror the authoritative
+    // #[no_mangle] defs in morloc-runtime::intrinsics; every heavy operation
+    // (SHM, file handles, buffers, the shared slot registry, tmpfile, stdio
+    // RPC to the nexus) lives behind these symbols in libmorloc, so each Rust
+    // shim below is a thin wrapper, mirroring the C++ pool's `_mlc_*` helpers.
+    fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_save(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_write(level: u8, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_tell(errmsg: *mut *mut c_char) -> u64;
+    fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_open_ostream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_open_istream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_open_stdout(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_open_stderr(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    // Canonicalises a schema to the string the runtime keys/compares streams
+    // by (used by the open_*/append family). libc-malloc'd result.
+    fn schema_to_string(schema: *const CSchema) -> *mut c_char;
+    // Cross-pool stream-handle wire codec. A handle (IFile/IStream/OStream) is a
+    // bare u64 slot id in-pool, but crosses a boundary as a 16-byte tagged field
+    // (TAG_HANDLE inline, or TAG_PATH + a path suballoc) so the receiving pool
+    // can re-resolve the slot. These marshal that field; `cursor` advances past
+    // any path suballoc, `base_ptr` resolves a relptr (null for in-SHM reads).
+    fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_read_handle_voidstar(field: *const c_void, base_ptr: *const c_void, kind: u8, errmsg: *mut *mut c_char) -> i64;
+}
+
+/// C-ABI layout of one `@ifile_walk` runtime bracket argument (16 bytes).
+/// Mirrors `morloc-runtime::intrinsics::IFileWalkArg`; rustmorloc cannot import
+/// that type (it depends on `morloc-runtime-types`, not libmorloc), so the
+/// layout is redeclared here and must stay in lockstep.
+#[repr(C)]
+struct IFileWalkArg {
+    has: u8,
+    _pad: [u8; 7],
+    value: i64,
 }
 
 // The C-ABI functions take a `const Schema*` (C struct). We bridge our Rust
@@ -360,27 +411,80 @@ pub trait FromVoidstar: Sized {
 }
 
 // ---- scalars --------------------------------------------------------------
+// Map a stream-handle SerialType to the `MLC_KIND_*` open-kind byte the reader
+// reopens with (0/1/2). Distinct from the schema enum value (21/22/23).
+#[inline]
+fn handle_kind(t: SerialType) -> u8 {
+    match t {
+        SerialType::IFile => 0,
+        SerialType::IStream => 1,
+        SerialType::OStream => 2,
+        _ => 0,
+    }
+}
+
+// A C-ABI handle-codec error message, or `fallback` when none was set.
+#[inline]
+unsafe fn handle_err(err: *mut c_char, fallback: &str) -> String {
+    if err.is_null() { fallback.to_string() } else { cstr_take(err) }
+}
+
 macro_rules! int_impl {
     ($t:ty) => {
         impl ToVoidstar for $t {
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
-            unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, schema: &Schema) {
-                if schema.serial_type == SerialType::Int {
+            unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+                match schema.serial_type {
+                    // A stream handle (IFile/IStream/OStream) is a u64 slot id
+                    // that crosses a boundary as a 16-byte tagged field, not a
+                    // bare int. The forwarder emits TAG_HANDLE (inline slot id);
+                    // `cursor` would advance past a path suballoc under TAG_PATH.
+                    SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                        let mut err: *mut c_char = std::ptr::null_mut();
+                        let rc = mlc_write_handle_voidstar(
+                            *self as i64,
+                            dest as *mut c_void,
+                            cursor as *mut *mut u8 as *mut *mut c_void,
+                            &mut err,
+                        );
+                        if rc != 0 {
+                            morloc_throw(handle_err(err, "mlc_write_handle_voidstar failed"));
+                        }
+                    }
                     // Inline BigInt [size=1, value] (16 bytes); v1 never emits
                     // multi-limb (I6 handles consume).
-                    core::ptr::write_unaligned(dest as *mut i64, 1);
-                    core::ptr::write_unaligned((dest as *mut i64).add(1), *self as i64);
-                } else {
-                    core::ptr::write_unaligned(dest as *mut $t, *self); // I8 unaligned
+                    SerialType::Int => {
+                        core::ptr::write_unaligned(dest as *mut i64, 1);
+                        core::ptr::write_unaligned((dest as *mut i64).add(1), *self as i64);
+                    }
+                    _ => core::ptr::write_unaligned(dest as *mut $t, *self), // I8 unaligned
                 }
             }
         }
         impl FromVoidstar for $t {
             #[inline]
-            unsafe fn read(schema: &Schema, data: *const u8, _base: *const u8) -> Self {
-                read_int(schema, data) as $t
+            unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+                match schema.serial_type {
+                    // Read the 16-byte tagged field (payload at offset 8) and
+                    // re-resolve it to a local handle -- NOT the plain-int path,
+                    // which would read the tag byte at offset 0.
+                    SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                        let mut err: *mut c_char = std::ptr::null_mut();
+                        let handle = mlc_read_handle_voidstar(
+                            data as *const c_void,
+                            base as *const c_void,
+                            handle_kind(schema.serial_type),
+                            &mut err,
+                        );
+                        if !err.is_null() || handle < 0 {
+                            morloc_throw(handle_err(err, "mlc_read_handle_voidstar failed"));
+                        }
+                        handle as $t
+                    }
+                    _ => read_int(schema, data) as $t,
+                }
             }
         }
     };
@@ -926,6 +1030,326 @@ pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
     shfree(voidstar, &mut e2);
     discard_err(e2);
     result
+}
+
+// ---- File / stream / IO intrinsics ----------------------------------------
+//
+// Thin bridges over the libmorloc `mlc_*` C ABI, mirroring the C++ pool's
+// `_mlc_*` helpers (data/lang/cpp/pool.cpp). The runtime owns all IO state; a
+// shim only marshals values and propagates errors. Value-in ops stage the
+// value through `with_voidstar`; value-out ops reconstruct a runtime-returned
+// SHM voidstar via `FromVoidstar` then `shfree` it (the `@load`/`@read`
+// shape). A handle is an opaque `u64` slot id (the ABI uses `i64`); the error
+// string is always checked BEFORE the i64->u64 narrowing so a -1 error
+// sentinel never becomes a bogus handle.
+
+/// Convert a borrowed string arg to a CString, raising a catchable morloc
+/// error on an interior NUL byte (matches `@read`).
+unsafe fn cstr_arg(s: &str, what: &str) -> CString {
+    match CString::new(s) {
+        Ok(c) => c,
+        Err(_) => morloc_throw(format!("{}: string contains an interior NUL byte", what)),
+    }
+}
+
+/// Propagate a C-ABI error string as a catchable morloc throw (the Rust
+/// analogue of the C++ `PROPAGATE_ERROR` macro). No-op when `err` is null.
+#[inline]
+unsafe fn check_err(err: *mut c_char) {
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
+}
+
+/// Propagate a C-ABI error, then narrow an `i64` handle to the `u64` slot id
+/// used in generated pools. The error is checked FIRST so a -1 sentinel is
+/// never cast to `u64::MAX`.
+#[inline]
+unsafe fn handle_or_throw(handle: i64, err: *mut c_char, what: &str) -> u64 {
+    check_err(err);
+    if handle < 0 {
+        morloc_throw(format!("{}: runtime returned an invalid handle", what));
+    }
+    handle as u64
+}
+
+/// Reconstruct a value from a runtime-returned SHM voidstar (the `@load`
+/// shape): propagate any error, reject null, read via `FromVoidstar`, then
+/// `shfree` the SHM block.
+unsafe fn read_voidstar<T: FromVoidstar>(
+    voidstar: *mut c_void,
+    err: *mut c_char,
+    schema: &Schema,
+    what: &str,
+) -> T {
+    if !err.is_null() {
+        morloc_throw(format!("{}: {}", what, cstr_take(err)));
+    }
+    if voidstar.is_null() {
+        morloc_throw(format!("{}: runtime returned a null value", what));
+    }
+    let _recur = RecurScope::enter(schema);
+    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, std::ptr::null());
+    let mut e2: *mut c_char = std::ptr::null_mut();
+    shfree(voidstar, &mut e2);
+    discard_err(e2);
+    result
+}
+
+/// Canonicalise `schema` to the string the runtime keys and compares streams
+/// by (so it is byte-identical to what other pools write), hand the borrowed C
+/// string to `f`, then free it. Mirrors the C++ helpers' `schema_to_string(..)
+/// .. free(s)` and, like them, forwards the libc-owned pointer directly rather
+/// than copying it into a Rust-owned buffer.
+unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R) -> R {
+    let s = schema_to_string(cschema_of(schema));
+    if s.is_null() {
+        morloc_throw("morloc IO: schema_to_string returned null");
+    }
+    let r = f(s);
+    libc::free(s as *mut c_void);
+    r
+}
+
+/// @hash: content hash of a value as a hex string.
+pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
+    let h = with_voidstar(value, schema, |vs, cs, err| mlc_hash(vs, cs, err));
+    if h.is_null() {
+        morloc_throw("@hash: runtime returned null");
+    }
+    cstr_take(h)
+}
+
+/// @save: write a value to disk in the voidstar packet format. `level` is the
+/// compression level (the runtime narrows it to a byte). Returns unit.
+pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
+    let path_c = cstr_arg(path, "@save");
+    let rc = with_voidstar(value, schema, |vs, cs, err| {
+        mlc_save(vs, cs, level as u8, path_c.as_ptr(), err)
+    });
+    if rc != 0 {
+        morloc_throw("@save: runtime write failed");
+    }
+}
+
+/// @savej: write a value to disk as JSON.
+pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
+    let path_c = cstr_arg(path, "@savej");
+    let rc = with_voidstar(value, schema, |vs, cs, err| {
+        mlc_save_json(vs, cs, level as u8, path_c.as_ptr(), err)
+    });
+    if rc != 0 {
+        morloc_throw("@savej: runtime write failed");
+    }
+}
+
+/// @savem: write a value to disk as a raw voidstar block.
+pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
+    let path_c = cstr_arg(path, "@savem");
+    let rc = with_voidstar(value, schema, |vs, cs, err| {
+        mlc_save_voidstar(vs, cs, level as u8, path_c.as_ptr(), err)
+    });
+    if rc != 0 {
+        morloc_throw("@savem: runtime write failed");
+    }
+}
+
+/// @load: read a saved packet from disk into a typed value.
+pub unsafe fn load<T: FromVoidstar>(schema: &Schema, path: &str) -> T {
+    let path_c = cstr_arg(path, "@load");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_load(path_c.as_ptr(), cschema_of(schema), &mut err);
+    read_voidstar(voidstar, err, schema, "@load")
+}
+
+/// @open (IFile): open a file as a handle of the given kind byte.
+pub unsafe fn open(path: &str, kind: u8) -> u64 {
+    let path_c = cstr_arg(path, "@open");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = mlc_open(path_c.as_ptr(), kind, &mut err);
+    handle_or_throw(h, err, "@open")
+}
+
+/// @close: close a stream/file handle.
+pub unsafe fn close(handle: u64) {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_close(handle as i64, &mut err);
+    check_err(err);
+}
+
+/// @close on a registered temp-file path: unlink it.
+pub unsafe fn unlink_tmp(path: &str) {
+    let path_c = cstr_arg(path, "@close");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_unlink_tmp(path_c.as_ptr(), &mut err);
+    check_err(err);
+}
+
+/// @fschema: read a file's element schema string without opening it. A missing
+/// schema (null result) reads as the empty string, which `cstr_take` yields.
+pub unsafe fn fschema(path: &str) -> String {
+    let path_c = cstr_arg(path, "@fschema");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let s = mlc_fschema(path_c.as_ptr(), &mut err);
+    check_err(err);
+    cstr_take(s)
+}
+
+/// @flen: total element count of an IFile.
+pub unsafe fn ifile_length(handle: u64) -> i64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let n = mlc_ifile_length(handle as i64, &mut err);
+    check_err(err);
+    n
+}
+
+/// @next: materialise an IStream's current sub-packet as `[a]` and advance the
+/// cursor. An empty list at EOF is a valid (non-null) voidstar.
+pub unsafe fn next<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_next(handle as i64, &mut err);
+    read_voidstar(voidstar, err, schema, "@next")
+}
+
+/// @streamLayout: per-sub-packet layout of an IFile as `[(U64,U64,U64)]`.
+pub unsafe fn stream_layout<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_stream_layout(handle as i64, &mut err);
+    read_voidstar(voidstar, err, schema, "@streamLayout")
+}
+
+/// @stream: derive an IStream handle from an IFile handle.
+pub unsafe fn stream(ifile_handle: u64) -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = mlc_stream(ifile_handle as i64, &mut err);
+    handle_or_throw(h, err, "@stream")
+}
+
+/// @write: emit one sub-packet of a value to an OStream handle. `mlc_write`
+/// copies the staged voidstar synchronously and takes no schema, so the
+/// `with_voidstar` closure ignores its CSchema argument.
+pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
+    let rc = with_voidstar(value, schema, |vs, _cs, err| {
+        mlc_write(level as u8, handle as i64, vs, err)
+    });
+    if rc != 0 {
+        morloc_throw("@write: runtime write failed");
+    }
+}
+
+/// @append: open an existing stream file for append, returning a fresh handle.
+pub unsafe fn append(schema: &Schema, path: &str) -> u64 {
+    let path_c = cstr_arg(path, "@append");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_append(s, path_c.as_ptr(), &mut err));
+    handle_or_throw(h, err, "@append")
+}
+
+/// @concat: byte-level concatenation of N stream files into `dest`.
+pub unsafe fn concat(paths: &[String], dest: &str) {
+    // Bind the CStrings to a named local so the *const c_char array does not
+    // dangle (the classic `.map(|s| CString::new(s).as_ptr())` use-after-free).
+    let path_cs: Vec<CString> = paths.iter().map(|p| cstr_arg(p, "@concat")).collect();
+    let ptrs: Vec<*const c_char> = path_cs.iter().map(|c| c.as_ptr()).collect();
+    let dest_c = cstr_arg(dest, "@concat");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let rc = mlc_concat(ptrs.as_ptr(), ptrs.len(), dest_c.as_ptr(), &mut err);
+    check_err(err);
+    if rc != 0 {
+        morloc_throw("@concat: runtime concat failed");
+    }
+}
+
+/// @flush: force buffered elements out as a sub-packet.
+pub unsafe fn flush(handle: u64) {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_flush(handle as i64, &mut err);
+    check_err(err);
+}
+
+/// @tell: current @stdout element count.
+pub unsafe fn tell() -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let n = mlc_tell(&mut err);
+    check_err(err);
+    n
+}
+
+/// @tmpfile: create + register a temp file, returning its path.
+pub unsafe fn tmpfile() -> String {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let s = mlc_tmpfile(&mut err);
+    check_err(err);
+    if s.is_null() {
+        morloc_throw("@tmpfile: runtime returned null");
+    }
+    cstr_take(s)
+}
+
+/// @open (OStream): open a file for writing with the element schema.
+pub unsafe fn open_ostream(schema: &Schema, path: &str) -> u64 {
+    let path_c = cstr_arg(path, "@open");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_ostream(s, path_c.as_ptr(), &mut err));
+    handle_or_throw(h, err, "@open")
+}
+
+/// @open (IStream): open a file for streamed reading with the element schema.
+pub unsafe fn open_istream(schema: &Schema, path: &str) -> u64 {
+    let path_c = cstr_arg(path, "@open");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_istream(s, path_c.as_ptr(), &mut err));
+    handle_or_throw(h, err, "@open")
+}
+
+/// @stdin: open the process stdin as an IStream of the element schema.
+pub unsafe fn open_stdin(schema: &Schema) -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_stdin(s, &mut err));
+    handle_or_throw(h, err, "@stdin")
+}
+
+/// @stdout: open the process stdout as an OStream of the element schema.
+pub unsafe fn open_stdout(schema: &Schema) -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_stdout(s, &mut err));
+    handle_or_throw(h, err, "@stdout")
+}
+
+/// @stderr: open the process stderr as an OStream of the element schema.
+pub unsafe fn open_stderr(schema: &Schema) -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_stderr(s, &mut err));
+    handle_or_throw(h, err, "@stderr")
+}
+
+/// @ifile_walk: unified IFile pattern walker. `path` encodes the walk-step
+/// chain; `args` are the runtime bracket bounds (optional ints, absent slots
+/// take the default). `T` is the materialised result type.
+pub unsafe fn ifile_walk<T: FromVoidstar>(
+    schema: &Schema,
+    handle: u64,
+    path: &str,
+    args: &[Option<i64>],
+) -> T {
+    let packed: Vec<IFileWalkArg> = args
+        .iter()
+        .map(|a| match a {
+            Some(v) => IFileWalkArg { has: 1, _pad: [0; 7], value: *v },
+            None => IFileWalkArg { has: 0, _pad: [0; 7], value: 0 },
+        })
+        .collect();
+    let path_c = cstr_arg(path, "@ifile_walk");
+    let args_ptr = if packed.is_empty() { std::ptr::null() } else { packed.as_ptr() };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_ifile_walk(
+        handle as i64,
+        path_c.as_ptr(),
+        args_ptr,
+        packed.len() as u64,
+        &mut err,
+    );
+    read_voidstar(voidstar, err, schema, "@ifile_walk")
 }
 
 // ---- fail packets (I1: always C-allocated via make_fail_packet) -----------

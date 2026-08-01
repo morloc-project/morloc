@@ -93,7 +93,73 @@ printExpr (IIntrinsicRead sid Nothing e) =
 printExpr (IIntrinsicThrow msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
 printExpr (IIntrinsicCatch fallible fallback) =
   "rustmorloc::mlc_catch(" <> printExpr fallible <> ", " <> printExpr fallback <> ")"
+-- File / stream / IO intrinsics. Each mirrors the C++ `_mlc_*` helper
+-- (CppPrinter.hs) but calls the corresponding thin `rustmorloc` shim. A value
+-- argument is borrowed (`&(..)`, the ToVoidstar shape); a handle is a bare
+-- `u64` value; a typed-result shim gets the `::<T>` turbofish so its return
+-- type resolves.
+printExpr (IIntrinsicHash sid e) =
+  "rustmorloc::hash(" <> refExpr e <> ", " <> schemaRef sid <> ")"
+printExpr (IIntrinsicSave fmt sid level e path)
+  | fmt == "json" = saveCall "save_json"
+  | fmt == "voidstar" = saveCall "save_voidstar"
+  | otherwise = saveCall "save"
+  where
+    saveCall f =
+      "rustmorloc::" <> f <> "(" <> refExpr e <> ", " <> schemaRef sid
+        <> ", " <> printExpr level <> ", " <> refExpr path <> ")"
+printExpr (IIntrinsicLoad sid mt path) =
+  "rustmorloc::load" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+printExpr (IIntrinsicOpen kind path) =
+  "rustmorloc::open(" <> refExpr path <> ", " <> pretty kind <> ")"
+printExpr (IIntrinsicClose h) = "rustmorloc::close(" <> printExpr h <> ")"
+printExpr (IIntrinsicUnlinkTemp path) = "rustmorloc::unlink_tmp(" <> refExpr path <> ")"
+printExpr (IIntrinsicFSchema path) = "rustmorloc::fschema(" <> refExpr path <> ")"
+printExpr (IIntrinsicFLength h) = "rustmorloc::ifile_length(" <> printExpr h <> ")"
+printExpr (IIntrinsicNext sid mt h) =
+  "rustmorloc::next" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicStreamLayout sid mt h) =
+  "rustmorloc::stream_layout" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicStream h) = "rustmorloc::stream(" <> printExpr h <> ")"
+printExpr (IIntrinsicOpenOStream sid path) =
+  "rustmorloc::open_ostream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+printExpr (IIntrinsicOpenIStream sid path) =
+  "rustmorloc::open_istream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+printExpr (IIntrinsicWrite sid level value handle) =
+  "rustmorloc::write(" <> schemaRef sid <> ", " <> printExpr level
+    <> ", " <> refExpr value <> ", " <> printExpr handle <> ")"
+printExpr (IIntrinsicAppend sid path) =
+  "rustmorloc::append(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+printExpr (IIntrinsicConcat paths dest) =
+  "rustmorloc::concat(" <> refExpr paths <> ", " <> refExpr dest <> ")"
+printExpr (IIntrinsicFlush h) = "rustmorloc::flush(" <> printExpr h <> ")"
+printExpr IIntrinsicTell = "rustmorloc::tell()"
+printExpr IIntrinsicTmpfile = "rustmorloc::tmpfile()"
+printExpr (IIntrinsicStdin sid) = "rustmorloc::open_stdin(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicStdout sid) = "rustmorloc::open_stdout(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicStderr sid) = "rustmorloc::open_stderr(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicIFileWalk sid mt pathExpr h runtimeArgs) =
+  "rustmorloc::ifile_walk" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h
+    <> ", " <> refExpr pathExpr <> ", &[" <> argList <> "])"
+  where
+    argList = hcat (punctuate ", " (map printExpr runtimeArgs))
 printExpr _ = error "RustPrinter: this intrinsic/expression is unsupported in Rust v1"
+
+-- | Reference into the pool's schema table: `schema(<id>)` returns a
+-- `&'static Schema`, which coerces to the `&Schema` every shim expects.
+schemaRef :: Int -> MDoc
+schemaRef sid = "schema(" <> pretty sid <> ")"
+
+-- | Borrow an expression (`&(e)`), the ToVoidstar/`&str` shape the value-in and
+-- path shims expect.
+refExpr :: IExpr -> MDoc
+refExpr e = "&" <> parens (printExpr e)
+
+-- | Optional turbofish for a typed-result intrinsic: `::<T>` when the result
+-- type is known (always, for Rust), empty otherwise. Lets a generic shim
+-- (`load`/`next`/`stream_layout`/`ifile_walk`) resolve its return type.
+turbofish :: Maybe IType -> MDoc
+turbofish = maybe "" (\t -> "::<" <> rustType t <> ">")
 
 -- Rust non-finite float literals.
 renderRealLit :: RealLit -> MDoc
