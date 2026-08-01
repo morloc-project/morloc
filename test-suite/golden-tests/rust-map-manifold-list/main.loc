@@ -1,0 +1,17 @@
+module main (doubleAll)
+
+import root-rust
+
+source Rust from "own.rs" ("inc" as inc, "make_list" as makeList)
+inc :: Int -> Int
+makeList :: Int -> [Int]
+
+-- `map` over a MANIFOLD-RESULT list: the list argument `makeList n` is a sourced
+-- call (a manifold), and it is passed to `morloc_map_vec` BY VALUE rather than by
+-- reference -- `map(closure, make_list(n))` yields `Vec<i64>` where `&[i64]` is
+-- expected (rustc E0308). A `map` over a DIRECT parameter list IS borrowed
+-- correctly; only a manifold-result list argument is not. The list argument of a
+-- higher-order call should be borrowed regardless of whether it is a variable or
+-- a manifold result.
+doubleAll :: Int -> [Int]
+doubleAll n = map (\x -> inc x) (makeList n)

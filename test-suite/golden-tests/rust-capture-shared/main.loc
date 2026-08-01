@@ -1,0 +1,20 @@
+module main (foo)
+
+import root-rust
+
+source Rust from "own.rs" ("cat" as cat)
+cat :: [Int] -> [Int] -> [Int]
+
+-- `pivot` (a non-Copy [Int]) is used at two points: it is CAPTURED into the
+-- mapping closure `\xs -> cat pivot xs`, and it is used again in the result
+-- tuple. The closure is a Rust `move ||` that captures pivot BY MOVE at closure
+-- formation, so the later `pivot` in the tuple is a use-after-move (rustc E0382).
+-- `rustBridgeContext` bridges the capture using only the caller's borrowed set
+-- (`oeParent`), not the caller's SHARED set, so it never clones a shared
+-- capture -- and an in-place clone would not help anyway (the move happens at
+-- capture). Gap 2 fix: track the caller's shared set and HOIST a
+-- `let pivot_c = pivot.clone();` before the closure, capturing the clone.
+foo :: [Int] -> [[Int]] -> ([[Int]], [Int])
+foo pivot xss =
+  let m = map (\xs -> cat pivot xs) xss
+  in (m, pivot)

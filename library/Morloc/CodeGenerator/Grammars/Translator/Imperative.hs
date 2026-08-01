@@ -394,9 +394,9 @@ data LowerConfig m = LowerConfig
   -- parameter conventions (tracked in member state).
   , lcArgManifoldOwnership :: NativeManifold -> m IOwnership
   -- ^ The ownership of the value produced by a manifold used as an argument (a
-  -- 'NativeArgManifold'). Default is 'Owned' (a call materializes a value); the
-  -- Rust member computes it under the sub-manifold's OWN borrowed set, so a
-  -- trivial pass-through of a borrowed variable is recognized as borrowed.
+  -- 'NativeArgManifold'). Always 'Owned' -- a manifold call materializes an owned
+  -- value (its return type is the owned @T@, and the return sink clones a borrowed
+  -- body) -- so no member distinguishes on the manifold.
   , lcOwnArg :: IOwnership -> TypeF -> MDoc -> MDoc
   -- ^ Adapt an expression to an owned value at an owned sink (a container
   -- element, a return, a let binding, a by-value parameter). Default is identity;
@@ -786,6 +786,12 @@ lowerNativeExpr cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)
 lowerNativeExpr _ _ (ManN_ call) = return call
+-- The manifold return is an owned sink: adapt the returned value to an owned
+-- value (Rust clones a borrowed/place value; other members are unchanged) so a
+-- `&T`/place value does not reach the owned return slot.
+lowerNativeExpr cfg (ReturnN innerE) (ReturnN_ x) = do
+  x' <- adaptOwnedElem cfg innerE x
+  return $ x' {poolReturnFlag = True}
 lowerNativeExpr _ _ (ReturnN_ x) =
   return $ x {poolReturnFlag = True}
 lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) = do
@@ -808,7 +814,12 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
           }
   lcMakeLet cfg helperNamer tmpIdx (Just bodyT) letResult releaseBody
 lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing x1 x2
-lowerNativeExpr cfg (NativeLetN _ (typeFof -> t) _) (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i (Just t) x1 x2
+-- A native let binds an owned local, so its RHS is an owned sink: adapt the
+-- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
+-- borrowed receiver -- to match the owned binding type; other members unchanged).
+lowerNativeExpr cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
+  x1' <- adaptOwnedElem cfg rhsE x1
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) x1' x2
 lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing x1 x2
 lowerNativeExpr _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExpr _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
@@ -870,8 +881,19 @@ lowerNativeExpr cfg _ (DoBlockN_ t x) = do
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional widens a value to an optional. Most languages treat a T as a
 -- valid ?T (identity); Rust must wrap the value in Some(..) (see lcCoerceOptional).
+-- The wrapped value must be OWNED first: `Some(&T)` is an `Option<&T>`, not the
+-- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
+lowerNativeExpr cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
+  x' <- adaptOwnedElem cfg innerE x
+  return $ x' {poolExpr = lcCoerceOptional cfg (poolExpr x')}
 lowerNativeExpr cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
+-- The two arms feed the conditional's owned result sink, so adapt each to an
+-- owned value (like every other owned sink); the condition is not a sink.
+lowerNativeExpr cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
+  thenDocs' <- adaptOwnedElem cfg thenE thenDocs
+  elseDocs' <- adaptOwnedElem cfg elseE elseDocs
+  lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do

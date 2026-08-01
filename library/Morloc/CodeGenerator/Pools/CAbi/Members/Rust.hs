@@ -81,11 +81,15 @@ data RustState = RustState
   , rsCScope :: Scope
   -- ^ The merged Rust concrete typedef scope; resolves a recursive back-ref
   -- (@RecF@) to its concrete struct name (as C++'s translatorCScope does).
-  , rsSrcTypeVarMask :: Map.Map SrcName [Bool]
-  -- ^ Per sourced function, per parameter position: True where the declared
-  -- morloc signature had a BARE type variable. Such a parameter is passed by
-  -- reference (@&A@) even at a Copy instantiation, because the sourced Rust fn
-  -- is generic over @&A@ (concrete Copy parameters still pass by value).
+  , rsSrcTypeVarMask :: Map.Map SrcName [(Bool, Bool)]
+  -- ^ Per sourced function, per parameter position: @(isBareTypeVar,
+  -- isFunctionParam)@ from the declared morloc signature. @isBareTypeVar@: the
+  -- parameter is a BARE type variable, so it is passed by reference (@&A@) even
+  -- at a Copy instantiation (the sourced Rust fn is generic over @&A@).
+  -- @isFunctionParam@: the parameter is itself function-typed (@F: Fn@), so a
+  -- function-valued argument is a genuine closure passed BY VALUE; when False,
+  -- a function-typed argument is a fully-applied sub-manifold VALUE, passed like
+  -- data (borrowed when non-'Copy').
   }
 
 instance Defaultable RustState where
@@ -102,10 +106,21 @@ instance Defaultable RustState where
 data OwnEnv = OwnEnv
   { oeCurrent :: Set.Set Int
   , oeParent :: Set.Set Int
+  , oeShared :: Set.Set Int
+  -- ^ Indices used at more than one point in the current manifold (the "shared"
+  -- set, see 'sharedIndicesSM'). A non-'Copy' shared local must be BORROWED at
+  -- reference sinks and CLONED at owned sinks so it survives every use -- never
+  -- moved. Kept SEPARATE from 'oeCurrent' (a shared owned local is a value, not
+  -- a @&T@ reference: tagging it 'BorrowedRef' would miscompile reference sinks).
+  , oeParentShared :: Set.Set Int
+  -- ^ The enclosing (caller) manifold's shared set. A captured context argument
+  -- names a caller variable, so a SHARED non-'Copy' capture must be cloned into
+  -- the @move||@ closure (the move happens at closure formation, so the clone is
+  -- hoisted before it) to leave the original live for the caller's other uses.
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -316,50 +331,91 @@ rustBridgeContext i (Native tf) name = do
   return $ if rustIsCopy tf then rustOwn own tf name else rustRef own name
 rustBridgeContext _ _ name = return $ "&(" <> name <> ")"
 
+-- | Per-index variable-use counts over a manifold, for the "shared" (used at
+-- more than one point) determination. ALL uses are counted (borrows INCLUDED --
+-- excluding them is unsound: an owned use followed by a later borrow would slip
+-- through to a use-after-move); the two arms of an 'IfN' are combined by MAX
+-- (they are mutually exclusive at runtime, so a value used once per arm is one
+-- use per run); a captured value (a nested manifold's context arg) counts as a
+-- use. Descends into nested manifolds; any resulting over-count is safe (an
+-- extra clone, never a missed one).
+varUseCountOps :: FoldManifoldM Identity (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int)
+varUseCountOps =
+  FoldManifoldM
+    { opSerialManifoldM = \full@(SerialManifold_ _ _ form _ _) -> return (ctxOf form `add` foldlSM add mempty full)
+    , opNativeManifoldM = \full@(NativeManifold_ _ _ form _) -> return (ctxOf form `add` foldlNM add mempty full)
+    , opSerialExprM = \node -> return (foldlSE add mempty node)
+    , opNativeExprM = \node -> return $ case node of
+        BndVarN_ _ i -> Map.singleton i 1
+        LetVarN_ _ i -> Map.singleton i 1
+        IfN_ _ c t e -> c `add` Map.unionWith max t e
+        _ -> foldlNE add mempty node
+    , opSerialArgM = \node -> return (foldlSA add mempty node)
+    , opNativeArgM = \node -> return (foldlNA add mempty node)
+    }
+  where
+    add = Map.unionWith (+)
+    ctxOf form = Map.fromList [(i, 1) | Arg i _ <- manifoldContext form]
+
+sharedOf :: Map.Map Int Int -> Set.Set Int
+sharedOf = Map.keysSet . Map.filter (>= 2)
+
+-- | The shared indices of a serial manifold: variables used at more than one
+-- point in its body (see 'varUseCountOps').
+sharedIndicesSM :: SerialManifold -> Set.Set Int
+sharedIndicesSM = sharedOf . runIdentity . foldSerialManifoldM varUseCountOps
+
+-- | The shared indices of a native manifold (used as an argument). Counting its
+-- own context args (captures from the enclosing scope) only over-clones (safe).
+sharedIndicesNM :: NativeManifold -> Set.Set Int
+sharedIndicesNM = sharedOf . runIdentity . foldNativeManifoldM varUseCountOps
+
 -- | The spec's @owner(e, Gamma)@ as a PURE function: the ownership of a native
--- expression given @Gamma@, the borrowed (@&T@) parameter indices of the
--- enclosing manifold. Because @Gamma@ is an explicit argument (not fold state),
--- the result is correct regardless of the fold's evaluation order. A bound
--- variable is a reference only when it is a borrowed parameter; a field of a
--- borrowed value is a place; everything else is an owned value.
-ownerPure :: Set.Set Int -> NativeExpr -> IOwnership
+-- expression given @Gamma@ (the borrowed @&T@ parameter indices) and @Shared@
+-- (indices used at more than one point). Because both are explicit arguments
+-- (not fold state), the result is correct regardless of the fold's evaluation
+-- order. A bound variable is a @&T@ reference only when it is a borrowed
+-- parameter; a shared value is a place (borrowed at reference sinks, cloned at
+-- owned sinks -- never moved); a field of a borrowed value is a place;
+-- everything else is an owned value.
+ownerPure :: Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
--- namespace, so both are borrowed exactly when @i@ is a borrowed parameter. A
--- fresh let binding (an owned temporary) has an index NOT in @Gamma@, so it
--- reads as 'Owned'; a let that aliases a borrowed parameter (same index) reads
--- as 'BorrowedRef'.
-ownerPure g (BndVarN _ i) = if Set.member i g then BorrowedRef else Owned
-ownerPure g (LetVarN _ i) = if Set.member i g then BorrowedRef else Owned
-ownerPure g (ReturnN e) = ownerPure g e
-ownerPure g (NativeLetN _ _ e) = ownerPure g e
-ownerPure g (SerialLetN _ _ e) = ownerPure g e
-ownerPure g (AppExeN _ (PatCallP (PatternStruct _)) [recv]) =
-  case argOwnerPure g recv of
+-- namespace, so both classify the same way ('classifyIndex').
+ownerPure g s (BndVarN _ i) = classifyIndex g s i
+ownerPure g s (LetVarN _ i) = classifyIndex g s i
+ownerPure g s (ReturnN e) = ownerPure g s e
+ownerPure g s (NativeLetN _ _ e) = ownerPure g s e
+ownerPure g s (SerialLetN _ _ e) = ownerPure g s e
+ownerPure g s (AppExeN _ (PatCallP (PatternStruct _)) [recv]) =
+  case argOwnerPure g s recv of
     Owned -> Owned
     _ -> BorrowedPlace
-ownerPure _ _ = Owned
+ownerPure _ _ _ = Owned
+
+-- | Classify a variable index: a borrowed parameter (in @Gamma@) is a @&T@
+-- reference; a shared value (in @Shared@, used at more than one point) is a place
+-- (borrowed at reference sinks, cloned at owned sinks, never moved); otherwise it
+-- is an owned value that may be moved.
+classifyIndex :: Set.Set Int -> Set.Set Int -> Int -> IOwnership
+classifyIndex g s i
+  | Set.member i g = BorrowedRef
+  | Set.member i s = BorrowedPlace
+  | otherwise = Owned
 
 -- | Ownership of an argument's value. An expression argument is read in the
--- current manifold's scope (@Gamma@); a manifold argument is a SELF-CONTAINED
--- sub-manifold whose result ownership is computed under ITS OWN borrowed set
--- (from its own form), never the caller's. This is what a trivial pass-through
--- needs -- @morloc_size xs@ wraps @xs@ in a manifold whose body is the borrowed
--- @xs@, so its result is @BorrowedRef@, not @Owned@.
-argOwnerPure :: Set.Set Int -> NativeArg -> IOwnership
-argOwnerPure g (NativeArgExpr e) = ownerPure g e
-argOwnerPure _ (NativeArgManifold nm) = argManifoldOwnership nm
-
--- | A manifold used as an argument is a self-contained sub-manifold: its result
--- ownership is computed under ITS OWN borrowed set (from its form), never the
--- caller's. Single definition shared by 'argOwnerPure' and 'lcArgManifoldOwnership'.
-argManifoldOwnership :: NativeManifold -> IOwnership
-argManifoldOwnership (NativeManifold _ _ form body) =
-  ownerPure (borrowedIndicesOfForm form) body
+-- current scope (@Gamma@, @Shared@); a manifold argument renders as a CALL that
+-- materializes an owned value (a manifold's return type is always the owned @T@,
+-- and the return sink clones a borrowed body -- see 'ReturnN_'), so it is 'Owned'
+-- regardless of the sub-manifold body's internal ownership.
+argOwnerPure :: Set.Set Int -> Set.Set Int -> NativeArg -> IOwnership
+argOwnerPure g s (NativeArgExpr e) = ownerPure g s e
+argOwnerPure _ _ (NativeArgManifold _) = Owned
 
 rustOwnership :: NativeExpr -> RustM IOwnership
 rustOwnership e = do
   g <- asks oeCurrent
-  return (ownerPure g e)
+  s <- asks oeShared
+  return (ownerPure g s e)
 
 -- | Adapt an expression to an owned value at an owned sink (a container element,
 -- a return, a let RHS, a by-value parameter): clone a borrowed non-'Copy' value,
@@ -392,10 +448,37 @@ rustClosureWrapper mname ctxArgs boundArgs = do
   boundTyped <- mapM (\a@(Arg _ t) -> do
                         base <- closureParamType t
                         return (argNamer a <> ":" <+> base)) boundArgs
-  ctxDocs <- mapM (\a@(Arg i t) -> rustBridgeContext i t (argNamer a)) ctxArgs
-  let boundDocs = [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
+  ctxParts <- mapM bridgeCapture ctxArgs
+  let cloneLets = concatMap fst ctxParts
+      ctxDocs = map snd ctxParts
+      boundDocs = [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
       call = mname <> tupled (ctxDocs ++ boundDocs)
-  return $ "move |" <> hcat (punctuate ", " boundTyped) <> "| unsafe {" <+> call <+> "}"
+      closure = "move |" <> hcat (punctuate ", " boundTyped) <> "| unsafe {" <+> call <+> "}"
+  -- A shared non-Copy capture is cloned in a block that brackets the closure, so
+  -- the `move` captures the clone and the original stays live for the caller.
+  return $ case cloneLets of
+    [] -> closure
+    _ -> "{" <+> hsep cloneLets <+> closure <+> "}"
+
+-- | Bridge one captured context argument: returns any hoisted clone bindings and
+-- the value passed into the inner manifold call. A SHARED non-'Copy' owned
+-- capture (used elsewhere by the caller) is cloned to a fresh local and the call
+-- takes a reference to the clone; everything else defers to 'rustBridgeContext'.
+bridgeCapture :: Arg TypeM -> RustM ([MDoc], MDoc)
+bridgeCapture a@(Arg i t) = do
+  parentBorrowed <- asks oeParent
+  parentShared <- asks oeParentShared
+  case t of
+    Native tf
+      | Set.member i parentShared
+          && not (rustIsCopy tf)
+          && not (Set.member i parentBorrowed) ->
+          let name = argNamer a
+              cloneVar = name <> "_c"
+           in return (["let" <+> cloneVar <+> "=" <+> name <> ".clone();"], rustRef Owned cloneVar)
+    _ -> do
+      d <- rustBridgeContext i t (argNamer a)
+      return ([], d)
 
 -- | Per sourced Rust function, the per-parameter "is a bare type variable"
 -- mask from the DECLARED morloc signature. A concrete parameter (Int, Str,
@@ -404,7 +487,7 @@ rustClosureWrapper mname ctxArgs boundArgs = do
 -- type variables 'ForallU'-quantified; a typeclass method is 'Polymorphic',
 -- whose per-instance 'termGeneral' has been monomorphized, so the class-level
 -- signature + the instance's 'classVars' carry the real type variables.
-buildSrcTypeVarMask :: MorlocMonad (Map.Map SrcName [Bool])
+buildSrcTypeVarMask :: MorlocMonad (Map.Map SrcName [(Bool, Bool)])
 buildSrcTypeVarMask = do
   GMap _ sigmap <- MM.gets stateSignatures
   tcls <- MM.gets stateTypeclasses
@@ -423,11 +506,14 @@ buildSrcTypeVarMask = do
     entries qs t' srcs =
       [(srcName s, paramMask qs t') | (_, isrc) <- srcs, let s = val isrc, srcLang s == rustLang]
 
-    paramMask qs (FunU args _) = map (isBareVar qs) args
+    paramMask qs (FunU args _) = map (\a -> (isBareVar qs a, isFunParam a)) args
     paramMask _ _ = []
 
     isBareVar qs (VarU v) = Set.member v qs
     isBareVar _ _ = False
+
+    isFunParam (FunU _ _) = True
+    isFunParam _ = False
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
@@ -583,28 +669,31 @@ borrowedIndicesOfForm form =
     isBorrowed _ = False
 
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the
--- manifold's borrowed parameter indices, and 'oeParent' becomes the enclosing
--- manifold's ('oeCurrent' from before). Because this extends the Reader
--- environment with 'local' rather than mutating state, the scope is purely
--- lexical -- sibling and nested manifolds cannot corrupt each other's view, and
--- the answer does not depend on the fold's evaluation order.
-withBorrowedBnds :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> RustM PoolDocs -> RustM PoolDocs
-withBorrowedBnds form act =
-  local (\e -> OwnEnv (borrowedIndicesOfForm form) (oeCurrent e)) act
+-- manifold's borrowed parameter indices, 'oeParent' the enclosing manifold's
+-- ('oeCurrent' from before), and 'oeShared' the manifold's used-more-than-once
+-- indices. Because this extends the Reader environment with 'local' rather than
+-- mutating state, the scope is purely lexical -- sibling and nested manifolds
+-- cannot corrupt each other's view, and the answer does not depend on the fold's
+-- evaluation order.
+withManifoldScope :: Set.Set Int -> Set.Set Int -> RustM a -> RustM a
+withManifoldScope borrowed shared =
+  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
 -- are named by index-aliasing after the caller's variables.
 rustWithCallerScope :: RustM a -> RustM a
-rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e})
+rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e})
 
 -- | Track each manifold's borrowed parameters as the body is folded, so
 -- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value.
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
 rustSurround =
   defaultValue
-    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) -> withBorrowedBnds form (recurse sm)
-    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) -> withBorrowedBnds form (recurse nm)
+    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm) (recurse sm)
+    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -639,7 +728,7 @@ makeTheMaker = do
 -- closures/partial application, remote calls, caching, and pattern evaluation
 -- raise a clear v1-unsupported error and are unreachable for the pool shapes
 -- v1 supports.
-rustLowerConfig :: Map.Map SrcName [Bool] -> LowerConfig RustM
+rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> LowerConfig RustM
 rustLowerConfig mask =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
@@ -652,33 +741,38 @@ rustLowerConfig mask =
         -- `Fn(&T, ...)` signature. A function argument passes BY VALUE (the
         -- callee takes it as `F: Fn`; borrowing `&closure` breaks higher-ranked
         -- closure inference).
-        let isVar = case site of
+        let (isVar, isFunParam) = case site of
               SourcedArg src i ->
-                maybe False (\bs -> i < length bs && bs !! i) (Map.lookup (srcName src) mask)
-              _ -> False
+                maybe (False, False) (\bs -> if i < length bs then bs !! i else (False, False)) (Map.lookup (srcName src) mask)
+              _ -> (False, False)
+            -- A value parameter: a Copy type is a by-value (owned) sink, a
+            -- non-Copy type is a reference sink.
+            byType tf = if rustIsCopy tf then rustOwn own tf x else rustRef own x
          in case tm of
-              -- A fully-applied sub-manifold argument carries the manifold's
-              -- FUNCTION type even though it renders as a call (a value). When
-              -- the callee's parameter is a value type-variable (`isVar`, e.g.
-              -- `toReal :: a -> Real`, `(/) :: a -> a -> a`), the argument is
-              -- really a value passed to a generic `&A`, so borrow it by
-              -- ownership; only a genuine function-typed parameter (a closure)
-              -- passes BY VALUE (borrowing `&closure` breaks HRTB inference).
-              Function _ _
+              -- A function-TYPED argument is one of two things: a GENUINE closure
+              -- passed to an `F: Fn` callee parameter (`isFunParam`), which goes
+              -- BY VALUE (borrowing `&closure` breaks higher-ranked inference);
+              -- or a fully-applied sub-manifold VALUE, whose Function type is a
+              -- misnomer -- it renders as a call and the callee wants its RESULT.
+              -- A sub-manifold value to a bare type-variable parameter (`isVar`,
+              -- e.g. `(/) :: a -> a -> a`) is generic over `&A`, so borrow it; to
+              -- any other value parameter, pass it like a Native arg of its result.
+              Function _ resultT
+                | isFunParam -> x
                 | isVar -> rustRef own x
-                | otherwise -> x
+                | otherwise -> case resultT of
+                    Native tf -> byType tf
+                    _ -> rustRef own x
               -- A closure application and a sourced type-variable parameter are
-              -- reference sinks; a Copy parameter is a by-value (owned) sink; a
-              -- non-Copy parameter is a reference sink. (`isVar` is only ever
-              -- True under 'SourcedArg'.)
+              -- reference sinks; otherwise pass by the value type. (`isVar` is only
+              -- ever True under 'SourcedArg'.)
               Native tf
                 | ClosureArg <- site -> rustRef own x
                 | isVar -> rustRef own x
-                | rustIsCopy tf -> rustOwn own tf x
-                | otherwise -> rustRef own x
+                | otherwise -> byType tf
               _ -> x
     , lcOwnership = rustOwnership
-    , lcArgManifoldOwnership = return . argManifoldOwnership
+    , lcArgManifoldOwnership = \_ -> return Owned
     , lcOwnArg = rustOwn
     , lcWithCallerScope = rustWithCallerScope
     -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
@@ -764,6 +858,8 @@ rustMakeLet namer letIndex mt p1 p2 = do
       }
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
+-- The arms are already adapted to the owned result type by the shared 'IfN_'
+-- lowering (via 'adaptOwnedElem'), so they splice directly into the owned let.
 rustMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> RustM PoolDocs
 rustMakeIf origExpr condDocs thenDocs elseDocs = do
   idx <- getCounter

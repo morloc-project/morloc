@@ -246,7 +246,11 @@ printProgram serialization signatures _extra prog =
 printRustStruct :: MDoc -> [(MDoc, MDoc)] -> MDoc
 printRustStruct name fields =
   vsep
-    [ "struct" <+> name <+> "{"
+    -- Clone is required by the ownership model: a struct value used at more than
+    -- one point is cloned at its by-value uses. All field types are Clone-able
+    -- morloc types (scalars, Vec, String, Option, tuples, nested structs, Box).
+    [ "#[derive(Clone)]"
+    , "struct" <+> name <+> "{"
     , indent 4 (vsep [f <> ":" <+> t <> "," | (f, t) <- fields])
     , "}"
     ]
