@@ -636,6 +636,66 @@ tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6);
 tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 
 // ---------------------------------------------------------------------------
+// Function values (defunctionalization). A morloc function stored in data (a
+// record/list field) or crossing a pool boundary is represented as a fat trait
+// object `Rc<dyn MorlocFnN<..>>`: callable via `callN`, and reifiable to its
+// origin via `reifyN`. A plain native closure is a THIN function value -- the
+// blanket impl makes any `Fn(&A..)->R` a `MorlocFnN`, so `callN` monomorphizes
+// (zero-cost, inlined) while a boxed one dispatches through the vtable. A
+// closure that can CROSS is built as a `FatClosure` carrying its
+// `(sockid, mid, captured)` origin, so `reifyN` returns `Some`; a thin one
+// returns `None`. Function ARGUMENTS to higher-order functions stay monomorphic
+// `impl Fn` (never boxed), so a local map/fold pays no dispatch cost.
+
+/// The reified origin of a crossing closure: (home socket name, home manifold
+/// id, serialized captured environment).
+pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
+
+/// A crossing closure: a native closure plus the origin needed to reify it.
+pub struct FatClosure<F> {
+    pub f: F,
+    pub origin: ClosureOrigin,
+}
+
+macro_rules! morloc_fn {
+    ($trait:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
+        pub trait $trait<$($A,)+ R> {
+            fn $call(&self, $($a: &$A,)+) -> R;
+            fn $reify(&self) -> Option<ClosureOrigin>;
+        }
+        // A native closure: callable, no recoverable origin.
+        impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for F {
+            #[inline]
+            fn $call(&self, $($a: &$A,)+) -> R { self($($a,)+) }
+            fn $reify(&self) -> Option<ClosureOrigin> { None }
+        }
+        // A crossing closure: reifies to its stored origin.
+        impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for FatClosure<F> {
+            #[inline]
+            fn $call(&self, $($a: &$A,)+) -> R { (self.f)($($a,)+) }
+            fn $reify(&self) -> Option<ClosureOrigin> { Some(self.origin.clone()) }
+        }
+        // A boxed function value (a record field, or a reflected proxy) is itself
+        // a function value, so `&impl MorlocFnN` accepts it as well as a thin
+        // closure. Delegates through the pointer to the object's own impl.
+        impl<$($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for std::rc::Rc<T> {
+            #[inline]
+            fn $call(&self, $($a: &$A,)+) -> R { (**self).$call($($a,)+) }
+            fn $reify(&self) -> Option<ClosureOrigin> { (**self).$reify() }
+        }
+    };
+}
+
+morloc_fn!(MorlocFn1, call1, reify1, (A1, a1));
+morloc_fn!(MorlocFn2, call2, reify2, (A1, a1), (A2, a2));
+morloc_fn!(MorlocFn3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
+morloc_fn!(MorlocFn4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
+morloc_fn!(MorlocFn5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
+morloc_fn!(MorlocFn6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
+morloc_fn!(MorlocFn7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
+morloc_fn!(MorlocFn8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+
+// ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a
 // C-allocated data packet (I1); `get_value` reconstructs a native value from
 // an argument packet. Both bracket the walk in a recur scope.

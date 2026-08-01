@@ -86,18 +86,6 @@ main = do
       -- , golden "specialization-2-py - bytes/bytearray" "specialization-2-py"
       -- , golden "specialization-1-r" "specialization-1-r"
 
-      , golden "lambda-reindex" "lambda-reindex"
-      , golden "collect-formatters" "collect-formatters"
-      , golden "detect-imported-handler" "detect-imported-handler"
-      , golden "collect-cross-module" "collect-cross-module"
-      , golden "vector-u8-cpp" "vector-u8-cpp"
-      , golden "close-nontemp-error" "close-nontemp-error"
-      , golden "whole-render-cpp" "whole-render-cpp"
-      , golden "render-record-arg-cpp" "render-record-arg-cpp"
-      , golden "stdin-input" "stdin-input"
-      , golden "docstring-alias-import" "docstring-alias-import"
-      , golden "stdout-stream-format" "stdout-stream-format"
-
       , golden "vector-gradual-desugar-py" "vector-gradual-desugar-py"
       , golden "vector-gradual-desugar-c" "vector-gradual-desugar-c"
 
@@ -113,6 +101,7 @@ main = do
       , golden "futhark-tuple" "futhark-tuple"
       , golden "futhark-sig-mismatch" "futhark-sig-mismatch"
       , golden "futhark-py-crosspool" "futhark-py-crosspool"
+      , golden "futhark-fractal" "futhark-fractal"
       , golden "rust-basic" "rust-basic"
       , golden "rust-py-crosspool" "rust-py-crosspool"
       , golden "rust-error" "rust-error"
@@ -122,6 +111,9 @@ main = do
       , golden "rust-return-borrow" "rust-return-borrow"
       , golden "rust-capture-shared" "rust-capture-shared"
       , golden "rust-map-manifold-list" "rust-map-manifold-list"
+      , golden "rust-captured-function" "rust-captured-function"
+      , golden "rust-record-function" "rust-record-function"
+      , golden "rust-record-function-binary" "rust-record-function-binary"
       , golden "intrinsic-catch-cpp" "intrinsic-catch-cpp"
       , golden "intrinsic-catch-py" "intrinsic-catch-py"
       , golden "intrinsic-catch-r" "intrinsic-catch-r"
@@ -890,4 +882,17 @@ main = do
         golden "negate-unary-operator" "negate-unary-operator"
         -- an annoyingly slow one
       , golden "shm-volume-growth-py" "shm-volume-growth-py"
+
+      , golden "lambda-reindex" "lambda-reindex"
+      , golden "collect-formatters" "collect-formatters"
+      , golden "detect-imported-handler" "detect-imported-handler"
+      , golden "collect-cross-module" "collect-cross-module"
+      , golden "vector-u8-cpp" "vector-u8-cpp"
+      , golden "close-nontemp-error" "close-nontemp-error"
+      , golden "whole-render-cpp" "whole-render-cpp"
+      , golden "render-record-arg-cpp" "render-record-arg-cpp"
+      , golden "stdin-input" "stdin-input"
+      , golden "docstring-alias-import" "docstring-alias-import"
+      , golden "stdout-stream-format" "stdout-stream-format"
+
       ]

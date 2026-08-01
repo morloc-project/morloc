@@ -1,0 +1,22 @@
+module main (apply2)
+
+import root-rust
+
+source Rust from "own.rs" ("add" as add)
+add :: Int -> Int -> Int
+
+-- A record with a TWO-ARGUMENT function field, exercising MorlocFn2 (the field
+-- type `Rc<dyn MorlocFn2<i64,i64,i64>>`, application via `.call2(..)`). The
+-- extracted field `f` is applied inside a larger expression, so `f a b` is
+-- lowered into its own manifold; that manifold's function parameter must accept
+-- the fat `Rc<dyn MorlocFn2>` value (typed `&impl MorlocFn2`, not `&impl Fn`).
+record BinOp where
+  op :: Int -> Int -> Int
+  seed :: Int
+record Rust => BinOp = "struct"
+
+apply2 :: Int -> Int -> Int
+apply2 a b =
+  let bo = ({op = add, seed = a} :: BinOp) in
+  let ({op = f, seed = s}) = bo in
+  add (f a b) s

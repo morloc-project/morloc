@@ -450,6 +450,15 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcStoreField :: TypeF -> MDoc -> MDoc
+  -- ^ Adapt a value to a record field's stored representation (given the field
+  -- type). Default is identity; the Rust member wraps a function value in
+  -- @Rc::new(..)@ so it fits the field's @Rc<dyn MorlocFnN>@ fat-trait-object type.
+  , lcApplyClosure :: MDoc -> [MDoc] -> MDoc
+  -- ^ Apply a local function value (a 'LocalCallP') to its arguments. Default is
+  -- a direct call @f(args)@; the Rust member emits @f.callN(args)@ (the fat/thin
+  -- trait method -- monomorphized and inlined for a thin closure, dispatched for
+  -- a boxed one) where N is the argument count.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
   , lcCacheBody :: SerialAST -> Text -> Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
@@ -780,7 +789,7 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
 lowerNativeExpr cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
-  return $ mergePoolDocs (\es -> nvarNamer idx <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
+  return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
 lowerNativeExpr cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
@@ -844,9 +853,17 @@ lowerNativeExpr cfg origExpr (TupleN_ v xs) = do
   xs' <- adaptOwnedElems cfg (case origExpr of TupleN _ es -> es; _ -> []) xs
   return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
-  es <- adaptOwnedElems cfg (case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []) (map snd rs)
+  let fieldEs = case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []
+  es <- adaptOwnedElems cfg fieldEs (map snd rs)
   let recType = typeFof origExpr
-  rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
+      -- Adapt each field value to its stored representation (Rust boxes a
+      -- function value into the field's fat-trait-object type); pass through
+      -- unadapted if the field-expression list is unavailable.
+      vals
+        | length fieldEs == length es =
+            zipWith (\fe e -> lcStoreField cfg (typeFof fe) (poolExpr e)) fieldEs es
+        | otherwise = map poolExpr es
+  rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) vals)
   return $
     rec'
       { poolCompleteManifolds = concatMap poolCompleteManifolds es <> poolCompleteManifolds rec'

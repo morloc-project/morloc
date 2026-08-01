@@ -739,6 +739,8 @@ cppLowerConfig reifyThunks =
                 _ -> v
             decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map wrapField rs) <> ";"
         return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+    , lcStoreField = \_ v -> v
+    , lcApplyClosure = \callee args -> callee <> tupled args
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
          in [idoc|foreign_call#{tupled argList}|]

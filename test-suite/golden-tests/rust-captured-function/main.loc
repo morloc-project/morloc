@@ -1,0 +1,18 @@
+module main (mapTwice)
+
+import root-rust
+
+source Rust from "own.rs" ("inc" as inc)
+inc :: Int -> Int
+
+-- `f` is a function VALUE (a let-bound closure) passed to `map` at two sites.
+-- Passing a function value to a HOF eta-abstracts it into a manifold that
+-- CAPTURES `f` as a context argument. In one Rust pool this needs: the captured
+-- function bound by reference before the `move` closure (so the closure holds a
+-- Copy `&f` and `f` stays live for the other `map`), and the eta manifold's
+-- captured-function parameter typed `&(impl Fn..)` so it is re-callable across
+-- map's per-element calls. (No boundary is crossed, so no reify/reflect.)
+mapTwice :: [Int] -> [Int] -> ([Int], [Int])
+mapTwice xs ys =
+  let f = (\x -> inc x)
+  in (map f xs, map f ys)

@@ -437,6 +437,8 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     pretty (ldRecordConstructor desc)
                       <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs]
                 }
+        , lcStoreField = \_ v -> v
+        , lcApplyClosure = \callee args -> callee <> tupled args
         , lcForeignCall = \socketFile mid args ->
             let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
                 argsDoc = case ldListStyle desc of
