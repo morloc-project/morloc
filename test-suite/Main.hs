@@ -102,6 +102,7 @@ main = do
       , golden "futhark-sig-mismatch" "futhark-sig-mismatch"
       , golden "futhark-py-crosspool" "futhark-py-crosspool"
       , golden "futhark-fractal" "futhark-fractal"
+      , golden "futhark-matrix-io" "futhark-matrix-io"
       , golden "rust-basic" "rust-basic"
       , golden "rust-py-crosspool" "rust-py-crosspool"
       , golden "rust-error" "rust-error"
@@ -325,6 +326,20 @@ main = do
       , -- a closure produced in one language, passed across a pool boundary,
         -- and applied by a higher-order function in another (Python producer)
         golden "defunc-interop-pc" "defunc-interop-pc"
+      , -- Rust CONSUMER: a Python-produced closure crosses into a sourced Rust
+        -- higher-order function; the Rust pool reflects the closure wire tuple
+        -- into a native callable that RPCs back to Python (Rust/C++ parity for
+        -- closure reflection)
+        golden "defunc-interop-py-rust" "defunc-interop-py-rust"
+      , -- Rust PRODUCER: a Rust effectful computation builds a closure over a
+        -- captured base and returns it across the boundary; the Rust pool reifies
+        -- it to the wire tuple and a home-pool dispatch wrapper applies it when
+        -- Python's reflected proxy calls back (Rust/C++ parity for closure reify)
+        golden "defunc-interop-rust-py" "defunc-interop-rust-py"
+      , -- Rust PRODUCER capturing a NON-SCALAR runtime value: reify_capture must
+        -- serialize the captured list self-contained (forced inline under
+        -- --inline-size 0) so it survives the producing manifold's SHM reclaim
+        golden "defunc-interop-rust-py-vectorcap" "defunc-interop-rust-py-vectorcap"
       , -- C++ producer (fat-closure reify) and R producer (construction-time
         -- attribute reify); cr-capture crosses a genuinely captured runtime
         -- value out of the C++ producer

@@ -171,11 +171,16 @@ printStmt (IFunDef _ _ _ _) = error "RustPrinter: IFunDef unsupported"
 -- guard. Manifold calls and @fail_packet@ are @unsafe@, so the match body sits
 -- in one @unsafe@ block.
 printDispatch :: [DispatchEntry] -> [DispatchEntry] -> [Int] -> MDoc
-printDispatch locals remotes _closureMids =
-  vsep [dispatchFn "local_dispatch" "local" localCases, "", dispatchFn "remote_dispatch" "remote" remoteCases]
+printDispatch locals remotes closureMids =
+  vsep [dispatchFn "local_dispatch" "local" (localCases ++ closureCases), "", dispatchFn "remote_dispatch" "remote" remoteCases]
   where
     localCases = map (makeCase "") locals
     remoteCases = map (makeCase "_remote") remotes
+    -- A crossing closure is applied in its home pool: a foreign pool's reflected
+    -- proxy calls back on the closure's manifold id, routed to its serial
+    -- dispatch wrapper (which deserializes captured ++ bound and calls the body).
+    closureCases =
+      [ pretty i <+> "=>" <+> "mlc_closure_dispatch_" <> pretty i <> "(args, nargs)," | i <- closureMids ]
 
     makeCase :: MDoc -> DispatchEntry -> MDoc
     makeCase suffix (DispatchEntry i n _) =

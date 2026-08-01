@@ -59,6 +59,11 @@ extern "C" {
     fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema,
                                     errmsg: *mut *mut c_char) -> *mut u8;
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
+    // Inline-threshold control: force a captured closure value to serialize
+    // SELF-CONTAINED (embedded, not a SHM relptr) so its packet survives the
+    // producing manifold's SHM reclamation (see `reify_capture`).
+    fn morloc_set_inline_threshold(bytes: i64);
+    fn morloc_get_inline_threshold() -> u64;
     // Cross-pool foreign call primitives (see `foreign_call`).
     fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
                                      nargs: usize, errmsg: *mut *mut c_char) -> *mut u8;
@@ -106,6 +111,7 @@ const PKT_HEADER_SIZE: usize = 32;
 const PKT_SOURCE_OFF: usize = 12; // command.data.source
 const PKT_FORMAT_OFF: usize = 13; // command.data.format
 const PKT_OFFSET_OFF: usize = 20; // u32 metadata-block length
+const PKT_LENGTH_OFF: usize = 24; // u64 data-block length
 
 // ---------------------------------------------------------------------------
 // Error carrier for @throw (I2 typed panic payload). The pool host's dispatch
@@ -760,6 +766,36 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         track(voidstar as *mut c_void);
     }
     <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
+}
+
+// Restore the inline threshold on drop (including a panic unwind out of
+// `put_value`), mirroring the C++ `_mlc_reify_capture` save/restore.
+struct ThresholdGuard(u64);
+impl Drop for ThresholdGuard {
+    fn drop(&mut self) {
+        unsafe { morloc_set_inline_threshold(self.0 as i64) }
+    }
+}
+
+/// Serialize a captured value into a SELF-CONTAINED wire packet: the inline
+/// threshold is forced so the packet embeds its voidstar rather than a SHM
+/// relptr that would dangle once the producing manifold's SHM is reclaimed
+/// (a crossing closure is applied back later, from another pool). Returns the
+/// owned packet bytes. Port of the C++ pool's `_mlc_reify_capture`.
+///
+/// # Safety
+/// `schema` must describe `value`'s wire type.
+pub unsafe fn reify_capture<T: ToVoidstar>(value: &T, schema: &Schema) -> Vec<u8> {
+    let saved = morloc_get_inline_threshold();
+    let _guard = ThresholdGuard(saved);
+    morloc_set_inline_threshold(i64::MAX);
+    let packet = put_value(value, schema);
+    let offset = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
+    let length = core::ptr::read_unaligned(packet.add(PKT_LENGTH_OFF) as *const u64) as usize;
+    let n = PKT_HEADER_SIZE + offset + length;
+    let bytes = std::slice::from_raw_parts(packet as *const u8, n).to_vec();
+    libc::free(packet as *mut c_void);
+    bytes
 }
 
 // ---------------------------------------------------------------------------

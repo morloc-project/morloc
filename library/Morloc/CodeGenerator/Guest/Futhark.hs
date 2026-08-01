@@ -713,19 +713,36 @@ readArray :: Text -> Text -> Int -> ([Text], Text, Text)
 readArray ptr e r =
   let sVar = ptr <> "_s"
       vVar = ptr <> "_v"
+      dVar = ptr <> "_d"
       cpp = cppScalar' e
-      total = T.intercalate " * " ["(size_t)(" <> sVar <> "[" <> tshow d <> "])" | d <- [0 .. r - 1]]
-      shapeDims = [sVar <> "[" <> tshow d <> "]" | d <- [0 .. r - 1]]
+      -- The result value is materialised AFTER the array is freed, so for rank
+      -- >= 2 the shape must be copied into stack locals ('dVar') before the free;
+      -- reading the futhark-owned shape pointer ('sVar') past the free is a
+      -- use-after-free. Rank 1 never reads the shape in its return, so it keeps
+      -- using 'sVar' directly (only in the pre-free vector sizing).
+      dimSrc
+        | r == 1 = sVar
+        | otherwise = dVar
+      total = T.intercalate " * " ["(size_t)(" <> dimSrc <> "[" <> tshow d <> "])" | d <- [0 .. r - 1]]
+      shapeDims = [dimSrc <> "[" <> tshow d <> "]" | d <- [0 .. r - 1]]
       value
         | r == 1 = "std::move(" <> vVar <> ")"
         | otherwise =
             "mlc::Tensor" <> tshow r <> "<" <> cpp <> ">(std::move(" <> vVar
               <> "), std::array<int64_t, " <> tshow r <> ">{" <> T.intercalate ", " shapeDims <> "})"
+      captureDims
+        | r == 1 = []
+        | otherwise =
+            [ "int64_t " <> dVar <> "[" <> tshow r <> "] = {"
+                <> T.intercalate ", " [sVar <> "[" <> tshow d <> "]" | d <- [0 .. r - 1]]
+                <> "};"
+            ]
       readLines =
-        [ "const int64_t* " <> sVar <> " = futhark_shape_" <> e <> "_" <> tshow r <> "d(ctx, " <> ptr <> ");"
-        , "std::vector<" <> cpp <> "> " <> vVar <> "(" <> total <> ");"
-        , "futhark_values_" <> e <> "_" <> tshow r <> "d(ctx, " <> ptr <> ", " <> vVar <> ".data());"
-        ]
+        [ "const int64_t* " <> sVar <> " = futhark_shape_" <> e <> "_" <> tshow r <> "d(ctx, " <> ptr <> ");" ]
+          ++ captureDims
+          ++ [ "std::vector<" <> cpp <> "> " <> vVar <> "(" <> total <> ");"
+             , "futhark_values_" <> e <> "_" <> tshow r <> "d(ctx, " <> ptr <> ", " <> vVar <> ".data());"
+             ]
       freeLine = "futhark_free_" <> e <> "_" <> tshow r <> "d(ctx, " <> ptr <> ");"
    in (readLines, value, freeLine)
 

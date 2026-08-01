@@ -18,9 +18,12 @@ stdlib as @type Rust => X = "..."@ declarations and reach the translator
 pre-resolved in each 'TypeF' CVar slot, so 'rustTypeOf' mostly renders them
 directly (mirroring 'cppTypeOf').
 
-v1 scope: scalars, Str, Vector, tuples, @?T@, records (including recursive),
-and cross-pool foreign calls. Closures/partial application, remote calls,
-caching, and pattern evaluation raise a clear "unsupported in Rust v1" error.
+Scope: scalars, Str, Vector, tuples, @?T@, records (including recursive),
+cross-pool foreign calls, closures/partial application (in-pool capture,
+records of functions, and cross-pool defunctionalization -- reify and reflect).
+Pattern evaluation is partial (struct getters and bracket index/slice). Remote
+calls, manifold caching, the file/stream IO intrinsics, and records with
+custom-packer fields crossing a boundary are not yet implemented.
 -}
 module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   ( translate
@@ -50,7 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
-import Morloc.CodeGenerator.Serial (serialAstToType, shallowType)
+import Morloc.CodeGenerator.Serial (serialAstToMsgpackSchema, serialAstToType, shallowType)
 import Morloc.Typecheck.Internal (unqualify)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
@@ -90,10 +93,16 @@ data RustState = RustState
   -- function-valued argument is a genuine closure passed BY VALUE; when False,
   -- a function-typed argument is a fully-applied sub-manifold VALUE, passed like
   -- data (borrowed when non-'Copy').
+  , rsReifyInfo :: Map.Map Text (Int, [Int])
+  -- ^ Per crossing-closure body-manifold name: @(mid, capturedSchemaIds)@.
+  -- Only closures that reach a serialize boundary appear here (the rest stay
+  -- thin @impl Fn@/@Rc@ with no reify cost). Drives 'rustClosureWrapper' to
+  -- build a @FatClosure@ carrying the closure's @(sockid, mid, captured)@
+  -- origin instead of a bare closure.
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) [] Map.empty Map.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) [] Map.empty Map.empty Map.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -262,7 +271,13 @@ rustReturnType :: TypeM -> RustM MDoc
 rustReturnType (Function _ o) = rustReturnType o
 rustReturnType (Serial _) = return "*mut u8"
 rustReturnType Passthrough = return "*mut u8"
-rustReturnType (Native t) = rustTypeOf (typeFof t)
+rustReturnType (Native t) = case typeFof t of
+  -- A deferred effect value is returned as a nullary thunk `impl Fn() -> T`
+  -- (the C++ member types it `std::function<T()>`), forced at the call site.
+  EffectF _ inner -> do
+    innerT <- rustTypeOf inner
+    return $ "impl Fn() ->" <+> innerT
+  tf -> rustTypeOf tf
 
 -- | The Rust type of a record field. A function-typed field is stored as a fat
 -- trait object @Rc<dyn MorlocFnN<A1,..,An,R>>@ -- a bare @impl Fn@ is illegal in
@@ -457,6 +472,10 @@ rustRef :: IOwnership -> MDoc -> MDoc
 rustRef BorrowedRef x = x
 rustRef _ x = "&(" <> x <> ")"
 
+-- | Reference the pool's schema for a registered schema id: @schema(<id>)@.
+sch :: Int -> MDoc
+sch sid = "schema(" <> pretty sid <> ")"
+
 -- | The safe by-reference closure that adapts a manifold to a higher-order
 -- function's @F: Fn@ (a bare @unsafe fn@ does not implement @Fn@). Remaining
 -- (bound) parameters become the closure's typed @&T@ parameters -- explicit
@@ -475,11 +494,88 @@ rustClosureWrapper mname ctxArgs boundArgs = do
       boundDocs = [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
       call = mname <> tupled (ctxDocs ++ boundDocs)
       closure = "move |" <> hcat (punctuate ", " boundTyped) <> "| unsafe {" <+> call <+> "}"
+  -- A crossing closure (its body manifold is in the reify table) is wrapped in a
+  -- `FatClosure` carrying its `(sockid, mid, captured)` origin, so a serialize
+  -- boundary can reify it. A purely in-pool closure stays thin (no origin, no
+  -- capture serialization).
+  reifyInfo <- CMS.gets rsReifyInfo
+  parentBorrowed <- asks oeParent
+  let -- `reify_capture` wants `&T`. A captured value that is already a borrowed
+      -- `&T` parameter (a non-Copy manifold parameter, tracked in 'oeParent') is
+      -- forwarded as-is; an owned or Copy value is referenced with `&`.
+      capRef c@(Arg ci _) =
+        rustRef (if Set.member ci parentBorrowed then BorrowedRef else Owned) (argNamer c)
+      wrapped = case Map.lookup (render mname) reifyInfo of
+        Nothing -> closure
+        Just (mid, capSids) ->
+          -- The origin's captured packets are built (borrowing each captured
+          -- value) BEFORE the `move` closure takes ownership -- struct fields
+          -- evaluate left to right, so `origin` is written first.
+          let capExprs =
+                -- `reify_capture` is an unsafe fn; wrap each call so the origin
+                -- compiles whether or not the enclosing context is already unsafe
+                -- (a crossing closure may be built inside a safe do-block thunk).
+                [ "unsafe { rustmorloc::reify_capture(" <> capRef c <> ", " <> sch sid <> ") }"
+                | (c, sid) <- zip ctxArgs capSids
+                ]
+              origin =
+                "(\"rust\".to_string(), " <> pretty mid <> "i64, vec!["
+                  <> hcat (punctuate ", " capExprs) <> "])"
+           in "rustmorloc::FatClosure { origin: " <> origin <> ", f: " <> closure <> " }"
   -- A shared non-Copy capture is cloned in a block that brackets the closure, so
   -- the `move` captures the clone and the original stays live for the caller.
   return $ case cloneLets of
-    [] -> closure
-    _ -> "{" <+> hsep cloneLets <+> closure <+> "}"
+    [] -> wrapped
+    _ -> "{" <+> hsep cloneLets <+> wrapped <+> "}"
+
+-- | Reflect an incoming closure wire tuple into a native callable: a bare
+-- @move@ closure that, on each application, appends the runtime-argument packets
+-- to the deserialized captured packets and RPCs back to the producing pool via
+-- 'foreign_call' (resolving its socket from the wire tuple's home-language
+-- name). The result is a plain @Fn(&A..)->R@, so it satisfies BOTH a sourced
+-- @impl Fn@ higher-order parameter (by value) and a morloc-defined
+-- @&impl MorlocFnN@ parameter (via the @Fn@ blanket) -- mirroring the C++
+-- member, whose reflected value is likewise a plain lambda. (Origin-preserving
+-- re-cross of a reflected closure is deferred; it needs the same reify work the
+-- C++ member also still lacks.)
+rustReflectClosure :: MDoc -> SerialAST -> RustM MDoc
+rustReflectClosure pkt (SerialClosure ins out) = do
+  argTs <- mapM (rustTypeOf . serialAstToType) ins
+  resT <- rustTypeOf (serialAstToType out)
+  tupSid <- rustRegisterSchema (render (serialAstToMsgpackSchema (SerialClosure ins out)))
+  argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
+  resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
+  let params = [ "__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs ]
+      pushes =
+        [ "__pkts.push(rustmorloc::put_value(__a" <> pretty i <> ", " <> sch sid <> "));"
+        | (i, sid) <- zip [(0 :: Int) ..] argSids
+        ]
+      -- The captured packets and socket name are call-invariant, so `__pkts` is
+      -- sized up front (captures + arguments) and only the per-call argument
+      -- packets are appended. `__clo.2` is read INSIDE the closure (so disjoint
+      -- capture keeps it alive); `__sock` is an independent owned String hoisted
+      -- to the outer scope so it is formatted once, not on every application.
+      bodyDoc =
+        vsep
+          [ "let mut __pkts: Vec<*const u8> = Vec::with_capacity(__clo.2.len() + " <> pretty (length argTs) <> ");"
+          , "__pkts.extend(__clo.2.iter().map(|__c| __c.as_ptr()));"
+          , vsep pushes
+          , "rustmorloc::get_value::<" <> resT <> ">(rustmorloc::foreign_call(&__sock, __clo.1 as u32, &__pkts), " <> sch resSid <> ")"
+          ]
+  return $
+    vsep
+      [ "{"
+      , indent 4 $
+          vsep
+            [ "let __clo: rustmorloc::ClosureOrigin = rustmorloc::get_value(" <> pkt <> ", " <> sch tupSid <> ");"
+            , "let __sock = format!(\"pipe-{}\", __clo.0);"
+            , "move |" <> hcat (punctuate ", " params) <> "| -> " <> resT <> " { unsafe {"
+            , indent 4 bodyDoc
+            , "} }"
+            ]
+      , "}"
+      ]
+rustReflectClosure _ _ = error "rustReflectClosure: expected SerialClosure"
 
 -- | Bridge one captured context argument: returns any hoisted clone bindings and
 -- the value passed into the inner manifold call. A SHARED non-'Copy' owned
@@ -490,14 +586,20 @@ bridgeCapture a@(Arg i t) = do
   parentBorrowed <- asks oeParent
   parentShared <- asks oeParentShared
   case t of
-    -- A captured FUNCTION value is bound to a reference hoisted BEFORE the `move`
-    -- closure, so the closure captures the (Copy) `&f` -- the function itself is
-    -- only borrowed, staying live for the caller's other uses -- and passes it to
-    -- the inner manifold's `&(impl Fn)` parameter (re-callable per element).
+    -- A captured FUNCTION value is forwarded into the inner manifold's
+    -- `&impl MorlocFnN` parameter. If it is ALREADY a borrowed reference (a
+    -- function-typed manifold parameter, `&impl MorlocFnN`), the `move` closure
+    -- captures that Copy reference directly and passes it as-is -- hoisting a
+    -- second `&` would make a `&&impl MorlocFnN`, which the inner parameter
+    -- rejects. If it is an OWNED local closure, hoist `&f` so the closure
+    -- captures the Copy reference and the function stays live for other uses.
     Function _ _ ->
       let name = argNamer a
-          refVar = name <> "_ref"
-       in return (["let" <+> refVar <+> "=" <+> "&" <> name <> ";"], refVar)
+       in if Set.member i parentBorrowed
+        then return ([], name)
+        else
+          let refVar = name <> "_ref"
+           in return (["let" <+> refVar <+> "=" <+> "&" <> name <> ";"], refVar)
     Native tf
       | Set.member i parentShared
           && not (rustIsCopy tf)
@@ -561,8 +663,12 @@ translate srcs es = do
       recmap = unifyRecords . concatMap collectRecords $ es
 
   srcTypeVarMask <- buildSrcTypeVarMask
+  -- Per closure-manifold wire schemas (captured/bound/result), shared with every
+  -- pool member; drives the reify path + home-pool dispatch wrappers for a
+  -- closure this Rust pool produces and sends to another pool.
+  closureTable <- computeClosureSchemas rustLang es
   let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask}
-      code = CMS.evalState (runReaderT (makeRustCode includeDocs es) emptyOwnEnv) st0
+      code = CMS.evalState (runReaderT (makeRustCode includeDocs closureTable es) emptyOwnEnv) st0
 
   maker <- makeTheMaker
   poolSubdir <- MM.getModuleName
@@ -585,12 +691,113 @@ rustSourceInclude p = do
 subVersion :: Text -> Text
 subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 
-makeRustCode :: [MDoc] -> [SerialManifold] -> RustM MDoc
-makeRustCode includeDocs es = do
+makeRustCode :: [MDoc] -> Map.Map Int ([Text], [Text], Text) -> [SerialManifold] -> RustM MDoc
+makeRustCode includeDocs closureTable0 es = do
   structDocs <- generateRustStructs es
-  program <- buildProgramM Map.empty Map.empty includeDocs es translateSegment getRustSchemaTable Map.empty
-  -- structDocs (struct defs + marshalling impls) go in the schema-table section.
-  return $ RP.printProgram structDocs [] [] program
+  -- Keep only closures that actually cross a boundary (their signature reaches a
+  -- serialize site); the rest stay thin `impl Fn`/`Rc` with no reify cost.
+  closureTable <- restrictToCrossingClosures es closureTable0
+  -- Per crossing closure: a home-pool serial dispatch wrapper (so a foreign pool
+  -- can apply it) and the reify info (mid + captured schema ids) that
+  -- 'rustClosureWrapper' uses to build a `FatClosure` carrying the closure's
+  -- origin instead of a bare closure.
+  (closureWrappers, reifyInfo) <- makeClosureDispatch closureTable es
+  CMS.modify $ \s -> s {rsReifyInfo = reifyInfo}
+  program <- buildProgramM Map.empty Map.empty includeDocs es translateSegment getRustSchemaTable closureTable
+  -- structDocs go in the schema-table section; the closure dispatch wrappers are
+  -- free functions spliced into the signatures section.
+  return $ RP.printProgram structDocs closureWrappers [] program
+
+-- | A closure value's Rust signature: result type + tupled argument types.
+-- Matches the signature seen at a serialize site for the same closure, so a
+-- crossing closure and its serialize point compare equal.
+closureRustSig :: [TypeF] -> TypeF -> RustM Text
+closureRustSig ins out = do
+  rt <- rustTypeOf out
+  ats <- mapM rustTypeOf ins
+  return (render (rt <> tupled ats))
+
+-- | The signature of a closure manifold's value: its bound (remaining) argument
+-- types and its result type.
+manifoldRustSig :: NativeManifold -> RustM Text
+manifoldRustSig nm@(NativeManifold _ _ form _) =
+  closureRustSig [t | Arg _ t <- manifoldBound form] resultType
+  where
+    resultType = case typeFof nm of
+      FunF _ o -> o
+      o -> o
+
+-- | Signatures of every closure that reaches a 'SerialClosure' serialize site,
+-- i.e. that crosses a language boundary anywhere in these manifolds.
+crossingClosureSigs :: [SerialManifold] -> RustM (Set.Set Text)
+crossingClosureSigs es = Set.fromList <$> mapM astSig (concatMap collectSerializedClosures es)
+  where
+    astSig (SerialClosure ins out) = closureRustSig (map serialAstToType ins) (serialAstToType out)
+    astSig _ = return "" -- collectSerializedClosures returns only SerialClosure
+
+-- | Keep in the closure table only closures whose signature can cross a
+-- boundary. Everything else is a purely in-pool closure that needs no reify or
+-- dispatch machinery (and must stay a thin @impl Fn@/@Rc@ for zero cost).
+restrictToCrossingClosures ::
+  [SerialManifold] ->
+  Map.Map Int ([Text], [Text], Text) ->
+  RustM (Map.Map Int ([Text], [Text], Text))
+restrictToCrossingClosures es closureTable = do
+  crossingSigs <- crossingClosureSigs es
+  let candidates =
+        [ nm | nm@(NativeManifold i _ _ _) <- concatMap collectClosureManifolds es
+             , Map.member i closureTable ]
+  crossing <-
+    Set.fromList . map fst . filter (\(_, sig) -> Set.member sig crossingSigs)
+      <$> mapM (\nm@(NativeManifold i _ _ _) -> (,) i <$> manifoldRustSig nm) candidates
+  return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
+
+-- | For each crossing closure, emit a home-pool serial dispatch wrapper so a
+-- foreign pool can apply it when its reflected proxy calls back on the closure's
+-- manifold id: deserialize the captured ++ bound argument packets, call the
+-- native closure-body manifold, and serialize the result. Also return, keyed by
+-- manifold name, the @(mid, capturedSchemaIds)@ 'rustClosureWrapper' needs to
+-- build the closure's @FatClosure@ origin.
+makeClosureDispatch ::
+  Map.Map Int ([Text], [Text], Text) ->
+  [SerialManifold] ->
+  RustM ([MDoc], Map.Map Text (Int, [Int]))
+makeClosureDispatch closureTable es = do
+  results <- mapM one (filter inTable (concatMap collectClosureManifolds es))
+  return (map fst results, Map.fromList (map snd results))
+  where
+    inTable (NativeManifold i _ _ _) = Map.member i closureTable
+    one (NativeManifold i _ form _) = do
+      let ctxTs = [t | Arg _ o <- manifoldContext form, Just t <- [orNativeType o]]
+          bndTs = [t | Arg _ t <- manifoldBound form]
+          -- inTable guaranteed membership, so this key is present.
+          (capScs, bndScs, resSc) = closureTable Map.! i
+      argTs <- mapM rustTypeOf (ctxTs <> bndTs)
+      argSids <- mapM rustRegisterSchema (capScs <> bndScs)
+      resSid <- rustRegisterSchema resSc
+      let capSids = take (length capScs) argSids
+          copies = map rustIsCopy (ctxTs <> bndTs)
+          argExprs =
+            [ deser t sid copy j
+            | (j, (t, sid, copy)) <- zip [(0 :: Int) ..] (zip3 argTs argSids copies)
+            ]
+          -- Deserialize each argument packet to the closure body's native param
+          -- form: a Copy value by value, a non-Copy value by shared reference.
+          deser t sid copy j =
+            let g = "rustmorloc::get_value::<" <> t <> ">(a(" <> pretty j <> "), " <> sch sid <> ")"
+             in if copy then g else rustRef Owned g
+          call = manNamer i <> tupled argExprs
+          wrapper =
+            vsep
+              [ "unsafe fn mlc_closure_dispatch_" <> pretty i <> "(args: *const *const u8, nargs: usize) -> *mut u8 {"
+              , indent 4 $
+                  vsep
+                    [ "let a = |k: usize| -> *const u8 { if k < nargs { unsafe { *args.add(k) } } else { std::ptr::null() } };"
+                    , "rustmorloc::put_value(&(" <> call <> "), " <> sch resSid <> ")"
+                    ]
+              , "}"
+              ]
+      return (wrapper, (render (manNamer i), (i, capSids)))
 
 -- | Collect every record type used in these manifolds, keyed by its FVar, with
 -- one representative field list (from a use site). Unlike the shared recmap
@@ -699,7 +906,11 @@ borrowedIndicesOfForm :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> Set.
 borrowedIndicesOfForm form =
   Set.fromList [i | Arg i tm <- typeMofForm form, isBorrowed tm]
   where
+    -- A function-typed parameter is rendered `&impl MorlocFnN` (see 'rustArgOf'),
+    -- so it too is a borrowed reference; tracking it keeps a captured function
+    -- from being double-referenced when it is forwarded into a nested closure.
     isBorrowed (Native tf) = not (rustIsCopy tf)
+    isBorrowed (Function _ _) = True
     isBorrowed _ = False
 
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the
@@ -861,8 +1072,12 @@ rustLowerConfig mask =
           )
     , lcSerialize = defaultSerialize (rustLowerConfig mask)
     , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)
-    , lcReifyClosure = \_ -> error "Rust v1: closure reification is unsupported"
-    , lcReflectClosure = \_ _ -> error "Rust v1: closure reflection is unsupported"
+    -- Reify a crossing closure to its wire tuple: read the origin the
+    -- `FatClosure` carries (built at construction by 'rustClosureWrapper'). The
+    -- surrounding serialize call borrows and serializes it under the closure
+    -- (t3sjaau1) schema. `ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`.
+    , lcReifyClosure = \v -> return $ parens v <> ".origin"
+    , lcReflectClosure = \pkt s -> rustReflectClosure pkt s
     , lcMakeFunction = rustMakeFunction
     -- A bare function passed to a HOF is a closure over all its params with no
     -- captured context; a lambda/section is a closure over its remaining params
@@ -879,6 +1094,10 @@ rustLowerConfig mask =
 -- @let@ binding (@impl Trait@ is only legal in argument/return position), so a
 -- function-valued binding must omit its type and let Rust infer the closure.
 isFunctionTypeF :: TypeF -> Bool
+-- A deferred effect value is a nullary thunk (`impl Fn() -> T`, forced at its
+-- use site), so it is function-valued like a closure and its let binding must
+-- omit the type annotation.
+isFunctionTypeF (EffectF _ _) = True
 isFunctionTypeF t = case stripEffectF t of
   FunF _ _ -> True
   _ -> False
