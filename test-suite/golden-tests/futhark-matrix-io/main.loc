@@ -1,0 +1,32 @@
+module main (inputSum, roundTripSum)
+
+import root-cpp
+import root-py
+import tensor-cpp
+import tensor-py
+import vector-cpp
+import vector-py
+
+-- Symmetric complement to futhark-fractal (which crosses a Futhark Matrix OUT
+-- to Python). Here Python builds the Matrix and it crosses INTO the co-located
+-- Futhark entry, so the C++ pool must deserialize a Python-origin Matrix into
+-- an mlc::Tensor2 (Packable pack path) before marshalling it to Futhark.
+source Py from "src.py" ("mk_mat" as mkMat, "mat_sum" as matSum)
+source Futhark from "kernels.fut" ("sum_mat" as fSumMat, "add_scalar" as fAddScalar)
+
+mkMat      :: I64 -> I64 -> Matrix m n F32
+matSum     :: Matrix m n F32 -> F32
+fSumMat    :: Matrix m n F32 -> F32
+fAddScalar :: F32 -> Matrix m n F32 -> Matrix m n F32
+
+-- Python builds a 3x4 matrix of 1..12; Futhark sums it. Exercises the Python
+-- -> Futhark Matrix INPUT crossing only. sum(1..12) = 78.
+inputSum :: F32
+inputSum = fSumMat (mkMat 3 4)
+
+-- Python builds the matrix, Futhark adds 10 to every element and returns the
+-- matrix, Python sums it. One call exercising both Matrix crossings: Python ->
+-- Futhark (input deserialize) and Futhark -> Python (result read back through
+-- the glue and serialized out). sum(1..12) + 12*10 = 78 + 120 = 198.
+roundTripSum :: F32
+roundTripSum = matSum (fAddScalar 10.0 (mkMat 3 4))
