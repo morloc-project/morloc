@@ -26,6 +26,7 @@ import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 
 {- | This step is performed after segmentation, so all terms are in the same
@@ -33,13 +34,27 @@ language. Here we need to determine where inputs are (de)serialized and the
 serialization states of arguments and variables.
 -}
 serialize :: MonoHead -> MorlocMonad SerialManifold
-serialize (MonoHead lang m0 args0 headForm0 e0) = do
+serialize mh = do
+  reg <- MM.gets stateLangRegistry
+  serializeHosted reg mh
+
+-- After segmentation a 'MonoHead' carries the language its terms were WRITTEN
+-- in. For a co-located guest (e.g. Futhark hosted in the C++ pool) that home
+-- language has no runtime in the pool: the manifold body executes as
+-- host-native code and its values are host-native objects. Serialization must
+-- therefore resolve concrete types and packing strategy under the HOST
+-- language ('LR.poolOf'), so a host-only 'Packable' (e.g. the C++ Matrix
+-- packer) is visible and the value marshals exactly as a native host value
+-- would. 'poolOf' is identity for ordinary (self-hosting) languages.
+serializeHosted :: LR.LangRegistry -> MonoHead -> MorlocMonad SerialManifold
+serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
   se1 <- serialExpr m0 e0
   let sm = SerialManifold m0 lang form0 headForm0 se1
   wireSerial lang sm
   where
+    lang = LR.poolOf reg lang0
     inferType = inferConcreteType lang
     inferTypeUniversal = inferConcreteTypeUniversal lang
     inferVar = inferConcreteVar lang
@@ -233,7 +248,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       serializedArgs <- mapM (serializeS "foreignRecArg" m) nativeArgs
       resultType <- inferType (Idx idx outputType)
       config <- MM.ask
-      reg <- MM.gets stateLangRegistry
       let socket = MC.setupServerAndSocket config reg targetLang
           serialCall = AppForeignRecS resultType mid socket serializedArgs
       naturalizeN "foreignRecCall" m lang resultType serialCall
