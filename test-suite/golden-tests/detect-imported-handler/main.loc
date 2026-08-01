@@ -10,7 +10,7 @@ produce sink = do
   sink (mk 1)
 
 --' Stream, with an IMPORTED offset handler and IMPORTED IFile handler
---' with.buffer: -t/--tag-off=tagOff
---' with: -m/--summary=sumFile
+--' @with -t/--tag-off=tagOff(@offset) @stream
+--' @with -m/--summary=sumFile
 streamNums :: <IO, Err> ()
 streamNums = @collect produce

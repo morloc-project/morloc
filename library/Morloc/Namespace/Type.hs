@@ -116,6 +116,7 @@ module Morloc.Namespace.Type
   , FormAtom (..)
   , PathPerm (..)
   , Check (..)
+  , ArgSource (..)
   , WithSpec (..)
   , mangleTerminalName
   , isInternalTerminalName
@@ -628,19 +629,32 @@ data Check
   = CheckPath PathPerm
   deriving (Show, Ord, Eq)
 
--- | One `--' with: <flag>=<term>` declaration on a signature preamble.
+-- | The source of one handler argument in a formatter directive
+-- (`@with`/`@render`). The formatted payload is bound separately: it is
+-- placed where 'ArgValue' appears in 'wsArgs', or appended last when
+-- 'wsArgs' contains no 'ArgValue'.
+data ArgSource
+  = ArgPos Int   -- ^ `$N`, a 1-based positional reference to a parent argument
+  | ArgOffset    -- ^ `@offset`, the per-batch stream element offset (@tell)
+  | ArgValue     -- ^ `@value`, the formatted payload
+  deriving (Show, Ord, Eq)
+
+-- | One `@with`/`@render` formatter declaration on a signature preamble.
 -- Declares a command-scoped CLI flag that dispatches to a compile-time-
 -- synthesized entry composing the referenced term with the head manifold
 -- (see Frontend/Desugar.hs). The term's type discipline is enforced by
 -- the normal typechecker.
 data WithSpec = WithSpec
-  { wsShort  :: Maybe Char
-  , wsLong   :: Text
-  , wsTerm   :: EVar
-  , wsRender :: Bool  -- ^ framing: False = `with`   (typed output, rendered by -f)
-                      --            True  = `render` (final bytes, emitted verbatim)
-  , wsBuffer :: Bool  -- ^ buffering: False = batch (per-chunk, streaming)
-                      --              True  = `.buffer` (materialize the whole stream)
+  { wsShort   :: Maybe Char
+  , wsLong    :: Text
+  , wsTerm    :: EVar
+  , wsRender  :: Bool         -- ^ framing: False = `@with`   (typed output, rendered by -f)
+                              --            True  = `@render` (final bytes, emitted verbatim)
+  , wsStream  :: Bool         -- ^ `@stream`: True = per-batch streaming
+                              --   False = whole-list gather (materialize, apply once)
+  , wsDefault :: Bool         -- ^ `@default`: fires when no formatter flag and no `-f`
+  , wsArgs    :: [ArgSource]  -- ^ handler argument sources, in order; the payload
+                              --   goes at 'ArgValue' or is appended last if absent
   }
   deriving (Show, Ord, Eq)
 

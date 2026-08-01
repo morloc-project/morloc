@@ -2392,7 +2392,7 @@ buildManifest ManifestInputs{..} =
       jsonArr (map (oneTerminal parentName) specs)
 
     oneTerminal :: Text -> WithSpec -> Text
-    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _) =
+    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _ isDefault _) =
       let EV mangled = mangleTerminalName (EV parentName) long
           desc = case Map.lookup (EV tName) miTermDocs of
             Just (firstLine : _) -> firstLine
@@ -2407,6 +2407,9 @@ buildManifest ManifestInputs{..} =
             -- `render` terminals emit their handler's bytes verbatim, so the
             -- nexus defaults their output format to `raw` (see phase2.rs).
             , ("render", jsonBool isRender)
+            -- a `@default` terminal fires when no formatter flag and no `-f`
+            -- is given (see phase2.rs redirect_via_terminal).
+            , ("default", jsonBool isDefault)
             ]
 
     -- Render the @args@ JSON array. 'makeSerialASTs' produces one

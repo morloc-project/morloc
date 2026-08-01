@@ -55,6 +55,10 @@ fn main() {
     let mut config: NexusConfig;
     let manifest_path: String;
     let user_zone: Vec<String>;
+    // Whether the user gave an explicit `-f`/`--output-form`. An explicit
+    // format suppresses a command's `@default` formatter (so `-f json` always
+    // recovers the typed output). Only meaningful in Run mode.
+    let mut format_explicit = false;
 
     let invocation = cli::parse_invocation();
 
@@ -104,6 +108,7 @@ fn main() {
             std::process::exit(0);
         }
         cli::Mode::Run(rargs) => {
+            format_explicit = rargs.common.output_form.is_some();
             let (mut cfg, _target) = cli::run_args_to_config(&rargs);
             cfg.debug_cache_depth = invocation.capability_values.debug_cache_depth;
             cfg.debug_cache_max = invocation.capability_values.debug_cache_max;
@@ -303,7 +308,7 @@ fn main() {
         // command zone are rejected here as unknown; users must
         // place them left of `@` or left of the subcommand.
         let parsed =
-            phase2::parse_run(&manifest, &user_zone, &prog_name);
+            phase2::parse_run(&manifest, &user_zone, &prog_name, format_explicit);
         // A `render` terminal emits its handler's bytes verbatim. Force raw for
         // BOTH output paths: the streamed-stdout path (`render.buffer`, whose
         // () return is suppressed by the Raw arm's top-null guard) and the

@@ -24,8 +24,8 @@ renderInts :: [Int] -> Str
 type Slice = Str
 
 --' A readable filename
---' check.path: r
---' stdin: true
+--' @check.path r
+--' @stdin true
 type RFile = Str
 
 --' Produce the first n integers (pipe with -f packet)
@@ -48,7 +48,7 @@ readCmd f = do
 --' Terminal-action command (mosm `cut` shape): a render.buffer terminal plus a
 --' `Slice` first arg and the imported `RFile` last arg. The RFile arg must be
 --' optional (stdin) here too.
---' name: streamcmd
---' render.buffer: -r/--text=renderInts
+--' @name streamcmd
+--' @render -r/--text=renderInts @stream
 streamCmd :: Slice -> RFile -> <IO, Err> ()
 streamCmd s f = @collect producer

@@ -48,12 +48,12 @@ produceInts sink = do
   sink (makeInts 2)
 
 --' Stream three batches of integers
---' with: -s/--sorted=sortInts
---' with: -m/--summary=sumIntsFile
---' with.buffer: -t/--tagged=tagInts
---' with.buffer: -T/--tag-off=tagIntsOff
---' render.buffer: -r/--text=renderInts
---' render.buffer: -R/--text-off=renderIntsOff
+--' @with -s/--sorted=sortInts
+--' @with -m/--summary=sumIntsFile
+--' @with -t/--tagged=tagInts @stream
+--' @with -T/--tag-off=tagIntsOff(@offset) @stream
+--' @render -r/--text=renderInts @stream
+--' @render -R/--text-off=renderIntsOff(@offset) @stream
 streamInts :: <IO, Err> ()
 streamInts = @collect produceInts
 
@@ -64,9 +64,9 @@ produceStrs sink = do
   sink (makeStrs 2)
 
 --' Stream three batches of strings
---' with: -s/--sorted=sortStrs
---' with: -m/--count=countStrsFile
---' render.buffer: -r/--text=joinStrs
+--' @with -s/--sorted=sortStrs
+--' @with -m/--count=countStrsFile
+--' @render -r/--text=joinStrs @stream
 streamStrs :: <IO, Err> ()
 streamStrs = @collect produceStrs
 

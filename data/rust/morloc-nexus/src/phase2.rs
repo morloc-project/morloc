@@ -21,7 +21,7 @@
 use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
 use crate::dispatch::{preprocess_cli_value, ArgValue};
-use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest};
+use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Terminal};
 
 /// Leak a string into a `&'static str` for clap's static-only
 /// builder API. The nexus is a short-lived dispatcher (one
@@ -63,6 +63,7 @@ pub fn parse_run(
     manifest: &Manifest,
     user_zone: &[String],
     prog_name: &str,
+    format_explicit: bool,
 ) -> ParsedCommand {
     let root = build_root(manifest, prog_name);
     // Internal (compiler-synthesized) commands never surface at the
@@ -111,7 +112,8 @@ pub fn parse_run(
     if single {
         let (cmd_index0, cmd) = visible[0];
         let values = extract_values(cmd, &matches);
-        let (cmd_index, render) = redirect_via_terminal(manifest, cmd_index0, cmd, &matches);
+        let (cmd_index, render) =
+            redirect_via_terminal(manifest, cmd_index0, cmd, &matches, format_explicit);
         return ParsedCommand { cmd_index, values, render };
     }
 
@@ -137,7 +139,8 @@ pub fn parse_run(
         .expect("clap-chosen command must be in manifest");
     let cmd = &manifest.commands[cmd_index];
     let values = extract_values(cmd, chosen_matches);
-    let (cmd_index, render) = redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches);
+    let (cmd_index, render) =
+        redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches, format_explicit);
     ParsedCommand { cmd_index, values, render }
 }
 
@@ -181,17 +184,31 @@ fn redirect_via_terminal(
     default_index: usize,
     cmd: &ManifestCommand,
     matches: &ArgMatches,
+    format_explicit: bool,
 ) -> (usize, bool) {
+    // Resolve a terminal to its synthesized entry command's (index, render).
+    let resolve = |t: &Terminal| {
+        manifest
+            .commands
+            .iter()
+            .position(|c| c.name == t.entry)
+            .map(|idx| (idx, t.render))
+    };
+    // An explicit terminal flag always wins.
     for (i, t) in cmd.terminals.iter().enumerate() {
         let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
         if matches.get_flag(id) {
-            if let Some(idx) = manifest
-                .commands
-                .iter()
-                .position(|c| c.name == t.entry)
-            {
-                return (idx, t.render);
+            if let Some(r) = resolve(t) {
+                return r;
             }
+        }
+    }
+    // No formatter flag given: a `@default` terminal fires -- unless the user
+    // gave an explicit `-f`, which suppresses the default and yields the
+    // command's typed output (so `-f json` always recovers JSON).
+    if !format_explicit {
+        if let Some(r) = cmd.terminals.iter().find(|t| t.default).and_then(resolve) {
+            return r;
         }
     }
     (default_index, false)
@@ -1097,7 +1114,7 @@ mod tests {
     #[test]
     fn single_command_positionals_extracted_in_order() {
         let m = fixture_single_add();
-        let parsed = parse_run(&m, &["3".into(), "5".into()], "add");
+        let parsed = parse_run(&m, &["3".into(), "5".into()], "add", false);
         assert_eq!(parsed.cmd_index, 0);
         assert_eq!(parsed.values.len(), 2);
         match &parsed.values[0] {
@@ -1118,7 +1135,7 @@ mod tests {
     #[test]
     fn single_command_accepts_negative_number_positional() {
         let m = fixture_single_add();
-        let parsed = parse_run(&m, &["-5".into(), "-7".into()], "add");
+        let parsed = parse_run(&m, &["-5".into(), "-7".into()], "add", false);
         assert_eq!(parsed.values.len(), 2);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "-5"),
@@ -1140,6 +1157,7 @@ mod tests {
             &m,
             &["add".into(), "3".into(), "5".into()],
             "add",
+            false,
         );
         assert_eq!(parsed.cmd_index, 0);
         assert_eq!(parsed.values.len(), 2);
@@ -1169,7 +1187,7 @@ mod tests {
     #[test]
     fn multi_command_routes_by_subcommand_name() {
         let m = fixture_multi_cmds();
-        let parsed = parse_run(&m, &["beta".into()], "main");
+        let parsed = parse_run(&m, &["beta".into()], "main", false);
         assert_eq!(parsed.cmd_index, 1);
     }
 
@@ -1201,7 +1219,7 @@ mod tests {
     #[test]
     fn optional_user_override_wins_over_default() {
         let m = fixture_optional_with_default();
-        let parsed = parse_run(&m, &["--name".into(), "Zeb".into()], "greet");
+        let parsed = parse_run(&m, &["--name".into(), "Zeb".into()], "greet", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "Zeb"),
             _ => panic!("expected Value"),
@@ -1211,7 +1229,7 @@ mod tests {
     #[test]
     fn optional_default_used_when_absent() {
         let m = fixture_optional_with_default();
-        let parsed = parse_run(&m, &[], "greet");
+        let parsed = parse_run(&m, &[], "greet", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "world"),
             _ => panic!("expected Value"),
@@ -1246,7 +1264,7 @@ mod tests {
     #[test]
     fn flag_set_becomes_true() {
         let m = fixture_flag();
-        let parsed = parse_run(&m, &["--verbose".into()], "go");
+        let parsed = parse_run(&m, &["--verbose".into()], "go", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "true"),
             _ => panic!("expected Value"),
@@ -1256,7 +1274,7 @@ mod tests {
     #[test]
     fn flag_absent_uses_default() {
         let m = fixture_flag();
-        let parsed = parse_run(&m, &[], "go");
+        let parsed = parse_run(&m, &[], "go", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "false"),
             _ => panic!("expected Value"),
@@ -1266,7 +1284,7 @@ mod tests {
     #[test]
     fn flag_with_short_form_set_becomes_true() {
         let m = fixture_flag();
-        let parsed = parse_run(&m, &["-v".into()], "go");
+        let parsed = parse_run(&m, &["-v".into()], "go", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "true"),
             _ => panic!("expected Value"),
@@ -1304,7 +1322,7 @@ mod tests {
     #[test]
     fn quoted_positional_is_json_escaped() {
         let m = fixture_quoted_positional();
-        let parsed = parse_run(&m, &[r#"hello "world""#.into()], "echo");
+        let parsed = parse_run(&m, &[r#"hello "world""#.into()], "echo", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => {
                 // Whatever clap and serde_json produce must round-trip through
@@ -1351,7 +1369,7 @@ mod tests {
     #[test]
     fn literal_optional_default_passes_through_verbatim() {
         let m = fixture_literal_optional_with_default();
-        let parsed = parse_run(&m, &[], "bar");
+        let parsed = parse_run(&m, &[], "bar", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "\"yolo\""),
             _ => panic!("expected Value"),
@@ -1363,7 +1381,7 @@ mod tests {
         // When the user types `-y a`, the value is JSON-quoted on
         // the way to the pool so the string survives transport.
         let m = fixture_literal_optional_with_default();
-        let parsed = parse_run(&m, &["-y".into(), "a".into()], "bar");
+        let parsed = parse_run(&m, &["-y".into(), "a".into()], "bar", false);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "\"a\""),
             _ => panic!("expected Value"),
@@ -1425,6 +1443,7 @@ mod tests {
             &m,
             &["--alg-config=algconf.json".into()],
             "foo",
+            false,
         );
         match &parsed.values[0] {
             ArgValue::Group { grp_val, fields, defaults } => {
@@ -1446,6 +1465,7 @@ mod tests {
             &m,
             &["-m".into(), "6".into()],
             "foo",
+            false,
         );
         match &parsed.values[0] {
             ArgValue::Group { fields, .. } => {
