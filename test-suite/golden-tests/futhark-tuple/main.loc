@@ -1,0 +1,42 @@
+module main (twSum, tTag, tScaled, tMat)
+
+import root
+import root-cpp
+import tensor
+import tensor-cpp
+import vector
+import vector-cpp
+
+-- Sourcing Futhark entry points whose arguments and/or returns are tuples.
+-- morloc compiles kernels.fut into the C++ pool and generates marshalling glue
+-- that builds a Futhark opaque from each tuple argument and projects each field
+-- out of a tuple return. Fields cover scalar, Vector (rank 1), and Matrix
+-- (rank 2), with a heterogeneous (I32, F32, Vector) return whose field order a
+-- transposition would corrupt.
+source Futhark from "kernels.fut"
+  ( "weighted_sum" as fweightedSum
+  , "tagged"       as ftagged
+  , "mat_reduce"   as fmatReduce
+  )
+
+fweightedSum :: (F32, Vector n F32) -> F32
+ftagged      :: I32 -> Vector n F32 -> (I32, F32, Vector n F32)
+fmatReduce   :: (Matrix m n F32, F32) -> F32
+
+-- tuple argument: weight 2.0 applied to [1,2,3,4] and summed = 2 * 10 = 20
+twSum :: F32
+twSum = fweightedSum (2.0, [1.0, 2.0, 3.0, 4.0])
+
+-- tuple return, first (I32) field: proves the integer tag is not confused with a
+-- neighboring F32 field
+tTag :: I32
+tTag = let (k, _, _) = ftagged 7 [1.0, 2.0, 3.0] in k
+
+-- tuple return, F32 sum field + doubled-vector field, combined:
+-- sum([1,2,3,4]) = 10, sum(2*[1,2,3,4]) = 20, total = 30
+tScaled :: F32
+tScaled = let (_, s, v) = ftagged 3 [1.0, 2.0, 3.0, 4.0] in s + fold (\acc x -> acc + x) 0.0 v
+
+-- tuple argument with a Matrix field: sum of a 2x3 matrix of ones (= 6) plus 5 = 11
+tMat :: F32
+tMat = fmatReduce (ones2 2 3, 5.0)
