@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
@@ -47,6 +48,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+  , ArgSite (..)
+  , IOwnership (..)
 
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
@@ -344,16 +347,72 @@ buildProgramM labels templates sources es translateSeg getSchemas closureTable =
   schemas <- getSchemas
   return $ buildProgram labels templates sources manifolds es schemas closureTable
 
+-- | Which kind of call an argument is being passed into. Members that vary
+-- argument passing by call kind (currently only Rust) branch on this; the
+-- others ignore it. Every argument-emission site names its kind, so a new
+-- call-emitting path is forced to choose one rather than defaulting silently.
+data ArgSite
+  = SourcedArg Source Int
+  -- ^ i-th argument of a sourced foreign call (carries the declared signature
+  -- so a member can, e.g., pass a type-variable parameter by reference)
+  | ManifoldArg
+  -- ^ argument of a generated manifold call
+  | ClosureArg
+  -- ^ argument of a native closure application (a function-valued variable)
+
+-- | The ownership form a lowered native expression evaluates to. Members that
+-- do not distinguish ownership (C++/Python/R) treat everything as 'Owned'; the
+-- Rust member uses it to decide whether to clone, dereference, or borrow an
+-- expression at a use site (its borrow-by-default parameter convention makes a
+-- non-'Copy' parameter a reference, so feeding it to an owned position requires
+-- a clone).
+data IOwnership
+  = Owned
+  -- ^ an owned value (@T@): a literal, a call result, a constructor
+  | BorrowedRef
+  -- ^ a shared reference (@&T@): a non-'Copy' bound variable
+  | BorrowedPlace
+  -- ^ a place of type @T@ reached through a borrow (a field of a borrowed
+  -- value): moving it out needs a clone, but it is not itself a reference
+  deriving (Eq, Show)
+
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
-  , lcSourcedArg :: Maybe (Source, Int) -> TypeM -> MDoc -> MDoc
-  -- ^ How to pass one argument at a call, given the arg's 'TypeM' and rendered
-  -- expression. @Just (src, i)@ identifies the i-th parameter of sourced
-  -- function @src@ (so a member can consult the declared signature -- e.g. to
-  -- pass a type-variable parameter by reference); @Nothing@ at manifold-call
-  -- sites. Default is identity (C++/Generic pass args unchanged); Rust borrows
-  -- non-'Copy' native args so a value fanned out to several consumers is shared.
+  , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
+  -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
+  -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
+  -- expression. Default is identity (C++/Generic pass args unchanged); Rust
+  -- borrows non-'Copy' native args so a value fanned out to several consumers is
+  -- shared, borrows every argument of a closure application to match the
+  -- by-reference @Fn(&T, ...)@ calling convention, and clones/derefs a borrowed
+  -- argument passed to a by-value parameter.
+  , lcOwnership :: NativeExpr -> m IOwnership
+  -- ^ The ownership form a native expression evaluates to (default: always
+  -- 'Owned'). Computed from the original IR so a use site can adapt it; monadic
+  -- because a bound variable's ownership depends on the enclosing manifold's
+  -- parameter conventions (tracked in member state).
+  , lcArgManifoldOwnership :: NativeManifold -> m IOwnership
+  -- ^ The ownership of the value produced by a manifold used as an argument (a
+  -- 'NativeArgManifold'). Default is 'Owned' (a call materializes a value); the
+  -- Rust member computes it under the sub-manifold's OWN borrowed set, so a
+  -- trivial pass-through of a borrowed variable is recognized as borrowed.
+  , lcOwnArg :: IOwnership -> TypeF -> MDoc -> MDoc
+  -- ^ Adapt an expression to an owned value at an owned sink (a container
+  -- element, a return, a let binding, a by-value parameter). Default is identity;
+  -- Rust clones a borrowed non-'Copy' value and dereferences a borrowed 'Copy'
+  -- reference.
+  , lcWithCallerScope :: forall a. m a -> m a
+  -- ^ Run an action as if in the enclosing (caller) manifold's scope, so
+  -- 'lcOwnership' of a manifold-call argument (named by index-aliasing after the
+  -- caller's variables) reflects the caller rather than the callee being
+  -- rendered. Default is identity (only Rust distinguishes ownership).
+  , lcCoerceOptional :: MDoc -> MDoc
+  -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
+  -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
+  -- Rust @?T@ is a distinct @Option<T>@ whose wire layout is type-driven, so the
+  -- value must be wrapped in @Some(..)@. The coercion is only inserted to widen a
+  -- non-optional inner, so this never double-wraps.
   , lcTypeOf :: TypeF -> m (Maybe IType)
   , lcSerialAstType :: SerialAST -> m (Maybe IType)
   -- ^ type of a SerialAST for serialization (used for C++ typed declarations)
@@ -658,6 +717,31 @@ lowerSerialExpr cfg _ (SerializeS_ s e) = do
   se <- lcSerialize cfg (poolExpr e) s
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
 
+-- | The ownership of each argument of an @AppExeN@, taken from the original IR
+-- (a manifold-valued argument is always an owned call result).
+argOwnerships :: (Monad m) => LowerConfig m -> NativeExpr -> m [IOwnership]
+argOwnerships cfg (AppExeN _ _ args) = mapM (nativeArgOwnership cfg) args
+argOwnerships _ _ = return (repeat Owned)
+
+nativeArgOwnership :: LowerConfig m -> NativeArg -> m IOwnership
+nativeArgOwnership cfg (NativeArgExpr e) = lcOwnership cfg e
+nativeArgOwnership cfg (NativeArgManifold nm) = lcArgManifoldOwnership cfg nm
+
+-- | Adapt a container element (an owned sink) to an owned value, using its
+-- ownership and type from the original IR.
+adaptOwnedElem :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+adaptOwnedElem cfg origE pd = do
+  own <- lcOwnership cfg origE
+  return pd {poolExpr = lcOwnArg cfg own (typeFof origE) (poolExpr pd)}
+
+-- | Adapt each element of a container (list/tuple/record) to an owned value,
+-- pairing the lowered elements with their originals; the elements pass through
+-- unadapted if the counts disagree.
+adaptOwnedElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
+adaptOwnedElems cfg origEs xs
+  | length origEs == length xs = zipWithM (adaptOwnedElem cfg) origEs xs
+  | otherwise = return xs
+
 -- | Lower a native expression to PoolDocs via the IR.
 lowerNativeExpr ::
   (Monad m) =>
@@ -669,14 +753,15 @@ lowerNativeExpr ::
 lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) es) = do
+lowerNativeExpr cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
+  owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
       handleFunctionArgs exprs =
         (<>) (lcSrcName cfg src)
           . hsep
           . map tupled
           . provideClosure src
-          $ zipWith3 (\i t e -> lcSourcedArg cfg (Just (src, i)) t e) [0 ..] argTypes exprs
+          $ zipWith (\(i, t, own) e -> lcSourcedArg cfg (SourcedArg src i) own t e) (zip3 [0 ..] argTypes owns) exprs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs
@@ -692,12 +777,14 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
-lowerNativeExpr cfg _ (AppExeN_ _ (LocalCallP idx) xs) = do
+lowerNativeExpr cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
+  owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
-  return $ mergePoolDocs (\es -> nvarNamer idx <> tupled (zipWith (lcSourcedArg cfg Nothing) argTypes es)) (map snd xs)
-lowerNativeExpr cfg _ (AppExeN_ _ (RecCallP mid _) xs) = do
+  return $ mergePoolDocs (\es -> nvarNamer idx <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
+lowerNativeExpr cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
+  owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
-  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith (lcSourcedArg cfg Nothing) argTypes es)) (map snd xs)
+  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)
 lowerNativeExpr _ _ (ManN_ call) = return call
 lowerNativeExpr _ _ (ReturnN_ x) =
   return $ x {poolReturnFlag = True}
@@ -736,15 +823,18 @@ lowerNativeExpr cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr
 lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
-lowerNativeExpr cfg _ (ListN_ v t xs) = return $ mergePoolDocs (lcListConstructor cfg v t) xs
-lowerNativeExpr cfg origExpr (TupleN_ v xs) =
+lowerNativeExpr cfg origExpr (ListN_ v t xs) = do
+  xs' <- adaptOwnedElems cfg (case origExpr of ListN _ _ es -> es; _ -> []) xs
+  return $ mergePoolDocs (lcListConstructor cfg v t) xs'
+lowerNativeExpr cfg origExpr (TupleN_ v xs) = do
   let slotTypes = case typeFof origExpr of
         AppF _ ts -> ts
         _ -> []
-  in return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs
+  xs' <- adaptOwnedElems cfg (case origExpr of TupleN _ es -> es; _ -> []) xs
+  return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
-  let es = map snd rs
-      recType = typeFof origExpr
+  es <- adaptOwnedElems cfg (case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []) (map snd rs)
+  let recType = typeFof origExpr
   rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
   return $
     rec'
@@ -778,8 +868,10 @@ lowerNativeExpr cfg _ (DoBlockN_ t x) = do
       , poolPriorExprs = poolPriorExprs x
       }
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
--- CoerceToOptional is a noop in all target languages: T is a valid ?T
-lowerNativeExpr _ _ (CoerceN_ CoerceToOptional _ x) = return x
+-- CoerceToOptional widens a value to an optional. Most languages treat a T as a
+-- valid ?T (identity); Rust must wrap the value in Some(..) (see lcCoerceOptional).
+lowerNativeExpr cfg _ (CoerceN_ CoerceToOptional _ x) =
+  return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
@@ -1103,11 +1195,23 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
   call <- case form of
         (ManifoldPass _) -> lcMakePass cfg mname args
         -- Wrap each manifold-call argument through lcSourcedArg (identity for
-        -- most languages; the Rust member borrows every native arg). Manifold
-        -- callees are concretely typed, so a borrowed param (already `&T`) that
-        -- becomes `&&T` here deref-coerces back to `&T` at the call boundary.
-        (ManifoldFull rs) ->
-          return $ mname <> tupled [lcSourcedArg cfg Nothing t (argNamer a) | a@(Arg _ t) <- typeMofRs rs]
+        -- most languages; the Rust member adapts each native arg to the callee's
+        -- convention by ownership, so an already-borrowed arg passes as `&T` and
+        -- an owned one is borrowed to `&T` -- never a double reference).
+        (ManifoldFull rs) -> do
+          -- The call arguments are named by index-aliasing after the CALLER's
+          -- variables, so their ownership is read in the caller's scope. A
+          -- non-Native (serialized) argument is an owned deserialized value.
+          callArgs <- lcWithCallerScope cfg $
+            mapM
+              ( \a@(Arg i t) -> do
+                  own <- case t of
+                    Native tf -> lcOwnership cfg (BndVarN tf i)
+                    _ -> return Owned
+                  return $ lcSourcedArg cfg ManifoldArg own t (argNamer a)
+              )
+              (typeMofRs rs)
+          return $ mname <> tupled callArgs
         (ManifoldPart rs vs) -> do
           -- The closure's callable signature is result(bound...) -- only the
           -- REMAINING parameters, never the captured context args. Build it

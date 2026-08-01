@@ -28,7 +28,8 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   ) where
 
 import Control.Monad.Identity (Identity, runIdentity)
-import qualified Control.Monad.State as CMS
+import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
+import qualified Control.Monad.State.Strict as CMS
 import Data.Function (on)
 import Data.List (nubBy)
 import Data.Ord (comparing)
@@ -38,7 +39,9 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( LowerConfig (..)
+  ( ArgSite (..)
+  , IOwnership (..)
+  , LowerConfig (..)
   , buildProgramM
   , defaultDeserialize
   , defaultFoldRules
@@ -88,7 +91,23 @@ data RustState = RustState
 instance Defaultable RustState where
   defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) [] Map.empty Map.empty
 
-type RustM = CMS.StateT RustState Identity
+-- | The ownership environment: the borrowed (@&T@) parameter indices of the
+-- manifold whose body is currently being lowered ('oeCurrent') and of its
+-- enclosing caller ('oeParent'). This is a lexically scoped Reader environment,
+-- extended by 'local' at each manifold boundary -- NOT mutable state -- so a
+-- variable's ownership is a pure function of the lexical context, immune to the
+-- fold's evaluation order. A manifold-call argument or captured context
+-- argument is named by index-aliasing after the caller's variables, so its
+-- ownership is read from 'oeParent' rather than 'oeCurrent'.
+data OwnEnv = OwnEnv
+  { oeCurrent :: Set.Set Int
+  , oeParent :: Set.Set Int
+  }
+
+emptyOwnEnv :: OwnEnv
+emptyOwnEnv = OwnEnv Set.empty Set.empty
+
+type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
 getCounter :: RustM Int
 getCounter = do
@@ -142,7 +161,12 @@ rustTypeOf = f
     f NatVoidF = return mempty
     f (StrLitF _) = return mempty
     f StrVoidF = return mempty
-    f (FunF _ _) = error "Rust v1: function types in signatures are unsupported"
+    -- A function type renders as a monomorphic `impl Fn` closure (by-reference
+    -- arguments, by-value result), matching 'rustArgType' on a 'Function'.
+    f (FunF ts t) = do
+      argTs <- mapM (\a -> ("&" <>) <$> f a) ts
+      retT <- f t
+      return $ "impl Fn" <> tupled argTs <+> "->" <+> retT
     -- Effects erase for type rendering: an effectful value's rendered type is
     -- its result type. Effect sequencing is carried by do-block thunks + eval,
     -- not by the type.
@@ -203,7 +227,17 @@ rustArgType :: TypeM -> RustM MDoc
 rustArgType (Serial _) = return "*const u8"
 rustArgType Passthrough = return "*const u8"
 rustArgType (Native t) = rustTypeOf (typeFof t)
-rustArgType (Function _ _) = error "Rust v1: function-typed arguments are unsupported"
+-- A function-typed parameter (a morloc-defined combinator abstracting over a
+-- function, e.g. `flip`) becomes a monomorphic `impl Fn` closure parameter:
+-- every closure argument is a shared reference (the HOF calling convention),
+-- the result is by value. morloc monomorphizes manifolds, so the argument and
+-- result types are concrete -- no generic manifold parameters are needed.
+-- `impl Fn` is zero-cost (rustc re-monomorphizes per closure type at each call
+-- site, matching morloc's signature-level manifold dedup).
+rustArgType (Function ts t) = do
+  argTs <- mapM closureParamType ts
+  retT <- rustReturnType t
+  return $ "impl Fn" <> tupled argTs <+> "->" <+> retT
 
 -- | The Rust return type of a manifold: a serial result is an owned packet.
 rustReturnType :: TypeM -> RustM MDoc
@@ -232,15 +266,6 @@ rustArgOf a@(Arg _ t) = do
 rustBridgeArg :: TypeM -> MDoc -> MDoc
 rustBridgeArg (Native tf) name | rustIsCopy tf = "*" <> name
 rustBridgeArg _ name = name
-
--- | Pass an owned native value to a callee parameter under the asymmetric
--- convention: a Copy scalar goes by value, a non-Copy value is borrowed. Shared
--- by the sourced-call site ('lcSourcedArg') and captured-context bridging
--- ('rustBridgeContext') so the convention has a single definition.
-rustBorrow :: TypeF -> MDoc -> MDoc
-rustBorrow tf x
-  | rustIsCopy tf = x
-  | otherwise = "&(" <> x <> ")"
 
 -- | The Rust type of a HOF closure parameter: a shared reference to the
 -- element/accumuland value type (a HOF passes every closure argument by ref).
@@ -272,11 +297,88 @@ writeSelectorRust d [] = d
 writeSelectorRust d (Right k : rs) = writeSelectorRust (d <> "." <> rustFieldIdent (Key k)) rs
 writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
 
--- | Adapt a partial application's captured context argument (an owned value in
--- the enclosing scope) to a manifold parameter (see 'rustBorrow').
-rustBridgeContext :: TypeM -> MDoc -> MDoc
-rustBridgeContext (Native tf) name = rustBorrow tf name
-rustBridgeContext _ name = "&(" <> name <> ")"
+-- | Adapt a partial application's captured context argument to the closure
+-- manifold's parameter. The captured value is a variable in the ENCLOSING
+-- (caller) scope, so its ownership is read from 'oeParent': a non-'Copy' context
+-- parameter is a reference sink, a 'Copy' one is a by-value (owned) sink --
+-- matching how a manifold call passes its arguments.
+rustBridgeContext :: Int -> TypeM -> MDoc -> RustM MDoc
+-- A captured FUNCTION value (a combinator like `any`/`all` whose inner lambda
+-- closes over a function argument) needs by-reference capture AND a by-reference
+-- inner manifold parameter (`&F: Fn` stays re-callable across the per-element
+-- calls; a by-value `impl Fn` would move out of an `Fn` closure). That param
+-- form is not yet emitted, so reject it rather than emit code that miscompiles.
+rustBridgeContext _ (Function _ _) _ =
+  error "Rust v1: a captured function value (e.g. a combinator closing over a function argument, like `any`/`all`) is not yet supported"
+rustBridgeContext i (Native tf) name = do
+  parent <- asks oeParent
+  let own = if Set.member i parent then BorrowedRef else Owned
+  return $ if rustIsCopy tf then rustOwn own tf name else rustRef own name
+rustBridgeContext _ _ name = return $ "&(" <> name <> ")"
+
+-- | The spec's @owner(e, Gamma)@ as a PURE function: the ownership of a native
+-- expression given @Gamma@, the borrowed (@&T@) parameter indices of the
+-- enclosing manifold. Because @Gamma@ is an explicit argument (not fold state),
+-- the result is correct regardless of the fold's evaluation order. A bound
+-- variable is a reference only when it is a borrowed parameter; a field of a
+-- borrowed value is a place; everything else is an owned value.
+ownerPure :: Set.Set Int -> NativeExpr -> IOwnership
+-- A bound variable and a let variable both render as `n<i>` and share the index
+-- namespace, so both are borrowed exactly when @i@ is a borrowed parameter. A
+-- fresh let binding (an owned temporary) has an index NOT in @Gamma@, so it
+-- reads as 'Owned'; a let that aliases a borrowed parameter (same index) reads
+-- as 'BorrowedRef'.
+ownerPure g (BndVarN _ i) = if Set.member i g then BorrowedRef else Owned
+ownerPure g (LetVarN _ i) = if Set.member i g then BorrowedRef else Owned
+ownerPure g (ReturnN e) = ownerPure g e
+ownerPure g (NativeLetN _ _ e) = ownerPure g e
+ownerPure g (SerialLetN _ _ e) = ownerPure g e
+ownerPure g (AppExeN _ (PatCallP (PatternStruct _)) [recv]) =
+  case argOwnerPure g recv of
+    Owned -> Owned
+    _ -> BorrowedPlace
+ownerPure _ _ = Owned
+
+-- | Ownership of an argument's value. An expression argument is read in the
+-- current manifold's scope (@Gamma@); a manifold argument is a SELF-CONTAINED
+-- sub-manifold whose result ownership is computed under ITS OWN borrowed set
+-- (from its own form), never the caller's. This is what a trivial pass-through
+-- needs -- @morloc_size xs@ wraps @xs@ in a manifold whose body is the borrowed
+-- @xs@, so its result is @BorrowedRef@, not @Owned@.
+argOwnerPure :: Set.Set Int -> NativeArg -> IOwnership
+argOwnerPure g (NativeArgExpr e) = ownerPure g e
+argOwnerPure _ (NativeArgManifold nm) = argManifoldOwnership nm
+
+-- | A manifold used as an argument is a self-contained sub-manifold: its result
+-- ownership is computed under ITS OWN borrowed set (from its form), never the
+-- caller's. Single definition shared by 'argOwnerPure' and 'lcArgManifoldOwnership'.
+argManifoldOwnership :: NativeManifold -> IOwnership
+argManifoldOwnership (NativeManifold _ _ form body) =
+  ownerPure (borrowedIndicesOfForm form) body
+
+rustOwnership :: NativeExpr -> RustM IOwnership
+rustOwnership e = do
+  g <- asks oeCurrent
+  return (ownerPure g e)
+
+-- | Adapt an expression to an owned value at an owned sink (a container element,
+-- a return, a let RHS, a by-value parameter): clone a borrowed non-'Copy' value,
+-- dereference a borrowed 'Copy' reference, read a 'Copy' place as-is.
+rustOwn :: IOwnership -> TypeF -> MDoc -> MDoc
+rustOwn Owned _ x = x
+rustOwn BorrowedRef tf x
+  | rustIsCopy tf = "*" <> x
+  | otherwise = x <> ".clone()"
+rustOwn BorrowedPlace tf x
+  | rustIsCopy tf = x
+  | otherwise = x <> ".clone()"
+
+-- | Adapt an expression to a shared reference at a reference sink (a @&T@
+-- parameter or a closure application): an owned value or a borrowed place is
+-- borrowed; a value that is already a reference is forwarded unchanged.
+rustRef :: IOwnership -> MDoc -> MDoc
+rustRef BorrowedRef x = x
+rustRef _ x = "&(" <> x <> ")"
 
 -- | The safe by-reference closure that adapts a manifold to a higher-order
 -- function's @F: Fn@ (a bare @unsafe fn@ does not implement @Fn@). Remaining
@@ -290,8 +392,8 @@ rustClosureWrapper mname ctxArgs boundArgs = do
   boundTyped <- mapM (\a@(Arg _ t) -> do
                         base <- closureParamType t
                         return (argNamer a <> ":" <+> base)) boundArgs
-  let ctxDocs = [rustBridgeContext t (argNamer a) | a@(Arg _ t) <- ctxArgs]
-      boundDocs = [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
+  ctxDocs <- mapM (\a@(Arg i t) -> rustBridgeContext i t (argNamer a)) ctxArgs
+  let boundDocs = [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
       call = mname <> tupled (ctxDocs ++ boundDocs)
   return $ "move |" <> hcat (punctuate ", " boundTyped) <> "| unsafe {" <+> call <+> "}"
 
@@ -345,7 +447,7 @@ translate srcs es = do
 
   srcTypeVarMask <- buildSrcTypeVarMask
   let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask}
-      code = CMS.evalState (makeRustCode includeDocs es) st0
+      code = CMS.evalState (runReaderT (makeRustCode includeDocs es) emptyOwnEnv) st0
 
   maker <- makeTheMaker
   poolSubdir <- MM.getModuleName
@@ -470,11 +572,46 @@ rustFieldIdent k
       , "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen"
       ]
 
+-- | The bound-variable indices that are borrowed (@&T@) parameters of a
+-- manifold: its non-'Copy' NATIVE parameters. Serial (dispatch) parameters
+-- deserialize to owned locals, so they are excluded.
+borrowedIndicesOfForm :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> Set.Set Int
+borrowedIndicesOfForm form =
+  Set.fromList [i | Arg i tm <- typeMofForm form, isBorrowed tm]
+  where
+    isBorrowed (Native tf) = not (rustIsCopy tf)
+    isBorrowed _ = False
+
+-- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the
+-- manifold's borrowed parameter indices, and 'oeParent' becomes the enclosing
+-- manifold's ('oeCurrent' from before). Because this extends the Reader
+-- environment with 'local' rather than mutating state, the scope is purely
+-- lexical -- sibling and nested manifolds cannot corrupt each other's view, and
+-- the answer does not depend on the fold's evaluation order.
+withBorrowedBnds :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> RustM PoolDocs -> RustM PoolDocs
+withBorrowedBnds form act =
+  local (\e -> OwnEnv (borrowedIndicesOfForm form) (oeCurrent e)) act
+
+-- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
+-- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
+-- are named by index-aliasing after the caller's variables.
+rustWithCallerScope :: RustM a -> RustM a
+rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e})
+
+-- | Track each manifold's borrowed parameters as the body is folded, so
+-- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value.
+rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
+rustSurround =
+  defaultValue
+    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) -> withBorrowedBnds form (recurse sm)
+    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) -> withBorrowedBnds form (recurse nm)
+    }
+
 translateSegment :: SerialManifold -> RustM MDoc
 translateSegment m0 = do
   resetCounter
   mask <- CMS.gets rsSrcTypeVarMask
-  e <- foldWithSerialManifoldM (defaultFoldRules (rustLowerConfig mask)) m0
+  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
   return $ renderPoolDocs e
 
 -- | The single bare-@rustc@ build command (no cargo): compile pool.rs against
@@ -506,25 +643,48 @@ rustLowerConfig :: Map.Map SrcName [Bool] -> LowerConfig RustM
 rustLowerConfig mask =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
-    , lcSourcedArg = \mctx tm x ->
-        -- Idiomatic asymmetric passing, matched to how each sourced fn is
-        -- written: a Copy scalar goes by value; a non-Copy value is borrowed.
-        -- A type-variable parameter is generic over `&A`, so it is passed by
-        -- reference EVEN at a Copy instantiation (detected from the declared
-        -- signature via the type-var mask). A function argument (closure or
-        -- manifold reference) is passed by value into the callee's `F: Fn`.
-        let isVar = case mctx of
-              Just (src, i) ->
+    , lcSourcedArg = \site own tm x ->
+        -- Pass each argument to match how the callee's parameter is written,
+        -- adapting by the argument's ownership so no unnecessary copy is made.
+        -- A non-Copy parameter (and a sourced type-variable parameter, which is
+        -- generic over `&A`) is a reference sink; a Copy parameter is a by-value
+        -- (owned) sink; a closure application borrows every argument to match its
+        -- `Fn(&T, ...)` signature. A function argument passes BY VALUE (the
+        -- callee takes it as `F: Fn`; borrowing `&closure` breaks higher-ranked
+        -- closure inference).
+        let isVar = case site of
+              SourcedArg src i ->
                 maybe False (\bs -> i < length bs && bs !! i) (Map.lookup (srcName src) mask)
-              Nothing -> False
+              _ -> False
          in case tm of
-              Native _ | isVar -> "&(" <> x <> ")"
-              Native tf -> rustBorrow tf x
-              -- A function argument (a manifold reference or a closure) is
-              -- passed BY VALUE: the HOF takes it as `F: Fn` by value; borrowing
-              -- it (`&closure`) breaks higher-ranked closure inference.
-              Function _ _ -> x
+              -- A fully-applied sub-manifold argument carries the manifold's
+              -- FUNCTION type even though it renders as a call (a value). When
+              -- the callee's parameter is a value type-variable (`isVar`, e.g.
+              -- `toReal :: a -> Real`, `(/) :: a -> a -> a`), the argument is
+              -- really a value passed to a generic `&A`, so borrow it by
+              -- ownership; only a genuine function-typed parameter (a closure)
+              -- passes BY VALUE (borrowing `&closure` breaks HRTB inference).
+              Function _ _
+                | isVar -> rustRef own x
+                | otherwise -> x
+              -- A closure application and a sourced type-variable parameter are
+              -- reference sinks; a Copy parameter is a by-value (owned) sink; a
+              -- non-Copy parameter is a reference sink. (`isVar` is only ever
+              -- True under 'SourcedArg'.)
+              Native tf
+                | ClosureArg <- site -> rustRef own x
+                | isVar -> rustRef own x
+                | rustIsCopy tf -> rustOwn own tf x
+                | otherwise -> rustRef own x
               _ -> x
+    , lcOwnership = rustOwnership
+    , lcArgManifoldOwnership = return . argManifoldOwnership
+    , lcOwnArg = rustOwn
+    , lcWithCallerScope = rustWithCallerScope
+    -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
+    -- be a real `Some(..)` (never a bare `T`) or put_value serializes the wrong
+    -- shape. The coercion only ever wraps a non-optional inner, so this is safe.
+    , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (serialAstToType s)
     , lcDeserialAstType = \s -> Just . toIType <$> rustTypeOf (shallowType s)
@@ -578,12 +738,21 @@ rustLowerConfig mask =
 
 -- | Assemble a @let@ binding at the PoolDocs level. A serialize let (mt =
 -- Nothing) binds an owned packet pointer; a native let binds its native type.
+-- | Does a type render as a closure (@impl Fn@)? Such a type cannot annotate a
+-- @let@ binding (@impl Trait@ is only legal in argument/return position), so a
+-- function-valued binding must omit its type and let Rust infer the closure.
+isFunctionTypeF :: TypeF -> Bool
+isFunctionTypeF t = case stripEffectF t of
+  FunF _ _ -> True
+  _ -> False
+
 rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> RustM PoolDocs
 rustMakeLet namer letIndex mt p1 p2 = do
-  ts <- case mt of
-    Just t -> rustTypeOf t
-    Nothing -> return "*mut u8"
-  let letLine = "let" <+> namer letIndex <> ":" <+> ts <+> "=" <+> poolExpr p1 <> ";"
+  ann <- case mt of
+    Just t | isFunctionTypeF t -> return ""
+    Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
+    Nothing -> return (":" <+> "*mut u8")
+  let letLine = "let" <+> namer letIndex <> ann <+> "=" <+> poolExpr p1 <> ";"
       rs = poolPriorLines p1 <> [letLine] <> poolPriorLines p2
   return $
     PoolDocs

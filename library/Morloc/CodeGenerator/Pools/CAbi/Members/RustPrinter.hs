@@ -53,7 +53,10 @@ printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
 printExpr (IBoolLit True) = "true"
 printExpr (IBoolLit False) = "false"
-printExpr (INullLit _) = "None"
+-- A bare `None` is ambiguous when passed to a generic function; the qualified
+-- path `<Option<T>>::None` pins the type without needing to extract the inner.
+printExpr (INullLit (Just t)) = "<" <> rustType t <> ">::None"
+printExpr (INullLit Nothing) = "None"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i) = parens (viaShow i <+> "as" <+> pretty t)
 printExpr (IRealLit Nothing r) = renderRealLit r

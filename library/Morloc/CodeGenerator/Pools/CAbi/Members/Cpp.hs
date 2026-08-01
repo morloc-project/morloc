@@ -35,6 +35,7 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( IType (..)
+  , IOwnership (..)
   , LowerConfig (..)
   , buildProgramM
   , defaultFoldRules
@@ -673,7 +674,12 @@ cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
 cppLowerConfig reifyThunks =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
-    , lcSourcedArg = \_ _ x -> x
+    , lcSourcedArg = \_ _ _ x -> x
+    , lcOwnership = \_ -> return Owned
+    , lcArgManifoldOwnership = \_ -> return Owned
+    , lcOwnArg = \_ _ x -> x
+    , lcWithCallerScope = id
+    , lcCoerceOptional = id
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf
     , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)

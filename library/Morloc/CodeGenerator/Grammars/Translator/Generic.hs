@@ -31,6 +31,7 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( IAccessor (..)
   , IExpr (..)
+  , IOwnership (..)
   , IProgram (..)
   , IStmt (..)
   , IndexM
@@ -394,7 +395,12 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
-        , lcSourcedArg = \_ _ x -> x
+        , lcSourcedArg = \_ _ _ x -> x
+        , lcOwnership = \_ -> return Owned
+        , lcArgManifoldOwnership = \_ -> return Owned
+        , lcOwnArg = \_ _ x -> x
+        , lcWithCallerScope = id
+        , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing
         , lcDeserialAstType = \_ -> return Nothing

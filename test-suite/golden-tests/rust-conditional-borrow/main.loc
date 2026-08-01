@@ -1,0 +1,27 @@
+module main (choose)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Bool = "bool"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "own.rs" ("is_long" as isLong, "cat" as cat)
+isLong :: [Int] -> Bool
+cat :: [Int] -> [Int] -> [Int]
+
+-- `pick`'s two arms are its own non-Copy [Int] parameters. Its guard is a Rust
+-- call, so the conditional realizes as a Rust manifold. When `pick` is a nested
+-- manifold (its parameters arrive as borrowed `&Vec<i64>`, not deserialized
+-- owned locals), the generated if-let binds a borrowed arm into an owned
+-- `Vec<i64>` slot: `let v: Vec<i64> = if is_long(&a) { a } else { b };`. The arm
+-- `a`/`b` is a `&Vec<i64>`, so a `&Vec` reaches a `Vec` sink -- a rustc E0308,
+-- because rustMakeIf does not clone/deref the arms to the owned if-let type.
+pick :: [Int] -> [Int] -> [Int]
+pick a b = ? isLong a = a : b
+
+-- Use `pick` more than once so it stays a real nested manifold with borrowed
+-- native arguments, rather than being inlined into the owned-parameter dispatch
+-- entry (where `a`/`b` would be owned and the bug would not appear).
+choose :: [Int] -> [Int] -> [Int]
+choose xs ys = cat (pick xs ys) (pick ys xs)
