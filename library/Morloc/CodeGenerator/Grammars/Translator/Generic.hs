@@ -408,6 +408,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcTypeMOf = \_ -> return Nothing
         , lcPackerName = srcNamer
         , lcUnpackerName = srcNamer
+        , lcBorrowPackArg = \_ -> False
         , lcRecordAccessor = genericRecordAccessor desc
         , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
             "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
@@ -1395,11 +1396,15 @@ genericEvalPattern desc _ (PatternStruct s) args
             [r] -> r
             _ -> error $ "genericEvalPattern: bracket-in-Selector expected 1 receiver, \
                          \got " <> show (length receivers)
-      in fst (walkSelectorBrackets desc receiver bracketArgs s)
+      in fst (walkGenericSelectorBrackets desc receiver bracketArgs s)
 -- setters
 genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
-  patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
+  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
   where
+    -- dynamically-typed members copy by value at the runtime level, so an
+    -- unchanged leaf needs no explicit clone
+    finalizeSet _ v = v
+
     makeTuple _ xs = case ldTupleConstructor desc of
       "" -> tupled xs
       name -> pretty name <> tupled xs
@@ -1450,55 +1455,20 @@ writeSelector desc (Left i) = case ldIndexStyle desc of
   OneDoubleBracket -> "[[" <> pretty (i + 1) <> "]]"
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting
--- per-step native source code. Threads the @brackets@ list of runtime
--- arg expressions through bracket steps in DFS order; each call
--- returns the produced expression and the remaining (unconsumed)
--- bracket args. Multi-sibling groups emit a tuple.
-walkSelectorBrackets
-  :: LangDescriptor
-  -> MDoc          -- accumulated receiver expression
-  -> [MDoc]        -- remaining bracket runtime args
-  -> Selector
-  -> (MDoc, [MDoc])
-walkSelectorBrackets _ rcv bracketArgs SelectorEnd = (rcv, bracketArgs)
-walkSelectorBrackets desc rcv bracketArgs (SelectorKey (k, sub) []) =
-  walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) bracketArgs sub
-walkSelectorBrackets desc rcv bracketArgs (SelectorIdx (i, sub) []) =
-  walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) bracketArgs sub
-walkSelectorBrackets desc rcv (idx : restBrackets) (SelectorBracketIndex sub) =
-  let accessed = case ldIndexStyle desc of
+-- per-step native source code for a dynamically-typed member driven by
+-- its 'LangDescriptor'. See 'walkSelectorBrackets'.
+walkGenericSelectorBrackets :: LangDescriptor -> MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+walkGenericSelectorBrackets desc =
+  walkSelectorBrackets
+    (\rcv k -> rcv <> writeSelector desc (Right k))
+    (\rcv i -> rcv <> writeSelector desc (Left i))
+    (\idx rcv -> case ldIndexStyle desc of
         ZeroBracket -> rcv <> "[" <> idx <> "]"
         OneBracket -> rcv <> "[(" <> idx <> ") + 1]"
-        OneDoubleBracket -> rcv <> "[[(" <> idx <> ") + 1]]"
-  in walkSelectorBrackets desc accessed restBrackets sub
-walkSelectorBrackets _ _ [] (SelectorBracketIndex _) =
-  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-index step"
-walkSelectorBrackets desc rcv (start : stop : step : restBrackets) SelectorBracketSlice =
-  let sliced = case ldIndexStyle desc of
+        OneDoubleBracket -> rcv <> "[[(" <> idx <> ") + 1]]")
+    (\start stop step rcv -> case ldIndexStyle desc of
         ZeroBracket -> rcv <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
-        _ -> "morloc_slice" <> tupled [start, stop, step, rcv]
-  in (sliced, restBrackets)
-walkSelectorBrackets _ _ _ SelectorBracketSlice =
-  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
-walkSelectorBrackets desc rcv bracketArgs (SelectorKey hd@(_, _) others) =
-  let pairs = hd : others
-      (results, finalBrackets) = foldl
-        (\(acc, b) (k, sub) ->
-           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) b sub
-           in (acc ++ [out], b'))
-        ([], bracketArgs) pairs
-      tupleExpr = case ldTupleConstructor desc of
+        _ -> "morloc_slice" <> tupled [start, stop, step, rcv])
+    (\results -> case ldTupleConstructor desc of
         "" -> tupled results
-        name -> pretty name <> tupled results
-  in (tupleExpr, finalBrackets)
-walkSelectorBrackets desc rcv bracketArgs (SelectorIdx hd@(_, _) others) =
-  let pairs = hd : others
-      (results, finalBrackets) = foldl
-        (\(acc, b) (i, sub) ->
-           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) b sub
-           in (acc ++ [out], b'))
-        ([], bracketArgs) pairs
-      tupleExpr = case ldTupleConstructor desc of
-        "" -> tupled results
-        name -> pretty name <> tupled results
-  in (tupleExpr, finalBrackets)
+        name -> pretty name <> tupled results)

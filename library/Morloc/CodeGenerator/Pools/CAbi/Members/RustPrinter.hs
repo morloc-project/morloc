@@ -21,6 +21,9 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printDispatch
   , printProgram
   , rustEscape
+  , rustFieldIdent
+  , rustRecordFields
+  , stripTypeParams
   , printRustStruct
   , printRecordImpls
   ) where
@@ -29,7 +32,7 @@ import qualified Data.Map as Map
 import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..))
+import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..), Key (..))
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 
@@ -64,7 +67,10 @@ printExpr (IRealLit (Just t) r) = parens (renderRealLit r <+> "as" <+> pretty t)
 printExpr (IStrLit _ s) = "String::from(" <> dquotes (pretty (rustEscape s)) <> ")"
 printExpr (IListLit es) = "vec![" <> hcat (punctuate ", " (map printExpr es)) <> "]"
 printExpr (ITupleLit es) = tupled (map printExpr es)
-printExpr (IRecordLit _ _ _) = error "RustPrinter: record literals unsupported in Rust v1"
+-- A record literal is always the RHS of an `IAssign` (its struct name lives on
+-- the assignment's type); `printStmt` handles it there. Reaching this clause
+-- means an IRecordLit escaped that context, which the lowering never produces.
+printExpr (IRecordLit _ _ _) = error "RustPrinter: record literal outside an assignment (lowering invariant broken)"
 printExpr (IAccess e (IIdx i)) = printExpr e <> "." <> pretty i
 printExpr (IAccess e (IField f)) = printExpr e <> "." <> pretty f
 printExpr (IAccess e (IKey _)) = printExpr e
@@ -184,7 +190,63 @@ rustEscape = T.concatMap esc
     esc '\0' = "\\0"
     esc c    = T.singleton c
 
+-- | Render a Rust named-field list `f0: v0, f1: v1` (no braces) from
+-- (field-name, rendered-value) pairs, escaping each name to a valid identifier.
+-- The single source for the struct-literal field syntax used by the printer,
+-- 'lcRecordConstructor', and the pattern setter.
+rustRecordFields :: [(Key, MDoc)] -> MDoc
+rustRecordFields kvs =
+  hcat (punctuate ", " [rustFieldIdent k <> ":" <+> v | (k, v) <- kvs])
+
+-- | A Rust struct-literal field block `{ f0: v0, f1: v1 }` from record entries.
+recordLit :: [(Key, IExpr)] -> MDoc
+recordLit entries = "{" <+> rustRecordFields [(k, printExpr e) | (k, e) <- entries] <+> "}"
+
+-- | Drop a rendered type's `<..>` generic-parameter suffix, leaving the bare
+-- name. A Rust struct literal takes no type arguments (they are inferred from
+-- the field values), so a generic (custom-packer) record still constructs by
+-- its bare name.
+stripTypeParams :: T.Text -> T.Text
+stripTypeParams = T.takeWhile (/= '<')
+
+-- | The bare struct name for a Rust struct-literal constructor.
+ctorName :: IType -> MDoc
+ctorName (ITyNamed name _) = pretty (stripTypeParams name)
+ctorName t = rustType t
+
+-- | Escape a morloc record field name into a valid Rust struct field
+-- identifier. A temporary bridge until morloc gains language-specific field
+-- aliases (functions/types already alias the foreign name; fields do not yet).
+rustFieldIdent :: Key -> MDoc
+rustFieldIdent k
+  | t `elem` unrawable =
+      error $
+        "Rust: record field `" <> T.unpack t <> "` is a reserved word that cannot be a raw \
+        \identifier. Rename the field (a future field-alias feature will lift this)."
+  | t `elem` rustKeywords = "r#" <> pretty t
+  | otherwise = pretty t
+  where
+    t = render (pretty k)
+    unrawable = ["self", "super", "crate", "Self"]
+    rustKeywords =
+      [ "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for"
+      , "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref"
+      , "return", "static", "struct", "trait", "true", "type", "unsafe", "use", "where"
+      , "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final"
+      , "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen"
+      ]
+
 printStmt :: IStmt -> MDoc
+-- A record reconstructed field-by-field (a custom-packer field crossing a
+-- boundary) arrives as `IAssign v (Just t) (IRecordLit _ _ entries)`. Rust
+-- needs a NAMED struct literal, unlike C++'s positional aggregate init: the
+-- struct name is the assignment's already-resolved type `t` (the recmap lookup
+-- happened at lowering) and the field names are the entry keys. This mirrors
+-- the in-pool `lcRecordConstructor` output. Nested non-serializable records are
+-- each hoisted to their own IAssign, so an IRecordLit's field values are never
+-- themselves bare record literals.
+printStmt (IAssign v (Just t) (IRecordLit _ _ entries)) =
+  "let" <+> pretty v <> ":" <+> rustType t <+> "=" <+> ctorName t <+> recordLit entries <> ";"
 printStmt (IAssign v Nothing e) = "let" <+> pretty v <+> "=" <+> printExpr e <> ";"
 printStmt (IAssign v (Just t) e) = "let" <+> pretty v <> ":" <+> rustType t <+> "=" <+> printExpr e <> ";"
 printStmt (IMapList resultVar resultType iterVar collection bodyStmts yieldExpr) =
@@ -312,34 +374,46 @@ printProgram serialization signatures _extra prog =
         , "}"
         ]
 
+-- | A Rust generic parameter list `<T1, T2>` (empty when there are none).
+paramList :: [MDoc] -> MDoc
+paramList [] = ""
+paramList ps = "<" <> hcat (punctuate ", " ps) <> ">"
+
 -- | Emit a Rust struct definition (for autogenerated @= "struct"@ records).
--- Fields are (escaped-name, rendered-type).
-printRustStruct :: MDoc -> [(MDoc, MDoc)] -> MDoc
-printRustStruct name fields =
+-- Fields are (escaped-name, rendered-type). @params@ are the generic type
+-- parameters (non-empty when a field's type differs between the native and wire
+-- forms of a custom-packer record, e.g. `struct S<T1> { w: T1, .. }`).
+printRustStruct :: MDoc -> [MDoc] -> [(MDoc, MDoc)] -> MDoc
+printRustStruct name params fields =
   vsep
     -- Clone is required by the ownership model: a struct value used at more than
     -- one point is cloned at its by-value uses. All field types are Clone-able
     -- morloc types (scalars, Vec, String, Option, tuples, nested structs, Box).
     [ "#[derive(Clone)]"
-    , "struct" <+> name <+> "{"
+    , "struct" <+> name <> paramList params <+> "{"
     , indent 4 (vsep [f <> ":" <+> t <> "," | (f, t) <- fields])
     , "}"
     ]
 
 -- | Emit @impl ToVoidstar/FromVoidstar@ for a record, marshalling each field in
 -- place at its schema offset (mirrors the hand-written LL template). Fields are
--- (escaped-name, rendered-type, is-variable-width). Recur scope is entered so a
+-- (escaped-name, rendered-type, is-variable-width). @params@ are the generic
+-- type parameters; each is bounded by the marshalling trait the impl needs
+-- (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Recur scope is entered so a
 -- back-reference resolves at any depth; fully fixed-width records short-circuit
 -- @shm_size@ to @schema.width@.
-printRecordImpls :: MDoc -> [(MDoc, MDoc, Bool)] -> MDoc
-printRecordImpls name fields = vsep [toImpl, "", fromImpl]
+printRecordImpls :: MDoc -> [MDoc] -> [(MDoc, MDoc, Bool)] -> MDoc
+printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
   where
     idx = zip [0 :: Int ..] fields
     allFixed = all (\(_, _, v) -> not v) fields
+    ty = name <> paramList params
+    -- Bound every generic param by `bound` for the impl's `impl<..>` header.
+    boundedParams bound = paramList [p <> ":" <+> bound | p <- params]
 
     toImpl =
       vsep
-        [ "impl ToVoidstar for" <+> name <+> "{"
+        [ "impl" <> boundedParams "ToVoidstar" <+> "ToVoidstar for" <+> ty <+> "{"
         , indent 4 $ vsep
             [ "fn shm_size(&self, schema: &Schema) -> usize {"
             , indent 4 shmBody
@@ -377,7 +451,7 @@ printRecordImpls name fields = vsep [toImpl, "", fromImpl]
 
     fromImpl =
       vsep
-        [ "impl FromVoidstar for" <+> name <+> "{"
+        [ "impl" <> boundedParams "FromVoidstar" <+> "FromVoidstar for" <+> ty <+> "{"
         , indent 4 $ vsep
             [ "unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {"
             , indent 4 $ vsep

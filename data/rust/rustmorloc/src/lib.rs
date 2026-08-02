@@ -26,7 +26,7 @@
 //!  * I8  All scalar pokes through the byte cursor use unaligned access.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use morloc_runtime_types::cschema::CSchema;
 use morloc_runtime_types::packet::{
@@ -115,6 +115,37 @@ extern "C" {
     // any path suballoc, `base_ptr` resolves a relptr (null for in-SHM reads).
     fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_read_handle_voidstar(field: *const c_void, base_ptr: *const c_void, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    // Remote (SLURM/nexus-dispatched) call. Builds the remote packet, resolves
+    // the `_remote` cache dir, rewrites args to self-contained form, and
+    // dispatches to the nexus. Renamed via link_name so the wrapper below can
+    // own the plain `remote_call` name.
+    #[link_name = "remote_call"]
+    fn remote_call_ffi(midx: i32, socket_basename: *const c_char, cache_path: *const c_char,
+                       resources: *const Resources, arg_packets: *const *const u8, nargs: usize,
+                       errmsg: *mut *mut c_char) -> *mut u8;
+    // On-disk content-addressed result cache (the `a@fn` / @cache path).
+    fn morloc_cache_key_compute(midx: u32, arg_packets: *const *const u8,
+                                arg_schemas: *const *const c_char, n_args: usize,
+                                errmsg: *mut *mut c_char) -> u64;
+    fn morloc_cache_lookup(key: u64, label: *const c_char, size_out: *mut usize,
+                           errmsg: *mut *mut c_char) -> *mut u8;
+    fn morloc_cache_store(key: u64, label: *const c_char, data: *const u8, size: usize,
+                          schema_str: *const c_char, errmsg: *mut *mut c_char) -> bool;
+    fn morloc_cache_record_hit();
+    fn morloc_cache_record_miss();
+    fn morloc_cache_record_store();
+    fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
+}
+
+/// C-ABI `resources_t` for a remote call: memory (GB), time (walltime seconds),
+/// cpus, gpus. A missing field defaults to -1 (memory/time/cpus) or 0 (gpus),
+/// matching the C++ pool's `lcRemoteCall`.
+#[repr(C)]
+struct Resources {
+    memory: i32,
+    time: i32,
+    cpus: i32,
+    gpus: i32,
 }
 
 /// C-ABI layout of one `@ifile_walk` runtime bracket argument (16 bytes).
@@ -603,8 +634,14 @@ impl FromVoidstar for String {
     }
 }
 
-// ---- Vec (Array) ----------------------------------------------------------
-impl<T: ToVoidstar> ToVoidstar for Vec<T> {
+// ---- sequences (Array wire form): Vec (List) and VecDeque (Deque) ----------
+// Both serialize identically -- a contiguous Array of elements written and read
+// one at a time (no bulk memcpy, so a VecDeque's ring buffer is fine); they
+// differ only in the container constructor and back-insert method. `$push` is
+// amortized O(1) for both, so neither adds a copy over the other.
+macro_rules! seq_impl {
+    ($container:ident, $push:ident) => {
+impl<T: ToVoidstar> ToVoidstar for $container<T> {
     fn shm_size(&self, schema: &Schema) -> usize {
         let elem = resolve_recur(&schema.parameters[0]);
         // width slot + worst-case cursor alignment padding + element data
@@ -637,22 +674,26 @@ impl<T: ToVoidstar> ToVoidstar for Vec<T> {
         core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: data_rel });
     }
 }
-impl<T: FromVoidstar> FromVoidstar for Vec<T> {
+impl<T: FromVoidstar> FromVoidstar for $container<T> {
     unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
         let a = core::ptr::read_unaligned(data as *const Array);
         if a.size == 0 {
-            return Vec::new();
+            return $container::new();
         }
         let elem = resolve_recur(&schema.parameters[0]);
         let start = resolve(a.data, base);
         let width = elem.width;
-        let mut out = Vec::with_capacity(a.size);
+        let mut out = $container::with_capacity(a.size);
         for i in 0..a.size {
-            out.push(<T as FromVoidstar>::read(elem, start.add(i * width), base));
+            out.$push(<T as FromVoidstar>::read(elem, start.add(i * width), base));
         }
         out
     }
 }
+    };
+}
+seq_impl!(Vec, push);
+seq_impl!(VecDeque, push_back);
 
 // ---- Option (?T) ----------------------------------------------------------
 impl<T: ToVoidstar> ToVoidstar for Option<T> {
@@ -946,7 +987,14 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
         morloc_throw(cstr_take(err));
     }
 
-    // A fail-packet result is a peer-side error -> catchable throw.
+    finalize_call_result(result)
+}
+
+/// Shared post-processing for a packet returned by a cross-pool or remote call:
+/// a fail packet becomes a catchable throw (I2); an RPTR (SHM-backed) result is
+/// increfed + tracked so the peer's next dispatch flush cannot reclaim data
+/// this pool still references (I3).
+unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
     let mut fail_err: *mut c_char = std::ptr::null_mut();
     let fail_msg = get_morloc_data_packet_error_message(result, &mut fail_err);
     discard_err(fail_err);
@@ -956,7 +1004,6 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
         morloc_throw(msg);
     }
 
-    // Incref + track a returned SHM-backed (RPTR) result.
     if *result.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
         let meta = core::ptr::read_unaligned(result.add(PKT_OFFSET_OFF) as *const u32) as usize;
         let rel = core::ptr::read_unaligned(result.add(PKT_HEADER_SIZE + meta) as *const RelPtr);
@@ -972,6 +1019,112 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
     }
 
     result
+}
+
+/// Issue a remote (SLURM/nexus-dispatched) call to manifold `mid`. The args are
+/// already-serialized argument packets (as in `foreign_call`); the runtime
+/// rewrites them to self-contained form and dispatches to the nexus. Mirrors
+/// the C++ pool's `remote_call` path.
+///
+/// # Safety
+/// `args` must be valid argument packets for the remote manifold `mid`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn remote_call(
+    mid: u32,
+    socket_basename: &str,
+    cache_dir: &str,
+    mem: i32,
+    time: i32,
+    cpus: i32,
+    gpus: i32,
+    args: &[*const u8],
+) -> *mut u8 {
+    let socket_c = match CString::new(socket_basename) {
+        Ok(s) => s,
+        Err(_) => morloc_throw("remote_call: socket name contains an interior NUL"),
+    };
+    let cache_c = match CString::new(cache_dir) {
+        Ok(s) => s,
+        Err(_) => morloc_throw("remote_call: cache dir contains an interior NUL"),
+    };
+    let resources = Resources { memory: mem, time, cpus, gpus };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    pool_mark_busy();
+    let result = remote_call_ffi(
+        mid as i32,
+        socket_c.as_ptr(),
+        cache_c.as_ptr(),
+        &resources,
+        args.as_ptr(),
+        args.len(),
+        &mut err,
+    );
+    pool_mark_idle();
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
+    finalize_call_result(result)
+}
+
+// ---- on-disk result cache (`a@fn` / @cache) -------------------------------
+//
+// Content-addressed cache: key = hash(manifold id + serialized args), value =
+// the result packet. On a hit the cached packet is returned directly (no
+// recompute); on a miss the body runs and its packet is stored. Mirrors the
+// C++ pool's cache wrapping (morloc_cache_* C ABI).
+
+/// Compute the cache key over the manifold id and the serialized arg packets.
+///
+/// # Safety
+/// `packets` must be valid argument packets whose wire types match `schemas`.
+pub unsafe fn cache_key(mid: u32, packets: &[*const u8], schemas: &[&str]) -> u64 {
+    // Small per-call CString build of the arg schemas; negligible on a cache
+    // path (the recompute it guards dominates), so kept simple over c"" literals.
+    let schema_cs: Vec<CString> = schemas.iter().map(|s| cstr_arg(s, "@cache")).collect();
+    let ptrs: Vec<*const c_char> = schema_cs.iter().map(|c| c.as_ptr()).collect();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let key = morloc_cache_key_compute(mid, packets.as_ptr(), ptrs.as_ptr(), packets.len(), &mut err);
+    check_err(err);
+    key
+}
+
+/// Look up a cached result packet, recording a hit or miss. A null result is a
+/// miss (the caller then computes and calls `cache_store`).
+///
+/// # Safety
+/// Calls into the libmorloc C ABI.
+pub unsafe fn cache_lookup(key: u64, label: &str) -> *mut u8 {
+    let label_c = cstr_arg(label, "@cache");
+    let mut size: usize = 0;
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let cached = morloc_cache_lookup(key, label_c.as_ptr(), &mut size, &mut err);
+    check_err(err);
+    if cached.is_null() {
+        morloc_cache_record_miss();
+    } else {
+        morloc_cache_record_hit();
+    }
+    cached
+}
+
+/// Store a freshly-computed result packet under `key`, recording the store.
+///
+/// # Safety
+/// `data` must be a valid result packet whose wire type matches `schema`.
+pub unsafe fn cache_store(key: u64, label: &str, data: *const u8, schema: &str) {
+    let label_c = cstr_arg(label, "@cache");
+    let schema_c = cstr_arg(schema, "@cache");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let size = morloc_packet_size(data, &mut err);
+    check_err(err);
+    let ok = morloc_cache_store(key, label_c.as_ptr(), data, size, schema_c.as_ptr(), &mut err);
+    if !ok {
+        if !err.is_null() {
+            morloc_throw(cstr_take(err));
+        }
+        morloc_throw("@cache: cache_store failed");
+    }
+    morloc_cache_record_store();
 }
 
 // ---- @show / @read : value <-> JSON text via the C ABI --------------------
@@ -1350,6 +1503,23 @@ pub unsafe fn ifile_walk<T: FromVoidstar>(
         &mut err,
     );
     read_voidstar(voidstar, err, schema, "@ifile_walk")
+}
+
+/// String interpolation: alternate `fragments[0], insertions[0], fragments[1],
+/// insertions[1], ..., fragments[n]`. `fragments` has exactly one more element
+/// than `insertions` (the compiler guarantees this). Mirrors the C++ pool's
+/// `interweave_strings`. Both sides are borrowed (`&str`) and appended in place,
+/// so no argument is copied before the single sized allocation.
+pub fn interweave_strings(fragments: &[&str], insertions: &[&str]) -> String {
+    let cap: usize = fragments.iter().map(|s| s.len()).sum::<usize>()
+        + insertions.iter().map(|s| s.len()).sum::<usize>();
+    let mut out = String::with_capacity(cap);
+    for (i, ins) in insertions.iter().enumerate() {
+        out.push_str(fragments[i]);
+        out.push_str(ins);
+    }
+    out.push_str(fragments[fragments.len() - 1]);
+    out
 }
 
 // ---- fail packets (I1: always C-allocated via make_fail_packet) -----------

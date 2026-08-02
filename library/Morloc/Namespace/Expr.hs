@@ -23,6 +23,7 @@ module Morloc.Namespace.Expr
   ( -- * Source and config types
     Source (..)
   , RemoteResources (..)
+  , remoteResourceInts
   , ManifoldConfig (..)
   , LogTemplate (..)
   , RunLogTemplate (..)
@@ -127,6 +128,18 @@ data RemoteResources = RemoteResources
   , remoteResourcesGpus :: Maybe Int
   }
   deriving (Show, Ord, Eq, Generic)
+
+-- | The four `resources_t` fields (memory, walltime seconds, cpus, gpus) with
+-- the shared codegen defaults applied: -1 for a missing memory/time/cpu limit,
+-- 0 for missing gpus. Single source of the SLURM default policy that every pool
+-- member's remote-call codegen renders.
+remoteResourceInts :: RemoteResources -> (Int, Int, Int, Int)
+remoteResourceInts res =
+  ( maybe (-1) id (remoteResourcesMemory res)
+  , maybe (-1) unTimeInSeconds (remoteResourcesTime res)
+  , maybe (-1) id (remoteResourcesThreads res)
+  , maybe 0 id (remoteResourcesGpus res)
+  )
 
 -- | Per-event log-message templates. Each subfield is the format string
 -- for the start, pass, and fail log lines respectively. 'Nothing' for a

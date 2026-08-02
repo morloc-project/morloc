@@ -200,7 +200,12 @@ rustTypeOf = f
     f (NamF _ v@(FV _ (CV "struct")) _ rs) = do
       recmap <- CMS.gets rsRecmap
       case lookup (v, map fst rs) recmap of
-        Just rec -> return (recName rec)
+        Just rec -> do
+          -- A field whose native and wire types diverge (a custom-packer field)
+          -- is a generic parameter of the struct; render its concrete type at
+          -- THIS occurrence as a type argument: `Name<Ta, Tb>`.
+          params <- mapM f [t | ((_, Nothing), (_, t)) <- zip (recFields rec) rs]
+          return $ recName rec <> if null params then "" else "<" <> hcat (punctuate ", " params) <> ">"
         Nothing -> error $ "Rust: record missing from recmap: " <> show v
     -- User-mapped record: the concrete struct name is the CVar text.
     f (NamF _ (FV _ (CV s)) _ _) = return (pretty s)
@@ -220,6 +225,15 @@ rustTypeOf = f
     bodyName (AppU (VarU (TV n)) _) = Just n
     bodyName (NamU _ (TV n) _ _) = Just n
     bodyName _ = Nothing
+
+-- | The bare struct name for a record-literal constructor: 'rustTypeOf' with any
+-- generic `<..>` parameters stripped. A Rust struct literal takes no type
+-- arguments -- they are inferred from the field values -- so a generic
+-- (custom-packer) record still constructs as `Name { .. }`, not `Name<T> { .. }`.
+rustStructCtor :: TypeF -> RustM MDoc
+rustStructCtor recType = do
+  full <- rustTypeOf recType
+  return $ pretty (RP.stripTypeParams (render full))
 
 -- | Whether a native type is Rust @Copy@ (freely duplicable, so a sourced-call
 -- argument is passed by value rather than borrowed). @Copy@: scalar numerics,
@@ -324,28 +338,91 @@ closureParamType :: TypeM -> RustM MDoc
 closureParamType (Native tf) = ("&" <>) <$> rustTypeOf tf
 closureParamType _ = return "_"
 
--- | Render a getter/bracket pattern. A getter (@.0@/@.field@, possibly chained
--- or multi-sibling) becomes native field access; a bracket index/slice calls
--- the sourced @__access_index__@/@__get_slice__@ (@morloc_at@/@morloc_slice@),
--- borrowing the list receiver. Setters, string interpolation, and brackets
--- nested inside a getter chain are not yet supported (unused by the stdlib).
+-- | Render a getter/bracket/interpolation pattern. A getter (@.0@/@.field@,
+-- possibly chained, multi-sibling, or with bracket steps) becomes native field
+-- access + @morloc_at@/@morloc_slice@; string interpolation interweaves
+-- fragments and insertions. Record/tuple SETTERS are not yet supported (unused
+-- by the stdlib) and fall to the catch-all error.
 rustEvalPattern :: TypeF -> Pattern -> [MDoc] -> RustM MDoc
-rustEvalPattern _ (PatternStruct sel) [m] =
-  return $ case ungroup sel of
-    [ss] -> writeSelectorRust m ss
-    sss -> tupled (map (writeSelectorRust m) sss)
+-- String interpolation: interweave compile-time fragments with the rendered
+-- insertion expressions (each forced to an owned String for a uniform slice).
+rustEvalPattern _ (PatternText s ss) xs =
+  return $ "rustmorloc::interweave_strings(&["
+    <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape frag)) | frag <- s : ss])
+    <> "], &["
+    <> hcat (punctuate ", " [parens x <> ".as_str()" | x <- xs])
+    <> "])"
+-- Field/index getter with NO bracket steps: plain `.field` / `.i` accessor(s).
+-- The `not selectorHasBracket` guard is load-bearing: a bracket chain with one
+-- receiver arg would otherwise match here and `ungroup` would silently drop the
+-- bracket steps, emitting field-only access.
+rustEvalPattern _ (PatternStruct sel) [m]
+  | not (selectorHasBracket sel) =
+      return $ case ungroup sel of
+        [ss] -> writeSelectorRust m ss
+        sss -> tupled (map (writeSelectorRust m) sss)
+-- Getter chain containing bracket steps (`.f.[i]`, `.[i:j].0`, ...). Args are
+-- [bracket_bounds..., receiver]; walk the selector, threading the bracket args.
+rustEvalPattern _ (PatternStruct s) args
+  | selectorHasBracket s, length args == bracketArity s + 1 =
+      let n = bracketArity s
+          (bracketArgs, receivers) = splitAt n args
+          receiver = case receivers of
+            [r] -> r
+            _ -> error "rustEvalPattern: bracket-in-selector expected 1 receiver"
+       in return $ fst (walkRustSelectorBrackets receiver bracketArgs s)
 rustEvalPattern _ PatternBracketIndex [i, m] =
   return $ "morloc_at" <> tupled [i, "&(" <> m <> ")"]
 rustEvalPattern _ PatternBracketSlice [start, stop, step, m] =
   return $ "morloc_slice" <> tupled [start, stop, step, "&(" <> m <> ")"]
+-- Record/tuple SETTER: rebuild the aggregate with one leaf replaced. The shared
+-- 'patternSetter' re-accesses every UNCHANGED field on the receiver; in Rust the
+-- receiver must be bound once (`&__r`) and each accessed field cloned -- an owned
+-- rebuild cannot move a field out of a borrowed/shared receiver (the setter
+-- receiver is usually a `&T` param), and a `Copy` field's `.clone()` is a free
+-- copy. This is the same per-field copy C++'s aggregate-init makes. The struct
+-- name for a record literal is resolved by running 'rustTypeOf' with the
+-- captured state (mirrors the C++ `evalState` name capture).
+rustEvalPattern t0 (PatternStruct s0) (m0 : xs0)
+  | not (null xs0) = do
+      st <- CMS.get
+      env <- asks id
+      let nameOf recType = CMS.evalState (runReaderT (rustStructCtor recType) env) st
+          makeTuple _ xs = tupled xs
+          makeRecord recType xs = case recType of
+            NamF _ _ _ rs ->
+              nameOf recType <+> "{" <+> RP.rustRecordFields (zip (map fst rs) xs) <+> "}"
+            _ -> error "rustEvalPattern: record setter on a non-record type"
+          accessTuple _ d i = d <> "." <> pretty i
+          accessRecord _ d k = d <> "." <> RP.rustFieldIdent (Key k)
+          -- An unchanged field is cloned into the owned rebuild; a changed
+          -- field's accessor is reused bare as a receiver (no clone), so a
+          -- nested set does not clone the whole enclosing field.
+          finalizeSet _ v = v <> ".clone()"
+          spine = patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet "__r" t0 s0 xs0
+      return $ "{ let __r = &(" <> m0 <> "); " <> spine <> " }"
 rustEvalPattern _ p args =
   error $ "Rust v1: unsupported pattern " <> show p <> " with " <> show (length args) <> " args"
+
+-- | Walk a 'Selector' that may contain bracket steps, emitting Rust source per
+-- step: @.field@ (record), @.i@ (tuple), @morloc_at(idx, &(rcv))@ (index),
+-- @morloc_slice(..)@ (slice). Multi-sibling groups emit a Rust tuple. Threads
+-- the bracket runtime args in DFS order; returns the expression and the
+-- unconsumed bracket args. Mirrors 'walkCppSelectorBrackets'.
+walkRustSelectorBrackets :: MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+walkRustSelectorBrackets =
+  walkSelectorBrackets
+    (\rcv k -> rcv <> "." <> RP.rustFieldIdent (Key k))
+    (\rcv i -> rcv <> "." <> pretty i)
+    (\idx rcv -> "morloc_at" <> tupled [idx, "&(" <> rcv <> ")"])
+    (\start stop step rcv -> "morloc_slice" <> tupled [start, stop, step, "&(" <> rcv <> ")"])
+    tupled
 
 -- | Walk an (ungrouped) selector, emitting Rust field access: @.i@ for a tuple
 -- index, @.field@ for a record key (keyword-escaped to match the struct).
 writeSelectorRust :: MDoc -> [Either Int Text] -> MDoc
 writeSelectorRust d [] = d
-writeSelectorRust d (Right k : rs) = writeSelectorRust (d <> "." <> rustFieldIdent (Key k)) rs
+writeSelectorRust d (Right k : rs) = writeSelectorRust (d <> "." <> RP.rustFieldIdent (Key k)) rs
 writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
 
 -- | Adapt a partial application's captured context argument to the closure
@@ -355,17 +432,82 @@ writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
 -- matching how a manifold call passes its arguments.
 rustBridgeContext :: Int -> TypeM -> MDoc -> RustM MDoc
 -- A captured FUNCTION value (a combinator like `any`/`all` whose inner lambda
--- closes over a function argument) needs by-reference capture AND a by-reference
--- inner manifold parameter (`&F: Fn` stays re-callable across the per-element
--- calls; a by-value `impl Fn` would move out of an `Fn` closure). That param
--- form is not yet emitted, so reject it rather than emit code that miscompiles.
+-- closes over a function argument) is intercepted by `bridgeCapture` (the sole
+-- caller) and forwarded by reference as `&impl MorlocFnN` -- which stays
+-- re-callable across the per-element calls -- so a Function never reaches here.
 rustBridgeContext _ (Function _ _) _ =
-  error "Rust v1: a captured function value (e.g. a combinator closing over a function argument, like `any`/`all`) is not yet supported"
+  error "Rust: internal error -- a captured Function should be handled by bridgeCapture"
 rustBridgeContext i (Native tf) name = do
   parent <- asks oeParent
   let own = if Set.member i parent then BorrowedRef else Owned
   return $ if rustIsCopy tf then rustOwn own tf name else rustRef own name
 rustBridgeContext _ _ name = return $ "&(" <> name <> ")"
+
+-- | Wrap a manifold body in an on-disk content-addressed cache lookup (`a@fn`
+-- / @cache). Mirrors the C++ @cppCacheBody@: serialize native args to packets,
+-- compute the key, look it up; on a hit return the cached packet, on a miss run
+-- the body and store its packet. The result is a `*mut u8` packet either way.
+rustCacheBody
+  :: SerialAST
+  -> Text
+  -> Int
+  -> [(Arg TypeM, SerialAST)]
+  -> PoolDocs
+  -> RustM PoolDocs
+rustCacheBody resSa lbl midx args bodyPool = do
+  wrapIdx <- getCounter
+  let suffix = pretty wrapIdx
+      keyVar = "__mlc_ck_" <> suffix
+      cachedVar = "__mlc_cd_" <> suffix
+      resultVar = "__mlc_cr_" <> suffix
+      bodyVar = "__mlc_cb_" <> suffix
+      labelLit = dquotes (pretty lbl)
+      resSchema = render (serialAstToMsgpackSchema resSa)
+  preparedArgs <- mapM (prepareRustCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  let argRefs = [r | (r, _, _) <- preparedArgs]
+      argSchemas = [s | (_, s, _) <- preparedArgs]
+      argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
+      packetsArr = "&[" <> hcat (punctuate ", " argRefs) <> "]"
+      schemasArr = "&[" <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape s)) | s <- argSchemas]) <> "]"
+      keyStmt = "let" <+> keyVar <> ": u64 = rustmorloc::cache_key("
+                  <> pretty midx <> ", " <> packetsArr <> ", " <> schemasArr <> ");"
+      lookupStmt = "let" <+> cachedVar <> ": *mut u8 = rustmorloc::cache_lookup("
+                  <> keyVar <> ", " <> labelLit <> ");"
+      missLines = poolPriorLines bodyPool
+        ++ [ "let" <+> bodyVar <> ": *mut u8 =" <+> poolExpr bodyPool <> ";"
+           , "rustmorloc::cache_store(" <> keyVar <> ", " <> labelLit <> ", "
+               <> bodyVar <> ", " <> dquotes (pretty (RP.rustEscape resSchema)) <> ");"
+           , bodyVar
+           ]
+      ifStmt = vsep
+        [ "let" <+> resultVar <> ": *mut u8 = if !" <> cachedVar <> ".is_null() {"
+        , indent 4 cachedVar
+        , "} else {"
+        , indent 4 (vsep missLines)
+        , "};"
+        ]
+  return $ PoolDocs
+    { poolExpr = resultVar
+    , poolPriorLines = argSetupLines ++ [keyStmt, lookupStmt, ifStmt]
+    , poolCompleteManifolds = poolCompleteManifolds bodyPool
+    , poolPriorExprs = poolPriorExprs bodyPool
+    , poolReturnFlag = poolReturnFlag bodyPool
+    }
+
+-- | Prepare one cache argument: a native arg is serialized to a packet via
+-- @put_value@; an already-serial arg passes through by name. Returns the
+-- packet-pointer expression, the arg's msgpack schema, and any setup lines.
+prepareRustCacheArg :: Int -> (Int, (Arg TypeM, SerialAST)) -> RustM (MDoc, Text, [MDoc])
+prepareRustCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
+  let schemaStr = render (serialAstToMsgpackSchema sa)
+  case tm of
+    Native _ -> do
+      sid <- rustRegisterSchema schemaStr
+      let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
+          decl = "let" <+> argVar <> ": *const u8 = rustmorloc::put_value(&("
+                   <> argNamer a <> "), " <> sch sid <> ");"
+      return (argVar, schemaStr, [decl])
+    _ -> return (argNamer a, schemaStr, [])
 
 -- | Per-index variable-use counts over a manifold, for the "shared" (used at
 -- more than one point) determination. ALL uses are counted (borrows INCLUDED --
@@ -831,34 +973,47 @@ generateRustStructs :: [SerialManifold] -> RustM [MDoc]
 generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
   where
     makeOne :: (FVar, [(Key, TypeF)]) -> RustM [MDoc]
-    makeOne (v@(FV gv _), rs) = do
-      (name, isAutogen) <- case v of
-        FV _ (CV "struct") -> do
-          recmap <- CMS.gets rsRecmap
-          case lookup (v, map fst rs) recmap of
-            Just rec -> return (recName rec, True)
-            Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
-        FV _ (CV s) -> return (pretty s, False)
-      fields <- mapM (oneField gv name) rs
-      -- A record with a function field is not (yet) serializable: a function
-      -- value crosses a boundary only through reify/reflect (Stage 3), so skip
-      -- the auto-marshaller. Such a record works IN-POOL; if it reaches a
-      -- serialize boundary the missing marshaller surfaces as a build error.
-      let hasFun = any (isFunctionTypeF . snd) rs
-          impls = [RP.printRecordImpls name fields | not hasFun]
-      return $
-        if isAutogen
-          then RP.printRustStruct name [(fld, ty) | (fld, ty, _) <- fields] : impls
-          else impls
+    makeOne (v@(FV gv _), rs) = case v of
+      -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
+      -- field whose native and wire types diverge (a custom-packer field)
+      -- becomes a GENERIC parameter -- one struct `S<T1> { w: T1, .. }` covers
+      -- both the native (`S<MyWrap>`) and wire (`S<i64>`) instantiations, the
+      -- Rust analogue of C++'s template-field records.
+      FV _ (CV "struct") -> do
+        recmap <- CMS.gets rsRecmap
+        case lookup (v, map fst rs) recmap of
+          Just rec -> do
+            let assigned = assignGenerics (1 :: Int) (recFields rec)
+                params = [p | (_, Left p) <- assigned]
+            fields <- mapM (oneField gv (recName rec)) assigned
+            let hasFun = any (\(_, e) -> either (const False) isFunctionTypeF e) assigned
+                impls = [RP.printRecordImpls (recName rec) params fields | not hasFun]
+            return $ RP.printRustStruct (recName rec) params [(fld, ty) | (fld, ty, _) <- fields] : impls
+          Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
+      -- User-mapped record: the user writes the (monomorphic) struct, so only
+      -- the marshalling impls are emitted, with concrete field types.
+      FV _ (CV s) -> do
+        fields <- mapM (oneField gv (pretty s) . fmap Right) rs
+        let hasFun = any (isFunctionTypeF . snd) rs
+        return [RP.printRecordImpls (pretty s) [] fields | not hasFun]
 
-    -- Render one field's type, Box'ing a self-optional (?self) so the recursive
-    -- cycle is Sized (a `[self]` field is already broken by Vec's indirection).
-    oneField :: TVar -> MDoc -> (Key, TypeF) -> RustM (MDoc, MDoc, Bool)
-    oneField selfGv selfName (k, ty) = do
+    -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
+    -- keep their unified type.
+    assignGenerics :: Int -> [(Key, Maybe TypeF)] -> [(Key, Either MDoc TypeF)]
+    assignGenerics _ [] = []
+    assignGenerics n ((k, Nothing) : fs) = (k, Left ("T" <> pretty n)) : assignGenerics (n + 1) fs
+    assignGenerics n ((k, Just t) : fs) = (k, Right t) : assignGenerics n fs
+
+    -- Render one field's (name, type, is-variable-width). A generic field is a
+    -- bare parameter (variable width, unknown until instantiated); a concrete
+    -- field Box'es a self-optional (?self) so the recursive cycle is Sized.
+    oneField :: TVar -> MDoc -> (Key, Either MDoc TypeF) -> RustM (MDoc, MDoc, Bool)
+    oneField _ _ (k, Left param) = return (RP.rustFieldIdent k, param, True)
+    oneField selfGv selfName (k, Right ty) = do
       ty' <- case ty of
         OptionalF inner | refsRecord selfGv inner -> return $ "Option<Box<" <> selfName <> ">>"
         _ -> rustFieldType ty
-      return (rustFieldIdent k, ty', isVarWidthF ty)
+      return (RP.rustFieldIdent k, ty', isVarWidthF ty)
 
     -- True when a type is an immediate reference back to the enclosing record.
     refsRecord :: TVar -> TypeF -> Bool
@@ -876,28 +1031,6 @@ isVarWidthF (VarF (FV (TV gv) _)) = gv == "Str"
 isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgsF ts))
 isVarWidthF _ = True
-
--- | Escape a morloc record field name into a valid Rust struct field
--- identifier. A temporary bridge until morloc gains language-specific field
--- aliases (functions/types already alias the foreign name; fields do not yet).
-rustFieldIdent :: Key -> MDoc
-rustFieldIdent k
-  | t `elem` unrawable =
-      error $
-        "Rust: record field `" <> T.unpack t <> "` is a reserved word that cannot be a raw \
-        \identifier. Rename the field (a future field-alias feature will lift this)."
-  | t `elem` rustKeywords = "r#" <> pretty t
-  | otherwise = pretty t
-  where
-    t = render (pretty k)
-    unrawable = ["self", "super", "crate", "Self"]
-    rustKeywords =
-      [ "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for"
-      , "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref"
-      , "return", "static", "struct", "trait", "true", "type", "unsafe", "use", "where"
-      , "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final"
-      , "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen"
-      ]
 
 -- | The bound-variable indices that are borrowed (@&T@) parameters of a
 -- manifold: its non-'Copy' NATIVE parameters. Serial (dispatch) parameters
@@ -1034,6 +1167,9 @@ rustLowerConfig mask =
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
+    -- A non-Copy arg to a pack/unpack function is borrowed to match the packer's
+    -- `&T` parameter (a Copy arg is passed by value).
+    , lcBorrowPackArg = \t -> not (rustIsCopy t)
     , lcRecordAccessor = \_ _ record field -> record <> "." <> field
     , lcDeserialRecordAccessor = \_ k v -> v <> "." <> pretty k
     , lcTupleAccessor = \i v -> v <> "." <> pretty i
@@ -1044,9 +1180,8 @@ rustLowerConfig mask =
     , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
     , lcTupleConstructor = \_ _ es -> tupled es
     , lcRecordConstructor = \recType _ _ _ rs -> do
-        name <- rustTypeOf recType
-        let fields = hcat (punctuate ", " [rustFieldIdent k <> ":" <+> v | (k, v) <- rs])
-        return $ defaultValue {poolExpr = name <+> "{" <+> fields <+> "}"}
+        name <- rustStructCtor recType
+        return $ defaultValue {poolExpr = name <+> "{" <+> RP.rustRecordFields rs <+> "}"}
     -- Box a function value into a record field's `Rc<dyn MorlocFnN>` type; a
     -- non-function field passes through.
     , lcStoreField = \ty v -> if isFunctionTypeF ty then "std::rc::Rc::new(" <> v <> ")" else v
@@ -1056,8 +1191,18 @@ rustLowerConfig mask =
     , lcForeignCall = \socketFile mid args ->
         let argList = "&[" <> hcat (punctuate ", " [a <+> "as *const u8" | a <- args]) <> "]"
          in [idoc|rustmorloc::foreign_call(#{dquotes socketFile}, #{pretty mid}, #{argList})|]
-    , lcRemoteCall = \_ _ _ _ -> error "Rust v1: remote calls are unsupported"
-    , lcCacheBody = \_ _ _ _ _ -> error "Rust v1: cache wrapping is unsupported"
+    -- A remote call: args are already-serialized packet pointers (like a
+    -- foreign call), so no put_value here. Resources fill the C `resources_t`
+    -- with the C++ defaults (-1 for memory/time/cpus, 0 for gpus).
+    , lcRemoteCall = \socketFile mid res args ->
+        let (rmem, rtime, rcpu, rgpu) = remoteResourceInts res
+            (resMem, resTime, resCPU, resGPU) = (pretty rmem, pretty rtime, pretty rcpu, pretty rgpu)
+            argList = "&[" <> hcat (punctuate ", " [a <+> "as *const u8" | a <- args]) <> "]"
+            call = "rustmorloc::remote_call(" <> pretty mid <> ", " <> dquotes socketFile
+                     <> ", \".morloc-cache\", " <> resMem <> ", " <> resTime <> ", "
+                     <> resCPU <> ", " <> resGPU <> ", " <> argList <> ")"
+         in return $ defaultValue {poolExpr = call}
+    , lcCacheBody = rustCacheBody
     , lcDebugWrap = \_ _ body -> return body
     , lcMakeLet = rustMakeLet
     , lcReleaseStmt = \_ -> ""

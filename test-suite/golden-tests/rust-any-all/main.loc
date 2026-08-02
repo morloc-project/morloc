@@ -1,0 +1,31 @@
+-- Rust pool member: combinators that capture a function-typed parameter.
+--
+-- `any`/`all` are morloc-defined in root as `fold (\b a -> b || f a) ...`,
+-- where the inner lambda CAPTURES the function parameter `f`. In Rust this
+-- needs the captured function forwarded by reference (`&impl MorlocFnN`) so it
+-- stays re-callable across the per-element fold; a by-value `impl Fn` would
+-- move out on the first call. This golden exercises that path (any/all over a
+-- sourced predicate and over a lambda).
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main (anyNonNeg, allNonNeg, anyEven, allSmall)
+
+import root-rust
+
+isNonNeg :: Int -> Bool
+isNonNeg x = 0 <= x
+
+-- any/all over a sourced-fn predicate (captured as a manifold param).
+anyNonNeg :: [Int] -> Bool
+anyNonNeg xs = any isNonNeg xs
+
+allNonNeg :: [Int] -> Bool
+allNonNeg xs = all isNonNeg xs
+
+-- any/all over a lambda predicate (captured closure).
+anyEven :: [Int] -> Bool
+anyEven xs = any (\x -> x % 2 == 0) xs
+
+allSmall :: [Int] -> Bool
+allSmall xs = all (\x -> x <= 10) xs

@@ -1,0 +1,30 @@
+-- Rust pool member: Deque (VecDeque) marshalling across a pool boundary.
+--
+-- `Deque a` maps to `std::collections::VecDeque` in Rust and is a directly-
+-- serializable sequence (Array wire form), distinct from `List` (Vec). This
+-- exercises a Deque crossing the Rust pool both bare and as a record field
+-- (idrust forces the value through the Rust pool: deserialize IN, serialize
+-- OUT).
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main (roundDeque, dequeRecord, dequeConcat)
+
+import root-rust
+
+record Box where
+  items :: Deque Int
+  tag :: Int
+record Rust => Box = "struct"
+
+-- bare Deque through the Rust pool.
+roundDeque :: Deque Int -> Deque Int
+roundDeque d = idrust d
+
+-- a record with a Deque field through the Rust pool.
+dequeRecord :: Deque Int -> Box
+dequeRecord d = idrust {items = d, tag = 7}
+
+-- Semigroup on Deque (built from list literals), forced through Rust.
+dequeConcat :: Deque Int -> Deque Int -> Deque Int
+dequeConcat a b = idrust (a <> b)

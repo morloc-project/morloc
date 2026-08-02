@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , argNamer
   , manNamer
   , patternSetter
+  , walkSelectorBrackets
 
     -- * Record collection/unification
   , RecEntry (..)
@@ -170,17 +171,22 @@ patternSetter ::
   (TypeF -> [MDoc] -> MDoc) -> -- make a record from a type and list of elements
   (TypeF -> MDoc -> Int -> MDoc) -> -- access an element in a tuple
   (TypeF -> MDoc -> Text -> MDoc) -> -- access an element in a record
+  (TypeF -> MDoc -> MDoc) -> -- finalize an UNCHANGED field's value for the rebuild
   MDoc -> -- initial data variable name
   TypeF -> -- data type
   Selector -> -- selection pattern
   [MDoc] -> -- ordered arguments substituted at set sites
   MDoc -- the returned data structure with a new spine that reuses unchanged fields
-patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
+patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 s0 args0 =
   snd (setter dat0 t0 s0 args0)
   where
     setter :: MDoc -> TypeF -> Selector -> [MDoc] -> ([MDoc], MDoc)
 
-    -- tuple setters
+    -- tuple setters. A field accessor is used bare as a recursion RECEIVER for a
+    -- changed field, but an UNCHANGED field's value is passed through
+    -- 'finalizeSet' (e.g. Rust clones it into the owned rebuild). Applying the
+    -- clone only to unchanged leaves avoids cloning a changed field's whole
+    -- subtree just to rebuild part of it.
     setter dat1 tupleType@(AppF _ ts1) (SelectorIdx s1 ss1) args1 =
       second (makeTuple tupleType) $ statefulMap (chooseField dat1 (s1 : ss1)) args1 (zip [0 ..] ts1)
       where
@@ -189,7 +195,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
           let dat' = accessTuple tupleType dat i
            in case (lookup i ss) of
                 (Just s) -> setter dat' t s args
-                Nothing -> (args, dat')
+                Nothing -> (args, finalizeSet t dat')
 
     -- record setters
     setter dat1 recType@(NamF _ _ _ rs1) (SelectorKey s1 ss1) args1 =
@@ -200,7 +206,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
           let dat' = accessRecord recType dat k
            in case (lookup k ss) of
                 (Just s) -> setter dat' t s args
-                Nothing -> (args, dat')
+                Nothing -> (args, finalizeSet t dat')
     -- Bracket selectors are not valid setter targets: bracket-index /
     -- bracket-slice describe element access on arrays, not record-style
     -- field assignment. The parser already rejects setters on accessor
@@ -212,6 +218,45 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
       error "patternSetter: bracket-slice step in a setter selector"
     setter _ _ _ (arg : args2) = (args2, arg)
     setter _ _ _ [] = error "Illegal setter"
+
+-- | Walk a 'Selector' that may contain bracket steps, emitting per-language
+-- source for each step and threading the bracket runtime args in DFS order.
+-- Returns the produced expression and the unconsumed bracket args. The five
+-- renderers supply the only per-language differences (field/index access,
+-- bracket index/slice receiver form, and the multi-sibling group wrapper); the
+-- traversal and arg-threading are shared. Used by both the C++ and Rust
+-- getter-chain lowering.
+walkSelectorBrackets ::
+  (MDoc -> Text -> MDoc) ->                  -- record key step: receiver -> key -> receiver
+  (MDoc -> Int -> MDoc) ->                   -- tuple index step: receiver -> index -> receiver
+  (MDoc -> MDoc -> MDoc) ->                  -- bracket index: index-arg -> receiver -> expr
+  (MDoc -> MDoc -> MDoc -> MDoc -> MDoc) ->  -- bracket slice: start stop step receiver -> expr
+  ([MDoc] -> MDoc) ->                        -- multi-sibling group: results -> expr
+  MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice group = go
+  where
+    go rcv brs SelectorEnd = (rcv, brs)
+    go rcv brs (SelectorKey (k, sub) []) = go (keyStep rcv k) brs sub
+    go rcv brs (SelectorIdx (i, sub) []) = go (idxStep rcv i) brs sub
+    go rcv (idx : rest) (SelectorBracketIndex sub) = go (bracketIndex idx rcv) rest sub
+    go _ [] (SelectorBracketIndex _) =
+      error "walkSelectorBrackets: ran out of bracket runtime args for a bracket-index step"
+    go rcv (start : stop : step : rest) SelectorBracketSlice =
+      (bracketSlice start stop step rcv, rest)
+    go _ _ SelectorBracketSlice =
+      error "walkSelectorBrackets: ran out of bracket runtime args for a bracket-slice step"
+    go rcv brs (SelectorKey hd others) =
+      groupWalk [\b -> go (keyStep rcv k) b sub | (k, sub) <- hd : others] brs
+    go rcv brs (SelectorIdx hd others) =
+      groupWalk [\b -> go (idxStep rcv i) b sub | (i, sub) <- hd : others] brs
+
+    -- A multi-sibling group: each sibling walks from the shared receiver,
+    -- threading the bracket args left-to-right through the siblings in order,
+    -- then wrap the results.
+    groupWalk steps brs =
+      let (results, finalBrs) =
+            foldl (\(acc, b) step -> let (out, b') = step b in (acc ++ [out], b')) ([], brs) steps
+       in (group results, finalBrs)
 
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]

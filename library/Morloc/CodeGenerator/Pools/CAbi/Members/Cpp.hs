@@ -687,6 +687,7 @@ cppLowerConfig reifyThunks =
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
+    , lcBorrowPackArg = \_ -> False
     , lcRecordAccessor = \_ _ -> recordAccess
     , lcDeserialRecordAccessor = \i _ v -> tupleKey i v
     , lcTupleAccessor = tupleKey
@@ -747,10 +748,8 @@ cppLowerConfig reifyThunks =
     , lcCacheBody = cppCacheBody
     , lcDebugWrap = cppDebugWrap
     , lcRemoteCall = \socketFile mid res args -> do
-        let resMem = pretty $ fromMaybe (-1) (remoteResourcesMemory res)
-            resTime = pretty $ maybe (-1) unTimeInSeconds (remoteResourcesTime res)
-            resCPU = pretty $ fromMaybe (-1) (remoteResourcesThreads res)
-            resGPU = pretty $ fromMaybe 0 (remoteResourcesGpus res)
+        let (rmem, rtime, rcpu, rgpu) = remoteResourceInts res
+            (resMem, resTime, resCPU, resGPU) = (pretty rmem, pretty rtime, pretty rcpu, pretty rgpu)
             cacheDir = ".morloc-cache"
             argList = encloseSep "{" "}" "," args
             setup =
@@ -1335,7 +1334,7 @@ evaluatePattern _ _ (PatternStruct s) args
                          \got " <> show (length receivers)
       in fst (walkCppSelectorBrackets receiver bracketArgs s)
 evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) =
-  patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
+  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
   where
     makeTuple (AppF _ ts) xs =
       let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
@@ -1346,6 +1345,8 @@ evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) =
 
     accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
     accessRecord _ d k = d <> "." <> pretty k
+    -- C++ copies an unchanged field by value into the aggregate init; no wrapper.
+    finalizeSet _ v = v
 evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
 -- C++ bracket index: List and Vector both use std::vector<T> on the wire,
 -- so the same morloc_at helper works for both. Args: [index, receiver].
@@ -1369,41 +1370,15 @@ writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <>
 -- source code per step. Threads the bracket runtime args through
 -- bracket steps in DFS order; returns the produced expression and
 -- the remaining (unconsumed) bracket args. Multi-sibling groups
--- emit @std::make_tuple(...)@.
-walkCppSelectorBrackets
-  :: MDoc          -- accumulated receiver expression
-  -> [MDoc]        -- remaining bracket runtime args
-  -> Selector
-  -> (MDoc, [MDoc])
-walkCppSelectorBrackets rcv bracketArgs SelectorEnd = (rcv, bracketArgs)
-walkCppSelectorBrackets rcv bracketArgs (SelectorKey (k, sub) []) =
-  walkCppSelectorBrackets (rcv <> "." <> pretty k) bracketArgs sub
-walkCppSelectorBrackets rcv bracketArgs (SelectorIdx (i, sub) []) =
-  walkCppSelectorBrackets ("std::get<" <> pretty i <> ">" <> parens rcv) bracketArgs sub
-walkCppSelectorBrackets rcv (idx : restBrackets) (SelectorBracketIndex sub) =
-  walkCppSelectorBrackets ("morloc_at" <> tupled [idx, rcv]) restBrackets sub
-walkCppSelectorBrackets _ [] (SelectorBracketIndex _) =
-  error "walkCppSelectorBrackets: ran out of bracket runtime args for bracket-index step"
-walkCppSelectorBrackets rcv (start : stop : step : restBrackets) SelectorBracketSlice =
-  ("morloc_slice" <> tupled [start, stop, step, rcv], restBrackets)
-walkCppSelectorBrackets _ _ SelectorBracketSlice =
-  error "walkCppSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
-walkCppSelectorBrackets rcv bracketArgs (SelectorKey hd@(_, _) others) =
-  let pairs = hd : others
-      (results, finalBrackets) = foldl
-        (\(acc, b) (k, sub) ->
-           let (out, b') = walkCppSelectorBrackets (rcv <> "." <> pretty k) b sub
-           in (acc ++ [out], b'))
-        ([], bracketArgs) pairs
-  in ("std::make_tuple" <> tupled results, finalBrackets)
-walkCppSelectorBrackets rcv bracketArgs (SelectorIdx hd@(_, _) others) =
-  let pairs = hd : others
-      (results, finalBrackets) = foldl
-        (\(acc, b) (i, sub) ->
-           let (out, b') = walkCppSelectorBrackets ("std::get<" <> pretty i <> ">" <> parens rcv) b sub
-           in (acc ++ [out], b'))
-        ([], bracketArgs) pairs
-  in ("std::make_tuple" <> tupled results, finalBrackets)
+-- emit @std::make_tuple(...)@. See 'walkSelectorBrackets'.
+walkCppSelectorBrackets :: MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+walkCppSelectorBrackets =
+  walkSelectorBrackets
+    (\rcv k -> rcv <> "." <> pretty k)
+    (\rcv i -> "std::get<" <> pretty i <> ">" <> parens rcv)
+    (\idx rcv -> "morloc_at" <> tupled [idx, rcv])
+    (\start stop step rcv -> "morloc_slice" <> tupled [start, stop, step, rcv])
+    (\results -> "std::make_tuple" <> tupled results)
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]

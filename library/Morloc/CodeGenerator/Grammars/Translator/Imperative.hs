@@ -424,6 +424,11 @@ data LowerConfig m = LowerConfig
   , lcTypeMOf :: TypeM -> m (Maybe IType)
   , lcPackerName :: Source -> MDoc
   , lcUnpackerName :: Source -> MDoc
+  -- | Whether the argument passed to a pack/unpack function during serialize
+  -- weaving must be borrowed. Default is 'False' (C++/Py/R bind a value to a
+  -- const-ref/by-value param implicitly); Rust borrows a non-'Copy' arg so it
+  -- matches the packer's `&T` parameter. The argument is the arg's type.
+  , lcBorrowPackArg :: TypeF -> Bool
   , lcRecordAccessor :: NamType -> CVar -> MDoc -> MDoc -> MDoc
   , lcDeserialRecordAccessor :: Int -> Key -> MDoc -> MDoc
   -- ^ How to access record fields during deserialization.
@@ -566,7 +571,8 @@ expandSerialize cfg v0 s0 = do
 
     construct v (SerialPack _ (p, s)) =
       let unpacker = lcUnpackerName cfg (typePackerReverse p)
-       in go (unpacker <> parens v) s
+          arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
+       in go (unpacker <> parens arg) s
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst
@@ -641,7 +647,13 @@ expandDeserialize cfg v0 s0
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
       let packer = render $ lcPackerName cfg (typePackerForward p)
-      return (IPack packer x, before)
+          -- Borrow the packer's arg (the wire value) for a non-Copy wire type,
+          -- matching a `&T` packer parameter. The common (no-borrow) case keeps
+          -- `x` structured; only a borrow needs a rendered `&(..)` wrapper.
+          x' = if lcBorrowPackArg cfg (typePackerUnpacked p)
+                 then IRawExpr (render ("&(" <> lcPrintExpr cfg x <> ")"))
+                 else x
+      return (IPack packer x', before)
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg lst
