@@ -13,7 +13,7 @@ Converts 'IStmt' and 'IExpr' IR nodes into C++ source text. Handles
 type rendering, struct definitions, forward declarations, and C++
 idioms (templates, shared_ptr, std::variant).
 -}
-module CppPrinter
+module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   ( printExpr
   , printStmt
   , printStmts
@@ -30,6 +30,7 @@ module CppPrinter
   , printRecordTemplate
   ) where
 
+import qualified Data.Map as Map
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..))
@@ -130,6 +131,10 @@ printExpr (IIntrinsicNext sid (Just t) h) =
   [idoc|_mlc_next<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
 printExpr (IIntrinsicNext sid Nothing h) =
   [idoc|_mlc_next(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicStreamLayout sid (Just t) h) =
+  [idoc|_mlc_stream_layout<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicStreamLayout sid Nothing h) =
+  [idoc|_mlc_stream_layout(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
 printExpr (IIntrinsicStream h) =
   [idoc|_mlc_stream(#{printExpr h})|]
 printExpr (IIntrinsicOpenOStream sid path) =
@@ -230,8 +235,8 @@ printStmts :: [IStmt] -> [MDoc]
 printStmts = map printStmt
 
 -- | Render C++ dispatch functions from structured dispatch entries.
-printDispatch :: [DispatchEntry] -> [DispatchEntry] -> MDoc
-printDispatch locals remotes =
+printDispatch :: [DispatchEntry] -> [DispatchEntry] -> [Int] -> MDoc
+printDispatch locals remotes closureMids =
   [idoc|uint8_t* local_dispatch(uint32_t mid, const uint8_t** args){
     switch(mid){
         #{align (vsep localCases)}
@@ -252,8 +257,15 @@ uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
     }
 }|]
   where
-    localCases = map (makeCase "") locals
+    -- Closure force-registration: each closure mid dispatches to its serial
+    -- wrapper (deserialize -> call native closure body -> serialize) so a
+    -- foreign pool can apply a boundary-crossing closure via foreign_call.
+    localCases = map (makeCase "") locals ++ map makeClosureCase closureMids
     remoteCases = map (makeCase "_remote") remotes
+
+    makeClosureCase :: Int -> MDoc
+    makeClosureCase i =
+      "case" <+> pretty i <> ":" <+> "return mlc_closure_dispatch_" <> pretty i <> "(args);"
 
     -- The dispatch case is just a direct return; per-label logging is
     -- injected at the manifold definition (see lcMakeFunction in
@@ -271,16 +283,16 @@ uint8_t* remote_dispatch(uint32_t mid, const uint8_t** args){
         <> ";"
 
 -- | Assemble a complete C++ pool file from an IProgram and C++-specific extras.
-printProgram :: [MDoc] -> [MDoc] -> IProgram -> MDoc
-printProgram serialization signatures prog =
+printProgram :: [MDoc] -> [MDoc] -> [MDoc] -> IProgram -> MDoc
+printProgram serialization signatures closureWrappers prog =
   format
     (DF.embededFileText (DF.poolTemplate "cpp"))
     "// <<<BREAK>>>"
     [ vsep (map pretty (ipSources prog))
     , vsep (schemaTableDecl : serialization)
     , vsep signatures
-    , vsep (map pretty (ipManifolds prog))
-    , printDispatch (ipLocalDispatch prog) (ipRemoteDispatch prog)
+    , vsep (map pretty (ipManifolds prog) ++ closureWrappers)
+    , printDispatch (ipLocalDispatch prog) (ipRemoteDispatch prog) (Map.keys (ipClosureTable prog))
     ]
   where
     schemas = ipSchemaTable prog

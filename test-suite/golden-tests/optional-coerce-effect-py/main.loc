@@ -1,0 +1,35 @@
+-- Optional widening UNDER an effect wrapper.
+--
+-- A do-block always synthesizes an effectful type <E> T. When such a
+-- block is checked against a declared <E> ?T return, the inner T must be
+-- widened to ?T with the optional placed UNDER the effect (<Err> ?Int,
+-- never ?(<Err> Int)). Before the fix, tryCoerce could not see the
+-- OptionalU beneath the EffectU wrapper, so <Err> Int <: <Err> ?Int fell
+-- through with a hard "Type mismatch".
+--
+-- `mkOpt` exercises the widening (its do-block is <Err> Int, its declared
+-- return is <Err> ?Int). `@catch` then discharges Err, leaving a plain
+-- ?Int that the nexus serializes with the optional wire form. This checks
+-- the end-to-end path: typecheck coercion insertion, the CoerceToOptional
+-- codegen retag under the effect, and optional serialization at the
+-- nexus boundary.
+
+module main
+  ( presentSmall
+  , presentBig
+  )
+
+import root
+import root-py
+
+mkOpt :: Int -> <Err> ?Int
+mkOpt x = do
+    let bound = x
+    ? x < 4 = @throw "value must be >= 4"
+    : bound
+
+presentSmall :: ?Int
+presentSmall = @catch (mkOpt 5) Null
+
+presentBig :: ?Int
+presentBig = @catch (mkOpt 42) Null

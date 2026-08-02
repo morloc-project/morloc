@@ -102,7 +102,11 @@ reduceNativeExpr ver ts lang (RecordN o fv tps rs) =
   RecordN o fv tps <$> mapM (\(k, ne) -> (,) k <$> reduceNativeExpr ver ts lang ne) rs
 reduceNativeExpr ver ts lang (DoBlockN t ne) = DoBlockN t <$> reduceNativeExpr ver ts lang ne
 -- Peephole: force an if/else whose branches are BOTH DoBlockN thunks by
--- pushing the force into each branch and cancelling with the wrap.
+-- pushing the force into each branch and cancelling with the wrap. This is the
+-- conditional analog of the `EvalN . DoBlockN = id` rule just below: an
+-- effect-typed conditional reaches here with both arms wrapped in a DoBlockN
+-- (Serialize.hs `nativeExpr (MonoIf ..)` -- see `wrapEffectArms`), so forcing
+-- it distributes the force over the arms and each wrap cancels.
 -- Eliminates the `helper0 = (lambda: X); ... = (lambda: Y); n7 = helper0;
 -- n7()` round-trip that every ?/: inside a do-block otherwise pays.
 -- Only fires when both branches are DoBlockN AND neither is Unit-typed.
@@ -111,12 +115,19 @@ reduceNativeExpr ver ts lang (DoBlockN t ne) = DoBlockN t <$> reduceNativeExpr v
 -- (CppTranslator.hs::lcMakeDoBlock) because the inner call (e.g.
 -- `_mlc_save_voidstar`) returns `void` -- stripping the wrap leaves the
 -- void return propagating up into `put_value(void, ...)`.
+-- The forced conditional is eager, so its type is the effect-stripped value
+-- type: a bare value arm coerced into the effect slot carries an EffectF type
+-- but reduces to a plain value here, and typing the IfN by that raw EffectF
+-- would make the pool declare a thunk (std::function) and then assign it a bare
+-- value. Stripping is safe for the thunk-producer case (an effect-typed call
+-- arm), which reaches the pool as a thunk-valued conditional forced at the
+-- serialize sink, not through this EvalN peephole.
 reduceNativeExpr ver ts lang (EvalN _ (IfN _ c (DoBlockN t1 th) (DoBlockN t2 el)))
   | not (isDoBlockUnit t1) && not (isDoBlockUnit t2) = do
       c' <- reduceNativeExpr ver ts lang c
       th' <- reduceNativeExpr ver ts lang th
       el' <- reduceNativeExpr ver ts lang el
-      return $ IfN (typeFof th') c' th' el'
+      return $ IfN (stripEffectF (typeFof th')) c' th' el'
 -- EvalN . DoBlockN = id (cancels the outermost thunk when a value is
 -- forced immediately after being wrapped). Skipped for Unit-typed
 -- DoBlockN for the same reason as the ?/: peephole above.
@@ -143,9 +154,9 @@ reduceNativeArg ver ts lang (NativeArgExpr ne) = NativeArgExpr <$> reduceNativeE
 -- strips this thunk, the `void` propagates into `put_value(void, ...)`
 -- and pool.cpp fails to compile.
 isDoBlockUnit :: TypeF -> Bool
-isDoBlockUnit (EffectF _ inner) = isDoBlockUnit inner
-isDoBlockUnit (VarF (FV tv _)) = tv == TV "Unit"
-isDoBlockUnit _ = False
+isDoBlockUnit t = case stripEffectF t of
+  VarF (FV tv _) -> tv == TV "Unit"
+  _ -> False
 
 makeStr :: TypeF -> Text -> NativeExpr
 makeStr (VarF fv) x = StrN fv x

@@ -1,0 +1,22 @@
+module main (foo, bar)
+
+import root
+import root-py
+
+type Rust => Int = "i64"
+
+source Rust from "add.rs" ("rust_double" as rustDouble, "rust_inc" as rustInc)
+source Py from "helpers.py" ("py_double" as pyDouble, "py_inc" as pyInc)
+
+rustDouble :: Int -> Int
+rustInc :: Int -> Int
+pyDouble :: Int -> Int
+pyInc :: Int -> Int
+
+-- rust-hosted composition -> rust pool foreign-calls the py pool
+foo :: Int -> Int
+foo x = rustInc (pyDouble x)
+
+-- py-hosted composition -> py pool foreign-calls the rust pool (rust as callee)
+bar :: Int -> Int
+bar x = pyInc (rustDouble x)

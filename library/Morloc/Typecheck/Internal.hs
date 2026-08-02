@@ -576,7 +576,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []) of
+isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
   (Left _) -> False
   (Right _) -> True
 
@@ -1028,7 +1028,19 @@ subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 -- forall-bound variable appears in multiple argument positions (e.g.,
 -- (==) :: c -> c -> Bool passed to fold).
 subtype scope t1@(FunU as1 ret1) t2@(FunU as2 ret2) g0
-  | length as1 /= length as2 = subtypeError t1 t2 "function arity mismatch"
+  -- @A -> (B -> C)@ and @A -> B -> C@ are the same curried type. The parser
+  -- right-flattens arrows, but a function value inferred from a lambda in
+  -- return position (@f x = \y -> ...@) can reach here still nested, giving a
+  -- different argument count than a flattened annotation. Re-nest the longer
+  -- argument list's surplus into its return so the arities line up, then
+  -- recurse; a genuine arity error still surfaces because the re-nested return
+  -- fails to subtype (a function vs a non-function).
+  | length as1 > length as2 =
+      let (pre, rest) = splitAt (length as2) as1
+       in subtype scope (FunU pre (FunU rest ret1)) t2 g0
+  | length as1 < length as2 =
+      let (pre, rest) = splitAt (length as1) as2
+       in subtype scope t1 (FunU pre (FunU rest ret2)) g0
   | null as1 = subtype scope ret1 ret2 g0
   | otherwise = do
       -- Process all arguments (contravariant: b <: a), applying context between each
@@ -1556,18 +1568,20 @@ instantiate scope (ForallU x b) tb@(ExistU _ ([], _) _) g1 =
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
 instantiate scope ta (ExistU v ([], _) ([], _)) g1 = do
   g1' <- propagateExistGRecords scope v ta g1
-  case lookupU v g1' of
-    Just t  -> subtype scope ta t g1' >>= specializeExist scope v t ta
-    Nothing -> solveExist v ta g1' >>= maybe (return g1') return
+  g1'' <- propagateExistGPositional scope v ta g1'
+  case lookupU v g1'' of
+    Just t  -> subtype scope ta t g1'' >>= specializeExist scope v t ta
+    Nothing -> solveExist v ta g1'' >>= maybe (return g1'') return
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
 instantiate scope (ExistU v ([], _) ([], _)) tb g1 = do
   g1' <- propagateExistGRecords scope v tb g1
-  case lookupU v g1' of
-    Just t  -> subtype scope t tb g1' >>= specializeExist scope v t tb
-    Nothing -> solveExist v tb g1' >>= maybe (return g1') return
+  g1'' <- propagateExistGPositional scope v tb g1'
+  case lookupU v g1'' of
+    Just t  -> subtype scope t tb g1'' >>= specializeExist scope v t tb
+    Nothing -> solveExist v tb g1'' >>= maybe (return g1'') return
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
@@ -1628,6 +1642,98 @@ propagateExistGRecords scope v t g = case t of
       g
       (accumulatedRecords v g)
   _ -> Right g
+
+-- | Positional (tuple) counterpart of 'accumulatedRecords': the field-slot
+-- constraint lists attached to a bare existential @v@ through solved
+-- structural existential aliases in gammaSolved -- the @[slot]@ list a
+-- tuple-index getter @.0 v@ or field setter @(.0 = e) v@ leaves behind.
+-- Each element is one alias's slot list, indexed by tuple position. Unlike
+-- the record case, the ExistU/ExistU merge does not copy these onto @v@'s
+-- own ExistG entry, so the solved aliases are the only place they live.
+--
+-- A getter's alias is keyed by its @_pattern_@ var, but a setter's chains
+-- through an unrelated var (e.g. a caller's forall), so we cannot filter on
+-- the alias key. We instead require at least one slot to be a getter/setter
+-- structural slot (@_pattern_@ / @set_slot_@), which both identifies the
+-- alias as accessor-derived and excludes the positional existentials that
+-- ordinary @AppU@ (list/vector/user-type) unification produces. Callers
+-- only invoke this once @v@ is solved to a ground type, keeping the
+-- gammaSolved walk off the hot path.
+accumulatedPositionalSets :: TVar -> Gamma -> [[TypeU]]
+accumulatedPositionalSets v g
+  -- Cheap gate: a structural alias for @v@ is only ever written through
+  -- 'cacheSolved', which records @v@ in 'gammaPositionalReceivers'. When
+  -- @v@ is absent there are no aliases to harvest, so skip the
+  -- O(|gammaSolved|) walk. This keeps the walk off the hot ground-solve
+  -- path, where almost every existential has no positional constraint.
+  -- INVARIANT: 'cacheSolved' must stay the sole writer of structural
+  -- aliases into 'gammaSolved'; a bypass would make this gate silently
+  -- return [] and drop the constraint.
+  | not (Set.member v (gammaPositionalReceivers g)) = []
+  | otherwise =
+      [ ps
+      | (_, ExistU v' (ps, _) _) <- Map.toList (gammaSolved g)
+      , v' == v
+      , any isStructuralSlot ps
+      ]
+
+-- | Whether a ground type is a tuple (@IsTuple args@), definitely not a
+-- tuple (@NotTuple@ -- a record, primitive, or non-tuple type constructor),
+-- or not yet decided (@UndecidedTuple@ -- an existential, forall, or other
+-- not-yet-ground form). Type aliases are reduced before deciding, so a
+-- @type Pair a b = (a, b)@ resolves to @IsTuple@.
+data TupleShape = IsTuple [TypeU] | NotTuple | UndecidedTuple
+
+classifyTupleShape :: Scope -> TypeU -> TupleShape
+classifyTupleShape scope = go (0 :: Int)
+  where
+    go fuel t
+      | fuel > 100 = UndecidedTuple
+      | otherwise = case t of
+          AppU (VarU (TV nm)) args
+            | MT.isPrefixOf "Tuple" nm -> IsTuple args
+            | Map.member (TV nm) scope -> reduced fuel t
+            | otherwise -> NotTuple
+          VarU (TV nm)
+            | Map.member (TV nm) scope -> reduced fuel t
+            | otherwise -> NotTuple
+          NamU {} -> NotTuple
+          _ -> UndecidedTuple
+    reduced fuel t = maybe NotTuple (go (fuel + 1)) (TE.reduceType scope t)
+
+-- | When a bare existential @v@ is solved to a ground type, reconcile it
+-- with any positional field-slot constraints accumulated on @v@ (see
+-- 'accumulatedPositionalSets'). If @v@ is solved to a tuple, push each
+-- tuple element into the corresponding slot: this pins a getter's
+-- result-slot (a projection @.0 v@ whose type would otherwise surface as an
+-- unresolved generic once @v@ is solved wholesale) and a setter's set-value
+-- slot (so @(.0 = e) v@ enforces the field type just as it does on a
+-- concrete receiver). If @v@ carries a positional constraint but is solved
+-- to a non-tuple, a destructuring pattern was applied to a value that is not
+-- a tuple -- reject it here rather than deferring to a codegen crash on the
+-- projection. Mirrors 'propagateExistGRecords' for positional slots. The
+-- shape classification skips the gammaSolved walk for not-yet-ground solves.
+propagateExistGPositional :: Scope -> TVar -> TypeU -> Gamma -> Either MDoc Gamma
+propagateExistGPositional scope v t g = case classifyTupleShape scope t of
+  UndecidedTuple -> Right g
+  IsTuple tupleArgs ->
+    foldM
+      (\gAcc ps ->
+         if length ps > length tupleArgs
+           then subtypeError t t $
+             "tuple arity" <+> pretty (length tupleArgs)
+               <+> "required, index" <+> pretty (length ps - 1) <+> "given"
+           else foldM
+                  (\g' (slot, elemT) -> subtype scope elemT slot g')
+                  gAcc
+                  (zip ps tupleArgs))
+      g
+      (accumulatedPositionalSets v g)
+  NotTuple -> case accumulatedPositionalSets v g of
+    [] -> Right g
+    _  -> subtypeError t t $
+      "a destructuring pattern requires a tuple, but the value has type"
+        <+> parens (pretty t)
 
 -- | After a subtype check succeeds between a solved existential's current
 -- value and a new type, check if the new type is more specialized (a
@@ -1714,9 +1820,29 @@ solve v t
     occursIn v' (RecSingletonU k vt) = occursIn v' k || occursIn v' vt
     occursIn v' (LabeledU _ t') = occursIn v' t'
 
--- | Record a solved variable in the gamma map cache
+-- | Record a solved variable in the gamma map cache. When the solution is
+-- a structural alias @ExistU rv (ps, _) _@ whose slots came from a tuple
+-- getter/setter (see 'isStructuralSlot'), also record the receiver @rv@ in
+-- 'gammaPositionalReceivers'. This is the only site that writes such an
+-- alias into 'gammaSolved', so it is a complete (grow-only) index of the
+-- receivers 'accumulatedPositionalSets' would otherwise scan for.
 cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
-cacheSolved v t g = g {gammaSolved = Map.insert v t (gammaSolved g)}
+cacheSolved v t g =
+  let g' = g {gammaSolved = Map.insert v t (gammaSolved g)}
+   in case t of
+        ExistU rv (ps, _) _
+          | any isStructuralSlot ps ->
+              g' {gammaPositionalReceivers = Set.insert rv (gammaPositionalReceivers g')}
+        _ -> g'
+
+-- | A positional slot introduced by a tuple-index getter (@_pattern_@) or a
+-- field setter (@set_slot_@). Distinguishes accessor-derived slots from the
+-- positional existentials ordinary @AppU@ (list/vector/user-type)
+-- unification produces.
+isStructuralSlot :: TypeU -> Bool
+isStructuralSlot (ExistU (TV nm) _ _) =
+  MT.isPrefixOf "_pattern_" nm || MT.isPrefixOf "set_slot_" nm
+isStructuralSlot _ = False
 
 occursCheck :: TypeU -> TypeU -> Text -> Either MDoc ()
 occursCheck t1 t2 place =

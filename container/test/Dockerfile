@@ -49,6 +49,15 @@ ENV ARROW_S3=OFF
 ENV ARROW_GCS=OFF
 RUN Rscript -e 'install.packages("arrow", repos = "https://cloud.r-project.org")'
 
+# Futhark: a hosted-guest language (`source Futhark` compiles into the C++ pool).
+# Prebuilt static binary -- not in apt. Needed by the futhark-* golden tests.
+# The c/multicore backends need no extra deps beyond the existing gcc/pthreads.
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils \
+ && curl -sSL https://futhark-lang.org/releases/futhark-0.26.4-linux-x86_64.tar.xz -o /tmp/futhark.tar.xz \
+ && tar -xf /tmp/futhark.tar.xz -C /tmp \
+ && make -C /tmp/futhark-0.26.4-linux-x86_64 install PREFIX=/usr/local \
+ && rm -rf /tmp/futhark.tar.xz /tmp/futhark-0.26.4-linux-x86_64
+
 # Cleanup to reduce image size
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 

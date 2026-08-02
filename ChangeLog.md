@@ -1,3 +1,25 @@
+0.96.0 [2026-08-02]
+-------------------
+
+Language support
+ * Orient pools around language families rather than independent languages
+ * Add full Rust
+ * Add Futhark support as C++ guest
+
+Docstring grammar rewrite
+ * `@` as initial sigil, replacing ":"
+ * Allow `@default` flag to make a formatter the default output
+ * Allow `-f json` to over-ride the default output 
+ * Move `render.buffer` and `with.buffer` to `@buffer <flag> @stream`
+ * Allow output formatters to be passed arguments, e.g.:
+   `--' @render -t/--tabulate=foo(@offset, $1, $3)
+
+Other
+ * Full support for passing nested closures between languages
+ * Add `@streamLayout` intrinsic for better parallelization design
+ * Many bug fixes
+
+
 0.95.0 [2026-07-23]
 -------------------
  

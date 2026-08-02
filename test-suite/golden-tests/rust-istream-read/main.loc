@@ -1,0 +1,68 @@
+-- Rust pool member: IStream read intrinsics on saved packet files.
+--
+-- Covers the stream-reader intrinsic family in a Rust pool:
+--   * @open path :: IStream T  -- forward-only reader
+--   * @next handle             -- materialise the current sub-packet as [a]
+--   * @open path :: IFile T    -- random-access view
+--   * @stream ifile            -- derive an IStream from an IFile
+--   * @flen handle             -- element count of an IFile
+--   * @fschema path            -- element schema string, without opening
+--
+-- A @save'd DATA_PACKET file reads as a single-sub-packet stream: the
+-- first @next materialises the whole list, the next returns [] at EOF.
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main
+  ( testNextOnce
+  , testNextEofTwice
+  , testStreamFromIFile
+  , testIntList
+  , testLength
+  , testFschema
+  )
+
+import root-rust
+
+-- 1. Open as IStream and pull the first (only) sub-packet.
+testNextOnce :: Str -> <IO, Err> [Str]
+testNextOnce path = do
+  @save 0 ["one", "two", "three"] path
+  s <- @open path :: <IO, Err> IStream Str
+  @next s
+
+-- 2. After EOF, subsequent @next calls return empty.
+testNextEofTwice :: Str -> <IO, Err> [Str]
+testNextEofTwice path = do
+  @save 0 ["alpha", "beta"] path
+  s <- @open path :: <IO, Err> IStream Str
+  _ <- @next s
+  @next s
+
+-- 3. Derive an IStream from an IFile and walk it.
+testStreamFromIFile :: Str -> <IO, Err> [Int]
+testStreamFromIFile path = do
+  @save 0 [11, 22, 33] path
+  f <- @open path :: <IO, Err> IFile Int
+  s <- @stream f
+  @next s
+
+-- 4. Int element type round-trip.
+testIntList :: Str -> <IO, Err> [Int]
+testIntList path = do
+  @save 0 [100, 200, 300, 400] path
+  s <- @open path :: <IO, Err> IStream Int
+  @next s
+
+-- 5. Element count of a saved list via IFile.
+testLength :: Str -> <IO, Err> Int
+testLength path = do
+  @save 0 [1, 2, 3, 4, 5, 6, 7] path
+  f <- @open path :: <IO, Err> IFile Int
+  @flen f
+
+-- 6. Read a file's element schema string without opening it.
+testFschema :: Str -> <IO, Err> Str
+testFschema path = do
+  @save 0 [1, 2, 3] path
+  @fschema path

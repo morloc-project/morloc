@@ -1,0 +1,39 @@
+-- The closure that crosses the boundary is CHOSEN AT RUNTIME (mkMul vs mkAdd)
+-- over a runtime-captured base. The producer's reification must recover the
+-- ACTUAL runtime manifold id of whichever closure was selected -- not a
+-- statically-known one.
+
+module main (crossApply)
+
+import root-py
+import root-cpp
+
+source Py from "producer.py" ("tick", "mul", "add")
+source Cpp from "consumer.hpp" ("applyIt")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+add :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+mkAdd :: Int -> <IO> (Int -> Int)
+mkAdd base = do
+  _ <- tick
+  (\y -> add base y)
+
+pick :: Bool -> Int -> <IO> (Int -> Int)
+pick useMul base
+  ? useMul = mkMul base
+  : mkAdd base
+
+crossApply :: Bool -> Int -> <IO> Int
+crossApply useMul base = do
+  f <- pick useMul base
+  applyIt f 10

@@ -1,0 +1,19 @@
+module main (wrapOpt)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "own.rs" ("scale" as scale)
+scale :: [Int] -> [Int]
+
+-- `scale xs` produces a plain [Int]; the declared ?[Int] result forces the
+-- frontend to insert a CoerceToOptional. In Rust `?T` lowers to `Option<T>`,
+-- so widening a value to an optional must emit `Some(..)`: a bare `T` is not a
+-- valid `Option<T>`. The shared CoerceToOptional lowering is a noop (it returns
+-- the value unwrapped, which is correct for C++/Python/R where a `T` is a valid
+-- `?T`), so the generated Rust manifold returns `Vec<i64>` where
+-- `Option<Vec<i64>>` is required -- a rustc E0308 at build time.
+wrapOpt :: [Int] -> ?[Int]
+wrapOpt xs = scale xs

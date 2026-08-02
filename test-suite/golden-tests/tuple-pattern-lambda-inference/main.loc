@@ -1,0 +1,29 @@
+module main (keys, vals, swapped, doubled, threeWide, nested)
+
+type Cpp => (List a) = "std::vector<$1>" a
+type Cpp => Str = "std::string"
+type Cpp => Int = "int64_t"
+type Cpp => Bool = "bool"
+type Cpp => (Tuple2 a b) = "std::tuple<$1,$2>" a b
+type Cpp => (Tuple3 a b c) = "std::tuple<$1,$2,$3>" a b c
+
+source Cpp from "foo.hpp" ("mapv" as map, "dbl")
+
+map :: (a -> b) -> [a] -> [b]
+dbl :: Int -> Int
+
+xs :: [(Str, Int)]
+xs = [("a", 1), ("b", 2), ("c", 3)]
+
+ts :: [(Str, Int, Bool)]
+ts = [("x", 10, True), ("y", 20, False)]
+
+us :: [((Str, Int), Bool)]
+us = [(("p", 1), True), (("q", 2), False)]
+
+keys = map (\(k, v) -> k) xs
+vals = map (\(k, v) -> v) xs
+swapped = map (\(k, v) -> (v, k)) xs
+doubled = map (\(k, v) -> (k, dbl v)) xs
+threeWide = map (\(a, b, c) -> (a, c)) ts
+nested = map (\((a, b), c) -> a) us

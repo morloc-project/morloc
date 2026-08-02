@@ -230,12 +230,19 @@ rewrite :: Int -> PolyExpr -> MorlocMonad PolyExpr
 rewrite m (PolyApp fn xs) = do
   fn'  <- rewrite m fn
   xs'  <- mapM (rewrite m) xs
+  -- A closure passed directly to a foreign source call is invoked as
+  -- @f(x)@ by the source implementation, which discards the thunk, so its
+  -- effect must be forced eagerly here (the 'CallbackReturn' boundary).
+  -- Every other consumer -- a local 'LocalCallP', an export, a wire
+  -- crossing -- forces the closure's result at its own consumption site,
+  -- so intra-pool closures are left as thunks.
+  let xs'' = if isSrcCallHead fn' then map maybeForceCallbackArg xs' else xs'
   return
     . maybeSuspendRemoteReceive
-    $ maybeSuspendSourceCall fn' xs'
+    $ maybeSuspendSourceCall fn' xs''
 rewrite _ (PolyManifold l m' f k e) = do
   e' <- rewrite m' e
-  return $ PolyManifold l m' f k (maybeForceCallbackReturn m' f e')
+  return $ PolyManifold l m' f k e'
 rewrite m (PolyRemoteInterface l ti is rf e) = do
   e' <- rewrite m e
   return $ PolyRemoteInterface l ti is rf (forceCalleeBody e')
@@ -376,22 +383,66 @@ suspendMixedIfBranches m cond thenB elseB =
         Just t | not (hasOuterEffect t) -> PolyDoBlock (Idx m' guardT) branch
         _                               -> branch
 
--- | 'CallbackReturn' Force. A lambda passed as an argument to a foreign
--- consumer will be invoked as @f(x)@; the consumer discards the return
--- value's outer structure and cares only about the side effect. If the
--- lambda's declared return is '<E> T', @f(x)@ merely materialises the
--- thunk and drops it, so the effect never fires. 'ManifoldPart' and
--- 'ManifoldPass' are the two lambda-shaped 'ManifoldForm's; either with
--- an 'EffectT' return must be forced. One 'PolyEval' per 'EffectT'
--- layer.
-maybeForceCallbackReturn :: Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> PolyExpr
-maybeForceCallbackReturn midx form body
-  | isLambdaForm form = forceReturnPosition midx body
-  | otherwise = body
+-- | 'CallbackReturn' Force. A closure passed as an argument to a foreign
+-- source call is invoked as @f(x)@ by the source implementation, which
+-- discards the return's outer structure and cares only about the side
+-- effect. If the closure's return is '<E> T', @f(x)@ merely materialises
+-- the thunk and drops it, so the effect never fires -- force it here (one
+-- 'PolyEval' per 'EffectT' layer). Only lambda-shaped manifolds
+-- ('ManifoldPart'/'ManifoldPass') are closures, and 'forceReturnPosition'
+-- is a no-op unless the return carries an effect, so pure callbacks are
+-- untouched.
+--
+-- This is the ONLY place a closure's return is force-adjusted. Intra-pool
+-- closures called via 'LocalCallP' are deliberately left as thunks: their
+-- result is forced by the caller's own consumption boundary (a do-bind, a
+-- return, a wire crossing), and leaving the closure body a thunk keeps its
+-- rendered type consistent between its definition and its use sites (a
+-- forced body renders @T@ but an argument slot is typed @<E> T@).
+maybeForceCallbackArg :: PolyExpr -> PolyExpr
+maybeForceCallbackArg e@(PolyManifold _ m form _ _)
+  | isLambdaForm form = forceReturnPosition m e
+-- A callback nested inside a structured argument (a list/tuple/record of
+-- closures passed to the source call) is invoked exactly the same way by the
+-- foreign code, so descend into the structure and force those too. The
+-- container's element TYPE is peeled in lock-step ('peelCallbackType'): forcing
+-- a closure element makes its value render the plain @T@, so the container that
+-- holds it must be declared with the peeled element type or the two disagree.
+-- Non-closure elements fall through unchanged (both the value and the type
+-- peel are no-ops on a non-effectful element).
+maybeForceCallbackArg (PolyList v ts es) =
+  PolyList v (map peelCallbackType ts) (map maybeForceCallbackArg es)
+maybeForceCallbackArg (PolyTuple v xs) =
+  PolyTuple v [(peelCallbackType t, maybeForceCallbackArg x) | (t, x) <- xs]
+maybeForceCallbackArg (PolyRecord nt v ts fs) =
+  PolyRecord nt v (map peelCallbackType ts)
+    [(k, (peelCallbackType t, maybeForceCallbackArg x)) | (k, (t, x)) <- fs]
+maybeForceCallbackArg e = e
+
+-- | Peel every 'EffectT' layer off the RETURN of a function-typed element, so
+-- @Int -> \<E\> ()@ becomes @Int -> ()@. Mirrors the value-level force of a
+-- callback ('forceReturnPosition' / 'forceLayers'): once the closure value is
+-- forced, the slot that holds it must carry the plain (peeled) type. A no-op on
+-- any non-effectful or non-function type.
+peelCallbackType :: Indexed Type -> Indexed Type
+peelCallbackType (Idx i t) = Idx i (peel t)
   where
-    isLambdaForm (ManifoldPart _ _) = True
-    isLambdaForm (ManifoldPass _)   = True
-    isLambdaForm _                  = False
+    peel (FunT ins ret) = FunT ins (peelEff ret)
+    peel other = other
+    peelEff (EffectT _ inner) = peelEff inner
+    peelEff other = other
+
+-- | A lambda-shaped manifold form (an unapplied or partially-applied
+-- function value), as opposed to a saturated 'ManifoldFull' call.
+isLambdaForm :: ManifoldForm c b -> Bool
+isLambdaForm (ManifoldPart _ _) = True
+isLambdaForm (ManifoldPass _)   = True
+isLambdaForm _                  = False
+
+-- | The head of a direct foreign source-call application.
+isSrcCallHead :: PolyExpr -> Bool
+isSrcCallHead (PolyExe _ (SrcCallP _)) = True
+isSrcCallHead _                        = False
 
 -- | Walk to the return position of a manifold body (through 'PolyReturn'
 -- and 'PolyLet' tails), and if the value there has an outer 'EffectT',

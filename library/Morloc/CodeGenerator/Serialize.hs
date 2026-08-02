@@ -26,6 +26,7 @@ import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 
 {- | This step is performed after segmentation, so all terms are in the same
@@ -33,13 +34,27 @@ language. Here we need to determine where inputs are (de)serialized and the
 serialization states of arguments and variables.
 -}
 serialize :: MonoHead -> MorlocMonad SerialManifold
-serialize (MonoHead lang m0 args0 headForm0 e0) = do
+serialize mh = do
+  reg <- MM.gets stateLangRegistry
+  serializeHosted reg mh
+
+-- After segmentation a 'MonoHead' carries the language its terms were WRITTEN
+-- in. For a co-located guest (e.g. Futhark hosted in the C++ pool) that home
+-- language has no runtime in the pool: the manifold body executes as
+-- host-native code and its values are host-native objects. Serialization must
+-- therefore resolve concrete types and packing strategy under the HOST
+-- language ('LR.poolOf'), so a host-only 'Packable' (e.g. the C++ Matrix
+-- packer) is visible and the value marshals exactly as a native host value
+-- would. 'poolOf' is identity for ordinary (self-hosting) languages.
+serializeHosted :: LR.LangRegistry -> MonoHead -> MorlocMonad SerialManifold
+serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
   se1 <- serialExpr m0 e0
   let sm = SerialManifold m0 lang form0 headForm0 se1
   wireSerial lang sm
   where
+    lang = LR.poolOf reg lang0
     inferType = inferConcreteType lang
     inferTypeUniversal = inferConcreteTypeUniversal lang
     inferVar = inferConcreteVar lang
@@ -53,24 +68,38 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Nothing -> return $ Arg i (L PassthroughS)
       (Just (Right t)) -> do
         t' <- inferType t
-        return $ Arg i (L (typeSof t'))
+        return $ Arg i (L (serialArgType t'))
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at prepareArg"
         t' <- inferTypeUniversal t
-        return $ Arg i (L (typeSof t'))
+        return $ Arg i (L (serialArgType t'))
+      where
+        -- A function-typed top-level argument is a closure that arrived
+        -- serialized (a closure wire tuple), not a manifold signature. Give it
+        -- a plain serial type ('SerialS') so the standard serial->native path
+        -- reflects it into a native callable, rather than 'typeSof''s
+        -- 'FunctionS' (native args, serial return) which would leave the arg
+        -- half-serialized and unreflected.
+        serialArgType tf@(FunF {}) = SerialS tf
+        serialArgType tf = typeSof tf
 
     contextArg ::
       Int ->
       MorlocMonad (Or TypeS TypeF)
     contextArg i = case Map.lookup i typemap of
-      (Just (Right t)) -> do
-        t' <- inferType t
-        return $ LR (typeSof t') t'
+      (Just (Right t)) -> funcAwareOr <$> inferType t
       Nothing -> return $ L PassthroughS
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at contextArg"
-        t' <- inferTypeUniversal t
-        return $ LR (typeSof t') t'
+        funcAwareOr <$> inferTypeUniversal t
+      where
+        -- A function value (a captured closure) has no wire form, so it is
+        -- native-only: advertising a serial side ('LR') would let the caller
+        -- serialize the closure -- 'put_value' of a partial fails at runtime.
+        -- Non-function context args keep both forms.
+        funcAwareOr t' = case t' of
+          FunF {} -> R t'
+          _       -> LR (typeSof t') t'
 
     boundArg :: Int -> MorlocMonad TypeF
     boundArg i = case Map.lookup i typemap of
@@ -84,7 +113,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad SerialExpr
-    serialExpr currentM orig@(MonoManifold m _ kind inner)
+    serialExpr currentM orig@(MonoManifold m form kind inner)
       -- 'Preserved' manifolds carry observability hooks (logging etc.) and
       -- must survive into codegen as real function definitions. Route
       -- through 'nativeExpr' (which preserves the structure as
@@ -104,6 +133,21 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
           -- 'ensurePolyReturn'), the inner 'ReturnN' lives inside the
           -- NativeManifold function; surface 'ReturnS' here so the
           -- enclosing manifold emits its own 'return' statement.
+          case inner of
+            MonoReturn _ -> return (ReturnS se)
+            _ -> return se
+      -- A function-valued manifold (a closure: a 'ManifoldPart'/'ManifoldPass'
+      -- with remaining bound parameters) is a first-class VALUE, not a
+      -- computation to inline. Stripping it ('serialExpr m inner') would splice
+      -- its body and drop its parameters -- corrupting a closure that crosses a
+      -- boundary as a serialized RETURN (the mirror of the function-valued
+      -- ARGUMENT path at 'serialArgType'). Route it through 'nativeExpr' +
+      -- 'serializeS' so its 'typeFof' (a function) serializes as a
+      -- 'SerialClosure' (reify), exactly as 'unwrapLetDef' keeps a let-bound
+      -- closure whole.
+      | not (null (manifoldBound form)) = do
+          ne <- nativeExpr m orig
+          se <- serializeS "closure value" m (forceSerializedThunk ne)
           case inner of
             MonoReturn _ -> return (ReturnS se)
             _ -> return se
@@ -204,7 +248,6 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       serializedArgs <- mapM (serializeS "foreignRecArg" m) nativeArgs
       resultType <- inferType (Idx idx outputType)
       config <- MM.ask
-      reg <- MM.gets stateLangRegistry
       let socket = MC.setupServerAndSocket config reg targetLang
           serialCall = AppForeignRecS resultType mid socket serializedArgs
       naturalizeN "foreignRecCall" m lang resultType serialCall
@@ -313,8 +356,82 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       let ifType = case (thenNe, elseNe) of
             (NullN _, _) -> typeFof elseNe
             (_, NullN _) -> typeFof thenNe
-            _ -> typeFof thenNe
-      return $ IfN ifType condNe thenNe elseNe
+            -- Prefer an effect-typed arm: the arms unify to one type, but a
+            -- pure value arm carries the bare (non-Effect) type while its
+            -- sibling carries the effect wrapper. Taking the then arm's type
+            -- unconditionally would type an @throw guard chain by its value arm
+            -- when that arm is first, so the arm-wrapping below (which fires on
+            -- an EffectF ifType) would not run and the value arm would stay
+            -- bare against the throwing arm's thunk.
+            _ -> case (typeFof thenNe, typeFof elseNe) of
+                   (tt@(EffectF _ _), _) -> tt
+                   (_, te@(EffectF _ _)) -> te
+                   (tt, _) -> tt
+          -- An effect-typed conditional is represented as a thunk (forced by an
+          -- enclosing DoBlock/EvalN or at the serialize sink), so every arm must
+          -- itself yield a thunk. Computations (a source call, a do-block, an
+          -- @throw, a nested guard chain whose own arms are thunks) already
+          -- lower to a thunk when effect-typed; a VALUE-producing arm lowers to
+          -- a plain value, which is then assigned or forced as if it were a
+          -- thunk and crashes (C++: a value assigned to a std::function;
+          -- Python: a value called as `n()`). A value-producing arm is a bare
+          -- value (variable, literal, container coerced into the effect slot)
+          -- OR a nested conditional whose own arms are all value-producing
+          -- (`? b>0 = 1 : 2` yields a value, not a thunk) -- so the check
+          -- recurses through IfN. Wrap those arms in a DoBlockN. NullN arms keep
+          -- the optional-handling shape.
+          producesValue e = case e of
+            BndVarN {} -> True
+            LetVarN {} -> True
+            IntN {} -> True
+            RealN {} -> True
+            StrN {} -> True
+            LogN {} -> True
+            ListN {} -> True
+            TupleN {} -> True
+            RecordN {} -> True
+            DeserializeN {} -> True
+            IfN _ _ a b -> producesValue a && producesValue b
+            -- Value-passthrough wrappers: the value flows out of the tail /
+            -- inner expression, whose shape -- not this wrapper's own
+            -- (possibly effect-annotated) type -- decides. A coercion whose
+            -- inner is a value stays a value (a coerced pure call whose effect
+            -- was stripped by the optional widening); a `let .. in <value>`
+            -- (NativeLetN/SerialLetN) or a returned value is a value too. A
+            -- coercion / let over an effectful computation (the do-block /
+            -- @catch widening) recurses to that computation and is NOT a value.
+            CoerceN _ _ a -> producesValue a
+            NativeLetN _ _ a -> producesValue a
+            SerialLetN _ _ a -> producesValue a
+            ReturnN a -> producesValue a
+            -- A PURE computation (a foreign source call, a local manifold, an
+            -- intrinsic, an optional-lift) yields a plain value; an effect-typed
+            -- one already lowers to a thunk-producer upstream (it reaches the
+            -- arm wrapped in a DoBlockN) and must not be re-wrapped. So gate on
+            -- the node's own type. This distinguishes a value arm widened to an
+            -- effect slot (e.g. `? x>N = @throw : idc x` :: <Err> ?Int, where
+            -- the widening leaves the call pure) from a genuinely effectful one.
+            AppExeN t _ _ -> not (isEffectF t)
+            ExeN t _ -> not (isEffectF t)
+            ManN nm -> not (isEffectF (typeFof nm))
+            IntrinsicN t _ _ _ -> not (isEffectF t)
+            MapOptionalN t _ _ _ -> not (isEffectF t)
+            _ -> False
+          wrapArm e = if producesValue e then DoBlockN (typeFof e) e else e
+          isNull NullN{} = True
+          isNull _       = False
+          -- The single gate the whole effect-conditional invariant hinges on:
+          -- wrap both arms into thunks exactly when the conditional is
+          -- effect-typed and is NOT the optional (Null-bearing) shape. 'ifType'
+          -- above prefers the EffectF arm precisely so this fires, and the
+          -- DoBlockN arms produced here are what the EvalN/IfN peephole in
+          -- Reduce.hs recognises and collapses back to eager form when the
+          -- conditional is immediately forced.
+          wrapEffectArms = isEffectF ifType && not (isNull thenNe || isNull elseNe)
+          (thenNe', elseNe')
+            | wrapEffectArms = (wrapArm thenNe, wrapArm elseNe)
+            | otherwise      = (thenNe, elseNe)
+      return $ IfN ifType condNe thenNe' elseNe'
     nativeExpr m (MonoDoBlock t e) = DoBlockN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoEval t e) = EvalN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
@@ -331,7 +448,7 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     nativeExpr m (MonoIntrinsic t intr es)
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
                      IntrOpen, IntrClose, IntrFSchema,
-                     IntrFLength, IntrNext, IntrStream,
+                     IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
@@ -474,16 +591,12 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is <IO, Err> a; the schema is for a.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the return type is <Err> a; the schema is for a.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
@@ -492,18 +605,21 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
       -- from_voidstar<T>). For bracket-index/struct chains the result
       -- is a single element type; for bracket-slice it is a list type.
       -- Either way, the post-EffectF type carries the right shape.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrNext tf _ = do
       -- @next returns the sub-packet as `[a]`. The wrapper drops the
       -- EffectF wrap and serialises the list type so the per-language
       -- from_voidstar call materialises it correctly.
-      let unwrap (EffectF _ inner) = unwrap inner
-          unwrap other = other
-          dataType = unwrap tf
+      let dataType = stripEffectF tf
+      ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    intrinsicSchema m IntrStreamLayout tf _ = do
+      -- @streamLayout returns `[(U64,U64,U64)]`. Drop the EffectF wrap and
+      -- serialise the list-of-triple type so the per-language from_voidstar
+      -- call materialises it (an ordinary composite, as for @next).
+      let dataType = stripEffectF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
@@ -690,6 +806,13 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoIntrinsic _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) es)
     makeTypemap parentIdx (MonoIf cond thenE elseE) =
       Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
+    -- A locally-defined function value (a closure) applied via 'LocalCallP j':
+    -- record j's FUNCTION type from the head annotation. Without this the
+    -- closure index has no typemap entry, so the arg machinery treats it as a
+    -- serializable scalar and tries to serialize the closure (functions have no
+    -- wire form). The head's 'Idx' carries the function type 'FunT ins out'.
+    makeTypemap _ (MonoApp (MonoExe hg@(Idx idx _) (LocalCallP j)) es) =
+      Map.unionsWith mergeTypes (Map.singleton j (Right hg) : map (makeTypemap idx) es)
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap parentIdx (MonoCacheBody _ _ _ e) = makeTypemap parentIdx e
@@ -714,7 +837,16 @@ serialize (MonoHead lang m0 args0 headForm0 e0) = do
     inferState (MonoApp (MonoManifold _ _ _ e) _) = inferState e
     inferState (MonoLet _ _ e) = inferState e
     inferState (MonoReturn e) = inferState e
-    inferState (MonoManifold _ _ _ e) = inferState e
+    -- A function-valued manifold (non-empty bound args) is a first-class
+    -- closure -- a NATIVE value, whatever its body does internally. Following
+    -- into the body (as the saturated 'ManifoldFull' case must) would report
+    -- 'Serialized' whenever an arm crosses a language boundary, driving a
+    -- spurious closure reify at the let binding even though the closure is
+    -- consumed locally. Agrees with 'unwrapLetDef', which keeps such a manifold
+    -- whole for native-partial lowering.
+    inferState (MonoManifold _ form _ e)
+      | not (null (manifoldBound form)) = Unserialized
+      | otherwise = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE
     inferState MonoPoolCall {} = Unserialized
     inferState MonoBndVar {} = Unserialized
@@ -728,10 +860,20 @@ Manifolds tagged 'Preserved' carry observability hooks and survive the
 strip -- the kind was set once at 'PolyManifold' construction in
 'Express.hs' and threaded through 'Segment.hs'. The 'm /= currentM'
 guard is the same self-wrap collision guard used in 'serialExpr'.
+
+A function-valued manifold ('ManifoldPart'/'ManifoldPass' -- non-empty
+bound args) is a first-class closure and also survives the strip: it must
+reach 'lowerManifold' so the manifold becomes a standalone def and the
+let-binding is materialized as its native partial (functools.partial /
+std::bind / R closure). Stripping it would splice the lambda body inline
+with its parameters unbound. 'ManifoldFull' (empty bound -- a saturated
+call producing a value) keeps the strip.
 -}
 unwrapLetDef :: Int -> MonoExpr -> (Int, MonoExpr)
 unwrapLetDef currentM orig@(MonoManifold m _ kind _)
   | kind == Preserved && m /= currentM = (m, orig)
+unwrapLetDef currentM orig@(MonoManifold m form _ _)
+  | not (null (manifoldBound form)) && m /= currentM = (m, orig)
 unwrapLetDef _ (MonoManifold m _ _ (MonoReturn e)) = (m, e)
 unwrapLetDef _ (MonoManifold m _ _ e) = (m, e)
 unwrapLetDef m (MonoReturn e) = (m, e)
@@ -881,6 +1023,11 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
 
     specialize :: Map.Map Int Request -> Int -> Or TypeS TypeF -> Or TypeS TypeF
     specialize req i r = case (Map.lookup i req, r) of
+      -- A native-only arg (no serial side) -- e.g. a captured function value,
+      -- which has no wire form -- must stay native regardless of the request.
+      -- Downgrading it to Passthrough would make a later pass try to serialize
+      -- the closure.
+      (_, R t) -> R t
       (Nothing, _) -> L PassthroughS
       (Just SerialContent, LR t _) -> L t
       (Just NativeContent, LR _ t) -> R t

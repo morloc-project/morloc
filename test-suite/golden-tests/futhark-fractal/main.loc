@@ -1,0 +1,28 @@
+module main (interiorSum, exteriorSum)
+
+import root-cpp
+import root-py
+import tensor-cpp
+import tensor-py
+import vector-cpp
+import vector-py
+
+-- Futhark renders a Mandelbrot escape-count image; Python reduces it to a
+-- deterministic checksum. This exercises a rank-2 I32 matrix crossing the
+-- Futhark -> C++ -> Python boundary. The viewports are chosen so the sum is
+-- exact by hand, keeping the golden deterministic with no visualization stage.
+source Futhark from "kernels.fut" ("render" as render)
+source Py from "checksum.py" ("checksum")
+
+render   :: I64 -> I64 -> F64 -> F64 -> F64 -> I32 -> Matrix m n I32
+checksum :: Matrix m n I32 -> I64
+
+-- A tiny window deep inside the set (around the origin): every pixel runs to
+-- max_iter (100), so the sum is 4 * 4 * 100 = 1600.
+interiorSum :: I64
+interiorSum = checksum (render 4 4 0.0 0.0 0.001 100)
+
+-- A window far outside the set: every pixel escapes after one step (count 1),
+-- so the sum is 4 * 4 * 1 = 16.
+exteriorSum :: I64
+exteriorSum = checksum (render 4 4 10.0 10.0 0.001 100)

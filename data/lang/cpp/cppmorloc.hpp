@@ -426,6 +426,23 @@ inline size_t array_data_alignment_cpp(const Schema* elem) {
 // get_shm_size
 // ============================================================
 
+// A compound schema (array/tuple/map/record) must be serialized by a dedicated
+// container overload. If one reaches a scalar-sized catch-all, a Packable value
+// was serialized without its pack wrapper -- fail loudly instead of silently
+// under-allocating shared memory (which writes the payload past the block and
+// crashes the reader with an out-of-volume relptr). Records serialize as tuples,
+// so a MORLOC_MAP always arrives at the tuple overload at runtime; this catch-all
+// is only instantiated (not called) for compound types.
+inline void guard_scalar_schema(const Schema* schema, const char* fn) {
+    if (schema->type == MORLOC_ARRAY
+     || schema->type == MORLOC_TUPLE
+     || schema->type == MORLOC_MAP) {
+        throw std::runtime_error(
+            std::string(fn) + ": compound schema reached a scalar-sized type -- "
+            "a Packable value was serialized without its pack wrapper");
+    }
+}
+
 // Forward declaration
 template<typename T>
 size_t get_shm_size(const Schema* schema, const T& data);
@@ -464,6 +481,7 @@ size_t get_shm_size(const Schema* schema, const Primitive& data) {
             );
         }
     }
+    guard_scalar_schema(schema, "get_shm_size");
     return schema->width;
 }
 
@@ -733,6 +751,7 @@ Wire check_range_narrow(const Src& data, const char* name) {
 // Also instantiated for record types (which fall through to default).
 template<typename Primitive>
 void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primitive& data) {
+    guard_scalar_schema(schema, "to_voidstar");
     if constexpr (std::is_arithmetic_v<Primitive>) {
         switch(schema->type) {
             case MORLOC_IFILE:

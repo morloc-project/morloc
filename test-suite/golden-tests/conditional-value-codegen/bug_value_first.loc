@@ -1,0 +1,18 @@
+-- FAILING (Bug C). An effect-typed conditional with a BARE VALUE in the THEN
+-- (first) arm and a thunk (@throw) in the ELSE arm, realized in C++. The
+-- conditional's type is taken from the then arm (a bare value), so the value
+-- arm is not wrapped to match the throwing arm's thunk representation and C++
+-- codegen emits a std::function assigned a bare int. The mirror image
+-- (throw-first, value tail -- `validate`/`validateCpp`) compiles. This file
+-- must build (and run) once the arm ordering is handled symmetrically.
+module main (vf)
+
+import root-cpp
+
+source Cpp from "helpers.hpp" ("idc")
+idc :: Int -> Int
+
+vf :: Int -> <Err> Int
+vf x =
+  ? x >= 0 = x
+  : @throw "negative"

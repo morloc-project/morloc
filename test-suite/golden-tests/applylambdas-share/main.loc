@@ -1,0 +1,45 @@
+module main (crossShared, effShared)
+
+-- Regression test for 'applyLambdas' sharing a multiply-used lambda parameter
+-- rather than cloning it (LambdaEval.hs betaSubst clause). Both exports apply
+-- a function whose parameter is used twice, on the pool path, so beta-reduction
+-- must bind the argument once as a shared 'let'. Cloning would (A) duplicate a
+-- cross-language call and (B) duplicate an effectful thunk.
+
+effect IO
+
+source Py from "helpers.py"
+  ( "py_id"      as pyId
+  , "py_counter" as pyCounter
+  )
+
+source Cpp from "helpers.hpp"
+  ( "cpp_pure_add" as cppAdd
+  )
+
+type Py  => Int = "int"
+type Cpp => Int = "int"
+
+pyId :: Int -> Int
+pyCounter :: <IO> Int
+cppAdd :: Int -> Int -> Int
+
+-- (A) Parameter 'a' used twice: a Py-produced value consumed twice by a Cpp
+-- function. Sharing binds 'pyId x' once; cloning emits the Py->Cpp value twice.
+dupCpp :: Int -> Int
+dupCpp a = cppAdd a a
+
+crossShared :: Int -> Int
+crossShared x = dupCpp (pyId x)
+
+-- (B) Parameter 'v' is an effectful thunk forced twice. Sharing forces one
+-- shared thunk twice, which must still run the effect twice (the counter
+-- returns 1 then 2), exactly as cloning would -- i.e. forcing is not memoized.
+forceTwice :: <IO> Int -> <IO> Int
+forceTwice v = do
+  a <- v
+  b <- v
+  cppAdd a b
+
+effShared :: <IO> Int
+effShared = forceTwice pyCounter

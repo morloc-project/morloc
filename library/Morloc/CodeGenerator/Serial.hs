@@ -16,6 +16,8 @@ pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST
+  , wireSerialAstToType
+  , containsFunT
   , chooseSerializationCycle
   , isSerializable
   , hasArrowHint
@@ -50,44 +52,76 @@ data AliasShape
   | AliasIsOther TypeU     -- ^ body is some other AppU; route via Packable
   | AliasIsNone            -- ^ outer is its own head (no aliasing)
 
--- | recurse all the way to a serializable type
+-- | Recurse all the way to a serializable type, parameterized by how a
+-- 'SerialClosure' leaf is rendered. Only the closure leaf differs between the
+-- native ('serialAstToType') and wire ('wireSerialAstToType') forms; the
+-- container recursion is shared here so a new container constructor need only be
+-- added once.
 --
 -- For SerialList, the optional dim slot is reified as a leading
 -- kind-kinded (Nat) arg when present. This preserves dimensional
 -- metadata in the wire schema. The macro layer (@expandMacro@) is
 -- independent: macro indices @$N@ count TYPE args only, so the dim
 -- slot here doesn't shift @$N@ positions in the per-language form.
+serialAstToTypeWith :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
+serialAstToTypeWith onClosure = go
+  where
+    go (SerialPack _ (_, s)) = go s
+    go (SerialList v (Just d) s) = AppF (VarF v) [d, go s]
+    go (SerialList v Nothing s) = AppF (VarF v) [go s]
+    go (SerialTuple v ss) = AppF (VarF v) (map go ss)
+    go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
+    go (SerialRec v) = RecF v
+    go (SerialReal x) = VarF x
+    go (SerialFloat32 x) = VarF x
+    go (SerialFloat64 x) = VarF x
+    go (SerialInt x) = VarF x
+    go (SerialInt8 x) = VarF x
+    go (SerialInt16 x) = VarF x
+    go (SerialInt32 x) = VarF x
+    go (SerialInt64 x) = VarF x
+    go (SerialUInt x) = VarF x
+    go (SerialUInt8 x) = VarF x
+    go (SerialUInt16 x) = VarF x
+    go (SerialUInt32 x) = VarF x
+    go (SerialUInt64 x) = VarF x
+    go (SerialBool x) = VarF x
+    go (SerialString x) = VarF x
+    go (SerialIFile x) = VarF x
+    go (SerialOStream x) = VarF x
+    go (SerialIStream x) = VarF x
+    go (SerialClosure ins out) = onClosure ins out
+    go (SerialNull x) = VarF x
+    go (SerialOptional _ s) = OptionalF (go s)
+    -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
+    go (SerialUnknown v) = UnkF v
+
 serialAstToType :: SerialAST -> TypeF
-serialAstToType (SerialPack _ (_, s)) = serialAstToType s
-serialAstToType (SerialList v (Just d) s) = AppF (VarF v) [d, serialAstToType s]
-serialAstToType (SerialList v Nothing s) = AppF (VarF v) [serialAstToType s]
-serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
-serialAstToType (SerialObject o n ps rs) =
-  let ts = map (serialAstToType . snd) rs
-   in NamF o n ps (zip (map fst rs) ts)
-serialAstToType (SerialRec v) = RecF v
-serialAstToType (SerialReal x) = VarF x
-serialAstToType (SerialFloat32 x) = VarF x
-serialAstToType (SerialFloat64 x) = VarF x
-serialAstToType (SerialInt x) = VarF x
-serialAstToType (SerialInt8 x) = VarF x
-serialAstToType (SerialInt16 x) = VarF x
-serialAstToType (SerialInt32 x) = VarF x
-serialAstToType (SerialInt64 x) = VarF x
-serialAstToType (SerialUInt x) = VarF x
-serialAstToType (SerialUInt8 x) = VarF x
-serialAstToType (SerialUInt16 x) = VarF x
-serialAstToType (SerialUInt32 x) = VarF x
-serialAstToType (SerialUInt64 x) = VarF x
-serialAstToType (SerialBool x) = VarF x
-serialAstToType (SerialString x) = VarF x
-serialAstToType (SerialIFile x) = VarF x
-serialAstToType (SerialOStream x) = VarF x
-serialAstToType (SerialIStream x) = VarF x
-serialAstToType (SerialNull x) = VarF x
-serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
--- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
-serialAstToType (SerialUnknown v) = UnkF v
+serialAstToType =
+  serialAstToTypeWith (\ins out -> FunF (map serialAstToType ins) (serialAstToType out))
+
+-- | Like 'serialAstToType', but a closure is rendered as the given wire-tuple
+-- leaf type instead of its native callable type ('FunF'). A defunctionalized
+-- closure travels as the fixed tuple @(home_language, manifold_id, captured)@,
+-- so a static backend serializing/raw-deserializing an aggregate that CONTAINS
+-- a closure must type the closure slot as that wire tuple (the reified value),
+-- not as the native function. Each backend supplies its own concrete wire-tuple
+-- leaf (e.g. the C++ @std::tuple<...>@ or Rust @(String,i64,Vec<Vec<u8>>)@
+-- injected via the leaf's concrete name).
+wireSerialAstToType :: TypeF -> SerialAST -> TypeF
+wireSerialAstToType wire = serialAstToTypeWith (\_ _ -> wire)
+
+-- | True when a function type appears anywhere in the type (a bare function, or
+-- one nested in a list/tuple/record/optional/effect). Used both by the nexus
+-- (which cannot serialize a higher-order value) and the C++ member (which skips
+-- generating a native struct (de)serializer for a record with a function field).
+containsFunT :: Type -> Bool
+containsFunT (FunT _ _) = True
+containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
+containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
+containsFunT (EffectT _ t) = containsFunT t
+containsFunT (OptionalT t) = containsFunT t
+containsFunT _ = False
 
 encode64 :: Int -> String
 encode64 i
@@ -179,6 +213,24 @@ serialAstToMsgpackSchema ast = emit ast
     emit (SerialIFile v) = addHint v <> "F"
     emit (SerialOStream v) = addHint v <> "O"
     emit (SerialIStream v) = addHint v <> "I"
+    -- A defunctionalized closure travels as a fixed-shape tuple, independent of
+    -- the closure's signature: (home_language:str, manifold_id:int,
+    -- captured_arg_packets:[bytes]). The language is a string (its lang name)
+    -- so the receiver builds the callback socket "pipe-<name>" directly, with
+    -- no integer language enum synchronized across pools. Captured packets are
+    -- opaque pre-serialized bytes (an array of uint8 arrays). Reified/reflected
+    -- by the pool at the serialize boundary; the reified value IS this tuple, so
+    -- the existing generic tuple/string/int/array codec carries it with no
+    -- runtime changes.
+    -- This literal MUST equal the schema of the wire tuple
+    -- (String, Int, [[UInt8]]) as the other 'emit' clauses would render it:
+    -- tuple-of-3 ("t" <> encode64D 3), then String ("s"), Int ("j"), and a
+    -- variable-length list-of-list-of-UInt8 ("a" <> "a" <> "u1", empty dims).
+    -- The pool reifies a real such tuple through the generic codec, so this
+    -- string and the runtime bytes must stay in lockstep; keep it in sync if
+    -- any tuple/list/leaf code below changes.
+    emit (SerialClosure _ _) =
+      "t" <> encode64D (3 :: Int) <> "s" <> "j" <> "a" <> "a" <> "u1"
     emit (SerialNull v) = addHint v <> "z"
     emit (SerialOptional v s) = addHint v <> "?" <> emit s
     emit (SerialUnknown v) = addHint v <> "*"
@@ -270,6 +322,7 @@ shallowType (SerialString x) = VarF x
 shallowType (SerialIFile x) = VarF x
 shallowType (SerialOStream x) = VarF x
 shallowType (SerialIStream x) = VarF x
+shallowType (SerialClosure ins out) = FunF (map shallowType ins) (shallowType out)
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- A back-reference re-uses the ancestor's NamF identity; downstream
@@ -507,11 +560,15 @@ makeSerialAST m lang t0 = do
         selectPacker [] = MM.throwSourcedError m $ "Cannot find constructor for" <+> pretty cv <+> "in selectPacker"
         selectPacker [x] = return x
         selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
-    makeSerialAST' _ _ t@(FunF _ _) =
-      MM.throwCompilerBugAt m $
-        "Function-type serialization reached codegen backstop -- the higher-order"
-        <+> "export guard at Nexus.hs (see 'checkExportedHigherOrder') should have"
-        <+> "caught this at the export boundary. Type dump:" <+> pretty t
+    -- A function value crossing a pool boundary is defunctionalized: it travels
+    -- as a closure datum (home language, manifold id, captured argument packets).
+    -- The argument and result schemas shape only the native callable on each
+    -- side; the wire form itself is signature-independent (a tuple emitted by
+    -- 'SerialClosure'). Recurse so the arg/result native types are available.
+    makeSerialAST' gscope typepackers (FunF ins out) =
+      SerialClosure
+        <$> mapM (makeSerialAST' gscope typepackers) ins
+        <*> makeSerialAST' gscope typepackers out
     -- Wire-form construction for an applied type `Foo a b ...`.
     --
     -- Two pieces of information drive dispatch here:
@@ -840,7 +897,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       MorlocMonad (Maybe TypeF) -- the resolved unpacked types
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []) of
+      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
         (Left typeErr) ->
           MM.throwSourcedError m0 $
             "There was an error raised in subtyping while resolving serialization"
@@ -866,7 +923,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
         (u, gc) -> do
           -- where u  is the unresolved general packed type that was stored in Desugar.hs
           --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []) of
+          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
             (Left _) -> return Nothing
             (Right g) -> do
               return . Just $ apply g (existential gc)
@@ -1050,6 +1107,7 @@ isSerializable (SerialString _) = True
 isSerializable (SerialIFile _) = True
 isSerializable (SerialOStream _) = True
 isSerializable (SerialIStream _) = True
+isSerializable (SerialClosure _ _) = True
 isSerializable (SerialNull _) = True
 isSerializable (SerialOptional _ x) = isSerializable x
 -- A back-reference is serializable iff its referenced object is.
@@ -1085,6 +1143,7 @@ prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialIFile _) = "SerialIFile"
 prettySerialOne (SerialOStream _) = "SerialOStream"
 prettySerialOne (SerialIStream _) = "SerialIStream"
+prettySerialOne (SerialClosure _ _) = "SerialClosure"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
 prettySerialOne (SerialRec v) = "SerialRec" <> angles (pretty v)

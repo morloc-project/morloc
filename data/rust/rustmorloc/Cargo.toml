@@ -1,0 +1,17 @@
+[package]
+name = "rustmorloc"
+version = "0.95.0"
+edition = "2021"
+description = "Direct voidstar <-> native-Rust marshaller for the morloc Rust pool member"
+# Version locked with morloc-runtime / morloc-runtime-types for ABI compatibility.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+libc = { workspace = true }
+morloc-runtime-types = { path = "../morloc-runtime-types" }
+
+[dev-dependencies]
+# Tests round-trip through the pure marshalling walk against a local buffer
+# (buffer-relative relptrs), so they need no libmorloc.so / SHM state.

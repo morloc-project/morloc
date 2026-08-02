@@ -215,6 +215,7 @@ data NexusExpr
       -- string (e.g. ".1.[]"), runtime args in DFS order. Each bracket
       -- step in the path consumes args (1 for `.[]`, 3 for `.[:]`).
   | NextX     Text NexusExpr        -- result schema ([a]), IStream handle expr
+  | StreamLayoutX Text NexusExpr    -- result schema ([(U64,U64,U64)]), IFile handle expr
   | StreamX   Text NexusExpr        -- result schema (IStream a), IFile handle expr
   | OpenOStreamX Text NexusExpr     -- element schema, path expr (typed OStream open)
   | WriteX    Text NexusExpr NexusExpr NexusExpr -- value [a] schema, level, value, handle
@@ -226,6 +227,11 @@ data NexusExpr
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
   | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
   | CatchX    NexusExpr NexusExpr   -- fallible, fallback -- try/catch
+  | IfX       Text NexusExpr NexusExpr NexusExpr
+    -- ^ result schema, condition (Bool), then-branch, else-branch. The
+    -- pure-nexus conditional: evaluate the condition and materialize the
+    -- taken branch. The condition is currently a Bool literal or a bound
+    -- Bool argument -- the pure evaluator has no comparison operators yet.
 
 data LitType = F32X | F64X | I8X | I16X | I32X | I64X | U8X | U16X | U32X | U64X | BoolX | NullX | IntX
 
@@ -244,7 +250,9 @@ findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
 findSockets rAST = do
   config <- MM.ask
   registry <- MM.gets stateLangRegistry
-  return . map (MC.setupServerAndSocket config registry) . unique $ findAllLangsSAnno rAST
+  -- Collapse guest members onto their pool host (futhark -> cpp) so a
+  -- co-located member never enumerates its own socket/pool in the manifest.
+  return . map (MC.setupServerAndSocket config registry) . unique . map (LR.poolOf registry) $ findAllLangsSAnno rAST
 
 findAllLangsSAnno :: (Foldable f) => AnnoS e f (Indexed Lang) -> [Lang]
 findAllLangsSAnno = foldAnnoS (\(AnnoS _ (Idx _ lang) _) -> [lang])
@@ -433,17 +441,6 @@ generalTypeToSerialAST' i anc (NamT o v _ rs) =
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
 
--- | Check whether a type contains a function type anywhere in its structure.
--- Used to detect higher-order functions appearing as arguments or in
--- compound positions (lists, tuples, records, optionals), which the CLI
--- nexus cannot serialize.
-containsFunT :: Type -> Bool
-containsFunT (FunT _ _) = True
-containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
-containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
-containsFunT (EffectT _ t) = containsFunT t
-containsFunT (OptionalT t) = containsFunT t
-containsFunT _ = False
 
 -- | Reject main-module exports whose type carries a function in argument or
 -- return position. The nexus turns each such export into a CLI subcommand
@@ -474,13 +471,13 @@ checkExportedHigherOrder i name t = case findOffender t of
   where
     findOffender :: Type -> Maybe (MDoc, Type)
     findOffender (FunT ts ret) =
-      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, containsFunT a] of
+      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, Serial.containsFunT a] of
         ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
-        [] | containsFunT ret ->
+        [] | Serial.containsFunT ret ->
              Just ("return type contains a function", ret)
            | otherwise -> Nothing
     findOffender ty
-      | containsFunT ty = Just ("exported value is or contains a function", ty)
+      | Serial.containsFunT ty = Just ("exported value is or contains a function", ty)
       | otherwise = Nothing
 
 resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
@@ -681,7 +678,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       bodyX <- toNexusExpr body
       e1X <- toNexusExpr e1
       return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
-    toNexusExpr (AnnoS _ _ (IfS _ t _)) = toNexusExpr t
+    toNexusExpr (AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) =
+      IfX <$> type2schema ift
+          <*> toNexusExpr cond
+          <*> toNexusExpr thenB
+          <*> toNexusExpr elseB
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     -- CoerceToOptional changes the value's runtime layout: the voidstar
@@ -768,6 +769,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       FLengthX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
       NextX <$> type2schema t <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStreamLayout [handle])) =
+      StreamLayoutX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
@@ -1660,6 +1663,7 @@ expectedJsonShape = go
     go (SerialIFile _)               = "IFile path (Str)"
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
+    go (SerialClosure _ _)           = "function value"
     go (SerialReal _)                = "Real"
     go (SerialFloat32 _)             = "F32"
     go (SerialFloat64 _)             = "F64"
@@ -2020,6 +2024,12 @@ exprToJson (NextX schema handle) =
     , ("schema", jsonStr schema)
     , ("handle", exprToJson handle)
     ]
+exprToJson (StreamLayoutX schema handle) =
+  jsonObj
+    [ ("tag", jsonStr "streamlayout")
+    , ("schema", jsonStr schema)
+    , ("handle", exprToJson handle)
+    ]
 exprToJson (StreamX schema handle) =
   jsonObj
     [ ("tag", jsonStr "stream")
@@ -2082,6 +2092,14 @@ exprToJson (CatchX fallible fallback) =
     [ ("tag", jsonStr "catch")
     , ("fallible", exprToJson fallible)
     , ("fallback", exprToJson fallback)
+    ]
+exprToJson (IfX schema cond thenX elseX) =
+  jsonObj
+    [ ("tag", jsonStr "if")
+    , ("schema", jsonStr schema)
+    , ("cond", exprToJson cond)
+    , ("then", exprToJson thenX)
+    , ("else", exprToJson elseX)
     ]
 exprToJson (OptX schema child) =
   jsonObj
@@ -2363,7 +2381,7 @@ buildManifest ManifestInputs{..} =
       jsonArr (map (oneTerminal parentName) specs)
 
     oneTerminal :: Text -> WithSpec -> Text
-    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _) =
+    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _ isDefault _) =
       let EV mangled = mangleTerminalName (EV parentName) long
           desc = case Map.lookup (EV tName) miTermDocs of
             Just (firstLine : _) -> firstLine
@@ -2378,6 +2396,9 @@ buildManifest ManifestInputs{..} =
             -- `render` terminals emit their handler's bytes verbatim, so the
             -- nexus defaults their output format to `raw` (see phase2.rs).
             , ("render", jsonBool isRender)
+            -- a `@default` terminal fires when no formatter flag and no `-f`
+            -- is given (see phase2.rs redirect_via_terminal).
+            , ("default", jsonBool isDefault)
             ]
 
     -- Render the @args@ JSON array. 'makeSerialASTs' produces one
@@ -2489,12 +2510,15 @@ generate cs rASTs helperRASTs = do
         return installDir
       else liftIO Dir.getCurrentDirectory
 
+  poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
       daemonSets = uniqueFst [(socketLang s, s) | s <- allSockets]
 
+      -- A guest member's manifolds live in its host's pool; map its lang to
+      -- the host pool index (futhark -> cpp). Identity for non-members.
       langToPoolIndex :: Lang -> Int
       langToPoolIndex lang =
-        case findIndex ((== lang) . fst) daemonSets of
+        case findIndex ((== LR.poolOf poolRegistry lang) . fst) daemonSets of
           Just idx -> idx
           Nothing -> error $ "Pool not found for language: " <> show lang
 

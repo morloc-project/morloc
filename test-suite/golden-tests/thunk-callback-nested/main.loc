@@ -1,0 +1,57 @@
+module main (nestedLambdas, nestedBare, nestedMulti)
+
+effect Error
+
+import root-cpp
+
+source Cpp from "foo.hpp"
+  ( "runList", "tap", "add", "totalSoFar", "resetTally"
+  , "runList" as runListE
+  , "tap"     as tapE
+  )
+
+type Cpp => Int = "int"
+
+runList     :: [Int -> <IO> ()] -> Int -> <IO> ()
+tap         :: Int -> <IO> ()
+add         :: Int -> Int -> Int
+totalSoFar  :: <IO> Int
+resetTally  :: <IO> ()
+
+-- Same C++ template, re-declared with a multi-label effect: the list's
+-- element type then carries two EffectT layers that must both be peeled.
+runListE    :: [Int -> <IO, Error> ()] -> Int -> <IO, Error> ()
+tapE        :: Int -> <IO, Error> ()
+
+-- Regression: an effectful callback nested inside a STRUCTURED argument (a
+-- list/tuple/record of closures) passed to a foreign source call must fire its
+-- effect when the source invokes it -- exactly as a direct callback argument
+-- does. 'EffectBoundary.maybeForceCallbackArg' descends into the structure to
+-- force each nested closure and peels the container's element type to match.
+-- Before the fix the nested closures kept their '<E> T' thunk return: a C++
+-- type mismatch (vector<function<function<Unit()>(int)>> vs the forced
+-- vector<function<Unit(int)>> the source expects) or a silently dropped effect.
+
+-- Two lambda callbacks in a list; the second runs a nested pure call.
+-- Correct: tap(5) + tap(add 5 5) = 5 + 10 = 15.
+nestedLambdas :: <IO> Int
+nestedLambdas = do
+  resetTally
+  runList [(\x -> tap x), (\x -> tap (add x x))] 5
+  totalSoFar
+
+-- Bare sourced callbacks in a list (no morloc lambda wrapper generated).
+-- Correct: tap(7) + tap(7) = 14.
+nestedBare :: <IO> Int
+nestedBare = do
+  resetTally
+  runList [tap, tap] 7
+  totalSoFar
+
+-- Multi-effect callbacks in a list; both EffectT layers must peel.
+-- Correct: tapE(6) + tapE(6) = 12.
+nestedMulti :: <IO, Error> Int
+nestedMulti = do
+  resetTally
+  runListE [(\x -> tapE x), (\x -> tapE x)] 6
+  totalSoFar

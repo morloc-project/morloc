@@ -1,0 +1,35 @@
+-- A function value is produced by an effectful computation in Rust and applied
+-- by a higher-order function sourced in Python. The closure crosses the
+-- Rust -> Python boundary carrying its captured `base`: the Rust pool REIFIES it
+-- into the wire tuple `(sockid, mid, captured)`, and a home-pool dispatch wrapper
+-- applies the closure body when Python's reflected proxy calls back. Exercises
+-- the Rust member's closure REIFICATION (the producer half of cross-pool
+-- defunctionalization), mirroring the C++ producer in `defunc-interop-cr`.
+--
+-- `base` is a runtime CLI argument, so it is NOT constant-folded: the Rust
+-- producer must serialize a genuinely captured value into the closure wire form
+-- (via `reify_capture`). A literal base would fold the capture to empty.
+
+module main (crossApply)
+
+import root-rust
+import root-py
+
+source Rust from "producer.rs" ("tick", "mul")
+source Py from "consumer.py" ("applyIt")
+
+type Rust => Int = "i64"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+crossApply :: Int -> <IO> Int
+crossApply base = do
+  f <- mkMul base
+  applyIt f 10

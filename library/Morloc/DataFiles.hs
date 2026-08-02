@@ -19,6 +19,7 @@ module Morloc.DataFiles
   , LangSetup (..)
   , libmorlocHeader
   , poolTemplate
+  , poolHostTemplate
   , poolTemplateGeneric
   , langSetups
   , langRegistryFiles
@@ -51,7 +52,14 @@ libmorlocHeader = decodeUtf8 $(embedFileRelative "data/morloc/morloc.h")
 -- | Pool template lookup by canonical language name
 poolTemplate :: Text -> EmbededFile
 poolTemplate "cpp" = EmbededFile "pool.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool.cpp"))
+poolTemplate "rust" = EmbededFile "pool.rs" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/pool.rs"))
 poolTemplate name = error $ "No embedded pool template for " <> T.unpack name
+
+-- | Member-agnostic pool host translation unit for the CAbi family. Owns
+-- main()/pool_main; the member (pool.cpp) provides the registration hook it calls.
+poolHostTemplate :: Text -> EmbededFile
+poolHostTemplate "cpp" = EmbededFile "pool_host.cpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/pool_host.cpp"))
+poolHostTemplate name = error $ "No embedded pool host template for " <> T.unpack name
 
 -- | 3-section pool templates for the generic translator (sources, manifolds, dispatch)
 poolTemplateGeneric :: Text -> EmbededFile
@@ -121,6 +129,8 @@ langRegistryFiles =
   , ("py", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/py/lang.yaml")))
   , ("r", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/lang.yaml")))
   , ("jl", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml")))
+  , ("futhark", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/futhark/lang.yaml")))
+  , ("rust", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/lang.yaml")))
   ]
 
 -- | Shared languages.yaml with pairwise costs

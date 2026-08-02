@@ -1,0 +1,25 @@
+module main (mmSumDoubled)
+
+import root
+import root-py
+import root-cpp
+import tensor
+import tensor-cpp
+import vector
+import vector-cpp
+
+-- A Python function consumes a co-located Futhark result. Futhark is a
+-- CAbi member of the C++ pool (no pool of its own), so this exercises a
+-- cross-pool call FROM the python pool INTO the C++ pool where futhark
+-- lives -- the socket/pool for the futhark call must resolve to cpp, not
+-- to a (nonexistent) futhark pool.
+source Futhark from "kernels.fut" ( "matmul" as fmatmul, "sum_mat" as fsumMat )
+source Py from "m.py" ("pyDouble")
+
+fmatmul :: Matrix m k F32 -> Matrix k n F32 -> Matrix m n F32
+fsumMat :: Matrix m n F32 -> F32
+pyDouble :: F32 -> F32
+
+-- matmul of two all-ones matrices (2x3 . 3x4) summed = 24, doubled in python = 48
+mmSumDoubled :: F32
+mmSumDoubled = pyDouble (fsumMat (fmatmul (ones2 2 3) (ones2 3 4)))

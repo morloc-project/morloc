@@ -1,0 +1,84 @@
+-- @streamLayout: per-sub-packet layout of an indexed IFile, for parallel planning.
+--
+-- @streamLayout :: IFile [a] -> <IO, Err> [(U64, U64, U64)]
+--   returns one (elementOffset, elementCount, uncompressedSize) triple per
+--   sub-packet, in file order. A DATA packet is the degenerate single-chunk
+--   case. The layout is derived at read time from the sub-packet index and
+--   the per-sub-packet headers (no wire-format change, no decompression).
+--
+-- The C++ projections below pull out the deterministic fields (elementOffset,
+-- elementCount) so the expected output is stable. Sourcing them also drives
+-- the layout through the C++ pool's `_mlc_stream_layout` wrapper end-to-end.
+-- uncompressedSize is byte-size dependent (not asserted here); its computation
+-- is exercised by the parallelization case study.
+
+module main
+  ( offsets
+  , counts
+  , numChunks
+  , totalElems
+  , dataOffsets
+  , dataCounts
+  )
+
+import root
+import root-cpp
+
+source Cpp from "proj.hpp" ("projOffsets", "projCounts", "chunkCount")
+projOffsets :: [(U64, U64, U64)] -> [U64]
+projCounts :: [(U64, U64, U64)] -> [U64]
+chunkCount :: [(U64, U64, U64)] -> Int
+
+-- Write three sub-packets (element counts 3, 4, 1) and reopen as an IFile.
+openThree :: Str -> <IO, Err> IFile [Int]
+openThree path = do
+  o <- @open path :: <IO, Err> OStream Int
+  @write 0 o [1, 2, 3]
+  @flush o
+  @write 0 o [4, 5, 6, 7]
+  @flush o
+  @write 0 o [8]
+  @close o
+  @open path :: <IO, Err> IFile [Int]
+
+offsets :: Str -> <IO, Err> [U64]
+offsets path = do
+  f <- openThree path
+  layout <- @streamLayout f
+  projOffsets layout
+
+counts :: Str -> <IO, Err> [U64]
+counts path = do
+  f <- openThree path
+  layout <- @streamLayout f
+  projCounts layout
+
+numChunks :: Str -> <IO, Err> Int
+numChunks path = do
+  f <- openThree path
+  layout <- @streamLayout f
+  chunkCount layout
+
+totalElems :: Str -> <IO, Err> Int
+totalElems path = do
+  f <- openThree path
+  @flen f
+
+-- DATA-packet single-chunk case: a monolithic @save'd list opens as an
+-- IFile whose layout is exactly one triple (offset 0, count = #elements).
+openData :: Str -> <IO, Err> IFile [Int]
+openData path = do
+  @save 0 [10, 20, 30, 40] path
+  @open path :: <IO, Err> IFile [Int]
+
+dataOffsets :: Str -> <IO, Err> [U64]
+dataOffsets path = do
+  f <- openData path
+  layout <- @streamLayout f
+  projOffsets layout
+
+dataCounts :: Str -> <IO, Err> [U64]
+dataCounts path = do
+  f <- openData path
+  layout <- @streamLayout f
+  projCounts layout

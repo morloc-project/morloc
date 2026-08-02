@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
@@ -35,6 +36,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
     -- * Lowering: serialize/deserialize expansion
   , expandSerialize
   , expandDeserialize
+  , containsClosure
 
     -- * Expression lowering
   , lowerSerialExpr
@@ -47,6 +49,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+  , ArgSite (..)
+  , IOwnership (..)
 
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
@@ -79,6 +83,7 @@ import Morloc.CodeGenerator.Grammars.Common
   , mergePoolDocs
   , nvarNamer
   , provideClosure
+  , serialClosuresOf
   , svarNamer
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
@@ -147,6 +152,11 @@ data IExpr
   | IIntrinsicFSchema IExpr -- path -> schema string
   | IIntrinsicFLength IExpr
       -- ^ handle -> Int element count (read from cached StreamDiag)
+  | IIntrinsicStreamLayout Int (Maybe IType) IExpr
+      -- ^ @streamLayout on an IFile: schemaId of the [(U64,U64,U64)] result,
+      --   return type (for C++ template), handle expression. Per-language
+      --   wrappers call mlc_stream_layout and deserialise via
+      --   from_voidstar<List<Tuple3<...>>>.
   | IIntrinsicIFileWalk Int (Maybe IType) IExpr IExpr [IExpr]
       -- ^ Unified IFile pattern walker.
       --   schemaId of the result type, return type (for C++ template),
@@ -280,6 +290,11 @@ data IProgram = IProgram
   , ipSchemaTable :: [Text]  -- ordered list of schema strings; index = schema ID
   , ipLogTemplates :: Map.Map Int RenderedTemplate
     -- ^ Per-labeled-midx pre-rendered log templates. See 'LogTemplate'.
+  , ipClosureTable :: Map.Map Int ([Text], [Text], Text)
+    -- ^ Per-closure-mid wire schemas: (captured-arg schemas, bound-arg schemas,
+    -- result schema). Drives the home-pool serial dispatch wrapper and the reify
+    -- path for defunctionalized closures that cross a language boundary. Empty
+    -- for pools that produce no crossing closures.
   }
   deriving (Generic)
 
@@ -298,8 +313,9 @@ buildProgram ::
   [MDoc] ->
   [SerialManifold] ->
   [Text] ->
+  Map.Map Int ([Text], [Text], Text) ->
   IProgram
-buildProgram labels templates sources manifolds es schemas =
+buildProgram labels templates sources manifolds es schemas closureTable =
   let definedIds = collectManifoldIds es
       foreignCalleeIds =
         Set.fromList [i | SerialManifold i _ _ f _ <- es, isForeignCalleeForm (Just f)]
@@ -314,6 +330,7 @@ buildProgram labels templates sources manifolds es schemas =
         , ipRemoteDispatch = extractRemoteDispatch labels' es
         , ipSchemaTable = schemas
         , ipLogTemplates = templates'
+        , ipClosureTable = closureTable
         }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
@@ -325,15 +342,79 @@ buildProgramM ::
   [SerialManifold] ->
   (SerialManifold -> m MDoc) ->
   m [Text] ->
+  Map.Map Int ([Text], [Text], Text) ->
   m IProgram
-buildProgramM labels templates sources es translateSeg getSchemas = do
+buildProgramM labels templates sources es translateSeg getSchemas closureTable = do
   manifolds <- mapM translateSeg es
   schemas <- getSchemas
-  return $ buildProgram labels templates sources manifolds es schemas
+  return $ buildProgram labels templates sources manifolds es schemas closureTable
+
+-- | Which kind of call an argument is being passed into. Members that vary
+-- argument passing by call kind (currently only Rust) branch on this; the
+-- others ignore it. Every argument-emission site names its kind, so a new
+-- call-emitting path is forced to choose one rather than defaulting silently.
+data ArgSite
+  = SourcedArg Source Int
+  -- ^ i-th argument of a sourced foreign call (carries the declared signature
+  -- so a member can, e.g., pass a type-variable parameter by reference)
+  | ManifoldArg
+  -- ^ argument of a generated manifold call
+  | ClosureArg
+  -- ^ argument of a native closure application (a function-valued variable)
+
+-- | The ownership form a lowered native expression evaluates to. Members that
+-- do not distinguish ownership (C++/Python/R) treat everything as 'Owned'; the
+-- Rust member uses it to decide whether to clone, dereference, or borrow an
+-- expression at a use site (its borrow-by-default parameter convention makes a
+-- non-'Copy' parameter a reference, so feeding it to an owned position requires
+-- a clone).
+data IOwnership
+  = Owned
+  -- ^ an owned value (@T@): a literal, a call result, a constructor
+  | BorrowedRef
+  -- ^ a shared reference (@&T@): a non-'Copy' bound variable
+  | BorrowedPlace
+  -- ^ a place of type @T@ reached through a borrow (a field of a borrowed
+  -- value): moving it out needs a clone, but it is not itself a reference
+  deriving (Eq, Show)
 
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
+  , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
+  -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
+  -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
+  -- expression. Default is identity (C++/Generic pass args unchanged); Rust
+  -- borrows non-'Copy' native args so a value fanned out to several consumers is
+  -- shared, borrows every argument of a closure application to match the
+  -- by-reference @Fn(&T, ...)@ calling convention, and clones/derefs a borrowed
+  -- argument passed to a by-value parameter.
+  , lcOwnership :: NativeExpr -> m IOwnership
+  -- ^ The ownership form a native expression evaluates to (default: always
+  -- 'Owned'). Computed from the original IR so a use site can adapt it; monadic
+  -- because a bound variable's ownership depends on the enclosing manifold's
+  -- parameter conventions (tracked in member state).
+  , lcArgManifoldOwnership :: NativeManifold -> m IOwnership
+  -- ^ The ownership of the value produced by a manifold used as an argument (a
+  -- 'NativeArgManifold'). Always 'Owned' -- a manifold call materializes an owned
+  -- value (its return type is the owned @T@, and the return sink clones a borrowed
+  -- body) -- so no member distinguishes on the manifold.
+  , lcOwnArg :: IOwnership -> TypeF -> MDoc -> MDoc
+  -- ^ Adapt an expression to an owned value at an owned sink (a container
+  -- element, a return, a let binding, a by-value parameter). Default is identity;
+  -- Rust clones a borrowed non-'Copy' value and dereferences a borrowed 'Copy'
+  -- reference.
+  , lcWithCallerScope :: forall a. m a -> m a
+  -- ^ Run an action as if in the enclosing (caller) manifold's scope, so
+  -- 'lcOwnership' of a manifold-call argument (named by index-aliasing after the
+  -- caller's variables) reflects the caller rather than the callee being
+  -- rendered. Default is identity (only Rust distinguishes ownership).
+  , lcCoerceOptional :: MDoc -> MDoc
+  -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
+  -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
+  -- Rust @?T@ is a distinct @Option<T>@ whose wire layout is type-driven, so the
+  -- value must be wrapped in @Some(..)@. The coercion is only inserted to widen a
+  -- non-optional inner, so this never double-wraps.
   , lcTypeOf :: TypeF -> m (Maybe IType)
   , lcSerialAstType :: SerialAST -> m (Maybe IType)
   -- ^ type of a SerialAST for serialization (used for C++ typed declarations)
@@ -345,6 +426,11 @@ data LowerConfig m = LowerConfig
   , lcTypeMOf :: TypeM -> m (Maybe IType)
   , lcPackerName :: Source -> MDoc
   , lcUnpackerName :: Source -> MDoc
+  -- | Whether the argument passed to a pack/unpack function during serialize
+  -- weaving must be borrowed. Default is 'False' (C++/Py/R bind a value to a
+  -- const-ref/by-value param implicitly); Rust borrows a non-'Copy' arg so it
+  -- matches the packer's `&T` parameter. The argument is the arg's type.
+  , lcBorrowPackArg :: TypeF -> Bool
   , lcRecordAccessor :: NamType -> CVar -> MDoc -> MDoc -> MDoc
   , lcDeserialRecordAccessor :: Int -> Key -> MDoc -> MDoc
   -- ^ How to access record fields during deserialization.
@@ -371,6 +457,19 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcStoreField :: TypeF -> MDoc -> m MDoc
+  -- ^ Adapt a value to its stored representation inside an aggregate (given the
+  -- element/field type). Applied to record fields AND list/tuple elements.
+  -- Default is identity; the Rust member wraps a function value in
+  -- @Rc::new(..) as Rc<dyn MorlocFnN<..>>@ so it fits the boxed fat-trait-object
+  -- element type (a bare @impl Fn@ is illegal in a Vec/tuple/struct field, and
+  -- the explicit cast is needed because a @vec![..]@ has no per-element declared
+  -- type to drive the unsizing coercion). Monadic so the cast type can render.
+  , lcApplyClosure :: MDoc -> [MDoc] -> MDoc
+  -- ^ Apply a local function value (a 'LocalCallP') to its arguments. Default is
+  -- a direct call @f(args)@; the Rust member emits @f.callN(args)@ (the fat/thin
+  -- trait method -- monomorphized and inlined for a thin closure, dispatched for
+  -- a boxed one) where N is the argument count.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
   , lcCacheBody :: SerialAST -> Text -> Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
@@ -410,6 +509,34 @@ data LowerConfig m = LowerConfig
   -- for a hoisted def-thunk.
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
+  , lcReifyClosure :: MDoc -> SerialAST -> m MDoc
+  -- ^ Reify a defunctionalized closure value into its wire form: given the
+  -- native closure expression and its 'SerialClosure', produce an expression
+  -- yielding the tuple @(home_language, manifold_id, captured_packets)@ that the
+  -- generic tuple codec then serializes. The 'SerialClosure' carries the arity,
+  -- needed by backends whose reify is arity-indexed (e.g. Rust @reifyN@). Called
+  -- at the serialize boundary for a 'SerialClosure'. See 'computeClosureSchemas'.
+  , lcReflectClosure :: MDoc -> SerialAST -> m MDoc
+  -- ^ Reflect an incoming closure wire form into a native callable: given the
+  -- serialized packet expression and the 'SerialClosure' type, produce an
+  -- expression yielding a callable that, on application, serializes its
+  -- arguments, calls back to the home pool via @foreign_call@ on the closure's
+  -- manifold id, and deserializes the result. Called at the deserialize
+  -- boundary for a top-level 'SerialClosure' (the whole packet is the closure).
+  , lcReflectClosureParsed :: MDoc -> SerialAST -> m MDoc
+  -- ^ Like 'lcReflectClosure', but for a closure NESTED in an aggregate: the
+  -- enclosing @get_value@ has already deserialized the wire tuple, so the given
+  -- expression is the parsed @(home_language, manifold_id, captured_packets)@
+  -- tuple, not a raw packet. Build the callable directly from it (no second
+  -- @get_value@). Called at the deserialize boundary for a nested 'SerialClosure'.
+  , lcDivertNestedClosure :: SerialAST -> Bool
+  -- ^ Whether this backend routes THIS aggregate node through 'construct' so a
+  -- closure inside it is reified/reflected in place, rather than the whole-value
+  -- msgpack short-circuit. C++/Python/R return True for any
+  -- list/tuple/record/optional holding a closure; Rust returns False everywhere
+  -- (nested-closure support is a documented follow-on -- a bare crossing closure
+  -- still works). Lets the shared engine opt in per backend AND per aggregate
+  -- shape.
   , -- manifold lowering fields
     lcMakeFunction ::
       Int ->
@@ -424,28 +551,69 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakeLambda :: MDoc -> [MDoc] -> [MDoc] -> MDoc
-  -- ^ name, contextArgs, boundArgs - partial application expression
+  , lcMakePass :: MDoc -> [Arg TypeM] -> m MDoc
+  -- ^ Render a whole function/operator passed to a higher-order function
+  -- (@ManifoldPass@), given the manifold name and its parameters. Most
+  -- languages pass the manifold by name; the Rust member wraps it in a safe
+  -- closure that adapts each argument to the manifold's parameter convention
+  -- (deref a Copy scalar, forward a reference) since a bare @unsafe fn@ does
+  -- not implement @Fn@.
+  , lcMakeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
+  -- ^ closureSig, name, contextArgs, boundArgs - partial application
+  -- expression. @closureSig@ is the language's rendering of the closure's own
+  -- callable signature (from 'lcClosureSig'); languages that do not need it
+  -- (Python, R) ignore it.
+  , lcClosureSig :: TypeM -> m MDoc
+  -- ^ Render a closure manifold's callable signature (e.g. C++ @int(int)@ for a
+  -- @ManifoldPart@ that takes an int and returns an int). Empty for languages
+  -- whose closures need no static signature.
   , lcRegisterSchema :: Text -> m Int
   -- ^ Register a schema string and return its unique ID (index into schema table)
   }
+
+-- | True if a closure appears anywhere inside the AST. An aggregate is
+-- @isSerializable@ even when it holds a closure field (a closure reports
+-- serializable so a bare crossing closure hits the top-level reify/reflect
+-- clause), so the recursion helpers must additionally refuse to treat such an
+-- aggregate as a msgpack leaf -- otherwise the nested closure field is never
+-- routed through 'lcReifyClosure'/'lcReflectClosure'.
+containsClosure :: SerialAST -> Bool
+containsClosure = not . null . serialClosuresOf
+
+-- | A node that serializes as an opaque msgpack leaf: serializable AND not
+-- diverted for in-place nested-closure handling by this backend.
+isMsgpackLeaf :: LowerConfig m -> SerialAST -> Bool
+isMsgpackLeaf cfg s = isSerializable s && not (lcDivertNestedClosure cfg s)
 
 {- | Expand serialization into IR statements.
 Returns (final expression representing the serialized value, prior statements).
 -}
 expandSerialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
+-- A closure has no msgpack leaf form: reify it into its wire tuple first, then
+-- let the generic tuple codec serialize that tuple.
+expandSerialize cfg v0 s0@(SerialClosure _ _) = do
+  reified <- lcReifyClosure cfg v0 s0
+  schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
+  return (ISerCall schemaId (IRawExpr (render reified)), [])
 expandSerialize cfg v0 s0 = do
   (stmts, vExpr) <- go v0 s0
   schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
   return (ISerCall schemaId vExpr, stmts)
   where
     go v s
-      | isSerializable s = return ([], IRawExpr (render v))
+      | isMsgpackLeaf cfg s = return ([], IRawExpr (render v))
       | otherwise = construct v s
 
+    -- A closure field inside an aggregate: reify it in place into its wire
+    -- tuple, which the enclosing aggregate's generic codec then serializes
+    -- against the closure field's tuple schema.
+    construct v s@(SerialClosure _ _) = do
+      reified <- lcReifyClosure cfg v s
+      return ([], IRawExpr (render reified))
     construct v (SerialPack _ (p, s)) =
       let unpacker = lcUnpackerName cfg (typePackerReverse p)
-       in go (unpacker <> parens v) s
+          arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
+       in go (unpacker <> parens arg) s
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcSerialAstType cfg lst
@@ -495,8 +663,13 @@ expandSerialize cfg v0 s0 = do
 Returns (final expression representing the deserialized value, prior statements).
 -}
 expandDeserialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
+-- A closure arrives as its wire tuple: reflect it into a native callable that
+-- calls back to the producing pool on apply.
+expandDeserialize cfg v0 s0@(SerialClosure _ _) = do
+  reflected <- lcReflectClosure cfg v0 s0
+  return (IRawExpr (render reflected), [])
 expandDeserialize cfg v0 s0
-  | isSerializable s0 = do
+  | isMsgpackLeaf cfg s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
       return (IDesCall schemaId desType (IRawExpr (render v0)), [])
@@ -509,13 +682,25 @@ expandDeserialize cfg v0 s0
       return (x, IAssign rawvar rawType (IDesCall schemaId rawType (IRawExpr (render v0))) : befores)
   where
     check v s
-      | isSerializable s = return (IRawExpr (render v), [])
+      | isMsgpackLeaf cfg s = return (IRawExpr (render v), [])
       | otherwise = construct v s
 
+    -- A closure field: the enclosing get_value has already parsed its wire
+    -- tuple, so reflect the parsed tuple in place into a native callable that
+    -- RPCs back to the producing pool on application.
+    construct v s@(SerialClosure _ _) = do
+      reflected <- lcReflectClosureParsed cfg v s
+      return (IRawExpr (render reflected), [])
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
       let packer = render $ lcPackerName cfg (typePackerForward p)
-      return (IPack packer x, before)
+          -- Borrow the packer's arg (the wire value) for a non-Copy wire type,
+          -- matching a `&T` packer parameter. The common (no-borrow) case keeps
+          -- `x` structured; only a borrow needs a rendered `&(..)` wrapper.
+          x' = if lcBorrowPackArg cfg (typePackerUnpacked p)
+                 then IRawExpr (render ("&(" <> lcPrintExpr cfg x <> ")"))
+                 else x
+      return (IPack packer x', before)
     construct v lst@(SerialList _ _ s) = do
       idx <- lcNewIndex cfg
       resultType <- lcDeserialAstType cfg lst
@@ -600,6 +785,46 @@ lowerSerialExpr cfg _ (SerializeS_ s e) = do
   se <- lcSerialize cfg (poolExpr e) s
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
 
+-- | The ownership of each argument of an @AppExeN@, taken from the original IR
+-- (a manifold-valued argument is always an owned call result).
+argOwnerships :: (Monad m) => LowerConfig m -> NativeExpr -> m [IOwnership]
+argOwnerships cfg (AppExeN _ _ args) = mapM (nativeArgOwnership cfg) args
+argOwnerships _ _ = return (repeat Owned)
+
+nativeArgOwnership :: LowerConfig m -> NativeArg -> m IOwnership
+nativeArgOwnership cfg (NativeArgExpr e) = lcOwnership cfg e
+nativeArgOwnership cfg (NativeArgManifold nm) = lcArgManifoldOwnership cfg nm
+
+-- | Adapt a container element (an owned sink) to an owned value, using its
+-- ownership and type from the original IR.
+adaptOwnedElem :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+adaptOwnedElem cfg origE pd = do
+  own <- lcOwnership cfg origE
+  return pd {poolExpr = lcOwnArg cfg own (typeFof origE) (poolExpr pd)}
+
+-- | Adapt each element of a container (list/tuple/record) to an owned value,
+-- pairing the lowered elements with their originals; the elements pass through
+-- unadapted if the counts disagree.
+adaptOwnedElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
+adaptOwnedElems cfg origEs xs
+  | length origEs == length xs = zipWithM (adaptOwnedElem cfg) origEs xs
+  | otherwise = return xs
+
+-- | Adapt each aggregate element/field to its stored representation via
+-- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
+-- element type). Passes through unchanged when the original expression list is
+-- unavailable (length mismatch), mirroring 'adaptOwnedElems'.
+storeElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
+storeElems cfg origEs xs
+  | length origEs == length xs =
+      zipWithM
+        (\e pd -> do
+            v <- lcStoreField cfg (typeFof e) (poolExpr pd)
+            return pd {poolExpr = v})
+        origEs
+        xs
+  | otherwise = return xs
+
 -- | Lower a native expression to PoolDocs via the IR.
 lowerNativeExpr ::
   (Monad m) =>
@@ -611,13 +836,16 @@ lowerNativeExpr ::
 lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExpr cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> es)) = do
-  let handleFunctionArgs =
+lowerNativeExpr cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
+  owns <- argOwnerships cfg origExpr
+  let argTypes = map fst es
+      handleFunctionArgs exprs =
         (<>) (lcSrcName cfg src)
           . hsep
           . map tupled
           . provideClosure src
-  return $ mergePoolDocs handleFunctionArgs es
+          $ zipWith (\(i, t, own) e -> lcSourcedArg cfg (SourcedArg src i) own t e) (zip3 [0 ..] argTypes owns) exprs
+  return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs
   patResult <- lcEvalPattern cfg t p (map poolExpr es)
@@ -629,11 +857,24 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
       , poolPriorExprs = concatMap poolPriorExprs es
       , poolReturnFlag = any poolReturnFlag es
       }
-lowerNativeExpr _ _ (AppExeN_ _ (LocalCallP idx) (map snd -> es)) = do
-  return $ mergePoolDocs ((<>) (nvarNamer idx) . tupled) es
-lowerNativeExpr _ _ (AppExeN_ _ (RecCallP mid _) (map snd -> es)) = do
-  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
+-- Manifold-call arguments go through lcSourcedArg too (identity for most
+-- languages; the Rust member borrows every native arg so a value can fan out to
+-- several manifold calls as shared borrows instead of a move-after-move).
+lowerNativeExpr cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
+  owns <- argOwnerships cfg origExpr
+  let argTypes = map fst xs
+  return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
+lowerNativeExpr cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
+  owns <- argOwnerships cfg origExpr
+  let argTypes = map fst xs
+  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)
 lowerNativeExpr _ _ (ManN_ call) = return call
+-- The manifold return is an owned sink: adapt the returned value to an owned
+-- value (Rust clones a borrowed/place value; other members are unchanged) so a
+-- `&T`/place value does not reach the owned return slot.
+lowerNativeExpr cfg (ReturnN innerE) (ReturnN_ x) = do
+  x' <- adaptOwnedElem cfg innerE x
+  return $ x' {poolReturnFlag = True}
 lowerNativeExpr _ _ (ReturnN_ x) =
   return $ x {poolReturnFlag = True}
 lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) = do
@@ -656,7 +897,12 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
           }
   lcMakeLet cfg helperNamer tmpIdx (Just bodyT) letResult releaseBody
 lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing x1 x2
-lowerNativeExpr cfg (NativeLetN _ (typeFof -> t) _) (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i (Just t) x1 x2
+-- A native let binds an owned local, so its RHS is an owned sink: adapt the
+-- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
+-- borrowed receiver -- to match the owned binding type; other members unchanged).
+lowerNativeExpr cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
+  x1' <- adaptOwnedElem cfg rhsE x1
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) x1' x2
 lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing x1 x2
 lowerNativeExpr _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExpr _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
@@ -671,15 +917,21 @@ lowerNativeExpr cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr
 lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
-lowerNativeExpr cfg _ (ListN_ v t xs) = return $ mergePoolDocs (lcListConstructor cfg v t) xs
-lowerNativeExpr cfg origExpr (TupleN_ v xs) =
+lowerNativeExpr cfg origExpr (ListN_ v t xs) = do
+  let elemEs = case origExpr of ListN _ _ es -> es; _ -> []
+  xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
+  return $ mergePoolDocs (lcListConstructor cfg v t) xs'
+lowerNativeExpr cfg origExpr (TupleN_ v xs) = do
   let slotTypes = case typeFof origExpr of
         AppF _ ts -> ts
         _ -> []
-  in return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs
+      elemEs = case origExpr of TupleN _ es -> es; _ -> []
+  xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
+  return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
-  let es = map snd rs
-      recType = typeFof origExpr
+  let fieldEs = case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []
+  es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= storeElems cfg fieldEs
+  let recType = typeFof origExpr
   rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
   return $
     rec'
@@ -713,8 +965,25 @@ lowerNativeExpr cfg _ (DoBlockN_ t x) = do
       , poolPriorExprs = poolPriorExprs x
       }
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
--- CoerceToOptional is a noop in all target languages: T is a valid ?T
-lowerNativeExpr _ _ (CoerceN_ CoerceToOptional _ x) = return x
+-- CoerceToOptional widens a value to an optional. Most languages treat a T as a
+-- valid ?T (identity); Rust must wrap the value in Some(..) (see lcCoerceOptional).
+-- The wrapped value must be OWNED first: `Some(&T)` is an `Option<&T>`, not the
+-- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
+lowerNativeExpr cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
+  x' <- adaptOwnedElem cfg innerE x
+  -- Adapt the inner to its stored representation before wrapping (Rust boxes a
+  -- closure into `Rc<dyn MorlocFnN>` so the payload matches the boxed
+  -- `Option<Rc<dyn MorlocFnN>>` element type), mirroring list/tuple/record.
+  boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
+  return $ x' {poolExpr = lcCoerceOptional cfg boxed}
+lowerNativeExpr cfg _ (CoerceN_ CoerceToOptional _ x) =
+  return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
+-- The two arms feed the conditional's owned result sink, so adapt each to an
+-- owned value (like every other owned sink); the condition is not a sink.
+lowerNativeExpr cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
+  thenDocs' <- adaptOwnedElem cfg thenE thenDocs
+  elseDocs' <- adaptOwnedElem cfg elseE elseDocs
+  lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
@@ -837,6 +1106,20 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs])
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicNext sid resultType
+          (IRawExpr (render (poolExpr handleDocs))))
+    }
+-- @streamLayout: IFile handle -> <IO> [(U64,U64,U64)]. The wrapper
+-- deserialises the materialised voidstar layout into a typed list of
+-- triples.
+lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrStreamLayout (Just schema) [handleDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  let resultTf = case typeFof origExpr of
+        EffectF _ inner -> inner
+        other -> other
+  resultType <- lcTypeOf cfg resultTf
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicStreamLayout sid resultType
           (IRawExpr (render (poolExpr handleDocs))))
     }
 -- @stream: derive an IStream handle from an IFile. The runtime opens
@@ -1021,15 +1304,36 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
       args = typeMofForm form
       mname = manNamer m
   maybeNewManifold <- lcMakeFunction cfg m mname args manifoldType priorLines body headForm
-  let call = case form of
-        (ManifoldPass _) -> mname
-        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
-        (ManifoldPart rs vs) ->
-          lcMakeLambda
-            cfg
-            mname
-            (map argNamer (typeMofRs rs))
-            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+  call <- case form of
+        (ManifoldPass _) -> lcMakePass cfg mname args
+        -- Wrap each manifold-call argument through lcSourcedArg (identity for
+        -- most languages; the Rust member adapts each native arg to the callee's
+        -- convention by ownership, so an already-borrowed arg passes as `&T` and
+        -- an owned one is borrowed to `&T` -- never a double reference).
+        (ManifoldFull rs) -> do
+          -- The call arguments are named by index-aliasing after the CALLER's
+          -- variables, so their ownership is read in the caller's scope. A
+          -- non-Native (serialized) argument is an owned deserialized value.
+          callArgs <- lcWithCallerScope cfg $
+            mapM
+              ( \a@(Arg i t) -> do
+                  own <- case t of
+                    Native tf -> lcOwnership cfg (BndVarN tf i)
+                    _ -> return Owned
+                  return $ lcSourcedArg cfg ManifoldArg own t (argNamer a)
+              )
+              (typeMofRs rs)
+          return $ mname <> tupled callArgs
+        (ManifoldPart rs vs) -> do
+          -- The closure's callable signature is result(bound...) -- only the
+          -- REMAINING parameters, never the captured context args. Build it
+          -- from the bound args and the manifold's result type.
+          let resultType = case manifoldType of
+                Function _ o -> o
+                o -> o
+              sigType = Function [typeMof t | Arg _ t <- vs] resultType
+          sig <- lcClosureSig cfg sigType
+          lcMakeLambda cfg sig mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
   return $
     PoolDocs
       { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold

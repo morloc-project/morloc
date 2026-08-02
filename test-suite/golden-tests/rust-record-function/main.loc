@@ -1,0 +1,23 @@
+module main (run)
+
+import root-rust
+
+source Rust from "own.rs" ("inc" as inc)
+inc :: Int -> Int
+
+-- A record with a FUNCTION field, used entirely within one Rust pool. The field
+-- is stored as a fat trait object `Rc<dyn MorlocFn1<i64,i64>>` (a bare `impl Fn`
+-- is illegal in a struct field); construction boxes the closure with `Rc::new`;
+-- the extracted field is applied via `act.call1(..)`. The record never crosses a
+-- boundary, so its auto-marshaller is skipped (a function value only crosses via
+-- reify/reflect, which is Stage 3).
+record Handler where
+  action :: Int -> Int
+  base :: Int
+record Rust => Handler = "struct"
+
+run :: Int -> Int
+run x =
+  let h = ({action = inc, base = x} :: Handler) in
+  let ({action = act, base = b}) = h in
+  act b

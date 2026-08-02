@@ -70,6 +70,57 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
     return go
 
 
+# Defunctionalized-closure support. A morloc function value is a
+# functools.partial over a manifold function m<mid>; when it crosses a language
+# boundary it travels as the wire tuple (home_language, manifold_id,
+# captured_packets) and is applied on the far side by calling back to this pool.
+
+def mlc_reify(f, home_lang):
+    # Recover (mid, captured) from a closure and serialize its captured values.
+    # partial.func.__name__ is "m<mid>"; partial.args are the captured values in
+    # the manifold's context-argument order; mlc_closure_table[mid] holds their
+    # schemas.
+    mid = int(f.func.__name__[1:])
+    captured = list(f.args)
+    cap_schemas = mlc_closure_table.get(mid, [])
+    packets = [morloc.put_value(c, s) for c, s in zip(captured, cap_schemas)]
+    return (home_lang, mid, packets)
+
+
+def mlc_reflect_from_tuple(tup, arg_schemas, res_schema):
+    # Rebuild a callable from an already-deserialized closure wire tuple
+    # (home_lang, mid, captured_packets). On application it serializes its
+    # arguments, appends them to the captured packets, and calls back to the
+    # producing pool via foreign_call on the closure's manifold id. Used when the
+    # closure is nested in an aggregate whose enclosing get_value has already
+    # parsed the tuple.
+    home_lang, mid, captured = tup
+    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    def _call(*args):
+        packets = list(captured) + [morloc.put_value(a, s) for a, s in zip(args, arg_schemas)]
+        return morloc.get_value(morloc.foreign_call(sock, mid, packets), res_schema)
+    return _call
+
+
+def mlc_reflect(pkt, tuple_schema, arg_schemas, res_schema):
+    # Rebuild a callable from a raw incoming closure wire packet: deserialize the
+    # tuple, then reflect it. Used when the closure is the top-level crossing
+    # value (the whole packet is the closure tuple).
+    return mlc_reflect_from_tuple(morloc.get_value(pkt, tuple_schema), arg_schemas, res_schema)
+
+
+def mlc_make_closure_dispatch(mid, arg_schemas, res_schema):
+    # Serial dispatch wrapper for a closure manifold: deserialize the incoming
+    # captured ++ bound argument packets, call the native manifold, and
+    # serialize the result. Registered under the closure's mid so a foreign
+    # apply reaches it.
+    fn = globals()["m" + str(mid)]
+    def _wrapper(*sargs):
+        args = [morloc.get_value(s, sch) for s, sch in zip(sargs, arg_schemas)]
+        return morloc.put_value(fn(*args), res_schema)
+    return _wrapper
+
+
 # AUTO include manifolds start
 # <<<BREAK>>>
 # AUTO include manifolds end

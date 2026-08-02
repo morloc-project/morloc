@@ -1,0 +1,36 @@
+-- A function value is produced by an effectful computation in Python and
+-- applied by a higher-order function sourced in Rust. The closure crosses the
+-- Python -> Rust boundary carrying its captured `base`; the Rust pool REFLECTS
+-- the incoming closure wire tuple into a native callable that appends the
+-- runtime arguments to the captured packets and RPCs back to the Python pool on
+-- each application. Exercises the Rust member's closure reflection (the consumer
+-- half of cross-pool defunctionalization), mirroring the C++ consumer in
+-- `defunc-interop-pc`.
+--
+-- `base` is a runtime CLI argument, so the crossing closure carries a genuinely
+-- captured packet that the Rust reflect proxy must forward (a literal base folds
+-- the capture to empty).
+
+module main (crossApply)
+
+import root-py
+import root-rust
+
+source Py from "producer.py" ("tick", "mul")
+source Rust from "consumer.rs" ("applyIt")
+
+type Rust => Int = "i64"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+crossApply :: Int -> <IO> Int
+crossApply base = do
+  f <- mkMul base
+  applyIt f 10

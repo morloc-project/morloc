@@ -18,6 +18,6 @@ produce sink = do
 -- parent command. Without the fix, --tagged silently falls back to the default
 -- (untagged) output.
 --' Stream two batches of integers
---' with.buffer: -t/--tagged=tag
+--' @with -t/--tagged=tag @stream
 streamNums :: <IO, Err> ()
 streamNums = @collect produce

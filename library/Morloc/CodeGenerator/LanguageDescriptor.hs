@@ -206,6 +206,25 @@ data LangDescriptor = LangDescriptor
     -- (the unwrapped callable expression, including any "_remote" suffix).
     -- Empty disables wrapping. Example for Python:
     -- @"__mlc_log(\"{{label}}\", {{inner}})"@.
+  , ldClosureRegisterEntry :: !Text
+    -- ^ Per-closure force-registration statement, giving each defunctionalized
+    -- closure a home-pool dispatch entry so a boundary-crossing closure can be
+    -- called back via @foreign_call@ on its manifold id. Substitutions:
+    -- {{mid}} (manifold id), {{args}} (list literal of the full argument
+    -- schema strings, captured ++ bound), {{res}} (result schema string).
+    -- Empty means the language does not yet support producing crossing
+    -- closures, and no closure table is emitted. Example for Python:
+    -- @"dispatch[{{mid}}] = mlc_make_closure_dispatch({{mid}}, {{args}}, {{res}})"@.
+  , ldClosureTableHeader :: !Text
+    -- ^ Statement that initializes the per-pool @mlc_closure_table@ (mid ->
+    -- captured-argument schemas), consulted by the reify helper. Emitted once
+    -- before the per-closure entries. Example Python: @"mlc_closure_table = {}"@;
+    -- R: @"mlc_closure_table <- list()"@.
+  , ldClosureTableEntry :: !Text
+    -- ^ Per-closure entry populating @mlc_closure_table@. Substitutions: {{mid}}
+    -- and {{caps}} (list literal of the captured-argument schema strings).
+    -- Example Python: @"mlc_closure_table[{{mid}}] = {{caps}}"@; R:
+    -- @"mlc_closure_table[[\"{{mid}}\"]] <- {{caps}}"@.
   }
   deriving (Eq, Show, Generic)
 
@@ -322,6 +341,9 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteEntry" (Y.String "")
             . ins "ldDispatchRemoteFooter" (Y.String "")
             . ins "ldLogWrap" (Y.String "")
+            . ins "ldClosureRegisterEntry" (Y.String "")
+            . ins "ldClosureTableHeader" (Y.String "")
+            . ins "ldClosureTableEntry" (Y.String "")
             $ obj
     Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
 
@@ -413,6 +435,9 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteEntry = ""
     , ldDispatchRemoteFooter = ""
     , ldLogWrap = ""
+    , ldClosureRegisterEntry = ""
+    , ldClosureTableHeader = ""
+    , ldClosureTableEntry = ""
     }
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the

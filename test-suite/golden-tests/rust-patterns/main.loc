@@ -1,0 +1,63 @@
+-- Rust pool member: pattern accessors beyond plain getters.
+--
+-- Covers the rustEvalPattern cases that previously errored:
+--   * string interpolation `"... #{x} ..."` (interweave_strings)
+--   * a getter chain with bracket steps `.1.[i]` / `.1.[a:b]`
+--   * a multi-sibling getter group `.(.0, .2)` -> a tuple
+--   * record/tuple SETTERS `.(.field = v)` (rebuild with one leaf replaced;
+--     the receiver is bound once and unchanged fields are cloned)
+--
+-- idrust forces the pattern evaluation into the Rust pool.
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main
+  ( greet
+  , tupIdx
+  , tupSlice
+  , tupGroup
+  , setX
+  , setTup
+  , setNested
+  )
+
+import root-rust
+
+record Rec where
+  x :: Int
+  y :: Str
+  z :: Int
+record Rust => Rec = "struct"
+
+record Rec2 where
+  a :: Int
+  p :: (Str, Int)
+record Rust => Rec2 = "struct"
+
+-- string interpolation
+greet :: Str -> Str -> Str
+greet name place = idrust "Hi #{name} from #{place}!"
+
+-- index element i of the [Int] at tuple position .1
+tupIdx :: (Str, [Int]) -> Int -> Int
+tupIdx t i = idrust (.1.[i] t)
+
+-- slice the [Int] at tuple position .1
+tupSlice :: (Str, [Int]) -> Int -> Int -> [Int]
+tupSlice t a b = idrust (.1.[a:b] t)
+
+-- multi-sibling group of getters at the root -> a tuple
+tupGroup :: (Int, Str, Int) -> (Int, Int)
+tupGroup t = idrust (.(.0, .2) t)
+
+-- record setter: replace one field, keep the rest
+setX :: Rec -> Int -> Rec
+setX r v = .(.x = v) (idrust r)
+
+-- tuple setter: replace position 1
+setTup :: (Int, Str, Int) -> Str -> (Int, Str, Int)
+setTup t v = .(.1 = v) (idrust t)
+
+-- nested setter: set element 0 of the tuple field .p
+setNested :: Rec2 -> Str -> Rec2
+setNested r v = .(.p.0 = v) (idrust r)

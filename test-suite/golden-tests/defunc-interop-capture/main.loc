@@ -1,0 +1,29 @@
+-- A closure captures a RUNTIME (non-literal) base and crosses to a foreign
+-- higher-order function sourced in another language, which invokes it back in
+-- the home language. `base` is a runtime CLI argument, so the capture is NOT
+-- constant-folded: this exercises serializing a captured value across the
+-- boundary (the base interop tests fold their captures to empty).
+
+module main (crossApply)
+
+import root-py
+import root-cpp
+
+source Py from "producer.py" ("tick", "mul")
+source Cpp from "consumer.hpp" ("applyIt")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+crossApply :: Int -> <IO> Int
+crossApply base = do
+  f <- mkMul base
+  applyIt f 10

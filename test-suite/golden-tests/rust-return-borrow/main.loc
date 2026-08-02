@@ -1,0 +1,18 @@
+module main (allTags)
+
+import root-rust
+
+record Item where
+  key :: Int
+  tags :: [Int]
+record Rust => Item = "struct"
+
+-- `map` runs the closure over BORROWED `&Item` elements. Destructuring an
+-- element binds its non-Copy `tags` field via a let whose RHS is the field
+-- reached THROUGH the borrow (an ownership `BorrowedPlace`): the generated
+-- `let t: Vec<i64> = it.tags;` moves `[Int]` out of a `&Item` -- rustc E0507.
+-- The let-RHS (and the return) owned sinks were spliced raw, bypassing the
+-- ownership adapter. Fix: route them through `rustOwn`, cloning the borrowed
+-- field.
+allTags :: [Item] -> [[Int]]
+allTags items = map (\it -> let ({key = _, tags = t}) = it in t) items

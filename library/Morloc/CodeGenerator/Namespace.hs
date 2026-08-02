@@ -42,6 +42,8 @@ module Morloc.CodeGenerator.Namespace
   , partitionKindArgsT
   , partitionKindArgsU
   , mkEffectF
+  , isEffectF
+  , stripEffectF
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -209,6 +211,19 @@ mkEffectF ls t
       EffectF ls2 t2 -> mkEffectF (Set.union ls ls2) t2
       _ -> EffectF ls t
 
+-- | True iff the outermost constructor is an effect wrapper (@<E> T@).
+isEffectF :: TypeF -> Bool
+isEffectF (EffectF _ _) = True
+isEffectF _ = False
+
+-- | Strip all outer effect wrappers to recover the bare value type. An
+-- effect-typed value and the value it wraps have the same runtime
+-- representation (effects are erased); this recovers the eager type when a
+-- thunk-valued effect expression is forced.
+stripEffectF :: TypeF -> TypeF
+stripEffectF (EffectF _ t) = stripEffectF t
+stripEffectF t = t
+
 -- | True iff a TypeF entry is kind-kinded (Nat or Str): a kind literal
 -- or the erased-phantom sentinel. These positions are structural
 -- metadata; macros never index them.
@@ -328,6 +343,11 @@ data SerialAST
   | SerialIFile FVar
   | SerialOStream FVar
   | SerialIStream FVar
+  -- A function value. Carries the signature (argument schemas and the
+  -- result schema) so the native type is a callable of the right shape;
+  -- the wire form is signature-independent -- home language, manifold id,
+  -- and the captured argument packets.
+  | SerialClosure [SerialAST] SerialAST
   | SerialNull FVar
   | SerialOptional FVar SerialAST
   | -- | Back-reference to an ancestor 'SerialObject' with this FVar in
@@ -375,6 +395,7 @@ instance Pretty SerialAST where
   pretty (SerialIFile v) = parens ("SerialIFile" <+> pretty v)
   pretty (SerialOStream v) = parens ("SerialOStream" <+> pretty v)
   pretty (SerialIStream v) = parens ("SerialIStream" <+> pretty v)
+  pretty (SerialClosure ins out) = parens ("SerialClosure" <+> list (map pretty ins) <+> pretty out)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
@@ -1345,10 +1366,16 @@ instance HasTypeS (Maybe TypeF) where
   typeSof (Just t) = typeSof t
   typeSof Nothing = PassthroughS
 
--- TODO: fix this - the type of a native manifold should be the full function
--- type, but the manifold function type may not be entirely native
+-- The type of a manifold accounts for its remaining (bound) parameters: a
+-- partially-applied / unapplied manifold (a closure) is a function
+-- @bound-types -> return-type@, while a saturated manifold (no bound args) is
+-- just its return type. Mirrors 'typeMof'/'typeSof', which build the function
+-- type from the form; without this a closure reports its result type and the
+-- serialization machinery mistakes it for a serializable value.
 instance HasTypeF NativeManifold where
-  typeFof (NativeManifold _ _ _ ne) = typeFof ne
+  typeFof (NativeManifold _ _ form ne) = case map val (manifoldBound form) of
+    [] -> typeFof ne
+    bts -> FunF bts (typeFof ne)
 
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm

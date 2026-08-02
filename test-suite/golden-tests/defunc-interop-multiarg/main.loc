@@ -1,0 +1,56 @@
+-- Cross-language closures beyond the single-argument, single-capture case:
+-- a MULTI-ARGUMENT closure crossing a boundary (the reflect callback must
+-- forward more than one applied argument), a closure over TWO runtime captures,
+-- and a LIST of closures crossing together (each element reified independently).
+-- All produced in Python and applied by C++ higher-order functions.
+
+module main (crossTwoArg, crossMultiVar, crossList)
+
+import root-py
+import root-cpp
+
+source Py from "producer.py" ("tick", "mul", "add3")
+source Cpp from "consumer.hpp" ("applyIt", "applyIt2", "applyEach")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+mul :: Int -> Int -> Int
+add3 :: Int -> Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+applyIt2 :: (Int -> Int -> Int) -> Int -> Int -> Int
+applyEach :: [Int -> Int] -> Int -> [Int]
+
+mkAdder :: Int -> <IO> (Int -> Int -> Int)
+mkAdder base = do
+  _ <- tick
+  (\a b -> add3 base a b)
+
+mkAffine :: Int -> Int -> <IO> (Int -> Int)
+mkAffine a b = do
+  _ <- tick
+  (\y -> add3 a (mul b y) 0)
+
+mkMul :: Int -> <IO> (Int -> Int)
+mkMul base = do
+  _ <- tick
+  (\y -> mul base y)
+
+-- a two-argument closure (capturing a runtime base) crossing to a C++ HOF
+crossTwoArg :: Int -> <IO> Int
+crossTwoArg base = do
+  f <- mkAdder base
+  applyIt2 f 10 20
+
+-- a closure capturing two runtime values crossing to a C++ HOF
+crossMultiVar :: Int -> Int -> <IO> Int
+crossMultiVar a b = do
+  f <- mkAffine a b
+  applyIt f 10
+
+-- a list of closures crossing together to a C++ HOF
+crossList :: Int -> <IO> [Int]
+crossList x = do
+  f <- mkMul 2
+  g <- mkMul 3
+  applyEach [f, g] x

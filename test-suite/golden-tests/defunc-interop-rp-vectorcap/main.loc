@@ -1,0 +1,27 @@
+-- An R producer captures a NON-SCALAR runtime value (a list, shared-memory-
+-- backed when the inline threshold is 0) and the closure crosses to a Python
+-- higher-order function, which invokes it back in R. Exercises the R reify
+-- path serializing a captured aggregate into a self-contained wire packet.
+
+module main (crossApply)
+
+import root-r
+import root-py
+
+source R from "producer.R" ("tick", "add", "vsum")
+source Py from "consumer.py" ("apply_it" as applyIt)
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+vsum :: [Int] -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkSummer :: [Int] -> <IO> (Int -> Int)
+mkSummer xs = do
+  _ <- tick
+  (\y -> add (vsum xs) y)
+
+crossApply :: [Int] -> <IO> Int
+crossApply xs = do
+  f <- mkSummer xs
+  applyIt f 10

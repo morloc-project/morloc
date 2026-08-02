@@ -3567,6 +3567,112 @@ pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
     Ok(count)
 }
 
+/// Per-sub-packet layout of an IFile, for parallel planning.
+///
+/// Returns one `(element_offset, element_count, uncompressed_size)` triple
+/// per sub-packet, in file order:
+///   - `element_offset`   -- cumulative element index at which the sub-packet
+///                           starts (prefix-sum of the counts).
+///   - `element_count`    -- number of elements in the sub-packet.
+///   - `uncompressed_size`-- uncompressed payload byte count, recovered WITHOUT
+///                           decompression: the header length for uncompressed
+///                           sub-packets, the sum of the FRAME_INDEX frame sizes
+///                           for compressed ones.
+///
+/// A DATA packet is the degenerate single-chunk case: exactly one triple
+/// `(0, element_count, payload_length)` (IFile only accepts uncompressed DATA
+/// packets, so the header length is the uncompressed size). An empty stream
+/// returns an empty vec. The only failure is a malformed/corrupt packet.
+pub fn shared_stream_layout(handle: i64) -> Result<Vec<(u64, u64, u64)>, MorlocError> {
+    with_process_local_slot(handle, |local, slot| {
+        if slot.kind != MLC_KIND_IFILE {
+            return Err(MorlocError::Other(format!(
+                "@streamLayout is only defined on IFile handles (got kind = {})",
+                handle_kind_name(slot.kind),
+            )));
+        }
+
+        // DATA packet: one chunk spanning the whole file. Its single
+        // synthesized index entry carries the element count; the uncompressed
+        // size is the outer packet's payload length (uncompressed by the IFile
+        // open guarantee). Read the outer header directly rather than via
+        // read_subpacket_header, which enforces the MESG source that stream
+        // sub-packets -- but not necessarily a monolithic DATA packet -- carry.
+        if local.is_data_packet {
+            // is_data_packet is defined as exactly one synthesized entry;
+            // guard rather than index blindly so a broken invariant surfaces
+            // as an error instead of a slice-index panic.
+            let elem_count = local
+                .subpacket_entries_local
+                .first()
+                .ok_or_else(|| MorlocError::Packet(
+                    "@streamLayout: DATA packet has no synthesized index entry".into(),
+                ))?
+                .elem_count;
+            if local.mmap_size < 32 {
+                return Err(MorlocError::Packet(
+                    "@streamLayout: DATA packet is shorter than a packet header".into(),
+                ));
+            }
+            let hdr_bytes = unsafe {
+                std::slice::from_raw_parts(local.mmap_ptr as *const u8, 32)
+            };
+            let header = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
+            // IFile only opens uncompressed DATA packets (open_data_packet
+            // rejects compressed monoliths), so header.length is the
+            // uncompressed payload size. Assert it rather than trust the
+            // distant open-time guarantee silently.
+            let data = unsafe { header.command.data };
+            if data.compression != PACKET_COMPRESSION_NONE {
+                return Err(MorlocError::Packet(
+                    "@streamLayout: DATA packet is compressed; cannot report an \
+                     uncompressed size (IFile should have refused it at open)".into(),
+                ));
+            }
+            return Ok(vec![(0u64, elem_count, header.length)]);
+        }
+
+        // Stream packet: walk the sub-packet index. element_offset is the
+        // cached cumulative-count prefix sum (cum[i] is sub-packet i's start
+        // index); uncompressed_size is derived per sub-packet without decompression.
+        ensure_elem_cum(local)?;
+        let n = local.subpacket_entries_local.len();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let entry_off = local.subpacket_entries_local[i].offset;
+            let entry_cnt = local.subpacket_entries_local[i].elem_count;
+            let element_offset = local.subpacket_elem_cum.as_ref().unwrap()[i];
+            let (header, _payload_off, payload_len, _meta_off) =
+                read_subpacket_header(local, entry_off)?;
+            let data = unsafe { header.command.data };
+            let uncompressed_size = if data.compression == PACKET_COMPRESSION_NONE {
+                payload_len
+            } else {
+                // Header + metadata are contiguous with the header; sum the
+                // FRAME_INDEX frame uncompressed sizes (no payload touched).
+                let hdr_meta_len = 32 + header.offset as usize;
+                let hdr_meta = unsafe {
+                    std::slice::from_raw_parts(
+                        (local.mmap_ptr as *const u8).add(entry_off as usize),
+                        hdr_meta_len,
+                    )
+                };
+                match morloc_runtime_types::packet::read_frame_index_from_meta(hdr_meta)? {
+                    Some(frames) => frames.iter().map(|f| f.uncompressed_size).sum(),
+                    // Every compressed sub-packet carries a FRAME_INDEX by
+                    // construction; its absence is a corrupt/foreign packet.
+                    None => return Err(MorlocError::Packet(format!(
+                        "@streamLayout: compressed sub-packet at offset {} \
+                         is missing its FRAME_INDEX", entry_off,
+                    ))),
+                }
+            };
+            out.push((element_offset, entry_cnt, uncompressed_size));
+        }
+        Ok(out)
+    })
+}
+
 /// Versioned-pointer read of `kind` from a shared slot. Used by the
 /// cross-pool wire codec to know which `open_dispatch` arm to call on
 /// the receiving side.

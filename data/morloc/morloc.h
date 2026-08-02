@@ -167,7 +167,12 @@ typedef enum {
                           // is `^<klen><name>`.
     MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
     MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
-    MORLOC_ISTREAM  = 23  // Sequential stream-file reader handle.
+    MORLOC_ISTREAM  = 23, // Sequential stream-file reader handle.
+    MORLOC_CLOSURE  = 24  // Function value: home language, manifold id, and
+                          // captured argument packets. Wire form is
+                          // `[u32 home][u32 mid][u32 n][ (u32 len, bytes) x n ]`;
+                          // the captured packets are opaque (serialized by the
+                          // home language, deserialized by its dispatch table).
     // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
     // form. The schema code selects the morloc-level type; the tag byte
     // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
@@ -196,6 +201,7 @@ typedef enum {
 #define SCHEMA_IFILE    'F'
 #define SCHEMA_OSTREAM  'O'
 #define SCHEMA_ISTREAM  'I'
+#define SCHEMA_CLOSURE  'C'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //
@@ -1480,6 +1486,13 @@ int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
 // new handle is auto-registered with the current `eval_arena`.
 void* mlc_next(int64_t handle, ERRMSG);
 int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
+
+// `mlc_stream_layout(handle)` returns the per-sub-packet layout of an IFile
+// as a fresh SHM voidstar `Array<Tuple3<U64,U64,U64>>`: one
+// (element_offset, element_count, uncompressed_size) triple per sub-packet.
+// A DATA packet yields a single triple; an empty stream an empty Array.
+// The per-language wrapper deserialises via from_voidstar. Error -> NULL.
+void* mlc_stream_layout(int64_t handle, ERRMSG);
 
 // OStream: forward-only file writers.
 //

@@ -98,9 +98,16 @@ COPY --from=glibc-builder /artifacts/libmorloc.so /out-staging/libmorloc.so
 COPY --from=glibc-builder /artifacts/morloc-nexus /out-staging/morloc-nexus
 COPY --from=musl-builder /artifacts/morloc-manager /out-staging/morloc-manager
 
+# Bundle the Rust crate sources (minus build artifacts). rustmorloc is an rlib
+# locked to the consumer's rustc, so it can't be prebuilt like the binaries
+# above; `morloc init` compiles it locally from these sources (resolved as
+# $MORLOC_RUST_BIN/rust).
+COPY data/rust /out-staging/rust
+RUN rm -rf /out-staging/rust/target
+
 # Verify morloc-manager is static (no dynamic linker needed)
 RUN file /out-staging/morloc-manager \
     && ! ldd /out-staging/morloc-manager 2>&1 | grep -q "=>" \
     && echo "OK: morloc-manager has no dynamic dependencies"
 
-CMD ["sh", "-c", "cp /out-staging/libmorloc.so /out-staging/morloc-nexus /out-staging/morloc-manager /out/ && echo 'Wrote libmorloc.so, morloc-nexus, morloc-manager' && ls -lh /out/libmorloc.so /out/morloc-nexus /out/morloc-manager && echo && file /out/morloc-manager"]
+CMD ["sh", "-c", "cp /out-staging/libmorloc.so /out-staging/morloc-nexus /out-staging/morloc-manager /out/ && cp -r /out-staging/rust /out/rust && echo 'Wrote libmorloc.so, morloc-nexus, morloc-manager, rust/' && ls -lh /out/libmorloc.so /out/morloc-nexus /out/morloc-manager && echo && file /out/morloc-manager"]

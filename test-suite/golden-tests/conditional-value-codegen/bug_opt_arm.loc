@@ -1,0 +1,16 @@
+-- FAILING (Bug H). A bare effect-typed conditional whose value arm must widen
+-- to an OPTIONAL under the effect: `x :: Int` used where `<Err> ?Int` is
+-- expected. Frontend typecheck fails ("Cannot compare types Int and ?Int") --
+-- the optional-widening-under-effect coercion reaches the do-block / @catch
+-- path but not a bare conditional arm. The `<Err> Int` (non-optional) form
+-- typechecks, so this is optional-specific. The do-block form
+-- (`do { let b = x ; ? ... = @throw : b }`) also works. This file must build
+-- once the coercion reaches the bare conditional arm.
+module main (f)
+
+import root-py
+
+f :: Int -> <Err> ?Int
+f x =
+  ? x > 100 = @throw "big"
+  : x

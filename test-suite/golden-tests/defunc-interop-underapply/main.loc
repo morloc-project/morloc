@@ -1,0 +1,45 @@
+-- Under-application of a closure that has crossed a language boundary. A
+-- multi-argument closure (produced in Python, capturing a runtime base) is
+-- partially applied at the morloc level BEFORE being handed to a foreign
+-- higher-order function. The under-applied partial must saturate correctly:
+-- each remaining argument, supplied later by the C++ HOF, is forwarded back to
+-- the producer along with the earlier-bound arguments and the capture. This
+-- pins the semantics as currying-by-saturation (not a rejection):
+--   underOnce -- a 2-arg closure under-applied by one, applied by a 1-arg HOF
+--   underDeep -- a 3-arg closure under-applied by one, applied by a 2-arg HOF
+
+module main (underOnce, underDeep)
+
+import root-py
+import root-cpp
+
+source Py from "producer.py" ("tick", "add3", "add4")
+source Cpp from "consumer.hpp" ("applyIt", "applyIt2")
+
+type Cpp => Int = "int"
+
+tick :: <IO> Int
+add3 :: Int -> Int -> Int -> Int
+add4 :: Int -> Int -> Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+applyIt2 :: (Int -> Int -> Int) -> Int -> Int -> Int
+
+mkAdder2 :: Int -> <IO> (Int -> Int -> Int)
+mkAdder2 base = do
+  _ <- tick
+  (\a b -> add3 base a b)
+
+mkAdder3 :: Int -> <IO> (Int -> Int -> Int -> Int)
+mkAdder3 base = do
+  _ <- tick
+  (\a b c -> add4 base a b c)
+
+underOnce :: Int -> <IO> Int
+underOnce base = do
+  f <- mkAdder2 base
+  applyIt (f 10) 20
+
+underDeep :: Int -> <IO> Int
+underDeep base = do
+  f <- mkAdder3 base
+  applyIt2 (f 100) 10 20

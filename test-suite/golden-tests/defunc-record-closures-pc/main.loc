@@ -1,0 +1,56 @@
+-- Runtime closures nested in a record / list / tuple / optional crossing a pool
+-- boundary, reified/reflected in place. Producer: Python. Consumer: C++.
+--
+-- The C++ record is a user-named struct whose fields are std::function; the
+-- reflected closures are assigned into those fields. The list/tuple/optional
+-- exercise the same per-element reify/reflect through the shared engine.
+
+module main (crossRecord, crossList, crossTuple, crossOpt)
+
+import root-py
+import root-cpp
+
+record Ops where
+  inc :: Int -> Int
+  scale :: Int -> Int
+record Py => Ops = "dict"
+record Cpp => Ops = "Ops"
+
+type Cpp => Int = "int"
+
+source Py from "producer.py" ("tick", "add", "mul")
+source Cpp from "consumer.hpp" ("useOps", "useList", "useTuple", "useOpt")
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+mul :: Int -> Int -> Int
+
+useOps :: Ops -> Int -> Int
+useList :: [Int -> Int] -> Int -> Int
+useTuple :: (Int -> Int, Int -> Int) -> Int -> Int
+useOpt :: ?(Int -> Int) -> Int -> Int
+
+mkOps :: Int -> Int -> <IO> Ops
+mkOps a b = do
+  _ <- tick
+  { inc = (\x -> add a x), scale = (\x -> mul b x) }
+
+crossRecord :: Int -> Int -> <IO> Int
+crossRecord a b = do
+  ops <- mkOps a b
+  useOps ops 10
+
+crossList :: Int -> Int -> <IO> Int
+crossList a b = do
+  _ <- tick
+  useList [(\x -> add a x), (\x -> mul b x)] 10
+
+crossTuple :: Int -> Int -> <IO> Int
+crossTuple a b = do
+  _ <- tick
+  useTuple ((\x -> add a x), (\x -> mul b x)) 10
+
+crossOpt :: Int -> <IO> Int
+crossOpt a = do
+  _ <- tick
+  useOpt (\x -> add a x) 10

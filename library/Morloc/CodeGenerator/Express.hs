@@ -38,6 +38,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
@@ -175,6 +176,15 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyEval _ e) = hasCacheWrapAt m e
     hasCacheWrapAt m (PolyCoerce _ _ e) = hasCacheWrapAt m e
     hasCacheWrapAt m (PolyIf a b c) = hasCacheWrapAt m a || hasCacheWrapAt m b || hasCacheWrapAt m c
+    -- Kept symmetric with 'cacheWrapExpr', which recurses into (and may insert a
+    -- PolyCacheBody within) each of these; missing one lets a same-midx wrap
+    -- hide from the head-wrap dedup and be double-memoized.
+    hasCacheWrapAt m (PolyList _ _ xs) = any (hasCacheWrapAt m) xs
+    hasCacheWrapAt m (PolyTuple _ xs) = any (hasCacheWrapAt m . snd) xs
+    hasCacheWrapAt m (PolyRecord _ _ _ rs) = any (hasCacheWrapAt m . snd . snd) rs
+    hasCacheWrapAt m (PolyIntrinsic _ _ xs) = any (hasCacheWrapAt m) xs
+    hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
+    hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
 
 cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
@@ -253,6 +263,12 @@ hasDebugWrapAt m (PolyDoBlock _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyEval _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyCoerce _ _ e) = hasDebugWrapAt m e
 hasDebugWrapAt m (PolyIf a b c) = hasDebugWrapAt m a || hasDebugWrapAt m b || hasDebugWrapAt m c
+-- Kept symmetric with 'debugWrapExpr', which recurses into each of these.
+hasDebugWrapAt m (PolyList _ _ xs) = any (hasDebugWrapAt m) xs
+hasDebugWrapAt m (PolyTuple _ xs) = any (hasDebugWrapAt m . snd) xs
+hasDebugWrapAt m (PolyRecord _ _ _ rs) = any (hasDebugWrapAt m . snd . snd) rs
+hasDebugWrapAt m (PolyIntrinsic _ _ xs) = any (hasDebugWrapAt m) xs
+hasDebugWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasDebugWrapAt m inner
 hasDebugWrapAt _ _ = False
 
 debugWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
@@ -431,23 +447,29 @@ expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ _) = do
 expressPolyExprWrapCommon ::
   Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
 expressPolyExprWrapCommon l t e@(AnnoS _ _ (AppS (AnnoS (Idx gidxCall _) _ _) _)) = do
+  reg <- MM.gets stateLangRegistry
   bconf <- MM.gets stateBuildConfig
   mconMap <- MM.gets stateManifoldConfig
-  expressPolyExpr (decideRemoteness bconf (Map.lookup gidxCall mconMap)) l t e
+  expressPolyExpr (decideRemoteness reg bconf (Map.lookup gidxCall mconMap)) l t e
 expressPolyExprWrapCommon l t e@(AnnoS (Idx midx _) _ _) = do
+  reg <- MM.gets stateLangRegistry
   bconf <- MM.gets stateBuildConfig
   mconMap <- MM.gets stateManifoldConfig
-  expressPolyExpr (decideRemoteness bconf (Map.lookup midx mconMap)) l t e
+  expressPolyExpr (decideRemoteness reg bconf (Map.lookup midx mconMap)) l t e
 
-decideRemoteness :: BuildConfig -> Maybe ManifoldConfig -> Lang -> Lang -> Maybe RemoteForm
-decideRemoteness _ Nothing l1 l2
-  | l1 == l2 = Nothing
+-- A call between two languages is a remote (socket) call unless they are
+-- co-located members of one pool (e.g. cpp and its guest futhark), in which
+-- case it stays an in-process call. For non-member languages 'coLocated'
+-- reduces to '==', so this is unchanged for cpp/py/r.
+decideRemoteness :: LR.LangRegistry -> BuildConfig -> Maybe ManifoldConfig -> Lang -> Lang -> Maybe RemoteForm
+decideRemoteness reg _ Nothing l1 l2
+  | LR.coLocated reg l1 l2 = Nothing
   | otherwise = Just ForeignCall
-decideRemoteness bconf (Just mconfig) l1 l2 = case manifoldConfigRemote mconfig of
+decideRemoteness reg bconf (Just mconfig) l1 l2 = case manifoldConfigRemote mconfig of
   Nothing
-    | l1 == l2 -> Nothing
+    | LR.coLocated reg l1 l2 -> Nothing
     | otherwise -> Just ForeignCall
-  Just res -> case (buildConfigSlurmSupport bconf, l1 /= l2) of
+  Just res -> case (buildConfigSlurmSupport bconf, not (LR.coLocated reg l1 l2)) of
     (Just True, _) -> Just $ RemoteCall res
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
@@ -1153,7 +1175,6 @@ expressPolyExpr
         mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) call
     | not isLocal = do
         propagateScope gidxCall midx
-
         xsInfo <- mapM partialExpress xs
 
         let xs' = map (\(_, _, e) -> e) xsInfo
@@ -1221,8 +1242,11 @@ expressPolyExpr
 expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArguments) (LamS vs body)) = do
   body' <- expressPolyExprWrap lang lambdaType body
 
+  -- Only the leading @length vs@ inputs belong to THIS lambda; when the body
+  -- returns a function (a curried type flattened by 'normalizeType'), the
+  -- surplus inputs belong to the returned closure, expressed within @body@.
   inputTypes <- case val lambdaType of
-    (FunT ts _) -> return ts
+    (FunT ts _) -> return (take (length vs) ts)
     _ -> return []
 
   let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
@@ -1372,20 +1396,35 @@ expressPolyExpr
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
+-- Implicit eta-abstraction of a bare function value passed where a function is
+-- expected. Skipped for a function-typed COMPUTED THUNK ('LetS'/'EvalS'/
+-- 'DoBlockS' -- e.g. a forced effectful generator's result): those are handled
+-- by their own value clauses (below), which bind the native closure and let it
+-- be applied via 'LocalCallP'. Eta-expanding them instead re-applies the thunk
+-- through 'expressPolyApp', which cannot invoke a raw 'LetS'/'EvalS' head.
 expressPolyExpr
   findRemote
   parentLang
   (val -> FunT pinputs poutput)
-  e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) _)
-    | isLocal = do
+  e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) inner)
+    | not (isComputedThunk inner), isLocal = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
         retapp <- expressPolyApp parentLang e lambdaVals
-        -- Implicit eta-abstraction of a function value. Callback-return
-        -- force lifted to Poly-stage 'EffectBoundary'.
-        mkPolyManifold callLang midx (ManifoldPass lambdaTypedArgs) retapp
-    | otherwise = do
+        -- Implicit eta-abstraction of a function value. Any variables the
+        -- wrapped value closes over (e.g. a let-bound closure `f <- ...;
+        -- applyIt f 10`) are captured as CONTEXT args so the trampoline
+        -- manifold receives them through its partial rather than referencing
+        -- them as undefined free variables. When it captures nothing (a
+        -- top-level function value) the wrapper stays a bare 'ManifoldPass'.
+        -- Callback-return force lifted to Poly-stage 'EffectBoundary'.
+        let ctxIds = Set.toList (polyFreeVars retapp `Set.difference` Set.fromList ids)
+            form = case ctxIds of
+              [] -> ManifoldPass lambdaTypedArgs
+              _ -> ManifoldPart [Arg i None | i <- ctxIds] lambdaTypedArgs
+        mkPolyManifold callLang midx form retapp
+    | not (isComputedThunk inner) = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
@@ -1443,6 +1482,23 @@ expressPolyExpr
     e2' <- expressPolyExprWrap lang pc e2
     let e = PolyLet letId e1' e2'
     expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
+-- A pure-data literal whose recorded type was coerced to an effect type by an
+-- effect-typed conditional arm (e.g. @? c = @throw : (x, x)@, @: [x]@, @: 42@).
+-- The literal carries no effect, so strip the EffectT wrapper and express the
+-- plain data -- the same stripping a do-block tail gets via its own clause.
+-- Without this the container clauses reject the EffectT-headed type ("Expected
+-- a tuple/list/record type").
+expressPolyExpr fr pl pc (AnnoS (Idx midx (EffectT _ innerT)) c e)
+  | isPureDataLit e = expressPolyExpr fr pl pc (AnnoS (Idx midx innerT) c e)
+  where
+    isPureDataLit LstS{}  = True
+    isPureDataLit TupS{}  = True
+    isPureDataLit NamS{}  = True
+    isPureDataLit IntS{}  = True
+    isPureDataLit RealS{} = True
+    isPureDataLit StrS{}  = True
+    isPureDataLit LogS{}  = True
+    isPureDataLit _       = False
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (RealS _ x)) =
   dispatchPrimLit midx lang t v (\tv -> PolyReal (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (IntS _ x)) =
@@ -1761,6 +1817,47 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
+-- A let-bound function value applied in head position. A multiply-referenced
+-- let lambda is kept shared (not inlined) by 'applyLambdas'; each use reaches
+-- here as a 'LetBndS' head and lowers to a native closure call, exactly as the
+-- 'BndS' (lambda-argument) case above.
+expressPolyApp _ (AnnoS g (_, args) (LetBndS v)) xs = do
+  case [j | (Arg j u) <- args, u == v] of
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    _ -> error "Unreachable? LetBndS value should have been wired uniquely to args previously"
+-- A function value produced by a runtime effect and applied. A `<-` bind
+-- leaves a forced function value ('EvalS') -- or an inline effectful block
+-- ('DoBlockS') -- in head position. Force/evaluate it, bind the resulting
+-- native closure, and call it via 'PolyLetVar' -> 'LocalCallP', mirroring the
+-- 'AppS'-head (computed-function) case below. We peel the wrapper and express
+-- its INNER (effect-typed) expression directly, rather than re-expressing the
+-- function-typed wrapper node: the latter re-enters the eta-abstraction path
+-- ('expressPolyExpr' on a bare @FunT@ value), which calls back into
+-- 'expressPolyApp' and loops.
+expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (EvalS x)) es = do
+  x' <- expressPolyExprWrap lang (Idx cidx t) x
+  return . PolyLet i (PolyEval (Idx cidx t) x') . PolyReturn
+    $ PolyApp (PolyLetVar (Idx cidx t) i) es
+expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
+  let innerT = case t of EffectT _ inner -> inner; _ -> t
+  x' <- expressPolyExprWrap lang (mkIdx x innerT) x
+  return . PolyLet i (PolyDoBlock (Idx cidx t) x') . PolyReturn
+    $ PolyApp (PolyLetVar (Idx cidx t) i) es
+-- A conditional that yields a function value, applied in head position (e.g. a
+-- let-bound @? c = f : g@ inlined at its single call site). Express each branch
+-- as a function value, bind the resulting conditional closure, and call it via
+-- 'PolyLetVar' -> 'LocalCallP', mirroring the 'EvalS' / 'DoBlockS' clauses
+-- above. Expressing the branches individually (rather than routing the whole
+-- 'IfS' through 'expressPolyExprWrap', as the 'AppS'-head case does) avoids the
+-- eta-abstraction clause, which would re-enter 'expressPolyApp' on the 'IfS'
+-- and loop.
+expressPolyApp _lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE)) es = do
+  let boolType = VarT (TV "Bool")
+  cond' <- expressPolyExprWrap clang (mkIdx cond boolType) cond
+  thenE' <- expressPolyExprWrap clang (mkIdx thenE t) thenE
+  elseE' <- expressPolyExprWrap clang (mkIdx elseE t) elseE
+  return . PolyLet i (PolyIf cond' thenE' elseE') . PolyReturn
+    $ PolyApp (PolyLetVar (Idx cidx t) i) es
 expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
   -- Serial manifolds force thunks before serializing, so strip EffectT from the
@@ -1909,6 +2006,40 @@ expressContainer pc (Idx midx parentLang) (Idx _ lang) args e
 unvalue :: Arg a -> Arg None
 unvalue (Arg i _) = Arg i None
 
+-- | Free variable indices a PolyExpr references from its enclosing scope. Used
+-- to capture the closure variables of an eta-abstracted function value as
+-- context args. A nested PolyManifold contributes only its own context-arg
+-- indices (the variables IT captures from this scope); its bound args and body
+-- locals belong to it. A PolyLet binder is removed from its body's free set.
+polyFreeVars :: PolyExpr -> Set.Set Int
+polyFreeVars = go
+  where
+    go (PolyBndVar _ i) = Set.singleton i
+    go (PolyLetVar _ i) = Set.singleton i
+    -- A locally-bound function value applied via 'LocalCallP j' references
+    -- the closure bound at index @j@ in the enclosing scope; other executable
+    -- forms (source / pattern / recursive calls) name no enclosing variable.
+    go (PolyExe _ (LocalCallP j)) = Set.singleton j
+    go (PolyApp e es) = Set.unions (map go (e : es))
+    go (PolyReturn e) = go e
+    go (PolyLet i e1 e2) = Set.union (go e1) (Set.delete i (go e2))
+    go (PolyManifold _ _ form _ _) = Set.fromList [i | Arg i _ <- manifoldContext form]
+    go (PolyList _ _ es) = Set.unions (map go es)
+    go (PolyTuple _ xs) = Set.unions (map (go . snd) xs)
+    go (PolyRecord _ _ _ rs) = Set.unions (map (go . snd . snd) rs)
+    go (PolyCacheBody _ _ _ e) = go e
+    go (PolyDebugWrap _ _ e) = go e
+    -- Value-wrapper forms carry sub-expressions in the SAME scope, so their
+    -- free variables must flow through. Omitting any of these silently drops
+    -- the captures of an eta-abstracted value that contains it, producing a
+    -- closure that references undefined enclosing variables.
+    go (PolyIf c t e) = Set.unions [go c, go t, go e]
+    go (PolyDoBlock _ e) = go e
+    go (PolyEval _ e) = go e
+    go (PolyCoerce _ _ e) = go e
+    go (PolyIntrinsic _ _ es) = Set.unions (map go es)
+    go _ = Set.empty
+
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.
 -- Searches all manifolds in stateName, not just exports, to support non-exported recursive helpers.
@@ -1916,13 +2047,16 @@ lookupRecursiveTarget :: Lang -> EVar -> MorlocMonad (Int, Maybe Lang)
 lookupRecursiveTarget parentLang v = do
   nameMap <- MM.gets stateName
   langMap <- MM.gets stateManifoldLang
+  reg <- MM.gets stateLangRegistry
   -- Filter to concrete manifolds only (those in langMap) to avoid picking up
   -- general/polymorphic indices that don't have serial manifold definitions
   let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
   case Map.lookup v reverseMap of
     (Just mid) -> do
+      -- A cross-language recursive call only when the target is NOT co-located
+      -- with the caller; a co-located member (futhark in cpp) is an in-process call.
       let crossLang = case Map.lookup mid langMap of
-            Just tl | tl /= parentLang -> Just tl
+            Just tl | not (LR.coLocated reg parentLang tl) -> Just tl
             _ -> Nothing
       return (mid, crossLang)
     Nothing -> MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
@@ -1932,3 +2066,13 @@ bindVarIds [] [] = []
 bindVarIds (i : args) (t : types) = PolyBndVar t i : bindVarIds args types
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
 bindVarIds _ [] = error "bindVarIds: too few types"
+
+-- A computed function value that produces its result through evaluation rather
+-- than being a bare callable: a let, a forced thunk, or an inline effectful
+-- block. Such values are bound and applied via 'LocalCallP', never
+-- eta-abstracted (see the eta clause in 'expressPolyExpr').
+isComputedThunk :: ExprS g One c -> Bool
+isComputedThunk (LetS {}) = True
+isComputedThunk (EvalS {}) = True
+isComputedThunk (DoBlockS {}) = True
+isComputedThunk _ = False

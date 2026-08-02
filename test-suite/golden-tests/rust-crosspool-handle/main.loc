@@ -1,0 +1,30 @@
+-- Cross-pool stream-handle passing through a Rust pool.
+--
+-- A stream handle (IFile/IStream/OStream) is a u64 slot id into a shared-SHM
+-- registry; in-pool it is a bare integer, but crossing a pool boundary it
+-- serialises as a 16-byte tagged field (TAG_HANDLE) so the receiving pool can
+-- re-resolve the same slot. This exercises the Rust handle wire codec in both
+-- directions: the OStream handle opened on the Rust side is written to from the
+-- Python pool (idpy) and from the Rust pool (idrust), so it is serialised OUT
+-- of and read back INTO the Rust pool.
+--
+-- Every writer contributes to the same buffer/cursor; @flen reads the shared
+-- element_count. Total = 3 + 3 + 2 + 3 = 11.
+--
+-- Swap idrust/root-rust for idcpp/root-cpp to run the same spec cpp<->py.
+
+module main (testRoundTrip)
+
+import root-rust
+import root-py
+
+testRoundTrip :: Str -> <IO, Err> Int
+testRoundTrip path = do
+  o <- @open (idrust path) :: <IO, Err> OStream Int
+  @write 0 o (idpy [1, 2, 3])
+  @write 0 o (idrust [1, 2, 3])
+  @write 0 o (idpy [4, 5])
+  @write 0 o (idrust [6, 7, 8])
+  @close o
+  s <- @open path :: <IO, Err> IStream Int
+  @flen s

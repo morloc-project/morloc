@@ -123,7 +123,7 @@ typecheck = mapM run
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty, gammaPendingNumLits = []}
+      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty}
       (g1raw, _, e1) <- synthG g0 e0
 
       -- Resolve numeric literals that were checked against unsolved
@@ -279,7 +279,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty []
+          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty
           isCompatible t = isSubtypeOf2 scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
@@ -1430,6 +1430,8 @@ intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
 intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
 intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
+intrinsicType IntrStreamLayout =
+  EffectU ioErrEffectSet (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U]))
 intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
 intrinsicType IntrTmpfile = EffectU ioErrEffectSet BT.strU
 intrinsicType IntrNext =
@@ -1520,6 +1522,13 @@ checkIntrinsicArgs i g intr argTypes = do
         -- @flen: IFile a -> <IO> Int. Receiver is any handle type;
         -- the runtime enforces kind == IFILE.
         (IntrFLength, [_]) -> return g
+        -- @streamLayout: IFile [a] -> <IO> [(U64,U64,U64)]. Pin the receiver to
+        -- a list-shaped IFile so both a wrong handle kind and non-list content
+        -- are rejected at compile time. Runtime enforces kind == IFILE.
+        (IntrStreamLayout, [argT]) ->
+          let (g'a, a) = newvar "streamlayout_a_" g
+              expectedT = AppU (VarU BT.ifileVar) [BT.listU a]
+           in subtype' i argT expectedT g'a
         -- @next: IStream a -> <IO> [a]. Pin the receiver shape so the
         -- result type's [a] is constrained to the same `a`. Runtime
         -- enforces kind == ISTREAM.
@@ -2435,6 +2444,29 @@ checkListNatDims g _ _ = return g
 -- Returns a list of coercions (inside-out) and the resulting gamma.
 -- Recursion terminates when the target is not OptionalU.
 tryCoerce :: Scope -> TypeU -> TypeU -> Gamma -> Maybe ([Coercion], Gamma)
+-- Widen through matching effect wrappers: @<E> T@ coerces to @<E> ?T@ by
+-- widening the inner value type. Mirrors subtype's effect handling
+-- (Morloc.Typecheck.Internal, the EffectU <: EffectU rule). This is what
+-- lets a do-block or @catch result (always @<E> T@) satisfy a declared
+-- @<E> ?T@ return. The rows must already agree after substitution -- they
+-- do for a synthesized result checked against a concrete declared type;
+-- open-row tails simply decline (no widening, unchanged behaviour). The
+-- inner OptionalU is placed under the EffectU by 'applyCoercion'.
+tryCoerce scope (EffectU e1 i1) (EffectU e2 i2) g
+  | applyEff g e1 == applyEff g e2 = tryCoerce scope i1 i2 g
+-- Pure source into an effectful target: a pure value inhabits any effect
+-- slot (effects are capabilities), so peel the target effect and coerce the
+-- inner value. Mirrors subtype's Pure-into-EffectU rule
+-- (Morloc.Typecheck.Internal). This is what lets a bare value arm of an
+-- effect-typed conditional widen to the declared optional inner, e.g.
+-- @? c = @throw : x@ against @<Err> ?Int@ where @x :: Int@. An effectful
+-- source is excluded (the both-effectful clause above handles a matching
+-- pair; a mismatched effectful source must not silently drop its effects).
+tryCoerce scope a (EffectU _ i2) g
+  | not (isEffectful a) = tryCoerce scope a i2 g
+  where
+    isEffectful EffectU{} = True
+    isEffectful _         = False
 tryCoerce scope a (OptionalU b) g =
   case subtype scope a b g of
     Right g' -> Just ([CoerceToOptional], g')

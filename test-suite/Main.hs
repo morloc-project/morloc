@@ -5,6 +5,7 @@ import qualified System.Directory as SD
 import Test.Tasty
 
 import EffectBoundaryTests (effectBoundaryTests)
+import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (goldenMakefileTest)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import MorlocDepsTests (morlocDepsTests)
@@ -23,6 +24,7 @@ main = do
     testGroup
       "Morloc tests"
       [ unitTypeTests
+      , futharkTupleTests
       , unitValuecheckTests
       , typeOrderTests
       , typeAliasTests
@@ -63,6 +65,7 @@ main = do
       , recursiveRecordTests
       , bidirectionalAppCheckTests
       , postArgPropagationTests
+      , tuplePatternLambdaTests
       , withDocstringTests
       , morlocDepsTests
       , sizeParseTests
@@ -90,6 +93,7 @@ main = do
       , golden "vector-u8-cpp" "vector-u8-cpp"
       , golden "close-nontemp-error" "close-nontemp-error"
       , golden "whole-render-cpp" "whole-render-cpp"
+      , golden "render-record-arg-cpp" "render-record-arg-cpp"
       , golden "stdin-input" "stdin-input"
       , golden "docstring-alias-import" "docstring-alias-import"
       , golden "stdout-stream-format" "stdout-stream-format"
@@ -104,6 +108,36 @@ main = do
       , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
       , golden "intrinsic-throw-py" "intrinsic-throw-py"
       , golden "intrinsic-throw-r" "intrinsic-throw-r"
+      , golden "conditional-value-codegen" "conditional-value-codegen"
+      , golden "futhark-basic" "futhark-basic"
+      , golden "futhark-tuple" "futhark-tuple"
+      , golden "futhark-sig-mismatch" "futhark-sig-mismatch"
+      , golden "futhark-py-crosspool" "futhark-py-crosspool"
+      , golden "futhark-fractal" "futhark-fractal"
+      , golden "futhark-matrix-io" "futhark-matrix-io"
+      , golden "rust-basic" "rust-basic"
+      , golden "rust-py-crosspool" "rust-py-crosspool"
+      , golden "rust-error" "rust-error"
+      , golden "rust-record" "rust-record"
+      , golden "rust-optional-widen" "rust-optional-widen"
+      , golden "rust-conditional-borrow" "rust-conditional-borrow"
+      , golden "rust-return-borrow" "rust-return-borrow"
+      , golden "rust-capture-shared" "rust-capture-shared"
+      , golden "rust-map-manifold-list" "rust-map-manifold-list"
+      , golden "rust-captured-function" "rust-captured-function"
+      , golden "rust-record-function" "rust-record-function"
+      , golden "rust-record-function-binary" "rust-record-function-binary"
+      , golden "rust-intrinsic-hash-save-load" "rust-intrinsic-hash-save-load"
+      , golden "rust-ostream-write" "rust-ostream-write"
+      , golden "rust-istream-read" "rust-istream-read"
+      , golden "rust-stdio" "rust-stdio"
+      , golden "rust-ifile-walk" "rust-ifile-walk"
+      , golden "rust-crosspool-handle" "rust-crosspool-handle"
+      , golden "rust-any-all" "rust-any-all"
+      , golden "rust-deque" "rust-deque"
+      , golden "rust-cache" "rust-cache"
+      , golden "rust-patterns" "rust-patterns"
+      , golden "rust-packer-record" "rust-packer-record"
       , golden "intrinsic-catch-cpp" "intrinsic-catch-cpp"
       , golden "intrinsic-catch-py" "intrinsic-catch-py"
       , golden "intrinsic-catch-r" "intrinsic-catch-r"
@@ -122,6 +156,7 @@ main = do
       , golden "terminal-polymorphic-py" "terminal-polymorphic-py"
       , golden "effect-boundary-cross" "effect-boundary-cross"
       , golden "effect-interaction" "effect-interaction"
+      , golden "applylambdas-share" "applylambdas-share"
       , golden "recursive-where-capture-multi" "recursive-where-capture-multi"
       , golden "recursive-where-capture-py" "recursive-where-capture-py"
       , golden "recursive-where-capture-effect-py" "recursive-where-capture-effect-py"
@@ -142,6 +177,7 @@ main = do
       , golden "intrmap-tuple-broadcast" "intrmap-tuple-broadcast"
       , golden "ifile-data-patterns" "ifile-data-patterns"
       , golden "ostream-write-roundtrip" "ostream-write-roundtrip"
+      , golden "stream-layout" "stream-layout"
       , golden "ostream-implicit-close" "ostream-implicit-close"
       , golden "istream-multi-subpacket-roundtrip" "istream-multi-subpacket-roundtrip"
       , golden "istream-compressed-subpacket" "istream-compressed-subpacket"
@@ -235,6 +271,7 @@ main = do
       , golden "thunk-guard-cross" "thunk-guard-cross"
       , golden "thunk-cross-force" "thunk-cross-force"
       , golden "thunk-callback-cpp" "thunk-callback-cpp"
+      , golden "thunk-callback-nested" "thunk-callback-nested"
       , golden "thunk-callback-cross-py" "thunk-callback-cross-py"
       , golden "thunk-eval-forall" "thunk-eval-forall"
       , golden "thunk-eval-hk" "thunk-eval-hk"
@@ -286,6 +323,98 @@ main = do
       , golden "functional-data-3d-r" "functional-data-3d-r"
       , golden "functional-data-3e" "functional-data-3e"
       , golden "functional-data-3f" "functional-data-3f"
+      , -- a function whose body is an explicit lambda (a returned function
+        -- capturing the outer parameter), used by over-application, binding,
+        -- a higher-order function, and deeper currying
+        golden "lambda-return-py" "lambda-return-py"
+      , -- a deep chain of let-bound lambdas each referencing the previous
+        -- binding twice: inline-by-duplication expands this to 2^N copies and
+        -- exhausts memory, while shared function values keep it linear
+        golden "let-lambda-sharing-py" "let-lambda-sharing-py"
+      , -- a function value produced by an effect (bound with `<-`) and then
+        -- applied: intra-language in each backend, and cross-language where the
+        -- closure crosses a pool boundary carrying its captured environment
+        golden "defunc-py" "defunc-py"
+      , golden "defunc-cpp" "defunc-cpp"
+      , golden "defunc-r" "defunc-r"
+      , -- a closure VALUE (bare lambda / effect-bound over runtime captures /
+        -- multi-variable / under-applied / reused) passed to a same-language
+        -- higher-order function, then applied by it
+        golden "defunc-hof-py" "defunc-hof-py"
+      , golden "defunc-hof-cpp" "defunc-hof-cpp"
+      , golden "defunc-hof-r" "defunc-hof-r"
+      , -- RED: a function-returning-function passed to a HOF with a curried
+        -- function-type parameter; rejected by the arity checker (should work)
+        golden "defunc-hof-return" "defunc-hof-return"
+      , -- a closure produced in one language, passed across a pool boundary,
+        -- and applied by a higher-order function in another (Python producer)
+        golden "defunc-interop-pc" "defunc-interop-pc"
+      , -- Rust CONSUMER: a Python-produced closure crosses into a sourced Rust
+        -- higher-order function; the Rust pool reflects the closure wire tuple
+        -- into a native callable that RPCs back to Python (Rust/C++ parity for
+        -- closure reflection)
+        golden "defunc-interop-py-rust" "defunc-interop-py-rust"
+      , -- Rust PRODUCER: a Rust effectful computation builds a closure over a
+        -- captured base and returns it across the boundary; the Rust pool reifies
+        -- it to the wire tuple and a home-pool dispatch wrapper applies it when
+        -- Python's reflected proxy calls back (Rust/C++ parity for closure reify)
+        golden "defunc-interop-rust-py" "defunc-interop-rust-py"
+      , -- Rust PRODUCER capturing a NON-SCALAR runtime value: reify_capture must
+        -- serialize the captured list self-contained (forced inline under
+        -- --inline-size 0) so it survives the producing manifold's SHM reclaim
+        golden "defunc-interop-rust-py-vectorcap" "defunc-interop-rust-py-vectorcap"
+      , -- C++ producer (fat-closure reify) and R producer (construction-time
+        -- attribute reify); cr-capture crosses a genuinely captured runtime
+        -- value out of the C++ producer
+        golden "defunc-interop-cr" "defunc-interop-cr"
+      , golden "defunc-interop-cr-capture" "defunc-interop-cr-capture"
+      , golden "defunc-interop-cr-vectorcap" "defunc-interop-cr-vectorcap"
+      , golden "defunc-interop-rp" "defunc-interop-rp"
+      , golden "defunc-interop-rp-vectorcap" "defunc-interop-rp-vectorcap"
+      , -- cross-language closures whose captures are NON-LITERAL runtime values:
+        -- a captured runtime base, a runtime-chosen closure, reuse, and a
+        -- Vector capture (Python producer)
+        golden "defunc-interop-capture" "defunc-interop-capture"
+      , golden "defunc-interop-dynamic" "defunc-interop-dynamic"
+      , golden "defunc-interop-reuse" "defunc-interop-reuse"
+      , golden "defunc-interop-vectorcap" "defunc-interop-vectorcap"
+      , -- multi-argument closure, two-variable capture, and a list of closures
+        -- all crossing a boundary (Python producer, C++ higher-order functions)
+        golden "defunc-interop-multiarg" "defunc-interop-multiarg"
+      , -- a crossed closure partially applied at the morloc level before a
+        -- foreign HOF supplies the rest: under-application saturates by currying
+        golden "defunc-interop-underapply" "defunc-interop-underapply"
+      , -- RUNTIME closures nested in a record / list / tuple / optional that
+        -- crosses a boundary: each closure is reified/reflected in place inside
+        -- the aggregate. Every producer/consumer pairing across Python, R, and
+        -- C++ (a record uses a user-named C++ struct of std::function fields).
+        golden "defunc-record-closures-pr" "defunc-record-closures-pr"
+      , -- Rust producer of a list/tuple/optional of runtime closures, consumed in
+        -- Python (Phase R1 structural path: closures boxed to Rc<dyn MorlocFnN>,
+        -- reified in place, reflected as Python callbacks).
+        golden "defunc-record-closures-rust-py" "defunc-record-closures-rust-py"
+      , -- Python producer, Rust consumer: Rust REFLECTS a record/list/tuple/
+        -- optional of runtime closures (and a list-of-closure-records, where the
+        -- structural and nominal record paths compose) into Rc<dyn MorlocFnN>
+        -- proxies that RPC back to Python.
+        golden "defunc-record-closures-py-rust" "defunc-record-closures-py-rust"
+      , -- Rust structurally REFLECTS a list/tuple/optional of closures that
+        -- genuinely crosses as data (effectful Python producer), not one built
+        -- locally in the Rust consumer.
+        golden "defunc-record-closures-py-rust-crossed" "defunc-record-closures-py-rust-crossed"
+      , -- Rust<->C++ (two STATICALLY typed pools) for a record/list/tuple/optional
+        -- of runtime closures, both directions: Rust reify -> C++ reflect, and
+        -- C++ reify -> Rust reflect.
+        golden "defunc-record-closures-rust-cpp" "defunc-record-closures-rust-cpp"
+      , golden "defunc-record-closures-cpp-rust" "defunc-record-closures-cpp-rust"
+      , -- Origin-preserving re-cross A->B->C with Rust as the relay: a closure
+        -- reflected in Rust and re-forwarded RPCs back to its ORIGINAL home when
+        -- applied from a third pool (both Python-origin and C++-origin).
+        golden "defunc-record-closures-recross" "defunc-record-closures-recross"
+      , golden "defunc-record-closures-pc" "defunc-record-closures-pc"
+      , golden "defunc-record-closures-cp" "defunc-record-closures-cp"
+      , golden "defunc-record-closures-rp" "defunc-record-closures-rp"
+      , golden "defunc-record-closures-cr" "defunc-record-closures-cr"
       , golden "functional-data-4" "functional-data-4"
       , golden "functional-data-5" "functional-data-5"
       , golden "pattern-getters" "pattern-getters"
@@ -368,6 +497,7 @@ main = do
       , golden "edge-cases-2" "edge-cases-2"
       , golden "type-synthesis-1" "type-synthesis-1"
       , golden "type-synthesis-2" "type-synthesis-2"
+      , golden "tuple-pattern-lambda-inference" "tuple-pattern-lambda-inference"
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"
       , golden "argument-form-1-r" "argument-form-1-r"
@@ -545,8 +675,8 @@ main = do
       , golden "C(S) serial-form-7-py" "serial-form-7-py"
       , golden "C(S) serial-form-7-r" "serial-form-7-r"
       , golden "C(C) serial-form-8-c" "serial-form-8-c"
-      , -- , golden "C(C) serial-form-8-py" "serial-form-8-py"
-        golden "C(C) serial-form-8-r" "serial-form-8-r"
+      , golden "C(C) serial-form-8-py" "serial-form-8-py"
+      , golden "C(C) serial-form-8-r" "serial-form-8-r"
       , golden "C(R) serial-form-9-c" "serial-form-9-c"
       , golden "C(R) serial-form-9-py" "serial-form-9-py"
       , golden "C(R) serial-form-9-r" "serial-form-9-r"
@@ -625,6 +755,9 @@ main = do
       , golden "optional-coerce-interop" "optional-coerce-interop"
       , golden "optional-coerce-return-py" "optional-coerce-return-py"
       , golden "optional-coerce-return-cpp" "optional-coerce-return-cpp"
+      , -- optional widening under an effect wrapper (<Err> ?Int): do-block
+        -- final coerces to optional, placed under the effect
+        golden "optional-coerce-effect-py" "optional-coerce-effect-py"
       , -- eval-sugar ('!' prefix) end-to-end: '!' form must produce the
         -- same output as the equivalent explicit do-block form.
         golden "eval-sugar-py" "eval-sugar-py"

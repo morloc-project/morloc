@@ -23,6 +23,7 @@ module Morloc.Namespace.Expr
   ( -- * Source and config types
     Source (..)
   , RemoteResources (..)
+  , remoteResourceInts
   , ManifoldConfig (..)
   , LogTemplate (..)
   , RunLogTemplate (..)
@@ -127,6 +128,18 @@ data RemoteResources = RemoteResources
   , remoteResourcesGpus :: Maybe Int
   }
   deriving (Show, Ord, Eq, Generic)
+
+-- | The four `resources_t` fields (memory, walltime seconds, cpus, gpus) with
+-- the shared codegen defaults applied: -1 for a missing memory/time/cpu limit,
+-- 0 for missing gpus. Single source of the SLURM default policy that every pool
+-- member's remote-call codegen renders.
+remoteResourceInts :: RemoteResources -> (Int, Int, Int, Int)
+remoteResourceInts res =
+  ( maybe (-1) id (remoteResourcesMemory res)
+  , maybe (-1) unTimeInSeconds (remoteResourcesTime res)
+  , maybe (-1) id (remoteResourcesThreads res)
+  , maybe 0 id (remoteResourcesGpus res)
+  )
 
 -- | Per-event log-message templates. Each subfield is the format string
 -- for the start, pass, and fail log lines respectively. 'Nothing' for a
@@ -368,6 +381,14 @@ data Intrinsic
   | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
+  | IntrStreamLayout -- ^ @streamLayout :: IFile [a] -> <IO, Err> [(U64,U64,U64)]@
+                    -- -- per-sub-packet layout for parallel planning: one triple
+                    -- @(elementOffset, elementCount, uncompressedSize)@ per
+                    -- sub-packet, in file order. A DATA packet is the degenerate
+                    -- single-chunk case (one triple @(0, count, size)@); an empty
+                    -- stream yields @[]@. Derived at read time from the existing
+                    -- sub-packet index + per-sub-packet headers (no wire change,
+                    -- no payload decompression). Malformed packets raise Err.
   | IntrNext        -- ^ @next :: IStream a -> <IO, Err> [a]@ -- materialise the
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
@@ -460,6 +481,7 @@ intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
 intrinsicName IntrFLength = "flen"
+intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
 intrinsicName IntrStream = "stream"
 intrinsicName IntrWrite = "write"
@@ -498,6 +520,7 @@ parseIntrinsic "fschema" = Just IntrFSchema
 -- IntrIFileWalk is compiler-internal (synthesized from `.[i] f`, `.foo f`,
 -- etc. by Express.hs and Nexus.hs); no entry here.
 parseIntrinsic "flen" = Just IntrFLength
+parseIntrinsic "streamLayout" = Just IntrStreamLayout
 parseIntrinsic "next" = Just IntrNext
 parseIntrinsic "stream" = Just IntrStream
 parseIntrinsic "write" = Just IntrWrite
@@ -533,6 +556,7 @@ intrinsicArity IntrClose = 1
 intrinsicArity IntrFSchema = 1
 intrinsicArity IntrMap = 2
 intrinsicArity IntrFLength = 1
+intrinsicArity IntrStreamLayout = 1
 intrinsicArity IntrNext = 1
 intrinsicArity IntrStream = 1
 intrinsicArity IntrWrite = 3
@@ -679,11 +703,16 @@ data Coercion
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.
+-- CoerceToOptional widens the RESULT type; under an effect wrapper the
+-- result is the inner type, so the OptionalU is placed under the EffectU
+-- (yielding @<E> ?T@, never @?(<E> T)@).
 applyCoercion :: Coercion -> TypeU -> TypeU
+applyCoercion CoerceToOptional (EffectU e t) = EffectU e (OptionalU t)
 applyCoercion CoerceToOptional t = OptionalU t
 
 -- | Invert a coercion on a resolved Type.
 unapplyCoercion :: Coercion -> Type -> Type
+unapplyCoercion CoerceToOptional (EffectT e (OptionalT t)) = EffectT e t
 unapplyCoercion CoerceToOptional (OptionalT t) = t
 unapplyCoercion CoerceToOptional t = t  -- defensive fallback
 

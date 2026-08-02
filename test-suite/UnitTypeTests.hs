@@ -49,10 +49,11 @@ module UnitTypeTests
   , recursiveRecordTests
   , bidirectionalAppCheckTests
   , postArgPropagationTests
+  , tuplePatternLambdaTests
   , withDocstringTests
   ) where
 
-import Morloc (typecheck, typecheckFrontend)
+import Morloc (typecheck, typecheckFrontend, generatePools)
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
@@ -111,6 +112,30 @@ runMiddle code = do
   config <- emptyConfig
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 config defaultValue (typecheck Nothing (Code code))
   return x
+
+-- | Run the full code-generation pipeline ('typecheck' then 'generatePools',
+-- which is where 'applyLambdas' runs) and force the result to a manifold
+-- count. Used by the complexity guard to catch 'applyLambdas' rebuilding an
+-- exponentially large tree: a divergent/blowup run overruns the group's
+-- 'mkTimeout' (or exhausts memory) rather than returning.
+runGen :: MT.Text -> IO (Either MorlocError Int)
+runGen code = do
+  config <- emptyConfig
+  ((x, _), _) <-
+    MM.runMorlocMonad Nothing 0 config defaultValue $ do
+      (_, rasts) <- typecheck Nothing (Code code)
+      pools <- generatePools rasts
+      return (sum (map (length . snd) pools))
+  return x
+
+-- | Assert that a program lowers all the way to pools without diverging (the
+-- complexity guards only care that 'runGen' returns before the timeout).
+assertGenerates :: MT.Text -> Assertion
+assertGenerates code = do
+  result <- runGen code
+  case result of
+    Right _ -> return ()
+    Left e -> assertFailure ("expected pool generation to succeed: " <> show e)
 
 emptyConfig :: IO Config
 emptyConfig = do
@@ -309,6 +334,7 @@ listToGamma gs =
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
     , gammaPendingNumLits = []
+    , gammaPositionalReceivers = Set.empty
     }
 
 exprTestBad :: String -> MT.Text -> TestTree
@@ -3310,7 +3336,123 @@ complexityRegressionTests =
           test
         |]
           bool
+      , -- A long composition chain with no tuples at all: the positional
+        -- (tuple-slot) reconciliation runs on every bare-existential solve,
+        -- so if it scans the whole solved-context map unconditionally the
+        -- cost is quadratic in the chain length and this times out. With the
+        -- receiver index gating the scan, a chain that has no destructuring
+        -- receivers pays only a set membership test per solve and stays
+        -- linear. This mirrors the standard-library `root` test, whose
+        -- `test` value is one large composition of mostly non-tuple groups.
+        localOption (mkTimeout 1000000) $
+          assertGeneralType
+            "long non-tuple composition chain stays linear"
+            (deepIdComposition 200)
+            int
+      , -- The companion positive case: a long chain that *does* destructure
+        -- tuples still typechecks promptly, confirming the gate admits the
+        -- scan when destructuring receivers are present.
+        localOption (mkTimeout 1000000) $
+          assertGeneralType
+            "long tuple-pattern composition chain typechecks"
+            (tuplePatternComposition 40)
+            (lst (tuple [str, int]))
+      , -- 'applyLambdas' must SHARE, not clone, a multiply-used lambda
+        -- parameter when it beta-reduces on the pool path. Beta-reducing
+        -- @(\\a -> add a a) arg@ by substitution inserts a fresh copy of @arg@
+        -- at each of @a@'s occurrences; through a chain of such reductions the
+        -- argument doubles per step (2^depth copies) and exhausts memory. The
+        -- fix binds the argument once as a @let@. This must run the full
+        -- codegen path ('generatePools', where 'applyLambdas' lives), not just
+        -- the frontend, so it uses 'runGen'. With the fix this finishes
+        -- instantly; without it, 30 levels is ~10^9 nodes and overruns the
+        -- timeout / memory. Mirrors the standard-library 'root' test, whose
+        -- pool AST feeds such a chain into 'applyLambdas False'.
+        localOption (mkTimeout 10000000) $
+          testCase "deep multiply-used-parameter chain shares instead of cloning"
+            (assertGenerates (dupParamChain 30))
+      , -- 'applyLambdas' must MOVE, not clone, a SINGLY-used lambda parameter.
+        -- Beta-reducing @(\\a -> inc a) arg@ needs no copy at all: @a@ occurs
+        -- once, so the argument is placed at that site with its own indices
+        -- (reindexing exists only to disambiguate several copies). Cloning it
+        -- instead re-copies the whole rest-of-chain at every level of a deep
+        -- reduction chain -- @arg@ at level k has size O(k), so the total is
+        -- O(depth^2) copies and a deep chain exhausts memory. This is the shape
+        -- of the standard-library 'root' test's pool AST (a long composition
+        -- threading one value), which OOMed before the move fix. First-order
+        -- @Int -> Int@ throughout so realize stays cheap and this isolates
+        -- 'applyLambdas'. With the fix it is linear and finishes instantly.
+        localOption (mkTimeout 20000000) $
+          testCase "deep singly-used-parameter chain moves instead of cloning"
+            (assertGenerates (singleUseChain 2000))
       ]
+
+-- | @id . id . ... . id@ applied to an @Int@, @k@ compositions deep, with
+-- no tuple/destructuring anywhere. Used to catch a per-solve full scan of
+-- the solved context reintroducing quadratic typechecking on plain
+-- composition chains.
+deepIdComposition :: Int -> MT.Text
+deepIdComposition k =
+  "module main (r)\n"
+    <> "id :: a -> a\n"
+    <> "(.) :: (b -> c) -> (a -> b) -> a -> c\n"
+    <> "r = (" <> MT.intercalate " . " (replicate k "id") <> ") 42\n"
+
+-- | @map (\\(k, v) -> (k, dbl v)) . ... @ applied to @[(Str, Int)]@, @k@
+-- compositions deep. Exercises a long chain in which every stage
+-- destructures a tuple, so the receiver index is populated and the scan is
+-- actually taken.
+tuplePatternComposition :: Int -> MT.Text
+tuplePatternComposition k =
+  "module main (r)\n"
+    <> "map :: (a -> b) -> [a] -> [b]\n"
+    <> "dbl :: Int -> Int\n"
+    <> "(.) :: (b -> c) -> (a -> b) -> a -> c\n"
+    <> "xs :: [(Str, Int)]\n"
+    <> "xs = [(\"a\", 1)]\n"
+    <> "r = (" <> MT.intercalate " . " (replicate k stage) <> ") xs\n"
+  where
+    stage = "map (\\(k, v) -> (k, dbl v))"
+
+-- | @dd (dd (... (big x)))@, @k@ deep, where @dd a = add a a@ uses its
+-- parameter twice. Each application is a beta-redex @(\\a -> add a a) arg@
+-- whose parameter is multiply-used, so substitution would clone @arg@ twice
+-- and a chain doubles it (2^k). Sourced so it lands on the pool path. Used to
+-- verify 'applyLambdas' shares such a parameter rather than cloning it.
+dupParamChain :: Int -> MT.Text
+dupParamChain k =
+  "module main (run)\n"
+    <> "type Py => Int = \"int\"\n"
+    <> "source Py from \"dup.py\" (\"add\", \"big\")\n"
+    <> "add :: Int -> Int -> Int\n"
+    <> "big :: Int -> Int\n"
+    <> "dd :: Int -> Int\n"
+    <> "dd a = add a a\n"
+    <> "run :: Int -> Int\n"
+    <> "run x = " <> nest <> "\n"
+  where
+    nest = foldr (\_ acc -> "dd (" <> acc <> ")") "big x" [1 .. k]
+
+-- | @mid (mid (... (seed x)))@, @k@ deep, where @mid a = inc a@ uses its
+-- parameter exactly ONCE. Each application is a beta-redex @(\\a -> inc a) arg@
+-- whose parameter is singly-used: the fix MOVES @arg@ (no copy), so the chain
+-- is linear. Cloning instead re-copies the growing rest-of-chain at every
+-- level -- O(k^2) -- and a deep chain blows up. First-order @Int -> Int@ only,
+-- so realize does no function-argument re-scoring and this isolates the
+-- 'applyLambdas' move/clone decision. Sourced so it lands on the pool path.
+singleUseChain :: Int -> MT.Text
+singleUseChain k =
+  "module main (run)\n"
+    <> "type Py => Int = \"int\"\n"
+    <> "source Py from \"m.py\" (\"inc\", \"seed\")\n"
+    <> "inc :: Int -> Int\n"
+    <> "seed :: Int -> Int\n"
+    <> "mid :: Int -> Int\n"
+    <> "mid a = inc a\n"
+    <> "run :: Int -> Int\n"
+    <> "run x = " <> nest <> "\n"
+  where
+    nest = foldr (\_ acc -> "mid (" <> acc <> ")") "seed x" [1 .. k]
 
 -- Effect type helpers used throughout the effect test groups.
 ioEff :: TypeU -> TypeU
@@ -7477,6 +7619,56 @@ bidirectionalAppCheckTests =
         foo :: [a] -> ?a
         foo xs = f xs
         |]
+      , -- Widening under an effect wrapper: a do-block always synthesizes
+        -- <E> T, so a bare-value final checked against a declared <E> ?T
+        -- return must coerce the inner T to ?T. tryCoerce now traverses the
+        -- matching EffectU wrapper; without that, <Err> Int <: <Err> ?Int
+        -- fell through.
+        expectPass
+          "do-block bare final coerces to optional under effect"
+          [r|
+        module main (foo)
+        escapable effect Err
+        source Py ("act")
+        act :: Int -> <Err> Int
+        foo :: Int -> <Err> ?Int
+        foo x = do
+          y <- act x
+          y
+        |]
+      , -- The exact shape from mosm's parseComposition: a `?:` whose Null
+        -- branch is optional and whose other branch is an effectful do-block
+        -- yielding a bare value. checkE pushes the <Err> ?Int expectation
+        -- into both branches; the do-block branch coerces via the effect
+        -- traversal.
+        expectPass
+          "null-guarded effectful do-block branch coerces to optional"
+          [r|
+        module main (foo)
+        escapable effect Err
+        source Py ("act", "isZero")
+        act :: Int -> <Err> Int
+        isZero :: Int -> Bool
+        foo :: Int -> <Err> ?Int
+        foo x
+          ? isZero x = Null
+          : do y <- act x
+               y
+        |]
+      , -- Guard against over-firing: the effect traversal must still reject
+        -- a wrong inner type. <Err> Int cannot widen to <Err> ?Str.
+        exprTestBad
+          "effectful do-block final at wrong optional inner type rejected"
+          [r|
+        module main (foo)
+        escapable effect Err
+        source Py ("act")
+        act :: Int -> <Err> Int
+        foo :: Int -> <Err> ?Str
+        foo x = do
+          y <- act x
+          y
+        |]
       ]
 
 -- | Build a morloc source program with a depth-N recursive literal
@@ -7749,6 +7941,154 @@ postArgPropagationTests =
         x = g (f (make 9))
           |]
           (AppU (VarU (TV "T1")) [NatLitU 9, VarU (TV "Real")])
+      ]
+
+-- Shared abstract environment for the destructuring-propagation tests.
+-- Every case exports a single binding `r`; it references only the
+-- signatures/data it needs and ignores the rest.
+tplEnv :: MT.Text
+tplEnv =
+  [r|
+map :: (a -> b) -> [a] -> [b]
+dbl :: Int -> Int
+proj :: (Str, Int) -> Str
+proj (k, v) = k
+ys :: [Int]
+ys = [1, 2, 3]
+n :: Int
+n = 5
+t :: (Str, Int)
+t = ("a", 1)
+xs :: [(Str, Int)]
+xs = [("a", 1)]
+sxs :: [(Str, Str)]
+sxs = [("a", "b")]
+ts :: [(Str, Int, Bool)]
+ts = [("a", 1, True)]
+us :: [((Str, Int), Bool)]
+us = [(("a", 1), True)]
+|]
+
+tplProg :: MT.Text -> MT.Text
+tplProg body = "module main (r)\n" <> tplEnv <> "\nr = " <> body <> "\n"
+
+-- | When a function argument has a concrete type, each variable pulled
+-- out by a destructuring pattern (a tuple pattern in a lambda parameter
+-- or a let binding) must receive the corresponding component type --
+-- even when that component is passed straight through to the result
+-- without any other constraint. Axes covered: lambda-param vs let
+-- destructuring; argument pinned by a binding vs an inline literal;
+-- pass-through of the first / second / both / swapped / three-wide /
+-- nested components; a component pinned by a same-application function
+-- as a control; plain-variable lambdas and annotated/checked forms as
+-- controls that must keep working; and negative cases where consuming a
+-- destructured component at a contradictory type must be rejected.
+tuplePatternLambdaTests :: TestTree
+tuplePatternLambdaTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout
+    testGroup
+      "Destructuring-pattern argument-type propagation"
+      [ -- Controls: plain-variable lambdas already flow the argument
+        -- type in, including a pass-through into a constructed tuple.
+        assertGeneralType
+          "plain-var lambda, argument pinned by a binding"
+          (tplProg "map (\\x -> dbl x) ys")
+          (lst int)
+      , assertGeneralType
+          "plain-var lambda constructing a tuple (pass-through)"
+          (tplProg "map (\\x -> (x, x)) ys")
+          (lst (tuple [int, int]))
+      , assertGeneralType
+          "plain-var lambda, direct application"
+          (tplProg "(\\x -> dbl x) n")
+          int
+      , -- Core: a tuple-pattern parameter must receive each component
+        -- type from the argument. The pass-through first component is
+        -- the one with no other constraint.
+        assertGeneralType
+          "tuple-pattern lambda, pass-through first component"
+          (tplProg "map (\\(k, v) -> (k, dbl v)) xs")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "tuple-pattern lambda over an inline literal argument"
+          (tplProg "map (\\(k, v) -> (k, dbl v)) [(\"a\", 1)]")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "tuple-pattern lambda, project the first component"
+          (tplProg "map (\\(k, v) -> k) xs")
+          (lst str)
+      , assertGeneralType
+          "tuple-pattern lambda, project the second component"
+          (tplProg "map (\\(k, v) -> v) xs")
+          (lst int)
+      , assertGeneralType
+          "tuple-pattern lambda, both components (identity)"
+          (tplProg "map (\\(k, v) -> (k, v)) xs")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "tuple-pattern lambda, swapped components"
+          (tplProg "map (\\(k, v) -> (v, k)) xs")
+          (lst (tuple [int, str]))
+      , assertGeneralType
+          "tuple-pattern lambda, component pinned by a function (control)"
+          (tplProg "map (\\(k, v) -> dbl v) xs")
+          (lst int)
+      , assertGeneralType
+          "three-wide tuple-pattern lambda"
+          (tplProg "map (\\(a, b, c) -> (a, c)) ts")
+          (lst (tuple [str, bool]))
+      , assertGeneralType
+          "nested tuple-pattern lambda"
+          (tplProg "map (\\((a, b), c) -> a) us")
+          (lst str)
+      , assertGeneralType
+          "direct application of a tuple-pattern lambda"
+          (tplProg "(\\(k, v) -> k) t")
+          str
+      , assertGeneralType
+          "let-bound tuple destructuring inside a lambda"
+          (tplProg "map (\\p -> let (k, v) = p in k) xs")
+          (lst str)
+      , -- Controls in checking mode: an annotated result and a named
+        -- helper with an explicit signature must keep resolving.
+        assertGeneralType
+          "annotated result (checking mode control)"
+          (tplProg "map (\\(k, v) -> (k, dbl v)) xs :: [(Str, Int)]")
+          (lst (tuple [str, int]))
+      , assertGeneralType
+          "named helper with an explicit signature (control)"
+          (tplProg "map proj xs")
+          (lst str)
+      , -- Negative: a destructured component consumed at a type that
+        -- contradicts the argument must be rejected. A component whose
+        -- type is dropped would silently accept these.
+        exprTestBad
+          "destructured first component used at a wrong type is rejected"
+          (tplProg "map (\\(k, v) -> dbl k) xs")
+      , exprTestBad
+          "wrong-typed destructured component under direct application is rejected"
+          (tplProg "(\\(k, v) -> dbl k) t")
+      , exprTestBad
+          "destructured second component used at a wrong type is rejected"
+          (tplProg "map (\\(k, v) -> dbl v) sxs")
+      , -- A destructuring pattern pins its parameter to a tuple shape, so
+        -- applying such a lambda to a non-tuple must be rejected up front,
+        -- not deferred to a codegen crash on the projection.
+        exprTestBad
+          "tuple-pattern lambda mapped over non-tuples is rejected"
+          (tplProg "map (\\(k, v) -> k) ys")
+      , exprTestBad
+          "tuple-pattern lambda applied to a scalar is rejected"
+          (tplProg "(\\(k, v) -> k) n")
+      , -- A field setter reached through a lambda parameter must enforce the
+        -- field's type just as it does on a concrete receiver: setting the
+        -- Str field .0 to an Int literal must fail.
+        exprTestBad
+          "wrong-typed field setter through a lambda parameter is rejected"
+          (tplProg "map (\\p -> (.0 = 7) p) xs")
+      , exprTestBad
+          "wrong-typed field setter under direct application is rejected"
+          (tplProg "(\\p -> (.0 = 7) p) t")
       ]
 
 -- | Frontend validation of `--' with:` docstring atoms (terminal

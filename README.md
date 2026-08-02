@@ -1,25 +1,17 @@
 <p align="center">
-  <a href="https://github.com/morloc-project/morloc/actions/workflows/.test.yml">
-    <img src="https://github.com/morloc-project/morloc/actions/workflows/.test.yml/badge.svg" alt="build status">
-  </a>
-  <a href="https://github.com/morloc-project/morloc/releases">
-    <img src="https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release" alt="github release">
-  </a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0">
-      <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="license: Apache 2.0">
-</a>
+  <a href="https://github.com/morloc-project/morloc/releases"><img src="https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release" alt="github release"></a>&nbsp;&nbsp;
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="license: Apache 2.0"></a>&nbsp;&nbsp;
+  <a href="https://morloc-project.github.io/docs"><img src="https://img.shields.io/badge/Manual-000000?style=flat&logo=readthedocs&logoColor=white" alt="Manual"></a>&nbsp;&nbsp;
+  <a href="https://discord.gg/dyhKd9sJfF"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord"></a>&nbsp;&nbsp;
+  <a href="https://peerj.com/articles/cs-3435/"><img src="https://img.shields.io/badge/Paper-02A98D?style=flat&logo=googlescholar&logoColor=white" alt="Paper"></a>&nbsp;&nbsp;
+  <a href="https://x.com/morlocproject"><img src="https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white" alt="X"></a>&nbsp;&nbsp;
+  <a href="https://bsky.app/profile/morloc-project.bsky.social"><img src="https://img.shields.io/badge/Bluesky-0285FF?style=flat&logo=bluesky&logoColor=white" alt="BlueSky"></a>&nbsp;&nbsp;
+  <a href="mailto:z@morloc.io"><img src="https://img.shields.io/badge/Email-D14836?style=flat&logo=gmail&logoColor=white" alt="Email"></a>
 </p>
 
 <p align="center">
-  <a href="https://morloc-project.github.io/docs">Manual</a> |
-  <a href="https://discord.gg/dyhKd9sJfF">Discord</a> |
-  <a href="https://peerj.com/articles/cs-3435/">Paper</a> |
-  <a href="https://x.com/morlocproject">X</a> |
-  <a href="https://bsky.app/profile/morloc-project.bsky.social">BlueSky</a> |
-  <a href= "mailto:z@morloc.io">Email</a>
+  <img src="./assets/comp-fig.svg" alt="Composition" width="100%" />
 </p>
-
-
 
 <div align="center">
 <h1>Morloc</h1>

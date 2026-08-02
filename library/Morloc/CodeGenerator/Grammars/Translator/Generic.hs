@@ -29,8 +29,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( IAccessor (..)
+  ( containsClosure
+  , IAccessor (..)
   , IExpr (..)
+  , IOwnership (..)
   , IProgram (..)
   , IStmt (..)
   , IndexM
@@ -113,7 +115,8 @@ translateBuiltin lang desc srcs es = do
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  let program = buildProgram labels templates allSources mDocs es schemas
+  closureTable <- computeClosureSchemas lang es
+  let program = buildProgram labels templates allSources mDocs es schemas closureTable
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -164,7 +167,8 @@ translateExternal cmd lang desc srcs es = do
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  let program = buildProgram labels templates includeDocs mDocs es schemas
+  closureTable <- computeClosureSchemas lang es
+  let program = buildProgram labels templates includeDocs mDocs es schemas closureTable
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -389,9 +393,25 @@ genericLowerConfig ::
   LowerConfig IndexM
 genericLowerConfig desc srcNamer debugInfo debugMode = cfg
   where
+    -- Shared arg-schema list + result-schema doc for the two reflect hooks;
+    -- mlc_reflect and mlc_reflect_from_tuple differ only in whether the wire
+    -- tuple has already been parsed.
+    reflectSchemas ins out =
+      let argSchemas = map (dquotes . pretty . render . Serial.serialAstToMsgpackSchema) ins
+          argListDoc = case ldListStyle desc of
+            BracketList -> list argSchemas
+            _ -> pretty (ldGenericListFn desc) <> tupled argSchemas
+       in (argListDoc, dquotes (pretty (render (Serial.serialAstToMsgpackSchema out))))
+
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
+        , lcSourcedArg = \_ _ _ x -> x
+        , lcOwnership = \_ -> return Owned
+        , lcArgManifoldOwnership = \_ -> return Owned
+        , lcOwnArg = \_ _ x -> x
+        , lcWithCallerScope = id
+        , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing
         , lcDeserialAstType = \_ -> return Nothing
@@ -399,6 +419,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcTypeMOf = \_ -> return Nothing
         , lcPackerName = srcNamer
         , lcUnpackerName = srcNamer
+        , lcBorrowPackArg = \_ -> False
         , lcRecordAccessor = genericRecordAccessor desc
         , lcDeserialRecordAccessor = \_ k v -> case ldKeyAccess desc of
             "double_bracket" -> v <> "[[" <> dquotes (pretty k) <> "]]"
@@ -428,6 +449,8 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     pretty (ldRecordConstructor desc)
                       <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs]
                 }
+        , lcStoreField = \_ v -> return v
+        , lcApplyClosure = \callee args -> callee <> tupled args
         , lcForeignCall = \socketFile mid args ->
             let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
                 argsDoc = case ldListStyle desc of
@@ -445,6 +468,30 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
+        , lcReifyClosure = \v _ ->
+            return $ "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
+        , lcReflectClosure = \pkt s ->
+            case s of
+              SerialClosure ins out ->
+                let tupleSchema = render (Serial.serialAstToMsgpackSchema s)
+                    (argListDoc, resDoc) = reflectSchemas ins out
+                 in return $
+                      "mlc_reflect"
+                        <> tupled [pkt, dquotes (pretty tupleSchema), argListDoc, resDoc]
+              _ -> error "lcReflectClosure: expected SerialClosure"
+        , lcReflectClosureParsed = \tup s ->
+            case s of
+              SerialClosure ins out ->
+                let (argListDoc, resDoc) = reflectSchemas ins out
+                 in return $
+                      "mlc_reflect_from_tuple" <> tupled [tup, argListDoc, resDoc]
+              _ -> error "lcReflectClosureParsed: expected SerialClosure"
+        -- A language that supports producing crossing closures (a non-empty
+        -- 'ldClosureRegisterEntry', i.e. Python and R) reifies/reflects a closure
+        -- nested in ANY aggregate (record/list/tuple/optional) via the shared
+        -- engine -- its dict/list records are structural, so all shapes divert.
+        , lcDivertNestedClosure =
+            \s -> not (T.null (ldClosureRegisterEntry desc)) && containsClosure s
         , lcMakeFunction = \m mname args _ priorLines body headForm ->
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""
@@ -491,21 +538,35 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                   EndKeywordBlock ->
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
-        , lcMakeLambda = \mname contextArgs boundArgs ->
-            let tmpl = ldPartialTemplate desc
+        , lcClosureSig = \_ -> return ""
+        , lcMakePass = \mname _ -> return mname
+        , lcMakeLambda = \_sig mname contextArgs boundArgs ->
+            let ctxNames = map argNamer contextArgs
+                bndNames = map argNamer boundArgs
+                tmpl = ldPartialTemplate desc
                 fnText = render mname
-                allArgsList = contextArgs <> boundArgs
-                fnWithCtxList = mname : contextArgs
+                allArgsList = ctxNames <> bndNames
+                fnWithCtxList = mname : ctxNames
                 fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
                 allArgs = render (hsep (punctuate "," allArgsList))
-                boundArgsText = render (hsep (punctuate "," boundArgs))
-             in pretty $
+                boundArgsText = render (hsep (punctuate "," bndNames))
+                -- manNamer is "m<mid>", so the mid is the name minus its leading
+                -- "m". {{mid}} and {{captured_list}} let a language that cannot
+                -- introspect its closures (R) tag them with their manifold id and
+                -- captured values at construction, for later reification.
+                midText = T.drop 1 (render mname)
+                capturedList = render $ case ldListStyle desc of
+                  BracketList -> list ctxNames
+                  _ -> pretty (ldGenericListFn desc) <> tupled ctxNames
+             in return . pretty $
                   substituteT
                     tmpl
                     [ ("fn", fnText)
                     , ("fn_with_context", fnWithCtx)
                     , ("all_args", allArgs)
                     , ("bound_args", boundArgsText)
+                    , ("mid", midText)
+                    , ("captured_list", capturedList)
                     ]
         , lcRegisterSchema = registerSchemaIndex
         }
@@ -966,6 +1027,10 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_next("
             <> schemaRef sid <> ", " <> go handle <> ")"
+    go (IIntrinsicStreamLayout sid _ handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_stream_layout("
+            <> schemaRef sid <> ", " <> go handle <> ")"
     go (IIntrinsicStream handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_stream(" <> go handle <> ")"
@@ -1177,10 +1242,55 @@ printProgram desc prog =
     sections
   where
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit])
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
       ]
+
+    -- Per-closure captured-argument schemas, keyed by manifold id. Consulted by
+    -- the pool's reify helper to serialize each captured value when a closure
+    -- crosses a language boundary. Emitted only for languages that support
+    -- producing crossing closures (a non-empty 'ldClosureRegisterEntry').
+    closureTableInit
+      | T.null (ldClosureRegisterEntry desc) = mempty
+      | Map.null (ipClosureTable prog) = mempty
+      | otherwise =
+          vsep $
+            pretty (ldClosureTableHeader desc)
+              : [ pretty $
+                    substituteT
+                      (ldClosureTableEntry desc)
+                      [ ("mid", T.pack (show mid))
+                      , ("caps", render (closureLangList [dquotes (pretty c) | c <- caps]))
+                      ]
+                | (mid, (caps, _, _)) <- Map.toAscList (ipClosureTable prog)
+                ]
+
+    -- Render a list literal of schema strings in the language's own style
+    -- (Python brackets vs the generic list function), for the closure table and
+    -- registration entries.
+    closureLangList xs = case ldListStyle desc of
+      BracketList -> list xs
+      _ -> pretty (ldGenericListFn desc) <> tupled xs
+
+    -- Force-register each closure manifold in the local dispatch table so a
+    -- boundary-crossing closure can be applied by a foreign pool via
+    -- foreign_call on its manifold id. Emitted after the dispatch table is
+    -- defined (in 'templateDispatch') so the entries are available.
+    closureRegistrations
+      | T.null (ldClosureRegisterEntry desc) = mempty
+      | Map.null (ipClosureTable prog) = mempty
+      | otherwise =
+          vsep
+            [ pretty $
+                substituteT
+                  (ldClosureRegisterEntry desc)
+                  [ ("mid", T.pack (show mid))
+                  , ("args", render (closureLangList [dquotes (pretty s) | s <- caps <> bnds]))
+                  , ("res", render (dquotes (pretty res)))
+                  ]
+            | (mid, (caps, bnds, res)) <- Map.toAscList (ipClosureTable prog)
+            ]
 
     -- Rebind each labeled manifold function name to a logging shim. Placed
     -- immediately after the manifold definitions so any later reference
@@ -1230,7 +1340,7 @@ printProgram desc prog =
                 _ -> pretty (ldGenericListFn desc) <> tupled entries
            in "mlc_schema_table = " <> listExpr
 
-    templateDispatch = vsep [localD, remoteD]
+    templateDispatch = vsep [localD, remoteD, closureRegistrations]
       where
         renderEntry :: Text -> DispatchEntry -> MDoc
         renderEntry entryTmpl (DispatchEntry i _ _) =
@@ -1306,11 +1416,15 @@ genericEvalPattern desc _ (PatternStruct s) args
             [r] -> r
             _ -> error $ "genericEvalPattern: bracket-in-Selector expected 1 receiver, \
                          \got " <> show (length receivers)
-      in fst (walkSelectorBrackets desc receiver bracketArgs s)
+      in fst (walkGenericSelectorBrackets desc receiver bracketArgs s)
 -- setters
 genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
-  patternSetter makeTuple makeRecord accessTuple accessRecord m0 t0 s0 xs0
+  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
   where
+    -- dynamically-typed members copy by value at the runtime level, so an
+    -- unchanged leaf needs no explicit clone
+    finalizeSet _ v = v
+
     makeTuple _ xs = case ldTupleConstructor desc of
       "" -> tupled xs
       name -> pretty name <> tupled xs
@@ -1361,55 +1475,20 @@ writeSelector desc (Left i) = case ldIndexStyle desc of
   OneDoubleBracket -> "[[" <> pretty (i + 1) <> "]]"
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting
--- per-step native source code. Threads the @brackets@ list of runtime
--- arg expressions through bracket steps in DFS order; each call
--- returns the produced expression and the remaining (unconsumed)
--- bracket args. Multi-sibling groups emit a tuple.
-walkSelectorBrackets
-  :: LangDescriptor
-  -> MDoc          -- accumulated receiver expression
-  -> [MDoc]        -- remaining bracket runtime args
-  -> Selector
-  -> (MDoc, [MDoc])
-walkSelectorBrackets _ rcv bracketArgs SelectorEnd = (rcv, bracketArgs)
-walkSelectorBrackets desc rcv bracketArgs (SelectorKey (k, sub) []) =
-  walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) bracketArgs sub
-walkSelectorBrackets desc rcv bracketArgs (SelectorIdx (i, sub) []) =
-  walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) bracketArgs sub
-walkSelectorBrackets desc rcv (idx : restBrackets) (SelectorBracketIndex sub) =
-  let accessed = case ldIndexStyle desc of
+-- per-step native source code for a dynamically-typed member driven by
+-- its 'LangDescriptor'. See 'walkSelectorBrackets'.
+walkGenericSelectorBrackets :: LangDescriptor -> MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+walkGenericSelectorBrackets desc =
+  walkSelectorBrackets
+    (\rcv k -> rcv <> writeSelector desc (Right k))
+    (\rcv i -> rcv <> writeSelector desc (Left i))
+    (\idx rcv -> case ldIndexStyle desc of
         ZeroBracket -> rcv <> "[" <> idx <> "]"
         OneBracket -> rcv <> "[(" <> idx <> ") + 1]"
-        OneDoubleBracket -> rcv <> "[[(" <> idx <> ") + 1]]"
-  in walkSelectorBrackets desc accessed restBrackets sub
-walkSelectorBrackets _ _ [] (SelectorBracketIndex _) =
-  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-index step"
-walkSelectorBrackets desc rcv (start : stop : step : restBrackets) SelectorBracketSlice =
-  let sliced = case ldIndexStyle desc of
+        OneDoubleBracket -> rcv <> "[[(" <> idx <> ") + 1]]")
+    (\start stop step rcv -> case ldIndexStyle desc of
         ZeroBracket -> rcv <> "[" <> start <> ":" <> stop <> ":" <> step <> "]"
-        _ -> "morloc_slice" <> tupled [start, stop, step, rcv]
-  in (sliced, restBrackets)
-walkSelectorBrackets _ _ _ SelectorBracketSlice =
-  error "walkSelectorBrackets: ran out of bracket runtime args for bracket-slice step"
-walkSelectorBrackets desc rcv bracketArgs (SelectorKey hd@(_, _) others) =
-  let pairs = hd : others
-      (results, finalBrackets) = foldl
-        (\(acc, b) (k, sub) ->
-           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Right k)) b sub
-           in (acc ++ [out], b'))
-        ([], bracketArgs) pairs
-      tupleExpr = case ldTupleConstructor desc of
+        _ -> "morloc_slice" <> tupled [start, stop, step, rcv])
+    (\results -> case ldTupleConstructor desc of
         "" -> tupled results
-        name -> pretty name <> tupled results
-  in (tupleExpr, finalBrackets)
-walkSelectorBrackets desc rcv bracketArgs (SelectorIdx hd@(_, _) others) =
-  let pairs = hd : others
-      (results, finalBrackets) = foldl
-        (\(acc, b) (i, sub) ->
-           let (out, b') = walkSelectorBrackets desc (rcv <> writeSelector desc (Left i)) b sub
-           in (acc ++ [out], b'))
-        ([], bracketArgs) pairs
-      tupleExpr = case ldTupleConstructor desc of
-        "" -> tupled results
-        name -> pretty name <> tupled results
-  in (tupleExpr, finalBrackets)
+        name -> pretty name <> tupled results)

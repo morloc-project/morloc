@@ -36,6 +36,7 @@ import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
+import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Reduce (reduce)
@@ -75,6 +76,8 @@ typecheck ::
     )
 typecheck path code =
   typecheckFrontend path code
+    -- lower guest-language sources (e.g. Futhark) into host glue
+    >>= lowerGuests
     -- resolve all TypeU types to Type
     |>> map F.resolveTypes
     -- resolve all TypeU types to Type
@@ -83,8 +86,16 @@ typecheck path code =
     >>= realityCheck
 
 -- | Do everything except language specific code generation.
+--
+-- Runs 'applyLambdas' first, matching the pool path in 'writeProgram': the
+-- 'express' pipeline assumes lambdas have been reduced/lifted, so skipping it
+-- lets a lambda reach 'expressPolyApp' as an un-handled head ("unexpected
+-- LamS"). 'False' keeps a multiply-used lambda as a shared native closure
+-- (rASTs become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = do
+generatePools rASTs0 = do
+  reg <- MM.gets stateLangRegistry
+  rASTs <- mapM (applyLambdas False) rASTs0
   paramRASTs <- mapM parameterize rASTs
   let langMap = Map.fromList
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
@@ -102,7 +113,7 @@ generatePools rASTs = do
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
-      |>> pool
+      |>> pool reg
 
 -- | Build a program as a local executable
 writeProgram ::
@@ -115,8 +126,11 @@ writeProgram ::
   MorlocMonad ()
 writeProgram translateFn path code = do
   typecheck path code
-    -- evaluate all applied lambdas in rasts and gasts
-    >>= bimapM (mapM applyLambdas) (mapM applyLambdas)
+    -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
+    -- cannot hold a native closure, so let-bound lambdas are always inlined
+    -- there (True); rASTs become pools, where a multiply-used lambda is kept
+    -- as a shared native closure to avoid exponential inlining (False).
+    >>= bimapM (mapM (applyLambdas True)) (mapM (applyLambdas False))
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools
@@ -148,6 +162,7 @@ writeProgram translateFn path code = do
         let langMap = Map.fromList
               [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
         MM.modify (\s -> s { stateManifoldLang = langMap })
+        reg <- MM.gets stateLangRegistry
         pools <-
           mapM express paramRASTs
             -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
@@ -163,7 +178,7 @@ writeProgram translateFn path code = do
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce
-              |>> pool
+              |>> pool reg
             >>= mapM (uncurry (emit translateFn))
         -- Fingerprint each pool's emitted source and substitute the
         -- hex hashes into the @<MORLOC_POOL_HASH:lang>@ placeholders

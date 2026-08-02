@@ -1,0 +1,18 @@
+-- Rust pool member: on-disk result caching (`a@fn` labeled group).
+--
+-- The `a`-labeled call is cache:true (see main.yaml), so the Rust pool wraps
+-- the manifold in a content-addressed cache: the first call computes and
+-- stores the result packet; a second call with the same input hits the cache
+-- (no recompute). A distinct input gets a distinct key -> a second packet.
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main (fooR)
+
+import root-rust
+
+mysum :: [Real] -> Real
+mysum = fold (+) 0.0
+
+fooR :: [Real] -> Real
+fooR xs = a@idrust (mysum xs)

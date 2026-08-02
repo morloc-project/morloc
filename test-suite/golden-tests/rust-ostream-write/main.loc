@@ -1,0 +1,102 @@
+-- Rust pool member: OStream write intrinsics, end to end.
+--
+-- Covers the stream-writer intrinsic family in a Rust pool:
+--   * @open path :: OStream T  -- typed create + header
+--   * @write level handle xs   -- emit one sub-packet
+--   * @flush handle            -- force buffered elements out
+--   * @close handle            -- final footer + close
+--   * @append path :: OStream T -- resume an existing stream
+--   * @concat [src..] dest      -- byte-level merge
+--   * @flen handle              -- element count (via reopened IFile)
+--
+-- Each writer result is read back (as IStream via @next, or as IFile
+-- via @flen) to prove the round-trip. All handle state lives in the
+-- shared-SHM slot registry keyed by the u64 handle.
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main
+  ( testWriteOne
+  , testWriteMulti
+  , testWriteIStream
+  , testAppendThenLength
+  , testConcatTwo
+  , testStreamLayoutChunks
+  )
+
+import root-rust
+
+-- 1. Write one sub-packet; reopen as IStream and read it back.
+testWriteOne :: Str -> <IO, Err> [Int]
+testWriteOne path = do
+  s <- @open path :: <IO, Err> OStream Int
+  @write 0 s [10, 20, 30]
+  @close s
+  r <- @open path :: <IO, Err> IStream Int
+  @next r
+
+-- 2. Write three sub-packets; reopen as IFile, check length.
+testWriteMulti :: Str -> <IO, Err> Int
+testWriteMulti path = do
+  s <- @open path :: <IO, Err> OStream Int
+  @write 0 s [1, 2, 3]
+  @flush s
+  @write 0 s [4, 5, 6, 7]
+  @flush s
+  @write 0 s [8]
+  @close s
+  f <- @open path :: <IO, Err> IFile Int
+  @flen f
+
+-- 3. Write multi-sub-packet file, reopen as IStream, first @next.
+testWriteIStream :: Str -> <IO, Err> [Int]
+testWriteIStream path = do
+  o <- @open path :: <IO, Err> OStream Int
+  @write 0 o [100, 200]
+  @flush o
+  @write 0 o [300, 400, 500]
+  @close o
+  s <- @open path :: <IO, Err> IStream Int
+  @next s
+
+-- 4. Append to a closed stream; total element count = 3 + 2.
+testAppendThenLength :: Str -> <IO, Err> Int
+testAppendThenLength path = do
+  o <- @open path :: <IO, Err> OStream Int
+  @write 0 o [1, 2, 3]
+  @close o
+  o2 <- @append path :: <IO, Err> OStream Int
+  @write 0 o2 [4, 5]
+  @close o2
+  f <- @open path :: <IO, Err> IFile Int
+  @flen f
+
+-- 5. Concat two source files; total element count = 3 + 2.
+testConcatTwo :: Str -> Str -> Str -> <IO, Err> Int
+testConcatTwo a b dest = do
+  oa <- @open a :: <IO, Err> OStream Int
+  @write 0 oa [11, 22, 33]
+  @close oa
+  ob <- @open b :: <IO, Err> OStream Int
+  @write 0 ob [44, 55]
+  @close ob
+  @concat [a, b] dest
+  f <- @open dest :: <IO, Err> IFile Int
+  @flen f
+
+-- 6. @streamLayout on a 3-sub-packet IFile returns one (offset,count,size)
+-- triple per sub-packet; its length is the chunk count. This materialises
+-- the whole [(U64,U64,U64)] layout via the Rust FromVoidstar path (the
+-- same value-out shape as @next), then counts the chunks.
+testStreamLayoutChunks :: Str -> <IO, Err> U64
+testStreamLayoutChunks path = do
+  s <- @open path :: <IO, Err> OStream Int
+  @write 0 s [1, 2, 3]
+  @flush s
+  @write 0 s [4, 5, 6, 7]
+  @flush s
+  @write 0 s [8]
+  @close s
+  f <- @open path :: <IO, Err> IFile [Int]
+  layout <- @streamLayout f
+  size layout

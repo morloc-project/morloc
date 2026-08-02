@@ -79,6 +79,11 @@ pub enum MorlocExpressionType {
                       // Never returns; the return schema is a sentinel "z".
     Catch = 28,       // (fallible, fallback) -> value. Evaluate fallible;
                       // on Err, evaluate fallback into the caller's dest.
+    If = 29,          // (cond, then, else) -> value. Evaluate cond (a Bool);
+                      // materialize the taken branch into the caller's dest.
+    StreamLayout = 30, // IFile handle -> [(U64,U64,U64)]. Per-sub-packet layout
+                       // (element_offset, element_count, uncompressed_size);
+                       // DATA packet -> single triple; empty stream -> [].
 }
 
 #[repr(C)]
@@ -224,6 +229,16 @@ pub struct MorlocCatchExpression {
     pub fallback: *mut MorlocExpression,
 }
 
+// Pure-nexus conditional: evaluate `cond` (a Bool) and materialize the taken
+// branch into the caller's dest. `then_branch` and `else_branch` share the
+// result type (and schema) with the If node.
+#[repr(C)]
+pub struct MorlocIfExpression {
+    pub cond: *mut MorlocExpression,
+    pub then_branch: *mut MorlocExpression,
+    pub else_branch: *mut MorlocExpression,
+}
+
 // IFile-family handle intrinsics.
 #[repr(C)]
 pub struct MorlocOpenExpression {
@@ -258,6 +273,7 @@ pub union ExprUnion {
     pub save_expr: *mut MorlocSaveExpression,
     pub map_expr: *mut MorlocMapExpression,
     pub catch_expr: *mut MorlocCatchExpression,
+    pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
     pub ifile_walk_expr: *mut MorlocIFileWalkExpression,
@@ -1076,6 +1092,23 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(expr)
         }
 
+        "streamlayout" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::StreamLayout;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = handle;
+            Ok(expr)
+        }
+
         "stream" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let c_schema_str = CString::new(schema_str).unwrap_or_default();
@@ -1272,6 +1305,35 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // process-lifetime, so sharing the pointer is not a dangling risk.
             (*expr).schema = (*fallback).schema;
             (*expr).expr.catch_expr = catch;
+            Ok(expr)
+        }
+
+        "if" => {
+            let cond = build_expr(je.get("cond").unwrap_or(&serde_json::Value::Null))?;
+            let then_branch = build_expr(je.get("then").unwrap_or(&serde_json::Value::Null))?;
+            let else_branch = build_expr(je.get("else").unwrap_or(&serde_json::Value::Null))?;
+            let ifx = libc::calloc(1, std::mem::size_of::<MorlocIfExpression>()) as *mut MorlocIfExpression;
+            (*ifx).cond = cond;
+            (*ifx).then_branch = then_branch;
+            (*ifx).else_branch = else_branch;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::If;
+            // Parse the result schema from the If node's own "schema" field.
+            // Do NOT reuse a branch's schema: a @throw arm carries a Unit "z"
+            // sentinel (width 0), so if it is the then-branch (throw-first
+            // guard) reusing it would size the If result at 0. The If node is
+            // evaluated against its own schema width by its caller, so the
+            // value arm would then trip the eval width check.
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema = CString::new(schema_str).unwrap_or_default();
+            let sc = parse_schema(c_schema.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            (*expr).schema = sc;
+            (*expr).expr.if_expr = ifx;
             Ok(expr)
         }
 

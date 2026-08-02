@@ -1,0 +1,19 @@
+-- FAILING (Bug I). An effect-typed conditional (the @throw makes it effectful)
+-- whose OTHER arm is itself a value-producing conditional (`? b > 0 = 1 : 2`,
+-- arms are plain values, so it yields a value, not a thunk). The Bug C fix
+-- wraps LEAF value arms (Int/Str/Tuple/...) in a thunk to match the @throw
+-- arm's thunk representation, but a nested value-CONDITIONAL arm is neither a
+-- leaf value nor thunk-valued, so it stays unwrapped and inconsistent with its
+-- @throw sibling. Realized in C++ this is a compile error (a value assigned to
+-- a std::function); realized in Python it is `'int' object is not callable` at
+-- runtime. A no-@throw sibling (`? a>0 = 9 : (? b>0 = 1 : 2)`) works. This file
+-- must build once the arm-thunking recurses into value-conditional arms.
+module main (nv)
+
+import root-py
+import root-cpp
+
+nv :: Int -> Int -> <Err> Int
+nv a b =
+  ? a > 0 = @throw "outer"
+  : (? b > 0 = 1 : 2)

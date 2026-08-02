@@ -1,0 +1,35 @@
+-- A Rust producer captures a NON-SCALAR runtime value (a list, which may be
+-- shared-memory-backed) into a closure that crosses to a Python higher-order
+-- function. The reify path must copy the captured aggregate into a
+-- SELF-CONTAINED wire packet whose bytes stay valid until the closure is applied
+-- back in Rust -- `reify_capture` forces the inline threshold so the packet
+-- embeds its voidstar rather than a SHM relptr that would dangle once the
+-- producing manifold's SHM is reclaimed. Built with `--inline-size 0`, which
+-- would otherwise force the captured list to serialize as a relptr; the scalar
+-- `defunc-interop-rust-py` cannot exercise this (an int always inlines).
+
+module main (crossApply)
+
+import root-rust
+import root-py
+
+source Rust from "producer.rs" ("tick", "add", "vsum")
+source Py from "consumer.py" ("applyIt")
+
+type Rust => Int = "i64"
+type Rust => (List a) = "Vec<$1>" a
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+vsum :: [Int] -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+
+mkSummer :: [Int] -> <IO> (Int -> Int)
+mkSummer xs = do
+  _ <- tick
+  (\y -> add (vsum xs) y)
+
+crossApply :: [Int] -> <IO> Int
+crossApply xs = do
+  f <- mkSummer xs
+  applyIt f 10

@@ -1,0 +1,16 @@
+--- offsets ---
+[0,3,7]
+--- counts ---
+[3,4,1]
+--- numChunks ---
+3
+--- totalElems ---
+8
+--- dataOffsets ---
+[0]
+--- dataCounts ---
+[4]
+--- reject @streamLayout on OStream ---
+OK: OStream rejected
+--- reject @streamLayout on non-list IFile ---
+OK: non-list IFile rejected

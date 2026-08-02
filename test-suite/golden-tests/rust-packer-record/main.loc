@@ -1,0 +1,59 @@
+-- Rust pool member: a record with scalar custom-packer fields crossing a pool
+-- boundary, plus a setter that rewrites one such field.
+--
+-- `Wrapped` is a newtype over `Int` whose Rust representation (`MyWrap`) is a
+-- distinct struct, with a Packable instance (pack/unpack sourced from Rust). A
+-- record field of type `Wrapped` therefore has a native type (`MyWrap`) that
+-- differs from its wire type (`i64`) -- a genuine `SerialPack` divergence.
+--
+-- `WStr` is the same shape but its WIRE type is `Str` (native `MyStr`). Because
+-- `Str` is not Copy, this exercises the deserialize-side borrow (the pack
+-- argument is passed by reference); `Wrapped`'s Copy `i64` wire does not.
+--
+-- Crossing `Holder` walks the record field-by-field (IRecordLit), applying
+-- unpack on the way out and pack on the way in, and the struct is emitted as a
+-- GENERIC `mlc_Holder_2<T1, T2>` so both the native (`<MyWrap>`/`<MyStr>`) and
+-- wire (`<i64>`/`<String>`) forms are one type. `setW` rebuilds that generic
+-- struct with one custom-packer field replaced. idrust forces Rust.
+--
+-- Rust because it imports root-rust; the spec is backend-agnostic.
+
+module main (roundRec, getN, getW, setW, setS)
+
+import root-rust
+
+newtype Wrapped = Int
+type Rust => Wrapped = "MyWrap"
+
+instance Packable Int Wrapped where
+  source Rust from "wrap.rs" ("pack_wrap" as pack, "unpack_wrap" as unpack)
+
+newtype WStr = Str
+type Rust => WStr = "MyStr"
+
+instance Packable Str WStr where
+  source Rust from "wrap.rs" ("pack_str" as pack, "unpack_str" as unpack)
+
+record Holder where
+  w :: Wrapped
+  s :: WStr
+  n :: Int
+record Rust => Holder = "struct"
+
+-- receive a Holder (deserialize) and return it (serialize) -- the full crossing.
+roundRec :: Holder -> Holder
+roundRec h = idrust h
+
+getN :: Holder -> Int
+getN h = .n (idrust h)
+
+getW :: Holder -> Wrapped
+getW h = .w (idrust h)
+
+-- setter on a generic packer-field record: replace the Copy-wire field .w
+setW :: Holder -> Wrapped -> Holder
+setW h v = .(.w = v) (idrust h)
+
+-- setter replacing the non-Copy-wire packer field .s
+setS :: Holder -> WStr -> Holder
+setS h v = .(.s = v) (idrust h)

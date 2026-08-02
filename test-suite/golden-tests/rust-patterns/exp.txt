@@ -1,0 +1,7 @@
+"Hi Ada from London!"
+20
+[20,30]
+[7,9]
+{"x":99,"y":"hi","z":8}
+[1,"new",3]
+{"a":5,"p":["rewritten",7]}

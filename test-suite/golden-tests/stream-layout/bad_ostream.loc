@@ -1,0 +1,9 @@
+-- @streamLayout requires an IFile receiver; an OStream must be rejected.
+module main (bad)
+
+import root
+
+bad :: Str -> <IO, Err> [(U64, U64, U64)]
+bad path = do
+  o <- @open path :: <IO, Err> OStream Int
+  @streamLayout o

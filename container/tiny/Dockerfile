@@ -54,6 +54,11 @@ RUN mkdir -p /rust-bin \
     && cp target/release/morloc-nexus /rust-bin/ \
     && cp target/release/morloc-manager /rust-bin/
 
+# Bundle the Rust crate sources (minus build artifacts). rustmorloc is an rlib
+# locked to the runtime rustc, so it can't be prebuilt like the C-ABI
+# libmorloc.so; `morloc init` compiles it locally from these sources.
+RUN cp -r /build /rust-src && rm -rf /rust-src/target
+
 ###############################################################################
 # Stage 3: Final minimal image with compiler + pre-built Rust binaries
 
@@ -64,6 +69,8 @@ LABEL org.opencontainers.image.licenses=Apache-2.0
 FROM docker.io/library/ubuntu:24.04
 COPY --from=morloc-build /root/.local/bin/morloc /bin/morloc
 COPY --from=rust-build /rust-bin/ /opt/morloc-rust-bin/
+# Rust crate sources for building rustmorloc locally at `morloc init`.
+COPY --from=rust-build /rust-src/ /opt/morloc-rust-bin/rust/
 
 # morloc make builds C++ pools, so g++ is needed
 RUN apt-get update && apt-get install -y --no-install-recommends g++ \

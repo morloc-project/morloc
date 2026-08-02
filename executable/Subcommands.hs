@@ -8,16 +8,14 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Implements each CLI subcommand (make, typecheck, install, init, dump) and
-defines the 'TranslateFn' callback that routes C++ to 'CppTranslator' and
-other languages to the generic translator. This is the dependency injection
-point that keeps translator code out of the library.
+supplies the 'TranslateFn' callback by routing each language to its member via
+'Morloc.CodeGenerator.Pools.CAbi.Pool.memberFor'.
 -}
 module Subcommands (runMorloc) where
 
 import Control.Exception (SomeException, bracket, finally, try)
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
-import qualified CppTranslator
 import qualified Data.Aeson as JSON
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -28,8 +26,9 @@ import qualified Data.Text.IO as TIO
 import Morloc (generatePools)
 import qualified Morloc as M
 import Morloc.CodeGenerator.Emit (TranslateFn)
-import qualified Morloc.CodeGenerator.Grammars.Translator.Generic as Generic
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
+import Morloc.CodeGenerator.Pools.Pool (Member (..))
+import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import qualified Morloc.Completion as Completion
@@ -67,11 +66,10 @@ import UI
 decodePackageMeta :: BL.ByteString -> Maybe PackageMeta
 decodePackageMeta = JSON.decode
 
--- | Route each language to its translator.
+-- | Route each language to its member's emitter. The per-language dispatch now
+-- lives in the CAbi pool's member registry.
 translator :: TranslateFn
-translator lang srcs es
-  | lang == CppTranslator.cppLang = CppTranslator.translate srcs es
-  | otherwise = Generic.translate lang srcs es
+translator lang = memberEmit (memberFor lang)
 
 runMorloc :: CliCommand -> IO ()
 runMorloc args = do

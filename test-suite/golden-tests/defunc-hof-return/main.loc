@@ -1,0 +1,24 @@
+-- RED (known limitation): a function that RETURNS a function is passed to a
+-- higher-order function whose parameter is itself a curried function type,
+-- `(Int -> (Int -> Int))`. This is a valid higher-order pattern -- makeAndApply
+-- builds a closure from its argument (g x) and applies it -- but the frontend
+-- arity checker currently normalizes `Int -> (Int -> Int)` to a two-argument
+-- function and rejects the match against the one-argument-returning-one-argument
+-- parameter shape with "function arity mismatch". Expected result once the
+-- curried-function-argument case is handled: roundtrip 4 -> 16.
+
+module main (roundtrip)
+
+import root-py
+
+source Py from "helpers.py" ("mul", "applyIt", "makeAndApply")
+
+mul :: Int -> Int -> Int
+applyIt :: (Int -> Int) -> Int -> Int
+makeAndApply :: (Int -> (Int -> Int)) -> Int -> Int
+
+mkMul :: Int -> (Int -> Int)
+mkMul base = \y -> mul base y
+
+roundtrip :: Int -> Int
+roundtrip x = makeAndApply mkMul x

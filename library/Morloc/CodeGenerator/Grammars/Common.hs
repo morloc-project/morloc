@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , argNamer
   , manNamer
   , patternSetter
+  , walkSelectorBrackets
 
     -- * Record collection/unification
   , RecEntry (..)
@@ -38,6 +39,12 @@ module Morloc.CodeGenerator.Grammars.Common
   , DispatchEntry (..)
   , extractLocalDispatch
   , extractRemoteDispatch
+  , collectClosureManifolds
+  , collectSerializedClosures
+  , serialClosuresOf
+  , collectSerialObjects
+  , computeClosureSchemas
+  , orNativeType
   , collectLogLabels
   , collectManifoldIds
   , propagateManifoldLabel
@@ -57,7 +64,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (serialAstToType)
+import Morloc.CodeGenerator.Serial (serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
@@ -166,17 +173,22 @@ patternSetter ::
   (TypeF -> [MDoc] -> MDoc) -> -- make a record from a type and list of elements
   (TypeF -> MDoc -> Int -> MDoc) -> -- access an element in a tuple
   (TypeF -> MDoc -> Text -> MDoc) -> -- access an element in a record
+  (TypeF -> MDoc -> MDoc) -> -- finalize an UNCHANGED field's value for the rebuild
   MDoc -> -- initial data variable name
   TypeF -> -- data type
   Selector -> -- selection pattern
   [MDoc] -> -- ordered arguments substituted at set sites
   MDoc -- the returned data structure with a new spine that reuses unchanged fields
-patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
+patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 s0 args0 =
   snd (setter dat0 t0 s0 args0)
   where
     setter :: MDoc -> TypeF -> Selector -> [MDoc] -> ([MDoc], MDoc)
 
-    -- tuple setters
+    -- tuple setters. A field accessor is used bare as a recursion RECEIVER for a
+    -- changed field, but an UNCHANGED field's value is passed through
+    -- 'finalizeSet' (e.g. Rust clones it into the owned rebuild). Applying the
+    -- clone only to unchanged leaves avoids cloning a changed field's whole
+    -- subtree just to rebuild part of it.
     setter dat1 tupleType@(AppF _ ts1) (SelectorIdx s1 ss1) args1 =
       second (makeTuple tupleType) $ statefulMap (chooseField dat1 (s1 : ss1)) args1 (zip [0 ..] ts1)
       where
@@ -185,7 +197,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
           let dat' = accessTuple tupleType dat i
            in case (lookup i ss) of
                 (Just s) -> setter dat' t s args
-                Nothing -> (args, dat')
+                Nothing -> (args, finalizeSet t dat')
 
     -- record setters
     setter dat1 recType@(NamF _ _ _ rs1) (SelectorKey s1 ss1) args1 =
@@ -196,7 +208,7 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
           let dat' = accessRecord recType dat k
            in case (lookup k ss) of
                 (Just s) -> setter dat' t s args
-                Nothing -> (args, dat')
+                Nothing -> (args, finalizeSet t dat')
     -- Bracket selectors are not valid setter targets: bracket-index /
     -- bracket-slice describe element access on arrays, not record-style
     -- field assignment. The parser already rejects setters on accessor
@@ -208,6 +220,45 @@ patternSetter makeTuple makeRecord accessTuple accessRecord dat0 t0 s0 args0 =
       error "patternSetter: bracket-slice step in a setter selector"
     setter _ _ _ (arg : args2) = (args2, arg)
     setter _ _ _ [] = error "Illegal setter"
+
+-- | Walk a 'Selector' that may contain bracket steps, emitting per-language
+-- source for each step and threading the bracket runtime args in DFS order.
+-- Returns the produced expression and the unconsumed bracket args. The five
+-- renderers supply the only per-language differences (field/index access,
+-- bracket index/slice receiver form, and the multi-sibling group wrapper); the
+-- traversal and arg-threading are shared. Used by both the C++ and Rust
+-- getter-chain lowering.
+walkSelectorBrackets ::
+  (MDoc -> Text -> MDoc) ->                  -- record key step: receiver -> key -> receiver
+  (MDoc -> Int -> MDoc) ->                   -- tuple index step: receiver -> index -> receiver
+  (MDoc -> MDoc -> MDoc) ->                  -- bracket index: index-arg -> receiver -> expr
+  (MDoc -> MDoc -> MDoc -> MDoc -> MDoc) ->  -- bracket slice: start stop step receiver -> expr
+  ([MDoc] -> MDoc) ->                        -- multi-sibling group: results -> expr
+  MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice group = go
+  where
+    go rcv brs SelectorEnd = (rcv, brs)
+    go rcv brs (SelectorKey (k, sub) []) = go (keyStep rcv k) brs sub
+    go rcv brs (SelectorIdx (i, sub) []) = go (idxStep rcv i) brs sub
+    go rcv (idx : rest) (SelectorBracketIndex sub) = go (bracketIndex idx rcv) rest sub
+    go _ [] (SelectorBracketIndex _) =
+      error "walkSelectorBrackets: ran out of bracket runtime args for a bracket-index step"
+    go rcv (start : stop : step : rest) SelectorBracketSlice =
+      (bracketSlice start stop step rcv, rest)
+    go _ _ SelectorBracketSlice =
+      error "walkSelectorBrackets: ran out of bracket runtime args for a bracket-slice step"
+    go rcv brs (SelectorKey hd others) =
+      groupWalk [\b -> go (keyStep rcv k) b sub | (k, sub) <- hd : others] brs
+    go rcv brs (SelectorIdx hd others) =
+      groupWalk [\b -> go (idxStep rcv i) b sub | (i, sub) <- hd : others] brs
+
+    -- A multi-sibling group: each sibling walks from the shared receiver,
+    -- threading the bracket args left-to-right through the siblings in order,
+    -- then wrap the results.
+    groupWalk steps brs =
+      let (results, finalBrs) =
+            foldl (\(acc, b) step -> let (out, b') = step b in (acc ++ [out], b')) ([], brs) steps
+       in (group results, finalBrs)
 
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]
@@ -725,6 +776,138 @@ extractRemoteDispatch labels =
       Identity [(Int, Int)]
     getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
     getRemoteSE x = return $ foldlSE mappend mempty x
+
+-- | Collect every NESTED closure manifold (a 'ManifoldPart'/'ManifoldPass'
+-- with non-empty bound args) from a manifold tree. Such closures are
+-- materialized as standalone defs but live inside a parent manifold's body, so
+-- they never appear in the top-level '[SerialManifold]' list. Used to give each
+-- closure a cross-language dispatch entry (a defunctionalized closure applied in
+-- another pool calls back home via @foreign_call(mid)@). The custom fold keeps
+-- the ORIGINAL 'NativeManifold' (not just the folded body) so callers can read
+-- its form and 'typeFof'.
+collectClosureManifolds :: SerialManifold -> [NativeManifold]
+collectClosureManifolds = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [NativeManifold] [NativeManifold] [NativeManifold] [NativeManifold] [NativeManifold] [NativeManifold]
+    fw =
+      defaultValue
+        { opFoldWithNativeManifoldM = \orig folded ->
+            let NativeManifold_ _ _ form child = folded
+             in return $
+                  if not (null (manifoldBound form)) then orig : child else child
+        }
+
+-- | Every 'SerialClosure' AST that is serialized (reified across a language
+-- boundary) anywhere in the given manifold. A closure value only needs its
+-- reify machinery when it actually crosses -- i.e. when it reaches a
+-- 'SerializeS' site as (or containing) a 'SerialClosure'. Collecting these lets
+-- a translator give the fat/registered closure representation only to closures
+-- that can cross, and leave purely-local closures in their cheap native form.
+collectSerializedClosures :: SerialManifold -> [SerialAST]
+collectSerializedClosures = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST]
+    fw =
+      defaultValue
+        { opFoldWithSerialExprM = \_ folded ->
+            return $ case folded of
+              SerializeS_ s child -> serialClosuresOf s <> child
+              _ -> foldlSE (<>) mempty folded
+        }
+
+-- | All 'SerialClosure' nodes reachable within a 'SerialAST' (e.g. a list or
+-- record of closures crossing together, not only a bare closure).
+serialClosuresOf :: SerialAST -> [SerialAST]
+serialClosuresOf = go
+  where
+    go c@(SerialClosure ins out) = c : concatMap go ins <> go out
+    go (SerialPack _ (_, s)) = go s
+    go (SerialList _ _ s) = go s
+    go (SerialTuple _ ss) = concatMap go ss
+    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialOptional _ s) = go s
+    go _ = []
+
+-- | Every 'SerialObject' (record) reachable at a (de)serialization site in the
+-- manifold, as (record FVar, fields). Retains the enclosing FVar and each field
+-- Key (which 'serialClosuresOf' discards), so a static backend can recover a
+-- record's field ASTs -- e.g. a closure field's 'SerialClosure' wire schemas --
+-- at struct-generation time, from the manifolds it already has (no
+-- 'makeSerialAST'/'MorlocMonad'). Covers both serialize ('SerializeS') and
+-- deserialize ('DeserializeN') sites, and records nested in an outer aggregate.
+collectSerialObjects :: SerialManifold -> [(FVar, [(Key, SerialAST)])]
+collectSerialObjects = concatMap serialObjectsOf . allSerialASTs
+  where
+    allSerialASTs :: SerialManifold -> [SerialAST]
+    allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+    fw :: FoldWithManifoldM Identity [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST]
+    fw =
+      defaultValue
+        { opFoldWithSerialExprM = \_ folded ->
+            return $ case folded of
+              SerializeS_ s child -> s : child
+              _ -> foldlSE (<>) mempty folded
+        , opFoldWithNativeExprM = \_ folded ->
+            return $ case folded of
+              DeserializeN_ _ s child -> s : child
+              _ -> foldlNE (<>) mempty folded
+        }
+    serialObjectsOf :: SerialAST -> [(FVar, [(Key, SerialAST)])]
+    serialObjectsOf = go
+      where
+        go (SerialObject _ v _ rs) = (v, rs) : concatMap (go . snd) rs
+        go (SerialClosure ins out) = concatMap go ins <> go out
+        go (SerialList _ _ s) = go s
+        go (SerialTuple _ ss) = concatMap go ss
+        go (SerialOptional _ s) = go s
+        go (SerialPack _ (_, s)) = go s
+        go _ = []
+
+-- | For each nested closure in the given manifolds, compute its serial wire
+-- schemas: the captured (context) arg schemas, the bound (remaining) arg
+-- schemas, and the result schema. Keyed by the closure's manifold id. The
+-- native def takes @captured ++ bound@ in that order. These drive both the
+-- home-pool serial dispatch wrapper (deserialize captured ++ bound -> call the
+-- native closure -> serialize result) and the reify path (serialize only the
+-- captured values into the wire tuple).
+computeClosureSchemas ::
+  Lang -> [SerialManifold] -> MorlocMonad (Map.Map Int ([Text], [Text], Text))
+computeClosureSchemas lang sms =
+  Map.fromList <$> mapM one (filter isNativeContext (concatMap collectClosureManifolds sms))
+  where
+    -- Only closures whose ENTIRE rendered signature is native are the
+    -- reify/reflect kind this machinery serializes: the closure-body dispatch
+    -- wrapper deserializes each argument packet and calls the native manifold.
+    -- Any non-native parameter -- a 'Serial'/'Passthrough' arg (rendered as a
+    -- raw packet pointer), including the serial half of an 'LR' arg that
+    -- 'typeMofForm' expands into a serial+native pair -- means the manifold is a
+    -- cross-language HOF argument handled by the pre-existing serial path, not a
+    -- native closure to reify; a wrapper for it would mismatch those parameters.
+    isNativeContext (NativeManifold _ _ form _) = all isNativeArg (typeMofForm form)
+    isNativeArg (Arg _ (Native _)) = True
+    isNativeArg _ = False
+
+    one nm@(NativeManifold i _ form _) = do
+      let ctxTs = [t | Arg _ o <- manifoldContext form, Just t <- [orNativeType o]]
+          bndTs = [t | Arg _ t <- manifoldBound form]
+          resT = case typeFof nm of
+            FunF _ out -> out
+            other -> other
+      capSchemas <- mapM (schemaOf i) ctxTs
+      bndSchemas <- mapM (schemaOf i) bndTs
+      resSchema <- schemaOf i resT
+      return (i, (capSchemas, bndSchemas, resSchema))
+
+    schemaOf :: Int -> TypeF -> MorlocMonad Text
+    schemaOf i t = render . serialAstToMsgpackSchema <$> makeSerialAST i lang t
+
+-- | The native ('R'/'LR') type carried by a context arg, or 'Nothing' for a
+-- serial-only ('L') arg. Used by the closure passes to pull the captured
+-- values' native types out of a manifold's context.
+orNativeType :: Or TypeS TypeF -> Maybe TypeF
+orNativeType (R t) = Just t
+orNativeType (LR _ t) = Just t
+orNativeType (L _) = Nothing
 
 {- | Build a pure @midx -> (name, srcloc)@ closure by snapshotting
 'stateName' and 'stateSourceMap' from the monad. Each translator
