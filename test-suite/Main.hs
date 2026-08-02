@@ -384,6 +384,37 @@ main = do
       , -- a crossed closure partially applied at the morloc level before a
         -- foreign HOF supplies the rest: under-application saturates by currying
         golden "defunc-interop-underapply" "defunc-interop-underapply"
+      , -- RUNTIME closures nested in a record / list / tuple / optional that
+        -- crosses a boundary: each closure is reified/reflected in place inside
+        -- the aggregate. Every producer/consumer pairing across Python, R, and
+        -- C++ (a record uses a user-named C++ struct of std::function fields).
+        golden "defunc-record-closures-pr" "defunc-record-closures-pr"
+      , -- Rust producer of a list/tuple/optional of runtime closures, consumed in
+        -- Python (Phase R1 structural path: closures boxed to Rc<dyn MorlocFnN>,
+        -- reified in place, reflected as Python callbacks).
+        golden "defunc-record-closures-rust-py" "defunc-record-closures-rust-py"
+      , -- Python producer, Rust consumer: Rust REFLECTS a record/list/tuple/
+        -- optional of runtime closures (and a list-of-closure-records, where the
+        -- structural and nominal record paths compose) into Rc<dyn MorlocFnN>
+        -- proxies that RPC back to Python.
+        golden "defunc-record-closures-py-rust" "defunc-record-closures-py-rust"
+      , -- Rust structurally REFLECTS a list/tuple/optional of closures that
+        -- genuinely crosses as data (effectful Python producer), not one built
+        -- locally in the Rust consumer.
+        golden "defunc-record-closures-py-rust-crossed" "defunc-record-closures-py-rust-crossed"
+      , -- Rust<->C++ (two STATICALLY typed pools) for a record/list/tuple/optional
+        -- of runtime closures, both directions: Rust reify -> C++ reflect, and
+        -- C++ reify -> Rust reflect.
+        golden "defunc-record-closures-rust-cpp" "defunc-record-closures-rust-cpp"
+      , golden "defunc-record-closures-cpp-rust" "defunc-record-closures-cpp-rust"
+      , -- Origin-preserving re-cross A->B->C with Rust as the relay: a closure
+        -- reflected in Rust and re-forwarded RPCs back to its ORIGINAL home when
+        -- applied from a third pool (both Python-origin and C++-origin).
+        golden "defunc-record-closures-recross" "defunc-record-closures-recross"
+      , golden "defunc-record-closures-pc" "defunc-record-closures-pc"
+      , golden "defunc-record-closures-cp" "defunc-record-closures-cp"
+      , golden "defunc-record-closures-rp" "defunc-record-closures-rp"
+      , golden "defunc-record-closures-cr" "defunc-record-closures-cr"
       , golden "functional-data-4" "functional-data-4"
       , golden "functional-data-5" "functional-data-5"
       , golden "pattern-getters" "pattern-getters"

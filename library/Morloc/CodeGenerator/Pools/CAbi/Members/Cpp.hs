@@ -34,7 +34,8 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( IType (..)
+  ( containsClosure
+  , IType (..)
   , IOwnership (..)
   , LowerConfig (..)
   , buildProgramM
@@ -50,6 +51,8 @@ import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
+  , wireSerialAstToType
+  , containsFunT
   , serialAstToMsgpackSchema
   , shallowType
   )
@@ -740,7 +743,7 @@ cppLowerConfig reifyThunks =
                 _ -> v
             decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map wrapField rs) <> ";"
         return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
-    , lcStoreField = \_ v -> v
+    , lcStoreField = \_ v -> return v
     , lcApplyClosure = \callee args -> callee <> tupled args
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
@@ -830,42 +833,30 @@ PROPAGATE_ERROR(errmsg)|]
     , lcDeserialize = \t v s -> do
         typestr <- cppTypeOf t
         deserialize v typestr s
-    , lcReifyClosure = \v ->
+    , lcReifyClosure = \v _ ->
         -- C++ reification (producing a crossing closure from C++) recovers the
         -- manifold id and captured values from the fat MorlocClosure functor
-        -- stored in the std::function (see '_mlc_reify' in pool.cpp).
+        -- stored in the std::function (see '_mlc_reify' in pool.cpp). Arity-generic
+        -- via templates, so the 'SerialClosure' argument is unused.
         return $ "_mlc_reify" <> parens v
     , lcReflectClosure = \pkt s ->
         case s of
           SerialClosure ins out -> do
-            argTypes <- mapM (cppTypeOf . serialAstToType) ins
-            resType <- cppTypeOf (serialAstToType out)
             tupSid <- cppRegisterSchema (render (serialAstToMsgpackSchema s))
-            argSids <- mapM (cppRegisterSchema . render . serialAstToMsgpackSchema) ins
-            resSid <- cppRegisterSchema (render (serialAstToMsgpackSchema out))
-            let tupleT = "std::tuple<std::string, int64_t, std::vector<std::vector<uint8_t>>>" :: MDoc
-                paramDocs = [ t <+> ("__a" <> pretty i) | (i, t) <- zip [(0 :: Int) ..] argTypes ]
-                pushDocs =
-                  [ "__pkts.push_back(_put_value(__a" <> pretty i <> ", mlc_schema_table[" <> pretty sid <> "]));"
-                  | (i, sid) <- zip [(0 :: Int) ..] argSids
-                  ]
-                bodyDocs =
-                  [ "std::vector<const uint8_t*> __pkts;"
-                  , "for (const auto& __c : std::get<2>(__clo)) { __pkts.push_back(__c.data()); }"
-                  ]
-                    <> pushDocs
-                    <> [ "std::string __sock = std::string(\"pipe-\") + std::get<0>(__clo);"
-                       , "return _get_value<" <> resType <> ">(foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size()), mlc_schema_table[" <> pretty resSid <> "]);"
-                       ]
-                lam =
-                  vsep
-                    [ "[__clo = _get_value<" <> tupleT <> ">(" <> pkt <> ", mlc_schema_table[" <> pretty tupSid <> "])]"
-                        <> parens (hsep (punctuate "," paramDocs)) <+> "->" <+> resType <+> "{"
-                    , indent 4 (vsep bodyDocs)
-                    , "}"
-                    ]
-            return lam
+            let cloInit =
+                  "_get_value<" <> pretty cppClosureWireTupleName <> ">(" <> pkt
+                    <> ", mlc_schema_table[" <> pretty tupSid <> "])"
+            cppClosureProxyLambda cloInit ins out
           _ -> error "lcReflectClosure: expected SerialClosure"
+    -- A closure NESTED in an aggregate: the enclosing get_value already produced
+    -- the wire tuple, so the proxy captures it directly (no second get_value).
+    , lcReflectClosureParsed = \tup s ->
+        case s of
+          SerialClosure ins out -> cppClosureProxyLambda tup ins out
+          _ -> error "lcReflectClosureParsed: expected SerialClosure"
+    -- C++ serializes every aggregate positionally (a record is a std::tuple), so
+    -- a closure in any list/tuple/record/optional reifies/reflects in place.
+    , lcDivertNestedClosure = containsClosure
     , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm -> do
         state <- CMS.get
         let alreadyDone = case headForm of
@@ -991,13 +982,16 @@ PROPAGATE_ERROR(errmsg)|]
     }
   where
     -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)
+    -- Serialize/raw-deserialize types use the WIRE form: a closure nested in an
+    -- aggregate travels as its reified wire tuple, so the closure slot is typed
+    -- as that tuple ('cppClosureWireLeaf'), not the native std::function.
     serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     serializeTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
-    serializeTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
+    serializeTypeOf s = Just . toIType <$> cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
 
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
     rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
-    rawTypeOf s = Just . toIType <$> cppTypeOf (serialAstToType s)
+    rawTypeOf s = Just . toIType <$> cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
 
     -- | Escape a log-template string for embedding in a C++ double-quoted
     -- literal. Reuses the canonical 'Morloc.Data.Doc.escapeStringLit'
@@ -1296,9 +1290,53 @@ deserialize varname0 typestr0 s0 = do
       let final = [idoc|#{typestr0} #{schemaVar} = #{rendered};|]
       return (schemaVar, map CP.printStmt stmts ++ [final])
 
+-- The C++ concrete type of a defunctionalized closure's wire tuple:
+-- @(home_language, manifold_id, captured_packets)@. MUST match '_mlc_reify' in
+-- pool.cpp and the t3sjaau1 schema.
+cppClosureWireTupleName :: Text
+cppClosureWireTupleName = "std::tuple<std::string, int64_t, std::vector<std::vector<uint8_t>>>"
+
+-- The wire-tuple leaf type for a closure. Its concrete type is carried in the
+-- CVar so 'cppTypeOf' renders it verbatim (a closure nested in a vector/tuple/
+-- struct then becomes a vector/tuple/struct OF this tuple).
+cppClosureWireLeaf :: TypeF
+cppClosureWireLeaf = VarF (FV (TV "Closure") (CV cppClosureWireTupleName))
+
+-- Build a C++ reflect proxy lambda for a crossing closure. @cloInit@ initializes
+-- the captured @__clo@ wire tuple: the deserialized packet at the top level, or
+-- the already-parsed tuple for a closure nested in an aggregate. On each
+-- application the proxy serializes its arguments, appends them to the captured
+-- packets, and RPCs back to the home pool via foreign_call on the manifold id.
+cppClosureProxyLambda :: MDoc -> [SerialAST] -> SerialAST -> CppTranslator MDoc
+cppClosureProxyLambda cloInit ins out = do
+  argTypes <- mapM (cppTypeOf . serialAstToType) ins
+  resType <- cppTypeOf (serialAstToType out)
+  argSids <- mapM (cppRegisterSchema . render . serialAstToMsgpackSchema) ins
+  resSid <- cppRegisterSchema (render (serialAstToMsgpackSchema out))
+  let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- zip [(0 :: Int) ..] argTypes]
+      pushDocs =
+        [ "__pkts.push_back(_put_value(__a" <> pretty i <> ", mlc_schema_table[" <> pretty sid <> "]));"
+        | (i, sid) <- zip [(0 :: Int) ..] argSids
+        ]
+      bodyDocs =
+        [ "std::vector<const uint8_t*> __pkts;"
+        , "for (const auto& __c : std::get<2>(__clo)) { __pkts.push_back(__c.data()); }"
+        ]
+          <> pushDocs
+          <> [ "std::string __sock = std::string(\"pipe-\") + std::get<0>(__clo);"
+             , "return _get_value<" <> resType <> ">(foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size()), mlc_schema_table[" <> pretty resSid <> "]);"
+             ]
+  return $
+    vsep
+      [ "[__clo = " <> cloInit <> "]"
+          <> parens (hsep (punctuate "," paramDocs)) <+> "->" <+> resType <+> "{"
+      , indent 4 (vsep bodyDocs)
+      , "}"
+      ]
+
 recordToCppTuple :: [SerialAST] -> CppTranslator MDoc
 recordToCppTuple ts = do
-  tsDocs <- mapM (cppTypeOf . serialAstToType) ts
+  tsDocs <- mapM (cppTypeOf . wireSerialAstToType cppClosureWireLeaf) ts
   return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
 
 translateSegment :: Map.Map Text MDoc -> SerialManifold -> CppTranslator MDoc
@@ -1511,6 +1549,12 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       Scope -> TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> CppTranslator (Maybe (MDoc, MDoc))
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _, _) = return Nothing
     makeSerial _ _ (_, NamU _ (TV "arrow") _ _, _, _, _) = return Nothing
+    -- A record with a function field is marshalled through the shared engine
+    -- (its closures reified/reflected in place, the record itself typed as its
+    -- wire tuple); its native struct (de)serializer is unused, and showDefType
+    -- cannot render a function field, so skip generating one.
+    makeSerial scope _ (_, NamU _ _ _ rs, _, _, _)
+      | any (containsFunT . typeOf . evaluateTypeU scope . snd) rs = return Nothing
     makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _, _) = do
       let selfName = TV v
           -- The struct's own name is needed by showDefType so a `?T`

@@ -441,17 +441,6 @@ generalTypeToSerialAST' i anc (NamT o v _ rs) =
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
 
--- | Check whether a type contains a function type anywhere in its structure.
--- Used to detect higher-order functions appearing as arguments or in
--- compound positions (lists, tuples, records, optionals), which the CLI
--- nexus cannot serialize.
-containsFunT :: Type -> Bool
-containsFunT (FunT _ _) = True
-containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
-containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
-containsFunT (EffectT _ t) = containsFunT t
-containsFunT (OptionalT t) = containsFunT t
-containsFunT _ = False
 
 -- | Reject main-module exports whose type carries a function in argument or
 -- return position. The nexus turns each such export into a CLI subcommand
@@ -482,13 +471,13 @@ checkExportedHigherOrder i name t = case findOffender t of
   where
     findOffender :: Type -> Maybe (MDoc, Type)
     findOffender (FunT ts ret) =
-      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, containsFunT a] of
+      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, Serial.containsFunT a] of
         ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
-        [] | containsFunT ret ->
+        [] | Serial.containsFunT ret ->
              Just ("return type contains a function", ret)
            | otherwise -> Nothing
     findOffender ty
-      | containsFunT ty = Just ("exported value is or contains a function", ty)
+      | Serial.containsFunT ty = Just ("exported value is or contains a function", ty)
       | otherwise = Nothing
 
 resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST

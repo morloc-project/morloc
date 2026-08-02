@@ -812,19 +812,19 @@ macro_rules! morloc_fn {
     ($trait:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
         pub trait $trait<$($A,)+ R> {
             fn $call(&self, $($a: &$A,)+) -> R;
-            fn $reify(&self) -> Option<ClosureOrigin>;
+            fn $reify(&self) -> Option<&ClosureOrigin>;
         }
         // A native closure: callable, no recoverable origin.
         impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for F {
             #[inline]
             fn $call(&self, $($a: &$A,)+) -> R { self($($a,)+) }
-            fn $reify(&self) -> Option<ClosureOrigin> { None }
+            fn $reify(&self) -> Option<&ClosureOrigin> { None }
         }
         // A crossing closure: reifies to its stored origin.
         impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for FatClosure<F> {
             #[inline]
             fn $call(&self, $($a: &$A,)+) -> R { (self.f)($($a,)+) }
-            fn $reify(&self) -> Option<ClosureOrigin> { Some(self.origin.clone()) }
+            fn $reify(&self) -> Option<&ClosureOrigin> { Some(&self.origin) }
         }
         // A boxed function value (a record field, or a reflected proxy) is itself
         // a function value, so `&impl MorlocFnN` accepts it as well as a thin
@@ -832,7 +832,7 @@ macro_rules! morloc_fn {
         impl<$($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for std::rc::Rc<T> {
             #[inline]
             fn $call(&self, $($a: &$A,)+) -> R { (**self).$call($($a,)+) }
-            fn $reify(&self) -> Option<ClosureOrigin> { (**self).$reify() }
+            fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
         }
     };
 }

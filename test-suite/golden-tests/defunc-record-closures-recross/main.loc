@@ -1,0 +1,62 @@
+-- Origin-preserving RE-CROSS (A -> B -> C) of a runtime closure carried in a
+-- list, with Rust as the middle RELAY. A closure crosses from its home pool A,
+-- is REFLECTED in pool B, then RE-SERIALIZED and forwarded to pool C where it is
+-- applied. Origin preservation means C's application RPCs back to the ORIGINAL
+-- home A, not to the relay B.
+--
+-- Rust's reflected closure is a `FatClosure` carrying the ORIGINAL origin, so
+-- re-reifying it (via `reifyN`) reproduces A's socket + manifold id. This is
+-- proven both ways:
+--   recrossPRC : Python -> Rust -> C++  (closure's `add` lives ONLY in Python;
+--                C++ must RPC back to Python)
+--   recrossCRP : C++    -> Rust -> Python (closure's `addCpp` lives ONLY in C++;
+--                Python must RPC back to C++)
+-- If Rust substituted its OWN origin, the applier would RPC to Rust -- which has
+-- no such closure manifold -- and fail. A `13` result is conclusive.
+--
+-- `forward` (Rust) genuinely reflects the incoming list into
+-- `Vec<Rc<dyn MorlocFnN>>` and returns it, so the closure round-trips THROUGH the
+-- Rust pool. Capture `a` is a runtime CLI arg (not constant folded).
+
+module main (recrossPRC, recrossCRP)
+
+import root-py
+import root-rust
+import root-cpp
+
+type Rust => Int = "i64"
+type Cpp => Int = "int"
+
+source Py from "producer.py" ("tick", "add", "applyPy")
+source Rust from "relay.rs" ("forward")
+source Cpp from "producer.hpp" ("tickCpp", "addCpp", "applyCpp")
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+applyPy :: [Int -> Int] -> Int -> Int
+tickCpp :: <IO> Int
+addCpp :: Int -> Int -> Int
+applyCpp :: [Int -> Int] -> Int -> Int
+forward :: [Int -> Int] -> [Int -> Int]
+
+-- closure home = Python (add lives only in Python)
+mkPy :: Int -> <IO> [Int -> Int]
+mkPy a = do
+  _ <- tick
+  [(\x -> add a x)]
+
+-- closure home = C++ (addCpp lives only in C++)
+mkCpp :: Int -> <IO> [Int -> Int]
+mkCpp a = do
+  _ <- tickCpp
+  [(\x -> addCpp a x)]
+
+recrossPRC :: Int -> <IO> Int
+recrossPRC a = do
+  fs <- mkPy a
+  applyCpp (forward fs) 10
+
+recrossCRP :: Int -> <IO> Int
+recrossCRP a = do
+  fs <- mkCpp a
+  applyPy (forward fs) 10

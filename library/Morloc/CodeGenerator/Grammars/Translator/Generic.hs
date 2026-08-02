@@ -29,7 +29,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( IAccessor (..)
+  ( containsClosure
+  , IAccessor (..)
   , IExpr (..)
   , IOwnership (..)
   , IProgram (..)
@@ -392,6 +393,16 @@ genericLowerConfig ::
   LowerConfig IndexM
 genericLowerConfig desc srcNamer debugInfo debugMode = cfg
   where
+    -- Shared arg-schema list + result-schema doc for the two reflect hooks;
+    -- mlc_reflect and mlc_reflect_from_tuple differ only in whether the wire
+    -- tuple has already been parsed.
+    reflectSchemas ins out =
+      let argSchemas = map (dquotes . pretty . render . Serial.serialAstToMsgpackSchema) ins
+          argListDoc = case ldListStyle desc of
+            BracketList -> list argSchemas
+            _ -> pretty (ldGenericListFn desc) <> tupled argSchemas
+       in (argListDoc, dquotes (pretty (render (Serial.serialAstToMsgpackSchema out))))
+
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
@@ -438,7 +449,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     pretty (ldRecordConstructor desc)
                       <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs]
                 }
-        , lcStoreField = \_ v -> v
+        , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args
         , lcForeignCall = \socketFile mid args ->
             let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
@@ -457,21 +468,30 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
-        , lcReifyClosure = \v ->
+        , lcReifyClosure = \v _ ->
             return $ "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
         , lcReflectClosure = \pkt s ->
             case s of
               SerialClosure ins out ->
                 let tupleSchema = render (Serial.serialAstToMsgpackSchema s)
-                    argSchemas = map (dquotes . pretty . render . Serial.serialAstToMsgpackSchema) ins
-                    resSchema = render (Serial.serialAstToMsgpackSchema out)
-                    argListDoc = case ldListStyle desc of
-                      BracketList -> list argSchemas
-                      _ -> pretty (ldGenericListFn desc) <> tupled argSchemas
+                    (argListDoc, resDoc) = reflectSchemas ins out
                  in return $
                       "mlc_reflect"
-                        <> tupled [pkt, dquotes (pretty tupleSchema), argListDoc, dquotes (pretty resSchema)]
+                        <> tupled [pkt, dquotes (pretty tupleSchema), argListDoc, resDoc]
               _ -> error "lcReflectClosure: expected SerialClosure"
+        , lcReflectClosureParsed = \tup s ->
+            case s of
+              SerialClosure ins out ->
+                let (argListDoc, resDoc) = reflectSchemas ins out
+                 in return $
+                      "mlc_reflect_from_tuple" <> tupled [tup, argListDoc, resDoc]
+              _ -> error "lcReflectClosureParsed: expected SerialClosure"
+        -- A language that supports producing crossing closures (a non-empty
+        -- 'ldClosureRegisterEntry', i.e. Python and R) reifies/reflects a closure
+        -- nested in ANY aggregate (record/list/tuple/optional) via the shared
+        -- engine -- its dict/list records are structural, so all shapes divert.
+        , lcDivertNestedClosure =
+            \s -> not (T.null (ldClosureRegisterEntry desc)) && containsClosure s
         , lcMakeFunction = \m mname args _ priorLines body headForm ->
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""

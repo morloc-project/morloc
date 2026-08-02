@@ -87,16 +87,26 @@ def mlc_reify(f, home_lang):
     return (home_lang, mid, packets)
 
 
-def mlc_reflect(pkt, tuple_schema, arg_schemas, res_schema):
-    # Rebuild a callable from an incoming closure wire tuple. On application it
-    # serializes its arguments, appends them to the captured packets, and calls
-    # back to the producing pool via foreign_call on the closure's manifold id.
-    home_lang, mid, captured = morloc.get_value(pkt, tuple_schema)
+def mlc_reflect_from_tuple(tup, arg_schemas, res_schema):
+    # Rebuild a callable from an already-deserialized closure wire tuple
+    # (home_lang, mid, captured_packets). On application it serializes its
+    # arguments, appends them to the captured packets, and calls back to the
+    # producing pool via foreign_call on the closure's manifold id. Used when the
+    # closure is nested in an aggregate whose enclosing get_value has already
+    # parsed the tuple.
+    home_lang, mid, captured = tup
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
     def _call(*args):
         packets = list(captured) + [morloc.put_value(a, s) for a, s in zip(args, arg_schemas)]
         return morloc.get_value(morloc.foreign_call(sock, mid, packets), res_schema)
     return _call
+
+
+def mlc_reflect(pkt, tuple_schema, arg_schemas, res_schema):
+    # Rebuild a callable from a raw incoming closure wire packet: deserialize the
+    # tuple, then reflect it. Used when the closure is the top-level crossing
+    # value (the whole packet is the closure tuple).
+    return mlc_reflect_from_tuple(morloc.get_value(pkt, tuple_schema), arg_schemas, res_schema)
 
 
 def mlc_make_closure_dispatch(mid, arg_schemas, res_schema):

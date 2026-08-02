@@ -53,7 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
-import Morloc.CodeGenerator.Serial (serialAstToMsgpackSchema, serialAstToType, shallowType)
+import Morloc.CodeGenerator.Serial (serialAstToMsgpackSchema, serialAstToType, shallowType, wireSerialAstToType)
 import Morloc.Typecheck.Internal (unqualify)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
@@ -170,7 +170,10 @@ rustTypeOf = f
     f (AppF t ts) = do
       t' <- f t
       let (typeTs, kindCount) = partitionKindArgsF ts
-      ts' <- mapM f typeTs
+      -- Type arguments are STORED positions (a Vec element, a tuple slot): a
+      -- function leaf among them must box to `Rc<dyn MorlocFnN>` (a bare
+      -- `impl Fn` is illegal in a container), which is exactly 'rustFieldType'.
+      ts' <- mapM rustFieldType typeTs
       return . pretty $ expandMacro (render t') (map render ts') kindCount
     -- A recursive optional (?T where T points back to a containing record)
     -- must break the cycle with Box (an Option<T> of an infinite-size T won't
@@ -179,7 +182,8 @@ rustTypeOf = f
       t' <- f t
       return $ "Option<Box<" <> t' <> ">>"
     f (OptionalF t) = do
-      t' <- f t
+      -- The payload is a stored position; a function payload boxes ('rustFieldType').
+      t' <- rustFieldType t
       return $ "Option<" <> t' <> ">"
     f (NatLitF _) = return mempty
     f NatVoidF = return mempty
@@ -305,6 +309,31 @@ rustFieldType (FunF ts t) = do
       params = hcat (punctuate ", " (argTs <> [retT]))
   return $ "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty n <> "<" <> params <> ">>"
 rustFieldType t = rustTypeOf t
+
+-- | The wire-tuple leaf type for a defunctionalized closure nested in an
+-- aggregate being serialized/raw-deserialized: the reified
+-- @(home_language, manifold_id, captured_packets)@ tuple. Its concrete type is
+-- carried in the CVar so 'rustTypeOf' renders it verbatim (`VarF (FV _ (CV s)) ->
+-- pretty s`), so a closure nested in a Vec/tuple/Option becomes a Vec/tuple/
+-- Option OF this tuple. Mirrors the C++ 'cppClosureWireLeaf'. `ClosureOrigin` is
+-- the rustmorloc alias for @(String, i64, Vec<Vec<u8>>)@.
+rustClosureWireLeaf :: TypeF
+rustClosureWireLeaf = VarF (FV (TV "Closure") (CV "rustmorloc::ClosureOrigin"))
+
+-- | Whether Rust routes this aggregate node through the shared structural
+-- (reify/reflect-in-place) path: True iff it carries a closure leaf reachable
+-- WITHOUT crossing a nominal record boundary. Recursion stops at a 'SerialObject'
+-- (records are marshalled by their own nominal ToVoidstar impls), so a record
+-- node returns False, and so does a list/optional OF records (@[R]@/@?R@) -- those
+-- fall through to the generic @Vec@/@Option@ codec plus the record's impl.
+rustDivertsClosure :: SerialAST -> Bool
+rustDivertsClosure (SerialClosure _ _) = True
+rustDivertsClosure (SerialObject _ _ _ _) = False
+rustDivertsClosure (SerialList _ _ s) = rustDivertsClosure s
+rustDivertsClosure (SerialTuple _ ss) = any rustDivertsClosure ss
+rustDivertsClosure (SerialOptional _ s) = rustDivertsClosure s
+rustDivertsClosure (SerialPack _ (_, s)) = rustDivertsClosure s
+rustDivertsClosure _ = False
 
 rustArgOf :: Arg TypeM -> RustM MDoc
 rustArgOf a@(Arg _ t) = do
@@ -441,7 +470,12 @@ rustBridgeContext i (Native tf) name = do
   parent <- asks oeParent
   let own = if Set.member i parent then BorrowedRef else Owned
   return $ if rustIsCopy tf then rustOwn own tf name else rustRef own name
-rustBridgeContext _ _ name = return $ "&(" <> name <> ")"
+-- A captured Serial/Passthrough value is a `*const u8` (a Copy pointer): the
+-- closure-body manifold takes it by value, so pass it as-is. (This case is only
+-- reached when a closure captures a serialized value -- e.g. a list of closures
+-- built in the consumer pool, each wrapping a foreign manifold over a serial
+-- capture.) A leading `&` would make it `&*const u8`, which the parameter rejects.
+rustBridgeContext _ _ name = return name
 
 -- | Wrap a manifold body in an on-disk content-addressed cache lookup (`a@fn`
 -- / @cache). Mirrors the C++ @cppCacheBody@: serialize native args to packets,
@@ -614,9 +648,13 @@ rustRef :: IOwnership -> MDoc -> MDoc
 rustRef BorrowedRef x = x
 rustRef _ x = "&(" <> x <> ")"
 
--- | Reference the pool's schema for a registered schema id: @schema(<id>)@.
+-- | Reference the pool's schema for a registered schema id via the crate-root
+-- @schema(<id>)@ accessor. Fully qualified (@crate::@) so it resolves even inside
+-- a scope that binds a local @schema@ -- e.g. a record's generated
+-- @ToVoidstar@/@FromVoidstar@ impl, whose closure fields inline a reflect proxy
+-- that looks up the closure's own arg/result schemas.
 sch :: Int -> MDoc
-sch sid = "schema(" <> pretty sid <> ")"
+sch sid = "crate::schema(" <> pretty sid <> ")"
 
 -- | The safe by-reference closure that adapts a manifold to a higher-order
 -- function's @F: Fn@ (a bare @unsafe fn@ does not implement @Fn@). Remaining
@@ -718,6 +756,60 @@ rustReflectClosure pkt (SerialClosure ins out) = do
       , "}"
       ]
 rustReflectClosure _ _ = error "rustReflectClosure: expected SerialClosure"
+
+-- | Compute the schema-dependent pieces of an origin-preserving reflect ONCE
+-- (in 'RustM', which the schema table needs), returning a PURE assembler that
+-- maps a parsed-'ClosureOrigin' expression to the reflected @Rc<dyn MorlocFnN>@.
+-- Reused by the nested-aggregate reflect ('rustReflectClosureParsed') and the
+-- record-field reflect ('printRecordImpls' via 'generateRustStructs'), which
+-- differ only in how the origin expression is obtained (an already-parsed tuple
+-- vs a @FromVoidstar::read@ off the record's wire slot).
+rustReflectClosureAssembler :: SerialAST -> RustM (MDoc -> MDoc)
+rustReflectClosureAssembler (SerialClosure ins out) = do
+  argTs <- mapM (rustTypeOf . serialAstToType) ins
+  resT <- rustTypeOf (serialAstToType out)
+  argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
+  resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
+  let n = length ins
+      params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs]
+      pushes =
+        [ "__pkts.push(rustmorloc::put_value(__a" <> pretty i <> ", " <> sch sid <> "));"
+        | (i, sid) <- zip [(0 :: Int) ..] argSids
+        ]
+      dynT =
+        "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty n
+          <> "<" <> hcat (punctuate ", " (argTs <> [resT])) <> ">>"
+      bodyDoc =
+        vsep
+          [ "let mut __pkts: Vec<*const u8> = Vec::with_capacity(__cap.2.len() + " <> pretty n <> ");"
+          , "__pkts.extend(__cap.2.iter().map(|__c| __c.as_ptr()));"
+          , vsep pushes
+          , "rustmorloc::get_value::<" <> resT <> ">(rustmorloc::foreign_call(&__sock, __cap.1 as u32, &__pkts), " <> sch resSid <> ")"
+          ]
+  return $ \tup ->
+    vsep
+      [ "{"
+      , indent 4 $
+          vsep
+            [ "let __clo: rustmorloc::ClosureOrigin = " <> tup <> ";"
+            , "let __sock = format!(\"pipe-{}\", __clo.0);"
+            , "let __cap = __clo.clone();"
+            , "std::rc::Rc::new(rustmorloc::FatClosure { origin: __clo, f: move |"
+                <> hcat (punctuate ", " params) <> "| -> " <> resT <> " { unsafe {"
+            , indent 4 bodyDoc
+            , "} } }) as " <> dynT
+            ]
+      , "}"
+      ]
+rustReflectClosureAssembler _ = error "rustReflectClosureAssembler: expected SerialClosure"
+
+-- | Reflect a closure NESTED in an aggregate: the enclosing get_value already
+-- produced the wire tuple, so @tup@ is the parsed 'ClosureOrigin' (not a raw
+-- packet). Build an origin-preserving @Rc<dyn MorlocFnN>@: the reflected value
+-- is a 'FatClosure' carrying the ORIGINAL origin, so a later reify (@reifyN@)
+-- reproduces the producing pool (a re-cross A->B->C calls back to A, not B).
+rustReflectClosureParsed :: MDoc -> SerialAST -> RustM MDoc
+rustReflectClosureParsed tup s = ($ tup) <$> rustReflectClosureAssembler s
 
 -- | Bridge one captured context argument: returns any hoisted clone bindings and
 -- the value passed into the inner manifold call. A SHARED non-'Copy' owned
@@ -972,13 +1064,56 @@ collectRustRecords =
 generateRustStructs :: [SerialManifold] -> RustM [MDoc]
 generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
   where
+    -- Each record's closure fields (keyed by the record's general TVar + field
+    -- Key), harvested from every (de)serialization site; the 'SerialClosure'
+    -- carries the arg/result wire schemas the reify/reflect need. Duplicate keys
+    -- (the same record with a closure field at different arities) keep the last
+    -- -- a rare corner also collapsed by 'collectRustRecords' (nubBy general TVar).
+    harvest :: Map.Map (TVar, Key) SerialAST
+    harvest =
+      Map.fromList
+        [ ((g, k), s)
+        | sm <- es
+        , (FV g _, flds) <- collectSerialObjects sm
+        , (k, s@(SerialClosure _ _)) <- flds
+        ]
+
+    -- A bare function field (needs `Rc<dyn MorlocFnN>` boxing + reify/reflect).
+    -- Deliberately NARROWER than 'isFunctionTypeF' (which also matches `EffectF`,
+    -- for let-binding-annotation elision) -- a deferred-effect field is not a
+    -- closure and is not boxed this way.
+    isFunF (FunF _ _) = True
+    isFunF _ = False
+
+    -- The marshalling strategy for a field: a function field that has a harvested
+    -- crossing 'SerialClosure' gets reify/reflect; anything else is plain. A
+    -- function field with NO harvest hit returns Nothing -- it is used natively
+    -- but never crosses in this pool, so its record stays struct-only.
+    fieldMarshal :: TVar -> Key -> TypeF -> RustM (Maybe RP.ClosureMarshal)
+    fieldMarshal g k ty
+      | isFunF ty = case Map.lookup (g, k) harvest of
+          Just s@(SerialClosure sins _) -> do
+            assembler <- rustReflectClosureAssembler s
+            return $
+              Just
+                RP.ClosureMarshal
+                  { RP.cmReify = "reify" <> pretty (length sins)
+                  , RP.cmReflect = assembler
+                  }
+          _ -> return Nothing
+      | otherwise = return Nothing
+
     makeOne :: (FVar, [(Key, TypeF)]) -> RustM [MDoc]
     makeOne (v@(FV gv _), rs) = case v of
       -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
       -- field whose native and wire types diverge (a custom-packer field)
       -- becomes a GENERIC parameter -- one struct `S<T1> { w: T1, .. }` covers
       -- both the native (`S<MyWrap>`) and wire (`S<i64>`) instantiations, the
-      -- Rust analogue of C++'s template-field records.
+      -- Rust analogue of C++'s template-field records. A closure field also
+      -- diverges (native `Rc<dyn MorlocFnN>` vs wire `ClosureOrigin`), so it is a
+      -- generic param here and cannot carry a per-field reify/reflect -- an
+      -- autogenerated struct with a function field is therefore struct-only (use
+      -- a user-mapped `record Rust => X = "..."` for a crossing closure record).
       FV _ (CV "struct") -> do
         recmap <- CMS.gets rsRecmap
         case lookup (v, map fst rs) recmap of
@@ -986,16 +1121,23 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
             let assigned = assignGenerics (1 :: Int) (recFields rec)
                 params = [p | (_, Left p) <- assigned]
             fields <- mapM (oneField gv (recName rec)) assigned
-            let hasFun = any (\(_, e) -> either (const False) isFunctionTypeF e) assigned
-                impls = [RP.printRecordImpls (recName rec) params fields | not hasFun]
+            let hasFun = any (isFunF . snd) rs
+                fields4 = [(fld, ty, w, Nothing) | (fld, ty, w) <- fields]
+                impls = [RP.printRecordImpls (recName rec) params fields4 | not hasFun]
             return $ RP.printRustStruct (recName rec) params [(fld, ty) | (fld, ty, _) <- fields] : impls
           Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
-      -- User-mapped record: the user writes the (monomorphic) struct, so only
-      -- the marshalling impls are emitted, with concrete field types.
+      -- User-mapped record: the user writes the (monomorphic) struct, so only the
+      -- marshalling impls are emitted, with concrete field types. A closure field
+      -- reifies/reflects in place (via 'fieldMarshal'); the impl is emitted only
+      -- when EVERY function field has a harvested crossing site, else struct-only.
       FV _ (CV s) -> do
         fields <- mapM (oneField gv (pretty s) . fmap Right) rs
-        let hasFun = any (isFunctionTypeF . snd) rs
-        return [RP.printRecordImpls (pretty s) [] fields | not hasFun]
+        marshals <- mapM (\(k, ty) -> fieldMarshal gv k ty) rs
+        let fields4 = zipWith (\(fld, ty, w) m -> (fld, ty, w, m)) fields marshals
+            -- Emit the impl only when EVERY function field has a harvested marshal
+            -- (a non-function field imposes no requirement); else struct-only.
+            emitImpl = and (zipWith (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
+        return [RP.printRecordImpls (pretty s) [] fields4 | emitImpl]
 
     -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
     -- keep their unified type.
@@ -1161,9 +1303,13 @@ rustLowerConfig mask =
     -- shape. The coercion only ever wraps a non-optional inner, so this is safe.
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
-    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (serialAstToType s)
+    -- The serialize / raw-deserialize types use the WIRE form: a closure nested
+    -- in an aggregate travels as its reified `ClosureOrigin` tuple, so the closure
+    -- slot is typed as that tuple ('rustClosureWireLeaf'), not the native
+    -- `impl Fn`/`Rc<dyn MorlocFnN>`. Mirrors the C++ 'cppClosureWireLeaf'.
+    , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (wireSerialAstToType rustClosureWireLeaf s)
     , lcDeserialAstType = \s -> Just . toIType <$> rustTypeOf (shallowType s)
-    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (serialAstToType s)
+    , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (wireSerialAstToType rustClosureWireLeaf s)
     , lcTypeMOf = \_ -> return Nothing
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
@@ -1182,9 +1328,18 @@ rustLowerConfig mask =
     , lcRecordConstructor = \recType _ _ _ rs -> do
         name <- rustStructCtor recType
         return $ defaultValue {poolExpr = name <+> "{" <+> RP.rustRecordFields rs <+> "}"}
-    -- Box a function value into a record field's `Rc<dyn MorlocFnN>` type; a
-    -- non-function field passes through.
-    , lcStoreField = \ty v -> if isFunctionTypeF ty then "std::rc::Rc::new(" <> v <> ")" else v
+    -- Box a function value into its stored fat-trait-object representation
+    -- @Rc::new(v) as Rc<dyn MorlocFnN<..>>@. The explicit @as@ cast is required
+    -- for a list/tuple element (a @vec![..]@ literal has no per-element declared
+    -- type to drive the @Rc<F> -> Rc<dyn>@ unsizing coercion, and distinct
+    -- closures are distinct anonymous types); it is redundant-but-valid for a
+    -- record field. Only a genuine @FunF@ boxes -- an @EffectF@ (erased) or any
+    -- non-function element passes through.
+    , lcStoreField = \ty v -> case ty of
+        FunF _ _ -> do
+          castT <- rustFieldType ty
+          return $ "std::rc::Rc::new(" <> parens v <> ") as " <> castT
+        _ -> return v
     -- Apply a function value via the MorlocFnN trait (`f.callN(args)`): a thin
     -- closure monomorphizes and inlines, a boxed one dispatches. Zero-cost calls.
     , lcApplyClosure = \callee args -> callee <> ".call" <> pretty (length args) <> tupled args
@@ -1217,12 +1372,29 @@ rustLowerConfig mask =
           )
     , lcSerialize = defaultSerialize (rustLowerConfig mask)
     , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)
-    -- Reify a crossing closure to its wire tuple: read the origin the
-    -- `FatClosure` carries (built at construction by 'rustClosureWrapper'). The
-    -- surrounding serialize call borrows and serializes it under the closure
-    -- (t3sjaau1) schema. `ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`.
-    , lcReifyClosure = \v -> return $ parens v <> ".origin"
+    -- Reify a crossing closure to its wire tuple via the arity-indexed trait
+    -- method `reifyN` (`ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`). This is
+    -- uniform across a top-level thin `FatClosure` (built by 'rustClosureWrapper',
+    -- `reifyN` = Some(&origin)) AND a nested boxed `Rc<dyn MorlocFnN>` element
+    -- (delegates through the pointer) -- a boxed element has no `.origin` field,
+    -- so a plain field access would not compile. `.unwrap()` is safe: every
+    -- crossing closure is a registered `FatClosure` (see 'rustClosureWrapper' /
+    -- 'rsReifyInfo'). `reifyN` borrows the origin; the reified value is placed into
+    -- an owned wire aggregate (a `Vec`/tuple/`Option` element, or a `put_value`
+    -- argument), so it is `.clone()`d here to own it.
+    , lcReifyClosure = \v s -> case s of
+        SerialClosure ins _ ->
+          return $ parens v <> ".reify" <> pretty (length ins) <> "().unwrap().clone()"
+        _ -> error "Rust lcReifyClosure: expected SerialClosure"
     , lcReflectClosure = \pkt s -> rustReflectClosure pkt s
+    , lcReflectClosureParsed = \tup s -> rustReflectClosureParsed tup s
+    -- Divert a list/tuple/optional through the shared structural path when it
+    -- carries a closure leaf NOT enclosed in a nominal record. A closure inside a
+    -- record field is marshalled by that record's own (nominal) ToVoidstar impl,
+    -- so a record node -- and a list/optional OF records ([R]/?R) -- is NOT
+    -- diverted (it falls through to Vec/Option + the record impl). See
+    -- 'rustDivertsClosure'.
+    , lcDivertNestedClosure = rustDivertsClosure
     , lcMakeFunction = rustMakeFunction
     -- A bare function passed to a HOF is a closure over all its params with no
     -- captured context; a lambda/section is a closure over its remaining params

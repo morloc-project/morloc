@@ -41,6 +41,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , extractRemoteDispatch
   , collectClosureManifolds
   , collectSerializedClosures
+  , serialClosuresOf
+  , collectSerialObjects
   , computeClosureSchemas
   , orNativeType
   , collectLogLabels
@@ -825,6 +827,41 @@ serialClosuresOf = go
     go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
     go _ = []
+
+-- | Every 'SerialObject' (record) reachable at a (de)serialization site in the
+-- manifold, as (record FVar, fields). Retains the enclosing FVar and each field
+-- Key (which 'serialClosuresOf' discards), so a static backend can recover a
+-- record's field ASTs -- e.g. a closure field's 'SerialClosure' wire schemas --
+-- at struct-generation time, from the manifolds it already has (no
+-- 'makeSerialAST'/'MorlocMonad'). Covers both serialize ('SerializeS') and
+-- deserialize ('DeserializeN') sites, and records nested in an outer aggregate.
+collectSerialObjects :: SerialManifold -> [(FVar, [(Key, SerialAST)])]
+collectSerialObjects = concatMap serialObjectsOf . allSerialASTs
+  where
+    allSerialASTs :: SerialManifold -> [SerialAST]
+    allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+    fw :: FoldWithManifoldM Identity [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST]
+    fw =
+      defaultValue
+        { opFoldWithSerialExprM = \_ folded ->
+            return $ case folded of
+              SerializeS_ s child -> s : child
+              _ -> foldlSE (<>) mempty folded
+        , opFoldWithNativeExprM = \_ folded ->
+            return $ case folded of
+              DeserializeN_ _ s child -> s : child
+              _ -> foldlNE (<>) mempty folded
+        }
+    serialObjectsOf :: SerialAST -> [(FVar, [(Key, SerialAST)])]
+    serialObjectsOf = go
+      where
+        go (SerialObject _ v _ rs) = (v, rs) : concatMap (go . snd) rs
+        go (SerialClosure ins out) = concatMap go ins <> go out
+        go (SerialList _ _ s) = go s
+        go (SerialTuple _ ss) = concatMap go ss
+        go (SerialOptional _ s) = go s
+        go (SerialPack _ (_, s)) = go s
+        go _ = []
 
 -- | For each nested closure in the given manifolds, compute its serial wire
 -- schemas: the captured (context) arg schemas, the bound (remaining) arg

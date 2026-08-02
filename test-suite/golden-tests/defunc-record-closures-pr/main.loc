@@ -1,0 +1,67 @@
+-- A record / list / tuple / optional whose ELEMENTS are RUNTIME closures (each
+-- capturing a runtime value) is built in one language and crosses a pool
+-- boundary, where a higher-order function in another language pulls each
+-- closure out and applies it. Unlike functional-data-* (named source functions
+-- resolved by compile-time HOF specialization), these are runtime closures that
+-- must be reified on the producer side and reflected on the consumer side
+-- field-by-field, in place, inside the aggregate.
+--
+-- Producer: Python. Consumer: R.
+
+module main (crossRecord, crossList, crossTuple, crossOpt)
+
+import root-py
+import root-r
+
+record Ops where
+  inc :: Int -> Int
+  scale :: Int -> Int
+record Py => Ops = "dict"
+record R => Ops = "list"
+
+source Py from "producer.py" ("tick", "add", "mul")
+source R from "consumer.R"
+  ( "use_ops" as useOps
+  , "use_list" as useList
+  , "use_tuple" as useTuple
+  , "use_opt" as useOpt
+  )
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+mul :: Int -> Int -> Int
+
+useOps :: Ops -> Int -> Int
+useList :: [Int -> Int] -> Int -> Int
+useTuple :: (Int -> Int, Int -> Int) -> Int -> Int
+useOpt :: ?(Int -> Int) -> Int -> Int
+
+-- build a record of two runtime closures, each capturing a runtime base
+mkOps :: Int -> Int -> <IO> Ops
+mkOps a b = do
+  _ <- tick
+  { inc = (\x -> add a x), scale = (\x -> mul b x) }
+
+-- a record of runtime closures crossing Python -> R
+crossRecord :: Int -> Int -> <IO> Int
+crossRecord a b = do
+  ops <- mkOps a b
+  useOps ops 10
+
+-- a list of runtime closures crossing Python -> R
+crossList :: Int -> Int -> <IO> Int
+crossList a b = do
+  _ <- tick
+  useList [(\x -> add a x), (\x -> mul b x)] 10
+
+-- a tuple of runtime closures crossing Python -> R
+crossTuple :: Int -> Int -> <IO> Int
+crossTuple a b = do
+  _ <- tick
+  useTuple ((\x -> add a x), (\x -> mul b x)) 10
+
+-- an optional runtime closure crossing Python -> R (coerced from a bare closure)
+crossOpt :: Int -> <IO> Int
+crossOpt a = do
+  _ <- tick
+  useOpt (\x -> add a x) 10

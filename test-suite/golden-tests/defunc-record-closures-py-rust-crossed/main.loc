@@ -1,0 +1,65 @@
+-- Rust STRUCTURALLY REFLECTS a list / tuple / optional of runtime closures that
+-- genuinely crosses the boundary as serialized data (not one built locally in the
+-- consumer). The aggregate producers are effectful (`<IO>` + `tick`), so they run
+-- in the Python home pool, which reifies the whole aggregate into a
+-- `Vec`/tuple/`Option` of wire tuples; Rust then deserializes it
+-- (`get_value::<Vec<ClosureOrigin>>` ...) and reflects each element in place into
+-- an `Rc<dyn MorlocFnN>` FatClosure proxy applied with `.call1`.
+--
+-- This exercises the structural reflect path (the deserialize-side `construct`
+-- over SerialList/Tuple/Optional) that the plain `defunc-record-closures-py-rust`
+-- golden does not -- there the realizer builds the aggregates locally in the Rust
+-- consumer, so only the record field reflects. Captures `a`/`b` are runtime CLI
+-- args (not constant folded).
+
+module main (crossList, crossTuple, crossOpt)
+
+import root-py
+import root-rust
+
+type Rust => Int = "i64"
+
+source Py from "producer.py" ("tick", "add", "mul")
+source Rust from "consumer.rs"
+  ( "use_list" as useList
+  , "use_tuple" as useTuple
+  , "use_opt" as useOpt
+  )
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+mul :: Int -> Int -> Int
+
+useList :: [Int -> Int] -> Int -> Int
+useTuple :: (Int -> Int, Int -> Int) -> Int -> Int
+useOpt :: ?(Int -> Int) -> Int -> Int
+
+mkList :: Int -> Int -> <IO> [Int -> Int]
+mkList a b = do
+  _ <- tick
+  [(\x -> add a x), (\x -> mul b x)]
+
+mkTup :: Int -> Int -> <IO> (Int -> Int, Int -> Int)
+mkTup a b = do
+  _ <- tick
+  ((\x -> add a x), (\x -> mul b x))
+
+mkOpt :: Int -> <IO> ?(Int -> Int)
+mkOpt a = do
+  _ <- tick
+  (\x -> add a x)
+
+crossList :: Int -> Int -> <IO> Int
+crossList a b = do
+  fs <- mkList a b
+  useList fs 10
+
+crossTuple :: Int -> Int -> <IO> Int
+crossTuple a b = do
+  t <- mkTup a b
+  useTuple t 10
+
+crossOpt :: Int -> <IO> Int
+crossOpt a = do
+  f <- mkOpt a
+  useOpt f 10

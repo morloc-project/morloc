@@ -16,6 +16,8 @@ pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST
+  , wireSerialAstToType
+  , containsFunT
   , chooseSerializationCycle
   , isSerializable
   , hasArrowHint
@@ -50,45 +52,76 @@ data AliasShape
   | AliasIsOther TypeU     -- ^ body is some other AppU; route via Packable
   | AliasIsNone            -- ^ outer is its own head (no aliasing)
 
--- | recurse all the way to a serializable type
+-- | Recurse all the way to a serializable type, parameterized by how a
+-- 'SerialClosure' leaf is rendered. Only the closure leaf differs between the
+-- native ('serialAstToType') and wire ('wireSerialAstToType') forms; the
+-- container recursion is shared here so a new container constructor need only be
+-- added once.
 --
 -- For SerialList, the optional dim slot is reified as a leading
 -- kind-kinded (Nat) arg when present. This preserves dimensional
 -- metadata in the wire schema. The macro layer (@expandMacro@) is
 -- independent: macro indices @$N@ count TYPE args only, so the dim
 -- slot here doesn't shift @$N@ positions in the per-language form.
+serialAstToTypeWith :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
+serialAstToTypeWith onClosure = go
+  where
+    go (SerialPack _ (_, s)) = go s
+    go (SerialList v (Just d) s) = AppF (VarF v) [d, go s]
+    go (SerialList v Nothing s) = AppF (VarF v) [go s]
+    go (SerialTuple v ss) = AppF (VarF v) (map go ss)
+    go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
+    go (SerialRec v) = RecF v
+    go (SerialReal x) = VarF x
+    go (SerialFloat32 x) = VarF x
+    go (SerialFloat64 x) = VarF x
+    go (SerialInt x) = VarF x
+    go (SerialInt8 x) = VarF x
+    go (SerialInt16 x) = VarF x
+    go (SerialInt32 x) = VarF x
+    go (SerialInt64 x) = VarF x
+    go (SerialUInt x) = VarF x
+    go (SerialUInt8 x) = VarF x
+    go (SerialUInt16 x) = VarF x
+    go (SerialUInt32 x) = VarF x
+    go (SerialUInt64 x) = VarF x
+    go (SerialBool x) = VarF x
+    go (SerialString x) = VarF x
+    go (SerialIFile x) = VarF x
+    go (SerialOStream x) = VarF x
+    go (SerialIStream x) = VarF x
+    go (SerialClosure ins out) = onClosure ins out
+    go (SerialNull x) = VarF x
+    go (SerialOptional _ s) = OptionalF (go s)
+    -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
+    go (SerialUnknown v) = UnkF v
+
 serialAstToType :: SerialAST -> TypeF
-serialAstToType (SerialPack _ (_, s)) = serialAstToType s
-serialAstToType (SerialList v (Just d) s) = AppF (VarF v) [d, serialAstToType s]
-serialAstToType (SerialList v Nothing s) = AppF (VarF v) [serialAstToType s]
-serialAstToType (SerialTuple v ss) = AppF (VarF v) (map serialAstToType ss)
-serialAstToType (SerialObject o n ps rs) =
-  let ts = map (serialAstToType . snd) rs
-   in NamF o n ps (zip (map fst rs) ts)
-serialAstToType (SerialRec v) = RecF v
-serialAstToType (SerialReal x) = VarF x
-serialAstToType (SerialFloat32 x) = VarF x
-serialAstToType (SerialFloat64 x) = VarF x
-serialAstToType (SerialInt x) = VarF x
-serialAstToType (SerialInt8 x) = VarF x
-serialAstToType (SerialInt16 x) = VarF x
-serialAstToType (SerialInt32 x) = VarF x
-serialAstToType (SerialInt64 x) = VarF x
-serialAstToType (SerialUInt x) = VarF x
-serialAstToType (SerialUInt8 x) = VarF x
-serialAstToType (SerialUInt16 x) = VarF x
-serialAstToType (SerialUInt32 x) = VarF x
-serialAstToType (SerialUInt64 x) = VarF x
-serialAstToType (SerialBool x) = VarF x
-serialAstToType (SerialString x) = VarF x
-serialAstToType (SerialIFile x) = VarF x
-serialAstToType (SerialOStream x) = VarF x
-serialAstToType (SerialIStream x) = VarF x
-serialAstToType (SerialClosure ins out) = FunF (map serialAstToType ins) (serialAstToType out)
-serialAstToType (SerialNull x) = VarF x
-serialAstToType (SerialOptional _ s) = OptionalF (serialAstToType s)
--- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
-serialAstToType (SerialUnknown v) = UnkF v
+serialAstToType =
+  serialAstToTypeWith (\ins out -> FunF (map serialAstToType ins) (serialAstToType out))
+
+-- | Like 'serialAstToType', but a closure is rendered as the given wire-tuple
+-- leaf type instead of its native callable type ('FunF'). A defunctionalized
+-- closure travels as the fixed tuple @(home_language, manifold_id, captured)@,
+-- so a static backend serializing/raw-deserializing an aggregate that CONTAINS
+-- a closure must type the closure slot as that wire tuple (the reified value),
+-- not as the native function. Each backend supplies its own concrete wire-tuple
+-- leaf (e.g. the C++ @std::tuple<...>@ or Rust @(String,i64,Vec<Vec<u8>>)@
+-- injected via the leaf's concrete name).
+wireSerialAstToType :: TypeF -> SerialAST -> TypeF
+wireSerialAstToType wire = serialAstToTypeWith (\_ _ -> wire)
+
+-- | True when a function type appears anywhere in the type (a bare function, or
+-- one nested in a list/tuple/record/optional/effect). Used both by the nexus
+-- (which cannot serialize a higher-order value) and the C++ member (which skips
+-- generating a native struct (de)serializer for a record with a function field).
+containsFunT :: Type -> Bool
+containsFunT (FunT _ _) = True
+containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
+containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
+containsFunT (EffectT _ t) = containsFunT t
+containsFunT (OptionalT t) = containsFunT t
+containsFunT _ = False
 
 encode64 :: Int -> String
 encode64 i

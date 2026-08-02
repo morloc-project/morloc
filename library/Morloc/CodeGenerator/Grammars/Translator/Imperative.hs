@@ -36,6 +36,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
     -- * Lowering: serialize/deserialize expansion
   , expandSerialize
   , expandDeserialize
+  , containsClosure
 
     -- * Expression lowering
   , lowerSerialExpr
@@ -82,6 +83,7 @@ import Morloc.CodeGenerator.Grammars.Common
   , mergePoolDocs
   , nvarNamer
   , provideClosure
+  , serialClosuresOf
   , svarNamer
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
@@ -455,10 +457,14 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
-  , lcStoreField :: TypeF -> MDoc -> MDoc
-  -- ^ Adapt a value to a record field's stored representation (given the field
-  -- type). Default is identity; the Rust member wraps a function value in
-  -- @Rc::new(..)@ so it fits the field's @Rc<dyn MorlocFnN>@ fat-trait-object type.
+  , lcStoreField :: TypeF -> MDoc -> m MDoc
+  -- ^ Adapt a value to its stored representation inside an aggregate (given the
+  -- element/field type). Applied to record fields AND list/tuple elements.
+  -- Default is identity; the Rust member wraps a function value in
+  -- @Rc::new(..) as Rc<dyn MorlocFnN<..>>@ so it fits the boxed fat-trait-object
+  -- element type (a bare @impl Fn@ is illegal in a Vec/tuple/struct field, and
+  -- the explicit cast is needed because a @vec![..]@ has no per-element declared
+  -- type to drive the unsizing coercion). Monadic so the cast type can render.
   , lcApplyClosure :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply a local function value (a 'LocalCallP') to its arguments. Default is
   -- a direct call @f(args)@; the Rust member emits @f.callN(args)@ (the fat/thin
@@ -503,19 +509,34 @@ data LowerConfig m = LowerConfig
   -- for a hoisted def-thunk.
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
-  , lcReifyClosure :: MDoc -> m MDoc
+  , lcReifyClosure :: MDoc -> SerialAST -> m MDoc
   -- ^ Reify a defunctionalized closure value into its wire form: given the
-  -- native closure expression, produce an expression yielding the tuple
-  -- @(home_language, manifold_id, captured_packets)@ that the generic tuple
-  -- codec then serializes. Called at the serialize boundary for a
-  -- 'SerialClosure'. See 'computeClosureSchemas'.
+  -- native closure expression and its 'SerialClosure', produce an expression
+  -- yielding the tuple @(home_language, manifold_id, captured_packets)@ that the
+  -- generic tuple codec then serializes. The 'SerialClosure' carries the arity,
+  -- needed by backends whose reify is arity-indexed (e.g. Rust @reifyN@). Called
+  -- at the serialize boundary for a 'SerialClosure'. See 'computeClosureSchemas'.
   , lcReflectClosure :: MDoc -> SerialAST -> m MDoc
   -- ^ Reflect an incoming closure wire form into a native callable: given the
   -- serialized packet expression and the 'SerialClosure' type, produce an
   -- expression yielding a callable that, on application, serializes its
   -- arguments, calls back to the home pool via @foreign_call@ on the closure's
   -- manifold id, and deserializes the result. Called at the deserialize
-  -- boundary for a 'SerialClosure'.
+  -- boundary for a top-level 'SerialClosure' (the whole packet is the closure).
+  , lcReflectClosureParsed :: MDoc -> SerialAST -> m MDoc
+  -- ^ Like 'lcReflectClosure', but for a closure NESTED in an aggregate: the
+  -- enclosing @get_value@ has already deserialized the wire tuple, so the given
+  -- expression is the parsed @(home_language, manifold_id, captured_packets)@
+  -- tuple, not a raw packet. Build the callable directly from it (no second
+  -- @get_value@). Called at the deserialize boundary for a nested 'SerialClosure'.
+  , lcDivertNestedClosure :: SerialAST -> Bool
+  -- ^ Whether this backend routes THIS aggregate node through 'construct' so a
+  -- closure inside it is reified/reflected in place, rather than the whole-value
+  -- msgpack short-circuit. C++/Python/R return True for any
+  -- list/tuple/record/optional holding a closure; Rust returns False everywhere
+  -- (nested-closure support is a documented follow-on -- a bare crossing closure
+  -- still works). Lets the shared engine opt in per backend AND per aggregate
+  -- shape.
   , -- manifold lowering fields
     lcMakeFunction ::
       Int ->
@@ -550,6 +571,20 @@ data LowerConfig m = LowerConfig
   -- ^ Register a schema string and return its unique ID (index into schema table)
   }
 
+-- | True if a closure appears anywhere inside the AST. An aggregate is
+-- @isSerializable@ even when it holds a closure field (a closure reports
+-- serializable so a bare crossing closure hits the top-level reify/reflect
+-- clause), so the recursion helpers must additionally refuse to treat such an
+-- aggregate as a msgpack leaf -- otherwise the nested closure field is never
+-- routed through 'lcReifyClosure'/'lcReflectClosure'.
+containsClosure :: SerialAST -> Bool
+containsClosure = not . null . serialClosuresOf
+
+-- | A node that serializes as an opaque msgpack leaf: serializable AND not
+-- diverted for in-place nested-closure handling by this backend.
+isMsgpackLeaf :: LowerConfig m -> SerialAST -> Bool
+isMsgpackLeaf cfg s = isSerializable s && not (lcDivertNestedClosure cfg s)
+
 {- | Expand serialization into IR statements.
 Returns (final expression representing the serialized value, prior statements).
 -}
@@ -557,7 +592,7 @@ expandSerialize :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, 
 -- A closure has no msgpack leaf form: reify it into its wire tuple first, then
 -- let the generic tuple codec serialize that tuple.
 expandSerialize cfg v0 s0@(SerialClosure _ _) = do
-  reified <- lcReifyClosure cfg v0
+  reified <- lcReifyClosure cfg v0 s0
   schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
   return (ISerCall schemaId (IRawExpr (render reified)), [])
 expandSerialize cfg v0 s0 = do
@@ -566,9 +601,15 @@ expandSerialize cfg v0 s0 = do
   return (ISerCall schemaId vExpr, stmts)
   where
     go v s
-      | isSerializable s = return ([], IRawExpr (render v))
+      | isMsgpackLeaf cfg s = return ([], IRawExpr (render v))
       | otherwise = construct v s
 
+    -- A closure field inside an aggregate: reify it in place into its wire
+    -- tuple, which the enclosing aggregate's generic codec then serializes
+    -- against the closure field's tuple schema.
+    construct v s@(SerialClosure _ _) = do
+      reified <- lcReifyClosure cfg v s
+      return ([], IRawExpr (render reified))
     construct v (SerialPack _ (p, s)) =
       let unpacker = lcUnpackerName cfg (typePackerReverse p)
           arg = if lcBorrowPackArg cfg (typePackerPacked p) then "&(" <> v <> ")" else v
@@ -628,7 +669,7 @@ expandDeserialize cfg v0 s0@(SerialClosure _ _) = do
   reflected <- lcReflectClosure cfg v0 s0
   return (IRawExpr (render reflected), [])
 expandDeserialize cfg v0 s0
-  | isSerializable s0 = do
+  | isMsgpackLeaf cfg s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
       return (IDesCall schemaId desType (IRawExpr (render v0)), [])
@@ -641,9 +682,15 @@ expandDeserialize cfg v0 s0
       return (x, IAssign rawvar rawType (IDesCall schemaId rawType (IRawExpr (render v0))) : befores)
   where
     check v s
-      | isSerializable s = return (IRawExpr (render v), [])
+      | isMsgpackLeaf cfg s = return (IRawExpr (render v), [])
       | otherwise = construct v s
 
+    -- A closure field: the enclosing get_value has already parsed its wire
+    -- tuple, so reflect the parsed tuple in place into a native callable that
+    -- RPCs back to the producing pool on application.
+    construct v s@(SerialClosure _ _) = do
+      reflected <- lcReflectClosureParsed cfg v s
+      return (IRawExpr (render reflected), [])
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
       let packer = render $ lcPackerName cfg (typePackerForward p)
@@ -763,6 +810,21 @@ adaptOwnedElems cfg origEs xs
   | length origEs == length xs = zipWithM (adaptOwnedElem cfg) origEs xs
   | otherwise = return xs
 
+-- | Adapt each aggregate element/field to its stored representation via
+-- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
+-- element type). Passes through unchanged when the original expression list is
+-- unavailable (length mismatch), mirroring 'adaptOwnedElems'.
+storeElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
+storeElems cfg origEs xs
+  | length origEs == length xs =
+      zipWithM
+        (\e pd -> do
+            v <- lcStoreField cfg (typeFof e) (poolExpr pd)
+            return pd {poolExpr = v})
+        origEs
+        xs
+  | otherwise = return xs
+
 -- | Lower a native expression to PoolDocs via the IR.
 lowerNativeExpr ::
   (Monad m) =>
@@ -856,26 +918,21 @@ lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are al
 lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
 lowerNativeExpr cfg origExpr (ListN_ v t xs) = do
-  xs' <- adaptOwnedElems cfg (case origExpr of ListN _ _ es -> es; _ -> []) xs
+  let elemEs = case origExpr of ListN _ _ es -> es; _ -> []
+  xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
   return $ mergePoolDocs (lcListConstructor cfg v t) xs'
 lowerNativeExpr cfg origExpr (TupleN_ v xs) = do
   let slotTypes = case typeFof origExpr of
         AppF _ ts -> ts
         _ -> []
-  xs' <- adaptOwnedElems cfg (case origExpr of TupleN _ es -> es; _ -> []) xs
+      elemEs = case origExpr of TupleN _ es -> es; _ -> []
+  xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
   return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
 lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
   let fieldEs = case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []
-  es <- adaptOwnedElems cfg fieldEs (map snd rs)
+  es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= storeElems cfg fieldEs
   let recType = typeFof origExpr
-      -- Adapt each field value to its stored representation (Rust boxes a
-      -- function value into the field's fat-trait-object type); pass through
-      -- unadapted if the field-expression list is unavailable.
-      vals
-        | length fieldEs == length es =
-            zipWith (\fe e -> lcStoreField cfg (typeFof fe) (poolExpr e)) fieldEs es
-        | otherwise = map poolExpr es
-  rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) vals)
+  rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
   return $
     rec'
       { poolCompleteManifolds = concatMap poolCompleteManifolds es <> poolCompleteManifolds rec'
@@ -914,7 +971,11 @@ lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEv
 -- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
 lowerNativeExpr cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   x' <- adaptOwnedElem cfg innerE x
-  return $ x' {poolExpr = lcCoerceOptional cfg (poolExpr x')}
+  -- Adapt the inner to its stored representation before wrapping (Rust boxes a
+  -- closure into `Rc<dyn MorlocFnN>` so the payload matches the boxed
+  -- `Option<Rc<dyn MorlocFnN>>` element type), mirroring list/tuple/record.
+  boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
+  return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExpr cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
 -- The two arms feed the conditional's owned result sink, so adapt each to an

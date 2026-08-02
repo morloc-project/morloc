@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , stripTypeParams
   , printRustStruct
   , printRecordImpls
+  , ClosureMarshal (..)
   ) where
 
 import qualified Data.Map as Map
@@ -395,21 +396,42 @@ printRustStruct name params fields =
     , "}"
     ]
 
+-- | Per-field marshalling strategy for a record function field. A closure field
+-- is stored natively as @Rc<dyn MorlocFnN>@ (no @ToVoidstar@), so it is reified
+-- to its @ClosureOrigin@ wire tuple on write/shm_size and reflected back on read.
+data ClosureMarshal = ClosureMarshal
+  { cmReify :: MDoc              -- ^ arity-indexed reify method, e.g. @reify1@
+  , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @Rc<dyn MorlocFnN>@
+  }
+
 -- | Emit @impl ToVoidstar/FromVoidstar@ for a record, marshalling each field in
 -- place at its schema offset (mirrors the hand-written LL template). Fields are
--- (escaped-name, rendered-type, is-variable-width). @params@ are the generic
--- type parameters; each is bounded by the marshalling trait the impl needs
--- (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Recur scope is entered so a
+-- (escaped-name, rendered-type, is-variable-width, closure-marshal). @params@ are
+-- the generic type parameters; each is bounded by the marshalling trait the impl
+-- needs (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Recur scope is entered so a
 -- back-reference resolves at any depth; fully fixed-width records short-circuit
--- @shm_size@ to @schema.width@.
-printRecordImpls :: MDoc -> [MDoc] -> [(MDoc, MDoc, Bool)] -> MDoc
+-- @shm_size@ to @schema.width@. A function field carries a 'ClosureMarshal' and is
+-- reified/reflected instead of marshalled directly.
+printRecordImpls :: MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
 printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
   where
     idx = zip [0 :: Int ..] fields
-    allFixed = all (\(_, _, v) -> not v) fields
+    -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
+    -- with any closure field cannot short-circuit shm_size to schema.width.
+    allFixed = all (\(_, _, v, cm) -> not v && isPlain cm) fields
+    isPlain Nothing = True
+    isPlain (Just _) = False
     ty = name <> paramList params
     -- Bound every generic param by `bound` for the impl's `impl<..>` header.
     boundedParams bound = paramList [p <> ":" <+> bound | p <- params]
+
+    -- The writable value for field `f`: a closure field reifies to its
+    -- ClosureOrigin wire tuple (which IS ToVoidstar) first; a plain field is
+    -- marshalled directly. `reifyN` BORROWS the origin (`Option<&ClosureOrigin>`),
+    -- so the two callers (shm_size, write) share it without cloning the captured
+    -- packets twice.
+    fieldVal f Nothing = "self." <> f
+    fieldVal f (Just cm) = "self." <> f <> "." <> cmReify cm <> "().unwrap()"
 
     toImpl =
       vsep
@@ -434,10 +456,10 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
             ]
               ++ concat
                 [ [ "let fs" <> pretty i <+> "= resolve_recur(&schema.parameters[" <> pretty i <> "]);"
-                  , "let e" <> pretty i <+> "= self." <> f <> ".shm_size(fs" <> pretty i <> ");"
+                  , "let e" <> pretty i <+> "= " <> fieldVal f cm <> ".shm_size(fs" <> pretty i <> ");"
                   , "if e" <> pretty i <+> "> fs" <> pretty i <> ".width { total += e" <> pretty i <+> "- fs" <> pretty i <> ".width; }"
                   ]
-                | (i, (f, _, _)) <- idx
+                | (i, (f, _, _, cm)) <- idx
                 ]
               ++ ["total"]
     writeBody =
@@ -445,8 +467,8 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
         [ "let schema = resolve_recur(schema);"
         , "let _g = RecurScope::enter(schema);"
         ]
-          ++ [ "self." <> f <> ".write(dest.add(schema.offsets[" <> pretty i <> "]), cursor, resolve_recur(&schema.parameters[" <> pretty i <> "]));"
-             | (i, (f, _, _)) <- idx
+          ++ [ fieldVal f cm <> ".write(dest.add(schema.offsets[" <> pretty i <> "]), cursor, resolve_recur(&schema.parameters[" <> pretty i <> "]));"
+             | (i, (f, _, _, cm)) <- idx
              ]
 
     fromImpl =
@@ -458,13 +480,19 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
                 [ "let schema = resolve_recur(schema);"
                 , "let _g = RecurScope::enter(schema);"
                 , name <+> "{"
-                , indent 4 $ vsep
-                    [ f <> ": <" <> t <> " as FromVoidstar>::read(resolve_recur(&schema.parameters[" <> pretty i <> "]), data.add(schema.offsets[" <> pretty i <> "]), base),"
-                    | (i, (f, t, _)) <- idx
-                    ]
+                , indent 4 $ vsep (map readField idx)
                 , "}"
                 ]
             , "}"
             ]
         , "}"
         ]
+    -- A plain field reads via FromVoidstar directly; a closure field reads its
+    -- ClosureOrigin wire tuple off the slot and reflects it into a callable.
+    readField (i, (f, t, _, Nothing)) =
+      f <> ": <" <> t <> " as FromVoidstar>::read(resolve_recur(&schema.parameters[" <> pretty i <> "]), data.add(schema.offsets[" <> pretty i <> "]), base),"
+    readField (i, (f, _, _, Just cm)) =
+      let slotRead =
+            "<rustmorloc::ClosureOrigin as FromVoidstar>::read(resolve_recur(&schema.parameters["
+              <> pretty i <> "]), data.add(schema.offsets[" <> pretty i <> "]), base)"
+       in f <> ": " <> cmReflect cm slotRead <> ","

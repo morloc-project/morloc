@@ -173,8 +173,10 @@ mlc_reify <- function(f, home_lang) {
   list(home_lang, as.integer(mid), packets)
 }
 
-mlc_reflect <- function(pkt, tuple_schema, arg_schemas, res_schema) {
-  tup <- morloc_get_value(pkt, tuple_schema)
+# Rebuild a callable from an already-deserialized closure wire tuple
+# (home_lang, mid, captured_packets), used when the closure is nested in an
+# aggregate whose enclosing get_value has already parsed the tuple.
+mlc_reflect_from_tuple <- function(tup, arg_schemas, res_schema) {
   home_lang <- tup[[1]]
   mid <- tup[[2]]
   captured <- tup[[3]]
@@ -185,6 +187,12 @@ mlc_reflect <- function(pkt, tuple_schema, arg_schemas, res_schema) {
     packets <- c(captured, arg_packets)
     morloc_get_value(morloc_foreign_call(sock, as.integer(mid), packets), res_schema)
   }
+}
+
+# Rebuild a callable from a raw incoming closure wire packet, used when the
+# closure is the top-level crossing value (the whole packet is the tuple).
+mlc_reflect <- function(pkt, tuple_schema, arg_schemas, res_schema) {
+  mlc_reflect_from_tuple(morloc_get_value(pkt, tuple_schema), arg_schemas, res_schema)
 }
 
 mlc_make_closure_dispatch <- function(mid, arg_schemas, res_schema) {

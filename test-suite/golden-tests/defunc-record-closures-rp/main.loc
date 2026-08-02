@@ -1,0 +1,56 @@
+-- Runtime closures nested in a record / list / tuple / optional crossing a pool
+-- boundary. Producer: R (reify via construction-time attributes). Consumer:
+-- Python (reflect).
+
+module main (crossRecord, crossList, crossTuple, crossOpt)
+
+import root-r
+import root-py
+
+record Ops where
+  inc :: Int -> Int
+  scale :: Int -> Int
+record R => Ops = "list"
+record Py => Ops = "dict"
+
+source R from "producer.R" ("tick", "add", "mul")
+source Py from "consumer.py"
+  ( "use_ops" as useOps
+  , "use_list" as useList
+  , "use_tuple" as useTuple
+  , "use_opt" as useOpt
+  )
+
+tick :: <IO> Int
+add :: Int -> Int -> Int
+mul :: Int -> Int -> Int
+
+useOps :: Ops -> Int -> Int
+useList :: [Int -> Int] -> Int -> Int
+useTuple :: (Int -> Int, Int -> Int) -> Int -> Int
+useOpt :: ?(Int -> Int) -> Int -> Int
+
+mkOps :: Int -> Int -> <IO> Ops
+mkOps a b = do
+  _ <- tick
+  { inc = (\x -> add a x), scale = (\x -> mul b x) }
+
+crossRecord :: Int -> Int -> <IO> Int
+crossRecord a b = do
+  ops <- mkOps a b
+  useOps ops 10
+
+crossList :: Int -> Int -> <IO> Int
+crossList a b = do
+  _ <- tick
+  useList [(\x -> add a x), (\x -> mul b x)] 10
+
+crossTuple :: Int -> Int -> <IO> Int
+crossTuple a b = do
+  _ <- tick
+  useTuple ((\x -> add a x), (\x -> mul b x)) 10
+
+crossOpt :: Int -> <IO> Int
+crossOpt a = do
+  _ <- tick
+  useOpt (\x -> add a x) 10
