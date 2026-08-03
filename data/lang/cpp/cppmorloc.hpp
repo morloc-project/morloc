@@ -411,6 +411,29 @@ inline bool is_primitive_numeric_cpp(const Schema* schema) {
     }
 }
 
+// True iff a std::vector<T> with this element schema is byte-identical to the
+// voidstar element layout, so the whole data region can be bulk-copied. Both
+// T's numeric KIND (float / signed-int / unsigned-int) AND width must match the
+// schema element -- not merely "both are equal-size primitive numerics", which
+// would let a float-vs-int or signed-vs-unsigned pairing memcpy raw bits and
+// skip the per-element value-cast / range-check the scalar to_voidstar applies.
+// Excludes the variable-width BigInt (MORLOC_INT) and non-arithmetic T.
+template <typename T>
+inline bool vector_is_bulk_copyable(const Schema* elem) {
+    if (static_cast<size_t>(elem->width) != sizeof(T)) return false;
+    if constexpr (std::is_floating_point_v<T>) {
+        return elem->type == MORLOC_FLOAT32 || elem->type == MORLOC_FLOAT64;
+    } else if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
+        return elem->type == MORLOC_SINT8 || elem->type == MORLOC_SINT16
+            || elem->type == MORLOC_SINT32 || elem->type == MORLOC_SINT64;
+    } else if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>) {
+        return elem->type == MORLOC_UINT8 || elem->type == MORLOC_UINT16
+            || elem->type == MORLOC_UINT32 || elem->type == MORLOC_UINT64;
+    } else {
+        return false;
+    }
+}
+
 // Alignment for an Array's element data buffer in SHM. For primitive numerics
 // we bump to MORLOC_ARRAY_DATA_ALIGN (SIMD/BLAS); otherwise use the element's
 // natural alignment.
@@ -822,6 +845,20 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::ve
                 free(err);
                 throw std::runtime_error(msg);
             }
+            return dest;
+        }
+    }
+    // Fast path: a vector of a fixed-width primitive numeric packs identically
+    // to the voidstar layout, so the data region is one memcpy instead of a
+    // per-element call (a Vector U8 otherwise costs a call per BYTE). The gate
+    // is on the SCHEMA kind+width, not the C++ type: morloc `Int` is a
+    // variable-width BigInt whose C++ type is `int64_t`, and a same-size
+    // float-vs-int pairing would copy raw bits -- `vector_is_bulk_copyable<T>`
+    // requires the kind AND width to match. The `if constexpr` keeps
+    // `data.data()` valid (std::vector<bool> has no contiguous storage).
+    if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
+        if (vector_is_bulk_copyable<T>(elem_schema)) {
+            std::memcpy(start, data.data(), data.size() * width);
             return dest;
         }
     }

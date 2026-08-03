@@ -146,6 +146,26 @@ impl Schema {
         }
     }
 
+    /// True when this String/Array schema's data region is one contiguous flat
+    /// blob (`arr.size * elem_width` bytes, no sub-allocations), so it can be
+    /// bulk sized/copied/hashed instead of walked element by element. A
+    /// `String`'s bytes are always flat; an `Array`'s data is flat exactly when
+    /// its element is fixed-width.
+    ///
+    /// This is the element-level question the Array walks need, and is NOT
+    /// `is_fixed_width()`: that asks whether the WHOLE value has a
+    /// compile-time-fixed byte width, which is always false for a
+    /// variable-length Array. Testing `is_fixed_width()` on an Array node
+    /// compiles and runs but silently forces the O(bytes) per-element path --
+    /// use this predicate for the bulk-vs-walk decision.
+    pub fn array_data_is_flat(&self) -> bool {
+        match self.serial_type {
+            SerialType::String => true,
+            SerialType::Array => self.parameters.first().map_or(false, |e| e.is_fixed_width()),
+            _ => false,
+        }
+    }
+
     /// Alignment requirement for this type.
     pub fn alignment(&self) -> usize {
         match self.serial_type {

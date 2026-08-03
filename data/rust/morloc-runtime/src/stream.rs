@@ -3003,14 +3003,19 @@ fn append_one_element(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
     elem_src: AbsPtr,
+    buf_size: usize,
+    scratch: &mut Vec<u8>,
 ) -> Result<(), MorlocError> {
     let w = local.elem_schema.width;
-    let buf_size = read_write_buffer_bytes_env();
 
     // Flatten the single element to a self-contained blob:
     //   blob[0..w]: inline (with buffer-relative relptrs into blob[w..])
     //   blob[w..]:  variable bytes (sub-allocations)
-    let elem_blob = crate::voidstar::flatten_to_buffer(elem_src, &local.elem_schema)?;
+    // `scratch` reuses its allocation across the whole @write batch, so this
+    // hot loop pays no per-element heap allocation. `buf_size` is read once by
+    // the caller rather than re-querying the environment per element.
+    crate::voidstar::flatten_into(scratch, elem_src, &local.elem_schema)?;
+    let elem_blob: &[u8] = scratch.as_slice();
     // Round the variable region up to 8-byte alignment. Successive
     // elements' variable regions concatenate in the write buffer at
     // `data_region_start + write_buffer_data_used`; if any element's
@@ -3065,7 +3070,7 @@ fn append_one_element(
             )
         });
         // Element blob
-        oversize_payload.extend_from_slice(&elem_blob);
+        oversize_payload.extend_from_slice(elem_blob);
         // Shift relptrs in the appended element by +16.
         let payload_base = oversize_payload.as_mut_ptr();
         unsafe {
@@ -3226,9 +3231,15 @@ pub fn shared_write_subpacket(
 
         // Walk the elements and append each. element_count updates
         // here (not at flush) so @flen reflects buffered elements too.
+        // `buf_size` and `scratch` are hoisted out of the loop: the write-
+        // buffer size is read from the environment once, and one scratch
+        // buffer is reused for every element's flatten (no per-element
+        // env lookup, no per-element heap allocation).
+        let buf_size = read_write_buffer_bytes_env();
+        let mut scratch: Vec<u8> = Vec::new();
         for i in 0..n_elements {
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
-            append_one_element(slot, local, elem_src)?;
+            append_one_element(slot, local, elem_src, buf_size, &mut scratch)?;
             unsafe {
                 let mp = slot as *const RegistrySlot as *mut RegistrySlot;
                 (*mp).element_count += 1;

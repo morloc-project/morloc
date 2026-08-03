@@ -1419,8 +1419,10 @@ isFunctionTypeF t = case stripEffectF t of
   FunF _ _ -> True
   _ -> False
 
-rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> RustM PoolDocs
-rustMakeLet namer letIndex mt p1 p2 = do
+-- The borrow-safe flag ('isBorrowableProjection') is unused: Rust binds owned
+-- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
+rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> RustM PoolDocs
+rustMakeLet namer letIndex mt _ p1 p2 = do
   ann <- case mt of
     Just t | isFunctionTypeF t -> return ""
     Just t -> do ts <- rustTypeOf t; return (":" <+> ts)

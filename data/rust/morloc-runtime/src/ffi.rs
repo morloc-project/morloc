@@ -476,8 +476,17 @@ fn calc_voidstar_size_inner_walk(
                 // bumps to 64 for primitive numerics for SIMD/BLAS
                 size += elem_schema.array_data_alignment().saturating_sub(1);
 
-                if schema.is_fixed_width() {
-                    size += elem_width * arr.size;
+                // A flat data region (fixed-width element) sizes to a single
+                // multiply; a variable element must be walked. See
+                // Schema::array_data_is_flat -- do NOT test schema.is_fixed_width()
+                // on the Array node, which silently forces the per-element path.
+                if schema.array_data_is_flat() {
+                    // Saturating: in bounded mode the per-element walk this
+                    // replaces early-exited once `size` passed `upper_bound`, so
+                    // it never overflowed. A corrupt/hostile `arr.size` must not
+                    // wrap the product to a small value and misroute a huge array
+                    // as inline; saturating to usize::MAX keeps it "oversized".
+                    size = size.saturating_add(elem_width.saturating_mul(arr.size));
                 } else {
                     let elem_data = shm::rel2abs(arr.data)?;
                     for i in 0..arr.size {

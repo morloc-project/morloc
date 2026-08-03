@@ -771,11 +771,11 @@ char* errmsg = NULL;|]
 );
 PROPAGATE_ERROR(errmsg)|]
         return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
-    , lcMakeLet = \namer letIndex mt e1 e2 -> do
+    , lcMakeLet = \namer letIndex mt borrowSafe e1 e2 -> do
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) e1 e2
+        return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
     , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
     , lcReturn = \e -> "return(" <> e <> ");"
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
@@ -1006,12 +1006,26 @@ PROPAGATE_ERROR(errmsg)|]
     -- 'mlc::Unit{}' whenever the let-var's type is 'Unit' -- the effect
     -- fires, the caller's 'Unit' variable is present, and any subsequent
     -- reference to @ni@ still type-checks.
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr isUnit p1 p2 =
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer letIndex typestr isUnit borrowSafe p1 p2 =
       let letAssignment
             | isUnit =
                 [idoc|#{poolExpr p1};|]
                   <+> [idoc|#{typestr} #{namer letIndex}{};|]
+            -- A field/index projection rooted at a live variable: bind by
+            -- const-reference so the projected sub-value is not copied out of
+            -- its container (see 'isBorrowableProjection'). The referent (the
+            -- root variable) outlives the alias because lets flatten in scope
+            -- order and codegen never moves a bound local. INVARIANT: anything
+            -- that escapes the frame must COPY this alias's referent, not hold a
+            -- reference to it -- today std::bind decay-copies bound args, '[=]'
+            -- captures copy the referent, and the sole '[&]' is an immediately
+            -- invoked IIFE. A future by-reference capture would dangle.
+            -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
+            -- saves nothing and a 'const T&' can't bind a 'source Cpp' non-const
+            -- 'T&' parameter, so keep the cheap by-value copy for them.
+            | borrowSafe && not (isScalarCppType typestr) =
+                [idoc|const #{typestr}& #{namer letIndex} = #{poolExpr p1};|]
             | otherwise =
                 [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
           rs = poolPriorLines p1 <> [letAssignment] <> poolPriorLines p2
@@ -1022,6 +1036,18 @@ PROPAGATE_ERROR(errmsg)|]
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             }
+
+    -- Cheap-to-copy scalar C++ types. Borrowing one by const-reference saves
+    -- nothing (the copy is a register move) and would newly break a 'source
+    -- Cpp' function taking a non-const 'T&' (a 'const T&' cannot bind there);
+    -- so the borrow optimization is restricted to the container/aggregate
+    -- types (Str, Vector, Tuple, records) where copying the projected
+    -- sub-value actually costs.
+    isScalarCppType :: MDoc -> Bool
+    isScalarCppType t = render t `elem`
+      [ "int8_t", "int16_t", "int32_t", "int64_t"
+      , "uint8_t", "uint16_t", "uint32_t", "uint64_t"
+      , "float", "double", "bool" ]
 
     -- Match only bare 'Unit' -- a thunk-of-Unit ('EffectF _ Unit') is
     -- 'std::function<mlc::Unit()>', an assignable function value, not a

@@ -489,8 +489,12 @@ data LowerConfig m = LowerConfig
   -- lcDebugWrap closes over its own manifold @(name, srcloc)@ lookup
   -- (from 'makeManifoldDebugInfoLookup') and bakes the strings into the
   -- codegen'd call so the runtime can render them next to @mid=@.
-  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
-  -- ^ Let binding assembly at the PoolDocs level
+  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ Let binding assembly at the PoolDocs level. The 'Bool' marks a
+  -- borrow-safe RHS: a field/index projection rooted at a live variable
+  -- (see 'isBorrowableProjection'). A statically typed member may bind such
+  -- a RHS by reference to avoid copying the projected sub-value; members for
+  -- which this is meaningless ignore it.
   , lcReleaseStmt :: Text -> MDoc
   -- ^ Produce a statement releasing the SHM owned by a serialize-let-bound
   -- packet variable. Called at the end of a serialize let's body so the
@@ -764,7 +768,7 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- temp as the new pool expression. This makes the SHM ref's lifetime
   -- end exactly at the body's last use of the bound variable rather than
   -- carrying it to the outer dispatch boundary.
-  letResult <- lcMakeLet cfg svarNamer i Nothing e1 e2
+  letResult <- lcMakeLet cfg svarNamer i Nothing False e1 e2
   tmpIdx <- lcNewIndex cfg
   let releaseLine = lcReleaseStmt cfg (render (svarNamer i))
       releaseBody =
@@ -772,18 +776,48 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
           { poolExpr = helperNamer tmpIdx
           , poolPriorLines = [releaseLine]
           }
-  lcMakeLet cfg helperNamer tmpIdx Nothing letResult releaseBody
+  lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
-  lcMakeLet cfg svarNamer i Nothing e1 e2
-lowerSerialExpr cfg (NativeLetS _ (typeFof -> t) _) (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i (Just t) e1 e2
+  lcMakeLet cfg svarNamer i Nothing False e1 e2
+lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) =
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1 e2
 lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i Nothing e1 e2
+  lcMakeLet cfg nvarNamer i Nothing False e1 e2
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr cfg _ (SerializeS_ s e) = do
   se <- lcSerialize cfg (poolExpr e) s
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
+
+-- | True when a native expression lowers to a reference into a live variable:
+-- a bracket-free, single-path field/index projection (@.field@ / @.N@ chains)
+-- ultimately rooted at a bound variable. Binding such a RHS by const-reference
+-- (in a statically typed member that does no last-use moves) avoids copying the
+-- projected sub-value out of its container; the reference stays valid because
+-- the root variable is single-assignment and never moved.
+--
+-- Bracket steps (@.[i]@ / slices) build new values (they call @morloc_at@ /
+-- @morloc_slice@, which return by value), so a selector containing one is
+-- excluded. Multi-sibling selectors materialise a fresh tuple, so only a
+-- single-leaf selector qualifies. A receiver that is a call result (a
+-- temporary) is excluded -- a reference into it would dangle.
+--
+-- NOTE for zero-copy Vector work: when the root variable is a zero-copy view
+-- into incoming-packet SHM, the const& alias holds a reference into that SHM.
+-- Safe today because the packet's SHM is released only at the dispatch
+-- boundary, after the manifold body (put_value-tracked serialize-lets pass
+-- @borrowSafe = False@). If a future path frees a value's backing SHM mid-body,
+-- revisit whether that value's fields may be borrowed.
+isBorrowableProjection :: NativeExpr -> Bool
+isBorrowableProjection (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr arg]) =
+  not (selectorHasBracket sel)
+    && length (ungroup sel) == 1
+    && borrowableRoot arg
+  where
+    borrowableRoot (LetVarN _ _) = True
+    borrowableRoot (BndVarN _ _) = True
+    borrowableRoot e = isBorrowableProjection e
+isBorrowableProjection _ = False
 
 -- | The ownership of each argument of an @AppExeN@, taken from the original IR
 -- (a manifold-valued argument is always an owned call result).
@@ -886,7 +920,7 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
   -- via SerialLetN -- e.g., the m1417-style wrapper around a foreign call.
   -- The body is a NativeExpr, so the temp's declared type must match it
   -- (rather than falling back to the serial type used for SerialLetS).
-  letResult <- lcMakeLet cfg svarNamer i Nothing x1 x2
+  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
   tmpIdx <- lcNewIndex cfg
   let bodyT = typeFof body
       releaseLine = lcReleaseStmt cfg (render (svarNamer i))
@@ -895,15 +929,15 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
           { poolExpr = helperNamer tmpIdx
           , poolPriorLines = [releaseLine]
           }
-  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) letResult releaseBody
-lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing x1 x2
+  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
+lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExpr cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
   x1' <- adaptOwnedElem cfg rhsE x1
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) x1' x2
-lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing x1 x2
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
+lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
 lowerNativeExpr _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExpr _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExpr cfg _ (DeserializeN_ t s x) = do

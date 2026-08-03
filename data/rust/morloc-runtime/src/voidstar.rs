@@ -685,8 +685,24 @@ where
 /// Flatten a voidstar structure in SHM into a self-contained byte buffer.
 /// Relptrs in the output are offsets from position 0 of the buffer.
 pub fn flatten_to_buffer(data: AbsPtr, schema: &Schema) -> Result<Vec<u8>, MorlocError> {
+    let mut buf = Vec::new();
+    flatten_into(&mut buf, data, schema)?;
+    Ok(buf)
+}
+
+/// Like [`flatten_to_buffer`] but writes into a caller-provided buffer,
+/// reusing its allocation across calls so hot loops that flatten many values
+/// (e.g. the per-element `@write` append) pay no heap allocation per value.
+/// `buf` is reset to a zero-filled `total` bytes (the trailing padding relies
+/// on the zeros), discarding any prior contents.
+pub fn flatten_into(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
     let total = crate::ffi::calc_voidstar_size_inner(data, schema)?;
-    let mut buf = vec![0u8; total];
+    buf.clear();
+    buf.resize(total, 0);
 
     // SAFETY: data points to at least schema.width bytes in SHM; buf has total >= schema.width bytes.
     unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), schema.width) };
@@ -694,9 +710,9 @@ pub fn flatten_to_buffer(data: AbsPtr, schema: &Schema) -> Result<Vec<u8>, Morlo
     // Phase 2: fix up relptrs and copy variable-length data
     let mut cursor = schema.width;
     let mut env: RecurEnv = Vec::new();
-    flatten_fixup(&mut buf, 0, data, schema, &mut cursor, &mut env)?;
+    flatten_fixup(&mut buf[..], 0, data, schema, &mut cursor, &mut env)?;
 
-    Ok(buf)
+    Ok(())
 }
 
 fn flatten_fixup(
@@ -764,7 +780,13 @@ fn flatten_fixup_inner(
                 *cursor = shm::align_up(*cursor, align);
                 buf_arr.data = *cursor as RelPtr;
                 let elem_w = elem_schema.width;
-                let total_bytes = elem_w * orig_arr.size;
+                // Checked: a corrupt/hostile arr.size must not wrap the product
+                // (an OOB from_raw_parts read / silent truncation); error out
+                // instead. calc_voidstar_size (saturating) normally fails the
+                // buffer alloc first, so this is a belt-and-suspenders guard.
+                let total_bytes = elem_w
+                    .checked_mul(orig_arr.size)
+                    .ok_or_else(|| MorlocError::Other("flatten: array data size overflow".into()))?;
                 buf[*cursor..*cursor + total_bytes].copy_from_slice(
                     std::slice::from_raw_parts(orig_data, total_bytes)
                 );
