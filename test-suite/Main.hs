@@ -78,7 +78,7 @@ main = do
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
       -- -- with no STDERR output on github. I have no idea why. But for now I'm
-      -- -- just going to comment them out. Rememver uncomment them on dev cycles
+      -- -- just going to comment them out. Remember uncomment them on dev cycles
       -- -- so that they are tested somewhere, at least.
       -- , golden "specialization-1-c" "specialization-1-c"
       -- , golden "specialization-2-c" "specialization-2-c"
@@ -87,6 +87,7 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "lambda-reindex" "lambda-reindex"
+      , golden "deep-compose" "deep-compose"
       , golden "collect-formatters" "collect-formatters"
       , golden "detect-imported-handler" "detect-imported-handler"
       , golden "collect-cross-module" "collect-cross-module"
