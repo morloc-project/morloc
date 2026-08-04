@@ -129,6 +129,12 @@ segmentExpr m args (PolyIf cond thenE elseE) = do
   (ms2, (_, thenE')) <- segmentExpr m args thenE
   (ms3, (_, elseE')) <- segmentExpr m args elseE
   return (ms1 ++ ms2 ++ ms3, (Nothing, MonoIf cond' thenE' elseE'))
+segmentExpr m args (PolyLoop t ids e) = do
+  (ms, (_, e')) <- segmentExpr m args e
+  return (ms, (Nothing, MonoLoop t ids e'))
+segmentExpr m args (PolyLoopContinue es) = do
+  (mss, es') <- mapM (segmentExpr m args) es |>> unzip
+  return (concat mss, (Nothing, MonoLoopContinue (map snd es')))
 segmentExpr m args (PolyEval t e) = do
   (ms, (_, e')) <- segmentExpr m args e
   return (ms, (Nothing, MonoEval t e'))

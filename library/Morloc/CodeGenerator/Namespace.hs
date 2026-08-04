@@ -92,6 +92,7 @@ module Morloc.CodeGenerator.Namespace
   , foldlNM
   , foldlSE
   , foldlNE
+  , polySubExprs
   , foldlSA
   , foldlNA
 
@@ -659,6 +660,14 @@ data PolyExpr
   | PolyEval (Indexed Type) PolyExpr
   | PolyCoerce Coercion (Indexed Type) PolyExpr
   | PolyIf PolyExpr PolyExpr PolyExpr
+  | PolyLoop (Indexed Type) [Int] PolyExpr
+    -- ^ Native tail-loop over loop-carried variable ids. Fields: result type
+    -- (base-case type), loop-carried var ids (the manifold's bound args),
+    -- body. Introduced by 'addLoopWraps' before segmentation. Each tail
+    -- back-edge in the body is a 'PolyLoopContinue'.
+  | PolyLoopContinue [PolyExpr]
+    -- ^ A tail back-edge inside a 'PolyLoop': the new values for the
+    -- loop-carried variables (positional with the enclosing loop's var ids).
   | PolyIntrinsic (Indexed Type) Intrinsic [PolyExpr]
 
 data MonoHead = MonoHead Lang Int [Arg None] HeadManifoldForm MonoExpr
@@ -704,6 +713,8 @@ data MonoExpr
   | MonoEval (Indexed Type) MonoExpr
   | MonoCoerce Coercion (Indexed Type) MonoExpr
   | MonoIf MonoExpr MonoExpr MonoExpr
+  | MonoLoop (Indexed Type) [Int] MonoExpr
+  | MonoLoopContinue [MonoExpr]
   | MonoIntrinsic (Indexed Type) Intrinsic [MonoExpr]
 
 data PoolCall
@@ -775,6 +786,16 @@ data SerialExpr
   | LetVarS (Maybe TypeF) Int
   | BndVarS (Maybe TypeF) Int
   | SerializeS SerialAST NativeExpr
+  | LoopS TypeF [Int] NativeExpr SerialExpr [NativeExpr]
+    -- ^ Native tail-loop (single-guard first cut). Fields: result type
+    -- (base-case type); loop-carried local ids (fresh mutable native locals,
+    -- initialized from the manifold params by enclosing 'NativeLetS'
+    -- deserializations and reassigned each iteration); guard condition (a
+    -- native Bool -- when true the loop returns the base); base-return value
+    -- (serialized); and the continue values (new native values for the
+    -- loop-locals, positional with the ids). Built by 'serialExpr' from a
+    -- 'MonoLoop' by extracting these pieces, so no 'LoopContinue' ever reaches
+    -- the value-@if@ machinery.
   deriving (Show)
 
 data NativeExpr
@@ -847,6 +868,7 @@ foldlSE f b (NativeLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE _ b (LetVarS_ _ _) = b
 foldlSE _ b (BndVarS_ _ _) = b
 foldlSE f b (SerializeS_ _ x) = f b x
+foldlSE f b (LoopS_ _ _ nc se cs) = foldl f b (nc : se : cs)
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
 foldlNE f b (AppExeN_ _ _ xs) = foldl f b xs
@@ -872,6 +894,31 @@ foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
 foldlNE f b (MapOptionalN_ _ _ _ x) = f b x
+
+-- | Direct 'PolyExpr' children, for structural traversal. 'PolyExpr' has no
+-- fold/'MFunctor' instance (unlike 'SerialExpr'/'NativeExpr'), so this is the
+-- one place enumerating every constructor's sub-expressions -- keep it in sync
+-- when adding a 'PolyExpr' constructor or a structural walk will silently drop
+-- the new node's children.
+polySubExprs :: PolyExpr -> [PolyExpr]
+polySubExprs (PolyManifold _ _ _ _ e) = [e]
+polySubExprs (PolyRemoteInterface _ _ _ _ e) = [e]
+polySubExprs (PolyLet _ a b) = [a, b]
+polySubExprs (PolyReturn e) = [e]
+polySubExprs (PolyApp h xs) = h : xs
+polySubExprs (PolyCacheBody _ _ _ e) = [e]
+polySubExprs (PolyDebugWrap _ _ e) = [e]
+polySubExprs (PolyList _ _ xs) = xs
+polySubExprs (PolyTuple _ xs) = map snd xs
+polySubExprs (PolyRecord _ _ _ rs) = map (snd . snd) rs
+polySubExprs (PolyDoBlock _ e) = [e]
+polySubExprs (PolyEval _ e) = [e]
+polySubExprs (PolyCoerce _ _ e) = [e]
+polySubExprs (PolyIf a b c) = [a, b, c]
+polySubExprs (PolyLoop _ _ e) = [e]
+polySubExprs (PolyLoopContinue xs) = xs
+polySubExprs (PolyIntrinsic _ _ xs) = xs
+polySubExprs _ = []
 
 data MonoidFold m a = MonoidFold
   { monoidSerialManifold :: SerialManifold_ (a, SerialExpr) -> m (a, SerialManifold)
@@ -921,6 +968,9 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidSerialExpr' (LetVarS_ mayT i) = return (mempty', LetVarS mayT i)
     monoidSerialExpr' (BndVarS_ mayT i) = return (mempty', BndVarS mayT i)
     monoidSerialExpr' (SerializeS_ s (req, ne)) = return (req, SerializeS s ne)
+    monoidSerialExpr' (LoopS_ t ids (rc, nc) (rb, se) csPairs) =
+      let (rcs, cs) = unzip csPairs
+       in return (foldl mappend' mempty' (rc : rb : rcs), LoopS t ids nc se cs)
 
     monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
     monoidNativeExpr' (AppExeN_ t exe (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppExeN t exe es)
@@ -1070,6 +1120,7 @@ data SerialExpr_ sm se ne sr nr
   | LetVarS_ (Maybe TypeF) Int
   | BndVarS_ (Maybe TypeF) Int
   | SerializeS_ SerialAST ne
+  | LoopS_ TypeF [Int] ne se [ne]
 
 data NativeExpr_ nm se ne sr nr
   = AppExeN_ TypeF ExecutableExpressionPool [nr]
@@ -1221,6 +1272,11 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     f full@(AppForeignRecS t m s es) = do
       es' <- mapM (surroundFoldSerialExprM sfm fm) es
       opFoldWithSerialExprM fm full $ AppForeignRecS_ t m s es'
+    f full@(LoopS t ids nc se cs) = do
+      nc' <- surroundFoldNativeExprM sfm fm nc
+      se' <- surroundFoldSerialExprM sfm fm se
+      cs' <- mapM (surroundFoldNativeExprM sfm fm) cs
+      opFoldWithSerialExprM fm full $ LoopS_ t ids nc' se' cs'
     f full@(CacheBodyS t resSa lbl m args body) = do
       body' <- surroundFoldSerialExprM sfm fm body
       opFoldWithSerialExprM fm full $ CacheBodyS_ t resSa lbl m args body'
@@ -1390,6 +1446,7 @@ instance HasTypeS SerialExpr where
   typeSof (LetVarS t _) = maybe PassthroughS SerialS t
   typeSof (BndVarS t _) = maybe PassthroughS SerialS t
   typeSof (SerializeS _ e) = SerialS (typeFof e)
+  typeSof (LoopS t _ _ _ _) = SerialS t
 
 instance HasTypeM SerialExpr where
   typeMof = typeMof . typeSof
@@ -1522,6 +1579,7 @@ instance MFunctor SerialExpr where
         e@(LetVarS _ _) -> mapSerialExpr f e
         e@(BndVarS _ _) -> mapSerialExpr f e
         (SerializeS s ne) -> mapSerialExpr f $ SerializeS s (mgatedMap g f ne)
+        (LoopS t ids nc se cs) -> mapSerialExpr f $ LoopS t ids (mgatedMap g f nc) (mgatedMap g f se) (map (mgatedMap g f) cs)
     | otherwise = mapSerialExpr f se0
 
 -- WARNING - mapping must not change the type of any argument
@@ -1603,6 +1661,8 @@ instance Pretty PolyExpr where
   pretty (PolyEval _ e) = "PolyEval" <+> pretty e
   pretty (PolyCoerce _ _ e) = "PolyCoerce" <+> pretty e
   pretty (PolyIf c t e) = "PolyIf" <+> pretty c <+> pretty t <+> pretty e
+  pretty (PolyLoop _ ids e) = "PolyLoop" <> list (map pretty ids) <+> parens (pretty e)
+  pretty (PolyLoopContinue es) = "PolyLoopContinue" <+> list (map pretty es)
   pretty (PolyIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)
 
 instance Pretty MonoExpr where
@@ -1637,6 +1697,8 @@ instance Pretty MonoExpr where
   pretty (MonoEval _ e) = "!" <> pretty e
   pretty (MonoCoerce _ _ e) = "coerce(" <> pretty e <> ")"
   pretty (MonoIf c t e) = "if" <+> pretty c <+> "then" <+> pretty t <+> "else" <+> pretty e
+  pretty (MonoLoop _ ids e) = "loop" <> list (map pretty ids) <+> braces (pretty e)
+  pretty (MonoLoopContinue es) = "continue" <+> list (map pretty es)
   pretty (MonoIntrinsic _ intr es) = "@" <> pretty (intrinsicName intr) <+> list (map pretty es)
 
 instance Pretty MonoHead where

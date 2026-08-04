@@ -1,0 +1,11 @@
+{
+  "status": "fail",
+  "exit_code": 1,
+  "command": "countdownP",
+  "run_id": "20260804T225942Z-abeed7fc",
+  "started_at": "2026-08-04T22:59:42.019273082+00:00",
+  "finished_at": "2026-08-04T22:59:42.216713728+00:00",
+  "wall_ms": 197,
+  "morloc_version": "0.96.0",
+  "error": "division by zero\nmorloc trace [py pool]:\n  at _ (mid=1372, main.loc:25:31)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/77541e6e96726dd0.pkt\n  at countdownP (mid=1, main.loc:1:14)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/77541e6e96726dd0.pkt\n  at _ (mid=1377, main.loc:26:21)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/6fffcb30bbcc5a72.pkt\n  at countdownP (mid=1, main.loc:1:14)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/6fffcb30bbcc5a72.pkt\n  at _ (mid=1377, main.loc:26:21)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/8032f906eda5305e.pkt\n  at countdownP (mid=1, main.loc:1:14)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/8032f906eda5305e.pkt\n  at _ (mid=1377, main.loc:26:21)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/88d29fa0282ff4b9.pkt\n  at countdownP (mid=1, main.loc:1:14)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/88d29fa0282ff4b9.pkt\n  at _ (mid=1377, main.loc:26:21)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/0282b2e0e2d9cc3c.pkt\n  at countdownP (mid=1, main.loc:1:14)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/0282b2e0e2d9cc3c.pkt\n  at _ (mid=1377, main.loc:26:21)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/d7c2353825cccc38.pkt\n  at countdownP (mid=1, main.loc:1:14)\n    arg[0] :: j -> logs_unlimited/20260804T225942Z-abeed7fc/debug/inputs/d7c2353825cccc38.pkt\n"
+}

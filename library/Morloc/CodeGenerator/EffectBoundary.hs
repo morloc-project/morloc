@@ -116,6 +116,9 @@ polyOuterType (PolyApp fn _) = case polyOuterType fn of
 polyOuterType (PolyIf _ t e) = case polyOuterType t of
   Just tp | hasOuterEffect tp -> Just tp
   _                           -> polyOuterType e
+-- A loop's outer type is its base-case return type (the continue produces
+-- no value); it is carried on the body's base branch.
+polyOuterType (PolyLoop _ _ body) = polyOuterType body
 polyOuterType _                                       = Nothing
 
 -- | Does the outer layer of the type declare an effect?
@@ -214,6 +217,11 @@ descend m _ (PolyList _ _ xs) = mapM_ (walk m LocalRoot) xs
 descend m _ (PolyTuple _ xs) = mapM_ (walk m LocalRoot . snd) xs
 descend m _ (PolyRecord _ _ _ rs) = mapM_ (walk m LocalRoot . snd . snd) rs
 descend m _ (PolyIntrinsic _ _ xs) = mapM_ (walk m LocalRoot) xs
+-- A loop's base branch flows to the enclosing boundary (same ctx); the
+-- continue args are new loop-carried values (LocalRoot). The 'PolyIf' inside
+-- routes ctx to the base branch and 'PolyLoopContinue' descends its args.
+descend m ctx (PolyLoop _ _ body) = walk m ctx body
+descend m _ (PolyLoopContinue es) = mapM_ (walk m LocalRoot) es
 descend _ _ _ = return ()
 
 -- | Poly-stage insertion pass. Walks 'PolyExpr' and installs the
@@ -260,6 +268,8 @@ rewrite m (PolyIf c t' e) = do
   t'' <- rewrite m t'
   e'  <- rewrite m e
   return $ suspendMixedIfBranches m c' t'' e'
+rewrite m (PolyLoop t ids e) = PolyLoop t ids <$> rewrite m e
+rewrite m (PolyLoopContinue es) = PolyLoopContinue <$> mapM (rewrite m) es
 rewrite m (PolyList v ts xs)  = PolyList v ts <$> mapM (rewrite m) xs
 rewrite m (PolyTuple v xs)    =
   PolyTuple v <$> mapM (\(t,x) -> (,) t <$> rewrite m x) xs
@@ -454,6 +464,15 @@ forceReturnPosition m (PolyReturn e) = PolyReturn (forceReturnPosition m e)
 forceReturnPosition m (PolyLet i v e) = PolyLet i v (forceReturnPosition m e)
 forceReturnPosition m (PolyManifold l m' f k e) =
   PolyManifold l m' f k (forceReturnPosition m e)
+-- A loop's base branch is its return position; force effects there. The
+-- continue back-edge produces no value and must NOT be forced (its args are
+-- new loop-carried values, not the manifold's return).
+forceReturnPosition m (PolyLoop t ids e) = PolyLoop t ids (goLoop e)
+  where
+    goLoop (PolyIf c a b) = PolyIf c (goLoop a) (goLoop b)
+    goLoop (PolyLet i v x) = PolyLet i v (goLoop x)
+    goLoop cont@(PolyLoopContinue _) = cont
+    goLoop base = forceReturnPosition m base
 forceReturnPosition m e =
   case polyOuterType e of
     Just t | hasOuterEffect t -> forceLayers m t e

@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Express
   ( express
   , addCacheWraps
   , addDebugWraps
+  , addLoopWraps
   ) where
 
 import qualified Data.Set as Set
@@ -186,6 +187,105 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
+
+-- | Whether a driver language can host a native tail-loop. Python/R lower via
+-- 'genericMakeLoop'; C++ via the member's 'lcMakeLoop' (non-const native locals
+-- reassigned in place). Rust is excluded: its borrow checker + single-assignment
+-- last-use pass reject in-place reassignment of a loop-carried local (its
+-- 'lcMakeLoop' is a matching fail-loud stub). Single source of truth for the
+-- gate.
+langSupportsNativeLoop :: Lang -> Bool
+langSupportsNativeLoop lang = langName lang `elem` ["py", "r", "cpp"]
+
+-- | Lower an eligible tail-recursive manifold to a native 'PolyLoop'. Runs after
+-- 'express'/'addCacheWraps'/'addDebugWraps' and before 'insertEffectBoundaries'
+-- and 'segment', so the loop node propagates through the rest of the pipeline.
+-- Applies to any self-recursive 'PolyHead' -- an extracted helper OR an exported
+-- directly-recursive function (both carry a @RecCallP@ back to their own midx).
+--
+-- Tail-ness is decided structurally at THIS stage rather than from a frontend
+-- flag: 'rewriteLoopTail' turns every TAIL-position self back-edge into a
+-- 'PolyLoopContinue', so any @RecCallP@ still remaining in @loopBody@ is a
+-- non-tail back-edge. Eligibility (first cut): at least one self back-edge, none
+-- remaining after the rewrite (all tail), not @--debug@ (recursion preserves the
+-- nested trace), same-pool (@crossLang == Nothing@), a driver language that can
+-- host a loop, and the single-guard canonical shape. Cross-pool loops and the
+-- type-based crossing gates come later; anything ineligible falls back to the
+-- existing round-trip recursion.
+addLoopWraps :: PolyHead -> MorlocMonad PolyHead
+addLoopWraps ph@(PolyHead lang midx args body) = do
+  debugOn <- MM.gets stateDebugTrace
+  let backEdges = collectRecCalls midx body
+      loopBody = rewriteLoopTail midx body
+  -- Ordered cheapest-first: the O(1) flag/language gates short-circuit before
+  -- the body traversals ('backEdges'), which in turn precede forcing 'loopBody'
+  -- (the 'rewriteLoopTail' rebuild) in the last two conjuncts.
+  if not debugOn
+       && langSupportsNativeLoop lang
+       && not (null backEdges)
+       && all (isNothing . fst) backEdges
+       -- Every self back-edge is in tail position: 'rewriteLoopTail' converted
+       -- each tail one to a 'PolyLoopContinue', so a non-empty result here means
+       -- a back-edge survived in a non-tail position -- fall back to recursion.
+       && null (collectRecCalls midx loopBody)
+       -- Single-guard canonical shape (@if guard then base else continue@ with a
+       -- bare continue in the else branch). Any other shape (nested guards,
+       -- continue wrapped in a let/manifold, mixed branches) falls back to the
+       -- existing round-trip recursion below.
+       && isCanonicalLoopBody loopBody
+    then do
+      let ityp = snd (head backEdges)
+          ids = map ann args
+      MM.sayVVV $ "addLoopWraps: lowering midx" <+> pretty midx <+> "to a native loop over" <+> list (map pretty ids)
+      return $ PolyHead lang midx args (PolyLoop ityp ids loopBody)
+    else return ph
+  where
+    -- Every self back-edge in the body, as (crossLang, result type). The
+    -- 'RecCallP' 'PolyExe' carries @Idx i (FunT inputs out)@; the loop's result
+    -- type is @Idx i out@.
+    collectRecCalls :: Int -> PolyExpr -> [(Maybe Lang, Indexed Type)]
+    collectRecCalls mid = go
+      where
+        go (PolyExe (Idx i t) (RecCallP mid' cl))
+          | mid' == mid = [(cl, Idx i (resultType t))]
+        go e = concatMap go (polySubExprs e)
+        resultType (FunT _ out) = out
+        resultType t = t
+
+    -- The single-guard canonical loop body that 'serialExpr' can extract:
+    -- a top 'PolyIf' whose ELSE branch is a bare 'PolyLoopContinue' (possibly
+    -- under 'PolyReturn') and whose THEN branch is the continue-free base.
+    isCanonicalLoopBody :: PolyExpr -> Bool
+    isCanonicalLoopBody (PolyIf _ thenB elseB) =
+      isBareContinue elseB && not (hasContinue thenB)
+    isCanonicalLoopBody _ = False
+
+    isBareContinue (PolyReturn e) = isBareContinue e
+    isBareContinue (PolyLoopContinue _) = True
+    isBareContinue _ = False
+
+    hasContinue (PolyLoopContinue _) = True
+    hasContinue e = any hasContinue (polySubExprs e)
+
+    -- Rewrite the manifold's return position into a loop body: base leaves
+    -- become 'PolyReturn'; each tail back-edge becomes a 'PolyLoopContinue'
+    -- carrying the new loop-carried values, dropping the per-branch
+    -- 'PolyManifold' wrapper so the continue is not stranded in a value
+    -- position. Control/effect wrappers (If/Let/DoBlock) are preserved.
+    rewriteLoopTail :: Int -> PolyExpr -> PolyExpr
+    rewriteLoopTail mid = goT
+      where
+        goT (PolyReturn x) = goT x
+        goT (PolyIf c t e) = PolyIf c (goT t) (goT e)
+        goT (PolyDoBlock ti x) = PolyDoBlock ti (goT x)
+        goT (PolyLet i a b) = PolyLet i a (goT b)
+        goT (PolyManifold l m form k inner) =
+          case goT inner of
+            cont@(PolyLoopContinue _) -> cont
+            other -> PolyManifold l m form k other
+        goT (PolyApp (PolyExe _ (RecCallP mid' _)) xs) | mid' == mid = PolyLoopContinue xs
+        goT (PolyExe _ (RecCallP mid' _)) | mid' == mid = PolyLoopContinue []
+        goT leaf = PolyReturn leaf
 
 cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
 cacheWrapExpr (PolyManifold l m form k inner) = do

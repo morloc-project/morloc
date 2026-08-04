@@ -779,6 +779,40 @@ PROPAGATE_ERROR(errmsg)|]
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
     , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
     , lcReturn = \e -> "return(" <> e <> ");"
+    , lcMakeLoop = \ids guardDocs baseDocs contDocs -> do
+        -- Native tail-loop. The loop-carried vars are the manifold's deserialized
+        -- native locals ('nvarNamer id'), which C++ declares non-const, so they
+        -- are reassigned in place. Each continue value goes into an 'auto' temp
+        -- before any loop-local is reassigned, so a continue value that reads
+        -- another loop-carried var sees its pre-update value (parallel-assignment
+        -- hazard); the reassignment then MOVES the (dead) temp in, avoiding a
+        -- per-iteration deep copy of the loop-carried value.
+        resultIdx <- getCounter
+        tmpIdxs <- mapM (const getCounter) ids
+        let resultVar = helperNamer resultIdx
+            tmpVars = map helperNamer tmpIdxs
+            guardE = poolExpr guardDocs
+            baseE = poolExpr baseDocs
+            -- Init to nullptr: the single-guard while(true) always breaks after
+            -- setting resultVar, but a null init keeps the pointer defined if a
+            -- future multi-guard shape reaches the trailing return without a
+            -- break, and silences -Wmaybe-uninitialized (g++ can't prove the
+            -- loop always breaks after the assignment).
+            resultDecl = "uint8_t*" <+> resultVar <+> "= nullptr;"
+            baseLines = poolPriorLines baseDocs <> [resultVar <+> "=" <+> baseE <> ";", "break;"]
+            contPriors = concatMap poolPriorLines contDocs
+            tmpAssigns = zipWith (\tv cd -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
+            reassigns = zipWith (\i tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") ids tmpVars
+            ifBlock = vsep ["if" <+> parens guardE <+> "{", indent 4 (vsep baseLines), "}"]
+            bodyLines = poolPriorLines guardDocs <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
+            whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
+        return $ PoolDocs
+          { poolCompleteManifolds = poolCompleteManifolds guardDocs <> poolCompleteManifolds baseDocs <> concatMap poolCompleteManifolds contDocs
+          , poolExpr = resultVar
+          , poolPriorLines = [resultDecl, whileDoc]
+          , poolPriorExprs = poolPriorExprs guardDocs <> poolPriorExprs baseDocs <> concatMap poolPriorExprs contDocs
+          , poolReturnFlag = True
+          }
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
         let v = helperNamer idx

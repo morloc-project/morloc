@@ -386,6 +386,7 @@ renameSE old new = go where
   go (LetVarS mt i) = LetVarS mt (ri i)
   go (BndVarS mt i) = BndVarS mt (ri i)
   go (SerializeS s ne) = SerializeS s (renameNE old new ne)
+  go (LoopS t ids nc se cs) = LoopS t (map ri ids) (renameNE old new nc) (go se) (map (renameNE old new) cs)
   goA (SerialArgManifold sm) = SerialArgManifold (renameSM old new sm)
   goA (SerialArgExpr se) = SerialArgExpr (go se)
 
@@ -489,6 +490,11 @@ invertSerialManifold sm0 =
       -- still want the catch block to fire and record the frame.
       return $ D (DebugWrapS t mid args (weave (D body lets))) []
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
+    -- KEEP each loop piece's let-bindings INSIDE the piece (weave): the
+    -- per-iteration cond/base/continue work must not be hoisted above the loop
+    -- where it would run once instead of every iteration.
+    invertSerialExprM (LoopS_ t ids condD baseD csD) =
+      return $ D (LoopS t ids (weave condD) (weave baseD) (map weave csD)) []
 
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->

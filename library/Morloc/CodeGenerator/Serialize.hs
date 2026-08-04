@@ -182,6 +182,34 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
       serializeS "serialE MonoIf" m (forceSerializedThunk ne)
+    -- Native-loop lowering (single-guard first cut). The body is
+    -- @if guard then base else continue@ where @base@ is the loop's return and
+    -- @continue@ is a 'MonoLoopContinue' carrying the new loop-carried values.
+    -- Every piece is lowered through 'nativeExpr' over the loop-carried native
+    -- locals ('ids') so it reads their CURRENT (reassigned) values -- the base
+    -- is then serialized from that native value, never from the stale serial
+    -- param packet. 'addLoopWraps' has already gated to this canonical shape
+    -- (guard true -> base), so anything else is a compiler bug.
+    serialExpr m (MonoLoop t ids body) = do
+      t' <- inferType t
+      case body of
+        MonoIf cond thenB elseB ->
+          case (continueArgs thenB, continueArgs elseB) of
+            (Nothing, Just contArgs) -> do
+              guardNe <- nativeExpr m cond
+              baseSe <- nativeExpr m (unReturn thenB)
+                >>= serializeS "loop base" m . forceSerializedThunk
+              contNes <- mapM (nativeExpr m) contArgs
+              return $ LoopS t' ids guardNe baseSe contNes
+            _ -> error "morloc bug: MonoLoop body is not a canonical single-guard base/continue"
+        _ -> error "morloc bug: MonoLoop body is not a single-guard conditional"
+      where
+        continueArgs (MonoLoopContinue args) = Just args
+        continueArgs (MonoReturn e) = continueArgs e
+        continueArgs _ = Nothing
+        unReturn (MonoReturn e) = e
+        unReturn e = e
+    serialExpr _ (MonoLoopContinue {}) = error "morloc: MonoLoopContinue reached serialExpr outside MonoLoop extraction"
     -- Thunk-producing intrinsics: convert to native and serialize with the
     -- inner type (strip EffectF) so the wire format matches the forced value.
     serialExpr m (MonoDoBlock _ e) = serialExpr m e
@@ -227,6 +255,8 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
       return . ManN $ NativeManifold m lang form' ne
     nativeExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to NativeExpr"
+    nativeExpr _ (MonoLoop {}) = error "morloc bug: MonoLoop in native position (loops are serial-only)"
+    nativeExpr _ (MonoLoopContinue {}) = error "morloc bug: MonoLoopContinue in native position"
     nativeExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
        in case inferState e1 of
@@ -806,6 +836,8 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     makeTypemap parentIdx (MonoIntrinsic _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) es)
     makeTypemap parentIdx (MonoIf cond thenE elseE) =
       Map.unionsWith mergeTypes [makeTypemap parentIdx cond, makeTypemap parentIdx thenE, makeTypemap parentIdx elseE]
+    makeTypemap parentIdx (MonoLoop _ _ e) = makeTypemap parentIdx e
+    makeTypemap parentIdx (MonoLoopContinue es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) es)
     -- A locally-defined function value (a closure) applied via 'LocalCallP j':
     -- record j's FUNCTION type from the head annotation. Without this the
     -- closure index has no typemap entry, so the arg machinery treats it as a
@@ -848,6 +880,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       | not (null (manifoldBound form)) = Unserialized
       | otherwise = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE
+    inferState (MonoLoop _ _ e) = inferState e
     inferState MonoPoolCall {} = Unserialized
     inferState MonoBndVar {} = Unserialized
     inferState _ = Unserialized

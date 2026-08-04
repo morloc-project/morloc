@@ -71,6 +71,15 @@ prettyFoldManifold =
     makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = letNamerS i}
     makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = bndNamerS i}
     makeSerialExpr _ (SerializeS_ _ e) = return $ e {poolExpr = "SerializeS" <> parens (poolExpr e)}
+    makeSerialExpr _ (LoopS_ _ ids nc se cs) =
+      return $ mergePoolDocs
+        (\ds -> case ds of
+            (cond : base : conts) ->
+              "loop" <> list (map pretty ids)
+                <+> braces ("if" <+> cond <+> "then return" <+> base
+                             <+> "else __continue__" <> list conts)
+            _ -> "loop")
+        (nc : se : cs)
 
     makeNativeExpr ::
       (Monad m) => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs

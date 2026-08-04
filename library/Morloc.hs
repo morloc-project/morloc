@@ -33,7 +33,7 @@ import qualified Data.Set as Set
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
-import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps)
+import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
@@ -172,6 +172,8 @@ writeProgram translateFn path code = do
             -- When 'stateDebugTrace' (--debug), wrap every foreign-call
             -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
             >>= mapM addDebugWraps
+            -- Lower eligible tail-recursive helpers to native 'PolyLoop's.
+            >>= mapM addLoopWraps
             -- Boundary reconciliation + invariant check; see 'generatePools'.
             >>= mapM (\ph -> do
                          ph' <- insertEffectBoundaries ph

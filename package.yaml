@@ -92,9 +92,12 @@ ghc-options:
   - -Wall
   - -Wcompat
   - -fwarn-unused-binds
-  - -fwarn-unused-imports 
+  - -fwarn-unused-imports
   - -fwarn-tabs
   - -fwarn-incomplete-uni-patterns
+  - -Wincomplete-patterns
+  - -Werror=incomplete-patterns
+  - -Werror=missing-fields
   - -fwarn-incomplete-record-updates
   - -fwarn-redundant-constraints
   - -fno-warn-missing-signatures

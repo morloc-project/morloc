@@ -1,0 +1,12 @@
+module main (sumTo)
+
+import root-py
+
+-- An EXPORTED directly tail-recursive function (no helper wrapper). It is
+-- lowered to a native `while` loop on the export manifold itself, so a large
+-- call depth that would overflow the recursive interpreter stack runs in O(1)
+-- stack. `sumTo acc n = acc + n + (n-1) + ... + 1`.
+sumTo :: Int -> Int -> Int
+sumTo acc n
+  ? n == 0 = acc
+  : sumTo (acc + n) (n - 1)

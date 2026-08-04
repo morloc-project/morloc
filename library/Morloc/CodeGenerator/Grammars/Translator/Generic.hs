@@ -462,6 +462,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcCacheBody = genericCacheBody desc cfg
         , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
+        , lcMakeLoop = genericMakeLoop desc cfg
         , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
@@ -873,6 +874,74 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
+      }
+
+-- Native tail-loop assembly (single-guard first cut). Renders
+-- @while(true){ <guard>; if guard { <base>; result = base; break } <compute
+-- each continue value into a temp; reassign the loop-carried native locals> }@.
+-- The loop-carried locals are the manifold's native param vars (@nvarNamer id@),
+-- deserialized once by the manifold prologue and reassigned each iteration;
+-- computing all continue values into temps before any reassignment avoids the
+-- parallel-assignment hazard when one continue value reads another loop var.
+-- The result is exposed through a pre-declared local so control that leaves the
+-- loop via @break@ carries the base value out.
+genericMakeLoop ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  [Int] ->
+  PoolDocs ->
+  PoolDocs ->
+  [PoolDocs] ->
+  IndexM PoolDocs
+genericMakeLoop desc cfg ids guardDocs baseDocs contDocs = do
+  resultIdx <- lcNewIndex cfg
+  tmpIdxs <- mapM (const (lcNewIndex cfg)) ids
+  let assign = pretty (ldAssignOp desc)
+      trueLit = pretty (ldBoolTrue desc)
+      resultVar = helperNamer resultIdx
+      tmpVars = map helperNamer tmpIdxs
+      guardE = poolExpr guardDocs
+      baseE = poolExpr baseDocs
+      resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
+      -- base branch: run its priors, capture the value, leave the loop
+      baseLines = poolPriorLines baseDocs <> [resultVar <+> assign <+> baseE, "break"]
+      -- continue: all values into temps first, then reassign the loop locals
+      contPriors = concatMap poolPriorLines contDocs
+      tmpAssigns = zipWith (\tv cd -> tv <+> assign <+> poolExpr cd) tmpVars contDocs
+      reassigns = zipWith (\i tv -> nvarNamer i <+> assign <+> tv) ids tmpVars
+      guardPriors = poolPriorLines guardDocs
+      -- Handles all three block styles for consistency with the other
+      -- 'genericMake*' emitters, but only IndentBlock (Python) and BraceBlock (R)
+      -- are reached today: 'langSupportsNativeLoop' gates native loops to py/r/cpp
+      -- (cpp has its own emitter), so the EndKeywordBlock (Julia) arm is dead
+      -- until Julia is re-enabled there.
+      whileDoc = case ldBlockStyle desc of
+        IndentBlock ->
+          let ifBlock = nest 4 (vsep (("if" <+> guardE <> ":") : baseLines))
+              bodyLines = guardPriors <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
+           in nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
+        BraceBlock ->
+          let ifBlock = vsep ["if" <+> parens guardE <+> "{", indent 4 (vsep baseLines), "}"]
+              bodyLines = guardPriors <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
+           in vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
+        EndKeywordBlock ->
+          let endKw = pretty (ldBlockEnd desc)
+              ifBlock = vsep ["if" <+> guardE, indent 4 (vsep baseLines), endKw]
+              bodyLines = guardPriors <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
+           in vsep ["while" <+> trueLit, indent 4 (vsep bodyLines), endKw]
+  return $
+    PoolDocs
+      { poolCompleteManifolds =
+          poolCompleteManifolds guardDocs
+            <> poolCompleteManifolds baseDocs
+            <> concatMap poolCompleteManifolds contDocs
+      , poolExpr = resultVar
+      , poolPriorLines = [resultDecl, whileDoc]
+      , poolPriorExprs =
+          poolPriorExprs guardDocs
+            <> poolPriorExprs baseDocs
+            <> concatMap poolPriorExprs contDocs
+      , poolReturnFlag = True
       }
 
 -- Build a suspended do-block thunk. When the thunk form can hold
