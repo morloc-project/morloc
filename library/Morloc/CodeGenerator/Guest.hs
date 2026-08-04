@@ -39,9 +39,10 @@ data GuestSource = GuestSource
   , gsLang :: Lang
   }
 
--- | Build options extracted from package.yaml and the build environment.
+-- | Build options resolved from the build parameters and the build environment.
 data BuildOpts = BuildOpts
   { boBackend :: Maybe Text -- ^ backend selector; Nothing = the guest default
+  , boDevice :: Maybe Text -- ^ optional device selector; guest-specific meaning
   , boOutDir :: Path -- ^ where artifacts are written (pools/<module>/)
   }
 
@@ -53,6 +54,7 @@ data BuildProducts = BuildProducts
   , bpIncludeDirs :: [Path]
   , bpLinkFlags :: [Text]
   , bpManifests :: [Path] -- ^ interface descriptors; empty if the guest has none
+  , bpDevice :: Maybe Text -- ^ optional device selector to configure at runtime
   }
 
 -- | A sourced guest function: its morloc-side declaration paired with its

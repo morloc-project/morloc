@@ -104,6 +104,7 @@ copyState oldIdx newIdx = do
       , stateSourceMap = updateMap (stateSourceMap s)
       , stateSourceText = stateSourceText s
       , stateBuildConfig = stateBuildConfig s
+      , stateLangParams = stateLangParams s
       , stateModuleName = stateModuleName s
       , stateInstall = stateInstall s
       , stateInstallForce = stateInstallForce s

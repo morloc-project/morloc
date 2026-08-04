@@ -4,6 +4,7 @@
 import qualified System.Directory as SD
 import Test.Tasty
 
+import BuildParamsTests (buildParamsTests)
 import EffectBoundaryTests (effectBoundaryTests)
 import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (goldenMakefileTest)
@@ -24,6 +25,7 @@ main = do
     testGroup
       "Morloc tests"
       [ unitTypeTests
+      , buildParamsTests
       , futharkTupleTests
       , unitValuecheckTests
       , typeOrderTests
@@ -111,6 +113,7 @@ main = do
       , golden "intrinsic-throw-r" "intrinsic-throw-r"
       , golden "conditional-value-codegen" "conditional-value-codegen"
       , golden "futhark-basic" "futhark-basic"
+      , golden "futhark-backend-multicore" "futhark-backend-multicore"
       , golden "futhark-tuple" "futhark-tuple"
       , golden "futhark-sig-mismatch" "futhark-sig-mismatch"
       , golden "futhark-py-crosspool" "futhark-py-crosspool"

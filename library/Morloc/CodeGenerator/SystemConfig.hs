@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.SystemConfig
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Completion as Completion
+import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
 import Morloc.Module (OverwriteProtocol (..))
 
@@ -84,10 +85,15 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   sayInfo verbose $ "Sanitize ... " <> show sanitize
 
   sayInfo verbose "Writing build config file"
-  let sanitizeLine = if sanitize then "\nsanitize: true" else "\nsanitize: false"
-  TIO.writeFile
-    (configBuildConfig config)
-    ((if slurmSupport then "slurm-support: true" else "slurm-support: false") <> sanitizeLine)
+  -- Read-modify-write: preserve any existing fields (e.g. `lang-params` set via
+  -- `morloc config`) and only override the two flags `morloc init` owns.
+  existingBuildConfig <- Config.loadBuildConfig config
+  Config.writeBuildConfig
+    config
+    existingBuildConfig
+      { buildConfigSlurmSupport = Just slurmSupport
+      , buildConfigSanitize = Just sanitize
+      }
 
   -- Clean and create build directory
   let buildDir = tmpDir </> "libmorloc-build"

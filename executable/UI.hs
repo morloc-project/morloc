@@ -22,6 +22,8 @@ module UI
   , UninstallCommand (..)
   , NewCommand (..)
   , EvalCommand (..)
+  , ConfigCommand (..)
+  , ConfigAction (..)
   ) where
 
 import Data.Int (Int64)
@@ -51,6 +53,7 @@ data CliCommand
   | CmdInit InitCommand
   | CmdNew NewCommand
   | CmdEval EvalCommand
+  | CmdConfig ConfigCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -64,6 +67,7 @@ cliParser =
         <> initSubcommand
         <> newSubcommand
         <> evalSubcommand
+        <> configSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -80,6 +84,7 @@ data MakeCommand = MakeCommand
   , makeNoShm :: Bool
   , makeTmpdir :: Maybe String
   , makeDebugTrace :: Bool
+  , makeLangParams :: [String]
   , makeScript :: String
   }
 
@@ -99,6 +104,7 @@ makeCommandParser =
     <*> optNoShm
     <*> optTmpdir
     <*> optDebugTrace
+    <*> optLangParams
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -125,6 +131,51 @@ initCommandParser =
 
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))
+
+data ConfigCommand = ConfigCommand
+  { configCmdConfig :: String
+  , configCmdVanilla :: Bool
+  , configCmdAction :: ConfigAction
+  }
+
+-- | An action over the per-machine build config's @lang-params@ table.
+data ConfigAction
+  = ConfigSet [String] -- ^ LANG:KEY=VALUE entries to set
+  | ConfigUnset [String] -- ^ LANG:KEY entries to remove
+  | ConfigList -- ^ print the current lang-params
+
+configCommandParser :: Parser ConfigCommand
+configCommandParser =
+  ConfigCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> configActionParser
+
+configActionParser :: Parser ConfigAction
+configActionParser =
+  hsubparser
+    ( command
+        "set"
+        ( info
+            (ConfigSet <$> some (strArgument (metavar "LANG:KEY=VALUE")))
+            (progDesc "Set per-machine build parameter defaults")
+        )
+        <> command
+          "unset"
+          ( info
+              (ConfigUnset <$> some (strArgument (metavar "LANG:KEY")))
+              (progDesc "Remove per-machine build parameter defaults")
+          )
+        <> command
+          "list"
+          ( info
+              (pure ConfigList)
+              (progDesc "List per-machine build parameter defaults")
+          )
+    )
+
+configSubcommand :: Mod CommandFields CliCommand
+configSubcommand = command "config" (info (CmdConfig <$> configCommandParser) (progDesc "Manage the per-machine build configuration"))
 
 data NewCommand = NewCommand
   { newName :: String
@@ -438,6 +489,23 @@ optMakeInclude =
         ( long "include"
             <> metavar "PATTERN"
             <> help "File pattern to include in install"
+        )
+    )
+
+optLangParams :: Parser [String]
+optLangParams =
+  many
+    ( strOption
+        ( short 'X'
+            <> long "lang-param"
+            <> metavar "LANG:KEY=VALUE"
+            <> help
+                ( "Pass a build parameter to a language's builder, e.g. "
+                    ++ "-X futhark:backend=cuda or -X cpp:flags=-march=native. "
+                    ++ "Repeatable. The value is taken verbatim; morloc does not "
+                    ++ "interpret it -- the language's builder does. The reserved "
+                    ++ "key 'flags' accumulates in order as raw compiler flags."
+                )
         )
     )
 

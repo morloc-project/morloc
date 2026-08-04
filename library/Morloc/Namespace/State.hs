@@ -133,6 +133,11 @@ data MorlocState = MorlocState
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
+  , stateLangParams :: Map Text (Map Text Text)
+  -- ^ Resolved per-language build parameters, keyed lang -> key -> value,
+  -- from @-X lang:key=value@ overlaid on the build config's @lang-params@.
+  -- The morloc UI does not interpret keys/values; each language's builder
+  -- reads the entries it understands. See "Morloc.Build.Params".
   , stateModuleName :: Maybe MVar
   , stateInstall :: Bool
   , stateInstallForce :: Bool
@@ -464,6 +469,7 @@ instance Defaultable MorlocState where
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue
+      , stateLangParams = Map.empty
       , stateModuleName = Nothing
       , stateInstall = False
       , stateInstallForce = False

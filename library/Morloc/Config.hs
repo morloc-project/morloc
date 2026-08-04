@@ -17,6 +17,7 @@ module Morloc.Config
   , loadModuleConfig
   , loadDefaultMorlocConfig
   , loadBuildConfig
+  , writeBuildConfig
   , setupServerAndSocket
   , getDefaultConfigFilepath
   , getDefaultMorlocLibrary
@@ -132,6 +133,13 @@ loadBuildConfig config = do
         Right buildConfig -> return buildConfig
     else
       return defaultValue
+
+-- | Serialize the build config to its file. This writes the whole value, so to
+-- preserve existing fields a caller must start from a loaded config and modify
+-- it (a read-modify-write). Nothing-valued fields are omitted by the ToJSON
+-- instance, keeping the file minimal.
+writeBuildConfig :: Config -> BuildConfig -> IO ()
+writeBuildConfig config = Y.encodeFile (configBuildConfig config)
 
 setupServerAndSocket ::
   Config ->

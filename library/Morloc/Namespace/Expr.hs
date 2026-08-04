@@ -87,7 +87,7 @@ module Morloc.Namespace.Expr
   ) where
 
 import Control.Monad.Identity (runIdentity)
-import Data.Aeson (FromJSON (..), (.!=), (.:?))
+import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Foldable (toList)
@@ -220,6 +220,10 @@ data ModuleConfig = ModuleConfig
 data BuildConfig = BuildConfig
   { buildConfigSlurmSupport :: Maybe Bool
   , buildConfigSanitize :: Maybe Bool
+  , buildConfigLangParams :: Maybe (Map.Map Text (Map.Map Text Text))
+  -- ^ Per-machine default build parameters, keyed lang -> key -> value.
+  -- Written under the @lang-params@ key of the build config. Serves as the
+  -- layer below the @-X lang:key=value@ command-line overrides.
   }
   deriving (Show, Generic)
 
@@ -804,6 +808,7 @@ instance Defaultable BuildConfig where
     BuildConfig
       { buildConfigSlurmSupport = Nothing
       , buildConfigSanitize = Nothing
+      , buildConfigLangParams = Nothing
       }
 
 instance Defaultable RemoteResources where
@@ -864,6 +869,16 @@ instance FromJSON BuildConfig where
   parseJSON =
     Aeson.genericParseJSON $
       defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "buildConfig"}
+
+-- | Serialize the build config back to YAML/JSON. Nothing-valued fields are
+-- omitted so a round-trip write only records fields that are actually set.
+instance ToJSON BuildConfig where
+  toJSON =
+    Aeson.genericToJSON $
+      defaultOptions
+        { fieldLabelModifier = stripPrefixAndKebabCase "buildConfig"
+        , omitNothingFields = True
+        }
 
 ---- JSON helpers
 

@@ -46,6 +46,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
@@ -1688,6 +1689,10 @@ handleFlagsAndPaths srcs = do
   let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
   let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
   let userCxxFlags = unique . concatMap packageCxxFlags $ statePackageMeta state
+  -- Raw `-X cpp:flags=...` (and the build-config default) passthrough: ordered,
+  -- verbatim, never deduplicated, appended after the package flags. Kept out of
+  -- `unique` because flag order and adjacency are load-bearing.
+  let cliCxxFlags = BP.lookupFlags "cpp" (stateLangParams state)
   -- Collect sources belonging to this pool: cpp sources and any guest member
   -- whose pool host is cpp (e.g. futhark glue headers, srcLang=futhark). Their
   -- includes/-I flags must reach the cpp pool build.
@@ -1704,7 +1709,7 @@ handleFlagsAndPaths srcs = do
 
   return
     ( filter (isJust . srcPath) srcs'
-    , [gccversion] <> explicitLibs <> userCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
+    , [gccversion] <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
     , unique (catMaybes paths)
     )
 

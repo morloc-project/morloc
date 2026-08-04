@@ -30,9 +30,9 @@ import qualified Data.Text as T
 import System.Directory (canonicalizePath, createDirectoryIfMissing, getCurrentDirectory)
 
 import Morloc.CodeGenerator.Guest
-import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes)
+import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes, resolveFutharkBuild)
 import Morloc.CodeGenerator.Namespace
-import Morloc.Data.Doc (render)
+import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 
@@ -60,7 +60,11 @@ lowerFuthark ::
 lowerFuthark asts futSrcs = do
   outDir <- setupBuildDir (langName (guestLang futharkGuest))
   guestSources <- dedupSources futSrcs
-  products <- guestBuild futharkGuest guestSources (BuildOpts Nothing outDir)
+  langParams <- MM.gets stateLangParams
+  (backend, device) <- case resolveFutharkBuild langParams of
+    Left msg -> MM.throwSystemError (pretty msg)
+    Right bd -> return bd
+  products <- guestBuild futharkGuest guestSources (BuildOpts backend device outDir)
   let sigs = [SourcedSig src t | (src, t) <- futSrcs]
   checked <- guestCheck futharkGuest sigs products
   let glueEntries = map toGlueEntry checked

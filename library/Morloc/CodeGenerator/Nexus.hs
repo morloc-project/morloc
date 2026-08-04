@@ -31,6 +31,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
+import qualified Morloc.Build.Params as BP
 import qualified Data.Text.Encoding as TE
 import qualified Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as Time
@@ -2227,6 +2228,10 @@ data ManifestInputs = ManifestInputs
   , miInlineSize          :: !(Maybe Int64)
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
+  , miBuildParams         :: !Text
+    -- ^ Fingerprint of the resolved build parameters (@-X lang:key=value@),
+    -- recorded so a built program carries a record of how it was compiled.
+    -- Empty when no build parameters were given.
   , miRunLog              :: !(Maybe RenderedRunLog)
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
@@ -2264,6 +2269,7 @@ buildManifest ManifestInputs{..} =
         [ ("path", jsonStr (MT.pack miBuildDir))
         , ("time", jsonInt miBuildTime)
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
+        , ("build_params", jsonStr miBuildParams)
         ]
 
     poolJson :: (Lang, Socket) -> Text
@@ -2546,6 +2552,7 @@ generate cs rASTs helperRASTs = do
   inlineSize <- MM.gets stateInlineSize
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
+  buildParams <- MM.gets (BP.renderSalt . stateLangParams)
   runLog <- renderRunLogTemplate
   debugTrace <- MM.gets stateDebugTrace
   -- Capability strings advertise optional codegen features baked into
@@ -2578,6 +2585,7 @@ generate cs rASTs helperRASTs = do
             , miInlineSize          = inlineSize
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
+            , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs

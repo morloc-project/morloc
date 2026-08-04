@@ -26,6 +26,8 @@ import Morloc.Namespace.Type
 
 import Morloc.Data.Doc (pretty)
 import qualified Data.Map as Map
+import qualified Data.Text as T
+import qualified Morloc.Build.Params as BP
 import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
@@ -188,7 +190,23 @@ writeProgram translateFn path code = do
         -- disk. @hash-include@ files from the program YAML fold into
         -- every pool's hash so they invalidate the cache too.
         hashIncludes <- MM.gets stateHashIncludePaths
-        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes hashIncludes pools
+        -- Build parameters and guest object files are inputs that change the
+        -- emitted binary without changing the emitted pool source, so they must
+        -- enter the cache key too (see 'PoolHash.computePoolHashes'). The guest
+        -- objects are hashed once here (not re-read per pool) and their
+        -- fingerprint folded into the salt.
+        params <- MM.gets stateLangParams
+        guestObjects <-
+          MM.gets $ \s ->
+            [ T.unpack f
+            | f <- concatMap packageCxxFlags (statePackageMeta s)
+            , ".o" `T.isSuffixOf` f
+            ]
+        objHash <- MM.liftIO $ PoolHash.hashFiles guestObjects
+        let buildSalt
+              | null guestObjects = BP.renderSalt params
+              | otherwise = BP.renderSalt params <> "|obj:" <> PoolHash.poolHashHex objHash
+        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes buildSalt hashIncludes pools
         let nexusPatched = PoolHash.patchManifestPoolHashes poolHashes nexus
         buildProgram (nexusPatched, pools)
 

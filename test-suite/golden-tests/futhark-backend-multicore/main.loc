@@ -1,0 +1,29 @@
+module main (mmSum, vScaledSum)
+
+import root
+import root-cpp
+import tensor
+import tensor-cpp
+import vector
+import vector-cpp
+
+-- Sourcing idiomatic Futhark directly: morloc compiles kernels.fut into the C++
+-- pool and generates the marshalling glue. Exercises Matrix (rank 2), Vector
+-- (rank 1), and scalar (rank 0) entry types over F32.
+source Futhark from "kernels.fut"
+  ( "matmul"     as fmatmul
+  , "sum_mat"    as fsumMat
+  , "scaled_sum" as fscaledSum
+  )
+
+fmatmul    :: Matrix m k F32 -> Matrix k n F32 -> Matrix m n F32
+fsumMat    :: Matrix m n F32 -> F32
+fscaledSum :: F32 -> Vector n F32 -> F32
+
+-- matmul of two all-ones matrices (2x3 . 3x4), reduced to a scalar: 8 * 3 = 24
+mmSum :: F32
+mmSum = fsumMat (fmatmul (ones2 2 3) (ones2 3 4))
+
+-- scale a vector from the CLI and sum
+vScaledSum :: F32 -> Vector n F32 -> F32
+vScaledSum s v = fscaledSum s v
