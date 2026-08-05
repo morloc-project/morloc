@@ -674,6 +674,39 @@ tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
 
+-- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
+-- Guards -> if/else; native/serial lets -> @auto@ locals; a base leaf ->
+-- @resultVar = <base>; break;@; a continue leaf -> compute each new value into
+-- an @auto@ temp, then move it into the loop-carried local.
+cppWalkLoopBody :: MDoc -> [Int] -> LoopBody PoolDocs PoolDocs -> CppTranslatorM [MDoc]
+cppWalkLoopBody resultVar ids = go
+  where
+    go (LoopBase seDocs) =
+      return $ poolPriorLines seDocs <> [resultVar <+> "=" <+> poolExpr seDocs <> ";", "break;"]
+    go (LoopContinue contDocs) = do
+      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
+      let priors = concatMap poolPriorLines contDocs
+          tmpAssigns = zipWith (\tv cd -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
+          reassigns = zipWith (\i tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") ids tmpVars
+      return $ priors <> tmpAssigns <> reassigns
+    go (LoopNLet i neDocs b) = do
+      rest <- go b
+      return $ poolPriorLines neDocs <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+    go (LoopSLet i seDocs b) = do
+      rest <- go b
+      return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
+    go (LoopIf guardDocs t e) = do
+      tLines <- go t
+      eLines <- go e
+      let ifBlock = vsep
+            [ "if" <+> parens (poolExpr guardDocs) <+> "{"
+            , indent 4 (vsep tLines)
+            , "} else {"
+            , indent 4 (vsep eLines)
+            , "}"
+            ]
+      return $ poolPriorLines guardDocs <> [ifBlock]
+
 cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
 cppLowerConfig reifyThunks =
   LowerConfig
@@ -779,38 +812,25 @@ PROPAGATE_ERROR(errmsg)|]
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
     , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
     , lcReturn = \e -> "return(" <> e <> ");"
-    , lcMakeLoop = \ids guardDocs baseDocs contDocs -> do
-        -- Native tail-loop. The loop-carried vars are the manifold's deserialized
-        -- native locals ('nvarNamer id'), which C++ declares non-const, so they
-        -- are reassigned in place. Each continue value goes into an 'auto' temp
-        -- before any loop-local is reassigned, so a continue value that reads
-        -- another loop-carried var sees its pre-update value (parallel-assignment
-        -- hazard); the reassignment then MOVES the (dead) temp in, avoiding a
-        -- per-iteration deep copy of the loop-carried value.
+    , lcMakeLoop = \ids body -> do
+        -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
+        -- loop-carried vars are the manifold's deserialized native locals
+        -- ('nvarNamer id'), non-const, reassigned in place; each continue value
+        -- goes into an 'auto' temp before any loop-local is reassigned (parallel-
+        -- assignment hazard), then MOVED in to avoid a per-iteration deep copy.
+        -- 'resultVar' inits to nullptr so a control path reaching the trailing
+        -- return without a break is defined (and to silence -Wmaybe-uninitialized).
         resultIdx <- getCounter
-        tmpIdxs <- mapM (const getCounter) ids
         let resultVar = helperNamer resultIdx
-            tmpVars = map helperNamer tmpIdxs
-            guardE = poolExpr guardDocs
-            baseE = poolExpr baseDocs
-            -- Init to nullptr: the single-guard while(true) always breaks after
-            -- setting resultVar, but a null init keeps the pointer defined if a
-            -- future multi-guard shape reaches the trailing return without a
-            -- break, and silences -Wmaybe-uninitialized (g++ can't prove the
-            -- loop always breaks after the assignment).
-            resultDecl = "uint8_t*" <+> resultVar <+> "= nullptr;"
-            baseLines = poolPriorLines baseDocs <> [resultVar <+> "=" <+> baseE <> ";", "break;"]
-            contPriors = concatMap poolPriorLines contDocs
-            tmpAssigns = zipWith (\tv cd -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
-            reassigns = zipWith (\i tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") ids tmpVars
-            ifBlock = vsep ["if" <+> parens guardE <+> "{", indent 4 (vsep baseLines), "}"]
-            bodyLines = poolPriorLines guardDocs <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
+        bodyLines <- cppWalkLoopBody resultVar ids body
+        let resultDecl = "uint8_t*" <+> resultVar <+> "= nullptr;"
             whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
+            leaves = loopBodyLeaves body
         return $ PoolDocs
-          { poolCompleteManifolds = poolCompleteManifolds guardDocs <> poolCompleteManifolds baseDocs <> concatMap poolCompleteManifolds contDocs
+          { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
           , poolExpr = resultVar
           , poolPriorLines = [resultDecl, whileDoc]
-          , poolPriorExprs = poolPriorExprs guardDocs <> poolPriorExprs baseDocs <> concatMap poolPriorExprs contDocs
+          , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
           }
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do

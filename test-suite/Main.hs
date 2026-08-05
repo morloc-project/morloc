@@ -741,6 +741,8 @@ main = do
       , golden "recursion-loop-deep-cpp" "recursion-loop-deep-cpp"
       , golden "recursion-loop-deep-r" "recursion-loop-deep-r"
       , golden "recursion-loop-exported-py" "recursion-loop-exported-py"
+      , golden "recursion-loop-shapes-py" "recursion-loop-shapes-py"
+      , golden "recursion-loop-io-py" "recursion-loop-io-py"
       , golden "recursion-helper-cpp" "recursion-helper-cpp"
       , golden "recursion-thunk-py" "recursion-thunk-py"
       , golden "recursion-thunk-helper-cpp" "recursion-thunk-helper-cpp"

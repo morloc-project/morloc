@@ -79,6 +79,8 @@ module Morloc.CodeGenerator.Namespace
   , NativeArg (..)
   , SerialExpr (..)
   , NativeExpr (..)
+  , LoopBody (..)
+  , loopBodyLeaves
   -- unrecursive types
   , FoldManifoldM (..)
   , SurroundManifoldM (..)
@@ -786,15 +788,14 @@ data SerialExpr
   | LetVarS (Maybe TypeF) Int
   | BndVarS (Maybe TypeF) Int
   | SerializeS SerialAST NativeExpr
-  | LoopS TypeF [Int] NativeExpr SerialExpr [NativeExpr]
-    -- ^ Native tail-loop (single-guard first cut). Fields: result type
-    -- (base-case type); loop-carried local ids (fresh mutable native locals,
-    -- initialized from the manifold params by enclosing 'NativeLetS'
-    -- deserializations and reassigned each iteration); guard condition (a
-    -- native Bool -- when true the loop returns the base); base-return value
-    -- (serialized); and the continue values (new native values for the
-    -- loop-locals, positional with the ids). Built by 'serialExpr' from a
-    -- 'MonoLoop' by extracting these pieces, so no 'LoopContinue' ever reaches
+  | LoopS TypeF [Int] (LoopBody NativeExpr SerialExpr)
+    -- ^ Native tail-loop. Fields: result type (all base leaves share it);
+    -- loop-carried local ids (the manifold's native param vars, reassigned each
+    -- iteration); and the loop body as a decision tree ('LoopBody') whose leaves
+    -- are either a serialized base-return ('LoopBase', @break@ with that value)
+    -- or a reassign-and-iterate ('LoopContinue'). Built by 'serialExpr' from a
+    -- 'MonoLoop'. The 'LoopBody' is a SEPARATE non-value IR: 'LoopContinue' is
+    -- control flow, never a 'NativeExpr'/'SerialExpr' leaf, so it never reaches
     -- the value-@if@ machinery.
   deriving (Show)
 
@@ -841,6 +842,54 @@ data NativeExpr
   -- (@load) whose user-facing optional type wraps a Packable inner.
   deriving (Show)
 
+-- | The body of a 'LoopS' native tail-loop: a decision tree over guards
+-- ('LoopIf') and bindings ('LoopNLet'/'LoopSLet') whose leaves are one of two
+-- control actions -- break-with-a-serialized-value ('LoopBase') or
+-- reassign-loop-locals-and-iterate ('LoopContinue'). Parameterised over its
+-- native (@ne@) and serial (@se@) leaf expressions so the shared translator
+-- fold can lower the leaves and hand the translator a @LoopBody PoolDocs
+-- PoolDocs@ to render.
+--
+-- This is deliberately a SEPARATE IR from 'NativeExpr'/'SerialExpr': a
+-- 'LoopContinue' is control flow, not a value, so it must never flow through the
+-- value-@if@ / @typeFof@ / invert-atomize machinery (which is why 'LoopIf' is
+-- not 'IfN').
+data LoopBody ne se
+  = LoopIf ne (LoopBody ne se) (LoopBody ne se)
+    -- ^ guard (native Bool), then-branch, else-branch
+  | LoopNLet Int ne (LoopBody ne se)
+    -- ^ @let n<id> = ne@ scoping over the branch that follows
+  | LoopSLet Int se (LoopBody ne se)
+    -- ^ @let s<id> = se@ scoping over the branch that follows
+  | LoopBase se
+    -- ^ a base-case leaf: assign this serialized value as the result and break
+  | LoopContinue [ne]
+    -- ^ a tail back-edge leaf: the new loop-carried values (positional with the
+    -- enclosing 'LoopS' ids), reassigned before the next iteration
+  deriving (Show)
+
+-- | Rewrite a 'LoopBody's native and serial leaves. The single source of truth
+-- for descending a 'LoopBody'; the rename/map/fold sites derive from 'bimap' /
+-- 'bimapM'. ('loopBodyLeaves' below coalesces both leaf kinds, which the class
+-- cannot express.)
+instance Bifunctor LoopBody where
+  bimapM fne fse = go
+    where
+      go (LoopIf ne t e) = LoopIf <$> fne ne <*> go t <*> go e
+      go (LoopNLet i ne b) = LoopNLet i <$> fne ne <*> go b
+      go (LoopSLet i se b) = LoopSLet i <$> fse se <*> go b
+      go (LoopBase se) = LoopBase <$> fse se
+      go (LoopContinue nes) = LoopContinue <$> mapM fne nes
+
+-- | All leaves in traversal order, native and serial coalesced (used where the
+-- fold treats both leaf kinds as one type, e.g. 'foldlSE').
+loopBodyLeaves :: LoopBody a a -> [a]
+loopBodyLeaves (LoopIf ne t e) = ne : loopBodyLeaves t ++ loopBodyLeaves e
+loopBodyLeaves (LoopNLet _ ne b) = ne : loopBodyLeaves b
+loopBodyLeaves (LoopSLet _ se b) = se : loopBodyLeaves b
+loopBodyLeaves (LoopBase se) = [se]
+loopBodyLeaves (LoopContinue nes) = nes
+
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
 foldlSM f b (SerialManifold_ _ _ _ _ se) = f b se
 
@@ -868,7 +917,7 @@ foldlSE f b (NativeLetS_ _ x1 x2) = foldl f b [x1, x2]
 foldlSE _ b (LetVarS_ _ _) = b
 foldlSE _ b (BndVarS_ _ _) = b
 foldlSE f b (SerializeS_ _ x) = f b x
-foldlSE f b (LoopS_ _ _ nc se cs) = foldl f b (nc : se : cs)
+foldlSE f b (LoopS_ _ _ body) = foldl f b (loopBodyLeaves body)
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
 foldlNE f b (AppExeN_ _ _ xs) = foldl f b xs
@@ -968,9 +1017,9 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidSerialExpr' (LetVarS_ mayT i) = return (mempty', LetVarS mayT i)
     monoidSerialExpr' (BndVarS_ mayT i) = return (mempty', BndVarS mayT i)
     monoidSerialExpr' (SerializeS_ s (req, ne)) = return (req, SerializeS s ne)
-    monoidSerialExpr' (LoopS_ t ids (rc, nc) (rb, se) csPairs) =
-      let (rcs, cs) = unzip csPairs
-       in return (foldl mappend' mempty' (rc : rb : rcs), LoopS t ids nc se cs)
+    monoidSerialExpr' (LoopS_ t ids body) =
+      let reqs = map fst (loopBodyLeaves body)
+       in return (foldl mappend' mempty' reqs, LoopS t ids (bimap snd snd body))
 
     monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
     monoidNativeExpr' (AppExeN_ t exe (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppExeN t exe es)
@@ -1120,7 +1169,7 @@ data SerialExpr_ sm se ne sr nr
   | LetVarS_ (Maybe TypeF) Int
   | BndVarS_ (Maybe TypeF) Int
   | SerializeS_ SerialAST ne
-  | LoopS_ TypeF [Int] ne se [ne]
+  | LoopS_ TypeF [Int] (LoopBody ne se)
 
 data NativeExpr_ nm se ne sr nr
   = AppExeN_ TypeF ExecutableExpressionPool [nr]
@@ -1272,11 +1321,9 @@ surroundFoldSerialExprM sfm fm = surroundSerialExprM sfm f
     f full@(AppForeignRecS t m s es) = do
       es' <- mapM (surroundFoldSerialExprM sfm fm) es
       opFoldWithSerialExprM fm full $ AppForeignRecS_ t m s es'
-    f full@(LoopS t ids nc se cs) = do
-      nc' <- surroundFoldNativeExprM sfm fm nc
-      se' <- surroundFoldSerialExprM sfm fm se
-      cs' <- mapM (surroundFoldNativeExprM sfm fm) cs
-      opFoldWithSerialExprM fm full $ LoopS_ t ids nc' se' cs'
+    f full@(LoopS t ids body) = do
+      body' <- bimapM (surroundFoldNativeExprM sfm fm) (surroundFoldSerialExprM sfm fm) body
+      opFoldWithSerialExprM fm full $ LoopS_ t ids body'
     f full@(CacheBodyS t resSa lbl m args body) = do
       body' <- surroundFoldSerialExprM sfm fm body
       opFoldWithSerialExprM fm full $ CacheBodyS_ t resSa lbl m args body'
@@ -1446,7 +1493,7 @@ instance HasTypeS SerialExpr where
   typeSof (LetVarS t _) = maybe PassthroughS SerialS t
   typeSof (BndVarS t _) = maybe PassthroughS SerialS t
   typeSof (SerializeS _ e) = SerialS (typeFof e)
-  typeSof (LoopS t _ _ _ _) = SerialS t
+  typeSof (LoopS t _ _) = SerialS t
 
 instance HasTypeM SerialExpr where
   typeMof = typeMof . typeSof
@@ -1579,7 +1626,7 @@ instance MFunctor SerialExpr where
         e@(LetVarS _ _) -> mapSerialExpr f e
         e@(BndVarS _ _) -> mapSerialExpr f e
         (SerializeS s ne) -> mapSerialExpr f $ SerializeS s (mgatedMap g f ne)
-        (LoopS t ids nc se cs) -> mapSerialExpr f $ LoopS t ids (mgatedMap g f nc) (mgatedMap g f se) (map (mgatedMap g f) cs)
+        (LoopS t ids body) -> mapSerialExpr f $ LoopS t ids (bimap (mgatedMap g f) (mgatedMap g f) body)
     | otherwise = mapSerialExpr f se0
 
 -- WARNING - mapping must not change the type of any argument

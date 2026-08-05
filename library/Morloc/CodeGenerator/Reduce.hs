@@ -53,13 +53,11 @@ reduceSerialExpr ver ts lang (CacheBodyS t resSa lbl mid args body) =
   CacheBodyS t resSa lbl mid args <$> reduceSerialExpr ver ts lang body
 reduceSerialExpr ver ts lang (DebugWrapS t mid args body) =
   DebugWrapS t mid args <$> reduceSerialExpr ver ts lang body
--- Reduce descends INTO each loop piece (peepholes on the per-iteration
--- cond/base/continue) but the loop is a scope barrier.
-reduceSerialExpr ver ts lang (LoopS t ids nc se cs) =
+-- Reduce descends INTO each loop-body leaf (peepholes on the per-iteration
+-- guard/let/base/continue work) but the loop is a scope barrier.
+reduceSerialExpr ver ts lang (LoopS t ids body) =
   LoopS t ids
-    <$> reduceNativeExpr ver ts lang nc
-    <*> reduceSerialExpr ver ts lang se
-    <*> mapM (reduceNativeExpr ver ts lang) cs
+    <$> bimapM (reduceNativeExpr ver ts lang) (reduceSerialExpr ver ts lang) body
 reduceSerialExpr _ _ _ e = return e
 
 reduceSerialArg :: Text -> Text -> Lang -> SerialArg -> MorlocMonad SerialArg

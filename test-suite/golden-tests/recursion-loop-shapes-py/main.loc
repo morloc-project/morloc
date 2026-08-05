@@ -1,0 +1,21 @@
+module main (sumWithLet, collatz)
+
+import root-py
+
+-- let-in-continue: a `let` binding scopes over the recursive (continue) call.
+-- Exercises the LoopBody let node AND exported direct recursion together.
+sumWithLet :: Int -> Int -> Int
+sumWithLet acc n
+  ? n == 0 = acc
+  : let d = n - 1 in sumWithLet (acc + n) d
+
+-- multi-guard / multi-continue: two guarded recursive branches + one base,
+-- lowered to a nested if/else with a continue in each branch. Collatz step count.
+collatzHelp :: Int -> Int -> Int
+collatzHelp steps n
+  ? n == 1 = steps
+  ? (n // 2) * 2 == n = collatzHelp (steps + 1) (n // 2)
+  : collatzHelp (steps + 1) (n * 3 + 1)
+
+collatz :: Int -> Int
+collatz n = collatzHelp 0 n

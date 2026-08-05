@@ -506,16 +506,15 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeLoop :: [Int] -> PoolDocs -> PoolDocs -> [PoolDocs] -> m PoolDocs
-  -- ^ Native tail-loop assembly (single-guard first cut). Args: loop-carried
-  -- native local ids, guard-condition docs, base-return docs, and the
-  -- continue-value docs (positional with the ids). Emits
-  -- @while(1){ <guard>; if guard { <base>; result = base; break } <continue
-  -- reassigns loop-locals via temps> }@. The result PoolDocs carries the loop
-  -- as prior lines with the return flag set (the base value is the manifold's
-  -- return). Loop-carried locals are the manifold's native param vars
-  -- (@nvarNamer id@), deserialized once by the manifold prologue and reassigned
-  -- each iteration.
+  , lcMakeLoop :: [Int] -> LoopBody PoolDocs PoolDocs -> m PoolDocs
+  -- ^ Native tail-loop assembly. Args: loop-carried native local ids, and the
+  -- loop body as a 'LoopBody' tree whose leaves are already lowered to
+  -- 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else, lets ->
+  -- assignments, LoopBase -> result = base; break, LoopContinue -> reassign the
+  -- loop-locals via temps> }@. The result 'PoolDocs' carries the loop as prior
+  -- lines with the return flag set (a base value is the manifold's return).
+  -- Loop-carried locals are the manifold's native param vars (@nvarNamer id@),
+  -- deserialized once by the manifold prologue and reassigned each iteration.
   , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
   -- ^ type -> prior statements -> return expression -> (hoisted lines,
   -- suspended-thunk expression). Monadic so a language whose thunk form
@@ -771,8 +770,8 @@ lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
 lowerSerialExpr cfg _ (DebugWrapS_ _ mid args body) =
   lcDebugWrap cfg mid args body
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
-lowerSerialExpr cfg _ (LoopS_ _ ids guardDocs baseDocs contDocs) =
-  lcMakeLoop cfg ids guardDocs baseDocs contDocs
+lowerSerialExpr cfg _ (LoopS_ _ ids body) =
+  lcMakeLoop cfg ids body
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value
   -- tracker entry. Wrap the body to bind its result to a temp helper var,

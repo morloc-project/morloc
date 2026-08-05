@@ -118,7 +118,20 @@ polyOuterType (PolyIf _ t e) = case polyOuterType t of
   _                           -> polyOuterType e
 -- A loop's outer type is its base-case return type (the continue produces
 -- no value); it is carried on the body's base branch.
-polyOuterType (PolyLoop _ _ body) = polyOuterType body
+-- A loop's outer type is its BASE-case return type. Walk to a base leaf,
+-- skipping the continue leaves (control flow, not values); after
+-- 'insertEffectBoundaries' forces the bases, a base leaf is a 'PolyEval' whose
+-- inner (plain) type is reported, so 'ExportRoot' sees a plain value.
+polyOuterType (PolyLoop _ _ body) = loopBaseType body
+  where
+    loopBaseType (PolyIf _ t e) = case loopBaseType t of
+      Just x -> Just x
+      Nothing -> loopBaseType e
+    loopBaseType (PolyLet _ _ b) = loopBaseType b
+    loopBaseType (PolyDoBlock _ b) = loopBaseType b
+    loopBaseType (PolyReturn x) = loopBaseType x
+    loopBaseType (PolyLoopContinue _) = Nothing
+    loopBaseType leaf = polyOuterType leaf
 polyOuterType _                                       = Nothing
 
 -- | Does the outer layer of the type declare an effect?
@@ -217,9 +230,10 @@ descend m _ (PolyList _ _ xs) = mapM_ (walk m LocalRoot) xs
 descend m _ (PolyTuple _ xs) = mapM_ (walk m LocalRoot . snd) xs
 descend m _ (PolyRecord _ _ _ rs) = mapM_ (walk m LocalRoot . snd . snd) rs
 descend m _ (PolyIntrinsic _ _ xs) = mapM_ (walk m LocalRoot) xs
--- A loop's base branch flows to the enclosing boundary (same ctx); the
--- continue args are new loop-carried values (LocalRoot). The 'PolyIf' inside
--- routes ctx to the base branch and 'PolyLoopContinue' descends its args.
+-- Walk the loop body at the enclosing ctx: base leaves (forced to plain by
+-- 'rewrite's loop case) flow to that boundary; a 'PolyLoopContinue' leaf is
+-- control flow with 'polyOuterType' = Nothing, so it never trips the boundary
+-- check, and its args are walked at LocalRoot.
 descend m ctx (PolyLoop _ _ body) = walk m ctx body
 descend m _ (PolyLoopContinue es) = mapM_ (walk m LocalRoot) es
 descend _ _ _ = return ()
@@ -268,7 +282,10 @@ rewrite m (PolyIf c t' e) = do
   t'' <- rewrite m t'
   e'  <- rewrite m e
   return $ suspendMixedIfBranches m c' t'' e'
-rewrite m (PolyLoop t ids e) = PolyLoop t ids <$> rewrite m e
+-- Force the loop's base leaves so their <IO> is discharged before the
+-- serialize sink / export boundary (the continue leaves are control flow and
+-- are left unforced by 'forceReturnPosition's loop case).
+rewrite m (PolyLoop t ids e) = forceReturnPosition m . PolyLoop t ids <$> rewrite m e
 rewrite m (PolyLoopContinue es) = PolyLoopContinue <$> mapM (rewrite m) es
 rewrite m (PolyList v ts xs)  = PolyList v ts <$> mapM (rewrite m) xs
 rewrite m (PolyTuple v xs)    =

@@ -1363,10 +1363,10 @@ rustLowerConfig mask =
     , lcReleaseStmt = \_ -> ""
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcMakeIf = rustMakeIf
-    , lcMakeLoop = \_ _ _ _ ->
-        -- Native tail-loops are gated to the Python driver in 'addLoopWraps'
-        -- for the first cut; a Rust same-pool loop is blocked on the borrow
-        -- checker + single-assignment last-use pass (see the plan's Rust gate).
+    , lcMakeLoop = \_ _ ->
+        -- Rust is gated out of native loops in 'addLoopWraps' (langSupportsNativeLoop);
+        -- a Rust same-pool loop is blocked on the borrow checker + single-assignment
+        -- last-use pass rejecting in-place reassignment. Fail-loud if ever reached.
         error "morloc: Rust native tail-loop emission not yet enabled"
     , lcMakeDoBlock = \_ stmts expr ->
         return

@@ -876,73 +876,73 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       }
 
--- Native tail-loop assembly (single-guard first cut). Renders
--- @while(true){ <guard>; if guard { <base>; result = base; break } <compute
--- each continue value into a temp; reassign the loop-carried native locals> }@.
--- The loop-carried locals are the manifold's native param vars (@nvarNamer id@),
--- deserialized once by the manifold prologue and reassigned each iteration;
--- computing all continue values into temps before any reassignment avoids the
--- parallel-assignment hazard when one continue value reads another loop var.
--- The result is exposed through a pre-declared local so control that leaves the
--- loop via @break@ carries the base value out.
+-- Native tail-loop assembly. Walks the 'LoopBody' decision tree, emitting
+-- @<result> = null; while(true){ <body> }@ where the body renders guards to
+-- if/else, lets to assignments, a base leaf to @result = base; break@, and a
+-- continue leaf to @<compute each new value into a temp>; <reassign the
+-- loop-carried native locals>@. Loop-carried locals are the manifold's native
+-- param vars (@nvarNamer id@), reassigned each iteration; computing continue
+-- values into temps before any reassignment avoids the parallel-assignment
+-- hazard when one continue value reads another loop var. The pre-declared
+-- result local carries the base value out through @break@.
 genericMakeLoop ::
   LangDescriptor ->
   LowerConfig IndexM ->
   [Int] ->
-  PoolDocs ->
-  PoolDocs ->
-  [PoolDocs] ->
+  LoopBody PoolDocs PoolDocs ->
   IndexM PoolDocs
-genericMakeLoop desc cfg ids guardDocs baseDocs contDocs = do
+genericMakeLoop desc cfg ids body = do
   resultIdx <- lcNewIndex cfg
-  tmpIdxs <- mapM (const (lcNewIndex cfg)) ids
-  let assign = pretty (ldAssignOp desc)
-      trueLit = pretty (ldBoolTrue desc)
-      resultVar = helperNamer resultIdx
-      tmpVars = map helperNamer tmpIdxs
-      guardE = poolExpr guardDocs
-      baseE = poolExpr baseDocs
-      resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
-      -- base branch: run its priors, capture the value, leave the loop
-      baseLines = poolPriorLines baseDocs <> [resultVar <+> assign <+> baseE, "break"]
-      -- continue: all values into temps first, then reassign the loop locals
-      contPriors = concatMap poolPriorLines contDocs
-      tmpAssigns = zipWith (\tv cd -> tv <+> assign <+> poolExpr cd) tmpVars contDocs
-      reassigns = zipWith (\i tv -> nvarNamer i <+> assign <+> tv) ids tmpVars
-      guardPriors = poolPriorLines guardDocs
-      -- Handles all three block styles for consistency with the other
-      -- 'genericMake*' emitters, but only IndentBlock (Python) and BraceBlock (R)
-      -- are reached today: 'langSupportsNativeLoop' gates native loops to py/r/cpp
-      -- (cpp has its own emitter), so the EndKeywordBlock (Julia) arm is dead
-      -- until Julia is re-enabled there.
-      whileDoc = case ldBlockStyle desc of
-        IndentBlock ->
-          let ifBlock = nest 4 (vsep (("if" <+> guardE <> ":") : baseLines))
-              bodyLines = guardPriors <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
-           in nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
-        BraceBlock ->
-          let ifBlock = vsep ["if" <+> parens guardE <+> "{", indent 4 (vsep baseLines), "}"]
-              bodyLines = guardPriors <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
-           in vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
-        EndKeywordBlock ->
-          let endKw = pretty (ldBlockEnd desc)
-              ifBlock = vsep ["if" <+> guardE, indent 4 (vsep baseLines), endKw]
-              bodyLines = guardPriors <> [ifBlock] <> contPriors <> tmpAssigns <> reassigns
-           in vsep ["while" <+> trueLit, indent 4 (vsep bodyLines), endKw]
+  let resultVar = helperNamer resultIdx
+  bodyLines <- walkLB resultVar body
+  let resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
+      whileDoc = renderWhile bodyLines
+      leaves = loopBodyLeaves body
   return $
     PoolDocs
-      { poolCompleteManifolds =
-          poolCompleteManifolds guardDocs
-            <> poolCompleteManifolds baseDocs
-            <> concatMap poolCompleteManifolds contDocs
+      { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
       , poolExpr = resultVar
       , poolPriorLines = [resultDecl, whileDoc]
-      , poolPriorExprs =
-          poolPriorExprs guardDocs
-            <> poolPriorExprs baseDocs
-            <> concatMap poolPriorExprs contDocs
+      , poolPriorExprs = concatMap poolPriorExprs leaves
       , poolReturnFlag = True
       }
+  where
+    assign = pretty (ldAssignOp desc)
+    trueLit = pretty (ldBoolTrue desc)
+    -- Emit the statements for one loop-body subtree.
+    walkLB resultVar = go
+      where
+        go (LoopBase seDocs) =
+          return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]
+        go (LoopContinue contDocs) = do
+          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) contDocs
+          let priors = concatMap poolPriorLines contDocs
+              tmpAssigns = zipWith (\tv cd -> tv <+> assign <+> poolExpr cd) tmpVars contDocs
+              reassigns = zipWith (\i tv -> nvarNamer i <+> assign <+> tv) ids tmpVars
+          return $ priors <> tmpAssigns <> reassigns
+        go (LoopNLet i neDocs b) = do
+          rest <- go b
+          return $ poolPriorLines neDocs <> [nvarNamer i <+> assign <+> poolExpr neDocs] <> rest
+        go (LoopSLet i seDocs b) = do
+          rest <- go b
+          return $ poolPriorLines seDocs <> [svarNamer i <+> assign <+> poolExpr seDocs] <> rest
+        go (LoopIf guardDocs t e) = do
+          tLines <- go t
+          eLines <- go e
+          return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
+    -- Block-style rendering (IndentBlock=py, BraceBlock=r, EndKeywordBlock=julia
+    -- kept for consistency with sibling emitters though gated out today).
+    renderIf g tLines eLines = case ldBlockStyle desc of
+      IndentBlock ->
+        vsep [nest 4 (vsep (("if" <+> g <> ":") : tLines)), nest 4 (vsep ("else:" : eLines))]
+      BraceBlock ->
+        vsep ["if" <+> parens g <+> "{", indent 4 (vsep tLines), "} else {", indent 4 (vsep eLines), "}"]
+      EndKeywordBlock ->
+        vsep ["if" <+> g, indent 4 (vsep tLines), "else", indent 4 (vsep eLines), pretty (ldBlockEnd desc)]
+    renderWhile bodyLines = case ldBlockStyle desc of
+      IndentBlock -> nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
+      BraceBlock -> vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
+      EndKeywordBlock -> vsep ["while" <+> trueLit, indent 4 (vsep bodyLines), pretty (ldBlockEnd desc)]
 
 -- Build a suspended do-block thunk. When the thunk form can hold
 -- statements (non-empty ldDoBlockBlock, e.g. an R closure body) the

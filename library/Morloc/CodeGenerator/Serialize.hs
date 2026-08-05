@@ -182,33 +182,41 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
       serializeS "serialE MonoIf" m (forceSerializedThunk ne)
-    -- Native-loop lowering (single-guard first cut). The body is
-    -- @if guard then base else continue@ where @base@ is the loop's return and
-    -- @continue@ is a 'MonoLoopContinue' carrying the new loop-carried values.
-    -- Every piece is lowered through 'nativeExpr' over the loop-carried native
-    -- locals ('ids') so it reads their CURRENT (reassigned) values -- the base
-    -- is then serialized from that native value, never from the stale serial
-    -- param packet. 'addLoopWraps' has already gated to this canonical shape
-    -- (guard true -> base), so anything else is a compiler bug.
+    -- Native-loop lowering. Walk the loop body -- a decision tree of guards
+    -- ('MonoIf') and lets over base and continue leaves -- into a 'LoopBody'.
+    -- Guards/continue-values/let-RHS are lowered through 'nativeExpr' over the
+    -- loop-carried native locals ('ids') so they read their CURRENT (reassigned)
+    -- values; a base leaf is serialized from that native value (never the stale
+    -- serial param packet). 'addLoopWraps' has gated to a well-formed loop body
+    -- (every 'MonoLoopContinue' reachable in a tail position), so a continue in
+    -- a value/base position is a compiler bug -- 'nativeExpr' rejects it loud.
     serialExpr m (MonoLoop t ids body) = do
       t' <- inferType t
-      case body of
-        MonoIf cond thenB elseB ->
-          case (continueArgs thenB, continueArgs elseB) of
-            (Nothing, Just contArgs) -> do
-              guardNe <- nativeExpr m cond
-              baseSe <- nativeExpr m (unReturn thenB)
-                >>= serializeS "loop base" m . forceSerializedThunk
-              contNes <- mapM (nativeExpr m) contArgs
-              return $ LoopS t' ids guardNe baseSe contNes
-            _ -> error "morloc bug: MonoLoop body is not a canonical single-guard base/continue"
-        _ -> error "morloc bug: MonoLoop body is not a single-guard conditional"
+      LoopS t' ids <$> buildLoopBody body
       where
-        continueArgs (MonoLoopContinue args) = Just args
-        continueArgs (MonoReturn e) = continueArgs e
-        continueArgs _ = Nothing
-        unReturn (MonoReturn e) = e
-        unReturn e = e
+        buildLoopBody :: MonoExpr -> MorlocMonad (LoopBody NativeExpr SerialExpr)
+        buildLoopBody (MonoIf cond thenB elseB) = do
+          condNe <- nativeExpr m cond
+          LoopIf condNe <$> buildLoopBody thenB <*> buildLoopBody elseB
+        buildLoopBody (MonoReturn e) = buildLoopBody e
+        -- Descend a do-block on the continue path: its inner binds (per-iteration
+        -- effects) become loop-body lets emitted before the continue reassignment.
+        buildLoopBody (MonoDoBlock _ e) = buildLoopBody e
+        buildLoopBody (MonoLoopContinue args)
+          | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
+          | otherwise = error $
+              "morloc bug: MonoLoopContinue arity " <> show (length args)
+                <> " does not match loop-carried ids " <> show (length ids)
+        buildLoopBody (MonoLet i e1 e2) =
+          let (m1, e1') = unwrapLetDef m e1
+           in case inferState e1 of
+                Serialized -> LoopSLet i <$> serialExpr m1 e1' <*> buildLoopBody e2
+                Unserialized -> do
+                  ne1 <- nativeExpr m1 e1'
+                  LoopNLet i ne1 <$> buildLoopBody e2
+        -- Any other leaf is a base case: serialize the CURRENT native value.
+        buildLoopBody base =
+          LoopBase <$> (nativeExpr m base >>= serializeS "loop base" m . forceSerializedThunk)
     serialExpr _ (MonoLoopContinue {}) = error "morloc: MonoLoopContinue reached serialExpr outside MonoLoop extraction"
     -- Thunk-producing intrinsics: convert to native and serialize with the
     -- inner type (strip EffectF) so the wire format matches the forced value.
