@@ -1784,9 +1784,18 @@ mod tests {
             .collect()
     }
 
+    /// The list-shaped value schema `[a]` a stream header must carry (see
+    /// make_stream_header_block); tests pass the bare element `a`. The `a`
+    /// prefix is the Array schema-string form.
+    fn list_schema(elem: &Schema) -> Schema {
+        crate::schema::parse_schema(&format!(
+            "a{}", crate::schema::schema_to_string(elem)
+        )).unwrap()
+    }
+
     /// Helper: build a complete stream file = header + sub-packets + footer + tail.
     fn build_stream_file(schema: &Schema, schema_str: &str, n: u32) -> Vec<u8> {
-        let mut file = make_stream_header_block(schema);
+        let mut file = make_stream_header_block(&list_schema(schema));
         for sp in build_subpackets(schema_str, n) {
             file.extend_from_slice(&sp);
         }
@@ -1846,7 +1855,9 @@ mod tests {
         let recovered_schema = read_schema_from_meta(&file[..32 + stream_hdr.offset as usize])
             .unwrap()
             .unwrap();
-        assert_eq!(recovered_schema, crate::schema::schema_to_string(&schema));
+        // The header carries the list-shaped value schema `[u4]`, not the
+        // bare element `u4`.
+        assert_eq!(recovered_schema, crate::schema::schema_to_string(&list_schema(&schema)));
 
         // 4. Sub-packets enumerable; payloads contain 0..5 in u32 LE.
         let ranges = enumerate_subpackets(&file);
@@ -1865,7 +1876,7 @@ mod tests {
         // Simulate a writer that crashed (or in-progress stream): all
         // sub-packets written, but no footer and no EOF tail.
         let schema = crate::schema::parse_schema("u4").unwrap();
-        let mut file = make_stream_header_block(&schema);
+        let mut file = make_stream_header_block(&list_schema(&schema));
         for sp in build_subpackets("u4", 3) {
             file.extend_from_slice(&sp);
         }
@@ -1889,13 +1900,13 @@ mod tests {
         let schema = crate::schema::parse_schema("u4").unwrap();
 
         // Stream A: 3 sub-packets carrying 0, 1, 2.
-        let mut a = make_stream_header_block(&schema);
+        let mut a = make_stream_header_block(&list_schema(&schema));
         for sp in build_subpackets("u4", 3) {
             a.extend_from_slice(&sp);
         }
 
         // Stream B: 2 sub-packets, renumber to 10, 11.
-        let mut b = make_stream_header_block(&schema);
+        let mut b = make_stream_header_block(&list_schema(&schema));
         for v in &[10u32, 11] {
             let pkt = make_mesg_data_packet(&v.to_le_bytes(), "u4");
             b.extend_from_slice(&pkt);

@@ -897,6 +897,18 @@ pub unsafe extern "C" fn mlc_open_stdout(
     )
 }
 
+/// Reclaim any stdio singleton (@stdout/@stderr/@stdin) claim this pool
+/// dispatch left open -- e.g. an exception unwound past @close. Every pool
+/// language must call this after a dispatch returns so a leaked claim does
+/// not wedge the next @stdout open with "already open". The Rust/C++ pool
+/// loop (pool_dispatch_packet) calls the underlying reclaim directly;
+/// Python and R call this C-ABI wrapper from their per-dispatch handlers.
+/// Cheap on the common no-stdio path (a single thread-local read).
+#[no_mangle]
+pub unsafe extern "C" fn mlc_reclaim_stdio_after_dispatch() {
+    crate::stream::pool_reclaim_stdio_after_dispatch();
+}
+
 /// `@stderr :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 2;
 /// `mlc_write` routes through the pool-nexus RPC socket. At most one
 /// `@stderr` per nexus.
@@ -954,6 +966,9 @@ pub unsafe extern "C" fn mlc_close(
     clear_errmsg(errmsg);
     match crate::stream::shared_close_handle(handle) {
         Ok(()) => 0,
+        // A broken pipe while flushing the final footer is an <IO> condition,
+        // not a recoverable error (see mlc_write): reserved code, no errmsg.
+        Err(MorlocError::PipeClosed) => morloc_runtime_types::MLC_RESULT_PIPE_CLOSED,
         Err(e) => {
             set_errmsg(errmsg, &e);
             1
@@ -1155,6 +1170,10 @@ pub unsafe extern "C" fn mlc_write(
     clear_errmsg(errmsg);
     match crate::stream::shared_write_subpacket(handle, level, payload_voidstar as crate::shm::AbsPtr) {
         Ok(()) => 0,
+        // Broken pipe is an <IO> condition, not a recoverable error: return
+        // the reserved code with NO errmsg so the C++ shim throws a distinct
+        // MorlocPipeClosed that @catch does not swallow.
+        Err(MorlocError::PipeClosed) => morloc_runtime_types::MLC_RESULT_PIPE_CLOSED,
         Err(e) => {
             set_errmsg(errmsg, &e);
             1
@@ -1175,6 +1194,8 @@ pub unsafe extern "C" fn mlc_flush(
     clear_errmsg(errmsg);
     match crate::stream::shared_flush_buffer(handle) {
         Ok(()) => 0,
+        // See mlc_write: broken pipe surfaces as the reserved code (no errmsg).
+        Err(MorlocError::PipeClosed) => morloc_runtime_types::MLC_RESULT_PIPE_CLOSED,
         Err(e) => {
             set_errmsg(errmsg, &e);
             1

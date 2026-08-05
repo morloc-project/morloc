@@ -74,14 +74,18 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
         t' <- inferTypeUniversal t
         return $ Arg i (L (serialArgType t'))
       where
-        -- A function-typed top-level argument is a closure that arrived
-        -- serialized (a closure wire tuple), not a manifold signature. Give it
-        -- a plain serial type ('SerialS') so the standard serial->native path
-        -- reflects it into a native callable, rather than 'typeSof''s
-        -- 'FunctionS' (native args, serial return) which would leave the arg
-        -- half-serialized and unreflected.
-        serialArgType tf@(FunF {}) = SerialS tf
-        serialArgType tf = typeSof tf
+        -- The serial/wire form of an argument is always its PEELED type: it
+        -- arrives across a socket as a plain value ('makeSerialAST' likewise
+        -- strips 'EffectF' from the wire schema). A plain data value returned at
+        -- an '<E> T' position is recorded by 'makeTypemap' with an outer
+        -- 'EffectF' (a capability annotation, not a wire wrapper); left in place
+        -- it renders a spurious thunk ('std::function') that mismatches the plain
+        -- deserialize. Strip it. A genuine callback param is an OUTER 'FunF'
+        -- (any effect sits on its result), so 'stripEffectF' is a no-op there and
+        -- it still routes to the closure-reflecting 'SerialS' path.
+        serialArgType tf = case stripEffectF tf of
+          sf@(FunF {}) -> SerialS sf
+          sf -> typeSof sf
 
     contextArg ::
       Int ->
@@ -973,11 +977,76 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         }
 
     wireSerialManifold :: SerialManifold_ (D SerialExpr) -> MorlocMonad (D SerialManifold)
-    wireSerialManifold (SerialManifold_ m _ form headForm (req, e)) = do
-      let form' = afirst (specialize req) form
-          req' = Map.map fst (manifoldToMap form')
-      e' <- letWrap m form' req e
-      return (req', SerialManifold m lang form' headForm e')
+    wireSerialManifold (SerialManifold_ m _ form headForm (req, e)) =
+      case loopCarriedTypes e of
+        Nothing -> do
+          let form' = afirst (specialize req) form
+              req' = Map.map fst (manifoldToMap form')
+          e' <- letWrap m form' req e
+          return (req', SerialManifold m lang form' headForm e')
+        -- A native loop: a carried slot used only serially (a foreign-call
+        -- argument) never records a native type, so 'prepareArg' gave it
+        -- 'L PassthroughS'. Recover each carried slot's native type from the
+        -- continue value that reassigns it, then patch the form so the slot
+        -- carries its native type and force it 'NativeContent', so 'letWrap'
+        -- deserializes the entry packet into the native 'nvarNamer' local the
+        -- continue reassigns and the loop's per-iteration re-serialization reads
+        -- (see the 'LoopS_' handler).
+        Just carriedTM -> do
+          let form1 = patchCarriedForm carriedTM form
+              reqForced = foldr (\i -> Map.insert i NativeContent) req (Map.keys carriedTM)
+              form' = afirst (specialize reqForced) form1
+              req' = Map.map fst (manifoldToMap form')
+          e' <- letWrap m form' reqForced e
+          return (req', SerialManifold m lang form' headForm e')
+
+    -- First 'LoopContinue' leaf on the body spine (the back-edge reachable
+    -- without descending into a base). Shared by 'carriedTypes' below and the
+    -- 'LoopS_' handler.
+    firstContinue :: LoopBody ne se -> Maybe [ne]
+    firstContinue (LoopContinue nes) = Just nes
+    firstContinue (LoopIf _ a b) = case firstContinue a of
+      (Just x) -> Just x
+      Nothing -> firstContinue b
+    firstContinue (LoopNLet _ _ b) = firstContinue b
+    firstContinue (LoopSLet _ _ b) = firstContinue b
+    firstContinue (LoopBase _) = Nothing
+
+    -- Native types of loop-carried slots, read positionally from the continue
+    -- value that reassigns each slot. Requires the wired body (native leaves).
+    carriedTypes :: [Int] -> LoopBody NativeExpr se -> Maybe (Map.Map Int TypeF)
+    carriedTypes ids body = Map.fromList . zip ids . map typeFof <$> firstContinue body
+
+    -- 'carriedTypes' resolved on a manifold body spine; 'Nothing' if the body has
+    -- no native loop. The loop sits on the spine ('addLoopWraps' makes it the
+    -- whole body, possibly under structural wrappers).
+    loopCarriedTypes :: SerialExpr -> Maybe (Map.Map Int TypeF)
+    loopCarriedTypes (LoopS _ ids body) = carriedTypes ids body
+    loopCarriedTypes (ReturnS x) = loopCarriedTypes x
+    loopCarriedTypes (SerialLetS _ _ x) = loopCarriedTypes x
+    loopCarriedTypes (NativeLetS _ _ x) = loopCarriedTypes x
+    loopCarriedTypes (CacheBodyS _ _ _ _ _ x) = loopCarriedTypes x
+    loopCarriedTypes (DebugWrapS _ _ _ x) = loopCarriedTypes x
+    loopCarriedTypes _ = Nothing
+
+    -- Make the continue-derived native type authoritative for every serial
+    -- carried slot: recover the type of a serial-only slot (which 'prepareArg'
+    -- left 'L PassthroughS') and override a stale base-occurrence type with the
+    -- plain type the continue actually circulates. (The effect-strip half of this
+    -- -- an '<IO>' accumulator recorded with an '<IO> T' type -- is owned by
+    -- 'serialArgType'; here we simply trust the continue type.) Function-typed
+    -- slots (native-only closures) are left alone. See also 'stripCarriedBase'
+    -- (EffectBoundary), the same continue-vs-base-type mismatch at the force site.
+    patchCarriedForm ::
+      Map.Map Int TypeF ->
+      ManifoldForm (Or TypeS TypeF) TypeS ->
+      ManifoldForm (Or TypeS TypeF) TypeS
+    patchCarriedForm carriedTM = afirst patch
+      where
+        patch i (L _) | Just tf <- Map.lookup i carriedTM, not (isFunF tf) = L (SerialS tf)
+        patch _ orT = orT
+        isFunF (FunF {}) = True
+        isFunF _ = False
 
     wireNativeManifold :: NativeManifold_ (D NativeExpr) -> MorlocMonad (D NativeManifold)
     wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
@@ -1026,6 +1095,77 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           return $ NativeLetS i ne1 (SerialLetS i sv se2)
         _ -> return $ NativeLetS i ne1 se2
       return (req', e')
+    -- Native-loop reconciliation. The default 'monoidSerialExpr' rebuilds a
+    -- 'LoopS' body verbatim, skipping the serial<->native wiring the other cases
+    -- get. Three fixes:
+    --   (c) an internal 'LoopSLet' consumed natively downstream (a foreign-call
+    --       result destructured by a '.0'/'.1' projection) is naturalized,
+    --       mirroring the non-loop 'SerialLetS_' reconciliation.
+    --   (b) a carried slot used serially (a foreign-call argument, read by index
+    --       's<i>') is stale after the first iteration -- the entry packet is
+    --       never reassigned. Re-serialize the CURRENT native value at the top of
+    --       every iteration ('LoopSLet i (serialize (BndVarN i))'), shadowing the
+    --       entry packet so the index-based foreign-call read is fresh. The
+    --       carried native type comes from the continue value that reassigns the
+    --       slot ('wireSerialManifold' patches the form + forces 'letWrap' so the
+    --       'nvarNamer' local actually exists).
+    --   (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
+    --       each entry packet into that native local.
+    wireSerialExpr (LoopS_ t ids body) = do
+      (mergedReq, body') <- wireLoopBody body
+      let carriedTM = maybe Map.empty id (carriedTypes ids body')
+          serialUsed = [i | i <- Map.keys carriedTM, serialish (Map.lookup i mergedReq)]
+      -- (b) Re-serialize each serially-used carried slot from its CURRENT native
+      -- value at the top of every iteration, shadowing the stale entry packet: the
+      -- foreign call reads its args by index 's<i>' (see the loop-carry lowering
+      -- in Grammars/Translator/Generic.hs 'lcMakeLoop'), so the packet must be
+      -- refreshed from the reassigned 'nvarNamer' local.
+      body'' <-
+        foldlM
+          ( \b i ->
+              let tf = carriedTM Map.! i
+               in (\se -> LoopSLet i se b) <$> serializeS "loop-reserialize" m0 tf (BndVarN tf i)
+          )
+          body'
+          serialUsed
+      -- (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
+      -- each entry packet into the native local the continue reassigns.
+      let req' = Map.union (Map.fromList [(i, NativeContent) | i <- ids]) mergedReq
+      return (req', LoopS t ids body'')
+      where
+        serialish (Just SerialContent) = True
+        serialish (Just NativeAndSerialContent) = True
+        serialish _ = False
+
+        serialInner (SerialS tf) = Just tf
+        serialInner (FunctionS _ (SerialS tf)) = Just tf
+        serialInner _ = Nothing
+
+        -- Wire the loop body bottom-up, returning the merged request map of the
+        -- subtree alongside the rewired body (so a 'LoopSLet's downstream request
+        -- is the child's returned map -- no per-node re-fold). (c) An internal
+        -- 'LoopSLet' consumed natively downstream is naturalized, mirroring the
+        -- non-loop 'SerialLetS_' reconciliation.
+        wireLoopBody (LoopIf (rc, ne) tb eb) = do
+          (rt, tb') <- wireLoopBody tb
+          (re, eb') <- wireLoopBody eb
+          return (Map.unionsWith (<>) [rc, rt, re], LoopIf ne tb' eb')
+        wireLoopBody (LoopNLet i (rn, ne) b) = do
+          (rb, b') <- wireLoopBody b
+          return (Map.unionWith (<>) rn rb, LoopNLet i ne b')
+        wireLoopBody (LoopSLet i (rs, se) b) = do
+          (rb, b') <- wireLoopBody b
+          leaf <- case (Map.lookup i rb, serialInner (typeSof se)) of
+            (Just NativeContent, Just tf) ->
+              (\ne1 -> LoopNLet i ne1 b') <$> naturalizeN "loop-nat" m0 lang tf se
+            (Just NativeAndSerialContent, Just tf) -> do
+              ne1 <- naturalizeN "loop-nat" m0 lang tf (LetVarS (Just tf) i)
+              return (LoopSLet i se (LoopNLet i ne1 b'))
+            _ -> return (LoopSLet i se b')
+          return (Map.unionWith (<>) rs rb, leaf)
+        wireLoopBody (LoopBase (rb, se)) = return (rb, LoopBase se)
+        wireLoopBody (LoopContinue nes) =
+          return (Map.unionsWith (<>) (map fst nes), LoopContinue (map snd nes))
     wireSerialExpr e = monoidSerialExpr defs e
 
     wireNativeExpr ::

@@ -1,0 +1,42 @@
+-- Daemon-mode regression for the @stdout claim wedge.
+--
+-- @collect wires a @stdout OStream into `produce*` and invokes it inside
+-- the language pool, so the @stdout claim is opened POOL-SIDE -- as in
+-- mosm's `cut`, whose failure pointed at pool.cpp:_mlc_open_stdout. That
+-- is the path the pool-side per-call reclaim protects (the nexus-local
+-- reclaim already covered nexus-evaluated @stdout).
+--
+-- `produceLeak` raises mid-stream, BEFORE @collect closes the OStream,
+-- leaving the @stdout claim set in the shared-memory registry.
+--
+-- A daemon reuses one pool -- and one registry -- across every call, so
+-- without the reclaim the leaked claim would wedge every later @stdout
+-- open with "@stdout already open in this nexus". This is precisely the
+-- cross-call persistence a one-shot golden cannot reproduce (each
+-- one-shot run gets a fresh registry).
+
+module main (useStdout, leakStdout)
+
+import root-py
+
+source Py from "stdio-wedge.py" ("mk")
+
+mk :: Int -> [Int]
+
+produceOk :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceOk sink = do
+  _ <- sink (mk 1)
+  sink (mk 2)
+
+produceLeak :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceLeak sink = do
+  _ <- sink (mk 1)
+  @throw "leak: producer failed mid-stream"
+
+--' @stream
+useStdout :: <IO, Err> ()
+useStdout = @collect produceOk
+
+--' @stream
+leakStdout :: <IO, Err> ()
+leakStdout = @collect produceLeak

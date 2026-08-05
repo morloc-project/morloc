@@ -100,6 +100,7 @@ main = do
       , golden "stdin-input" "stdin-input"
       , golden "docstring-alias-import" "docstring-alias-import"
       , golden "stdout-stream-format" "stdout-stream-format"
+      , golden "stdio-pipe-closed" "stdio-pipe-closed"
 
       , golden "vector-gradual-desugar-py" "vector-gradual-desugar-py"
       , golden "vector-gradual-desugar-c" "vector-gradual-desugar-c"
@@ -742,10 +743,12 @@ main = do
       , golden "recursion-loop-deep-r" "recursion-loop-deep-r"
       , golden "recursion-loop-exported-py" "recursion-loop-exported-py"
       , golden "recursion-loop-shapes-py" "recursion-loop-shapes-py"
+      , golden "recursion-loop-tuple-crosspool" "recursion-loop-tuple-crosspool"
       , golden "recursion-loop-io-py" "recursion-loop-io-py"
       , golden "recursion-helper-cpp" "recursion-helper-cpp"
       , golden "recursion-thunk-py" "recursion-thunk-py"
       , golden "recursion-thunk-helper-cpp" "recursion-thunk-helper-cpp"
+      , golden "recursion-crosspool-io-tuple" "recursion-crosspool-io-tuple"
       , -- optional type tests
         golden "optional-py" "optional-py"
       , golden "optional-cpp" "optional-cpp"

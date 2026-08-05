@@ -189,6 +189,12 @@ def run_job(client_fd: int) -> None:
             pass
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
+        # Reclaim any stdio singleton claim this dispatch left open (e.g. a
+        # handler that raised past @close on a broken pipe). Runs on the
+        # same worker thread that opened it, so the reclaim's call_id gate
+        # matches. Without this a leaked @stdout claim wedges every later
+        # open with "@stdout already open in this nexus".
+        morloc.reclaim_stdio_after_dispatch()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
         # close child copy

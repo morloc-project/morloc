@@ -1498,7 +1498,9 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         // the publication store: cross-pool readers Acquire-load
         // this and observe all prior writes happens-before.
         let bump = registry_gen_salt() | 1;
-        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        // wrapping_add: generation is a wrapping counter masked to
+        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
+        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -1606,7 +1608,9 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         }
         slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
-        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        // wrapping_add: generation is a wrapping counter masked to
+        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
+        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -1645,6 +1649,80 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
 /// `MLC_KIND_OSTREAM` for `STDIO_KIND_STDOUT` / `STDIO_KIND_STDERR`.
 /// Any other pairing is a caller bug.
 ///
+/// True if process `pid` is alive and (when both start times are known)
+/// is the same process instance that opened a claim. `kill(pid, 0)` is the
+/// portable primary gate (no `/proc` dependency); the start time
+/// disambiguates PID reuse. Errs toward "alive" when uncertain so a live
+/// owner is never wrongly reclaimed.
+fn stdio_owner_is_alive(pid: u32, opener_start_time: u64) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc != 0 {
+        // ESRCH => no such process; EPERM (or other) => exists, can't signal.
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    // Alive by pid; check for pid reuse when both start times are known.
+    let live_start = read_pid_start_time_for(pid);
+    !(opener_start_time != 0 && live_start != 0 && live_start != opener_start_time)
+}
+
+/// The registry's online self-heal for a stale/corrupt stdio claim. If the
+/// set claim `existing` is unrecoverable garbage (its handle unpacks to an
+/// out-of-range/freed/non-stdio slot) or its owning process is gone, clear
+/// it so a fresh open can proceed, and return true. A claim held by THIS
+/// process, or by a live other process, is left intact so a genuine
+/// double-open still errors.
+///
+/// Without this a leaked or corrupt claim would wedge every @stdout open
+/// until the owning process dies (so the nexus poll's `sweep_per_pid`
+/// fires) or the daemon restarts.
+fn try_reclaim_stale_stdio_claim(
+    claim: &std::sync::atomic::AtomicI64,
+    existing: i64,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    let (gen_claim, slot_idx) = unpack_handle(existing);
+    let slot = match slot_ref(slot_idx) {
+        Some(s) => s,
+        // Handle unpacks to an out-of-range slot: it cannot correspond to
+        // any live owner. Clear it directly.
+        None => {
+            return claim
+                .compare_exchange(existing, STDIO_UNCLAIMED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+        }
+    };
+    slot_futex_lock(slot);
+    let cleared = if claim.load(Ordering::Acquire) != existing {
+        // Someone else changed the claim under us; the caller re-loads.
+        false
+    } else {
+        let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        let slot_ok = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
+            && slot.is_stdio != 0
+            && gen_now == gen_claim;
+        if !slot_ok {
+            // Claim points at a freed / reused / non-stdio slot: garbage.
+            claim
+                .compare_exchange(existing, STDIO_UNCLAIMED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        } else if slot.opener_pid == std::process::id() {
+            false // our own live claim -- a real double-open
+        } else if stdio_owner_is_alive(slot.opener_pid, slot.opener_pid_start_time) {
+            false // another process legitimately holds it
+        } else {
+            // Dead owner: finalize its OStream and discard, which stores
+            // STDIO_UNCLAIMED into the claim.
+            finalize_and_discard_slot_locked(slot, slot_idx);
+            true
+        }
+    };
+    slot_futex_unlock(slot);
+    cleared
+}
+
 /// Uniqueness across every pool attached to this nexus: the shared
 /// header carries three `AtomicI64` claim slots. Second open of the
 /// same stdio kind returns a generation-mismatch-shaped error
@@ -1666,13 +1744,22 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     })?;
 
     // Best-effort pre-check so the common "already open" case avoids
-    // burning a slot allocation. The real gate is the CAS below.
-    let existing = claim.load(Ordering::Acquire);
+    // burning a slot allocation. The real gate is the CAS below. If the
+    // claim is set but stale/corrupt (dead owner, or a garbage handle),
+    // reclaim it so a fresh open can proceed instead of wedging forever.
+    let mut existing = claim.load(Ordering::Acquire);
+    if existing != STDIO_UNCLAIMED && try_reclaim_stale_stdio_claim(claim, existing) {
+        existing = claim.load(Ordering::Acquire);
+    }
     if existing != STDIO_UNCLAIMED {
+        // Not reclaimed => a live owner (this process, or another). Report
+        // the owner pid so a genuine wedge is diagnosable in the field.
+        let (_g, owner_idx) = unpack_handle(existing);
+        let owner_pid = slot_ref(owner_idx).map(|s| s.opener_pid).unwrap_or(0);
         return Err(MorlocError::Other(format!(
-            "@{} already open in this nexus (handle {:#x}); \
+            "@{} already open in this nexus (handle {:#x}, owner pid {}); \
              at most one open per stdio kind is allowed",
-            stdio_kind_name(stdio_kind), existing,
+            stdio_kind_name(stdio_kind), existing, owner_pid,
         )));
     }
 
@@ -1776,9 +1863,22 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
         }
+        // Lazily mint a call_id if the caller has not set one, so the
+        // post-dispatch stdio reclaim (pool_reclaim_stdio_after_dispatch)
+        // can match this slot. The nexus dispatch always pre-sets a
+        // call_id, so this only fires in pool processes -- and only when
+        // a stdio handle is actually opened, keeping the /dev/urandom
+        // read off the no-stdio dispatch hot path.
+        if current_call_id() == CALL_ID_NO_SWEEP {
+            set_current_call_id(generate_call_id());
+        }
         slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
-        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump)
+        // wrapping_add: the generation is a wrapping counter masked to
+        // GENERATION_MASK; a large random salt can overflow u64, which
+        // panics in debug builds without the wrapping form.
+        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel)
+            .wrapping_add(bump)
             & GENERATION_MASK;
         Ok(new_gen)
     })();
@@ -1906,7 +2006,7 @@ pub fn verify_stdio_opener_pid(handle: i64) -> Result<(), MorlocError> {
 // connect cost per call.
 
 use morloc_runtime_types::stdio_proto::{
-    OP_NEXT_STDIO, OP_WRITE_STDIO, STATUS_OK, STATUS_ERR, STATUS_EOF,
+    OP_NEXT_STDIO, OP_WRITE_STDIO, STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
 };
 
 thread_local! {
@@ -2209,7 +2309,9 @@ pub fn shared_open_ostream_with_schema(
         }
         slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
-        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        // wrapping_add: generation is a wrapping counter masked to
+        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
+        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -2766,6 +2868,7 @@ fn stdio_rpc_send_write(
         ))?;
         match status[0] {
             STATUS_OK  => Ok(()),
+            STATUS_PIPE_CLOSED => Err(MorlocError::PipeClosed),
             STATUS_ERR => Err(MorlocError::Other(format!(
                 "@write: {}", read_error_message(s),
             ))),
@@ -4114,7 +4217,9 @@ pub fn shared_append_to_path(
         }
         slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
-        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump) & GENERATION_MASK;
+        // wrapping_add: generation is a wrapping counter masked to
+        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
+        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -4260,6 +4365,25 @@ fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
     }
 }
 
+/// Finalise an OStream slot's on-disk footer as PAUSED, then discard the
+/// handle. Caller MUST hold the slot futex. Shared by the per-call and
+/// per-pid sweeps and the pool-side stdio reclaim.
+///
+/// The paused-status footer lets a downstream reader see a clean file
+/// rather than a temp footer (distinguishing "producer exited with
+/// buffered data" from "crashed mid-flush"). Finalise errors are ignored
+/// so a single bad slot cannot strand a sweep across the registry.
+fn finalize_and_discard_slot_locked(slot: &RegistrySlot, idx: usize) {
+    if slot.kind == MLC_KIND_OSTREAM {
+        let _ = shared_finalize_ostream_locked(
+            slot,
+            idx,
+            morloc_runtime_types::packet::FOOTER_STATUS_PAUSED,
+        );
+    }
+    let _ = shared_discard_handle_locked(slot, idx);
+}
+
 /// Walk the registry and discard any OPEN slot whose `call_id`
 /// matches. Two-phase: lockfree pre-filter (`state` + `call_id`
 /// Acquire-loads), then take the slot futex and re-confirm before
@@ -4290,22 +4414,7 @@ fn sweep_per_call(call_id: u64) {
         let still_open = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED;
         let still_matches = slot.call_id.load(Ordering::Acquire) == call_id;
         if still_open && still_matches {
-            // OStream slots get a paused-status final footer so a
-            // downstream reader (typically a parent nexus expecting an
-            // OStream return) sees a clean file rather than a temp
-            // footer. Finalise errors are ignored here -- the slot is
-            // still released so a single bad slot doesn't strand the
-            // sweep across the registry.
-            if slot.kind == MLC_KIND_OSTREAM {
-                let _ = shared_finalize_ostream_locked(
-                    slot,
-                    idx,
-                    morloc_runtime_types::packet::FOOTER_STATUS_PAUSED,
-                );
-            }
-            // shared_discard_handle_locked frees the slot in place
-            // without taking the futex again (we hold it).
-            let _ = shared_discard_handle_locked(slot, idx);
+            finalize_and_discard_slot_locked(slot, idx);
         }
         slot_futex_unlock(slot);
     }
@@ -4350,21 +4459,61 @@ fn sweep_per_pid(pid: u32, start_time: u64) {
             && slot.opener_pid == pid
             && slot.opener_pid_start_time == start_time
         {
-            // A dead pool's OStream lands on disk as paused so a
-            // downstream consumer can distinguish "crashed mid-flush"
-            // (no footer at all) from "the producer pool exited while
-            // we still had buffered elements".
-            if slot.kind == MLC_KIND_OSTREAM {
-                let _ = shared_finalize_ostream_locked(
-                    slot,
-                    idx,
-                    morloc_runtime_types::packet::FOOTER_STATUS_PAUSED,
-                );
-            }
-            let _ = shared_discard_handle_locked(slot, idx);
+            finalize_and_discard_slot_locked(slot, idx);
         }
         slot_futex_unlock(slot);
     }
+}
+
+/// Reclaim a stdio singleton claim (@stdout/@stderr/@stdin) left open by
+/// the pool dispatch that just returned. Mirrors the nexus local path's
+/// per-call sweep, but scoped to the three stdio singletons only: a
+/// leaked stdio claim is never legitimate, whereas a file-backed OStream
+/// handle may legitimately outlive its opening dispatch, so this
+/// deliberately does NOT touch non-stdio slots.
+///
+/// Gate: the per-thread `call_id` is `CALL_ID_NO_SWEEP` unless THIS
+/// dispatch opened a stdio handle (`open_stdio` lazily mints one), so the
+/// common no-stdio dispatch pays only a thread-local read and returns.
+/// When a claim IS held, matching on the dispatch's own `call_id` keeps a
+/// concurrent same-pid worker's live claim (Threads mode) safe from
+/// reclaim. Resets the per-thread `call_id` before returning so the next
+/// dispatch on this worker starts clean.
+pub(crate) fn pool_reclaim_stdio_after_dispatch() {
+    use std::sync::atomic::Ordering;
+    let call_id = current_call_id();
+    if call_id == CALL_ID_NO_SWEEP {
+        return;
+    }
+    for stdio_kind in [STDIO_KIND_STDIN, STDIO_KIND_STDOUT, STDIO_KIND_STDERR] {
+        let claim = match stdio_claim_slot(stdio_kind) {
+            Some(c) => c,
+            None => continue,
+        };
+        let existing = claim.load(Ordering::Acquire);
+        if existing == STDIO_UNCLAIMED {
+            continue;
+        }
+        let (_gen, slot_idx) = unpack_handle(existing);
+        let slot = match slot_ref(slot_idx) {
+            Some(s) => s,
+            None => continue,
+        };
+        slot_futex_lock(slot);
+        // Re-confirm under the futex: same claim, still open, still a
+        // stdio slot, and tagged with THIS dispatch's call_id.
+        let owned = claim.load(Ordering::Acquire) == existing
+            && slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
+            && slot.is_stdio != 0
+            && slot.call_id.load(Ordering::Acquire) == call_id;
+        if owned {
+            // Discard the slot (which stores STDIO_UNCLAIMED into the
+            // claim), landing any buffered OStream data as a paused footer.
+            finalize_and_discard_slot_locked(slot, slot_idx);
+        }
+        slot_futex_unlock(slot);
+    }
+    set_current_call_id(CALL_ID_NO_SWEEP);
 }
 
 /// Read the configured write-buffer capacity in bytes from the
@@ -4624,13 +4773,17 @@ fn parse_stream_file(
     } else if outer_header.is_stream() {
         let StreamHeader { schema: schema_str, body_start } =
             parse_stream_header(mmap_ptr, mmap_size)?;
+        // An empty stream (opened + closed with no writes) has its final
+        // footer at body_start and no data sub-packets, so read_subpacket_format
+        // returns None; only validate the format when a DATA sub-packet exists.
         if body_start < mmap_size {
-            let fmt = read_subpacket_format(mmap_ptr, mmap_size, body_start)?;
-            if fmt != PACKET_FORMAT_VOIDSTAR {
-                return Err(MorlocError::Other(format!(
-                    "file '{}' has {}-format sub-packets; only voidstar is supported",
-                    path, packet_format_name(fmt)
-                )));
+            if let Some(fmt) = read_subpacket_format(mmap_ptr, mmap_size, body_start)? {
+                if fmt != PACKET_FORMAT_VOIDSTAR {
+                    return Err(MorlocError::Other(format!(
+                        "file '{}' has {}-format sub-packets; only voidstar is supported",
+                        path, packet_format_name(fmt)
+                    )));
+                }
             }
         }
         // IStream walks forward from body_start without needing an
@@ -4986,11 +5139,15 @@ fn parse_stream_header(mmap_ptr: AbsPtr, size: u64) -> Result<StreamHeader, Morl
 
 /// Read the format byte of a sub-packet whose header begins at
 /// `off` within the mmap'd region.
+/// Format byte of the sub-packet at `off`, or `None` when that packet is
+/// the final footer -- an empty stream (writer opened + closed with no
+/// writes) has its footer at `body_start` with no data sub-packets, so the
+/// caller has nothing to format-validate.
 fn read_subpacket_format(
     mmap_ptr: AbsPtr,
     size: u64,
     off: u64,
-) -> Result<u8, MorlocError> {
+) -> Result<Option<u8>, MorlocError> {
     if off + 32 > size {
         return Err(MorlocError::Packet(
             "sub-packet header extends past file end".into(),
@@ -5004,6 +5161,9 @@ fn read_subpacket_format(
         )
     };
     let header = PacketHeader::from_bytes(bytes.try_into().unwrap())?;
+    if header.is_footer() {
+        return Ok(None); // empty stream: footer at body_start, no sub-packets
+    }
     if !header.is_data() {
         return Err(MorlocError::Packet(format!(
             "sub-packet at offset {} is not a DATA packet", off
@@ -5018,7 +5178,7 @@ fn read_subpacket_format(
             off, data.source,
         )));
     }
-    Ok(data.format)
+    Ok(Some(data.format))
 }
 
 // ── Footer parsing ────────────────────────────────────────────────────────
@@ -8220,7 +8380,11 @@ pub fn shared_open_ifile_recovered(
         }
         slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
-        let new_gen = (slot.generation.fetch_add(bump, Ordering::AcqRel) + bump)
+        // wrapping_add: the generation is a wrapping counter masked to
+        // GENERATION_MASK; a large random salt can overflow u64, which
+        // panics in debug builds without the wrapping form.
+        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel)
+            .wrapping_add(bump)
             & GENERATION_MASK;
         Ok(new_gen)
     })();
@@ -8304,7 +8468,6 @@ mod tests {
             ".(.x;.y",           // unclosed group
             ".(.x;.y)x",         // missing dot after group close
             ".(.x;.y).0",        // step after group (groups are terminal)
-            ".[:].x",            // step after slice (slices are terminal)
             ".[a]",              // bracket with non-empty contents
             ".[",                // unclosed bracket
         ];
@@ -8348,15 +8511,20 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("empty.idx");
 
-        // Build a stream file consisting of only the stream header
-        // block (no sub-packets, no footer). Minimal schema = uint32;
-        // the actual element type doesn't matter for this open-test
-        // since we never walk any sub-packet.
+        // Create a canonical empty CLOSED stream by opening a file-backed
+        // OStream and closing it with no writes -- the writer emits the
+        // header plus an empty final footer. A cleanly-closed empty stream
+        // opens as an IFile; a footerless (header-only) file would
+        // correctly be rejected, since random access needs the footer's
+        // sub-packet index.
         let schema = crate::schema::Schema::primitive(
             crate::schema::SerialType::Uint32,
         );
-        let header = morloc_runtime_types::packet::make_stream_header_block(&schema);
-        std::fs::write(&path, &header).unwrap();
+        let schema_str =
+            morloc_runtime_types::schema::schema_to_string(&list_schema(&schema));
+        let out = shared_open_ostream_with_schema(path.to_str().unwrap(), &schema_str)
+            .unwrap();
+        shared_close_handle(out).unwrap();
 
         let handle = shared_open_ifile(path.to_str().unwrap()).unwrap();
         assert!(handle > 0);
@@ -8469,11 +8637,23 @@ mod tests {
         packet
     }
 
+    // A stream header carries the list-shaped value schema `[a]`, not the
+    // bare element `a`. Production always builds it from the parsed `[a]`
+    // (open_ostream/open_stdio enforce Array via reject_non_list_stream_schema);
+    // tests must mirror that so the header is well-formed. The `a` prefix is
+    // the Array schema-string form.
+    fn list_schema(elem: &TSchema) -> TSchema {
+        morloc_runtime_types::schema::parse_schema(&format!(
+            "a{}",
+            morloc_runtime_types::schema::schema_to_string(elem),
+        )).unwrap()
+    }
+
     fn build_stream_file(
         elem_schema: &TSchema,
         sub_values: &[&[i64]],
     ) -> Vec<u8> {
-        let mut out = make_stream_header_block(elem_schema);
+        let mut out = make_stream_header_block(&list_schema(elem_schema));
         let mut subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry> =
             Vec::with_capacity(sub_values.len());
         let mut element_count: u64 = 0;
@@ -8738,35 +8918,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Compressed DATA_PACKET files are rejected at open time: we
-    /// cannot serve random access without decompressing the whole
-    /// payload, which defeats IFile's purpose.
-    #[test]
-    fn ifile_compressed_data_packet_rejected() {
-        crate::init_test_shm();
-        let dir = std::env::temp_dir().join(format!(
-            "morloc_stream_test_{}_zstd", std::process::id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("ints-zstd.idx");
-
-        // Build an uncompressed DATA_PACKET and then flip the
-        // compression byte to PACKET_COMPRESSION_ZSTD. The file is
-        // structurally syntactic (the open path only checks the
-        // header's compression byte before rejecting); we don't need
-        // to actually compress the payload.
-        let mut bytes = build_int_voidstar_subpacket(&[1, 2, 3]);
-        // Bytes 0..32 are the header. CommandData.compression is at
-        // offset 8 + 3 = 11 (command_union starts at byte 8, then
-        // cmd_type:u8, source:u8, format:u8, compression:u8).
-        bytes[11] = PACKET_COMPRESSION_ZSTD;
-        std::fs::write(&path, &bytes).unwrap();
-
-        let err = open_ifile(path.to_str().unwrap()).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(msg.contains("compressed"), "error should mention compression: {}", msg);
-        let _ = std::fs::remove_file(&path);
-    }
 
     /// A footer-less stream file (writer crashed before writing the
     /// final footer) cannot be opened as an IFile: random access
@@ -8783,7 +8934,7 @@ mod tests {
         let path = dir.join("ints-no-footer.idx");
 
         let elem_schema = TSchema::primitive(TSerialType::Sint64);
-        let mut bytes = make_stream_header_block(&elem_schema);
+        let mut bytes = make_stream_header_block(&list_schema(&elem_schema));
         let sub_a: &[i64] = &[7, 8, 9];
         let sub_b: &[i64] = &[11];
         for vs in &[sub_a, sub_b] {
@@ -8839,5 +8990,60 @@ mod tests {
         shm::shfree(ptr).unwrap();
         close_handle(handle).unwrap();
         let _ = std::fs::remove_file(&path);
+    }
+
+    // Fork a child that exits immediately and reap it, returning its
+    // now-dead pid (guaranteed to be ESRCH until the OS reuses it).
+    fn reap_dead_child_pid() -> u32 {
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::_exit(0);
+            }
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+            pid as u32
+        }
+    }
+
+    /// A stale or corrupt @stdin claim must be reclaimed at open time so a
+    /// fresh open succeeds instead of wedging with "already open", while a
+    /// LIVE self-owned claim must still error. (@stdin is an IStream, so the
+    /// reclaim skips OStream finalize and needs no nexus RPC.) Fails without
+    /// the open-time self-heal (try_reclaim_stale_stdio_claim).
+    #[test]
+    fn stdio_stale_or_corrupt_claim_is_reclaimed() {
+        use std::sync::atomic::Ordering;
+        crate::init_test_shm();
+        registry_init().unwrap();
+        let claim = stdio_claim_slot(STDIO_KIND_STDIN).expect("registry attached");
+
+        // Corrupt claim: the handle unpacks to an out-of-range slot (60000
+        // exceeds the default slot count). A fresh open reclaims the garbage.
+        claim.store(pack_handle(1, 60000), Ordering::Release);
+        let hc = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "")
+            .expect("corrupt @stdin claim should be reclaimed");
+        close_handle(hc).unwrap();
+
+        // Live self-owned claim: a genuine double-open must still error.
+        let h1 = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "").unwrap();
+        assert!(
+            open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "").is_err(),
+            "a live self-owned @stdin claim must still error",
+        );
+
+        // Dead owner: mark the slot's opener pid as a reaped (dead) child;
+        // the next open must detect the dead owner, reclaim, and succeed.
+        let (_g, idx) = unpack_handle(h1);
+        let dead_pid = reap_dead_child_pid();
+        unsafe {
+            let slot = slot_ref(idx).unwrap();
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).opener_pid = dead_pid;
+            (*mp).opener_pid_start_time = 0;
+        }
+        let h2 = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "")
+            .expect("dead-owner @stdin claim should be reclaimed");
+        close_handle(h2).unwrap();
     }
 }

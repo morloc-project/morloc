@@ -1534,6 +1534,11 @@ int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
 int64_t mlc_open_stdin (const char* schema_str, ERRMSG);
 int64_t mlc_open_stdout(const char* schema_str, ERRMSG);
 int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
+// Reclaim any stdio singleton claim this pool dispatch left open (e.g. an
+// exception unwound past @close). Each pool language calls this after a
+// dispatch returns so a leaked claim does not wedge the next open. Cheap
+// on the no-stdio path (a single thread-local read).
+void mlc_reclaim_stdio_after_dispatch(void);
 int32_t mlc_write(uint8_t level, int64_t handle,
                   const void* payload_voidstar, ERRMSG);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);

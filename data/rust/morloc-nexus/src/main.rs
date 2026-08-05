@@ -257,7 +257,7 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
-    stdio_server::start(&tmpdir, config.output_format, config.compression_level);
+    stdio_server::start(&tmpdir, config.output_format, config.compression_level, config.daemon_flag);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();

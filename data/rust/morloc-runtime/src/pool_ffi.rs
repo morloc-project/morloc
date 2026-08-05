@@ -135,6 +135,14 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         // temps are already gone via @close(path).
         crate::intrinsics::sweep_call_temps();
 
+        // Reclaim any stdio singleton (@stdout/@stderr/@stdin) this dispatch
+        // left open -- e.g. an exception unwound past @close on a broken
+        // pipe. Without this, the claim persists in the nexus-scoped SHM
+        // registry and every later invocation fails "@stdout already open"
+        // while the (daemon-mode) pool stays alive. Cheap on the common
+        // no-stdio path: a single thread-local read (see the fn's gate).
+        crate::stream::pool_reclaim_stdio_after_dispatch();
+
         if result.is_null() {
             return make_fail_packet(b"dispatch callback returned NULL\0".as_ptr() as *const c_char);
         }

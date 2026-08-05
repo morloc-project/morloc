@@ -1,0 +1,24 @@
+module main (run)
+
+import root-py
+import root-cpp
+
+effect IO
+
+source Py from "py_helpers.py"
+  ( "py_step" as step
+  , "py_log"  as logIt
+  )
+step  :: [Int] -> ([Int], Int)
+logIt :: [Int] -> <IO> ()
+
+source Cpp from "cpp_helpers.hpp" ("cpp_dec" as dec)
+dec :: Int -> Int
+
+run :: Int -> [Int] -> Int -> <IO> Int
+run n xs acc
+  ? n == 0 = acc
+  : do
+      logIt xs
+      let (xs', c) = step xs
+      run (dec n) xs' (acc + c)

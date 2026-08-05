@@ -489,7 +489,40 @@ forceReturnPosition m (PolyLoop t ids e) = PolyLoop t ids (goLoop e)
     goLoop (PolyIf c a b) = PolyIf c (goLoop a) (goLoop b)
     goLoop (PolyLet i v x) = PolyLet i v (goLoop x)
     goLoop cont@(PolyLoopContinue _) = cont
-    goLoop base = forceReturnPosition m base
+    -- A base that just returns a loop-carried slot is a PLAIN value, not a
+    -- suspended computation: under the capability model a plain 'T' is already a
+    -- valid '<E> T', so there is no thunk to force ('acc()' would be wrong).
+    -- Strip the spurious outer effect from the slot's stored type and leave it
+    -- unforced. Restricted to a bare carried-var reference (index in the loop's
+    -- 'ids'); a genuine-thunk base (e.g. 'let t = srcIO acc in t', where 't' is
+    -- NOT a carried id) still routes to 'forceReturnPosition' and IS forced.
+    -- Shared root with 'Serialize.patchCarriedForm': the carried slot is
+    -- effect-typed from a base occurrence while the continue reassigns a plain
+    -- 'T'. The principled fix (type the slot by its continue type at the source)
+    -- would collapse both peels; until then keep them cross-referenced.
+    goLoop base = case stripCarriedBase base of
+      (Just base') -> base'
+      Nothing -> forceReturnPosition m base
+
+    stripCarriedBase (PolyReturn x) = PolyReturn <$> stripCarriedBase x
+    stripCarriedBase (PolyBndVar three i)
+      | i `elem` ids = (\three' -> PolyBndVar three' i) <$> stripThreeEffect three
+    stripCarriedBase (PolyLetVar (Idx ix ty) i)
+      | i `elem` ids = (\ty' -> PolyLetVar (Idx ix ty') i) <$> stripPlainEffect ty
+    stripCarriedBase _ = Nothing
+
+    stripThreeEffect (B ty) = B <$> stripPlainEffect ty
+    stripThreeEffect (C (Idx ix ty)) = (\ty' -> C (Idx ix ty')) <$> stripPlainEffect ty
+    stripThreeEffect _ = Nothing
+
+    -- Strip one outer effect layer, but only from a non-function value (an
+    -- effect-typed closure accumulator must keep its force/native representation).
+    stripPlainEffect (EffectT _ inner)
+      | not (isFunT inner) = Just inner
+    stripPlainEffect _ = Nothing
+
+    isFunT (FunT {}) = True
+    isFunT _ = False
 forceReturnPosition m e =
   case polyOuterType e of
     Just t | hasOuterEffect t -> forceLayers m t e

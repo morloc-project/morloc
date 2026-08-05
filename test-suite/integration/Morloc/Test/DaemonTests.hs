@@ -2,6 +2,7 @@ module Morloc.Test.DaemonTests (daemonTests) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
+import Data.List (isInfixOf)
 import System.Directory (copyFile, doesFileExist, listDirectory, removeFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -348,6 +349,64 @@ poolHealthTests env = testCase "Health reports pool status" $ do
     assertContains "health includes ok" "ok" body
 
 -- ======================================================================
+-- @stdout claim reclaim (wedge) tests
+-- ======================================================================
+
+-- A pool-side @stdout claim that a call leaves open (an exception
+-- unwinds past @collect's close) must be reclaimed at the end of that
+-- call, so the daemon's next @stdout open succeeds instead of failing
+-- "@stdout already open in this nexus". This reproduces -- in the only
+-- mode where it can persist across calls, the daemon -- the wedge that a
+-- one-shot golden cannot (each one-shot run gets a fresh registry).
+stdioWedgeTests :: TestEnv -> TestTree
+stdioWedgeTests env = testCase "Daemon @stdout claim reclaim (wedge)" $ do
+  dir <- compileDaemonProgram env "stdio-wedge.loc"
+  let sockPath = "/tmp/morloc-test-haskell-stdio-wedge.sock"
+  removeIfExists sockPath
+  withDaemon dir ["--socket", sockPath] $ \_ -> do
+    ready <- waitForSocket sockPath 15000
+    assertBool ("stdio-wedge daemon did not start (dir " ++ dir ++ ")") ready
+
+    let call cmd =
+          lpRequest
+            sockPath
+            ("{\"method\":\"call\",\"command\":\"" ++ cmd ++ "\",\"args\":[]}")
+
+    -- Baseline: a clean pool-side @stdout stream succeeds.
+    r0 <- call "useStdout"
+    assertJsonEq "baseline useStdout" r0 "status" "ok"
+
+    -- Leak the claim: the producer raises before @collect closes the
+    -- OStream, so this call fails and leaves @stdout claimed.
+    r1 <- call "leakStdout"
+    assertJsonEq "leakStdout reports an error" r1 "status" "error"
+
+    -- The pool-side per-call reclaim must release the leaked claim, so
+    -- the very next @stdout open succeeds. This is the wedge fix.
+    r2 <- call "useStdout"
+    assertBool
+      ("reuse after leak must not report 'already open': " ++ r2)
+      (not ("already open" `isInfixOf` r2))
+    assertJsonEq "reuse after leak succeeds" r2 "status" "ok"
+
+    -- Repeated leaks must not accumulate (no slot exhaustion, no wedge):
+    -- every interleaved reuse still works.
+    mapM_
+      ( \i -> do
+          _ <- call "leakStdout"
+          rr <- call "useStdout"
+          assertJsonEq ("reuse after repeated leak " ++ show i) rr "status" "ok"
+      )
+      [1 .. 5 :: Int]
+
+    -- The daemon survived every failing call and is still serving; a
+    -- per-call error (or pipe close) must not self-exit the daemon.
+    h <- lpRequest sockPath "{\"method\":\"health\"}"
+    assertJsonEq "daemon alive after leaks" h "status" "ok"
+
+  removeIfExists sockPath
+
+-- ======================================================================
 -- Helpers
 -- ======================================================================
 
@@ -374,4 +433,5 @@ daemonTests env =
     , concurrentHttpTests env
     , shutdownTests env
     , poolHealthTests env
+    , stdioWedgeTests env
     ]

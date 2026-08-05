@@ -2122,6 +2122,15 @@ static PyObject* pybinding__debug_flush_dispatch(PyObject* self, PyObject* args)
     Py_RETURN_NONE;
 }
 
+// Reclaim any stdio singleton claim this dispatch left open (e.g. an
+// exception unwound past @close). Called by the pool's run_job after each
+// dispatch so a leaked @stdout claim does not wedge the next open.
+static PyObject* pybinding__reclaim_stdio_after_dispatch(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    mlc_reclaim_stdio_after_dispatch();
+    Py_RETURN_NONE;
+}
+
 
 
 // Release the SHM ref owned by a put_value-produced packet. The codegen
@@ -3212,6 +3221,7 @@ static PyMethodDef Methods[] = {
     {"debug_record_frame", pybinding__debug_record_frame, METH_VARARGS, "Append a manifold's args to the debug-trace stack"},
     {"debug_drain_frames", pybinding__debug_drain_frames, METH_NOARGS, "Drain the debug-trace stack and return as a string, or None"},
     {"debug_flush_dispatch", pybinding__debug_flush_dispatch, METH_NOARGS, "Reset per-dispatch debug state (recursion counters etc.)"},
+    {"reclaim_stdio_after_dispatch", pybinding__reclaim_stdio_after_dispatch, METH_NOARGS, "Reclaim any stdio claim this dispatch left open"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},

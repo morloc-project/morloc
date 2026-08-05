@@ -461,6 +461,30 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// MorlocPipeClosed signals that the downstream consumer closed @stdout /
+// @stderr (a broken pipe). It is an <IO> condition, NOT a user-recoverable
+// <Err>, so it is deliberately NOT a subclass of MorlocException: _mlc_catch
+// lets it propagate rather than routing it into a fallback. The pool's
+// top-level dispatch converts it to a distinguished fail packet (the nexus,
+// which owns fd 1 and already saw the EPIPE, decides the exit status).
+class MorlocPipeClosed : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// Reserved return code from mlc_write / mlc_flush / mlc_close: the write
+// hit EPIPE. The runtime returns this WITHOUT setting errmsg. Kept in
+// sync with morloc_runtime_types::MLC_RESULT_PIPE_CLOSED (= 2).
+static constexpr int MLC_RESULT_PIPE_CLOSED = 2;
+
+// Throw the distinguished broken-pipe exception when a stdio C-ABI call
+// returns the reserved pipe-closed code. Shared by @write/@flush/@close.
+static inline void _mlc_throw_if_pipe_closed(int rc) {
+    if (rc == MLC_RESULT_PIPE_CLOSED) {
+        throw MorlocPipeClosed("@stdout: downstream pipe closed");
+    }
+}
+
 // Deserialize a JSON string to a typed value.
 // @read :: Str -> <Err> a. Parse failure throws MorlocException so
 // _mlc_catch can intercept.
@@ -514,8 +538,9 @@ inline int64_t _mlc_open(const std::string& path, uint8_t kind) {
 // @close: returns void; the runtime bumps generation and frees the slot.
 inline void _mlc_close(int64_t handle) {
     char* errmsg = NULL;
-    mlc_close(handle, &errmsg);
+    int rc = mlc_close(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    _mlc_throw_if_pipe_closed(rc);
 }
 
 // _mlc_throw returns a universal-conversion helper so that
@@ -529,12 +554,18 @@ struct _MlcThrowHelper {
 inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
     throw MorlocException(msg);
 }
-// @catch: run `fallible()`; on any std::exception, run `fallback()` and
+// @catch: run `fallible()`; on a recoverable error, run `fallback()` and
 // return its result. Template deduction picks the return type from the
 // fallible thunk. The fallback must return the same type.
+//
+// MorlocPipeClosed is re-thrown ahead of the broad catch: a broken pipe is
+// an <IO> condition, not a user-recoverable <Err>, so it must escape @catch
+// instead of being misrouted into a fallback. All other std::exceptions
+// (@throw, @read/@load failures, foreign <Err> helpers) stay catchable.
 template<typename FL, typename FB>
 auto _mlc_catch(FL&& fallible, FB&& fallback) -> decltype(fallible()) {
     try { return fallible(); }
+    catch (const MorlocPipeClosed&) { throw; }
     catch (const std::exception&) { return fallback(); }
 }
 // @fschema: read a file's element schema string without opening it.
@@ -703,6 +734,7 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     int rc = mlc_write(static_cast<uint8_t>(level), handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    _mlc_throw_if_pipe_closed(rc);
     if (rc != 0) {
         MLC_INTERNAL_ABORT("mlc_write returned non-zero without setting errmsg (libmorloc contract violation)");
     }
@@ -745,6 +777,7 @@ inline void _mlc_flush(int64_t handle) {
     char* errmsg = NULL;
     int rc = mlc_flush(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    _mlc_throw_if_pipe_closed(rc);
     if (rc != 0) {
         MLC_INTERNAL_ABORT("mlc_flush returned non-zero without setting errmsg (libmorloc contract violation)");
     }
@@ -994,6 +1027,10 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     morloc_debug_flush_dispatch();
     try {
         return local_dispatch(mid, args);
+    } catch (const MorlocPipeClosed& e) {
+        // Broken pipe: a distinguished, non-abort failure. The nexus owns
+        // fd 1 and decides the pipeline exit status.
+        return make_fail_packet(e.what());
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
     } catch (const char* e) {
@@ -1014,6 +1051,10 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
     morloc_debug_flush_dispatch();
     try {
         return remote_dispatch(mid, args);
+    } catch (const MorlocPipeClosed& e) {
+        // Broken pipe: a distinguished, non-abort failure. The nexus owns
+        // fd 1 and decides the pipeline exit status.
+        return make_fail_packet(e.what());
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
     } catch (const char* e) {

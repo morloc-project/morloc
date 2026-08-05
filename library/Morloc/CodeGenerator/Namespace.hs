@@ -1018,7 +1018,7 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidSerialExpr' (BndVarS_ mayT i) = return (mempty', BndVarS mayT i)
     monoidSerialExpr' (SerializeS_ s (req, ne)) = return (req, SerializeS s ne)
     monoidSerialExpr' (LoopS_ t ids body) =
-      let reqs = map fst (loopBodyLeaves body)
+      let reqs = loopBodyLeaves (bimap fst fst body)
        in return (foldl mappend' mempty' reqs, LoopS t ids (bimap snd snd body))
 
     monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
