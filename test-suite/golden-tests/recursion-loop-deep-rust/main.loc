@@ -1,0 +1,30 @@
+module main (countdown)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Bool = "bool"
+
+source Rust from "arith.rs"
+  ( "add_i" as add
+  , "sub_i" as sub
+  , "eq_i" as eq
+  )
+
+add :: Int -> Int -> Int
+sub :: Int -> Int -> Int
+eq :: Int -> Int -> Bool
+
+-- Tail-recursive same-pool helper, lowered to a native Rust `loop` (no
+-- per-iteration serialize round-trip, no stack growth). The loop-carried
+-- accumulator and counter are deserialized once at entry into `let mut` locals
+-- and reassigned each iteration by the continue; a million-deep count that would
+-- overflow the stack as true recursion runs in O(1) stack as a loop. Values are
+-- i64, so no 32-bit truncation.
+sumTo :: Int -> Int -> Int
+sumTo acc n
+  ? eq n 0 = acc
+  : sumTo (add acc n) (sub n 1)
+
+countdown :: Int -> Int
+countdown n = sumTo 0 n

@@ -195,7 +195,7 @@ addCacheWraps (PolyHead lang midx args body) = do
 -- 'lcMakeLoop' is a matching fail-loud stub). Single source of truth for the
 -- gate.
 langSupportsNativeLoop :: Lang -> Bool
-langSupportsNativeLoop lang = langName lang `elem` ["py", "r", "cpp"]
+langSupportsNativeLoop lang = langName lang `elem` ["py", "r", "cpp", "rust"]
 
 -- | Lower an eligible tail-recursive manifold to a native 'PolyLoop'. Runs after
 -- 'express'/'addCacheWraps'/'addDebugWraps' and before 'insertEffectBoundaries'

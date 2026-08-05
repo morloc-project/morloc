@@ -126,10 +126,16 @@ data OwnEnv = OwnEnv
   -- names a caller variable, so a SHARED non-'Copy' capture must be cloned into
   -- the @move||@ closure (the move happens at closure formation, so the clone is
   -- hoisted before it) to leave the original live for the caller's other uses.
+  , oeLoopCarried :: Set.Set Int
+  -- ^ The loop-carried variable indices of a native-loop manifold. Each is an
+  -- owned native local deserialized once at entry (the carried slot is forced
+  -- 'NativeContent' so 'letWrap' emits a deserialize let) and reassigned by the
+  -- loop's continue, so its entry let is emitted @let mut@ ('rustMakeLet') and it
+  -- is unioned into 'oeShared' so the body borrows/clones but never moves it.
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -1195,25 +1201,45 @@ borrowedIndicesOfForm form =
 -- mutating state, the scope is purely lexical -- sibling and nested manifolds
 -- cannot corrupt each other's view, and the answer does not depend on the fold's
 -- evaluation order.
-withManifoldScope :: Set.Set Int -> Set.Set Int -> RustM a -> RustM a
-withManifoldScope borrowed shared =
-  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e})
+withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> RustM a -> RustM a
+withManifoldScope borrowed shared carried =
+  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
--- are named by index-aliasing after the caller's variables.
+-- are named by index-aliasing after the caller's variables. The loop-carried set
+-- does not cross into a callee's argument rendering, so it resets to empty.
 rustWithCallerScope :: RustM a -> RustM a
-rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e})
+rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e, oeLoopCarried = Set.empty})
+
+-- | The loop-carried variable indices of a manifold body, or empty if the body
+-- is not a native loop. 'addLoopWraps' makes the loop the whole body (possibly
+-- under structural wrappers and the entry deserialize lets), so walk that spine.
+-- The wrapper set must stay in sync with 'Serialize.loopCarriedTypes', which
+-- walks the identical spine to resolve the carried slots' types.
+loopCarriedIdsSM :: SerialManifold -> Set.Set Int
+loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
+  where
+    go (LoopS _ ids _) = Set.fromList ids
+    go (ReturnS x) = go x
+    go (SerialLetS _ _ x) = go x
+    go (NativeLetS _ _ x) = go x
+    go (CacheBodyS _ _ _ _ _ x) = go x
+    go (DebugWrapS _ _ _ x) = go x
+    go _ = Set.empty
 
 -- | Track each manifold's borrowed parameters as the body is folded, so
--- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value.
+-- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value. For a
+-- native-loop manifold the loop-carried locals are additionally recorded (for
+-- the @let mut@ / never-move handling) and unioned into the shared set.
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
 rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm) (recurse sm)
+        let carried = loopCarriedIdsSM sm
+         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
     , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) (recurse nm)
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -1363,11 +1389,7 @@ rustLowerConfig mask =
     , lcReleaseStmt = \_ -> ""
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcMakeIf = rustMakeIf
-    , lcMakeLoop = \_ _ ->
-        -- Rust is gated out of native loops in 'addLoopWraps' (langSupportsNativeLoop);
-        -- a Rust same-pool loop is blocked on the borrow checker + single-assignment
-        -- last-use pass rejecting in-place reassignment. Fail-loud if ever reached.
-        error "morloc: Rust native tail-loop emission not yet enabled"
+    , lcMakeLoop = rustMakeLoop
     , lcMakeDoBlock = \_ stmts expr ->
         return
           ( []
@@ -1432,7 +1454,11 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
     Just t | isFunctionTypeF t -> return ""
     Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
     Nothing -> return (":" <+> "*mut u8")
-  let letLine = "let" <+> namer letIndex <> ann <+> "=" <+> poolExpr p1 <> ";"
+  -- A loop-carried local's entry deserialize let is reassigned each iteration by
+  -- the loop's continue, so it must bind mutably.
+  carried <- asks oeLoopCarried
+  let letKw = if Set.member letIndex carried then "let mut" else "let"
+      letLine = letKw <+> namer letIndex <> ann <+> "=" <+> poolExpr p1 <> ";"
       rs = poolPriorLines p1 <> [letLine] <> poolPriorLines p2
   return $
     PoolDocs
@@ -1442,6 +1468,59 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
       , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
       , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
       }
+
+-- | Native tail-loop assembly. Walks the 'LoopBody' decision tree into a Rust
+-- @loop { ... }@ expression bound to the serial result: guards render to
+-- @if/else@, native/serial lets to @let@ locals, a base leaf to @break <base>;@
+-- (the loop expression's value), and a continue leaf to @let@ temps for each new
+-- value followed by reassignment of the loop-carried locals. The loop-carried
+-- vars are the manifold's own owned native locals (deserialized once at entry and
+-- bound @let mut@ by 'rustMakeLet'); every continue value was already owned by
+-- 'adaptLoopBodyOwned' (a passthrough carried var cloned, a fresh value moved), so
+-- computing all temps before any reassignment is safe against the
+-- parallel-assignment hazard (a temp reads a carried var by borrow/clone, never
+-- moving it out from under a later temp).
+rustMakeLoop :: [Int] -> LoopBody PoolDocs PoolDocs -> RustM PoolDocs
+rustMakeLoop ids body = do
+  resultIdx <- getCounter
+  let resultVar = helperNamer resultIdx
+  bodyLines <- walk body
+  let loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
+      resultDecl = "let" <+> resultVar <> ": *mut u8 =" <+> loopExpr <> ";"
+      leaves = loopBodyLeaves body
+  return $ PoolDocs
+    { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
+    , poolExpr = resultVar
+    , poolPriorLines = [resultDecl]
+    , poolPriorExprs = concatMap poolPriorExprs leaves
+    , poolReturnFlag = True
+    }
+  where
+    walk (LoopBase seDocs) =
+      return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
+    walk (LoopContinue contDocs) = do
+      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
+      let priors = concatMap poolPriorLines contDocs
+          tmpAssigns = zipWith (\tv cd -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
+          reassigns = zipWith (\i tv -> nvarNamer i <+> "=" <+> tv <> ";") ids tmpVars
+      return $ priors <> tmpAssigns <> reassigns
+    walk (LoopNLet i neDocs b) = do
+      rest <- walk b
+      return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+    walk (LoopSLet i seDocs b) = do
+      rest <- walk b
+      return $ poolPriorLines seDocs <> ["let" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
+    walk (LoopIf guardDocs t e) = do
+      tLines <- walk t
+      eLines <- walk e
+      let ifBlock = vsep
+            [ "if" <+> poolExpr guardDocs <+> "{"
+            , indent 4 (vsep tLines)
+            , "} else {"
+            , indent 4 (vsep eLines)
+            , "}"
+            ]
+      return $ poolPriorLines guardDocs <> [ifBlock]
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
 -- The arms are already adapted to the owned result type by the shared 'IfN_'

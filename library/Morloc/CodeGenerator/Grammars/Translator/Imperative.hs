@@ -770,6 +770,9 @@ lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
 lowerSerialExpr cfg _ (DebugWrapS_ _ mid args body) =
   lcDebugWrap cfg mid args body
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
+lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
+  body' <- adaptLoopBodyOwned cfg origBody body
+  lcMakeLoop cfg ids body'
 lowerSerialExpr cfg _ (LoopS_ _ ids body) =
   lcMakeLoop cfg ids body
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
@@ -854,6 +857,28 @@ adaptOwnedElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m
 adaptOwnedElems cfg origEs xs
   | length origEs == length xs = zipWithM (adaptOwnedElem cfg) origEs xs
   | otherwise = return xs
+
+-- | Own-adapt a native loop body's owned sinks, pairing the lowered body with
+-- the original IR. A 'LoopContinue' argument feeds a loop-carried reassignment
+-- and an intermediate 'LoopNLet' RHS feeds a fresh local -- both owned sinks, so
+-- a borrowed value must be cloned to survive (Rust); a no-op where ownership is
+-- trivial (C++/py/r 'lcOwnArg' is identity). Guards, serial lets, and the
+-- already-serialized base pass through. Shape mismatch falls back to the lowered
+-- body unchanged, mirroring 'adaptOwnedElems'.
+adaptLoopBodyOwned ::
+  (Monad m) =>
+  LowerConfig m ->
+  LoopBody NativeExpr SerialExpr ->
+  LoopBody PoolDocs PoolDocs ->
+  m (LoopBody PoolDocs PoolDocs)
+adaptLoopBodyOwned cfg = go
+  where
+    go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
+    go (LoopNLet _ orhs ob) (LoopNLet i rhs b) =
+      LoopNLet i <$> adaptOwnedElem cfg orhs rhs <*> go ob b
+    go (LoopSLet _ _ ob) (LoopSLet i rhs b) = LoopSLet i rhs <$> go ob b
+    go (LoopContinue ones) (LoopContinue pds) = LoopContinue <$> adaptOwnedElems cfg ones pds
+    go _ lowered = return lowered
 
 -- | Adapt each aggregate element/field to its stored representation via
 -- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
