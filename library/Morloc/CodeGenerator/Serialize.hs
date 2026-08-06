@@ -281,26 +281,17 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
               return $ NativeLetN i ne1 ne2
     nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
-    -- Cross-language recursive call: serialize args, call via socket, deserialize result
-    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid (Just targetLang))) es) = do
-      let (_, outputType) = case t0 of
-            FunT its ot -> (its, ot)
-            _ -> ([], t0)
-      nativeArgs <- mapM (nativeExpr m) es
-      serializedArgs <- mapM (serializeS "foreignRecArg" m) nativeArgs
-      resultType <- inferType (Idx idx outputType)
-      config <- MM.ask
-      let socket = MC.setupServerAndSocket config reg targetLang
-          serialCall = AppForeignRecS resultType mid socket serializedArgs
-      naturalizeN "foreignRecCall" m lang resultType serialCall
-    -- Recursive call with no cross-language mark from Express. The Express-time
-    -- 'crossLang' was decided relative to the recursion's TEXTUAL parent pool,
-    -- but an agnostic back-edge can be relocated into a different pool during
-    -- segmentation (it follows a foreign argument). Re-check co-location against
-    -- 'lang' -- the pool this manifold was actually segmented into, now finally
-    -- known -- and promote to a socket 'foreign_call' ('AppForeignRecS') when the
-    -- target manifold is not co-located; otherwise a local same-pool 'AppRecS'.
-    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid Nothing)) es) = do
+    -- Recursive call. The Express-time 'crossLang' mark was decided relative to
+    -- the recursion's TEXTUAL parent pool, but segmentation can relocate a
+    -- back-edge into a different pool (agnostic edges follow a foreign argument;
+    -- a marked edge can land inside its own target's pool). Ignore the stale mark
+    -- and re-derive co-location against 'lang' -- the pool this manifold was
+    -- actually segmented into, now finally known -- and 'stateManifoldLang', the
+    -- authoritative target pool: a socket 'foreign_call' ('AppForeignRecS') when
+    -- the target is not co-located, otherwise a local same-pool 'AppRecS'. For a
+    -- genuinely cross-pool recursion this reproduces the original mark exactly
+    -- (Express set 'Just tl' from the same 'stateManifoldLang' lookup).
+    nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid _)) es) = do
       let (_, outputType) = case t0 of
             FunT its ot -> (its, ot)
             _ -> ([], t0)

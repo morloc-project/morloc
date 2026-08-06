@@ -799,6 +799,15 @@ lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
   lcMakeLet cfg nvarNamer i Nothing False e1 e2
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
+lowerSerialExpr cfg (SerializeS _ origE) (SerializeS_ s e) = do
+  -- The serialized value crosses the wire (an owned sink), so own-adapt it: a
+  -- borrowed non-Copy Rust value (e.g. a '&Vec' parameter) must be cloned to an
+  -- owned value before serialization -- 'put_value' takes '&T', so a borrowed
+  -- '&Vec' would otherwise be double-referenced ('&&Vec', not 'ToVoidstar'). A
+  -- no-op where 'lcOwnArg' is identity (C++/py/r).
+  e' <- adaptOwnedElem cfg origE e
+  se <- lcSerialize cfg (poolExpr e') s
+  return $ e' {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e' <> poolPriorLines se}
 lowerSerialExpr cfg _ (SerializeS_ s e) = do
   se <- lcSerialize cfg (poolExpr e) s
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
@@ -1056,38 +1065,47 @@ lowerNativeExpr cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs els
   lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
+lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
+  -- The hashed value crosses into a 'ToVoidstar' (&T) sink; own-adapt it so a
+  -- borrowed non-Copy Rust value is cloned rather than double-borrowed
+  -- ('&(&Vec)'). No-op where 'lcOwnArg' is identity (C++/py/r).
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE, _]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
+  -- The saved value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- @hash above). level and path are scalar/Str, not value sinks.
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "voidstar"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr (render (poolExpr levelDocs)))
-                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs, pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs', pathDocs]
 -- @savem/@savej take source args in (path, value) order for
 -- partial-application ergonomics (`@savem path` is a reusable sink).
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
 -- They are not packet formats; codegen always passes a zero level
 -- expression so the printed call shape is uniform with @save.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "msgpack"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
-                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "json"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
-                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- Post effect-migration, @load returns bare `T` (no OptionalF wrap).
@@ -1097,9 +1115,12 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) =
   -- resolved type unconditionally.
   innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad sid innerType (IRawExpr (render (poolExpr pathDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
+lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs))))}
+  -- The shown value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- @hash above) so a borrowed non-Copy Rust value is cloned, not double-borrowed.
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs'))))}
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- Same rationale as IntrLoad above: @read returns bare `T` now,
@@ -1204,14 +1225,17 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
 -- (level, value, handle) to match the C ABI `mlc_write(level, handle,
 -- voidstar)` and the pool's `_mlc_write(schema, level, value, handle)`
 -- helper.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, valueE]) (IntrinsicN_ _ IntrWrite (Just schema)
                                   [levelDocs, handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  let allDocs = [levelDocs, handleDocs, valueDocs]
+  -- The written value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- @hash above). level and handle are not value sinks.
+  valueDocs' <- adaptOwnedElem cfg valueE valueDocs
+  let allDocs = [levelDocs, handleDocs, valueDocs']
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
-        (IIntrinsicWrite sid (raw levelDocs) (raw valueDocs) (raw handleDocs))
+        (IIntrinsicWrite sid (raw levelDocs) (raw valueDocs') (raw handleDocs))
     , poolPriorExprs = concatMap poolPriorExprs allDocs
     , poolPriorLines = concatMap poolPriorLines allDocs
     , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs

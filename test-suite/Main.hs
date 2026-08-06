@@ -121,6 +121,7 @@ main = do
       , golden "futhark-fractal" "futhark-fractal"
       , golden "futhark-matrix-io" "futhark-matrix-io"
       , golden "rust-basic" "rust-basic"
+      , golden "rust-intrinsic-borrowed" "rust-intrinsic-borrowed"
       , golden "rust-py-crosspool" "rust-py-crosspool"
       , golden "rust-error" "rust-error"
       , golden "rust-record" "rust-record"
@@ -754,6 +755,9 @@ main = do
       , golden "recursion-crosspool-mutual" "recursion-crosspool-mutual"
       , golden "recursion-crosspool-loop-shapes" "recursion-crosspool-loop-shapes"
       , golden "recursion-crosspool-mutual-list" "recursion-crosspool-mutual-list"
+      , golden "recursion-crosspool-features" "recursion-crosspool-features"
+      , golden "recursion-crosspool-closure-io" "recursion-crosspool-closure-io"
+      , golden "recursion-crosspool-pointfree" "recursion-crosspool-pointfree"
       , -- optional type tests
         golden "optional-py" "optional-py"
       , golden "optional-cpp" "optional-cpp"

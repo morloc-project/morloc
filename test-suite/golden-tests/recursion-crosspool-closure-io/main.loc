@@ -1,0 +1,38 @@
+-- Cross-pool CLOSURE-CAPTURE + <IO> recursion. The within-pool analog is
+-- `recursive-where-capture-effect-py`; here the recursion additionally crosses a
+-- pool boundary at its leaf calls.
+--
+-- `go` is a where-bound recursive helper that CAPTURES the outer scalar `k`,
+-- returns `<IO> Int`, and threads its recursion through a C++ guard/decrement
+-- (`isZeroC`/`decC`) while performing a Python IO effect (`noisyAddP`) each
+-- iteration. So a single manifold must simultaneously: (a) survive closure
+-- conversion with the captured `k` placed INSIDE the EffectT layer, and (b)
+-- cross the pool boundary on its leaf calls. The self-call stays same-pool
+-- (Category L); the effect and one of the guard/dec primitives cross.
+--
+-- Verify with `morloc dump main.loc` that `noisyAddP` and the C++ primitives
+-- realize in different pools; if the realizer collapses them this golden no
+-- longer exercises a cross-pool captured-effect recursion and must be adjusted.
+module main (effRec)
+
+import root-py
+import root-cpp
+
+source Py from "helpers.py" ("noisy_add" as noisyAddP)
+noisyAddP :: Int -> <IO> Int
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_dec"     as decC
+  , "cpp_is_zero" as isZeroC
+  )
+decC    :: Int -> Int
+isZeroC :: Int -> Bool
+
+effRec :: Int -> Int -> <IO> Int
+effRec k n = go n where
+  go m ? isZeroC m = noisyAddP k
+       : step m
+  step :: Int -> <IO> Int
+  step m = do
+    noisyAddP k
+    go (decC m)

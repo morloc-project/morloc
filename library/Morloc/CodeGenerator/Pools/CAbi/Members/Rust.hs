@@ -538,14 +538,18 @@ rustCacheBody resSa lbl midx args bodyPool = do
 -- @put_value@; an already-serial arg passes through by name. Returns the
 -- packet-pointer expression, the arg's msgpack schema, and any setup lines.
 prepareRustCacheArg :: Int -> (Int, (Arg TypeM, SerialAST)) -> RustM (MDoc, Text, [MDoc])
-prepareRustCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
+prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
   let schemaStr = render (serialAstToMsgpackSchema sa)
   case tm of
-    Native _ -> do
+    Native tf -> do
       sid <- rustRegisterSchema schemaStr
+      -- The cache-key value crosses into a 'ToVoidstar' (&T) 'put_value' sink;
+      -- own-adapt so a borrowed non-Copy native arg is cloned rather than
+      -- double-borrowed ('&(&Vec)').
+      own <- rustOwnership (BndVarN tf i)
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
           decl = "let" <+> argVar <> ": *const u8 = rustmorloc::put_value(&("
-                   <> argNamer a <> "), " <> sch sid <> ");"
+                   <> rustOwn own tf (argNamer a) <> "), " <> sch sid <> ");"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 

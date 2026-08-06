@@ -1,0 +1,34 @@
+-- Cross-pool recursion reached through a POINT-FREE export alias. The exported
+-- name is bound point-free (`countdownSum = go`, no arguments / no eta
+-- expansion) to a recursive worker whose leaf calls cross a pool boundary
+-- (Python guard/decrement `isZeroP`/`decP`, C++ accumulate `addC`). This checks
+-- that the point-free alias does not lose the worker's cross-pool recursion
+-- wiring on the way to becoming a nexus entry point -- the alias must resolve to
+-- the recursive manifold, not shadow or re-serialize it.
+--
+-- Verify with `morloc dump main.loc` that `go`'s guard/dec and `addC` realize in
+-- different pools so a leaf call genuinely crosses.
+module main (countdownSum)
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_is_zero" as isZeroP
+  , "py_dec"     as decP
+  )
+isZeroP :: Int -> Bool
+decP    :: Int -> Int
+
+source Cpp from "cpp_prim.hpp" ("cpp_add" as addC)
+addC :: Int -> Int -> Int
+
+-- tail-recursive worker: sum n + (n-1) + ... + 1 into acc, crossing pools
+go :: Int -> Int -> Int
+go n acc
+  ? isZeroP n = acc
+  : go (decP n) (addC acc n)
+
+-- point-free export alias of the recursive worker
+countdownSum :: Int -> Int -> Int
+countdownSum = go
