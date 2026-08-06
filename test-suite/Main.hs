@@ -751,6 +751,9 @@ main = do
       , golden "recursion-thunk-py" "recursion-thunk-py"
       , golden "recursion-thunk-helper-cpp" "recursion-thunk-helper-cpp"
       , golden "recursion-crosspool-io-tuple" "recursion-crosspool-io-tuple"
+      , golden "recursion-crosspool-mutual" "recursion-crosspool-mutual"
+      , golden "recursion-crosspool-loop-shapes" "recursion-crosspool-loop-shapes"
+      , golden "recursion-crosspool-mutual-list" "recursion-crosspool-mutual-list"
       , -- optional type tests
         golden "optional-py" "optional-py"
       , golden "optional-cpp" "optional-cpp"

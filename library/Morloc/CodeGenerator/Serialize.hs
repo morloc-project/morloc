@@ -293,19 +293,27 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       let socket = MC.setupServerAndSocket config reg targetLang
           serialCall = AppForeignRecS resultType mid socket serializedArgs
       naturalizeN "foreignRecCall" m lang resultType serialCall
-    -- Same-language recursive call: serialize args, call serial manifold, deserialize result
+    -- Recursive call with no cross-language mark from Express. The Express-time
+    -- 'crossLang' was decided relative to the recursion's TEXTUAL parent pool,
+    -- but an agnostic back-edge can be relocated into a different pool during
+    -- segmentation (it follows a foreign argument). Re-check co-location against
+    -- 'lang' -- the pool this manifold was actually segmented into, now finally
+    -- known -- and promote to a socket 'foreign_call' ('AppForeignRecS') when the
+    -- target manifold is not co-located; otherwise a local same-pool 'AppRecS'.
     nativeExpr m (MonoApp (MonoExe (Idx idx t0) (RecCallP mid Nothing)) es) = do
       let (_, outputType) = case t0 of
             FunT its ot -> (its, ot)
             _ -> ([], t0)
-      -- Build native args, then serialize each one
       nativeArgs <- mapM (nativeExpr m) es
       serializedArgs <- mapM (serializeS "recArg" m) nativeArgs
-      -- Return type of the serial manifold call
       resultType <- inferType (Idx idx outputType)
-      -- Create serial expression: call the serial manifold with serialized args
-      let serialCall = AppRecS resultType mid serializedArgs
-      -- Deserialize the result back to native
+      langMap <- MM.gets stateManifoldLang
+      serialCall <- case Map.lookup mid langMap of
+        Just targetLang | not (LR.coLocated reg lang targetLang) -> do
+          config <- MM.ask
+          let socket = MC.setupServerAndSocket config reg targetLang
+          return (AppForeignRecS resultType mid socket serializedArgs)
+        _ -> return (AppRecS resultType mid serializedArgs)
       naturalizeN "recCall" m lang resultType serialCall
     nativeExpr m (MonoApp (MonoExe (Idx idx t0) exe) es) = do
       args <- mapM (nativeArg m) es

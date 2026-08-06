@@ -1,0 +1,72 @@
+-- Cross-pool MUTUAL recursion. This is the first golden to exercise a recursive
+-- BACK-EDGE that itself crosses a pool boundary; every prior cross-pool
+-- recursion crossed only at leaf calls, with the recursive self-call staying in
+-- one pool.
+--
+-- Mechanism: mutual recursion is compiled by inline-once + back-edge collapse
+-- (Treeify `namerExpanding`). Compiling `isEven` inlines `isOdd`'s body once;
+-- the deep `isEven` reference inside that inlined region collapses to a
+-- recursive back-edge. If `isEven` is realized in Python and `isOdd` in C++,
+-- that back-edge sits in the C++ region while its target manifold is Python, so
+-- it becomes a cross-pool back-edge (`crossLang = Just`) and lowers through the
+-- `AppForeignRecS` path -- the path that must gain an all-serial dispatch
+-- wrapper.
+--
+-- To bias the realizer into splitting the pair, `isEven`/`ping` use ONLY
+-- Python-sourced primitives and `isOdd`/`pong` ONLY C++-sourced ones.
+-- IMPORTANT: verify with `morloc dump main.loc` (or `morloc make ... -vvv`)
+-- that the two partners actually realize in different pools; if the realizer
+-- collapses them into one pool this golden does NOT exercise a cross-pool
+-- back-edge and must be adjusted.
+
+module main
+  ( isEven
+  , isOdd
+  , ping
+  , pong
+  )
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_is_zero" as isZeroP
+  , "py_dec"     as decP
+  , "py_add"     as addP
+  )
+isZeroP :: Int -> Bool
+decP    :: Int -> Int
+addP    :: Int -> Int -> Int
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_is_zero" as isZeroC
+  , "cpp_dec"     as decC
+  , "cpp_add"     as addC
+  )
+isZeroC :: Int -> Bool
+decC    :: Int -> Int
+addC    :: Int -> Int -> Int
+
+-- Classic mutual parity check, scalar Bool state. isEven -> Python, isOdd -> C++.
+isEven :: Int -> Bool
+isEven n
+  ? isZeroP n = True
+  : isOdd (decP n)
+
+isOdd :: Int -> Bool
+isOdd n
+  ? isZeroC n = False
+  : isEven (decC n)
+
+-- Mutual recursion carrying an Int accumulator across the cross-pool back-edge:
+-- ping (Python) and pong (C++) alternate, summing n..1 into acc. Exercises a
+-- non-trivial value threaded through a back-edge that crosses pools.
+ping :: Int -> Int -> Int
+ping n acc
+  ? isZeroP n = acc
+  : pong (decP n) (addP acc n)
+
+pong :: Int -> Int -> Int
+pong n acc
+  ? isZeroC n = acc
+  : ping (decC n) (addC acc n)

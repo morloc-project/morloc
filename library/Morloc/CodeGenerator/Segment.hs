@@ -52,10 +52,21 @@ segmentExpr
         <> "\n  cargs" <+> pretty cargs
         <> "\n  foreignArgs" <+> pretty (map ann foreignArgs)
     (ms, (_, e')) <- segmentExpr m (map ann foreignArgs) e
+    -- An <IO>-forced recursion nested in this cross-pool callee does not inline
+    -- (Serialize collapses only a transparent, unforced manifold), so it would
+    -- emit as a NATIVE manifold reusing THIS wrapper's id 'm' -- the native form
+    -- then overwrites the serial-boundary wrapper in the per-id manifold dedup,
+    -- and 'local_dispatch' feeds serial packets to native params. Give any nested
+    -- recursion-bearing shadow of 'm' a fresh id so the serial wrapper keeps the
+    -- dispatch id. The wrapper (the top manifold at 'm') is left in place.
+    e'' <- case e' of
+      MonoManifold i mform mkind mbody | i == m ->
+        MonoManifold i mform mkind <$> reindexRecShadows m mbody
+      _ -> reindexRecShadows m e'
     headForm <- case remoteCall of
       ForeignCall -> return HeadManifoldFormLocalForeign
       (RemoteCall _) -> return HeadManifoldFormRemoteWorker
-    let foreignHead = MonoHead lang m foreignArgs headForm e'
+    let foreignHead = MonoHead lang m foreignArgs headForm e''
     config <- MM.ask
     reg <- MM.gets stateLangRegistry
     let socket = MC.setupServerAndSocket config reg lang
@@ -145,3 +156,60 @@ segmentExpr m args (PolyIntrinsic t intr es) = do
   results <- mapM (segmentExpr m args) es
   let (mss, pairs) = unzip results
   return (concat mss, (Nothing, MonoIntrinsic t intr (map snd pairs)))
+
+-- | Whether a 'MonoExpr' subtree contains a recursive back-edge ('RecCallP').
+-- Used to gate 'reindexRecShadows' so only recursion-bearing manifolds are
+-- reindexed; a non-recursive cross-pool crossing (e.g. a closure return) that
+-- legitimately shares the wrapper id and collapses is left untouched.
+monoHasRec :: MonoExpr -> Bool
+monoHasRec (MonoExe _ (RecCallP _ _)) = True
+monoHasRec (MonoManifold _ _ _ e) = monoHasRec e
+monoHasRec (MonoLet _ a b) = monoHasRec a || monoHasRec b
+monoHasRec (MonoReturn e) = monoHasRec e
+monoHasRec (MonoApp f xs) = monoHasRec f || any monoHasRec xs
+monoHasRec (MonoCacheBody _ _ _ e) = monoHasRec e
+monoHasRec (MonoDebugWrap _ _ e) = monoHasRec e
+monoHasRec (MonoRecord _ _ _ es) = any (monoHasRec . snd . snd) es
+monoHasRec (MonoList _ _ es) = any monoHasRec es
+monoHasRec (MonoTuple _ es) = any (monoHasRec . snd) es
+monoHasRec (MonoDoBlock _ e) = monoHasRec e
+monoHasRec (MonoEval _ e) = monoHasRec e
+monoHasRec (MonoCoerce _ _ e) = monoHasRec e
+monoHasRec (MonoIf c t e) = monoHasRec c || monoHasRec t || monoHasRec e
+monoHasRec (MonoLoop _ _ e) = monoHasRec e
+monoHasRec (MonoLoopContinue es) = any monoHasRec es
+monoHasRec (MonoIntrinsic _ _ es) = any monoHasRec es
+monoHasRec _ = False
+
+-- | Reindex any nested 'MonoManifold' that reuses the id @s@ AND whose subtree
+-- carries a recursive back-edge, giving it a fresh id. This separates an
+-- '<IO>'-forced recursion body (which does not inline into the cross-pool
+-- serial-boundary wrapper) from the wrapper that owns the dispatch id, so the
+-- native body no longer overwrites the serial wrapper in the per-id manifold
+-- dedup. Applied to the wrapper's BODY, so the wrapper (the top manifold at @s@)
+-- keeps its id.
+reindexRecShadows :: Int -> MonoExpr -> MorlocMonad MonoExpr
+reindexRecShadows s = go
+  where
+    go (MonoManifold i form k e)
+      | i == s && monoHasRec e = do
+          i' <- MM.getCounter
+          MonoManifold i' form k <$> go e
+      | otherwise = MonoManifold i form k <$> go e
+    go (MonoLet i a b) = MonoLet i <$> go a <*> go b
+    go (MonoReturn e) = MonoReturn <$> go e
+    go (MonoApp f xs) = MonoApp <$> go f <*> mapM go xs
+    go (MonoCacheBody l i as e) = MonoCacheBody l i as <$> go e
+    go (MonoDebugWrap i as e) = MonoDebugWrap i as <$> go e
+    go (MonoRecord n v ts es) =
+      MonoRecord n v ts <$> mapM (\(key, (t, e)) -> (\e' -> (key, (t, e'))) <$> go e) es
+    go (MonoList v ts es) = MonoList v ts <$> mapM go es
+    go (MonoTuple v es) = MonoTuple v <$> mapM (\(t, e) -> (,) t <$> go e) es
+    go (MonoDoBlock t e) = MonoDoBlock t <$> go e
+    go (MonoEval t e) = MonoEval t <$> go e
+    go (MonoCoerce c t e) = MonoCoerce c t <$> go e
+    go (MonoIf c t e) = MonoIf <$> go c <*> go t <*> go e
+    go (MonoLoop t ids e) = MonoLoop t ids <$> go e
+    go (MonoLoopContinue es) = MonoLoopContinue <$> mapM go es
+    go (MonoIntrinsic t intr es) = MonoIntrinsic t intr <$> mapM go es
+    go e = return e

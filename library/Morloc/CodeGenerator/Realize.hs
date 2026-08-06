@@ -301,7 +301,17 @@ realizeWithRegistry registry s0 = do
       c' <- scoreAnnoS rstat c
       t' <- scoreAnnoS rstat t
       e' <- scoreAnnoS rstat e
-      let best = minPairs (scoresOf c' ++ scoresOf t' ++ scoresOf e')
+      -- Combine the condition and both branches like an application (each
+      -- sub-result must be produced in the chosen language, with cross-language
+      -- penalties), NOT a per-language min across all three concatenated: a bare
+      -- 'minPairs' lets a language-agnostic branch (e.g. a base case that just
+      -- returns a parameter, score 0 in every language) mask the real cost of a
+      -- heavy branch (e.g. a cross-pool recursive loop body), collapsing the
+      -- manifold's language choice to an arbitrary tiebreak. Mirrors 'LetS'.
+      let best = scoreApp [] [ minPairs (scoresOf c')
+                             , minPairs (scoresOf t')
+                             , minPairs (scoresOf e')
+                             ]
       return (IfS c' t' e', Idx i best)
     scoreExpr rstat (DoBlockS x, i) = do
       x' <- scoreAnnoS rstat x

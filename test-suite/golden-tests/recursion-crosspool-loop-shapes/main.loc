@@ -1,0 +1,59 @@
+-- Cross-pool tail loops (Category L: the recursive back-edge stays same-pool,
+-- the per-iteration work crosses to a foreign leaf) in loop-body SHAPES that the
+-- existing cross-pool loop golden does not cover. The prior golden
+-- (recursion-loop-tuple-crosspool) covers a foreign 2-/3-tuple carry in a pure
+-- and a same-pool-IO loop; this one adds a MULTI-GUARD/nested-if loop body and a
+-- SWAP carry, both driven in C++ with a Python foreign leaf per iteration.
+--
+-- The guard/counter arithmetic is C++ (so the driver realizes in the cpp pool
+-- and self-recurses same-pool), while the per-iteration transform is a foreign
+-- Python call. VERIFY with `morloc dump` that these lower to a native cpp
+-- while-loop with one foreign_call per iteration (not O(N) recursion).
+
+module main
+  ( collatzX
+  , fibCross
+  )
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_half"    as half
+  , "py_triple1" as triple1
+  , "py_add"     as add
+  )
+half    :: Int -> Int
+triple1 :: Int -> Int
+add     :: Int -> Int -> Int
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_is_one"  as isOne
+  , "cpp_is_even" as isEven
+  , "cpp_is_zero" as isZero
+  , "cpp_dec"     as dec
+  , "cpp_inc"     as inc
+  )
+isOne  :: Int -> Bool
+isEven :: Int -> Bool
+isZero :: Int -> Bool
+dec    :: Int -> Int
+inc    :: Int -> Int
+
+-- Multi-guard / nested-if loop body: two guarded tail continues (even/odd) plus
+-- a base, with a FOREIGN Python transform (`half`/`triple1`) each iteration and
+-- a C++ driver. Collatz step count.
+collatzX :: Int -> Int -> Int
+collatzX n steps
+  ? isOne n = steps
+  ? isEven n = collatzX (half n) (inc steps)
+  : collatzX (triple1 n) (inc steps)
+
+-- Swap carry: `a` takes `b`'s old value while the new `b` reads the OLD `a` (via
+-- the foreign Python `add`). Correct only if both continue values are computed
+-- before either loop-local is reassigned. C++ driver (`dec`/`isZero`), foreign
+-- Python leaf (`add`). Fibonacci.
+fibCross :: Int -> Int -> Int -> Int
+fibCross a b n
+  ? isZero n = a
+  : fibCross b (add a b) (dec n)
