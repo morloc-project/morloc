@@ -1,0 +1,22 @@
+module main (run)
+
+import root-py
+
+source Py from "foo.py" ("emit")
+
+emit :: Int -> <IO> Int
+
+-- A multi-guard <IO> same-pool tail loop: two guarded recursive branches, each
+-- with a per-iteration effect, plus an <IO> base. Exercises native-loop lowering
+-- of a nested-if body whose every continue sits under a do-block -- i.e.
+-- multi-guard AND <IO> together, which single-guard recursion-loop-io-py and
+-- pure multi-guard recursion-loop-shapes-py do not cover jointly.
+run :: Int -> Int -> <IO> Int
+run acc n
+  ? n == 0 = emit acc
+  ? (n // 2) * 2 == n = do
+      _ <- emit n
+      run (acc + n) (n - 1)
+  : do
+      _ <- emit (0 - n)
+      run (acc + 1) (n - 1)

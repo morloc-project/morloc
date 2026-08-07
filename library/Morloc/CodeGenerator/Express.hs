@@ -241,6 +241,29 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
     then do
       let ityp = snd (head backEdges)
           ids = map ann args
+      -- Loud-fail two invariants the emitters (genericMakeLoop / lcMakeLoop /
+      -- rustMakeLoop) silently assume, now that co-location routes more programs
+      -- through this path. (1) Every continue carries exactly one value per
+      -- loop-carried id; otherwise the emitters' `zipWith` over (ids, values)
+      -- drops reassignments and the loop never advances its state. (2) The
+      -- rewrite introduced no new free variable (beyond the ids the continue
+      -- carries): dropping a recursion wrapper (rewriteLoopTail) must not strand
+      -- a reference to one of that wrapper's own bound params.
+      mapM_
+        (\n ->
+          if n == length ids
+            then return ()
+            else MM.throwSourcedError midx $
+              "Compiler-internal error: loop continue carries" <+> pretty n <+>
+              "values but the loop has" <+> pretty (length ids) <+> "carried variables")
+        (loopContinueArities loopBody)
+      let stranded = polyFreeVars loopBody
+            `Set.difference` (polyFreeVars body `Set.union` Set.fromList ids)
+      if Set.null stranded
+        then return ()
+        else MM.throwSourcedError midx $
+          "Compiler-internal error: loop lowering stranded variable reference(s)"
+          <+> list (map pretty (Set.toList stranded))
       MM.sayVVV $ "addLoopWraps: lowering midx" <+> pretty midx <+> "to a native loop over" <+> list (map pretty ids)
       return $ PolyHead lang midx args (PolyLoop ityp ids loopBody)
     else return ph
@@ -269,6 +292,14 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
         go e = concatMap go (polySubExprs e)
         resultType (FunT _ out) = out
         resultType t = t
+
+    -- The arity (count of carried values) of every 'PolyLoopContinue' in a
+    -- rewritten loop body, used by 'addLoopWraps' to check that each continue
+    -- supplies exactly one value per loop-carried id.
+    loopContinueArities :: PolyExpr -> [Int]
+    loopContinueArities e =
+      (case e of PolyLoopContinue xs -> [length xs]; _ -> [])
+        ++ concatMap loopContinueArities (polySubExprs e)
 
     -- A well-formed loop body that 'serialExpr'\'s 'buildLoopBody' can extract:
     -- a decision tree of guards ('PolyIf') and lets over base leaves and
@@ -2193,6 +2224,10 @@ polyFreeVars = go
     go (PolyEval _ e) = go e
     go (PolyCoerce _ _ e) = go e
     go (PolyIntrinsic _ _ es) = Set.unions (map go es)
+    -- The loop-carried ids are re-bound each iteration, so they are local to the
+    -- loop; a continue's values are ordinary sub-expressions in the loop scope.
+    go (PolyLoop _ ids e) = Set.difference (go e) (Set.fromList ids)
+    go (PolyLoopContinue xs) = Set.unions (map go xs)
     go _ = Set.empty
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.

@@ -1140,6 +1140,12 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         serialInner (FunctionS _ (SerialS tf)) = Just tf
         serialInner _ = Nothing
 
+        -- Function values have no wire form, so a serially-requested native
+        -- loop-local of function type must stay native (mirrors the guards in
+        -- 'patchCarriedForm' / 'specialize').
+        isFunF (FunF {}) = True
+        isFunF _ = False
+
         -- Wire the loop body bottom-up, returning the merged request map of the
         -- subtree alongside the rewired body (so a 'LoopSLet's downstream request
         -- is the child's returned map -- no per-node re-fold). (c) An internal
@@ -1149,9 +1155,23 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           (rt, tb') <- wireLoopBody tb
           (re, eb') <- wireLoopBody eb
           return (Map.unionsWith (<>) [rc, rt, re], LoopIf ne tb' eb')
+        -- Native->serial reconciliation (mirrors the non-loop 'NativeLetS_', and
+        -- the opposite of the 'LoopSLet' naturalize above): a native loop-local
+        -- consumed serially downstream -- e.g. a destructured tuple component
+        -- ('.0'/'.1' of a carried tuple) passed to a foreign-call leaf, which the
+        -- emitter reads by index 's<i>' -- needs a serial form bound at its own
+        -- (branch-local) scope. It cannot be hoisted to the loop top like a
+        -- carried slot ('serialUsed'), because the local does not exist there.
         wireLoopBody (LoopNLet i (rn, ne) b) = do
           (rb, b') <- wireLoopBody b
-          return (Map.unionWith (<>) rn rb, LoopNLet i ne b')
+          leaf <- case Map.lookup i rb of
+            (Just SerialContent) | not (isFunF (typeFof ne)) ->
+              (\se -> LoopSLet i se b') <$> serializeS "loop-nat-to-ser" m0 (typeFof ne) ne
+            (Just NativeAndSerialContent) | not (isFunF (typeFof ne)) -> do
+              sv <- serializeS "loop-nat-to-ser" m0 (typeFof ne) (LetVarN (typeFof ne) i)
+              return (LoopNLet i ne (LoopSLet i sv b'))
+            _ -> return (LoopNLet i ne b')
+          return (Map.unionWith (<>) rn rb, leaf)
         wireLoopBody (LoopSLet i (rs, se) b) = do
           (rb, b') <- wireLoopBody b
           leaf <- case (Map.lookup i rb, serialInner (typeSof se)) of
