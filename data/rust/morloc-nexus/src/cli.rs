@@ -92,6 +92,16 @@ pub struct DispatchOptions {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Print a machine-readable JSON description of every command
+    /// (arguments, types, CLI shape, return) and exit.
+    #[arg(long = "json-help")]
+    pub json_help: bool,
+
+    /// Print an MCP tools/list definition for every command (name,
+    /// description, JSON Schema inputSchema/outputSchema) and exit.
+    #[arg(long = "mcp-tools")]
+    pub mcp_tools: bool,
+
     /// Per-run output dir (logs, summary.json, debug dumps).
     #[arg(long = "log-dir", value_name = "DIR")]
     pub log_dir: Option<String>,

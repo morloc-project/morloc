@@ -9,6 +9,7 @@ mod convert;
 mod dispatch;
 mod file;
 mod help;
+mod json_help;
 mod loader;
 mod manifest;
 mod phase2;
@@ -73,6 +74,44 @@ fn main() {
             view::run(vargs);
         }
         _ => {}
+    }
+
+    // Machine-readable help: `--json-help` / `--mcp-tools` describe the whole
+    // program and short-circuit before any pool/SHM/signal setup, reading the
+    // loaded manifest only. They are nexus-global, not per-command: there is
+    // deliberately no `./prog cmd --json-help` -- callers dump the full JSON
+    // and extract the command they want.
+    //
+    // The flag is honored in the nexus zone (`morloc-nexus run --json-help
+    // ./prog`, or `./prog --json-help @`) or as the *leading* command-zone
+    // token (`./prog --json-help`, which the argv splitter routes into the
+    // command zone the same way it routes `-h`). A flag written *after* a
+    // subcommand (`./prog cmd --json-help`) is not leading, so it falls
+    // through to clap and is rejected as an unexpected argument -- keeping the
+    // "no per-command form" rule consistent rather than silently ignoring the
+    // subcommand.
+    if let cli::Mode::Run(ref rargs) = invocation.nexus.cmd {
+        let leading = invocation.user_zone.first().map(|s| s.as_str());
+        let want_json = rargs.common.json_help || leading == Some("--json-help");
+        let want_mcp = rargs.common.mcp_tools || leading == Some("--mcp-tools");
+        if want_json || want_mcp {
+            match invocation.manifest.as_ref() {
+                Some(m) => {
+                    if want_json {
+                        json_help::print_json_help(m);
+                    } else {
+                        json_help::print_mcp_tools(m);
+                    }
+                    std::process::exit(0);
+                }
+                None => {
+                    eprintln!(
+                        "Error: --json-help/--mcp-tools require a program target"
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
     }
 
     let mut manifest = match invocation.manifest {

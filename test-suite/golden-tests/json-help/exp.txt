@@ -1,0 +1,684 @@
+=== json-help ===
+{
+  "morloc_version": "VERSION",
+  "program": {
+    "name": "main",
+    "description": [
+      "Demo program exercising every CLI argument shape, used to verify the",
+      "--json-help and --mcp-tools machine-readable help outputs."
+    ]
+  },
+  "groups": [],
+  "commands": [
+    {
+      "name": "sumMany",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Sum a list of integers"
+      ],
+      "arguments": [
+        {
+          "name": "arg0",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": true,
+          "variadic": true,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "[Int]",
+            "wire": "aj",
+            "structure": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "auto",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": "one or more argv tokens, each parsed as the element type"
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "Int",
+          "wire": "j",
+          "structure": {
+            "type": "integer"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "configure",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Summarize a system configuration"
+      ],
+      "arguments": [
+        {
+          "name": "sysconfig",
+          "role": "group",
+          "metavar": "SYS_CONFIG",
+          "required": true,
+          "description": [
+            "System configuration passed as a flattened flag group"
+          ],
+          "type": {
+            "morloc": "SysConfig",
+            "wire": "<dict>m36tmpDirsanumThreadsjcremoveCachesb",
+            "structure": {
+              "type": "object",
+              "properties": {
+                "tmpDir": {
+                  "type": "string"
+                },
+                "numThreads": {
+                  "type": "integer"
+                },
+                "removeCaches": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "tmpDir",
+                "numThreads",
+                "removeCaches"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "named_type_kind": "record",
+          "group_option": {
+            "short": null,
+            "long": "sys-config"
+          },
+          "entries": [
+            {
+              "key": "tmpDir",
+              "argument": {
+                "name": "tmp-dir",
+                "role": "option",
+                "metavar": "FILE",
+                "required": false,
+                "variadic": false,
+                "quoted": true,
+                "short": null,
+                "long": "tmp-dir",
+                "default": "\"/tmp\"",
+                "description": [
+                  "Directory for scratch files"
+                ],
+                "type": {
+                  "morloc": "Str    (literal string)"
+                },
+                "named_type_kind": null,
+                "input": {
+                  "source": "inline",
+                  "form": "auto",
+                  "checks": [],
+                  "list_source": "inline",
+                  "list_form": "auto",
+                  "list_checks": [],
+                  "format": null
+                }
+              }
+            },
+            {
+              "key": "numThreads",
+              "argument": {
+                "name": "threads",
+                "role": "option",
+                "metavar": "INT",
+                "required": false,
+                "variadic": false,
+                "quoted": false,
+                "short": "t",
+                "long": "threads",
+                "default": "1",
+                "description": [
+                  "Worker thread count"
+                ],
+                "type": {
+                  "morloc": "Int"
+                },
+                "named_type_kind": null,
+                "input": {
+                  "source": "inline",
+                  "form": "auto",
+                  "checks": [],
+                  "list_source": "inline",
+                  "list_form": "auto",
+                  "list_checks": [],
+                  "format": null
+                }
+              }
+            },
+            {
+              "key": "removeCaches",
+              "argument": {
+                "name": "clean",
+                "role": "flag",
+                "required": false,
+                "short": null,
+                "long": "clean",
+                "long_reverse": "no-clean",
+                "default": "false",
+                "description": [
+                  "Whether to purge caches on exit"
+                ],
+                "type": {
+                  "morloc": "Bool",
+                  "structure": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "Str",
+          "wire": "s",
+          "structure": {
+            "type": "string"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "countWords",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Count whitespace-separated words given as tokens"
+      ],
+      "arguments": [
+        {
+          "name": "arg0",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": true,
+          "variadic": true,
+          "stdin": false,
+          "quoted": true,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "[Str]",
+            "wire": "as",
+            "structure": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "auto",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": "one or more argv tokens, each parsed as the element type"
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "Int",
+          "wire": "j",
+          "structure": {
+            "type": "integer"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "mapSize",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Count the entries of a string-to-int map read from a two-column table"
+      ],
+      "arguments": [
+        {
+          "name": "arg0",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "Map Str Int",
+            "wire": "<dict>at2sj",
+            "structure": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "auto",
+            "form": "list",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": "path to file with one row entry line (JSON or table)"
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "Int",
+          "wire": "j",
+          "structure": {
+            "type": "integer"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "fileHead",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Read the lines of a file"
+      ],
+      "arguments": [
+        {
+          "name": "file",
+          "role": "positional",
+          "position": 0,
+          "metavar": "FILE",
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": true,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "Str    (a filename)",
+            "wire": "s",
+            "structure": {
+              "type": "string"
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [
+              {
+                "kind": "path",
+                "value": "r"
+              }
+            ],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": "path to a readable file"
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "[Str]",
+          "wire": "as",
+          "structure": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "terminals": [
+        {
+          "short": "l",
+          "long": "lines",
+          "description": "Print each string on its own line",
+          "render": false,
+          "default": false
+        },
+        {
+          "short": "s",
+          "long": "sum",
+          "description": "Join all strings into one semicolon-separated summary",
+          "render": false,
+          "default": false
+        }
+      ]
+    },
+    {
+      "name": "addOne",
+      "kind": "pure",
+      "group": null,
+      "description": [
+        "Add one to an integer"
+      ],
+      "arguments": [
+        {
+          "name": "n",
+          "role": "positional",
+          "position": 0,
+          "metavar": "N",
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "Int",
+            "wire": "j",
+            "structure": {
+              "type": "integer"
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": null
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "Int",
+          "wire": "j",
+          "structure": {
+            "type": "integer"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "maybeDouble",
+      "kind": "pure",
+      "group": null,
+      "description": [
+        "Double an optional integer, or pass through nothing"
+      ],
+      "arguments": [
+        {
+          "name": "arg0",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": false,
+          "variadic": false,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "?Int",
+            "wire": "?j",
+            "structure": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": null
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "type": {
+          "morloc": "?Int",
+          "wire": "?j",
+          "structure": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "terminals": []
+    }
+  ]
+}
+=== mcp-tools ===
+{
+  "tools": [
+    {
+      "name": "sumMany",
+      "description": "Sum a list of integers",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "arg0": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        },
+        "required": [
+          "arg0"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "integer"
+      }
+    },
+    {
+      "name": "configure",
+      "description": "Summarize a system configuration",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sysconfig": {
+            "type": "object",
+            "properties": {
+              "tmpDir": {
+                "type": "string"
+              },
+              "numThreads": {
+                "type": "integer"
+              },
+              "removeCaches": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tmpDir",
+              "numThreads",
+              "removeCaches"
+            ],
+            "additionalProperties": false,
+            "description": "System configuration passed as a flattened flag group"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "string"
+      }
+    },
+    {
+      "name": "countWords",
+      "description": "Count whitespace-separated words given as tokens",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "arg0": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "arg0"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "integer"
+      }
+    },
+    {
+      "name": "mapSize",
+      "description": "Count the entries of a string-to-int map read from a two-column table",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "arg0": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        "required": [
+          "arg0"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "integer"
+      }
+    },
+    {
+      "name": "fileHead",
+      "description": "Read the lines of a file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "addOne",
+      "description": "Add one to an integer",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "integer"
+      }
+    },
+    {
+      "name": "maybeDouble",
+      "description": "Double an optional integer, or pass through nothing",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "arg0": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    }
+  ]
+}

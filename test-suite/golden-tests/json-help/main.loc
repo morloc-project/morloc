@@ -1,0 +1,113 @@
+--' Demo program exercising every CLI argument shape, used to verify the
+--' --json-help and --mcp-tools machine-readable help outputs.
+module main
+  ( addOne
+  , sumMany
+  , configure
+  , maybeDouble
+  , countWords
+  , mapSize
+  , fileHead
+  )
+
+import root-py
+import map-py
+
+source Py from "helpers.py"
+  ( "sum_ints"      as sumInts
+  , "count_words"   as countWords_
+  , "config_summary" as configSummary
+  , "map_size"      as mapSizePy
+  , "read_lines"    as readLines
+  , "print_each"    as printEach
+  , "join_semi"     as joinSemi
+  )
+
+sumInts       :: [Int] -> Int
+countWords_   :: [Str] -> Int
+configSummary :: SysConfig -> Str
+mapSizePy     :: Map Str Int -> Int
+readLines     :: Str -> <IO> [Str]
+printEach     :: [Str] -> <IO> ()
+joinSemi      :: [Str] -> Str
+
+--' Add one to an integer
+addOne ::
+  --' metavar: N
+  Int ->
+  Int
+addOne x = x
+
+--' Sum a list of integers
+sumMany ::
+  --' many: true
+  [Int] ->
+  Int
+sumMany xs = sumInts xs
+
+--' System configuration passed as a flattened flag group
+--' metavar: SYS_CONFIG
+--' unroll: true
+--' arg: --sys-config
+record SysConfig where
+  --' Directory for scratch files
+  --' arg: --tmp-dir
+  --' metavar: FILE
+  --' default: "/tmp"
+  tmpDir :: Str
+
+  --' Worker thread count
+  --' arg: -t/--threads
+  --' metavar: INT
+  --' default: 1
+  numThreads :: Int
+
+  --' Whether to purge caches on exit
+  --' true:  --clean
+  --' false: --no-clean
+  --' default: false
+  removeCaches :: Bool
+
+record Py => SysConfig = "dict"
+
+--' Summarize a system configuration
+configure :: SysConfig -> Str
+configure c = configSummary c
+
+--' Double an optional integer, or pass through nothing
+maybeDouble ::
+  ?Int ->
+  ?Int
+maybeDouble x = x
+
+--' Count whitespace-separated words given as tokens
+countWords ::
+  --' many: true
+  [Str] ->
+  Int
+countWords xs = countWords_ xs
+
+--' Count the entries of a string-to-int map read from a two-column table
+mapSize ::
+  --' form: list
+  Map Str Int ->
+  Int
+mapSize m = mapSizePy m
+
+--' Print each string on its own line
+formatLines :: [Str] -> <IO> ()
+formatLines xs = printEach xs
+
+--' Join all strings into one semicolon-separated summary
+summarize :: [Str] -> <IO> Str
+summarize xs = joinSemi xs
+
+--' Read the lines of a file
+--' with: -l/--lines=formatLines
+--' with: -s/--sum=summarize
+fileHead ::
+  --' check.path: r
+  --' metavar: FILE
+  Str ->
+  <IO> [Str]
+fileHead path = readLines path
