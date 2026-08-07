@@ -1985,6 +1985,11 @@ pub unsafe extern "C" fn daemon_run(
     n_pools: usize,
     shm_basename: *const c_char,
 ) {
+    // Widen the open-file ceiling: this process accepts and fans out to every
+    // pool, so it can hold the most fds. poll() tolerates fds >= 1024 but only
+    // if the soft limit permits them to exist.
+    crate::utility::raise_nofile_limit();
+
     // Set globals
     G_POOL_ALIVE_FN = (*config).pool_alive_fn;
     G_N_POOLS = n_pools;
@@ -2050,7 +2055,7 @@ pub unsafe extern "C" fn daemon_run(
             libc::close(sock_fd);
             return;
         }
-        libc::listen(sock_fd, 64);
+        libc::listen(sock_fd, libc::SOMAXCONN);
         fds[nfds].fd = sock_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 0;
@@ -2094,7 +2099,7 @@ pub unsafe extern "C" fn daemon_run(
             return;
         }
         let actual = getsockname_port(tcp_fd).unwrap_or(requested);
-        libc::listen(tcp_fd, 64);
+        libc::listen(tcp_fd, libc::SOMAXCONN);
         fds[nfds].fd = tcp_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 1;
@@ -2136,7 +2141,7 @@ pub unsafe extern "C" fn daemon_run(
             return;
         }
         let actual = getsockname_port(http_fd).unwrap_or(requested);
-        libc::listen(http_fd, 64);
+        libc::listen(http_fd, libc::SOMAXCONN);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 2;

@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -1560,26 +1560,36 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
 
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
 
-    // Use pselect directly (not wait_for_client_with_timeout) so we can
-    // return immediately on EINTR from SIGTERM instead of retrying via WAIT
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(daemon->server_fd, &read_fds);
-    int max_fd = daemon->server_fd;
+    // poll() instead of pselect/FD_SET (used directly, not
+    // wait_for_client_with_timeout, so we can return immediately on EINTR from
+    // SIGTERM). An fd_set caps at FD_SETSIZE (1024) and FD_SET on a higher fd is
+    // out of bounds; poll accepts any fd value. The old empty pselect mask meant
+    // no signals were blocked during the wait, so SIGTERM still interrupts poll
+    // (EINTR) -- same responsive-shutdown behavior. Index 0 is the listening
+    // socket; client fds follow so activity on them also wakes the wait.
+    int nclients = 0;
+    for (client_list_t* cl = daemon->client_fds; cl != NULL; cl = cl->next) nclients++;
 
+    int nfds = nclients + 1;
+    struct pollfd* pfds = (struct pollfd*)calloc(nfds, sizeof(struct pollfd));
+    if (pfds == NULL) {
+        MORLOC_INTERNAL_ABORT("calloc failed (OOM)");
+    }
+    pfds[0].fd = daemon->server_fd;
+    pfds[0].events = POLLIN;
+    int pidx = 1;
     for (client_list_t* cl = daemon->client_fds; cl != NULL; cl = cl->next) {
-        FD_SET(cl->fd, &read_fds);
-        if (cl->fd > max_fd) max_fd = cl->fd;
+        pfds[pidx].fd = cl->fd;
+        pfds[pidx].events = POLLIN;
+        pidx++;
     }
 
     // 100ms timeout -- short enough for responsive SIGTERM handling
-    struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
-    sigset_t emptymask;
-    sigemptyset(&emptymask);
+    int ready = poll(pfds, nfds, 100);
+    int server_ready = (pfds[0].revents & POLLIN) != 0;
+    free(pfds);
 
-    int ready = pselect(max_fd + 1, &read_fds, NULL, NULL, &ts, &emptymask);
-
-    // Check shutdown after pselect (signal may have arrived during the call)
+    // Check shutdown after poll (signal may have arrived during the call)
     if (r_shutting_down) {
         return ScalarInteger(-1);
     }
@@ -1590,7 +1600,7 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     }
 
     // Accept new connection if server_fd is ready
-    if (FD_ISSET(daemon->server_fd, &read_fds)) {
+    if (server_ready) {
         int fd = accept(daemon->server_fd, NULL, NULL);
         if (fd >= 0) {
             fcntl(fd, F_SETFL, O_NONBLOCK);

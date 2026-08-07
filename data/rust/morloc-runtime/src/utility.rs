@@ -94,6 +94,20 @@ pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> 
     xs.ends_with(ss.as_ref())
 }
 
+/// Best-effort raise of the soft open-file limit (RLIMIT_NOFILE) to the hard
+/// limit, so a process holding many concurrent connections/fds is bounded by the
+/// (large) hard limit rather than the common 1024 soft cap. poll()-based
+/// readiness waits already tolerate fds >= 1024, so this only widens headroom.
+/// Process-global and idempotent; failures (e.g. sandboxes forbidding setrlimit)
+/// are ignored. Call once at each process entry point that accepts connections.
+pub unsafe fn raise_nofile_limit() {
+    let mut rl: libc::rlimit = std::mem::zeroed();
+    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur < rl.rlim_max {
+        rl.rlim_cur = rl.rlim_max;
+        let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
+    }
+}
+
 /// Rust-friendly entry point shared by every in-crate caller.
 /// Writes to `.<basename>.tmp.<pid>.<seq>` first, fsyncs, renames,
 /// then fsyncs the parent dir. The tmp basename's PID + monotonic

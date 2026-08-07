@@ -14,8 +14,7 @@ pub struct ClientList {
     pub next: *mut ClientList,
 }
 
-// language_daemon_t has fd_set which is 128 bytes on Linux.
-// We represent it as an opaque struct and use libc calls.
+// Mirrors C `language_daemon_t` in morloc.h; layout must stay in sync.
 #[repr(C)]
 pub struct LanguageDaemon {
     pub socket_path: *mut c_char,
@@ -24,11 +23,17 @@ pub struct LanguageDaemon {
     pub shm: *mut crate::shm::ShmHeader,
     pub shm_default_size: usize,
     pub server_fd: i32,
-    pub read_fds: libc::fd_set,
     pub client_fds: *mut ClientList,
 }
 
 const BUFFER_SIZE: usize = 65536;
+
+// A polled fd is ready to read when data is available or the peer has
+// hung up / errored (so the following recv observes EOF or the error).
+#[inline]
+unsafe fn pfd_ready(pfd: &libc::pollfd) -> bool {
+    pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+}
 
 // ── close_socket / close_daemon ──────────────────────────────────────────────
 
@@ -120,7 +125,7 @@ unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i3
         return -1;
     }
 
-    if libc::listen(server_fd, 16) < 0 {
+    if libc::listen(server_fd, libc::SOMAXCONN) < 0 {
         close_socket(server_fd);
         set_errmsg(errmsg, &MorlocError::Ipc("Error listening on socket".into()));
         return -1;
@@ -141,6 +146,8 @@ pub unsafe extern "C" fn start_daemon(
 ) -> *mut LanguageDaemon {
     clear_errmsg(errmsg);
 
+    crate::utility::raise_nofile_limit();
+
     let daemon = libc::calloc(1, std::mem::size_of::<LanguageDaemon>()) as *mut LanguageDaemon;
     if daemon.is_null() {
         set_errmsg(errmsg, &MorlocError::Ipc("Calloc for language_daemon_t failed".into()));
@@ -160,7 +167,6 @@ pub unsafe extern "C" fn start_daemon(
 
     (*daemon).shm_default_size = shm_default_size;
     (*daemon).client_fds = ptr::null_mut();
-    libc::FD_ZERO(&mut (*daemon).read_fds);
 
     // Set fallback dir for file-backed SHM
     crate::shm::shm_set_fallback_dir(&CStr::from_ptr(tmpdir).to_string_lossy());
@@ -213,7 +219,7 @@ pub unsafe extern "C" fn start_daemon(
 #[no_mangle]
 pub unsafe extern "C" fn stream_from_client_wait(
     client_fd: i32,
-    pselect_timeout_us: i32,
+    poll_timeout_us: i32,
     recv_timeout_us: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
@@ -230,14 +236,16 @@ pub unsafe extern "C" fn stream_from_client_wait(
         return ptr::null_mut();
     }
 
-    let mut read_fds: libc::fd_set = std::mem::zeroed();
-    let max_fd = client_fd;
+    // poll() (via ppoll for the atomic signal mask) instead of pselect/FD_SET:
+    // an fd_set can only hold descriptors below FD_SETSIZE (1024), and FD_SET on
+    // a higher fd is out-of-bounds. A pollfd imposes no ceiling on the fd value.
+    let mut pfd = libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 };
 
     // Timeout setup
     let mut ts_loop: libc::timespec = std::mem::zeroed();
-    let timeout_ptr = if pselect_timeout_us > 0 {
-        ts_loop.tv_sec = (pselect_timeout_us / 1000000) as i64;
-        ts_loop.tv_nsec = ((pselect_timeout_us % 1000000) * 1000) as i64;
+    let timeout_ptr = if poll_timeout_us > 0 {
+        ts_loop.tv_sec = (poll_timeout_us / 1000000) as i64;
+        ts_loop.tv_nsec = ((poll_timeout_us % 1000000) * 1000) as i64;
         &ts_loop as *const libc::timespec
     } else {
         ptr::null()
@@ -253,9 +261,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
     // Initial receive with timeout
     let mut ready;
     loop {
-        libc::FD_ZERO(&mut read_fds);
-        libc::FD_SET(client_fd, &mut read_fds);
-        ready = libc::pselect(max_fd + 1, &mut read_fds, ptr::null_mut(), ptr::null_mut(), timeout_ptr, &origmask);
+        ready = libc::ppoll(&mut pfd, 1, timeout_ptr, &origmask);
         if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
             break;
         }
@@ -269,10 +275,10 @@ pub unsafe extern "C" fn stream_from_client_wait(
     }
     if ready < 0 {
         libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("pselect error".into()));
+        set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
         return ptr::null_mut();
     }
-    if !libc::FD_ISSET(client_fd, &read_fds) {
+    if !pfd_ready(&pfd) {
         libc::free(buffer as *mut c_void);
         set_errmsg(errmsg, &MorlocError::Ipc("Bad client file descriptor".into()));
         return ptr::null_mut();
@@ -315,9 +321,6 @@ pub unsafe extern "C" fn stream_from_client_wait(
     while (data_ptr as usize - result as usize) < packet_length {
         let mut packet_received = false;
         for attempt in 0..attempts {
-            libc::FD_ZERO(&mut read_fds);
-            libc::FD_SET(client_fd, &mut read_fds);
-
             let recv_timeout_ptr = if recv_timeout_us > 0 {
                 let total_us = recv_timeout_us as i64 * (attempt as i64 + 1);
                 ts_loop.tv_sec = total_us / 1000000;
@@ -328,7 +331,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
             };
 
             libc::pthread_sigmask(libc::SIG_SETMASK, &mask, ptr::null_mut());
-            ready = libc::pselect(max_fd + 1, &mut read_fds, ptr::null_mut(), ptr::null_mut(), recv_timeout_ptr, &origmask);
+            ready = libc::ppoll(&mut pfd, 1, recv_timeout_ptr, &origmask);
             libc::pthread_sigmask(libc::SIG_SETMASK, &origmask, ptr::null_mut());
 
             if ready == 0 {
@@ -338,12 +341,12 @@ pub unsafe extern "C" fn stream_from_client_wait(
             }
             if ready < 0 && crate::utility::errno_val() != libc::EINTR {
                 libc::free(result as *mut c_void);
-                set_errmsg(errmsg, &MorlocError::Ipc("pselect error".into()));
+                set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
                 return ptr::null_mut();
             }
             if ready <= 0 { continue; }
 
-            if libc::FD_ISSET(client_fd, &read_fds) {
+            if pfd_ready(&pfd) {
                 let remaining = packet_length - (data_ptr as usize - result as usize);
                 let recv_size = remaining.min(BUFFER_SIZE);
                 let n = libc::recv(client_fd, data_ptr as *mut c_void, recv_size, 0);
@@ -388,7 +391,7 @@ pub unsafe extern "C" fn stream_from_client(
 pub unsafe extern "C" fn send_and_receive_over_socket_wait(
     socket_path: *const c_char,
     packet: *const u8,
-    pselect_timeout_us: i32,
+    poll_timeout_us: i32,
     recv_timeout_us: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
@@ -449,7 +452,7 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
         total_sent += bytes_sent as usize;
     }
 
-    let result = stream_from_client_wait(client_fd, pselect_timeout_us, recv_timeout_us, &mut err);
+    let result = stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, &mut err);
     if !err.is_null() {
         close_socket(client_fd);
         *errmsg = err;
@@ -516,18 +519,15 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
 ) -> i32 {
     clear_errmsg(errmsg);
 
-    libc::FD_ZERO(&mut (*daemon).read_fds);
-    libc::FD_SET((*daemon).server_fd, &mut (*daemon).read_fds);
-
-    let mut max_fd = (*daemon).server_fd;
-
-    // Add existing client fds
+    // poll() instead of pselect/FD_SET so any fd value is accepted (an fd_set
+    // caps at FD_SETSIZE=1024). Index 0 is the listening socket; the client fds
+    // follow. Only the server slot is acted on (accept), matching the original;
+    // clients are included so activity on them still wakes the wait.
+    let mut pfds: Vec<libc::pollfd> = Vec::new();
+    pfds.push(libc::pollfd { fd: (*daemon).server_fd, events: libc::POLLIN, revents: 0 });
     let mut client = (*daemon).client_fds;
     while !client.is_null() {
-        libc::FD_SET((*client).fd, &mut (*daemon).read_fds);
-        if (*client).fd > max_fd {
-            max_fd = (*client).fd;
-        }
+        pfds.push(libc::pollfd { fd: (*client).fd, events: libc::POLLIN, revents: 0 });
         client = (*client).next;
     }
 
@@ -544,12 +544,12 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
     let mut emptymask: libc::sigset_t = std::mem::zeroed();
     libc::sigemptyset(&mut emptymask);
 
-    let ready = libc::pselect(max_fd + 1, &mut (*daemon).read_fds, ptr::null_mut(), ptr::null_mut(), timeout_ptr, &emptymask);
+    let ready = libc::ppoll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ptr, &emptymask);
     if ready < 0 {
         if crate::utility::errno_val() == libc::EINTR {
             return 0;
         }
-        set_errmsg(errmsg, &MorlocError::Ipc("pselect error".into()));
+        set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
         return -1;
     }
     if ready == 0 {
@@ -557,7 +557,7 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
     }
 
     // Check for new connection
-    if libc::FD_ISSET((*daemon).server_fd, &(*daemon).read_fds) {
+    if pfds[0].revents & libc::POLLIN != 0 {
         let selected_fd = libc::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
         if selected_fd >= 0 {
             crate::utility::set_nosigpipe(selected_fd);

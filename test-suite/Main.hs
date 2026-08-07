@@ -759,6 +759,8 @@ main = do
       , golden "recursion-crosspool-features" "recursion-crosspool-features"
       , golden "recursion-crosspool-closure-io" "recursion-crosspool-closure-io"
       , golden "recursion-crosspool-pointfree" "recursion-crosspool-pointfree"
+      , golden "recursion-crosspool-coloc-nested" "recursion-crosspool-coloc-nested"
+      , golden "recursion-crosspool-io-tuple-helper" "recursion-crosspool-io-tuple-helper"
       , -- optional type tests
         golden "optional-py" "optional-py"
       , golden "optional-cpp" "optional-cpp"

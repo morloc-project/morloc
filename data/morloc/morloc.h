@@ -37,7 +37,6 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>      // FILE* for read_binary_fd
-#include <sys/select.h> // fd_set
 #include <sys/socket.h>
 #include <sys/types.h>  // pid_t, ssize_t
 #include <sys/un.h>     // struct sockaddr_un
@@ -724,7 +723,6 @@ typedef struct language_daemon_s {
     shm_t* shm;
     size_t shm_default_size;
     int server_fd;
-    fd_set read_fds;
     client_list_t* client_fds;
 } language_daemon_t;
 
@@ -1151,11 +1149,11 @@ void close_daemon(language_daemon_t** daemon_ptr);
 language_daemon_t* start_daemon(
     const char* socket_path, const char* tmpdir,
     const char* shm_basename, size_t shm_default_size, ERRMSG);
-uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv_timeout_us, ERRMSG);
+uint8_t* stream_from_client_wait(int client_fd, int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* stream_from_client(int client_fd, ERRMSG);
 uint8_t* send_and_receive_over_socket_wait(
     const char* socket_path, const uint8_t* packet,
-    int pselect_timeout_us, int recv_timeout_us, ERRMSG);
+    int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);

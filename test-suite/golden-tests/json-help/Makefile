@@ -1,6 +1,5 @@
 all:
-	: > obs.txt
-	rm -f *.err
+	rm -f *.err obs.txt
 	morloc make -o main main.loc 2> build.err
 	# --json-help: full morloc-native help as JSON. The morloc_version
 	# value is normalized so the golden is stable across releases.
@@ -12,4 +11,4 @@ all:
 	./main --mcp-tools 2>> obs.err >> obs.txt
 
 clean:
-	rm -rf main main.manifest pools __pycache__ obs.txt obs.err build.err
+	rm -rf main main.manifest pools __pycache__ obs.err build.err

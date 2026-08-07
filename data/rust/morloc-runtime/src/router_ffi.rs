@@ -991,6 +991,10 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
 
     daemon_set_eval_timeout((*config).eval_timeout);
 
+    // Widen the open-file ceiling: the router accepts connections and holds
+    // per-request fds; poll() tolerates fds >= 1024 only if the soft limit does.
+    crate::utility::raise_nofile_limit();
+
     // Install signal handlers
     ROUTER_SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
     let handler: libc::sighandler_t =
@@ -1042,7 +1046,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             return;
         }
         let actual = crate::daemon_ffi::getsockname_port_pub(http_fd).unwrap_or(requested);
-        libc::listen(http_fd, 16);
+        libc::listen(http_fd, libc::SOMAXCONN);
         eprintln!("morloc-router: listening on http://0.0.0.0:{}", actual);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
@@ -1077,7 +1081,7 @@ pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Rout
             libc::close(sock_fd);
             return;
         }
-        libc::listen(sock_fd, 16);
+        libc::listen(sock_fd, libc::SOMAXCONN);
         let unix_path = CStr::from_ptr((*config).unix_socket_path)
             .to_string_lossy()
             .into_owned();

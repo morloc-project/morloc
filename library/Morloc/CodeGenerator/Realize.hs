@@ -553,25 +553,25 @@ realizeWithRegistry registry s0 = do
 
     -- Propagate downwards
     collapseExpr _ l1 (LamS vs x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (LamS vs x', Idx i lang)
     collapseExpr _ l1 (AppS f xs, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec (f : xs)) ss
       f' <- collapseAnnoS lang f
       xs' <- mapM (collapseAnnoS lang) xs
       return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
       xs' <- mapM (collapseAnnoS lang) xs
       return (LstS xs', Idx i lang)
     collapseExpr _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
       xs' <- mapM (collapseAnnoS lang) xs
       return (TupS xs', Idx i lang)
     collapseExpr _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
       xs' <- mapM (collapseAnnoS lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
@@ -585,38 +585,75 @@ realizeWithRegistry registry s0 = do
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
     collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
     collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [e1, e2]) ss
       e1' <- collapseAnnoS lang e1
       e2' <- collapseAnnoS lang e2
       return (LetS v e1' e2', Idx i lang)
     collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
     collapseExpr _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
     collapseExpr _ l1 (IfS c t e, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [c, t, e]) ss
       c' <- collapseAnnoS lang c
       t' <- collapseAnnoS lang t
       e' <- collapseAnnoS lang e
       return (IfS c' t' e', Idx i lang)
     collapseExpr _ l1 (DoBlockS x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (DoBlockS x', Idx i lang)
     collapseExpr _ l1 (EvalS x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (EvalS x', Idx i lang)
     collapseExpr _ l1 (CoerceS c x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (CoerceS c x', Idx i lang)
     collapseExpr _ l1 (IntrinsicS intr xs, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec xs) ss
       xs' <- mapM (collapseAnnoS lang) xs
       return (IntrinsicS intr xs', Idx i lang)
 
-    chooseLanguage :: Maybe Lang -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
-    chooseLanguage l1 ss = do
-      case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+    -- True if the subtree carries a self-recursive back-edge. During realize
+    -- every 'CallS' is such a back-edge; they are introduced before this pass
+    -- and only renamed/lifted afterward by 'extractRecursiveHelpers'.
+    hasRecCall :: (Foldable f) => AnnoS g f c -> Bool
+    hasRecCall = anyCallS (const True)
+
+    -- Whether this whole rAST is recursive at all (computed once). Non-recursive
+    -- trees -- the common case -- then short-circuit 'subtreeHasRec' without any
+    -- per-node subtree walk (so they stay O(n)); only actually-recursive rASTs,
+    -- which are small extracted helpers, pay the per-node walk. Computed from the
+    -- pre-scoring tree 's0'; 'normalizePop1' only beta-reduces literal-lambda
+    -- redexes and never adds or removes a 'CallS', so this agrees with the scored
+    -- tree the collapse actually walks.
+    treeHasCall :: Bool
+    treeHasCall = hasRecCall s0
+
+    -- 'recSpine' for a container: only meaningful in a recursive rAST, so gate
+    -- the (short-circuiting) per-child walk on 'treeHasCall'.
+    subtreeHasRec :: (Foldable f) => [AnnoS g f c] -> Bool
+    subtreeHasRec xs = treeHasCall && any hasRecCall xs
+
+    -- 'recSpine' is True when the subtree being placed contains a recursive
+    -- back-edge. The back-edge must return to the enclosing recursive
+    -- manifold's language (the head); on the un-crossed recursive spine that
+    -- head language is the incoming parent 'l1'. Realizing the subtree in any
+    -- other language 'l2' therefore forces the back-edge to cross 'l2 -> head'
+    -- every iteration. That crossing is invisible to the scorer (a recursive
+    -- 'CallS' scores (0,0) in every language, via 'zipLang'), so without this
+    -- correction the scorer splits a mixed-language recursive body onto its
+    -- heavy leaf's pool, putting the back-edge across a pool boundary and
+    -- blocking native-loop lowering. Adding the back-edge crossing here keeps a
+    -- recursive body co-located with its head whenever that is cost-competitive,
+    -- WITHOUT hard-pinning: a genuinely cheaper cross-pool body (e.g. cross-pool
+    -- mutual recursion whose partner is another language entirely) still wins.
+    chooseLanguage :: Maybe Lang -> Bool -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
+    chooseLanguage l1 recSpine ss = do
+      let recPenalty l2 = case l1 of
+            Just h | recSpine && l2 /= h -> transScore l2 h
+            _ -> (0, 0)
+      case minBy snd [(l2, cost l1 l2 s2 `addScore` recPenalty l2) | (l2, s2) <- ss] of
         Nothing -> return Nothing
         (Just (l3, _)) -> return (Just l3)
 
@@ -1029,11 +1066,15 @@ freshLamVar = do
   return (EV (MT.pack ("$eta_" <> show i)))
 
 -- | Does the tree contain a @CallS target@ anywhere?
-containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
-containsCallS target = getAny . foldAnnoS check
+-- | True if any 'CallS' back-edge in the tree names a variable satisfying @p@.
+anyCallS :: (Foldable f) => (EVar -> Bool) -> AnnoS g f c -> Bool
+anyCallS p = getAny . foldAnnoS check
   where
-    check (AnnoS _ _ (CallS v)) = Any (v == target)
+    check (AnnoS _ _ (CallS v)) = Any (p v)
     check _                     = Any False
+
+containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
+containsCallS target = anyCallS (== target)
 
 -- | Rewrite every @CallS old@ target to @CallS new@.
 renameCallS ::
