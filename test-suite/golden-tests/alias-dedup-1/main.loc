@@ -1,7 +1,3 @@
--- Test alias deduplication correctness and performance.
--- Verifies that type aliases (Deque/Array = List, I32/I64 = Int)
--- are handled correctly by the typechecker's instance resolution dedup.
-
 module main (testAliasPy, testAliasCpp, testI32Cpp, testDeepChainPy)
 
 import root-py

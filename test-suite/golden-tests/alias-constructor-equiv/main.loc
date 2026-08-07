@@ -1,11 +1,3 @@
--- Test that @List@ and @Deque@ (newtype-of-List with a @Packable
--- (List a) (Deque a)@ instance) support the same Monoid / Semigroup
--- / Foldable / Functor operations on values constructed via list
--- literals. Each comparison annotates both sides at the same nominal
--- type since newtypes are nominally distinct (no implicit
--- @Deque == List@ across the newtype boundary). The earlier @Array@
--- type has been removed in favor of @Vector@.
-
 module main (testConcatPy, testConcatCpp, testConcatR)
 
 import root-py

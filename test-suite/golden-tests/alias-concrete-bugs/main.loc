@@ -1,17 +1,3 @@
--- Minimal reproducers for two concrete-type bugs with type aliases.
---
--- BUG 1: Nested containers with mixed concrete types.
--- [Deque Int] = List (Deque Int) = std::vector<std::deque<int>> in C++.
--- The code generator produces brace initialization {n1, n2} where n1/n2
--- are std::vector<int> (inner list literal default), not std::deque<int>.
--- C++ cannot implicitly convert vector to deque in an initializer list.
---
--- BUG 2: Integer alias literal type mismatch.
--- I64 = Int at the general level, but int64_t vs int in C++.
--- When comparing `mul64 x y == 20000`, the literal 20000 is Int (int)
--- but the LHS is I64 (int64_t). morloc_eq<A>(A, A) fails template
--- deduction because int64_t != int.
-
 module main (bug1_nested_alias_py, bug1_nested_alias_cpp, bug2_int64_eq_cpp)
 
 import root-py

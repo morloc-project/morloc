@@ -1,13 +1,3 @@
--- Test that typeclass instance inheritance is blocked when the concrete
--- type is overridden in the target language.
---
--- type Bytes = Str           (general: Bytes = Str)
--- type Py => Bytes = "bytes" (Python: Bytes maps to "bytes", not "str")
---
--- A Python function expecting Bytes ("bytes") should NOT accept Str ("str")
--- because the concrete types differ, even though the general types are
--- alias-equivalent.
-
 module main (shouldFail)
 
 type Py => Str = "str"

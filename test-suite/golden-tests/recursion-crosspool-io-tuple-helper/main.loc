@@ -1,13 +1,3 @@
--- Same shape as recursion-crosspool-io-tuple, EXCEPT `run` is not exported --
--- it is called through an exported wrapper `runW`, so it is hoisted into a
--- non-exported recursive helper. This mirrors the galaxy demo exactly (galaxy
--- exports `simulate` and `runSteps` is an internal helper), and isolates whether
--- the EXPORTED-direct-recursion path is the reason the anchor fails to
--- loop-lower (falling to the broken m2108 cross-pool recursion). If this variant
--- loop-lowers (compiles + runs) while the exported anchor does not, the fix
--- belongs in the exported-recursion lowering; if both produce m2108, the
--- foreign-tuple `<IO>` shape fails to loop-lower regardless of export-ness.
-
 module main (runW)
 
 import root-py

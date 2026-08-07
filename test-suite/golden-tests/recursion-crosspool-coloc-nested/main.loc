@@ -3,22 +3,6 @@ module main (run)
 import root-py
 import root-cpp
 
--- A self-recursive <IO> tail loop that stresses B1 realize co-location when a
--- language boundary is pressured ABOVE the recursive back-edge.
---
--- The head must be Python: 'logIt' is a py-only <IO> effect. But each iteration
--- does several cpp-only operations ('mix', 'bump') and the recursive call is
--- nested UNDER those cpp-affine let bindings. The scorer is therefore tempted
--- to place the {let a; let b; let c; recurse} spine on cpp (where the heavy
--- leaves are native), which would move the self back-edge to another pool and
--- block native-loop lowering.
---
--- B1 makes the recursive back-edge's (previously free) cross-pool cost visible,
--- so the recursive spine co-locates with the py head: 'mix'/'bump' become cpp
--- foreign leaves and the back-edge stays same-pool (a native loop). If for some
--- cost balance it did NOT co-locate, it must fall back to round-trip recursion
--- with identical output -- which is exactly what this golden pins.
-
 source Py from "py_helpers.py"
   ( "py_log" as logIt )
 source Cpp from "cpp_helpers.hpp"

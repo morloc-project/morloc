@@ -1,10 +1,3 @@
--- Cross-pool BRANCHING, non-tail recursion (Ackermann): the recursive call
--- appears nested as an ARGUMENT to another recursive call, and there are
--- multiple recursive branches. The guards/primitives are split across Python and
--- C++ so the recursion's arguments cross the pool boundary -- exercising the
--- cross-pool recursion machinery on a doubly-recursive, non-tail shape (never a
--- loop). Complements the tail-recursive cross-pool goldens.
-
 module main (ack)
 
 import root-py

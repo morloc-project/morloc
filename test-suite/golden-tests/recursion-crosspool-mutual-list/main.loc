@@ -1,17 +1,3 @@
--- Cross-pool MUTUAL recursion carrying RICH (non-scalar) state: `drainP`
--- (Python) and `drainC` (C++) are mutually recursive and thread a LIST `[Int]`
--- plus an Int accumulator, summing the list by alternating pools each step.
---
--- Finding (2026-08-05): this PASSES. Mutual recursion collapses via inline-once
--- into a same-pool SELF-recursion per partner (drainP self-recurses in Python
--- with drainC's C++ body realized as foreign leaf calls, and symmetrically for
--- drainC), and the realizer keeps each recursive back-edge co-located with its
--- own manifold. So the recursive back-edge stays SAME-POOL even with disjoint
--- single-language primitives -- cross-pool mutual recursion reduces to the
--- leaf-crossing loop case, which already handles a foreign-fed list carry. This
--- golden is therefore parity coverage for cross-pool mutual recursion over a
--- non-scalar state, not a back-edge-crossing defect (which does not arise here).
-
 module main
   ( drainP
   , drainC
@@ -42,9 +28,6 @@ headC    :: [Int] -> Int
 tailC    :: [Int] -> [Int]
 addC     :: Int -> Int -> Int
 
--- Sum a list by alternating pools each step, threading the shrinking list AND an
--- accumulator across the cross-pool mutual back-edge. drainP -> Python,
--- drainC -> C++ (disjoint single-language primitives).
 drainP :: [Int] -> Int -> Int
 drainP xs acc
   ? isEmptyP xs = acc
