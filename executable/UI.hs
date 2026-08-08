@@ -75,7 +75,12 @@ data MakeCommand = MakeCommand
   , makeConfig :: String
   , makeVerbose :: Int
   , makeVanilla :: Bool
-  , makeOutfile :: String
+  , makeCliOut :: String
+  , makeMcpOut :: String
+  , makeDaemonOut :: String
+  , makeNoCli :: Bool
+  , makeBuildDir :: Maybe String
+  , makeName :: Maybe String
   , makeInstall :: Bool
   , makeForce :: Bool
   , makeInclude :: [String]
@@ -95,7 +100,12 @@ makeCommandParser =
     <*> optConfig
     <*> optVerbose
     <*> optVanilla
-    <*> optOutfile
+    <*> optCliOut
+    <*> optMcpOut
+    <*> optDaemonOut
+    <*> optNoCli
+    <*> optBuildDir
+    <*> optName
     <*> optMakeInstall
     <*> optMakeForce
     <*> optMakeInclude
@@ -456,15 +466,60 @@ optConfig =
         <> help "Use this config rather than the one in morloc home"
     )
 
-optOutfile :: Parser String
-optOutfile =
+optCliOut :: Parser String
+optCliOut =
   strOption
-    ( long "outfile"
+    ( long "cli-out"
         <> short 'o'
         <> metavar "OUT"
         <> value ""
         <> showDefault
-        <> help "The name of the generated executable"
+        <> help "The name of the generated CLI executable (default: program name)"
+    )
+
+optMcpOut :: Parser String
+optMcpOut =
+  strOption
+    ( long "mcp-out"
+        <> metavar "OUT"
+        <> value ""
+        <> help "Also emit a wrapper that serves the program as an MCP server"
+    )
+
+optDaemonOut :: Parser String
+optDaemonOut =
+  strOption
+    ( long "daemon-out"
+        <> metavar "OUT"
+        <> value ""
+        <> help "Also emit a wrapper that runs the program as a daemon"
+    )
+
+optNoCli :: Parser Bool
+optNoCli =
+  switch
+    ( long "no-cli"
+        <> help "Suppress the default CLI executable"
+    )
+
+optBuildDir :: Parser (Maybe String)
+optBuildDir =
+  optional
+    ( strOption
+        ( long "build-dir"
+            <> metavar "DIR"
+            <> help "Parent directory in which the <name>-build/ folder is created (default: CWD)"
+        )
+    )
+
+optName :: Parser (Maybe String)
+optName =
+  optional
+    ( strOption
+        ( long "name"
+            <> metavar "NAME"
+            <> help "Program identity for the build directory (required for -e expression builds)"
+        )
     )
 
 optMakeInstall :: Parser Bool

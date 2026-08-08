@@ -122,7 +122,7 @@ translateBuiltin lang desc srcs es = do
   let exefile = ML.makeExecutablePoolName lang
   let rendered = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)
 
-  poolSubdir <- getPoolSubdir
+  let poolSubdir = getPoolSubdir lang
 
   return $
     Script
@@ -213,7 +213,7 @@ translateExternal cmd lang desc srcs es = do
           let exefile = ML.makeExecutablePoolName lang
               poolContent = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (cgmPoolCode m)
               buildCmds = map (SysRun . Code) (cgmBuildCommands m)
-          poolSubdir <- getPoolSubdir
+              poolSubdir = getPoolSubdir lang
           return $
             Script
               { scriptBase = "pool"
@@ -296,11 +296,11 @@ loadDescriptorForLang lang = do
     lookupEmbeddedPool "cpp" = Just $ DF.embededFileText (DF.poolTemplate "cpp")
     lookupEmbeddedPool _ = Nothing
 
-{- | Get the pool subdirectory name from the module name.
-This ensures each program gets its own pool directory (e.g., pools/foo/).
+{- | Per-language pool subdirectory name (e.g. pools/py/, pools/cpp/).
+One pool directory per pool language within a program's build directory.
 -}
-getPoolSubdir :: MorlocMonad String
-getPoolSubdir = MM.getModuleName
+getPoolSubdir :: Lang -> String
+getPoolSubdir = ML.poolDirKey
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do

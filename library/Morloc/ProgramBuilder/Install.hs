@@ -45,9 +45,11 @@ import System.FilePath
   )
 import System.IO (hPutStrLn, stderr)
 
--- | Finalize an installed program. The build step has already written pools
--- and the wrapper script directly into installDir. This function copies the
--- wrapper to bin/, extracts the manifest to fdb/, and copies include files.
+-- | Finalize an installed program. The build step has already written
+-- @manifest.json@, the pools, and the launcher wrapper(s) into installDir.
+-- This function copies the CLI wrapper to bin/ and copies include files.
+-- Program discovery reads @exe/<name>/manifest.json@ in place, so no
+-- separate manifest copy is made.
 installProgram ::
   -- | configHome (e.g. ~/.local/share/morloc)
   String ->
@@ -77,24 +79,25 @@ installProgram configHome installDir installName includes force = do
     Nothing -> copyAllFiltered "." installDir
     Just pats -> mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) pats
 
-  -- Copy wrapper from installDir to bin/
-  createDirectoryIfMissing True binDir
-  copyFile installedWrapper binPath
-  makeExecutable binPath
-
-  -- Copy manifest to fdb/ for daemon discovery
-  let fdbDir = configHome </> "fdb"
-      fdbPath = fdbDir </> (installName ++ ".manifest")
-  createDirectoryIfMissing True fdbDir
-  extractAndWriteManifest binPath fdbPath
-
-  -- Check if bin dir is on PATH and print hint if not
-  pathEnv <- lookupEnv "PATH"
-  let pathStr = fromMaybe "" pathEnv
-  when (not (binDir `isInfixOf` pathStr)) $
-    hPutStrLn stderr $ "Note: add " <> binDir <> " to your PATH"
-
-  hPutStrLn stderr $ "Installed '" <> installName <> "' to " <> binPath
+  -- Copy the CLI wrapper from installDir to bin/. When the build emitted no
+  -- CLI wrapper named after the install (e.g. --no-cli), there is nothing to
+  -- place on PATH; the program is still installed and discoverable via its
+  -- exe/<name>/ dir, so report that honestly rather than claiming a bin entry.
+  wrapperExists <- doesFileExist installedWrapper
+  if wrapperExists
+    then do
+      createDirectoryIfMissing True binDir
+      copyFile installedWrapper binPath
+      makeExecutable binPath
+      -- Check if bin dir is on PATH and print hint if not
+      pathEnv <- lookupEnv "PATH"
+      let pathStr = fromMaybe "" pathEnv
+      when (not (binDir `isInfixOf` pathStr)) $
+        hPutStrLn stderr $ "Note: add " <> binDir <> " to your PATH"
+      hPutStrLn stderr $ "Installed '" <> installName <> "' to " <> binPath
+    else
+      hPutStrLn stderr $
+        "Installed '" <> installName <> "' (no CLI executable on PATH; build directory at " <> installDir <> ")"
 
   -- Regenerate shell completions
   Completion.regenerateCompletions False configHome
@@ -108,7 +111,6 @@ defaultIgnorePatterns :: [String]
 defaultIgnorePatterns =
   [ ".git/"
   , ".morlocignore"
-  , "*.manifest"
   ]
 
 -- | Copy all files from srcRoot to dstRoot, excluding files that match
@@ -447,23 +449,3 @@ isCovered patterns relPath = any (coversOne relPath) patterns
       -- exact path
       | otherwise = pat == rel
 
--- ======================================================================
--- Manifest extraction
--- ======================================================================
-
-{- | Extract the manifest JSON from a wrapper script and write it to a file.
-The wrapper script has the format:
-  #!/bin/sh
-  # morloc-program v<version>
-  exec morloc-nexus run "$0" "$@"
-  ### MANIFEST ###
-  <json>
--}
-extractAndWriteManifest :: FilePath -> FilePath -> IO ()
-extractAndWriteManifest wrapperPath manifestPath = do
-  contents <- readFile wrapperPath
-  let marker = "### MANIFEST ###"
-      afterMarker = drop 1 $ dropWhile (/= marker) (lines contents)
-  case afterMarker of
-    [] -> return () -- no manifest found, skip silently
-    _ -> writeFile manifestPath (unlines afterMarker)

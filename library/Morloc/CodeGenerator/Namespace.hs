@@ -680,7 +680,7 @@ data MonoExpr
   | MonoPoolCall
       (Indexed Type) -- return type in calling language
       Int -- foreign manifold id
-      Socket -- shell command components that preceed the passed data
+      Socket -- foreign pool socket (lang + socket path)
       RemoteForm
       [Arg None] -- arguments
   | MonoLet Int MonoExpr MonoExpr

@@ -1,8 +1,8 @@
 //! Morloc Nexus: CLI dispatcher for multi-language pool orchestration.
 //!
 //! Replaces data/nexus.c. Entry point for all morloc programs.
-//! Reads a .manifest JSON, spawns language pool daemons, and routes
-//! function calls to them over Unix sockets.
+//! Reads a program's manifest.json, spawns language pool daemons, and
+//! routes function calls to them over Unix sockets.
 
 mod cli;
 mod convert;
@@ -189,17 +189,25 @@ fn main() {
         None
     };
 
-    let prog_name = std::path::Path::new(&manifest_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&manifest_path)
-        .to_string();
+    // The program's own declared name (the manifest filename is always
+    // "manifest.json", so it cannot serve as the program identity).
+    let prog_name = manifest.name.clone();
 
     // Re-read the raw manifest payload string from disk. The
     // structured manifest was already loaded and validated inside
     // parse_invocation; the payload is used downstream by
     // `daemon_run` (which parses the JSON via libmorloc.so for its
     // C-layout Manifest type).
+    //
+    // INVARIANT: this payload carries pool exec paths RELATIVE to the
+    // manifest directory (they are absolutized below only on the Rust
+    // `manifest` struct, not on this text). Pools are therefore always
+    // spawned Rust-side (`process::start_daemons` from `sockets`, with
+    // crash recovery via `install_recovery_context`). `daemon_run`'s
+    // C-layout manifest must be used for command dispatch only, never to
+    // (re)spawn a pool -- doing so would exec a build-dir-relative path
+    // against the daemon's CWD. If that ever changes, resolve this payload
+    // (see `morloc_runtime`'s `resolve_pool_paths`) before passing it in.
     let payload = match manifest::read_manifest_payload(&manifest_path) {
         Ok(p) => p,
         Err(e) => {
@@ -207,9 +215,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Touch `manifest` to keep the binding live for the rest of
-    // main.
-    let _ = &mut manifest;
 
     // Forward the per-program inline-vs-shm routing knobs to libmorloc.
     // Env vars are inherited by every pool process the nexus later
@@ -236,10 +241,11 @@ fn main() {
     if let Ok(exe) = std::env::current_exe() {
         std::env::set_var("MORLOC_NEXUS_PATH", &exe);
     }
-    if let Ok(abs_manifest) = std::fs::canonicalize(&manifest_path) {
-        std::env::set_var("MORLOC_MANIFEST_PATH", &abs_manifest);
-    } else {
-        std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path);
+    // Canonicalize once; reused below to resolve relative pool exec paths.
+    let abs_manifest = std::fs::canonicalize(&manifest_path).ok();
+    match &abs_manifest {
+        Some(p) => std::env::set_var("MORLOC_MANIFEST_PATH", p),
+        None => std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path),
     }
 
     // Publish the run-scope activation env vars NOW (after both option
@@ -292,10 +298,27 @@ fn main() {
     // before morloc_run_finalize writes summary.json.
     runlog::install(manifest.run_log.clone());
 
-    // Pool paths in the manifest are absolute, so no chdir is needed.
-    // This lets user programs resolve file paths relative to the caller's CWD.
-    // Source imports in pools resolve via __file__-relative paths (Python sys.path)
-    // or script-relative paths (R .morloc.source) rather than depending on CWD.
+    // Pool exec paths in the manifest are relative to the manifest's own
+    // directory (the build dir). Resolve the pool executable (the last exec
+    // element) to an absolute path here so pools spawn correctly regardless
+    // of the caller's CWD, and so the build directory stays relocatable. The
+    // interpreter token (e.g. "python3") is left untouched. No chdir is done,
+    // so user programs still resolve their own file arguments relative to the
+    // caller's CWD; source imports in pools resolve via __file__-relative
+    // paths (Python sys.path) or script-relative paths (R .morloc.source).
+    {
+        let manifest_dir = abs_manifest
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        for pool in manifest.pools.iter_mut() {
+            if let Some(last) = pool.exec.last_mut() {
+                if std::path::Path::new(last).is_relative() {
+                    *last = manifest_dir.join(&*last).to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
 
     // Validate pool executables exist
     if let Err(e) = process::validate_pools(&manifest.pools) {
@@ -571,21 +594,22 @@ fn run_daemon(
 }
 
 /// Run the multi-program router daemon.
-/// Scans the fdb directory for .manifest files and serves them all via HTTP/TCP/Unix.
+/// Scans the exe directory (one exe/<name>/manifest.json per installed
+/// program) and serves them all via HTTP/TCP/Unix.
 fn run_router(config: &dispatch::NexusConfig) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
 
     extern "C" {
-        fn router_init(fdb_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
+        fn router_init(exe_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn router_run(config: *mut c_void, router: *mut c_void);
         fn router_free(router: *mut c_void);
     }
 
-    let fdb_path = config.fdb_path.clone().unwrap_or_else(|| {
-        format!("{}/fdb", morloc_home())
+    let exe_path = config.fdb_path.clone().unwrap_or_else(|| {
+        format!("{}/exe", morloc_home())
     });
-    let fdb_c = CString::new(fdb_path.as_str()).unwrap();
+    let fdb_c = CString::new(exe_path.as_str()).unwrap();
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let router = unsafe { router_init(fdb_c.as_ptr(), &mut errmsg) };

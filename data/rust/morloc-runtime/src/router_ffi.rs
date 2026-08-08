@@ -70,12 +70,14 @@ pub unsafe extern "C" fn router_init(
         set_errmsg(
             errmsg,
             &MorlocError::Other(format!(
-                "Cannot open fdb directory '{}': {}",
+                "Cannot open exe directory '{}': {}",
                 path_str, errno_msg
             )),
         );
         return ptr::null_mut();
     }
+
+    let exe_str = CStr::from_ptr(fdb_path).to_string_lossy().into_owned();
 
     let router = libc::calloc(1, std::mem::size_of::<Router>()) as *mut Router;
     (*router).fdb_path = libc::strdup(fdb_path);
@@ -94,7 +96,13 @@ pub unsafe extern "C" fn router_init(
         let name = CStr::from_ptr((*entry).d_name.as_ptr());
         let name_str = name.to_string_lossy();
 
-        if name_str.len() < 10 || !name_str.ends_with(".manifest") {
+        // Each installed program is a subdirectory exe/<name>/ holding a
+        // manifest.json. Skip "." / ".." and any entry without a manifest.
+        if name_str == "." || name_str == ".." {
+            continue;
+        }
+        let full_path = format!("{}/{}/manifest.json", exe_str, name_str);
+        if !std::path::Path::new(&full_path).is_file() {
             continue;
         }
 
@@ -110,16 +118,12 @@ pub unsafe extern "C" fn router_init(
         let prog = &mut *(*router).programs.add((*router).n_programs);
         ptr::write_bytes(prog as *mut RouterProgram, 0, 1);
 
-        // Extract program name (filename without .manifest)
-        let prog_name_len = name_str.len() - 9;
-        let prog_name = &name_str[..prog_name_len];
+        // Program name is the subdirectory name.
+        let prog_name = name_str.as_ref();
         let c_prog_name = CString::new(prog_name).unwrap_or_default();
         prog.name = libc::strdup(c_prog_name.as_ptr());
 
-        // Build full path
-        let fdb_str = CStr::from_ptr(fdb_path).to_string_lossy();
-        let full_path = format!("{}/{}", fdb_str, name_str);
-        let c_path = CString::new(full_path).unwrap_or_default();
+        let c_path = CString::new(full_path.clone()).unwrap_or_default();
         prog.manifest_path = libc::strdup(c_path.as_ptr());
 
         // Read and parse manifest

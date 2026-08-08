@@ -1736,7 +1736,13 @@ pub unsafe extern "C" fn read_manifest(
     let path_str = CStr::from_ptr(path).to_string_lossy();
     match std::fs::read_to_string(path_str.as_ref()) {
         Ok(text) => {
-            let c_text = CString::new(text).unwrap_or_default();
+            // Pool exec paths are relative to the manifest's own directory.
+            // The router spawns pools straight from this parsed C manifest,
+            // so resolve them to absolute here (dirname of the manifest
+            // file). The single-program daemon spawns pools from the Rust
+            // manifest and does not depend on this.
+            let resolved = resolve_pool_paths(&text, path_str.as_ref());
+            let c_text = CString::new(resolved).unwrap_or_default();
             parse_manifest(c_text.as_ptr(), errmsg)
         }
         Err(e) => {
@@ -1744,6 +1750,40 @@ pub unsafe extern "C" fn read_manifest(
             ptr::null_mut()
         }
     }
+}
+
+/// Rewrite each pool's executable path (the last `exec` element) to an
+/// absolute path resolved against the manifest file's directory, leaving
+/// the interpreter token and any already-absolute path untouched. Returns
+/// the original text unchanged if it cannot be parsed as JSON.
+fn resolve_pool_paths(text: &str, manifest_path: &str) -> String {
+    let dir = match std::path::Path::new(manifest_path)
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        Some(d) => d,
+        None => return text.to_string(),
+    };
+    let mut v: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return text.to_string(),
+    };
+    if let Some(pools) = v.get_mut("pools").and_then(|p| p.as_array_mut()) {
+        for pool in pools {
+            if let Some(exec) = pool.get_mut("exec").and_then(|e| e.as_array_mut()) {
+                if let Some(last) = exec.last_mut() {
+                    if let Some(s) = last.as_str() {
+                        if std::path::Path::new(s).is_relative() {
+                            let abs = dir.join(s).to_string_lossy().into_owned();
+                            *last = serde_json::Value::String(abs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| text.to_string())
 }
 
 // -- free_manifest ------------------------------------------------------------

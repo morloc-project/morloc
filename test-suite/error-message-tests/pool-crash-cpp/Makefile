@@ -4,4 +4,4 @@ all:
 	./nexus crashme 0 2>&1 | grep -ci "signal\|crash\|abort" > obs.txt || echo "0" > obs.txt
 
 clean:
-	rm -rf nexus pools* __pycache__ *.err obs.txt .manifest
+	rm -rf nexus *-build/* __pycache__ *.err obs.txt .manifest

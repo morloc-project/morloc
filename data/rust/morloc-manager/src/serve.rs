@@ -96,9 +96,9 @@ pub fn build_serve_image(
         ));
     }
 
-    // Rewrite build.path in each manifest so the nexus chdirs to the
-    // container-internal path instead of the original host path.
-    rewrite_manifest_paths(&context_dir)?;
+    // No manifest rewriting is needed: pool exec paths are relative to each
+    // manifest.json's own directory, so the copied exe/<name>/ trees resolve
+    // correctly inside the container with no host-path leakage.
 
     let dockerfile_path = context_dir.join("Dockerfile");
     let has_exe = context_dir.join("exe").is_dir()
@@ -161,7 +161,7 @@ pub fn build_serve_image(
          {healthcheck}\
          # Entrypoint: nexus router aggregates all installed programs\n\
          ENTRYPOINT [\"morloc-nexus\", \"--router\", \\\n\
-                     \"--fdb\", \"{mh}/fdb\", \\\n\
+                     \"--fdb\", \"{mh}/exe\", \\\n\
                      \"--http-port\", \"8080\"]\n"
     );
     fs::write(&dockerfile_path, &dockerfile_content)
@@ -344,7 +344,7 @@ pub fn serve_environment(
     cfg.command = Some(vec![
         "morloc-nexus".to_string(),
         "--router".to_string(),
-        "--fdb".to_string(), format!("{mh}/fdb"),
+        "--fdb".to_string(), format!("{mh}/exe"),
         "--http-port".to_string(), "8080".to_string(),
     ]);
     cfg.shm_size = shm_size.clone();
@@ -640,75 +640,10 @@ pub fn validate_programs(
 }
 
 // ======================================================================
-// Manifest path rewriting for frozen images
+// Container constants
 // ======================================================================
 
 const CONTAINER_MORLOC_HOME: &str = "/opt/morloc";
-const MANIFEST_MARKER: &str = "### MANIFEST ###";
-
-/// Rewrite `build.path` in every `.manifest` file under `fdb/` so the
-/// nexus inside the container chdirs to the correct location instead of
-/// the original host path.
-fn rewrite_manifest_paths(context_dir: &Path) -> Result<()> {
-    let fdb_dir = context_dir.join("fdb");
-    if !fdb_dir.is_dir() {
-        return Ok(());
-    }
-    let entries = fs::read_dir(&fdb_dir)
-        .map_err(|e| ManagerError::UnfreezeError(format!("read fdb/: {e}")))?;
-    for entry in entries {
-        let entry = entry
-            .map_err(|e| ManagerError::UnfreezeError(format!("read fdb/ entry: {e}")))?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.ends_with(".manifest") {
-            continue;
-        }
-        let prog_name = &name_str[..name_str.len() - ".manifest".len()];
-        let container_build_path = format!("{}/exe/{}", CONTAINER_MORLOC_HOME, prog_name);
-        rewrite_one_manifest(&path, &container_build_path)?;
-    }
-    Ok(())
-}
-
-/// Rewrite the `build.path` field in a single manifest wrapper script.
-fn rewrite_one_manifest(path: &Path, new_build_path: &str) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| ManagerError::UnfreezeError(format!("read {}: {e}", path.display())))?;
-
-    let (prefix, json_str) = if content.starts_with("#!") {
-        if let Some(marker_pos) = content.find(MANIFEST_MARKER) {
-            let after_marker = &content[marker_pos..];
-            let json_start = after_marker
-                .find('\n')
-                .map(|i| marker_pos + i + 1)
-                .unwrap_or(content.len());
-            (&content[..json_start], &content[json_start..])
-        } else {
-            return Ok(()); // no marker, skip
-        }
-    } else {
-        ("", content.as_str())
-    };
-
-    let mut manifest: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| ManagerError::UnfreezeError(format!("parse {}: {e}", path.display())))?;
-
-    if let Some(build) = manifest.get_mut("build") {
-        if let Some(p) = build.get_mut("path") {
-            *p = serde_json::Value::String(new_build_path.to_string());
-        }
-    }
-
-    let new_json = serde_json::to_string(&manifest)
-        .map_err(|e| ManagerError::UnfreezeError(format!("serialize {}: {e}", path.display())))?;
-
-    let new_content = format!("{}{}\n", prefix, new_json);
-    fs::write(path, new_content)
-        .map_err(|e| ManagerError::UnfreezeError(format!("write {}: {e}", path.display())))?;
-    Ok(())
-}
 
 // ======================================================================
 // Manifest and image resolution
@@ -882,7 +817,7 @@ fn serve_apptainer_instance(
     argv.push("morloc-nexus".to_string());
     argv.push("--router".to_string());
     argv.push("--fdb".to_string());
-    argv.push(format!("{mh}/fdb"));
+    argv.push(format!("{mh}/exe"));
     argv.push("--http-port".to_string());
     argv.push(ports.first().map(|(_, c)| c.to_string()).unwrap_or_else(|| "8080".to_string()));
 

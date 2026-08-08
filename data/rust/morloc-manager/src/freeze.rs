@@ -28,7 +28,7 @@ pub fn freeze_from_dir(
 
     // Validate programs exist before writing any files
     let modules = scan_modules(&format!("{v_data_dir}/fdb"));
-    let programs = scan_programs(&format!("{v_data_dir}/fdb"));
+    let programs = scan_programs(&format!("{v_data_dir}/exe"));
     if programs.is_empty() {
         return Err(ManagerError::FreezeError(
             "No morloc programs are installed. Compile and install with 'morloc make --install' before freezing.".to_string()
@@ -193,29 +193,29 @@ fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
         .collect()
 }
 
-fn scan_programs(fdb_dir: &str) -> Vec<ProgramEntry> {
-    let fdb_path = Path::new(fdb_dir);
-    if !fdb_path.is_dir() {
+fn scan_programs(exe_dir: &str) -> Vec<ProgramEntry> {
+    let exe_path = Path::new(exe_dir);
+    if !exe_path.is_dir() {
         return Vec::new();
     }
-    let Ok(entries) = fs::read_dir(fdb_path) else {
+    let Ok(entries) = fs::read_dir(exe_path) else {
         return Vec::new();
     };
+    // Each installed program is a subdirectory exe/<name>/ with a manifest.json.
     entries
         .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .ends_with(".manifest")
-        })
-        .map(|e| {
-            let filename = e.file_name().to_string_lossy().to_string();
-            let prog_name = filename.strip_suffix(".manifest").unwrap_or(&filename);
-            let commands = parse_manifest_commands(&e.path());
-            ProgramEntry {
-                name: prog_name.to_string(),
-                commands,
+        .filter_map(|e| {
+            let dir = e.path();
+            if !dir.is_dir() {
+                return None;
             }
+            let manifest = dir.join("manifest.json");
+            if !manifest.is_file() {
+                return None;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            let commands = parse_manifest_commands(&manifest);
+            Some(ProgramEntry { name, commands })
         })
         .collect()
 }

@@ -511,7 +511,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "arg0": {
+          "_1": {
             "type": "array",
             "items": {
               "type": "integer"
@@ -519,7 +519,7 @@
           }
         },
         "required": [
-          "arg0"
+          "_1"
         ],
         "additionalProperties": false
       }
@@ -562,7 +562,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "arg0": {
+          "_1": {
             "type": "array",
             "items": {
               "type": "string"
@@ -570,7 +570,7 @@
           }
         },
         "required": [
-          "arg0"
+          "_1"
         ],
         "additionalProperties": false
       }
@@ -581,7 +581,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "arg0": {
+          "_1": {
             "type": "array",
             "items": {
               "type": "array",
@@ -599,7 +599,7 @@
           }
         },
         "required": [
-          "arg0"
+          "_1"
         ],
         "additionalProperties": false
       }
@@ -610,12 +610,12 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "file": {
+          "_1": {
             "type": "string"
           }
         },
         "required": [
-          "file"
+          "_1"
         ],
         "additionalProperties": false
       }
@@ -626,12 +626,12 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "n": {
+          "_1": {
             "type": "integer"
           }
         },
         "required": [
-          "n"
+          "_1"
         ],
         "additionalProperties": false
       }
@@ -642,7 +642,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "arg0": {
+          "_1": {
             "type": [
               "integer",
               "null"

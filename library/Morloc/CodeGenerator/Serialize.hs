@@ -301,8 +301,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       langMap <- MM.gets stateManifoldLang
       serialCall <- case Map.lookup mid langMap of
         Just targetLang | not (LR.coLocated reg lang targetLang) -> do
-          config <- MM.ask
-          let socket = MC.setupServerAndSocket config reg targetLang
+          let socket = MC.setupServerAndSocket reg targetLang
           return (AppForeignRecS resultType mid socket serializedArgs)
         _ -> return (AppRecS resultType mid serializedArgs)
       naturalizeN "recCall" m lang resultType serialCall

@@ -19,12 +19,12 @@ import qualified Data.Aeson as JSON
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAlphaNum)
-import Data.List (intercalate, isSuffixOf, nub)
+import Data.List (intercalate, nub)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (createDirectoryIfMissing, listDirectory)
-import System.FilePath (dropExtension, takeFileName, (</>))
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
+import System.FilePath ((</>))
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
 
 -- Lightweight manifest types for completion generation
@@ -114,11 +114,11 @@ The Bool parameter controls whether to print activation instructions.
 -}
 regenerateCompletions :: Bool -> String -> IO ()
 regenerateCompletions printInstructions configHome = do
-  let fdbDir = configHome </> "fdb"
+  let exeDir = configHome </> "exe"
       compDir = configHome </> "completions"
   createDirectoryIfMissing True compDir
 
-  manifests <- loadManifests fdbDir
+  manifests <- loadManifests exeDir
   let bashScript = generateBash manifests
       zshScript = generateZsh manifests
       bashPath = compDir </> "morloc-completions.bash"
@@ -133,30 +133,30 @@ regenerateCompletions printInstructions configHome = do
       hPutStrLn stderr $ info $ "  Bash: add to ~/.bashrc:  source " ++ bashPath
       hPutStrLn stderr $ info $ "  Zsh:  add to ~/.zshrc:   source " ++ zshPath
 
--- | Load all .manifest files from the fdb directory
+-- | Load every program's manifest.json from the exe directory. Each
+-- installed program lives in @exe/<name>/@; the program name is the
+-- subdirectory name.
 loadManifests :: FilePath -> IO [ManifestInfo]
-loadManifests fdbDir = do
-  result <- try (listDirectory fdbDir) :: IO (Either SomeException [FilePath])
+loadManifests exeDir = do
+  result <- try (listDirectory exeDir) :: IO (Either SomeException [FilePath])
   case result of
     Left _ -> return []
-    Right entries -> do
-      let manifestFiles = filter (".manifest" `isSuffixOf`) entries
-      catMaybes <$> mapM loadOne manifestFiles
+    Right entries -> catMaybes <$> mapM loadOne entries
   where
-    -- Derive program name from filename (e.g. "pricer.manifest" -> "pricer")
-    nameFromFile f = T.pack (dropExtension (takeFileName f))
-
-    loadOne f = do
-      r <- try (BL.readFile (fdbDir </> f)) :: IO (Either SomeException BL.ByteString)
-      case r of
-        Left _ -> return Nothing
-        Right bs -> case JSON.eitherDecode bs of
-          Right m ->
-            let m' = if T.null (miName m) then m {miName = nameFromFile f} else m
-             in return (Just m')
-          Left err -> do
-            hPutStrLn stderr $ "Warning: failed to parse " ++ f ++ ": " ++ err
-            return Nothing
+    loadOne name = do
+      let manifestPath = exeDir </> name </> "manifest.json"
+      exists <- doesFileExist manifestPath
+      if not exists
+        then return Nothing
+        else do
+          r <- try (BL.readFile manifestPath) :: IO (Either SomeException BL.ByteString)
+          case r of
+            Left _ -> return Nothing
+            Right bs -> case JSON.eitherDecode bs of
+              Right m -> return (Just m {miName = T.pack name})
+              Left err -> do
+                hPutStrLn stderr $ "Warning: failed to parse " ++ manifestPath ++ ": " ++ err
+                return Nothing
 
 -- | Collect all flag/opt strings for a command
 argCompletionWords :: [ArgInfo] -> [String]

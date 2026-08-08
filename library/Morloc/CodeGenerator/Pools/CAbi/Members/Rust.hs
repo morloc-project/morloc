@@ -915,7 +915,7 @@ translate srcs es = do
       code = CMS.evalState (runReaderT (makeRustCode includeDocs closureTable es) emptyOwnEnv) st0
 
   maker <- makeTheMaker
-  poolSubdir <- MM.getModuleName
+  let poolSubdir = ML.poolDirKey rustLang
 
   return $
     Script
@@ -1259,7 +1259,7 @@ translateSegment m0 = do
 makeTheMaker :: MorlocMonad [SysCommand]
 makeTheMaker = do
   home <- MM.asks configHome
-  poolSubdir <- MM.getModuleName
+  let poolSubdir = ML.poolDirKey rustLang
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
       src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName rustLang
       libDir = pretty (home </> "lib")

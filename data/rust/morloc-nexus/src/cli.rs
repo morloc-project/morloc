@@ -202,13 +202,13 @@ pub struct McpArgs {
     pub target: String,
 }
 
-/// Multi-program router across installed modules. Doesn't take a
-/// single program target -- it serves every manifest it finds under
-/// the fdb directory.
+/// Multi-program router across installed programs. Doesn't take a
+/// single program target -- it serves every `exe/<name>/manifest.json`
+/// it finds under the exe directory.
 #[derive(Args, Debug)]
 pub struct RouterArgs {
-    /// Path to the fdb manifest directory. Defaults to
-    /// `$MORLOC_HOME/fdb`.
+    /// Path to the exe directory (one `<name>/manifest.json` per installed
+    /// program). Defaults to `$MORLOC_HOME/exe`.
     #[arg(long, value_name = "PATH")]
     pub fdb: Option<String>,
 
@@ -681,63 +681,61 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     cfg
 }
 
-/// Sentinel comment the compiler emits on line 2 of every generated
-/// wrapper script (see `Morloc.CodeGenerator.Nexus.makeWrapperScript`).
-/// Used by [`resolve_daemon_target`] to confirm a non-`.manifest`
-/// daemon target is actually a morloc wrapper before trusting its
-/// embedded JSON payload.
-pub const WRAPPER_SENTINEL: &str = "# morloc-program v";
-
-/// Resolve a daemon target argument to a path that
-/// [`crate::manifest::read_manifest_payload`] can ingest. The
-/// wrapper format embeds the manifest JSON after a `### MANIFEST ###`
-/// marker, so a wrapper script and a freestanding `.manifest` file
-/// both yield the manifest from the same extraction code path. This
-/// resolver gates which paths reach that extractor:
+/// Resolve a manifest target argument to a path that
+/// [`crate::manifest::read_manifest_payload`] can ingest. A generated
+/// program is a standalone `manifest.json` plus one or more thin shell
+/// launchers that exec `morloc-nexus <mode> <manifest.json>`. This
+/// resolver accepts either shape:
 ///
-/// 1. A `.manifest` extension is trusted (the JSON parser fails
-///    fast if it's malformed).
-/// 2. Other files are accepted iff their head contains the
-///    [`WRAPPER_SENTINEL`] comment that the compiler stamps onto
-///    every generated wrapper. This guards against a user passing a
-///    random shell script and seeing a confusing "no marker" error
-///    from deep inside the manifest extractor.
-/// 3. Anything else is rejected with a clear "not a morloc wrapper
-///    or manifest file" diagnostic.
+/// 1. A thin wrapper (a `#!` shell script mentioning `morloc-nexus`):
+///    the manifest path is extracted from its exec line, so
+///    `morloc-nexus daemon ./mycli` keeps working.
+/// 2. Anything else is returned as-is and treated as a `manifest.json`
+///    file; [`crate::manifest::parse_manifest`] fails cleanly if it is
+///    not valid manifest JSON.
 ///
-/// Returns the path that should be fed to `read_manifest_payload`
-/// (the same path that was passed in -- the embedded-payload
-/// extractor handles both wrapper and freestanding shapes
-/// uniformly). Errors are caller-friendly strings ready to print.
-pub fn resolve_daemon_target(target: &str) -> Result<String, String> {
+/// Errors are caller-friendly strings ready to print.
+pub fn resolve_manifest_target(target: &str) -> Result<String, String> {
     use std::io::Read;
 
-    if target.ends_with(".manifest") {
-        // Trust the extension; the manifest parser will fail cleanly
-        // if the file is missing or unreadable.
-        return Ok(target.to_string());
-    }
+    let mut buf = [0u8; 8192];
+    let n = match std::fs::File::open(target).and_then(|mut f| f.read(&mut buf)) {
+        // Let read_manifest_payload report a clean open error.
+        Err(_) => return Ok(target.to_string()),
+        Ok(n) => n,
+    };
+    let head = match std::str::from_utf8(&buf[..n]) {
+        Ok(s) => s,
+        // Not UTF-8: not a wrapper; hand it to the manifest reader as-is.
+        Err(_) => return Ok(target.to_string()),
+    };
 
-    let mut buf = [0u8; 4096];
-    let n = std::fs::File::open(target)
-        .and_then(|mut f| f.read(&mut buf))
-        .map_err(|e| format!("cannot open '{}': {}", target, e))?;
-
-    let head = std::str::from_utf8(&buf[..n]).map_err(|_| {
-        format!(
-            "'{}' is not a morloc wrapper or manifest file (binary content)",
-            target
-        )
-    })?;
-    if head.contains(WRAPPER_SENTINEL) {
-        Ok(target.to_string())
+    if head.starts_with("#!") && head.contains("morloc-nexus") {
+        match extract_manifest_from_wrapper(head) {
+            Some(p) => Ok(p),
+            None => Err(format!(
+                "'{}' looks like a morloc wrapper but no manifest path was found on its exec line",
+                target
+            )),
+        }
     } else {
-        Err(format!(
-            "'{}' is not a morloc wrapper or manifest file \
-             (missing sentinel comment and not a *.manifest)",
-            target
-        ))
+        Ok(target.to_string())
     }
+}
+
+/// Extract the single-quoted manifest path from a wrapper's
+/// `exec morloc-nexus <mode> '<path>' "$@"` line, reversing the POSIX
+/// single-quote escaping the compiler applies (see
+/// `Morloc.CodeGenerator.Nexus.shellQuote`).
+fn extract_manifest_from_wrapper(content: &str) -> Option<String> {
+    let line = content.lines().find(|l| {
+        let t = l.trim_start();
+        t.starts_with("exec morloc-nexus") || t.starts_with("morloc-nexus")
+    })?;
+    let first = line.find('\'')?;
+    let rest = &line[first + 1..];
+    let last = rest.rfind('\'')?;
+    Some(rest[..last].replace("'\\''", "'"))
 }
 
 // ============================================================
@@ -1179,7 +1177,7 @@ fn parse_mcp(argv: &[String]) -> ParsedInvocation {
         Mode::Mcp(m) => m.target.clone(),
         _ => unreachable!("parse_mcp only reached for the mcp subcommand"),
     };
-    let resolved = match resolve_daemon_target(&target) {
+    let resolved = match resolve_manifest_target(&target) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -1227,16 +1225,16 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
     let target_str = find_wrapper_target(raw_tail, &flags);
     let (manifest, manifest_path) = match target_str {
         Some(target) => {
-            let resolved = if !is_run {
-                match resolve_daemon_target(target) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
+            // Both run and daemon accept either a manifest.json path or a
+            // thin wrapper; the wrapper's own exec line passes manifest.json
+            // to `run`, so this is a no-op there but lets an explicit
+            // `morloc-nexus run ./mycli` work too.
+            let resolved = match resolve_manifest_target(target) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
                 }
-            } else {
-                target.to_string()
             };
             let payload = match crate::manifest::read_manifest_payload(&resolved) {
                 Ok(p) => p,
@@ -2001,60 +1999,59 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
-    /// Build a synthetic wrapper that starts with `#!/bin/sh` plus
-    /// the sentinel comment plus the manifest marker. The exact
-    /// payload after `### MANIFEST ###` doesn't matter for the
-    /// resolver -- it only inspects the head.
-    fn wrapper_head() -> Vec<u8> {
+    /// Build a synthetic thin wrapper of the shape the compiler emits:
+    /// a pure-shell launcher that execs `morloc-nexus <mode> '<path>'`.
+    fn wrapper_for(manifest_path: &str) -> Vec<u8> {
         format!(
-            "#!/bin/sh\n{}{}\nexec morloc-nexus run \"$0\" \"$@\"\n### MANIFEST ###\n{{}}\n",
-            WRAPPER_SENTINEL, "0.0.0"
+            "#!/bin/sh\nexec morloc-nexus run '{}' \"$@\"\n",
+            manifest_path
         )
         .into_bytes()
     }
 
     #[test]
-    fn resolves_dot_manifest_unconditionally() {
-        // A `.manifest` extension is trusted without reading the
-        // file -- the parser later in main() catches any I/O or
-        // shape problems.
-        let result = resolve_daemon_target("/nonexistent/path/to/file.manifest");
-        assert_eq!(result.as_deref(), Ok("/nonexistent/path/to/file.manifest"));
-    }
-
-    #[test]
-    fn resolves_wrapper_via_sentinel() {
+    fn resolves_wrapper_to_manifest_path() {
         let tmp = std::env::temp_dir().join(format!(
             "morloc-nexus-resolve-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
-        let path = write_tmp(&tmp, "morloc-prog", &wrapper_head());
-        let result = resolve_daemon_target(&path).unwrap();
+        let manifest = "/abs/path/foo-build/manifest.json";
+        let path = write_tmp(&tmp, "morloc-prog", &wrapper_for(manifest));
+        let result = resolve_manifest_target(&path).unwrap();
+        assert_eq!(result, manifest);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolves_bare_manifest_to_itself() {
+        // A non-wrapper file (a manifest.json, or anything else) is
+        // returned unchanged; parse_manifest later reports any shape
+        // problem cleanly.
+        let tmp = std::env::temp_dir().join(format!(
+            "morloc-nexus-bare-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_tmp(&tmp, "manifest.json", b"{\"name\":\"x\"}\n");
+        let result = resolve_manifest_target(&path).unwrap();
         assert_eq!(result, path);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn rejects_random_shell_script() {
-        let tmp = std::env::temp_dir().join(format!(
-            "morloc-nexus-reject-shell-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let path = write_tmp(&tmp, "not-morloc", b"#!/bin/sh\necho hi\n");
-        let err = resolve_daemon_target(&path).unwrap_err();
-        assert!(
-            err.contains("not a morloc wrapper or manifest file"),
-            "unexpected error: {}",
-            err
-        );
-        std::fs::remove_dir_all(&tmp).ok();
+    fn missing_file_deferred_to_reader() {
+        // An unreadable target is returned as-is so the manifest reader
+        // reports a single clean "cannot open" error.
+        let result = resolve_manifest_target("/definitely/does/not/exist");
+        assert_eq!(result.as_deref(), Ok("/definitely/does/not/exist"));
     }
 
     #[test]
-    fn rejects_missing_file() {
-        let err = resolve_daemon_target("/definitely/does/not/exist").unwrap_err();
-        assert!(err.contains("cannot open"), "unexpected error: {}", err);
+    fn unquotes_escaped_single_quote_in_path() {
+        let extracted = extract_manifest_from_wrapper(
+            "#!/bin/sh\nexec morloc-nexus daemon 'a'\\''b/manifest.json' \"$@\"\n",
+        );
+        assert_eq!(extracted.as_deref(), Some("a'b/manifest.json"));
     }
 }

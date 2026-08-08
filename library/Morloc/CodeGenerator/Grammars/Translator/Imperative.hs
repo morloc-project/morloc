@@ -757,13 +757,13 @@ lowerSerialExpr ::
   SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 lowerSerialExpr _ _ (ManS_ f) = return f
-lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) =
+lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) ForeignCall args) _) =
   return $ defaultValue {poolExpr = lcForeignCall cfg socketFile mid (map argNamer args)}
-lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) =
+lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
 lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
-lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
+lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
 lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
   lcCacheBody cfg resSa lbl mid args body

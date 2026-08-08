@@ -3,4 +3,4 @@ all:
 	morloc make -o dnd foo.loc
 
 clean:
-	rm -rf dnd nexus pool-* *.manifest
+	rm -rf dnd nexus *-build/ *.manifest

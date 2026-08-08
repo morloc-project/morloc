@@ -421,7 +421,7 @@ translate srcs es = do
 
   maker <- makeTheMaker srcs'
 
-  poolSubdir <- MM.getModuleName
+  let poolSubdir = ML.poolDirKey cppLang
 
   return $
     Script
@@ -617,7 +617,7 @@ collectNamedRecordTVars e0 =
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  poolSubdir <- MM.getModuleName
+  let poolSubdir = ML.poolDirKey cppLang
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
   -- The member-agnostic host translation unit (owns main()/pool_main); the C++

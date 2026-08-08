@@ -75,6 +75,7 @@ module Morloc.Monad
     -- * naming helpers
   , getModuleName
   , getOutfileName
+  , getProgramKey
 
     -- * Indexing monad
   , Index
@@ -549,6 +550,18 @@ getOutfileName = do
   case stateOutfile st of
     Just name -> return name
     Nothing -> getModuleName
+
+{- | Get the program identity used to name the build directory
+(@<key>-build@ / @exe/<key>@). Uses 'stateProgramKey' (--name or the
+source basename) when set; otherwise falls back to the outfile/module
+name, which is how eval reuses its @--save@ name.
+-}
+getProgramKey :: MorlocMonad String
+getProgramKey = do
+  st <- get
+  case stateProgramKey st of
+    Just k -> return k
+    Nothing -> getOutfileName
 
 data IndexState = IndexState
   { index :: !Int

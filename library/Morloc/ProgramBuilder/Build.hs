@@ -7,9 +7,11 @@ Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-Orchestrates the @morloc make@ build step: writes generated pool source
-files, compiles them with the appropriate language toolchain, copies the
-pre-compiled nexus binary, and writes the manifest file.
+Orchestrates the @morloc make@ build step: writes @manifest.json@ and the
+per-language pool sources into a staging directory, compiles the pools with
+the appropriate language toolchain, then atomically swaps the staging tree
+into the final @<key>-build@ directory. Finally it writes the thin shell
+launcher wrappers that point at the built @manifest.json@.
 -}
 module Morloc.ProgramBuilder.Build
   ( buildProgram
@@ -23,32 +25,63 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Error (ioeGetFileName)
-import System.Process (callProcess)
+import System.Process (callProcess, getCurrentPid)
 
-buildProgram :: (Script, [Script]) -> MorlocMonad ()
-buildProgram (nexus, pools) = do
-  installDir <- MM.gets stateInstallDir
-  case installDir of
-    Just dir -> do
-      -- When installing, copy includes and the morloc script into the install
-      -- directory, cd there, and build as normal. This avoids leaving artifacts
-      -- in CWD and ensures the installed pools are a fresh build.
-      force <- MM.gets stateInstallForce
-      dirExists <- liftIO $ SD.doesDirectoryExist dir
-      when (dirExists && not force) $ do
-        contents <- liftIO $ SD.listDirectory dir
-        unless (null contents) $
-          MM.throwSystemError $ "Install directory already exists: " <> pretty dir
-            <> ". Use --force to overwrite."
-      when (dirExists && force) $
-        liftIO $ SD.removeDirectoryRecursive dir
-      liftIO $ SD.createDirectoryIfMissing True dir
-      origDir <- liftIO SD.getCurrentDirectory
-      liftIO $ SD.setCurrentDirectory dir
-      buildAll (nexus : pools) `finally` liftIO (SD.setCurrentDirectory origDir)
-    Nothing ->
-      buildAll (nexus : pools)
+-- | Marker file written at the root of every morloc build directory. Its
+-- presence is required before a pre-existing directory may be deleted on
+-- rebuild, so a stray or user-owned directory is never destroyed.
+buildMarker :: FilePath
+buildMarker = ".morloc-build"
+
+buildProgram :: (Script, [WrapperFile], [Script]) -> MorlocMonad ()
+buildProgram (manifest, wrappers, pools) = do
+  mBuildDir <- MM.gets stateInstallDir
+  buildDir <- case mBuildDir of
+    Just d -> return d
+    Nothing -> liftIO SD.getCurrentDirectory
+  isInstall <- MM.gets stateInstall
+  force <- MM.gets stateInstallForce
+
+  -- Install-mode guard: refuse to clobber a populated install dir without
+  -- --force, so a failed reinstall can never destroy an existing program
+  -- before its bin/ entry is checked.
+  when isInstall $ do
+    dirExists <- liftIO $ SD.doesDirectoryExist buildDir
+    when dirExists $ do
+      contents <- liftIO $ SD.listDirectory buildDir
+      when (not (null contents) && not force) $
+        MM.throwSystemError $ "Install directory already exists: " <> pretty buildDir
+          <> ". Use --force to overwrite."
+
+  -- Build into a sibling staging directory (same parent, so the later
+  -- rename is atomic), then swap it into place. A crash mid-build leaves
+  -- the previous good build untouched (there is no compilation cache to
+  -- preserve, so every build is clean). The pid keys the staging name;
+  -- a stale same-pid dir from a prior crash is cleared first.
+  pid <- liftIO getCurrentPid
+  let parent = takeDirectory buildDir
+      staging = buildDir <> ".tmp." <> show pid
+  liftIO $ SD.createDirectoryIfMissing True parent
+  liftIO $ removeDirIfExists staging
+  liftIO $ SD.createDirectoryIfMissing True staging
+  origDir <- liftIO SD.getCurrentDirectory
+
+  ( do
+      liftIO $ MT.writeFile (staging </> buildMarker) ""
+      liftIO $ SD.setCurrentDirectory staging
+      buildAll (manifest : pools)
+      liftIO $ SD.setCurrentDirectory origDir
+      liftIO $ swapIn staging buildDir
+    ) `catchError` \e -> do
+      liftIO $ SD.setCurrentDirectory origDir
+      liftIO $ removeDirIfExists staging
+      throwError e
+
+  -- Launcher wrappers land at their absolute targets (CWD for plain make,
+  -- the install dir for install) and are made executable.
+  liftIO $ mapM_ writeWrapper wrappers
   where
     -- Land every pool's source files on disk BEFORE running any make
     -- commands. If one pool's compile fails, the other pools' sources
@@ -57,14 +90,48 @@ buildProgram (nexus, pools) = do
     -- files ever get written.
     buildAll ss = mapM_ writeScript ss >> mapM_ runMakes ss
 
--- | catch/finally for MorlocMonad
-finally :: MorlocMonad a -> MorlocMonad () -> MorlocMonad a
-finally action cleanup = do
-  result <- catchError (fmap Right action) (return . Left)
-  cleanup
-  case result of
-    Right a -> return a
-    Left e -> throwError e
+-- | Atomically replace @dest@ with @staging@ (same parent, so the rename is
+-- atomic). An existing @dest@ is removed only when it is a real directory
+-- (not a symlink) carrying the 'buildMarker', so a stray or user-owned
+-- directory is never destroyed.
+swapIn :: FilePath -> FilePath -> IO ()
+swapIn staging dest = do
+  destExists <- SD.doesDirectoryExist dest
+  when destExists $ do
+    ok <- safeToDelete dest
+    if ok
+      then SD.removeDirectoryRecursive dest
+      else ioError . userError $
+        "Refusing to overwrite '" <> dest <> "': not a morloc build directory "
+          <> "(missing " <> buildMarker <> " marker) or it is a symbolic link."
+  SD.renameDirectory staging dest
+
+-- | A directory may be deleted on rebuild only if it is a real directory
+-- (not a symlink) and carries the 'buildMarker'.
+safeToDelete :: FilePath -> IO Bool
+safeToDelete dir = do
+  isDir <- SD.doesDirectoryExist dir
+  isSym <- SD.pathIsSymbolicLink dir
+  hasMarker <- SD.doesFileExist (dir </> buildMarker)
+  return (isDir && not isSym && hasMarker)
+
+removeDirIfExists :: FilePath -> IO ()
+removeDirIfExists dir = do
+  exists <- SD.doesDirectoryExist dir
+  when exists $ SD.removeDirectoryRecursive dir
+
+writeWrapper :: WrapperFile -> IO ()
+writeWrapper (WrapperFile path body) = do
+  -- A directory occupying the launcher path is the common recoverable
+  -- mistake (the chosen output name collides with an existing directory);
+  -- name the conflict instead of leaking a raw "is a directory" IOError.
+  isDir <- SD.doesDirectoryExist path
+  when isDir . ioError . userError $
+    "Cannot write the launcher '" <> path <> "': a directory of that name already exists. "
+      <> "Choose a different output name with --cli-out/-o, or remove the directory."
+  SD.createDirectoryIfMissing True (takeDirectory path)
+  MT.writeFile path body
+  callProcess "chmod" ["755", path]
 
 writeScript :: Script -> MorlocMonad ()
 writeScript s = do

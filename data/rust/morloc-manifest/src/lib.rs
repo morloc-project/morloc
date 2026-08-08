@@ -1,6 +1,6 @@
 //! Morloc manifest schema (v2) -- canonical Rust types.
 //!
-//! The morloc compiler emits a `.manifest` JSON blob describing every
+//! The morloc compiler emits a standalone `manifest.json` describing every
 //! exported command's interface. This crate is the **single source of
 //! truth** for that schema's Rust representation. Both the CLI nexus
 //! (`morloc-nexus`) and the C-FFI runtime (`morloc-runtime`) depend on
@@ -60,8 +60,8 @@ pub type Metadata = BTreeMap<String, serde_json::Value>;
 
 // -- Top-level manifest -------------------------------------------------------
 
-/// The top-level manifest object. Embedded in every built nexus binary
-/// as a JSON blob after the `### MANIFEST ###` marker.
+/// The top-level manifest object. Written as a standalone `manifest.json`
+/// in each program's build directory; the launcher wrappers point at it.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Manifest {
@@ -162,9 +162,9 @@ fn default_capabilities() -> Vec<String> {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Build {
-    /// Absolute path to the build directory containing this program's
-    /// pool executables and generated source files. The nexus chdirs
-    /// here at startup so relative pool exec paths resolve.
+    /// Build directory marker. Emitted as "." (the manifest's own
+    /// directory): pool exec paths are relative to the manifest file, so
+    /// no absolute build path is recorded and the directory is relocatable.
     pub path: String,
     /// Unix timestamp at which the manifest was generated.
     pub time: i64,
@@ -792,28 +792,12 @@ pub struct Service {
 
 // -- I/O ----------------------------------------------------------------------
 
-/// Read the manifest payload from a built-nexus wrapper script. The
-/// nexus binary is wrapped in a shell script that contains a
-/// `### MANIFEST ###` marker followed by the JSON blob. Plain JSON
-/// files (no shebang) are returned as-is.
+/// Read a standalone `manifest.json` file. Thin shell launchers point at
+/// this file directly (they carry no embedded payload), so the whole file
+/// is the JSON manifest.
 pub fn read_manifest_payload(path: &str) -> Result<String, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot open manifest file '{}': {}", path, e))?;
-
-    if content.starts_with("#!") {
-        if let Some(pos) = content.find("### MANIFEST ###") {
-            let after_marker = &content[pos..];
-            let payload_start = after_marker
-                .find('\n')
-                .map(|i| pos + i + 1)
-                .unwrap_or(content.len());
-            Ok(content[payload_start..].to_string())
-        } else {
-            Err("No ### MANIFEST ### marker found in wrapper script".into())
-        }
-    } else {
-        Ok(content)
-    }
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot open manifest file '{}': {}", path, e))
 }
 
 /// Parse a manifest JSON payload into a [`Manifest`]. Performs a

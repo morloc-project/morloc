@@ -9,7 +9,7 @@ morloc.cabal
 run/
 .idea/
 *.iml
-pool.*
+*-build/
 nexus.*
 z/
 z

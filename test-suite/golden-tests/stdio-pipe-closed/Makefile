@@ -14,4 +14,4 @@ all:
 	rm -f got.txt gotc.txt
 
 clean:
-	rm -rf nexus pools __pycache__ *.err got.txt gotc.txt
+	rm -rf nexus *-build __pycache__ *.err got.txt gotc.txt

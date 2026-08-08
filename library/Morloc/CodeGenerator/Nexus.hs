@@ -4,14 +4,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Nexus
-Description : Generate the @.manifest@ JSON file consumed by the pre-compiled nexus
+Description : Generate the @manifest.json@ file consumed by the pre-compiled nexus
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-Produces the JSON manifest that the static nexus binary reads at startup.
-The manifest describes all exported subcommands, their argument types,
-help text, and which pool executables to dispatch to.
+Produces the standalone @manifest.json@ that the shared nexus binary reads
+at startup, plus the thin shell launcher wrappers that point at it. The
+manifest describes all exported subcommands, their argument types, help
+text, and which (build-dir-relative) pool executables to dispatch to.
 -}
 module Morloc.CodeGenerator.Nexus
   ( generate
@@ -249,11 +250,10 @@ makeFData (e@(AnnoS (Idx i t) (Idx _ lang) _), d) = do
 
 findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
 findSockets rAST = do
-  config <- MM.ask
   registry <- MM.gets stateLangRegistry
   -- Collapse guest members onto their pool host (futhark -> cpp) so a
   -- co-located member never enumerates its own socket/pool in the manifest.
-  return . map (MC.setupServerAndSocket config registry) . unique . map (LR.poolOf registry) $ findAllLangsSAnno rAST
+  return . map (MC.setupServerAndSocket registry) . unique . map (LR.poolOf registry) $ findAllLangsSAnno rAST
 
 findAllLangsSAnno :: (Foldable f) => AnnoS e f (Indexed Lang) -> [Lang]
 findAllLangsSAnno = foldAnnoS (\(AnnoS _ (Idx _ lang) _) -> [lang])
@@ -275,9 +275,8 @@ getFData (t, i, lang, doc, sockets) = do
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
   validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
-  config <- MM.ask
   registry <- MM.gets stateLangRegistry
-  let socket = MC.setupServerAndSocket config registry lang
+  let socket = MC.setupServerAndSocket registry lang
   return $
     FData
       { fdataSocket = socket
@@ -2214,7 +2213,6 @@ data ManifestInputs = ManifestInputs
   { miConfig              :: !Config
   , miRegistry            :: !LangRegistry
   , miProgramName         :: !String
-  , miBuildDir            :: !String
   , miBuildTime           :: !Int
   , miDaemonSets          :: ![(Lang, Socket)]
   , miFData               :: ![FData]
@@ -2266,7 +2264,7 @@ buildManifest ManifestInputs{..} =
     buildJson :: Text
     buildJson =
       jsonObj
-        [ ("path", jsonStr (MT.pack miBuildDir))
+        [ ("path", jsonStr ".")
         , ("time", jsonInt miBuildTime)
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
         , ("build_params", jsonStr miBuildParams)
@@ -2297,7 +2295,10 @@ buildManifest ManifestInputs{..} =
           runCmd = case Map.lookup name (MC.configLangOverrides miConfig) of
             Just cmd -> map MT.unpack cmd
             Nothing -> map MT.unpack (LR.registryRunCommand miRegistry name)
-          poolExe = miBuildDir </> "pools" </> miProgramName </> ML.makeExecutablePoolName lang
+          -- Relative to the manifest's own directory (the build dir). The
+          -- runtime nexus resolves this against dirname(manifest.json), so
+          -- the build directory is position-independent and relocatable.
+          poolExe = "pools" </> ML.poolDirKey lang </> ML.makeExecutablePoolName lang
        in if isCompiled
             then [poolExe]
             else
@@ -2470,7 +2471,7 @@ generate ::
   [(AnnoS (Indexed Type) One (), CmdDocSet)] ->
   [(AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet)] ->
   [AnnoS (Indexed Type) One (Indexed Lang)] ->
-  MorlocMonad Script
+  MorlocMonad (Script, [WrapperFile])
 generate cs rASTs helperRASTs = do
   config <- MM.ask
   st <- CMS.get
@@ -2500,21 +2501,20 @@ generate cs rASTs helperRASTs = do
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
-  -- In eval mode the source module is always synthesized as `main`, so a
-  -- shared `exe/main` directory would collide across distinct `--save NAME`
-  -- invocations. Use the outfile name (which carries --save NAME) to give
-  -- each saved eval program its own install directory.
-  installName <-
-    if stateEvalMode st
-      then MM.getOutfileName
-      else return programName
+  -- Program identity for the build directory. --name or the source
+  -- basename for @morloc make@; the --save name for eval; the module name
+  -- as a last resort. One shared key for both plain make and install so
+  -- the two layouts can never diverge.
+  programKey <- MM.getProgramKey
+  buildParent <- MM.gets stateBuildParentDir
   buildDir <-
     if stateInstall st
-      then do
-        let installDir = configHome config </> "exe" </> installName
-        CMS.modify (\s -> s {stateInstallDir = Just installDir})
-        return installDir
-      else liftIO Dir.getCurrentDirectory
+      then return (configHome config </> "exe" </> programKey)
+      else do
+        cwd <- liftIO Dir.getCurrentDirectory
+        absParent <- liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
+        return (absParent </> (programKey <> "-build"))
+  CMS.modify (\s -> s {stateInstallDir = Just buildDir})
 
   poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
@@ -2528,8 +2528,7 @@ generate cs rASTs helperRASTs = do
           Just idx -> idx
           Nothing -> error $ "Pool not found for language: " <> show lang
 
-  -- Build manifest JSON with relative pool paths
-  outfileName <- MM.getOutfileName
+  -- Build manifest JSON with pool paths relative to the manifest's dir
   registry <- MM.gets stateLangRegistry
 
   -- Build group info for manifest
@@ -2571,7 +2570,6 @@ generate cs rASTs helperRASTs = do
             { miConfig              = config
             , miRegistry            = registry
             , miProgramName         = programName
-            , miBuildDir            = buildDir
             , miBuildTime           = buildTime
             , miDaemonSets          = daemonSets
             , miFData               = fdata
@@ -2590,30 +2588,57 @@ generate cs rASTs helperRASTs = do
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
             }
-      wrapperScript = makeWrapperScript manifestJson
 
-  return $
-    Script
-      { scriptBase = outfileName
-      , scriptLang = cLang
-      , scriptCode = "." :/ File outfileName (Code wrapperScript)
-      , scriptMake = [SysExe outfileName]
-      }
+  -- Launcher wrappers. Each is a pure-shell script that execs
+  -- @morloc-nexus <mode> <abs-manifest-path>@. They land in CWD (plain
+  -- make) or the install dir (install, whence they are copied to bin/).
+  wrapperSpecs <- MM.gets stateWrapperSpecs
+  origCwd <- liftIO Dir.getCurrentDirectory
+  let specs = fromMaybe [WrapperSpec WCli programKey] wrapperSpecs
+      absManifest = buildDir </> "manifest.json"
+      wrapperDir = if stateInstall st then buildDir else origCwd
+      wrappers =
+        [ WrapperFile
+            (wrapperDir </> wsName s)
+            (makeWrapperScript (wsMode s) absManifest)
+        | s <- specs
+        ]
 
--- Build a self-contained wrapper script with embedded manifest.
---
--- The `# morloc-program v<version>` sentinel comment is the marker
--- `morloc-nexus daemon` uses to confirm a target path is a morloc
--- wrapper before resolving the sibling `<target>.manifest`. The
--- exec line hardcodes the `run` subcommand so the wrapper artifact
--- can never be (mis)used to start a daemon directly -- daemons are
--- launched through an explicit `morloc-nexus daemon <target>`.
-makeWrapperScript :: Text -> Text
-makeWrapperScript manifestJson =
-  "#!/bin/sh\n# morloc-program v"
-    <> MT.pack Morloc.Version.versionStr
-    <> "\nexec morloc-nexus run \"$0\" \"$@\"\n### MANIFEST ###\n"
-    <> manifestJson
+  return
+    ( Script
+        { scriptBase = "manifest"
+        , scriptLang = cLang
+        , scriptCode = "." :/ File "manifest.json" (Code manifestJson)
+        , scriptMake = []
+        }
+    , wrappers
+    )
+
+-- | A pure-shell launcher that execs the shared @morloc-nexus@ binary in
+-- the requested mode against an absolute path to the program's
+-- @manifest.json@. The manifest is a standalone file (no embedded
+-- payload), so the wrapper carries no JSON and can be freely moved; only
+-- the build directory it points at is fixed.
+makeWrapperScript :: WrapperMode -> FilePath -> Text
+makeWrapperScript mode absManifestPath =
+  "#!/bin/sh\nexec morloc-nexus "
+    <> modeToken mode
+    <> " "
+    <> MT.pack (shellQuote absManifestPath)
+    <> " \"$@\"\n"
+  where
+    modeToken WCli = "run"
+    modeToken WDaemon = "daemon"
+    modeToken WMcp = "mcp"
+
+-- | POSIX single-quote a path so spaces and shell metacharacters in the
+-- absolute manifest path survive. Embedded single quotes are escaped with
+-- the standard @'\\''@ idiom.
+shellQuote :: FilePath -> String
+shellQuote p = "'" <> concatMap esc p <> "'"
+  where
+    esc '\'' = "'\\''"
+    esc c = [c]
 
 -- ======================================================================
 -- Utilities

@@ -22,6 +22,9 @@ module Morloc.Namespace.State
   , MorlocMonad
   , MorlocReturn
   , MorlocState (..)
+  , WrapperSpec (..)
+  , WrapperMode (..)
+  , WrapperFile (..)
   , SignatureSet (..)
   , Instance (..)
   , TermTypes (..)
@@ -92,6 +95,25 @@ type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 ---- State
 
+-- | The morloc-nexus run mode a generated launcher wrapper selects.
+data WrapperMode = WCli | WDaemon | WMcp
+  deriving (Show, Eq, Ord)
+
+-- | A launcher wrapper to emit: which nexus mode and the executable name.
+data WrapperSpec = WrapperSpec
+  { wsMode :: WrapperMode
+  , wsName :: String
+  }
+  deriving (Show, Eq, Ord)
+
+-- | A launcher wrapper file ready to write to disk: the absolute target
+-- path and the shell-script body.
+data WrapperFile = WrapperFile
+  { wfPath :: FilePath
+  , wfBody :: Text
+  }
+  deriving (Show, Eq)
+
 {- | Mutable compiler state threaded through the entire pipeline.
 Accumulates type signatures, source bindings, typedefs, and metadata
 as modules are parsed, linked, and typechecked.
@@ -142,6 +164,17 @@ data MorlocState = MorlocState
   , stateInstall :: Bool
   , stateInstallForce :: Bool
   , stateInstallDir :: Maybe Path
+  , stateProgramKey :: Maybe String
+  -- ^ Program identity for the build directory (@<key>-build@ / @exe/<key>@).
+  -- Set to @--name@ if given, else the source-file basename. @Nothing@ falls
+  -- back to the outfile/module name (this is how eval reuses its @--save@ name).
+  , stateWrapperSpecs :: Maybe [WrapperSpec]
+  -- ^ Exact set of launcher wrappers to emit. @Nothing@ = default (a single
+  -- CLI wrapper named after the program); @Just []@ = emit none (@--no-cli@
+  -- with no other output flags).
+  , stateBuildParentDir :: Maybe Path
+  -- ^ Parent directory for the @<key>-build@ folder (@--build-dir@).
+  -- @Nothing@ = current working directory.
   , stateClassDefs :: Map ClassName [Constraint]
   , stateEffects :: Map.Map EffectLabel Bool
   -- ^ Declared effects: label -> isEscapable (True = escapable). The
@@ -419,7 +452,6 @@ data NexusSource = NexusSource
 
 data Socket = Socket
   { socketLang :: Lang
-  , socketServerInit :: [MDoc]
   , socketPath :: MDoc
   }
   deriving (Show)
@@ -474,6 +506,9 @@ instance Defaultable MorlocState where
       , stateInstall = False
       , stateInstallForce = False
       , stateInstallDir = Nothing
+      , stateProgramKey = Nothing
+      , stateWrapperSpecs = Nothing
+      , stateBuildParentDir = Nothing
       , stateClassDefs = Map.empty
       , stateEffects = Map.empty
       , stateLangRegistry = LR.emptyRegistry

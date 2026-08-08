@@ -268,8 +268,8 @@ compile_program() {
 #
 # Daemon-mode argv shape: `morloc-nexus daemon <target> [opts...]`.
 # The wrapper script that `morloc make` produced sits at
-# `<work_dir>/nexus`; daemon mode treats it the same as a freestanding
-# `.manifest` file via cli::resolve_daemon_target.
+# `<work_dir>/nexus`; the resolver extracts the manifest.json path from
+# the wrapper's exec line (cli::resolve_manifest_target).
 start_daemon() {
     local work_dir="$1"
     shift
@@ -1250,35 +1250,27 @@ fi
 if should_run "router"; then
     echo "${BOLD}[router] Multi-program router${RESET}"
 
-    # Set up a temporary fdb directory with manifests
+    # Set up a temporary exe/ directory: one <name>/manifest.json per
+    # program, exactly the shape the router scans ($MORLOC_HOME/exe). The
+    # build already produced a self-describing nexus-build/ dir (keyed on
+    # the -o name; manifest.json + pools/ with relative pool paths), so
+    # symlink it in under the program name -- no extraction or patching.
     FDB_DIR=$(mktemp -d)
     WORK_DIRS+=("$FDB_DIR")
 
-    # Extract manifest JSON from the nexus wrapper script
-    # Format is: #!/bin/sh\nexec morloc-nexus ...\n### MANIFEST ###\n<json>
-    if [ -f "$ARITH_DIR/nexus" ]; then
-        sed -n '/^### MANIFEST ###$/,$ { /^### MANIFEST ###$/d; p; }' \
-            "$ARITH_DIR/nexus" > "$FDB_DIR/arithmetic.manifest"
-        # Patch build_dir in manifest to point to the work dir
-        python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    m = json.load(f)
-m['build_dir'] = sys.argv[2]
-with open(sys.argv[1], 'w') as f:
-    json.dump(m, f)
-" "$FDB_DIR/arithmetic.manifest" "$ARITH_DIR"
+    if [ -f "$ARITH_DIR/nexus-build/manifest.json" ]; then
+        ln -s "$ARITH_DIR/nexus-build" "$FDB_DIR/arithmetic"
     fi
 
-    if [ ! -s "$FDB_DIR/arithmetic.manifest" ]; then
-        echo "  ${RED}SKIP: could not extract manifest${RESET}"
+    if [ ! -f "$FDB_DIR/arithmetic/manifest.json" ]; then
+        echo "  ${RED}SKIP: could not locate arithmetic build directory${RESET}"
         echo ""
         TOTAL=$((TOTAL + 1))
         FAILED=$((FAILED + 1))
-        FAILURES+=("router: could not extract manifest")
+        FAILURES+=("router: could not locate build directory")
     fi
 
-    if [ -s "$FDB_DIR/arithmetic.manifest" ]; then
+    if [ -f "$FDB_DIR/arithmetic/manifest.json" ]; then
         ROUTER_PORT=$(pick_port)
 
         # Start router (use the morloc-nexus binary)
