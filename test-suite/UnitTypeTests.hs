@@ -8366,4 +8366,20 @@ withDocstringTests =
         foo :: Int -> <IO> Int
         foo x = x
           |]
+
+        -- A leading-underscore long flag name is rejected: those names are
+        -- reserved for compiler-generated argument identifiers (the MCP
+        -- backend names positionals `_1`, `_2`, ...), so a flag must not be
+        -- able to produce one.
+      , expectError
+          "arg: long flag may not begin with an underscore"
+          [r|
+        module main (foo)
+        foo ::
+          --' arg: --_hidden
+          --' default: 0
+          Int ->
+          Int
+        foo x = x
+          |]
       ]

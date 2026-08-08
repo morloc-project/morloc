@@ -1,0 +1,16 @@
+module main (throwInt, throwUnit, caughtInt)
+
+escapable effect Err
+
+throwInt ::
+  Int ->
+  <Err> Int
+throwInt _ = @throw "PURE: boom int"
+
+throwUnit ::
+  Int ->
+  <Err> ()
+throwUnit _ = @throw "PURE: boom unit"
+
+caughtInt :: Int -> Int
+caughtInt x = @catch (throwInt x) x

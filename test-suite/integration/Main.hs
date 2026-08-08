@@ -9,6 +9,7 @@ import Morloc.Test.Common (TestEnv (..))
 import Morloc.Test.ConcurrencyTests (concurrencyTests)
 import Morloc.Test.DaemonTests (daemonTests)
 import Morloc.Test.InstallTests (installTests)
+import Morloc.Test.McpTests (mcpTests)
 import Morloc.Test.ShmTests (shmTests)
 import Morloc.Test.StressTests (stressTests)
 
@@ -43,6 +44,7 @@ main = do
         [ installTests env
         , concurrencyTests env
         , daemonTests env
+        , mcpTests env
         , stressTests env
         , shmTests env
         ]

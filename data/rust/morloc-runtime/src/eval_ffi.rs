@@ -931,7 +931,15 @@ unsafe fn morloc_eval_r(
         let d = shm::shcalloc(1, w)?;
         (d, w)
     } else {
-        if width != (*schema).width {
+        // A @throw node never writes to `dest` -- it always raises -- and
+        // carries the width-0 "z" sentinel as its schema, so its width
+        // legitimately differs from a caller's value-sized dest. This happens
+        // when @throw is the body of a PURE command that takes an argument and
+        // returns a non-Unit type: the lambda application passes the result
+        // width down to the body. Exempt @throw from the consistency check
+        // rather than making every caller special-case the sentinel (cf.
+        // @catch / If, which pass the callee's own width for the same reason).
+        if (*expr).etype != MorlocExpressionType::Throw && width != (*schema).width {
             return Err(MorlocError::Other("Unexpected data size".into()));
         }
         (dest, width)

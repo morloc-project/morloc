@@ -12,6 +12,7 @@ mod help;
 mod json_help;
 mod loader;
 mod manifest;
+mod mcp;
 mod phase2;
 mod process;
 mod runlog;
@@ -165,10 +166,28 @@ fn main() {
             manifest_path = invocation.manifest_path.clone();
             user_zone = Vec::new();
         }
+        cli::Mode::Mcp(margs) => {
+            let (cfg, _target) = cli::mcp_args_to_config(&margs);
+            config = cfg;
+            manifest_path = invocation.manifest_path.clone();
+            user_zone = Vec::new();
+        }
         cli::Mode::File(_) | cli::Mode::View(_) => unreachable!(
             "File/View dispatched before manifest setup"
         ),
     }
+
+    // MCP mode owns the stdout stream for JSON-RPC. Re-home fd 1 NOW, before
+    // any pool is forked or any in-process command is evaluated: pools inherit
+    // fd 0/1/2 unchanged, and a pure command's in-process `morloc_eval` can
+    // write to the nexus's own fd 1. Saving the real stdout to a private fd and
+    // aliasing fd 1 -> fd 2 guarantees every stray write lands on stderr, never
+    // the protocol stream. See `mcp::rehome_stdout_for_protocol`.
+    let mcp_protocol_fd: Option<i32> = if config.mcp_flag {
+        Some(mcp::rehome_stdout_for_protocol())
+    } else {
+        None
+    };
 
     let prog_name = std::path::Path::new(&manifest_path)
         .file_name()
@@ -306,6 +325,35 @@ fn main() {
 
     // Setup sockets
     let mut sockets = process::setup_sockets(&manifest.pools, &tmpdir, &shm_basename);
+
+    // MCP mode: spawn every pool eagerly (paid once, before the JSON-RPC loop
+    // starts, so `initialize` stays prompt), install the recovery context so a
+    // pool crash mid-call can be recovered, then run the stdio JSON-RPC loop.
+    // fd 1 was already re-homed above, so pools respawned by recovery also
+    // inherit the safe (stderr-aliased) fd 1.
+    if config.mcp_flag {
+        let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
+        if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
+            eprintln!("Error: {}", e);
+            process::clean_exit(1);
+        }
+        process::install_recovery_context(
+            sockets.clone(),
+            manifest.pools.clone(),
+            tmpdir.clone(),
+            shm_basename.clone(),
+        );
+        let protocol_fd = mcp_protocol_fd
+            .expect("mcp mode always re-homes stdout and sets the protocol fd");
+        mcp::serve(
+            &mut sockets,
+            &shm_basename,
+            &payload,
+            &manifest,
+            protocol_fd,
+        );
+        // mcp::serve never returns.
+    }
 
     // Daemon mode
     if config.daemon_flag {

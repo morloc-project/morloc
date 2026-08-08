@@ -1,0 +1,37 @@
+--' MCP tool-surface EXCLUSION coverage for Arrow Table types.
+--'
+--' Arrow `Table` values cannot be marshaled to/from JSON in either direction
+--' (json.rs errors both ways), so any command with a Table argument or return
+--' is dropped from `tools/list`. `plainAdd` is the control. run-tests.sh
+--' asserts `tools/list` contains `plainAdd` but neither `readTable` (Table
+--' return) nor `sumTable` (Table argument).
+--'
+--' Requires pyarrow; the runner skips this group if the program fails to build.
+module main
+  ( plainAdd
+  , readTable
+  , sumTable
+  )
+
+import root
+import root-py
+import table-py
+
+source Py from "excluded_table.py" ("add2", "read_data", "row_count")
+
+add2 :: Int -> Int -> Int
+
+--' Control command (MUST appear in tools/list)
+plainAdd :: Int -> Int -> Int
+plainAdd x y = add2 x y
+
+--' EXCLUDED: return type is an Arrow Table
+readTable :: Int -> Table n {id=Int, value=Real}
+readTable n = read_data n
+
+--' EXCLUDED: argument type is an Arrow Table
+sumTable :: Table n {id=Int, value=Real} -> Int
+sumTable t = row_count t
+
+read_data :: Int -> Table n {id=Int, value=Real}
+row_count :: Table n {id=Int, value=Real} -> Int

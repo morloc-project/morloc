@@ -50,6 +50,9 @@ pub struct NexusConfig {
     pub output_path: Option<String>,
     pub output_format: OutputFormat,
     pub daemon_flag: bool,
+    /// When true, serve the program as a native MCP server over stdio
+    /// (the `mcp` subcommand). Mutually exclusive with daemon/router.
+    pub mcp_flag: bool,
     pub router_flag: bool,
     pub unix_socket_path: Option<String>,
     pub tcp_port: Option<i32>,
@@ -94,6 +97,7 @@ impl Default for NexusConfig {
             output_path: None,
             output_format: OutputFormat::Json,
             daemon_flag: false,
+            mcp_flag: false,
             router_flag: false,
             unix_socket_path: None,
             tcp_port: None,

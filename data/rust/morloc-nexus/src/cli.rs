@@ -55,6 +55,8 @@ pub enum Mode {
     Run(RunArgs),
     /// Serve a compiled morloc program as a long-lived daemon.
     Daemon(DaemonArgs),
+    /// Serve a compiled program as a native MCP server over stdio.
+    Mcp(McpArgs),
     /// Multi-program router across installed modules.
     Router(RouterArgs),
     /// Classify morloc-compatible data files (UNIX file(1) style).
@@ -184,6 +186,20 @@ pub struct DaemonArgs {
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
     pub eval_timeout: u32,
+}
+
+/// Serve a compiled morloc program as a native MCP (Model Context
+/// Protocol) server over stdio: its exported functions become MCP tools.
+///
+/// Deliberately minimal -- no `-o`/`-f`/`-z`/`--print`: the transport is
+/// JSON-RPC on stdout, so those output-shaping options are meaningless
+/// (and `-o` would fight the fd re-homing the server relies on). Reads
+/// JSON-RPC requests on stdin and writes responses on stdout; all pool
+/// and diagnostic output is routed to stderr.
+#[derive(Args, Debug)]
+pub struct McpArgs {
+    /// Path to the program's wrapper script or .manifest file.
+    pub target: String,
 }
 
 /// Multi-program router across installed modules. Doesn't take a
@@ -640,6 +656,15 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     cfg.http_port = args.http_port.map(|p| p as i32);
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    (cfg, args.target.clone())
+}
+
+/// Translate a parsed [`McpArgs`] block into a [`NexusConfig`]. The MCP
+/// server needs none of the dispatch/output options; only the target and
+/// the `mcp_flag` gate matter.
+pub fn mcp_args_to_config(args: &McpArgs) -> (NexusConfig, String) {
+    let mut cfg = NexusConfig::default();
+    cfg.mcp_flag = true;
     (cfg, args.target.clone())
 }
 
@@ -1121,6 +1146,7 @@ pub fn parse_invocation() -> ParsedInvocation {
     match mode_str {
         Some("run") => parse_run_or_daemon(&argv, true),
         Some("daemon") => parse_run_or_daemon(&argv, false),
+        Some("mcp") => parse_mcp(&argv),
         _ => {
             use clap::{CommandFactory, FromArgMatches};
             let cmd = crate::help::strip_styles_recursively(Nexus::command());
@@ -1135,6 +1161,52 @@ pub fn parse_invocation() -> ParsedInvocation {
                 capability_values: CapabilityValues::default(),
             }
         }
+    }
+}
+
+/// Parse an `mcp` invocation. Structurally simple: clap parses the minimal
+/// [`McpArgs`] (target only, no capability flags to augment), then the target
+/// is resolved and its manifest loaded exactly as the daemon path does. Kept
+/// off [`parse_run_or_daemon`] so the MCP surface inherits none of the
+/// dispatch/output options.
+fn parse_mcp(argv: &[String]) -> ParsedInvocation {
+    use clap::{CommandFactory, FromArgMatches};
+    let cmd = crate::help::strip_styles_recursively(Nexus::command());
+    let matches = cmd.try_get_matches_from(argv).unwrap_or_else(|e| e.exit());
+    let nexus = Nexus::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    let target = match &nexus.cmd {
+        Mode::Mcp(m) => m.target.clone(),
+        _ => unreachable!("parse_mcp only reached for the mcp subcommand"),
+    };
+    let resolved = match resolve_daemon_target(&target) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let payload = match crate::manifest::read_manifest_payload(&resolved) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to load manifest '{}': {}", resolved, e);
+            std::process::exit(1);
+        }
+    };
+    let manifest = match crate::manifest::parse_manifest(&payload) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to parse manifest '{}': {}", resolved, e);
+            std::process::exit(1);
+        }
+    };
+
+    ParsedInvocation {
+        nexus,
+        manifest: Some(manifest),
+        manifest_path: resolved,
+        user_zone: Vec::new(),
+        capability_values: CapabilityValues::default(),
     }
 }
 

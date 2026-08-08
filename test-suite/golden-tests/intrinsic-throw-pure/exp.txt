@@ -1,0 +1,6 @@
+exit:1
+PURE: boom int
+exit:1
+PURE: boom unit
+7
+exit:0

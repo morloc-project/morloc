@@ -319,6 +319,19 @@ extern "C" fn pool_check_and_recover(
     unsafe { morloc_daemon_end_recovery() };
 }
 
+/// Synchronous pool-crash check + recovery for the MCP server loop.
+///
+/// The MCP loop has no periodic poll cycle (unlike `daemon_run`), so it calls
+/// this after a dispatch fails with an INTERNAL error: if the failure was a
+/// pool process dying, [`pool_check_and_recover`] tears down and respawns every
+/// pool (a fast per-pool `pool_is_alive` no-op when nothing died). Requires
+/// [`install_recovery_context`] to have run. The `sockets` argument is unused
+/// by the recovery routine (it walks the global PID tables), so a null pointer
+/// is passed.
+pub fn mcp_recover_pools(n_pools: usize) {
+    pool_check_and_recover(std::ptr::null_mut(), n_pools);
+}
+
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RETRY_MULTIPLIER: f64 = 1.25;

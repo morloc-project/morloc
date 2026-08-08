@@ -112,6 +112,7 @@ main = do
       , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
       , golden "intrinsic-throw-py" "intrinsic-throw-py"
       , golden "intrinsic-throw-r" "intrinsic-throw-r"
+      , golden "intrinsic-throw-pure" "intrinsic-throw-pure"
       , golden "conditional-value-codegen" "conditional-value-codegen"
       , golden "futhark-basic" "futhark-basic"
       , golden "futhark-backend-multicore" "futhark-backend-multicore"

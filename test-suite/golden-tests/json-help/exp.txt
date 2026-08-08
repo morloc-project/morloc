@@ -522,9 +522,6 @@
           "arg0"
         ],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": "integer"
       }
     },
     {
@@ -557,9 +554,6 @@
         },
         "required": [],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": "string"
       }
     },
     {
@@ -579,9 +573,6 @@
           "arg0"
         ],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": "integer"
       }
     },
     {
@@ -611,9 +602,6 @@
           "arg0"
         ],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": "integer"
       }
     },
     {
@@ -630,12 +618,6 @@
           "file"
         ],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
       }
     },
     {
@@ -652,9 +634,6 @@
           "n"
         ],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": "integer"
       }
     },
     {
@@ -672,12 +651,6 @@
         },
         "required": [],
         "additionalProperties": false
-      },
-      "outputSchema": {
-        "type": [
-          "integer",
-          "null"
-        ]
       }
     }
   ]

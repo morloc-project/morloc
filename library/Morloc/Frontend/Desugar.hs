@@ -297,6 +297,12 @@ parseCliOpt txt = case T.unpack (T.strip txt) of
     | otherwise -> CliOptShortCharInvalid c
   _ -> CliOptShapeUnknown
 
+-- | The long name of a CLI option, if it has one.
+cliOptLongName :: CliOpt -> Maybe Text
+cliOptLongName (CliOptLong l)   = Just l
+cliOptLongName (CliOptBoth _ l) = Just l
+cliOptLongName (CliOptShort _)  = Nothing
+
 -- Known directive keys recognized inside argument / signature docstrings.
 -- Includes the dotted families (`source`, `form`, `check.<kind>`,
 -- `list.source`, `list.form`, `list.check.<kind>`) used by the new
@@ -511,7 +517,14 @@ applyCliOptDirective ::
   Text -> -- raw value text
   ([Text], Maybe CliOpt)
 applyCliOptDirective k v = case parseCliOpt v of
-  CliOptOk o -> ([], Just o)
+  CliOptOk o
+    | Just l <- cliOptLongName o, "_" `T.isPrefixOf` l ->
+        let msg =
+              "invalid long flag name in '" <> k <> ": " <> v <> "': `--" <> l
+              <> "` may not begin with an underscore; leading-underscore names "
+              <> "are reserved for compiler-generated argument identifiers."
+         in ([msg], Nothing)
+    | otherwise -> ([], Just o)
   CliOptShapeUnknown -> ([], Nothing)
   CliOptShortCharInvalid c ->
     let msg =
