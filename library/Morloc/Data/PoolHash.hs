@@ -21,6 +21,7 @@ module uses @xxhash-ffi@; the runtime uses @twox-hash@.
 module Morloc.Data.PoolHash
   ( poolHash
   , poolHashHex
+  , hashText
   , hashFiles
   , computePoolHashes
   , patchManifestPoolHashes
@@ -65,6 +66,12 @@ foldFilesFrom h (fp : rest) = do
   -- become common, swap to a streaming approach.
   contents <- BS.readFile fp
   foldFilesFrom (XXH.xxh64 contents h) rest
+
+-- | XXH64 of a text, hex-encoded (16 lowercase chars). For deriving a stable,
+-- collision-resistant identifier from emitted source (e.g. a per-program pool
+-- crate name).
+hashText :: T.Text -> T.Text
+hashText t = poolHashHex (XXH.xxh64 (TE.encodeUtf8 t) 0)
 
 -- | Hex-encode a 64-bit pool hash as a 16-character lowercase string.
 -- This is the form embedded into each pool's manifest entry and later

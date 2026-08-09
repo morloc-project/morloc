@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   , rustLang
   ) where
 
+import Control.Monad (foldM)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import qualified Control.Monad.State.Strict as CMS
@@ -52,6 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
 import Morloc.CodeGenerator.Serial (serialAstToMsgpackSchema, serialAstToType, shallowType, wireSerialAstToType)
 import Morloc.Typecheck.Internal (unqualify)
@@ -63,6 +65,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Morloc.Version as MV
 import Morloc.Quasi
+import System.Directory (findExecutable)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -914,14 +917,37 @@ translate srcs es = do
   let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask}
       code = CMS.evalState (runReaderT (makeRustCode includeDocs closureTable es) emptyOwnEnv) st0
 
-  maker <- makeTheMaker
+  home <- MM.asks configHome
+  deps <- rustDepsUnion
+  installDir <- MM.gets stateInstallDir
+  -- The pool crate/bin name is derived from the build LOCATION (unique per
+  -- program/build-dir, stable across edits of one program). With a shared cargo
+  -- --target-dir (used to cache rustmorloc/deps across builds), this keeps one
+  -- `morloc make`'s pool binary from colliding with another's, while repeated
+  -- builds of the same program overwrite in place rather than accumulating a new
+  -- crate per edit. Falls back to a source hash if the build dir is unset.
+  let poolSrc = subVersion (render code)
+      crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
+      (cargoToml, buildRs) = makeCargoDocs crateName deps home
+  maker <- makeTheMaker crateName
   let poolSubdir = ML.poolDirKey rustLang
 
+  -- The Rust pool is a real Cargo project: `src/main.rs` is the rendered pool
+  -- code, `Cargo.toml` pulls in rustmorloc (path dep) + any declared rust-deps,
+  -- and `build.rs` supplies the libmorloc.so link + rpath. `cargo build`
+  -- (makeTheMaker) does dependency resolution and linking.
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = rustLang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File "pool.rs" (Code (subVersion (render code)))]]
+      , scriptCode =
+          "." :/ Dir "pools"
+            [ Dir poolSubdir
+                [ File "Cargo.toml" (Code (render cargoToml))
+                , File "build.rs" (Code (render buildRs))
+                , Dir "src" [File "main.rs" (Code poolSrc)]
+                ]
+            ]
       , scriptMake = maker
       }
 
@@ -1253,26 +1279,110 @@ translateSegment m0 = do
   e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
   return $ renderPoolDocs e
 
--- | The single bare-@rustc@ build command (no cargo): compile pool.rs against
--- the prebuilt @rustmorloc@/@morloc_runtime_types@ rlibs (+ transitive deps in
--- @rust-deps@) and link @libmorloc.so@ with an embedded rpath.
-makeTheMaker :: MorlocMonad [SysCommand]
-makeTheMaker = do
+-- | DAG-wide union of every imported module's @rust-deps@ (crate -> semver),
+-- written into the generated pool @Cargo.toml@. Two modules declaring the same
+-- crate at different versions is a hard error (cargo cannot list a crate twice
+-- and silent unification would be surprising).
+rustDepsUnion :: MorlocMonad (Map.Map Text Text)
+rustDepsUnion = do
+  metas <- MM.gets statePackageMeta
+  foldM
+    ( \acc (crate, ver) -> case Map.lookup crate acc of
+        Just v
+          | v /= ver ->
+              MM.throwSystemError $
+                "conflicting rust-deps versions for crate "
+                  <> squotes (pretty crate)
+                  <> ": "
+                  <> squotes (pretty v)
+                  <> " vs "
+                  <> squotes (pretty ver)
+        _ -> return (Map.insert crate ver acc)
+    )
+    Map.empty
+    (concatMap (Map.toList . packageRustDeps) metas)
+
+-- | Render the generated pool crate's @Cargo.toml@ and @build.rs@. rustmorloc
+-- is a path dependency on the source persisted at @$MORLOC_HOME/rust@ (by
+-- @morloc init@); external crates come from the DAG-wide rust-deps union.
+-- @build.rs@ carries the libmorloc.so link + rpath (parameterised by
+-- @$MORLOC_HOME/lib@). The release profile must set @panic = "unwind"@ to match
+-- rustmorloc/morloc-runtime (the SHM arena relies on Drop-on-unwind cleanup).
+-- @crateName@ is unique per program (a source hash) so a shared target-dir
+-- never collides one program's pool binary with another's.
+makeCargoDocs :: Text -> Map.Map Text Text -> FilePath -> (MDoc, MDoc)
+makeCargoDocs crateName deps home =
+  let rustmorlocPath = home </> "rust" </> "rustmorloc"
+      libDir = home </> "lib"
+      nameLit = dquotes (pretty crateName)
+      depLines = [pretty crate <> " = " <> dquotes (pretty ver) | (crate, ver) <- Map.toList deps]
+      cargoToml =
+        vsep
+          [ "[package]"
+          , "name = " <> nameLit
+          , [idoc|version = "0.0.0"|]
+          , [idoc|edition = "2021"|]
+          , ""
+          , "[[bin]]"
+          , "name = " <> nameLit
+          , [idoc|path = "src/main.rs"|]
+          , ""
+          , "[dependencies]"
+          , "rustmorloc = { path = " <> dquotes (pretty rustmorlocPath) <> " }"
+          , vsep depLines
+          , ""
+          , "[profile.release]"
+          , "opt-level = 2"
+          -- lto matches the data/rust workspace profile so the rustmorloc built
+          -- by `morloc init`'s warm-up (workspace profile) is reused here rather
+          -- than recompiled under a differing (no-lto) fingerprint.
+          , [idoc|lto = "thin"|]
+          , [idoc|panic = "unwind"|]
+          ]
+      buildRs =
+        vsep
+          [ "fn main() {"
+          , [idoc|    println!("cargo:rustc-link-search=native=#{pretty libDir}");|]
+          , [idoc|    println!("cargo:rustc-link-lib=dylib=morloc");|]
+          , [idoc|    println!("cargo:rustc-link-arg=-Wl,-rpath,#{pretty libDir}");|]
+          , "}"
+          ]
+  in (cargoToml, buildRs)
+
+-- | Build the Rust pool with @cargo build@ (one unified dependency resolution
+-- over rustmorloc + any external crates), then copy the produced binary to the
+-- @pool-rust.out@ path the manifest/nexus expect. @MORLOC_HOME@ is set on the
+-- command so rustmorloc's build.rs locates libmorloc.so. The @--target-dir@ is
+-- shared across programs so rustmorloc + deps compile once and cache (cargo's
+-- own lock serialises concurrent builds; the per-program @crateName@ keeps each
+-- program's output binary distinct within that shared dir).
+makeTheMaker :: Text -> MorlocMonad [SysCommand]
+makeTheMaker crateName = do
+  -- cargo is required at make time (a Rust pool is a Cargo project). Fail fast
+  -- with a clear message rather than a raw shell "command not found".
+  cargoAvail <- liftIO (findExecutable "cargo")
+  case cargoAvail of
+    Just _ -> return ()
+    Nothing ->
+      MM.throwSystemError
+        "building a Rust pool requires `cargo` on PATH (install Rust: https://rustup.rs)"
   home <- MM.asks configHome
   let poolSubdir = ML.poolDirKey rustLang
-  let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
-      src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName rustLang
-      libDir = pretty (home </> "lib")
-      rustRelease = home </> "lib" </> "rust-build" </> "release"
-      depDir = pretty (rustRelease </> "deps")
-      rustmorlocRlib = pretty (rustRelease </> "librustmorloc.rlib")
-      -- pool.rs has exactly one direct rlib dep (rustmorloc, pinned by path);
-      -- morloc_runtime_types and every other transitive dep resolve by exact
-      -- metadata hash from the isolated rust-build/release/deps dir.
-      cmd =
+      outRel = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
+      manifestPath = pretty $ "pools" </> poolSubdir </> "Cargo.toml"
+      targetDir = home </> "lib" </> "rust-build"
+      targetD = pretty targetDir
+      binPath = pretty $ targetDir </> "release" </> T.unpack crateName
+      homeD = pretty home
+      -- Paths are single-quoted: they are interpolated into a shell string and
+      -- $MORLOC_HOME (hence targetDir/binPath) may contain spaces.
+      buildCmd =
         SysRun . Code . render $
-          [idoc|rustc -O --edition 2021 -L dependency=#{depDir} --extern rustmorloc=#{rustmorlocRlib} -L native=#{libDir} -l dylib=morloc -C link-arg=-Wl,-rpath,#{libDir} -o #{outfile} #{src}|]
-  return [cmd]
+          [idoc|MORLOC_HOME='#{homeD}' cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
+      copyCmd =
+        SysRun . Code . render $
+          [idoc|cp '#{binPath}' '#{outRel}'|]
+  return [buildCmd, copyCmd]
 
 -- | The lowering configuration. The core fields are real; the fields for
 -- closures/partial application, remote calls, caching, and pattern evaluation

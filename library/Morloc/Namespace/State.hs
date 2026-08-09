@@ -321,6 +321,10 @@ data PackageMeta
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
   -- -march=native, -DXYZ). Propagates transitively through dependencies.
   , packageCxxFlags :: [Text]
+  -- | External Rust crates (crate name -> semver requirement) a module needs
+  -- available to the Rust pool. The DAG-wide union is written into the
+  -- generated pool @Cargo.toml@ dependencies. Propagates transitively.
+  , packageRustDeps :: Map Text Text
   , packageInclude :: Maybe [Text]
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
@@ -562,6 +566,7 @@ instance Defaultable PackageMeta where
       , packageCppVersion = 20
       , packageDependencies = []
       , packageCxxFlags = []
+      , packageRustDeps = Map.empty
       , packageInclude = Nothing
       , packageMorlocDependencies = []
       , packageSetup = Nothing
@@ -612,6 +617,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "cpp-version" .!= 0
       <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
+      <*> o .:? "rust-deps" .!= Map.empty
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
       <*> o .:? "setup"

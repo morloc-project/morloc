@@ -123,6 +123,7 @@ main = do
       , golden "futhark-fractal" "futhark-fractal"
       , golden "futhark-matrix-io" "futhark-matrix-io"
       , golden "rust-basic" "rust-basic"
+      , golden "rust-ndarray" "rust-ndarray"
       , golden "rust-intrinsic-borrowed" "rust-intrinsic-borrowed"
       , golden "rust-py-crosspool" "rust-py-crosspool"
       , golden "rust-error" "rust-error"

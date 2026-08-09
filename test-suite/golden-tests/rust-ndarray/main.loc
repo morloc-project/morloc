@@ -1,0 +1,27 @@
+module main (dot, matmul)
+
+-- Exercises the `rust-deps` external-crate mechanism end to end: package.yaml
+-- declares `ndarray`, so the generated Rust pool Cargo project pulls it from
+-- crates.io and the sourced functions below use `ndarray` types directly.
+-- ndarray is row-major, matching morloc's row-major wire form, so a Matrix
+-- travels as its flat wire tuple ((rows, cols), row-major-data) with no
+-- transpose. This is the compiler-level test for the cargo-pool + rust-deps
+-- feature (the vector-rust/tensor-rust stdlib modules test the library layer).
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Real = "f64"
+type Rust => (List a) = "Vec<$1>" a
+type Rust => (Tuple2 a b) = "($1, $2)" a b
+
+source Rust from "nd.rs"
+  ( "dot" as dot
+  , "matmul" as matmul
+  )
+
+-- inner product of two vectors (ndarray Array1::dot)
+dot :: [Real] -> [Real] -> Real
+
+-- dense matrix multiply on the flat wire form ((rows,cols), row-major data)
+matmul :: ((Int, Int), [Real]) -> ((Int, Int), [Real]) -> ((Int, Int), [Real])
