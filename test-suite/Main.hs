@@ -69,6 +69,7 @@ main = do
       , postArgPropagationTests
       , tuplePatternLambdaTests
       , withDocstringTests
+      , evalSandboxTests
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
@@ -843,6 +844,10 @@ main = do
         golden "source-old-op-py" "source-old-op-py"
       , -- eval mode restriction tests
         golden "eval-restrict-source" "eval-restrict-source"
+      , -- eval sandbox gates (Gate 1 IO-intrinsic ban + Gate 2 module
+        -- allow-list) end-to-end via `morloc eval --eval-sandbox`/
+        -- `--eval-allowed-modules`
+        golden "eval-sandbox" "eval-sandbox"
       , -- memory alignment tests (document misalignment bugs in voidstar format)
         golden "memory-optional-double-cpp" "memory-optional-double-cpp"
       , golden "memory-optional-double-py" "memory-optional-double-py"

@@ -22,6 +22,13 @@ const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
+// Eval sandbox policy for served eval/bind. When G_EVAL_SANDBOX is set, the
+// forked `morloc eval` runs with `--eval-sandbox` (+ the allow-list), so it
+// refuses directly-written IO intrinsics and imports outside the list. Read
+// once in the PARENT before fork (never locked in the async-signal-unsafe
+// post-fork child).
+static G_EVAL_SANDBOX: AtomicBool = AtomicBool::new(false);
+static G_EVAL_ALLOWED: Mutex<Option<String>> = Mutex::new(None);
 
 /// Set true while the daemon is performing pool-crash recovery: SIGTERM/KILL
 /// pools, drop SHM, respawn, etc. Workers must bail out of any incoming or
@@ -232,6 +239,41 @@ impl BindingStore {
                 return None;
             }
 
+            // Build argv in the PARENT (the policy read locks a mutex, which
+            // is unsafe in the post-fork child). These outlive the fork.
+            let cmd = CString::new("morloc").unwrap();
+            let arg_eval = CString::new("eval").unwrap();
+            let arg_save = CString::new("--save").unwrap();
+            let arg_hex = CString::new(hash_hex.as_str()).unwrap();
+            // `morloc eval` takes a script file by default; the binding store
+            // supplies an inline expression.
+            let arg_dash_e = CString::new("-e").unwrap();
+            // `expr` is client-supplied; an interior NUL cannot be exec'd.
+            // Fail this bind cleanly rather than panicking the worker thread.
+            let arg_expr = match CString::new(expr) {
+                Ok(c) => c,
+                Err(_) => {
+                    libc::close(stdout_pipe[0]);
+                    libc::close(stdout_pipe[1]);
+                    libc::close(stderr_pipe[0]);
+                    libc::close(stderr_pipe[1]);
+                    return None;
+                }
+            };
+            let policy = eval_policy_args();
+            // argv: morloc eval --save <hex> -e <policy...> <expr> NULL.
+            let mut argv: Vec<*const c_char> = Vec::with_capacity(7 + policy.len());
+            argv.push(cmd.as_ptr());
+            argv.push(arg_eval.as_ptr());
+            argv.push(arg_save.as_ptr());
+            argv.push(arg_hex.as_ptr());
+            argv.push(arg_dash_e.as_ptr());
+            for p in &policy {
+                argv.push(p.as_ptr());
+            }
+            argv.push(arg_expr.as_ptr());
+            argv.push(ptr::null());
+
             let pid = libc::fork();
             if pid < 0 {
                 libc::close(stdout_pipe[0]);
@@ -263,24 +305,7 @@ impl BindingStore {
                     libc::setrlimit(libc::RLIMIT_AS, &as_limit);
                 }
 
-                let cmd = CString::new("morloc").unwrap();
-                let arg_eval = CString::new("eval").unwrap();
-                let arg_save = CString::new("--save").unwrap();
-                let arg_hex = CString::new(hash_hex.as_str()).unwrap();
-                // `morloc eval` takes a script file by default; the
-                // binding store supplies an inline expression.
-                let arg_dash_e = CString::new("-e").unwrap();
-                let arg_expr = CString::new(expr).unwrap();
-                libc::execlp(
-                    cmd.as_ptr(),
-                    cmd.as_ptr(),
-                    arg_eval.as_ptr(),
-                    arg_save.as_ptr(),
-                    arg_hex.as_ptr(),
-                    arg_dash_e.as_ptr(),
-                    arg_expr.as_ptr(),
-                    ptr::null::<c_char>(),
-                );
+                libc::execvp(cmd.as_ptr(), argv.as_ptr());
                 libc::_exit(127);
             }
 
@@ -671,6 +696,44 @@ pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
     G_EVAL_TIMEOUT.store(t, Ordering::Relaxed);
 }
 
+/// Set the eval sandbox policy applied to forked `morloc eval`/`--save`.
+/// `sandbox` enables the sandbox; `allowed` is a NUL-terminated, comma-
+/// separated module allow-list (may be null/empty). The nexus calls this
+/// once before serving; the global is process-wide, so every serve path
+/// (daemon, router, future MCP eval) is covered.
+#[no_mangle]
+pub extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
+    G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
+    let list = if allowed.is_null() {
+        None
+    } else {
+        // Safe: `allowed` is a caller-owned C string valid for this call.
+        unsafe { CStr::from_ptr(allowed) }
+            .to_str()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    *G_EVAL_ALLOWED.lock().unwrap() = list;
+}
+
+/// Build the sandbox policy argv tail (`--eval-sandbox [--eval-allowed-modules
+/// <list>]`) for a forked `morloc eval`. MUST be called in the PARENT before
+/// fork: it locks G_EVAL_ALLOWED, which is not async-signal-safe to touch in
+/// the post-fork child. The returned CStrings outlive the fork (the child
+/// shares the parent's address space until exec).
+fn eval_policy_args() -> Vec<CString> {
+    let mut out = Vec::new();
+    if G_EVAL_SANDBOX.load(Ordering::Relaxed) {
+        out.push(CString::new("--eval-sandbox").unwrap());
+        if let Some(list) = G_EVAL_ALLOWED.lock().unwrap().as_deref() {
+            out.push(CString::new("--eval-allowed-modules").unwrap());
+            out.push(CString::new(list).unwrap());
+        }
+    }
+    out
+}
+
 // -- Fork-based eval/typecheck ------------------------------------------------
 
 /// Fork `morloc <subcmd> <expr>`, capture stdout/stderr, return a DaemonResponse.
@@ -686,6 +749,27 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
     }
+
+    // Build the exec argv in the PARENT (before fork): the sandbox policy
+    // read locks a mutex, which is not async-signal-safe in the child. The
+    // child shares this address space until exec, so these outlive the fork.
+    let cmd = CString::new("morloc").unwrap();
+    let arg_subcmd = CString::new(subcmd).unwrap();
+    // `morloc eval`/`typecheck` take a script file by default; the daemon
+    // always supplies an inline expression, so pass `-e`.
+    let dash_e = CString::new("-e").unwrap();
+    let policy = eval_policy_args();
+    // argv: morloc <subcmd> -e <policy...> <expr> NULL. Policy flags precede
+    // the expr positional so the positional is never read as a flag value.
+    let mut argv: Vec<*const c_char> = Vec::with_capacity(5 + policy.len());
+    argv.push(cmd.as_ptr());
+    argv.push(arg_subcmd.as_ptr());
+    argv.push(dash_e.as_ptr());
+    for p in &policy {
+        argv.push(p.as_ptr());
+    }
+    argv.push(expr);
+    argv.push(ptr::null());
 
     let pid = libc::fork();
     if pid < 0 {
@@ -723,19 +807,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
             libc::setrlimit(libc::RLIMIT_AS, &as_limit);
         }
 
-        let cmd = CString::new("morloc").unwrap();
-        let arg_subcmd = CString::new(subcmd).unwrap();
-        // `morloc eval`/`typecheck` take a script file by default; the
-        // daemon always supplies an inline expression, so pass `-e`.
-        let dash_e = CString::new("-e").unwrap();
-        libc::execlp(
-            cmd.as_ptr(),
-            cmd.as_ptr(),
-            arg_subcmd.as_ptr(),
-            dash_e.as_ptr(),
-            expr,
-            ptr::null::<c_char>(),
-        );
+        libc::execvp(cmd.as_ptr(), argv.as_ptr());
         libc::_exit(127);
     }
 

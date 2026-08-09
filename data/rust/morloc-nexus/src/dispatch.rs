@@ -60,6 +60,14 @@ pub struct NexusConfig {
     pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
+    /// Eval sandbox: true for served eval (daemon/router), which always
+    /// forbids directly-written IO intrinsics and restricts imports to
+    /// `eval_allowed_modules`. False for run/mcp configs that do not serve eval.
+    pub eval_sandbox: bool,
+    /// Module allow-list for served (sandboxed) eval (`None` => no imports,
+    /// only pure module-free expressions). Passed to the forked `morloc eval`
+    /// as `--eval-allowed-modules`.
+    pub eval_allowed_modules: Option<String>,
     /// Base directory under which a per-run subdir (named by run_id)
     /// is materialized. Activates rundir creation, log tee, and
     /// `summary.json`. Falls back to the `MORLOC_LOG_DIR` env var.
@@ -105,6 +113,8 @@ impl Default for NexusConfig {
             port_file_path: None,
             fdb_path: None,
             eval_timeout: 30,
+            eval_sandbox: false,
+            eval_allowed_modules: None,
             log_dir: None,
             summary_path: None,
             quiet: false,

@@ -195,6 +195,13 @@ data MorlocState = MorlocState
   -- ^ When False, import resolution ignores local/project-relative
   -- modules and resolves only installed (system) modules. False in
   -- eval mode (the API sandbox boundary) unless --allow-local-modules.
+  , stateEvalSandbox :: Maybe (Set.Set MVar)
+  -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
+  -- sandboxed eval (served): only these modules may be imported at the
+  -- top level of the eval expression, and IO intrinsics may not be
+  -- written directly. Set only at the single arbitrary-source entry
+  -- (cmdEval) from an explicit value -- never a defaulted flag a new
+  -- eval call site could silently skip.
   , stateUnsafeSkipNullCheck :: Bool
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
@@ -518,6 +525,7 @@ instance Defaultable MorlocState where
       , stateProjectRoot = Nothing
       , stateEvalMode = False
       , stateAllowLocalModules = True
+      , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
       , stateInlineSize = Nothing
       , stateNoShm = False

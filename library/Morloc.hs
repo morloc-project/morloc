@@ -24,7 +24,7 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 
-import Morloc.Data.Doc (pretty)
+import Morloc.Data.Doc (pretty, (<+>), squotes)
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import qualified Morloc.Build.Params as BP
@@ -217,25 +217,52 @@ writeProgram translateFn path code = do
 -- typeclasses, instances, or source foreign code. The check is fully
 -- recursive so a forbidden construct cannot hide inside a nested
 -- let/where/do block (the only grammatical path is a forced
--- expression). Imported modules are not checked: eval mode also
--- disables local-module resolution, so every import is genuinely
--- pre-existing installed code.
+-- expression). It walks only the root DAG node -- the user-written code
+-- -- so imported modules (separate nodes) are never inspected.
+--
+-- In sandbox mode ('stateEvalSandbox' = Just), two further gates apply
+-- to the untrusted expression: no directly-written IO intrinsic (Gate 1)
+-- and no top-level import outside the allow-list (Gate 2). Both are
+-- inert for trusted dev eval (Nothing), where local IO and any installed
+-- module remain available.
 checkEvalRestrictions :: DAG MVar Import ExprI -> MorlocMonad ()
-checkEvalRestrictions dag =
+checkEvalRestrictions dag = do
+  sandbox <- MM.gets stateEvalSandbox
   case DAG.roots dag of
     [] -> return ()
     (root : _) -> case Map.lookup root dag of
       Nothing -> return ()
-      Just (ExprI _ (ModE _ body), _) -> mapM_ (AST.checkExprI checkExpr) body
+      Just (ExprI _ (ModE _ body), edges) -> do
+        mapM_ (AST.checkExprI (checkExpr sandbox)) body
+        -- Gate 2: match on the resolved target MVar (the DAG child key),
+        -- so `import M as N` is still checked against M. A vetted facade's
+        -- own imports are edges from its node, never reached here, so the
+        -- facade may re-export terms drawn from non-listed modules. Inert
+        -- (Maybe is Foldable) when not sandboxed.
+        mapM_ (\allowed -> mapM_ (checkImport allowed) edges) sandbox
       Just _ -> return ()
   where
-    checkExpr :: ExprI -> MorlocMonad ()
-    checkExpr (ExprI i (SrcE _)) =
+    checkExpr :: Maybe (Set.Set MVar) -> ExprI -> MorlocMonad ()
+    checkExpr _ (ExprI i (SrcE _)) =
       MM.throwSourcedError i "source statements are not allowed in eval mode"
-    checkExpr (ExprI i (ClsE _)) =
+    checkExpr _ (ExprI i (ClsE _)) =
       MM.throwSourcedError i "class declarations are not allowed in eval mode"
-    checkExpr (ExprI i (IstE _ _ _)) =
+    checkExpr _ (ExprI i (IstE _ _ _)) =
       MM.throwSourcedError i "instance declarations are not allowed in eval mode"
-    checkExpr (ExprI i (TypE _)) =
+    checkExpr _ (ExprI i (TypE _)) =
       MM.throwSourcedError i "type declarations are not allowed in eval mode"
-    checkExpr _ = return ()
+    -- Gate 1: a directly-written IO intrinsic is refused in sandbox mode.
+    -- Calling an exported function that uses one internally is still fine:
+    -- that intrinsic lives in another DAG node this walk never visits.
+    checkExpr (Just _) (ExprI i (IntrinsicE intr _))
+      | intrinsicIsIO intr =
+          MM.throwSourcedError i
+            "IO intrinsics may not be used directly in a sandboxed eval expression; \
+            \wrap the intrinsic in an exported function of an allow-listed module instead"
+    checkExpr _ _ = return ()
+
+    checkImport :: Set.Set MVar -> (MVar, Import) -> MorlocMonad ()
+    checkImport allowed (childMV, _)
+      | Set.member childMV allowed = return ()
+      | otherwise = MM.throwSystemError $
+          "module" <+> squotes (pretty childMV) <+> "is not in the eval allow-list"

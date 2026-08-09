@@ -444,7 +444,19 @@ cmdEval args verbosity config buildConfig = do
       extraArgs = evalArgs args
       isSave = not (null saveName)
       exeName = if isSave then saveName else "eval"
-      allowLocal = evalAllowLocalModules args
+      -- --eval-allowed-modules implies --eval-sandbox, so an operator who
+      -- supplies an allow-list can never accidentally leave the gates off.
+      sandboxOn = evalSandbox args || not (null (evalAllowedModules args))
+      allowedModules = Set.fromList
+        [ MV m'
+        | m <- MT.splitOn "," (MT.pack (evalAllowedModules args))
+        , let m' = MT.strip m
+        , not (MT.null m') ]
+      evalSandboxState
+        | sandboxOn = Just allowedModules
+        | otherwise = Nothing
+      -- Sandbox hard-pins local imports off, overriding --allow-local-modules.
+      allowLocal = evalAllowLocalModules args && not sandboxOn
   createDirectoryIfMissing True tmpBase
   bracket
     (do
@@ -457,7 +469,7 @@ cmdEval args verbosity config buildConfig = do
       cleanupTmpDir tmpDir)
     (\(_origDir, tmpDir) -> do
       let action = do
-            MM.modify (\s -> s {stateEvalMode = True, stateAllowLocalModules = allowLocal})
+            MM.modify (\s -> s {stateEvalMode = True, stateAllowLocalModules = allowLocal, stateEvalSandbox = evalSandboxState})
             if isSave then MM.modify (\s -> s {stateInstall = True}) else return ()
             M.writeProgram translator Nothing (Code code)
       result <- MM.runMorlocMonad (Just exeName) verbosity config buildConfig action

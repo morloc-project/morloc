@@ -28,7 +28,7 @@ gcc $R_CPPFLAGS -I"$INCLUDE_DIR" $SANITIZE_FLAGS -fpic -O2 \
 gcc -shared $SANITIZE_FLAGS \
     -Wl,-Bsymbolic-functions -Wl,-z,relro \
     -o "$LIB_DIR/librmorloc.so" "$INCLUDE_DIR/rmorloc.o" \
-    -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -lmorloc -lpthread \
+    -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,'$ORIGIN' -lmorloc -lpthread \
     -L"$R_HOME/lib" -lR
 
 # Clean up

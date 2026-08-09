@@ -486,6 +486,7 @@ fn run_daemon(
             shm_basename: *const c_char,
         );
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
+        fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
     }
 
     // Build C MorlocSocket array (matches daemon_ffi::MorlocSocket layout)
@@ -582,6 +583,17 @@ fn run_daemon(
 
     let shm_c = CString::new(shm_basename).unwrap();
 
+    // Set the eval sandbox policy before serving so every forked `morloc eval`
+    // /`--save` inherits it (the runtime global is process-wide).
+    let eval_allowed_cstr = config.eval_allowed_modules.as_ref()
+        .map(|s| CString::new(s.as_str()).unwrap());
+    unsafe {
+        daemon_set_eval_policy(
+            config.eval_sandbox,
+            eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        );
+    }
+
     unsafe {
         daemon_run(
             &mut daemon_config as *mut CDaemonConfig as *mut c_void,
@@ -604,6 +616,7 @@ fn run_router(config: &dispatch::NexusConfig) {
         fn router_init(exe_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn router_run(config: *mut c_void, router: *mut c_void);
         fn router_free(router: *mut c_void);
+        fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
     }
 
     let exe_path = config.fdb_path.clone().unwrap_or_else(|| {
@@ -655,6 +668,17 @@ fn run_router(config: &dispatch::NexusConfig) {
         n_pools: 0,
         eval_timeout: if config.eval_timeout > 0 { config.eval_timeout } else { 30 },
     };
+
+    // Set the eval sandbox policy before serving (process-wide global read by
+    // every forked `morloc eval`/`--save`).
+    let eval_allowed_cstr = config.eval_allowed_modules.as_ref()
+        .map(|s| CString::new(s.as_str()).unwrap());
+    unsafe {
+        daemon_set_eval_policy(
+            config.eval_sandbox,
+            eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        );
+    }
 
     unsafe {
         router_run(&mut dc as *mut CDaemonConfig as *mut c_void, router);

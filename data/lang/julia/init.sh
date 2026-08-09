@@ -17,4 +17,4 @@ cp "$BUILD_DIR/MorlocRuntime.jl" "$LANG_DIR/"
 
 # Compile juliabridge.c -> libjuliamorloc.so
 gcc -shared -fPIC -O2 $SANITIZE_FLAGS -I"$INCLUDE_DIR" -o "$LIB_DIR/libjuliamorloc.so" \
-    "$BUILD_DIR/juliabridge.c" -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -lmorloc -lpthread
+    "$BUILD_DIR/juliabridge.c" -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,'$ORIGIN' -lmorloc -lpthread

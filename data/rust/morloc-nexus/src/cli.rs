@@ -186,6 +186,14 @@ pub struct DaemonArgs {
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
     pub eval_timeout: u32,
+
+    /// Comma-separated modules a served eval expression may import at top
+    /// level. Served eval is ALWAYS sandboxed (directly-written IO intrinsics
+    /// banned); an empty list grants no module imports, leaving only pure
+    /// module-free expressions. Trusted unrestricted eval is the local
+    /// `morloc eval` CLI, not a served endpoint.
+    #[arg(long = "eval-allowed-modules", value_name = "M,...", default_value = "")]
+    pub eval_allowed_modules: String,
 }
 
 /// Serve a compiled morloc program as a native MCP (Model Context
@@ -231,6 +239,14 @@ pub struct RouterArgs {
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
     pub eval_timeout: u32,
+
+    /// Comma-separated modules a served eval expression may import at top
+    /// level. Served eval is ALWAYS sandboxed (directly-written IO intrinsics
+    /// banned); an empty list grants no module imports, leaving only pure
+    /// module-free expressions. Trusted unrestricted eval is the local
+    /// `morloc eval` CLI, not a served endpoint.
+    #[arg(long = "eval-allowed-modules", value_name = "M,...", default_value = "")]
+    pub eval_allowed_modules: String,
 }
 
 /// Classify morloc-compatible data files. Reads only header bytes
@@ -634,6 +650,25 @@ pub fn parse_byte_size(flag: &str, raw: &str) -> u64 {
     }
 }
 
+/// Apply the eval sandbox policy to a serve config. Served eval is ALWAYS
+/// sandboxed: directly-written IO intrinsics are banned and imports are limited
+/// to `allowed` (an empty list grants no imports, leaving only pure module-free
+/// expressions). There is no unsandboxed served-eval mode -- trusted,
+/// unrestricted eval is the local `morloc eval` CLI, not a served endpoint.
+fn apply_eval_policy(cfg: &mut NexusConfig, allowed: &str) {
+    cfg.eval_sandbox = true;
+    let modules: Vec<&str> = allowed
+        .split(',')
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .collect();
+    cfg.eval_allowed_modules = if modules.is_empty() {
+        None
+    } else {
+        Some(modules.join(","))
+    };
+}
+
 /// Translate a parsed [`RunArgs`] block into a [`NexusConfig`]. The
 /// `target` field is returned separately so the caller can resolve
 /// it to a manifest path.
@@ -656,6 +691,7 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     cfg.http_port = args.http_port.map(|p| p as i32);
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     (cfg, args.target.clone())
 }
 
@@ -678,6 +714,7 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     cfg.http_port = args.http_port.map(|p| p as i32);
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     cfg
 }
 
@@ -1921,6 +1958,43 @@ mod tests {
                 assert!(cfg.daemon_flag);
                 assert_eq!(cfg.http_port, Some(8888));
                 assert_eq!(cfg.eval_timeout, 30);
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn eval_allowed_modules_sets_list() {
+        // The allow-list is normalized (trimmed, empty entries dropped);
+        // served eval is sandboxed regardless.
+        let n = parse(&[
+            "morloc-nexus",
+            "daemon",
+            "--eval-allowed-modules",
+            "root-py, bits ,",
+            "main.manifest",
+        ])
+        .unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert!(cfg.eval_sandbox);
+                assert_eq!(cfg.eval_allowed_modules.as_deref(), Some("root-py,bits"));
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn eval_always_sandboxed() {
+        // Served eval is always sandboxed; no flags => empty allow-list
+        // (no module imports, IO intrinsics banned).
+        let n = parse(&["morloc-nexus", "daemon", "main.manifest"]).unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert!(cfg.eval_sandbox);
+                assert_eq!(cfg.eval_allowed_modules, None);
             }
             _ => panic!("expected Daemon mode"),
         }

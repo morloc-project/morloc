@@ -121,6 +121,7 @@ copyState oldIdx newIdx = do
       , stateProjectRoot = stateProjectRoot s
       , stateEvalMode = stateEvalMode s
       , stateAllowLocalModules = stateAllowLocalModules s
+      , stateEvalSandbox = stateEvalSandbox s
       , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
       , stateInlineSize = stateInlineSize s
       , stateNoShm = stateNoShm s

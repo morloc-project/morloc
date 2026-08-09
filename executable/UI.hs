@@ -368,6 +368,22 @@ optAllowLocalModules =
         <> help "Permit eval to import local-filesystem modules (development only; insecure for server use -- prefer 'morloc make')"
     )
 
+optEvalSandbox :: Parser Bool
+optEvalSandbox =
+  switch
+    ( long "eval-sandbox"
+        <> help "Sandbox eval: forbid directly-written IO intrinsics and restrict imports to --eval-allowed-modules (implied when that flag is given)"
+    )
+
+optEvalAllowedModules :: Parser String
+optEvalAllowedModules =
+  strOption
+    ( long "eval-allowed-modules"
+        <> metavar "M,..."
+        <> value ""
+        <> help "Comma-separated modules an eval expression may import at top level (implies --eval-sandbox; an empty allow-list permits none)"
+    )
+
 optVanilla :: Parser Bool
 optVanilla =
   switch
@@ -688,6 +704,8 @@ data EvalCommand = EvalCommand
   , evalSave :: String
   , evalExpression :: Bool
   , evalAllowLocalModules :: Bool
+  , evalSandbox :: Bool
+  , evalAllowedModules :: String
   , evalScript :: String
   , evalArgs :: [String]
   }
@@ -701,6 +719,8 @@ evalCommandParser =
     <*> optSave
     <*> optExpression
     <*> optAllowLocalModules
+    <*> optEvalSandbox
+    <*> optEvalAllowedModules
     <*> optScript
     <*> many (strArgument (metavar "ARGS..." <> help "Extra arguments passed to the compiled program"))
 
