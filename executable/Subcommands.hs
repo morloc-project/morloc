@@ -47,6 +47,7 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 import qualified Morloc.ProgramBuilder.Install as Install
+import Morloc.ProgramBuilder.Paths (installedManifestPath, buildDirName)
 import Morloc.Typecheck.Internal (prettyTypeU)
 import System.Directory
   ( createDirectoryIfMissing
@@ -309,7 +310,9 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
             | otherwise = Just (concatMap (fromMaybe []) pkgIncludes)
           allSources = concat (GMap.elems (stateSources finalState))
           directSourcePaths = [ p | Source{srcPath = Just p} <- allSources ]
-      case stateInstallDir finalState of
+      -- The install ROOT (exe/<key>): its basename is the program name, and
+      -- installProgram mirrors sources + registers the launcher from here.
+      case stateBuildRoot finalState of
         Nothing -> do
           putStrLn "Error: install directory was not set during compilation"
           return False
@@ -484,7 +487,7 @@ cmdEval args verbosity config buildConfig = do
                   mergedIncludes
                     | all (== Nothing) pkgIncludes = Nothing
                     | otherwise = Just (concatMap (fromMaybe []) pkgIncludes)
-              case stateInstallDir finalState of
+              case stateBuildRoot finalState of
                 Nothing -> do
                   putStrLn "Error: install directory was not set during compilation"
                   return False
@@ -509,7 +512,7 @@ cmdEval args verbosity config buildConfig = do
                   exe = tmpDir </> exeName
                   manifestPath = case stateInstallDir finalState of
                     Just d -> d </> "manifest.json"
-                    Nothing -> tmpDir </> (exeName <> "-build") </> "manifest.json"
+                    Nothing -> tmpDir </> buildDirName exeName </> "manifest.json"
               subcommand <- getFirstSubcommand manifestPath
               let cmdArgs = subcommand : extraArgs
               runResult <- try (SP.callProcess exe cmdArgs) :: IO (Either SomeException ())
@@ -891,7 +894,7 @@ loadProgramManifests exeDir = do
   where
     loadOne name = do
       let dir = exeDir </> name
-          manifestPath = dir </> "manifest.json"
+          manifestPath = installedManifestPath dir
       isDir <- doesDirectoryExist dir
       hasManifest <- doesFileExist manifestPath
       if not (isDir && hasManifest)

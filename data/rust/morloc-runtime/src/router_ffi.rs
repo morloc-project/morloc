@@ -101,7 +101,9 @@ pub unsafe extern "C" fn router_init(
         if name_str == "." || name_str == ".." {
             continue;
         }
-        let full_path = format!("{}/{}/manifest.json", exe_str, name_str);
+        // Installed layout: exe/<name>/<name>-build/manifest.json
+        // (see Morloc.ProgramBuilder.Paths for the shared convention).
+        let full_path = format!("{}/{}/{}-build/manifest.json", exe_str, name_str, name_str);
         if !std::path::Path::new(&full_path).is_file() {
             continue;
         }

@@ -168,6 +168,7 @@ tests:
       - -rtsopts
       - -with-rtsopts=-N
     dependencies:
+      - morloc
       - base
       - async
       - directory

@@ -404,12 +404,13 @@ fn check_manifests(
         if !dir.is_dir() {
             continue;
         }
-        let manifest_path = dir.join("manifest.json");
+        let prog_name = entry.file_name().to_string_lossy().into_owned();
+        // Installed layout: exe/<name>/<name>-build/manifest.json.
+        let manifest_path = dir.join(format!("{}-build", prog_name)).join("manifest.json");
         if !manifest_path.is_file() {
             continue;
         }
         found_any = true;
-        let prog_name = entry.file_name().to_string_lossy().into_owned();
         check_one_manifest(c, &manifest_path, &prog_name, expected_version);
     }
 

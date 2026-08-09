@@ -317,7 +317,10 @@ translateSource desc p = do
   unless exists . MM.throwSystemError $
     "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
-      p'' = if ldIncludeRelToFile desc then "../" <> p' else p'
+      -- For languages whose import is resolved relative to the pool FILE
+      -- (Julia's `include`), reach the source root: the pool sits at
+      -- <root>/<key>-build/pools/<lang>/, so sources are three levels up.
+      p'' = if ldIncludeRelToFile desc then "../../../" <> p' else p'
   if ldQualifiedImports desc
     then do
       lib <- MT.pack <$> asks MC.configLibrary

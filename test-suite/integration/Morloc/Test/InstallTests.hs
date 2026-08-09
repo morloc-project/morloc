@@ -5,6 +5,7 @@ import System.FilePath ((</>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertEqual, assertFailure, testCase)
 
+import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker, installedManifestPath)
 import Morloc.Test.Common
 
 data InstallSpec = InstallSpec
@@ -34,20 +35,31 @@ installTest env name spec = testCase name $ do
         assertFailure $
           name ++ ": morloc make failed (exit " ++ show c ++ "):\n" ++ err
 
-    -- Check binary and exe directory exist
+    -- The installed root exe/<name> is a marked build root that holds the
+    -- program's sourced files; the build artifacts (manifest + pools) sit in
+    -- the nested <name>-build/ tree. Verify the whole layout stringently so a
+    -- regression to the old flat shape (or a wrong nesting depth) fails here.
+    let buildDir = exePath </> buildDirName name
     assertFileExists (name ++ ": binary installed") binPath
-    assertDirExists (name ++ ": exe directory created") exePath
-    assertDirExists (name ++ ": pools directory copied") (exePath </> "pools")
+    assertDirExists (name ++ ": exe root created") exePath
+    assertFileExists (name ++ ": build marker at root") (exePath </> buildMarker)
+    assertDirExists (name ++ ": nested build dir created") buildDir
+    assertFileExists (name ++ ": manifest in build dir") (installedManifestPath exePath)
+    assertDirExists (name ++ ": pools under build dir") (buildDir </> "pools")
+    -- The manifest must live only in the nested build dir, never at the root.
+    assertNotExists (name ++ ": no stale flat manifest at root") (exePath </> "manifest.json")
 
-    -- Check expected files
+    -- Sourced files/dirs are mirrored at the ROOT (beside the build dir), where
+    -- a pool resolves them via ../../.. -- not inside the build dir.
     mapM_
-      (\f -> assertFileExists (name ++ ": " ++ f ++ " included") (exePath </> f))
+      (\f -> assertFileExists (name ++ ": " ++ f ++ " mirrored at root") (exePath </> f))
       (isFiles spec)
-
-    -- Check expected directories
     mapM_
-      (\d -> assertDirExists (name ++ ": " ++ d ++ " included") (exePath </> d))
+      (\d -> assertDirExists (name ++ ": " ++ d ++ " mirrored at root") (exePath </> d))
       (isDirs spec)
+    mapM_
+      (\f -> assertNotExists (name ++ ": " ++ f ++ " not duplicated in build dir") (buildDir </> f))
+      (isFiles spec)
 
     -- Run the installed program
     (rc, stdout, stderr) <- runProgram binPath (isSubcommand spec) (isArgs spec)
@@ -56,9 +68,11 @@ installTest env name spec = testCase name $ do
           ExitFailure c -> "ERROR: rc=" ++ show c ++ "\n" ++ stderr
     assertEqual (name ++ ": output") (isExpected spec) actual
 
-    -- Uninstall and verify cleanup
+    -- Uninstall and verify cleanup: both the launcher and the whole install
+    -- root (build dir + mirrored sources) must be gone.
     morlocUninstall name
     assertNotExists (name ++ ": binary removed after uninstall") binPath
+    assertNotExists (name ++ ": install root removed after uninstall") exePath
 
 installTests :: TestEnv -> TestTree
 installTests env =

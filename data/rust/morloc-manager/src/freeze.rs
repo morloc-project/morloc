@@ -209,11 +209,12 @@ fn scan_programs(exe_dir: &str) -> Vec<ProgramEntry> {
             if !dir.is_dir() {
                 return None;
             }
-            let manifest = dir.join("manifest.json");
+            let name = e.file_name().to_string_lossy().to_string();
+            // Installed layout: exe/<name>/<name>-build/manifest.json.
+            let manifest = dir.join(format!("{}-build", name)).join("manifest.json");
             if !manifest.is_file() {
                 return None;
             }
-            let name = e.file_name().to_string_lossy().to_string();
             let commands = parse_manifest_commands(&manifest);
             Some(ProgramEntry { name, commands })
         })

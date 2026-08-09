@@ -17,12 +17,13 @@ module Morloc.ProgramBuilder.Install
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (forM_, when, unless)
+import Control.Monad (filterM, forM_, when, unless)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Completion as Completion
+import Morloc.ProgramBuilder.Paths (buildMarker)
 import System.Directory
   ( copyFile
   , createDirectoryIfMissing
@@ -119,7 +120,13 @@ defaultIgnorePatterns =
 copyAllFiltered :: FilePath -> FilePath -> IO ()
 copyAllFiltered srcRoot dstRoot = do
   userPatterns <- readMorlocIgnore (srcRoot </> ".morlocignore")
-  let allPatterns = defaultIgnorePatterns ++ userPatterns
+  -- Never mirror a stale morloc build dir sitting in the source tree (e.g. a
+  -- leftover `<key>-build/` from a prior `morloc make`); the install writes
+  -- its own fresh build. A build dir is identified by its marker, so user
+  -- directories merely named `*-build` are unaffected. Fold them into the
+  -- ignore patterns as directory rules, reusing isIgnored's matching.
+  buildDirs <- morlocBuildSubdirs srcRoot
+  let allPatterns = defaultIgnorePatterns ++ userPatterns ++ map (++ "/") buildDirs
   files <- listDirectoryRecursive srcRoot
   let relFiles = map (makeRelative srcRoot) files
       kept = filter (not . isIgnored allPatterns) relFiles
@@ -130,6 +137,13 @@ copyAllFiltered srcRoot dstRoot = do
     dstExists <- doesFileExist dst
     unless dstExists $
       copyFile (srcRoot </> rel) dst
+
+-- | Top-level subdirectories of @root@ that are morloc build directories
+-- (carry the @.morloc-build@ marker); returned as relative names.
+morlocBuildSubdirs :: FilePath -> IO [FilePath]
+morlocBuildSubdirs root = do
+  entries <- listDirectory root
+  filterM (\e -> doesFileExist (root </> e </> buildMarker)) entries
 
 -- | Remove files matching .morlocignore and always-excluded patterns
 -- from an already-populated directory. Used after git clone for module

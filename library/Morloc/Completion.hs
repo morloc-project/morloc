@@ -22,6 +22,7 @@ import Data.Char (isAlphaNum)
 import Data.List (intercalate, nub)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
+import Morloc.ProgramBuilder.Paths (installedManifestPath)
 import qualified Data.Text as T
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -144,7 +145,7 @@ loadManifests exeDir = do
     Right entries -> catMaybes <$> mapM loadOne entries
   where
     loadOne name = do
-      let manifestPath = exeDir </> name </> "manifest.json"
+      let manifestPath = installedManifestPath (exeDir </> name)
       exists <- doesFileExist manifestPath
       if not exists
         then return Nothing

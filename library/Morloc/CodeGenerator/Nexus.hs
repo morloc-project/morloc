@@ -54,6 +54,7 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
 import qualified System.Directory as Dir
+import Morloc.ProgramBuilder.Paths (buildDirName, resolveDatafileAgainstRoot)
 
 -- ======================================================================
 -- Data types
@@ -889,14 +890,14 @@ resolveCompileTimeIntrinsic intr =
 
 -- Resolve a @datafile path expression in the nexus. Mirrors
 -- Reduce.hs::reduceNativeExpr IntrDatafile: a literal Str argument is
--- joined with stateInstallDir; anything else gets the same sentinel
--- string the pool side emits.
+-- joined with the source root (stateBuildRoot); anything else gets the
+-- same sentinel string the pool side emits.
 resolveDatafilePath :: AnnoS (Indexed Type) One () -> MorlocMonad Text
 resolveDatafilePath (AnnoS _ _ (StrS rel)) = do
-  mInstallDir <- MM.gets stateInstallDir
-  return $ case mInstallDir of
-    Just dir -> MT.pack (dir </> MT.unpack rel)
-    Nothing -> rel
+  -- Data files are mirrored beside sources at the ROOT, not inside the
+  -- nested build dir, so resolve against the source root.
+  mRoot <- MM.gets stateBuildRoot
+  return (resolveDatafileAgainstRoot mRoot rel)
 resolveDatafilePath _ = return "<datafile: could not resolve path>"
 
 -- ======================================================================
@@ -2507,14 +2508,18 @@ generate cs rASTs helperRASTs = do
   -- the two layouts can never diverge.
   programKey <- MM.getProgramKey
   buildParent <- MM.gets stateBuildParentDir
-  buildDir <-
+  -- The source/install ROOT: exe/<key> for install (a mirror of the working
+  -- directory), the working directory (or --build-dir) for make. The build
+  -- artifacts nest at <root>/<key>-build, so a pool's sources are always at
+  -- ../../.. for both modes.
+  buildRoot <-
     if stateInstall st
       then return (configHome config </> "exe" </> programKey)
       else do
         cwd <- liftIO Dir.getCurrentDirectory
-        absParent <- liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
-        return (absParent </> (programKey <> "-build"))
-  CMS.modify (\s -> s {stateInstallDir = Just buildDir})
+        liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
+  let buildDir = buildRoot </> buildDirName programKey
+  CMS.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just buildRoot})
 
   poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
@@ -2593,10 +2598,12 @@ generate cs rASTs helperRASTs = do
   -- @morloc-nexus <mode> <abs-manifest-path>@. They land in CWD (plain
   -- make) or the install dir (install, whence they are copied to bin/).
   wrapperSpecs <- MM.gets stateWrapperSpecs
-  origCwd <- liftIO Dir.getCurrentDirectory
   let specs = fromMaybe [WrapperSpec WCli programKey] wrapperSpecs
       absManifest = buildDir </> "manifest.json"
-      wrapperDir = if stateInstall st then buildDir else origCwd
+      -- Launcher(s) land at the root (<root>/<key>), beside the nested
+      -- <key>-build; for install this is exe/<key>, whence installProgram
+      -- copies the CLI wrapper to bin/.
+      wrapperDir = buildRoot
       wrappers =
         [ WrapperFile
             (wrapperDir </> wsName s)

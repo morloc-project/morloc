@@ -164,6 +164,14 @@ data MorlocState = MorlocState
   , stateInstall :: Bool
   , stateInstallForce :: Bool
   , stateInstallDir :: Maybe Path
+  -- ^ The build dir @<root>/<key>-build@ (where manifest.json + pools land),
+  -- for both make and install. See 'stateBuildRoot' for the root.
+  , stateBuildRoot :: Maybe Path
+  -- ^ The source/install ROOT: the working directory for make, or
+  -- @exe/<key>@ (a mirror of the working directory) for install. Sources
+  -- live here and a pool resolves them at @../../..@. For install this is
+  -- the atomically-swapped, marker-owned unit; @stateInstallDir@ nests
+  -- inside it. @buildDir = root </> (key <> "-build")@.
   , stateProgramKey :: Maybe String
   -- ^ Program identity for the build directory (@<key>-build@ / @exe/<key>@).
   -- Set to @--name@ if given, else the source-file basename. @Nothing@ falls
@@ -513,6 +521,7 @@ instance Defaultable MorlocState where
       , stateInstall = False
       , stateInstallForce = False
       , stateInstallDir = Nothing
+      , stateBuildRoot = Nothing
       , stateProgramKey = Nothing
       , stateWrapperSpecs = Nothing
       , stateBuildParentDir = Nothing
