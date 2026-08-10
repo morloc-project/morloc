@@ -17,6 +17,7 @@ mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod serve_help;
 mod stdio_bridge;
 mod stdio_server;
 mod view;
@@ -189,9 +190,11 @@ fn main() {
         None
     };
 
-    // The program's own declared name (the manifest filename is always
-    // "manifest.json", so it cannot serve as the program identity).
-    let prog_name = manifest.name.clone();
+    // The name to show in Usage lines: the launcher's own `$0` (via
+    // MORLOC_PROG_NAME) when invoked through the generated wrapper, else the
+    // module name (the manifest filename is always "manifest.json", so it
+    // cannot serve as the program identity).
+    let prog_name = cli::program_display_name(&manifest.name);
 
     // Re-read the raw manifest payload string from disk. The
     // structured manifest was already loaded and validated inside
@@ -466,6 +469,24 @@ fn main() {
     process::clean_exit(0);
 }
 
+/// C `daemon_config_t` mirror (matches `daemon_ffi::DaemonConfig` layout).
+/// Shared by the daemon (`run_daemon`) and router (`run_router`) paths so the
+/// two ABI mirrors can never drift. Port sentinel: -1 = listener not
+/// configured; 0..=65535 = configured (0 means bind ephemeral).
+#[repr(C)]
+struct CDaemonConfig {
+    unix_socket_path: *const std::ffi::c_char,
+    tcp_port: i32,
+    http_port: i32,
+    port_file_path: *const std::ffi::c_char,
+    pool_check_fn: *const std::ffi::c_void,   // Option<fn> as null
+    pool_alive_fn: *const std::ffi::c_void,   // Option<fn> as null
+    n_pools: usize,
+    eval_timeout: i32,
+    output_packet: bool,
+    compression_level: u8,
+}
+
 /// Run the daemon event loop by calling daemon_run in libmorloc.so.
 fn run_daemon(
     config: &dispatch::NexusConfig,
@@ -529,23 +550,6 @@ fn run_daemon(
         _keepalive.push(vec![lang_c, socket_c]);
     }
 
-    // Build C DaemonConfig (matches daemon_ffi::DaemonConfig layout).
-    // Port sentinel: -1 = listener not configured; 0..=65535 = configured
-    // (0 means bind ephemeral). The pre-ephemeral code used 0 as "not
-    // configured", which conflicts with the standard "0 = OS picks port"
-    // idiom.
-    #[repr(C)]
-    struct CDaemonConfig {
-        unix_socket_path: *const c_char,
-        tcp_port: i32,
-        http_port: i32,
-        port_file_path: *const c_char,
-        pool_check_fn: *const c_void,   // Option<fn> as null
-        pool_alive_fn: *const c_void,   // Option<fn> as null
-        n_pools: usize,
-        eval_timeout: i32,
-    }
-
     let unix_socket_cstr = config.unix_socket_path.as_ref()
         .map(|p| CString::new(p.as_str()).unwrap());
     let port_file_cstr = config.port_file_path.as_ref()
@@ -562,6 +566,10 @@ fn run_daemon(
         pool_alive_fn: process::pool_is_alive_ptr(),
         n_pools,
         eval_timeout: config.eval_timeout,
+        // `-f packet` result form over the Unix socket / TCP transports,
+        // with the zstd preset from `-z`. HTTP results stay JSON.
+        output_packet: config.output_format == dispatch::OutputFormat::Packet,
+        compression_level: config.compression_level,
     };
 
     // Parse manifest via the C FFI (so daemon_run gets the C-layout manifest).
@@ -638,20 +646,6 @@ fn run_router(config: &dispatch::NexusConfig) {
         std::process::exit(1);
     }
 
-    // Build DaemonConfig for the router. Port sentinel: -1 = not
-    // configured; 0..=65535 = configured (0 means ephemeral).
-    #[repr(C)]
-    struct CDaemonConfig {
-        unix_socket_path: *const c_char,
-        tcp_port: i32,
-        http_port: i32,
-        port_file_path: *const c_char,
-        pool_check_fn: *const c_void,
-        pool_alive_fn: *const c_void,
-        n_pools: usize,
-        eval_timeout: i32,
-    }
-
     let unix_cstr = config.unix_socket_path.as_ref()
         .map(|p| CString::new(p.as_str()).unwrap());
     let port_file_cstr = config.port_file_path.as_ref()
@@ -667,6 +661,10 @@ fn run_router(config: &dispatch::NexusConfig) {
         pool_alive_fn: ptr::null(),
         n_pools: 0,
         eval_timeout: if config.eval_timeout > 0 { config.eval_timeout } else { 30 },
+        // Router does not offer per-program packet output; keep the ABI
+        // layout in sync with `daemon_config_t` and default to JSON.
+        output_packet: false,
+        compression_level: 0,
     };
 
     // Set the eval sandbox policy before serving (process-wide global read by

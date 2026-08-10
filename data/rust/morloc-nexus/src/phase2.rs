@@ -879,7 +879,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
 }
 
 /// First non-empty description line (used as clap's `about` text).
-fn first_desc(desc: &[String]) -> &str {
+pub(crate) fn first_desc(desc: &[String]) -> &str {
     desc.iter()
         .find(|d| !d.trim().is_empty())
         .map(|s| s.as_str())

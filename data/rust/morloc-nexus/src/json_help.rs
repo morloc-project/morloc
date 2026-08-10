@@ -625,6 +625,19 @@ fn build_mcp_tools(m: &Manifest) -> Value {
     json!({ "tools": tools })
 }
 
+/// Non-internal commands servable over the JSON/packet wire, in manifest
+/// order. Applies the same exclusions as [`build_tool_shapes`] (`@stdin`,
+/// Arrow `Table` / stream-handle types, property-name collisions) but emits
+/// no stderr note, so the daemon/mcp `-h` help renderer can list the servable
+/// surface without printing exclusion warnings.
+pub fn servable_commands(m: &Manifest) -> Vec<&Command> {
+    m.commands
+        .iter()
+        .filter(|c| !c.internal)
+        .filter(|c| command_to_tool_shape(c).is_ok())
+        .collect()
+}
+
 /// Build the MCP shape of every servable command. Commands the MCP tool surface
 /// cannot serve (Arrow `Table` / stream-handle types, `@stdin`, or a
 /// property-name collision) are dropped with a note on stderr.

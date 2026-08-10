@@ -123,55 +123,65 @@ assert_http_status() {
     fi
 }
 
-# Send a length-prefixed JSON message over a socket and read the response.
+# Send a length-prefixed JSON message over a socket and read the response as
+# text (the JSON-envelope wire). Thin wrapper over lp_request_raw so the socket
+# transport lives in one place.
 # Usage: lp_request <socket_or_host:port> <json>
 # Output: the response JSON string
 lp_request() {
+    local out
+    out=$(mktemp)
+    lp_request_raw "$1" "$2" "$out"
+    cat "$out"
+    rm -f "$out"
+}
+
+# Send a length-prefixed JSON message and write the RAW response bytes to a
+# file. Used to capture a `-f packet` daemon reply (binary morloc packet), which
+# cannot survive `$(...)` command substitution.
+# Usage: lp_request_raw <socket_or_host:port> <json> <out_file>
+lp_request_raw() {
     local target="$1"
     local json="$2"
+    local out_file="$3"
 
     python3 -c "
-import socket, struct, sys, json
+import socket, struct, sys
 
 target = sys.argv[1]
 msg = sys.argv[2].encode('utf-8')
+out_path = sys.argv[3]
 
 if target.startswith('/'):
-    # Unix socket
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(target)
 else:
-    # TCP host:port
     host, port = target.rsplit(':', 1)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((host, int(port)))
 
 s.settimeout(10)
-
-# Send length-prefixed message
 s.sendall(struct.pack('>I', len(msg)) + msg)
 
-# Read response length
 resp_len_bytes = b''
 while len(resp_len_bytes) < 4:
     chunk = s.recv(4 - len(resp_len_bytes))
     if not chunk:
         break
     resp_len_bytes += chunk
-
 resp_len = struct.unpack('>I', resp_len_bytes)[0]
 
-# Read response body
 resp = b''
 while len(resp) < resp_len:
     chunk = s.recv(resp_len - len(resp))
     if not chunk:
         break
     resp += chunk
-
 s.close()
-print(resp.decode('utf-8'))
-" "$target" "$json"
+
+with open(out_path, 'wb') as f:
+    f.write(resp)
+" "$target" "$json" "$out_file"
 }
 
 # Extract a JSON field value (simple string/number/bool/object extraction)
@@ -853,6 +863,69 @@ if should_run "socket"; then
     result=$(lp_request "$SOCK_PATH" '{"method":"call","command":"bogus","args":[1]}')
     status=$(json_field "$result" "status")
     assert_test "socket unknown command returns error" "error" "$status"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 4b: -f packet result form over the Unix socket
+#
+# With `-f packet -z 3`, a `call` result is returned as a raw (zstd-
+# compressed) morloc data packet instead of the JSON envelope; control
+# methods (health/discover) stay JSON. The captured packet is decoded with
+# the shared `morloc-nexus` binary's `file` (classify) and `view` (re-emit)
+# subcommands, so the daemon and the reader agree on the wire format.
+# ======================================================================
+
+if should_run "packet"; then
+    echo "${BOLD}[packet] Daemon -f packet result form (socket)${RESET}"
+
+    PKT_SOCK="/tmp/morloc-test-pkt-$$.sock"
+    SOCKET_FILES+=("$PKT_SOCK")
+    start_daemon "$ARITH_DIR" --socket "$PKT_SOCK" -f packet -z 3
+    wait_for_daemon "$LAST_DAEMON_LOG" 15
+
+    PKT_OUT="$ARITH_DIR/pkt-resp.bin"
+
+    # A `call` result is a raw morloc data packet, not the JSON envelope.
+    lp_request_raw "$PKT_SOCK" '{"method":"call","command":"add","args":[10,20]}' "$PKT_OUT"
+    kind=$(morloc-nexus file -FD "$PKT_OUT" 2>/dev/null || echo "classify-failed")
+    assert_contains "packet call add returns a morloc packet" "packet" "$kind"
+
+    # The packet decodes back to the numeric result -- proving the schema
+    # block survived and the `-z 3` payload decompresses cleanly.
+    decoded=$(morloc-nexus view "$PKT_OUT" 2>/dev/null || echo "decode-failed")
+    assert_contains "packet call add [10,20] decodes to 30" "30" "$decoded"
+
+    # An error result is a (FAIL) packet too, not a JSON error envelope, so a
+    # packet-mode client always reads exactly one packet.
+    lp_request_raw "$PKT_SOCK" '{"method":"call","command":"bogus","args":[1]}' "$PKT_OUT"
+    ekind=$(morloc-nexus file -FD "$PKT_OUT" 2>/dev/null || echo "classify-failed")
+    assert_contains "packet unknown command returns a packet (not JSON)" "packet" "$ekind"
+
+    # Control methods stay JSON even on a packet-configured daemon.
+    result=$(lp_request "$PKT_SOCK" '{"method":"health"}')
+    status=$(json_field "$result" "status")
+    assert_test "packet-mode health stays JSON status=ok" "ok" "$status"
+
+    result=$(lp_request "$PKT_SOCK" '{"method":"discover"}')
+    assert_contains "packet-mode discover stays JSON, lists add" "add" "$result"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # A pure (in-nexus eval) command in packet mode exercises the eval-path
+    # packetizer, which is a distinct code path from the remote-pool call above.
+    PKT_PURE_SOCK="/tmp/morloc-test-pkt-pure-$$.sock"
+    SOCKET_FILES+=("$PKT_PURE_SOCK")
+    start_daemon "$PURE_DIR" --socket "$PKT_PURE_SOCK" -f packet
+    wait_for_daemon "$LAST_DAEMON_LOG" 15
+
+    lp_request_raw "$PKT_PURE_SOCK" '{"method":"call","command":"checkInt","args":[]}' "$PKT_OUT"
+    pkind=$(morloc-nexus file -FD "$PKT_OUT" 2>/dev/null || echo "classify-failed")
+    assert_contains "packet pure checkInt returns a morloc packet" "packet" "$pkind"
+    pdecoded=$(morloc-nexus view "$PKT_OUT" 2>/dev/null || echo "decode-failed")
+    assert_contains "packet pure checkInt decodes to 42" "42" "$pdecoded"
 
     stop_daemon "$LAST_DAEMON_PID"
     echo ""

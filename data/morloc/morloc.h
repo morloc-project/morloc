@@ -780,6 +780,11 @@ typedef struct daemon_config_s {
     pool_alive_fn_t pool_alive_fn;
     size_t n_pools;
     int eval_timeout;
+    // When true, `call` results over the Unix socket / TCP transports are
+    // returned as a raw morloc data packet instead of a JSON envelope.
+    bool output_packet;
+    // zstd preset (0..=9) for `output_packet` results; 0 = no compression.
+    unsigned char compression_level;
 } daemon_config_t;
 
 typedef enum {
@@ -821,6 +826,11 @@ typedef struct daemon_response_s {
     int error_kind;
     char* result_json;
     char* error;
+    // Raw morloc data-packet bytes for the `-f packet` daemon wire (Unix
+    // socket / TCP). NULL in JSON mode; when non-NULL the length-prefixed
+    // handler writes these bytes verbatim instead of the JSON envelope.
+    unsigned char* result_bytes;
+    size_t result_len;
 } daemon_response_t;
 
 // -- HTTP types --

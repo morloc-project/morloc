@@ -154,18 +154,48 @@ pub struct RunArgs {
 
 /// Serve a compiled morloc program as a long-lived daemon.
 ///
-/// The `--debug-*` flags inherited via `common: DispatchOptions`
-/// only take effect when the target binary advertises the
-/// `"debug_trace"` capability in its manifest. Passing one against
-/// a binary built without `morloc make --debug` raises a clear
-/// error after manifest load (see [`validate_capabilities`]).
+/// The daemon surface carries only the options the RPC server honors:
+/// the listener flags, the served-eval policy, run-scope logging, and
+/// the `-f`/`-z` result-format pair (see [`DaemonOutputForm`]). Options
+/// that only make sense for the one-shot CLI (`-p`/`-o`/`--keep-null`)
+/// and the nexus-introspection flags (`--json-help`/`--mcp-tools`) are
+/// intentionally absent -- they had no effect on a served program.
+///
+/// The `--debug-*` capability flags are injected at parse time when the
+/// target binary advertises the `"debug_trace"` capability in its
+/// manifest (see [`augment_with_capability_flags`]).
 #[derive(Args, Debug)]
+#[command(next_help_heading = "Daemon Options")]
 pub struct DaemonArgs {
     /// Path to the program's wrapper script or .manifest file.
     pub target: String,
 
-    #[command(flatten)]
-    pub common: DispatchOptions,
+    /// Result form for `call` methods over the Unix socket / TCP
+    /// transports. `json` (default) returns the `{status,result}`
+    /// envelope; `packet` returns a raw morloc data packet (see `-z`).
+    /// Control methods (discover/health/...) always return JSON, and the
+    /// HTTP transport always returns JSON regardless of this flag.
+    #[arg(short = 'f', long = "output-form", value_name = "FORM", value_enum)]
+    pub output_form: Option<DaemonOutputForm>,
+
+    /// zstd compression preset (0..=9) for `-f packet` output. 0 = none
+    /// (default). Ignored for `-f json`.
+    #[arg(short = 'z', long = "compression-level",
+          default_value_t = 0, value_name = "N")]
+    pub compression_level: u8,
+
+    /// Suppress morloc-emitted log lines on stderr.
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Per-run output dir (logs, summary.json, debug dumps). Scoped to
+    /// the whole daemon lifetime.
+    #[arg(long = "log-dir", value_name = "DIR")]
+    pub log_dir: Option<String>,
+
+    /// Override the summary.json location.
+    #[arg(long, value_name = "PATH")]
+    pub summary: Option<String>,
 
     /// Listen on a Unix domain socket at PATH.
     #[arg(long, value_name = "PATH")]
@@ -205,6 +235,7 @@ pub struct DaemonArgs {
 /// JSON-RPC requests on stdin and writes responses on stdout; all pool
 /// and diagnostic output is routed to stderr.
 #[derive(Args, Debug)]
+#[command(next_help_heading = "MCP Options")]
 pub struct McpArgs {
     /// Path to the program's wrapper script or .manifest file.
     pub target: String,
@@ -414,6 +445,28 @@ impl OutputForm {
             OutputForm::Arrow => OutputFormat::Arrow,
             OutputForm::Parquet => OutputFormat::Parquet,
             OutputForm::Csv => OutputFormat::Csv,
+        }
+    }
+}
+
+/// Result-form choices for the `daemon` transport. Deliberately a
+/// narrower set than [`OutputForm`]: the served RPC path only
+/// materializes `json` (the envelope) and `packet` (a raw morloc data
+/// packet). Restricting the value-enum here makes clap reject
+/// `arrow`/`csv`/... with a clear "possible values" error instead of a
+/// flag that silently no-ops. Other formats are a future extension of
+/// the daemon dispatch serializer.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonOutputForm {
+    Json,
+    Packet,
+}
+
+impl DaemonOutputForm {
+    pub fn to_internal(self) -> OutputFormat {
+        match self {
+            DaemonOutputForm::Json => OutputFormat::Json,
+            DaemonOutputForm::Packet => OutputFormat::Packet,
         }
     }
 }
@@ -684,7 +737,15 @@ pub fn run_args_to_config(args: &RunArgs) -> (NexusConfig, String) {
 /// Returns the resolved config and the target path.
 pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     let mut cfg = NexusConfig::default();
-    apply_dispatch_options(&mut cfg, &args.common);
+    // The daemon honors only a subset of the CLI dispatch options; apply
+    // them directly rather than through `apply_dispatch_options`.
+    cfg.quiet = args.quiet;
+    cfg.log_dir = args.log_dir.clone();
+    cfg.summary_path = args.summary.clone();
+    cfg.compression_level = args.compression_level;
+    if let Some(form) = args.output_form {
+        cfg.output_format = form.to_internal();
+    }
     cfg.daemon_flag = true;
     cfg.unix_socket_path = args.socket.clone();
     cfg.tcp_port = args.port.map(|p| p as i32);
@@ -716,6 +777,34 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     cfg.eval_timeout = args.eval_timeout as i32;
     apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     cfg
+}
+
+/// The program name to show in Usage/help lines. Prefers `MORLOC_PROG_NAME`
+/// -- the launcher's own `$0` (e.g. `./main`), exported by the generated
+/// wrapper script -- so help reflects how the user actually invoked the
+/// program. Falls back to `fallback` (the module name) for a direct
+/// `morloc-nexus <mode> <manifest>` invocation with no wrapper.
+pub fn program_display_name(fallback: &str) -> String {
+    std::env::var("MORLOC_PROG_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// True when the argv slice requests help. Lets the daemon/mcp help
+/// decoration skip building the exported-commands block -- which parses every
+/// command's arg schemas -- on a normal serve boot, where clap never renders
+/// it. Matches `--help` and any short-flag cluster containing `h` (`-h`,
+/// `-hq`, `-qh`), mirroring how clap fires the help action; over-matching a
+/// stray `h` only builds a block that is never shown, so a permissive test is
+/// safe.
+fn wants_help(tokens: &[String]) -> bool {
+    tokens.iter().any(|t| {
+        t == "--help"
+            || (t.starts_with('-')
+                && !t.starts_with("--")
+                && t[1..].contains('h'))
+    })
 }
 
 /// Resolve a manifest target argument to a path that
@@ -1199,47 +1288,85 @@ pub fn parse_invocation() -> ParsedInvocation {
     }
 }
 
-/// Parse an `mcp` invocation. Structurally simple: clap parses the minimal
-/// [`McpArgs`] (target only, no capability flags to augment), then the target
-/// is resolved and its manifest loaded exactly as the daemon path does. Kept
-/// off [`parse_run_or_daemon`] so the MCP surface inherits none of the
-/// dispatch/output options.
+/// Parse an `mcp` invocation. The manifest is loaded from the wrapper
+/// target BEFORE the clap parse so `-h`/`--help` can render manifest-aware
+/// help (headline, Usage, exported commands) via [`crate::serve_help`],
+/// the same shape the daemon help uses. Kept off [`parse_run_or_daemon`]
+/// so the MCP surface inherits none of the dispatch/output options.
 fn parse_mcp(argv: &[String]) -> ParsedInvocation {
     use clap::{CommandFactory, FromArgMatches};
-    let cmd = crate::help::strip_styles_recursively(Nexus::command());
-    let matches = cmd.try_get_matches_from(argv).unwrap_or_else(|e| e.exit());
+
+    // Resolve target -> Manifest, exiting with a clean message on failure.
+    // A nested `fn` (not a closure) so it can be reused for both the
+    // pre-scan load and the post-parse fallback.
+    fn load_manifest(target: &str) -> (morloc_manifest::Manifest, String) {
+        let resolved = match resolve_manifest_target(target) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let payload = match crate::manifest::read_manifest_payload(&resolved) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to load manifest '{}': {}", resolved, e);
+                std::process::exit(1);
+            }
+        };
+        match crate::manifest::parse_manifest(&payload) {
+            Ok(m) => (m, resolved),
+            Err(e) => {
+                eprintln!("Failed to parse manifest '{}': {}", resolved, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Pre-resolve the target from raw argv (mcp has no value-taking flags,
+    // so the first non-flag positional is the target) and load its
+    // manifest up front, so the help decoration below has it. A target-less
+    // help invocation (`mcp -h`) yields None and keeps the generic help.
+    let flags = ValueTakingFlags::from_nexus();
+    let pre_target = find_wrapper_target(&argv[2..], &flags);
+    let loaded: Option<(morloc_manifest::Manifest, String)> =
+        pre_target.map(load_manifest);
+
+    let mut nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
+    if let Some((m, _)) = loaded.as_ref() {
+        let sub = nexus_cmd
+            .find_subcommand_mut("mcp")
+            .expect("Nexus declares an 'mcp' subcommand");
+        let prog = program_display_name(&m.name);
+        let about =
+            format!("Serve module \"{}\" as a native MCP server over stdio.", m.name);
+        // Only parse command schemas for the block when help is requested.
+        let block = if wants_help(argv) {
+            crate::serve_help::commands_block(m)
+        } else {
+            String::new()
+        };
+        let decorated =
+            crate::serve_help::decorate(sub.clone(), &prog, &about, "MCP Options", block);
+        *sub = decorated;
+    }
+
+    let matches = nexus_cmd.try_get_matches_from(argv).unwrap_or_else(|e| e.exit());
     let nexus = Nexus::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     let target = match &nexus.cmd {
         Mode::Mcp(m) => m.target.clone(),
         _ => unreachable!("parse_mcp only reached for the mcp subcommand"),
     };
-    let resolved = match resolve_manifest_target(&target) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let payload = match crate::manifest::read_manifest_payload(&resolved) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Failed to load manifest '{}': {}", resolved, e);
-            std::process::exit(1);
-        }
-    };
-    let manifest = match crate::manifest::parse_manifest(&payload) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Failed to parse manifest '{}': {}", resolved, e);
-            std::process::exit(1);
-        }
-    };
+
+    // Reuse the pre-loaded manifest; fall back to loading from the
+    // clap-bound target for any argv shape the pre-scan missed.
+    let (manifest, manifest_path) = loaded.unwrap_or_else(|| load_manifest(&target));
 
     ParsedInvocation {
         nexus,
         manifest: Some(manifest),
-        manifest_path: resolved,
+        manifest_path,
         user_zone: Vec::new(),
         capability_values: CapabilityValues::default(),
     }
@@ -1325,7 +1452,28 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
         let sub = nexus_cmd
             .find_subcommand_mut(mode_token)
             .expect("Nexus declares this subcommand");
-        let augmented = augment_with_capability_flags(sub.clone(), caps_for_augment);
+        let mut augmented = augment_with_capability_flags(sub.clone(), caps_for_augment);
+        // Daemon mode: decorate `-h`/`--help` with the manifest's own
+        // identity and exported-command surface (the run path gets its
+        // manifest-aware help from phase2 instead). Requires a loaded
+        // manifest; a target-less help invocation keeps the generic help.
+        if !is_run {
+            if let Some(m) = manifest.as_ref() {
+                let prog = program_display_name(&m.name);
+                let about =
+                    format!("Serve module \"{}\" as a long-lived daemon.", m.name);
+                // Only parse command schemas for the block when help is
+                // actually being requested; a plain serve boot never shows it.
+                let block = if wants_help(&nexus_tail) {
+                    crate::serve_help::commands_block(m)
+                } else {
+                    String::new()
+                };
+                augmented = crate::serve_help::decorate(
+                    augmented, &prog, &about, "Daemon Options", block,
+                );
+            }
+        }
         *sub = augmented;
     }
 
@@ -1961,6 +2109,69 @@ mod tests {
             }
             _ => panic!("expected Daemon mode"),
         }
+    }
+
+    #[test]
+    fn daemon_output_form_packet() {
+        // `-f packet` on the daemon selects raw-packet output; `-z`
+        // carries the compression preset.
+        let n = parse(&[
+            "morloc-nexus",
+            "daemon",
+            "-f",
+            "packet",
+            "-z",
+            "3",
+            "main.manifest",
+        ])
+        .unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert_eq!(cfg.output_format, OutputFormat::Packet);
+                assert_eq!(cfg.compression_level, 3);
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn daemon_output_form_defaults_json() {
+        let n = parse(&["morloc-nexus", "daemon", "main.manifest"]).unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert_eq!(cfg.output_format, OutputFormat::Json);
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn daemon_rejects_unsupported_output_form() {
+        // The daemon `-f` value-enum only accepts json/packet; other CLI
+        // formats are rejected up front rather than silently no-oping.
+        assert!(parse(&[
+            "morloc-nexus", "daemon", "-f", "arrow", "main.manifest",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn daemon_rejects_removed_dispatch_flags() {
+        // The CLI-only output-shaping flags are gone from the daemon
+        // surface; clap rejects them as unknown. Boolean flags use a single
+        // positional so the ONLY error source is the removed flag -- a
+        // re-added boolean would parse `main.manifest` as the sole target and
+        // the assert would (correctly) fail.
+        for flag in ["-p", "--keep-null", "--json-help", "--mcp-tools"] {
+            let argv = vec!["morloc-nexus", "daemon", flag, "main.manifest"];
+            assert!(parse(&argv).is_err(), "expected error for {}", flag);
+        }
+        // `-o` takes a value: were it re-added it would consume `out.txt`,
+        // leaving `main.manifest` as the sole target and parsing cleanly, so
+        // this value+positional form still isolates the removal.
+        assert!(parse(&["morloc-nexus", "daemon", "-o", "out.txt", "main.manifest"]).is_err());
     }
 
     #[test]

@@ -2628,7 +2628,9 @@ generate cs rASTs helperRASTs = do
 -- the build directory it points at is fixed.
 makeWrapperScript :: WrapperMode -> FilePath -> Text
 makeWrapperScript mode absManifestPath =
-  "#!/bin/sh\nexec morloc-nexus "
+  -- Export the launcher's own invocation name ($0, e.g. ./main) so the
+  -- nexus can print it in Usage/help lines instead of the module name.
+  "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus "
     <> modeToken mode
     <> " "
     <> MT.pack (shellQuote absManifestPath)
