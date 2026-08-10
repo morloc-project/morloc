@@ -700,6 +700,7 @@ data ArgDocVars = ArgDocVars
   , docListForm :: Maybe FormAtom
   , docListChecks :: [Check]
   , docWith :: [WithSpec]
+  , docMime :: Maybe Text
   }
   deriving (Show, Ord, Eq)
 
@@ -762,6 +763,7 @@ instance Defaultable ArgDocVars where
       , docListForm = Nothing
       , docListChecks = []
       , docWith = []
+      , docMime = Nothing
       }
 
 instance Typelike Type where

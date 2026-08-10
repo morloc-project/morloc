@@ -1,3 +1,27 @@
+0.97.0 [2026-08-02]
+-------------------
+
+Language support
+ * Build Rust pools as Cargo projects
+ * Allow Rust dependencies to be specified in package.yaml (rust-deps)
+
+Build system
+ * Generate `<root-filename>-build` folder rather than `pools`
+ * Separate the manifest JSON into a single JSON file in `*-build/manifest.json`
+ * Generated executables are now simple shell wrappers around `morloc-nexus`
+ * Directly generate daemon and MCP executables from `morloc make`
+   * `-o/--cli-out EXE` - name of the CLI executable
+   * `--daemon-out EXE` - name of the daemon executable
+   * `--mcp-out EXE` - name of the MCP server executable
+
+MCP Servers
+
+Safer Eval
+ * Require module allow-list
+ * Ban IO intrinsics in eval expressions
+   
+
+
 0.96.0 [2026-08-02]
 -------------------
 

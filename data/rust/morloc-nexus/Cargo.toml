@@ -35,3 +35,7 @@ chrono = "0.4"
 # explicitly so `did_you_mean` can reuse the same Levenshtein
 # implementation clap uses for its own error hints.
 strsim = "0.11"
+# MCP carries binary tool output only as base64 (image / audio / resource
+# blocks). Same version already resolved in the workspace lockfile, so no new
+# transitive version.
+base64 = "0.22"

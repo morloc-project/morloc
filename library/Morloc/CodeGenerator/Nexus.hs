@@ -2350,7 +2350,7 @@ buildManifest ManifestInputs{..} =
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
-        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
+        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
         -- Terminals array must use the ORIGINAL term name so the
@@ -2370,7 +2370,7 @@ buildManifest ManifestInputs{..} =
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
-        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
+        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
@@ -2443,16 +2443,17 @@ buildManifest ManifestInputs{..} =
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
     -- @metadata@ for symmetry with args.
-    returnJson :: Text -> Type -> [Text] -> Text
-    returnJson schema t desc =
+    returnJson :: Text -> Type -> [Text] -> Maybe Text -> Text
+    returnJson schema t desc mmime =
       let retT = stripThunks (returnTypeOnly t)
-      in jsonObj
+      in jsonObj $
         [ ("schema", jsonStr schema)
         , ("type", jsonStr (render (pretty retT)))
         , ("desc", jsonStrArr desc)
         , ("constraints", constraintsJsonFor retT)
         , ("metadata", metadataEmpty)
         ]
+        <> maybe [] (\m -> [("mime", jsonStr m)]) mmime
 
     -- Extract the return type from a function type; pass other types
     -- through unchanged.

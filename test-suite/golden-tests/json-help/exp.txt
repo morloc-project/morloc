@@ -612,6 +612,16 @@
         "properties": {
           "_1": {
             "type": "string"
+          },
+          "render": {
+            "type": "string",
+            "enum": [
+              "raw",
+              "lines",
+              "sum"
+            ],
+            "default": "raw",
+            "description": "Output projection: 'raw' returns the underlying typed value; a renderer name returns that projection (e.g. an image)."
           }
         },
         "required": [

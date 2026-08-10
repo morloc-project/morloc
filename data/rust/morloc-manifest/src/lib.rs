@@ -398,6 +398,13 @@ pub struct Return {
     /// rationale as the per-arg slot.
     #[serde(default)]
     pub metadata: Metadata,
+    /// Media type of the return value (RFC 6838 `type/subtype`, e.g.
+    /// `image/png`), inherited from a `@mime`-annotated return type alias.
+    /// Drives how the value's bytes are labeled downstream: an MCP `image`
+    /// content block, an HTTP `Content-Type` header. `None` when the return
+    /// type carries no media type.
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 // -- Constraints --------------------------------------------------------------

@@ -1797,6 +1797,11 @@ data CmdDocSet = CmdDocSet
   , -- one element for each argument to the function
     cmdDocRet :: (Type, [Text])
     -- description of the return data
+  , cmdDocRetMime :: Maybe Text
+    -- media type of the return value (RFC 6838 `type/subtype`), inherited
+    -- from a `@mime`-annotated return type alias; drives how output bytes are
+    -- labeled downstream (MCP content blocks, HTTP Content-Type). Nothing when
+    -- the return type carries no media type.
   , cmdDocTerminals :: [WithSpec]
     -- terminal-action declarations (`--' with:`) attached to this command.
     -- Empty for internal / synthesized entries and for commands without any
