@@ -1,4 +1,4 @@
-0.97.0 [2026-08-02]
+0.97.0 [2026-08-10]
 -------------------
 
 Language support
@@ -13,13 +13,22 @@ Build system
    * `-o/--cli-out EXE` - name of the CLI executable
    * `--daemon-out EXE` - name of the daemon executable
    * `--mcp-out EXE` - name of the MCP server executable
+ * Per-language build parameters
+   * `-X lang:key=value` pass to the language-specific compilers
 
-MCP Servers
-
-Safer Eval
- * Require module allow-list
- * Ban IO intrinsics in eval expressions
+Backends
+ * --json-help and --mcp-tool outputs
+ * Add `@mime` type docstring annotations -- used in MCP and HTTP
+ * Generate MCP Servers
+ * Safer `eval`
+    * Require module allow-list
+    * Ban IO intrinsics in eval expressions
    
+Other
+ * Fix cross-pool recursion
+ * Fix exponential blow-up in realization algorithm
+ * Tail-call optimization via native-loop lowering
+ * Many bug fixes
 
 
 0.96.0 [2026-08-02]
