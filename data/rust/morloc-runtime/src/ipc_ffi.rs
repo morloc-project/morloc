@@ -35,6 +35,37 @@ unsafe fn pfd_ready(pfd: &libc::pollfd) -> bool {
     pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
 }
 
+// Wait on file descriptors with poll(2). Used in preference to ppoll(2) because
+// the latter is not bound by the libc crate on Apple targets; plain poll is
+// portable and matches the pool/nexus poll loops. Callers handle EINTR and the
+// post-wait readiness checks themselves.
+//
+// The timeout arrives as a nanosecond `timespec` (or null for an unbounded
+// wait) and must be converted to poll's millisecond `c_int`:
+//   - null       -> -1  (block indefinitely; a naive numeric convert would give
+//                        0, an immediate return that busy-loops the caller)
+//   - positive   -> round UP with a 1 ms floor, so a sub-millisecond request
+//                   never collapses to 0 (which would fire spurious timeouts and
+//                   defeat retry loops). Values are clamped to c_int range.
+#[inline]
+unsafe fn poll_wait(
+    fds: *mut libc::pollfd,
+    nfds: libc::nfds_t,
+    timeout_ptr: *const libc::timespec,
+) -> libc::c_int {
+    let timeout_ms: libc::c_int = if timeout_ptr.is_null() {
+        -1
+    } else {
+        let ts = &*timeout_ptr;
+        let ms = ts.tv_sec as i64 * 1000 + (ts.tv_nsec as i64 + 999_999) / 1_000_000;
+        // A non-null (i.e. bounded) timeout must never round down to 0, or poll
+        // would return immediately instead of waiting.
+        debug_assert!(ms >= 1, "poll_wait: bounded timeout rounded to {} ms", ms);
+        ms.clamp(1, libc::c_int::MAX as i64) as libc::c_int
+    };
+    libc::poll(fds, nfds, timeout_ms)
+}
+
 // ── close_socket / close_daemon ──────────────────────────────────────────────
 
 #[no_mangle]
@@ -236,9 +267,9 @@ pub unsafe extern "C" fn stream_from_client_wait(
         return ptr::null_mut();
     }
 
-    // poll() (via ppoll for the atomic signal mask) instead of pselect/FD_SET:
-    // an fd_set can only hold descriptors below FD_SETSIZE (1024), and FD_SET on
-    // a higher fd is out-of-bounds. A pollfd imposes no ceiling on the fd value.
+    // poll() instead of pselect/FD_SET: an fd_set can only hold descriptors
+    // below FD_SETSIZE (1024), and FD_SET on a higher fd is out-of-bounds. A
+    // pollfd imposes no ceiling on the fd value.
     let mut pfd = libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 };
 
     // Timeout setup
@@ -251,22 +282,14 @@ pub unsafe extern "C" fn stream_from_client_wait(
         ptr::null()
     };
 
-    // Signal mask setup
-    let mut mask: libc::sigset_t = std::mem::zeroed();
-    let mut origmask: libc::sigset_t = std::mem::zeroed();
-    libc::sigemptyset(&mut mask);
-    libc::sigaddset(&mut mask, libc::SIGINT);
-    libc::pthread_sigmask(libc::SIG_SETMASK, &mask, &mut origmask);
-
-    // Initial receive with timeout
+    // Initial receive with timeout, retrying only on a signal interruption.
     let mut ready;
     loop {
-        ready = libc::ppoll(&mut pfd, 1, timeout_ptr, &origmask);
+        ready = poll_wait(&mut pfd, 1, timeout_ptr);
         if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
             break;
         }
     }
-    libc::pthread_sigmask(libc::SIG_SETMASK, &origmask, ptr::null_mut());
 
     if ready == 0 {
         libc::free(buffer as *mut c_void);
@@ -330,9 +353,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
                 ptr::null()
             };
 
-            libc::pthread_sigmask(libc::SIG_SETMASK, &mask, ptr::null_mut());
-            ready = libc::ppoll(&mut pfd, 1, recv_timeout_ptr, &origmask);
-            libc::pthread_sigmask(libc::SIG_SETMASK, &origmask, ptr::null_mut());
+            ready = poll_wait(&mut pfd, 1, recv_timeout_ptr);
 
             if ready == 0 {
                 libc::free(result as *mut c_void);
@@ -541,10 +562,7 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
         ptr::null()
     };
 
-    let mut emptymask: libc::sigset_t = std::mem::zeroed();
-    libc::sigemptyset(&mut emptymask);
-
-    let ready = libc::ppoll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ptr, &emptymask);
+    let ready = poll_wait(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ptr);
     if ready < 0 {
         if crate::utility::errno_val() == libc::EINTR {
             return 0;
