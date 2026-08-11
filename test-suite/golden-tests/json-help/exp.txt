@@ -613,7 +613,7 @@
           "_1": {
             "type": "string"
           },
-          "render": {
+          "_render": {
             "type": "string",
             "enum": [
               "raw",

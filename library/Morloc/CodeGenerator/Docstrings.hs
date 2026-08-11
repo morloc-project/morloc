@@ -120,6 +120,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   (ts', argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
+  mapM_ (rejectAuthoredMime loc) (cmddoc : retdoc : argdocs)
   cmdargs <-
     sequence
       [ makeCmdArg (loc <> "argument #" <> pretty n) t' a'
@@ -141,6 +142,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
 processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
+  mapM_ (rejectAuthoredMime loc) [cmddoc, retdoc]
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
     CmdDocSet
@@ -154,13 +156,18 @@ processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
 processArgDoc i t (ArgDocAlias r) = do
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc r
+  rejectAuthoredMime loc r
+  -- A nullary command's return type is still an alias chain that may carry a
+  -- `@mime` (e.g. `logo :: PNG`). Reduce it to inherit the media type; the
+  -- displayed return type/desc are left as-is.
+  (_, r') <- reduceArgDoc i t (ArgDocAlias r)
   return $
     CmdDocSet
       { cmdDocDesc = docLines r
       , cmdDocName = docName r
       , cmdDocArgs = []
       , cmdDocRet = (t, [])
-      , cmdDocRetMime = Nothing
+      , cmdDocRetMime = getReturnMime r'
       , cmdDocTerminals = []
       }
 processArgDoc i t r = do
@@ -217,6 +224,17 @@ validateCommandLevelDirectives loc r =
         <> " to describe a function; it applies to a specific argument and"
         <> " must appear inside the signature."
     check (_, False) = return ()
+
+-- | `@mime` attaches a media type to a TYPE; it is meaningless on a function,
+-- argument, or return signature (where it is silently ignored -- only a return
+-- type's `@mime` is consumed, via 'reduceArgDoc'). Reject the misplacement so it
+-- is a clear error rather than a no-op.
+rejectAuthoredMime :: MDoc -> ArgDocVars -> MorlocMonad ()
+rejectAuthoredMime loc r = case docMime r of
+  Just _ -> MM.throwSystemError $
+    loc <> "docstring directive '@mime' can only be attached to a type"
+      <> " definition, not to a function, argument, or return."
+  Nothing -> return ()
 
 getReturnDesc :: ArgDoc -> Maybe Text -> [Text]
 getReturnDesc _ (Just ret) = [ret]

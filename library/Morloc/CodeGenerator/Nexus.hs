@@ -259,6 +259,39 @@ findSockets rAST = do
 findAllLangsSAnno :: (Foldable f) => AnnoS e f (Indexed Lang) -> [Lang]
 findAllLangsSAnno = foldAnnoS (\(AnnoS _ (Idx _ lang) _) -> [lang])
 
+-- | A `@mime` return must serialize as raw bytes or text -- the shapes the
+-- daemon's HTTP body and the CLI `-f raw` path emit verbatim: `Str`, `[Str]`,
+-- `Vector U8`, `[Vector U8]`. Classified on the SerialAST (post-alias and
+-- packer-transparent) so it can't drift from the alias name; mirrors the accepted
+-- shapes of @json.rs::write_voidstar_raw@.
+mediaSerialValid :: SerialAST -> Bool
+mediaSerialValid ast = case unwrapPack ast of
+  SerialString _ -> True
+  SerialList _ _ inner -> case unwrapPack inner of
+    SerialUInt8 _ -> True   -- Vector U8
+    SerialString _ -> True  -- [Str]
+    SerialList _ _ inner2 -> case unwrapPack inner2 of
+      SerialUInt8 _ -> True -- [Vector U8]
+      _ -> False
+    _ -> False
+  _ -> False
+  where
+    unwrapPack (SerialPack _ (_, inner)) = unwrapPack inner
+    unwrapPack x = x
+
+-- | Reject a `@mime` on a return that is not raw-serializable (see
+-- 'mediaSerialValid'). A media type means "these bytes/text are format X"; if the
+-- value is not a byte/text sequence the daemon's raw HTTP path would fail at
+-- runtime, so it is caught here at compile time instead.
+validateReturnMime :: Int -> Maybe Text -> SerialAST -> MorlocMonad ()
+validateReturnMime _ Nothing _ = return ()
+validateReturnMime i (Just mime) ast
+  | mediaSerialValid ast = return ()
+  | otherwise = MM.throwSourcedError i $
+      "The @mime type (" <> pretty mime <> ") is on a return that does not"
+      <> " serialize as raw bytes or text; @mime requires the type to reduce to"
+      <> " Str or Vector U8 (or a list thereof)."
+
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
   mayName <- MM.metaName i
@@ -276,6 +309,7 @@ getFData (t, i, lang, doc, sockets) = do
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
   validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
+  validateReturnMime i (cmdDocRetMime doc) returnAst
   registry <- MM.gets stateLangRegistry
   let socket = MC.setupServerAndSocket registry lang
   return $
@@ -544,6 +578,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
       argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
   validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
+  validateReturnMime i (cmdDocRetMime docs) retAst
   expr <- toNexusExpr x0
 
   return $

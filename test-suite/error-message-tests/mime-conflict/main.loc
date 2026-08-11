@@ -1,0 +1,12 @@
+-- Conflicting media types along an alias chain are a contradiction: a value
+-- cannot be labeled two ways -- see Docstrings.checkMimeConflict.
+module main (foo)
+
+--' @mime image/png
+type A = B
+
+--' @mime image/jpeg
+type B = Vector U8
+
+foo :: A -> A
+foo x = x

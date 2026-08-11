@@ -358,12 +358,14 @@ echo ""
 ARITH_DIR=$(mktemp -d)
 STRINGS_DIR=$(mktemp -d)
 PURE_DIR=$(mktemp -d)
-WORK_DIRS+=("$ARITH_DIR" "$STRINGS_DIR" "$PURE_DIR")
+RENDER_DIR=$(mktemp -d)
+WORK_DIRS+=("$ARITH_DIR" "$STRINGS_DIR" "$PURE_DIR" "$RENDER_DIR")
 
 echo "Compiling test programs..."
 compile_program "arithmetic.loc" "$ARITH_DIR"
 compile_program "strings.loc" "$STRINGS_DIR"
 compile_program "pure.loc" "$PURE_DIR"
+compile_program "render.loc" "$RENDER_DIR"
 echo "Done."
 echo ""
 
@@ -440,6 +442,61 @@ if should_run "http"; then
 
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
+fi
+
+# ======================================================================
+# Test Group: render selection (?render=<flag>)
+#
+# `?render=<flag>` selects an output projection; absent, the command's
+# `@default` renderer fires (CLI-consistent). A media-typed (`@mime`)
+# projection is served as raw bytes + `Content-Type`; `?render=raw`
+# recovers the underlying typed value. `/discover` advertises them.
+# ======================================================================
+
+if should_run "render"; then
+    echo "${BOLD}[render] Output projection selection (?render=)${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$RENDER_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    # /discover advertises the render projections and their media types.
+    disco=$(curl -s "http://127.0.0.1:${HTTP_PORT}/discover")
+    assert_contains "discover lists render flag 'shout'" "shout" "$disco"
+    assert_contains "discover lists render mime text/plain" "text/plain" "$disco"
+    # Internal per-flag command is hidden from discovery.
+    if echo "$disco" | grep -q "mlcp_echo_shout"; then
+        assert_test "internal render entry hidden from discover" "hidden" "shown"
+    else
+        assert_test "internal render entry hidden from discover" "hidden" "hidden"
+    fi
+
+    # ?render=raw -> the underlying typed Str value, JSON-wrapped.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/echo?render=raw" \
+        -H "Content-Type: application/json" -d '["hi"]')
+    val=$(json_field "$result" "result")
+    assert_test "?render=raw returns typed value" "hi" "$val"
+
+    # ?render=shout -> raw text/plain body + Content-Type (media-typed return).
+    curl -s -D "$RENDER_DIR/s.hdr" -o "$RENDER_DIR/s.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout" \
+        -H "Content-Type: application/json" -d '["hi"]'
+    ct=$(grep -i '^content-type:' "$RENDER_DIR/s.hdr" | tr -d '\r' | awk '{print $2}')
+    assert_test "?render=shout Content-Type text/plain" "text/plain" "$ct"
+    assert_test "?render=shout raw body" "HI" "$(cat "$RENDER_DIR/s.body")"
+
+    # Bare call fires the @default (shout) renderer -> raw text/plain.
+    curl -s -D "$RENDER_DIR/d.hdr" -o "$RENDER_DIR/d.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo" \
+        -H "Content-Type: application/json" -d '["hey"]'
+    dct=$(grep -i '^content-type:' "$RENDER_DIR/d.hdr" | tr -d '\r' | awk '{print $2}')
+    assert_test "@default renderer Content-Type text/plain" "text/plain" "$dct"
+    assert_test "@default renderer raw body" "HEY" "$(cat "$RENDER_DIR/d.body")"
+
+    # Unknown render flag -> 400.
+    assert_http_status "POST /call/echo?render=nope -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=nope" \
+        -X POST -H "Content-Type: application/json" -d '["hi"]'
 fi
 
 # ======================================================================

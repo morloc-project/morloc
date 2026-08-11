@@ -1,0 +1,10 @@
+-- `@mime` requires the value's type to reduce to Str or Vector U8 (the shapes
+-- served as raw bytes). On an Int it is rejected at codegen -- see
+-- Nexus.validateReturnMime.
+module main (foo)
+
+--' @mime image/png
+type Weird = Int
+
+foo :: Weird -> Weird
+foo x = x

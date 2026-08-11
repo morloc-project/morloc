@@ -84,6 +84,48 @@ pub unsafe extern "C" fn voidstar_to_json_string(
     }
 }
 
+// ── voidstar_to_raw_bytes ──────────────────────────────────────────────────
+
+/// Serialize a `-f raw` value (`Str` / `Vector U8` / list variants) to its raw
+/// content bytes in a `libc::malloc`'d buffer (so the daemon can free it with
+/// `libc::free` in `daemon_free_response`). `*out_len` receives the byte length.
+/// Returns null with `errmsg` set on error. Used for a media-typed daemon HTTP
+/// response body.
+#[no_mangle]
+pub unsafe extern "C" fn voidstar_to_raw_bytes(
+    data: *const c_void,
+    schema: *const CSchema,
+    out_len: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    let rs = CSchema::to_rust(schema);
+    match crate::json::voidstar_raw_to_bytes(data as *mut u8, &rs) {
+        Ok(bytes) => {
+            let len = bytes.len();
+            let buf = libc::malloc(len.max(1)) as *mut u8;
+            if buf.is_null() {
+                set_errmsg(errmsg, &MorlocError::Other("malloc failed for raw bytes".into()));
+                return ptr::null_mut();
+            }
+            if len > 0 {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+            }
+            if !out_len.is_null() {
+                *out_len = len;
+            }
+            buf
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
 // ── print_voidstar ─────────────────────────────────────────────────────────
 
 use morloc_runtime_types::{PRINT_RESULT_OK, PRINT_RESULT_ERR, PRINT_RESULT_PIPE_CLOSED};

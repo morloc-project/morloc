@@ -57,6 +57,8 @@ const JSONRPC_METHOD_NOT_FOUND: i32 = -32601;
 const JSONRPC_INVALID_PARAMS: i32 = -32602;
 
 /// Layout-compatible view of `daemon_ffi::DaemonResponse`. We only read it.
+/// The trailing `result_bytes`/`result_len`/`mime` fields carry a raw-media
+/// (`@mime`) return when we requested one via `daemon_set_output_media_bytes`.
 #[repr(C)]
 struct CDaemonResponse {
     id: *mut c_char,
@@ -64,10 +66,17 @@ struct CDaemonResponse {
     error_kind: i32,
     result_json: *mut c_char,
     error: *mut c_char,
+    result_bytes: *mut u8,
+    result_len: usize,
+    mime: *mut c_char,
 }
 
 extern "C" {
     fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
+    /// Request the raw-media response form for this thread's next
+    /// `daemon_dispatch` (media-typed returns come back as raw bytes + mime).
+    /// Returns the previous value. See `daemon_ffi::daemon_set_output_media_bytes`.
+    fn daemon_set_output_media_bytes(on: bool) -> bool;
     fn daemon_parse_request(
         json: *const c_char,
         len: usize,
@@ -355,13 +364,13 @@ fn handle_tools_call(
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
 
-    // Select the output projection. Commands with terminals expose a `render`
+    // Select the output projection. Commands with terminals expose a `_render`
     // enum: "raw" (default) dispatches the command itself; a renderer name
     // dispatches that projection's entry command and packages its result by the
-    // entry's media type. `render` is not a pool argument, so `positional` is
+    // entry's media type. `_render` is not a pool argument, so `positional` is
     // identical for the command and any of its projections.
     let render_sel = arguments
-        .get("render")
+        .get("_render")
         .and_then(|v| v.as_str())
         .unwrap_or("raw");
     let (dispatch_command, ret_mime, returns_object) = match shape.dispatch_for(render_sel) {
@@ -369,16 +378,21 @@ fn handle_tools_call(
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
 
-    // Dispatch through the shared execution backend.
+    // Dispatch through the shared execution backend. A media-typed projection is
+    // fetched as raw bytes (no JSON int-array), then base64'd into an MCP block.
+    let want_media = ret_mime.is_some();
     let request_json = json!({
         "method": "call",
         "command": dispatch_command,
         "args": Value::Array(positional),
     });
 
-    match ctx.dispatch(&request_json) {
-        Ok(result_json) => {
-            result_response(id, tool_result_object(&result_json, returns_object, ret_mime))
+    match ctx.dispatch(&request_json, want_media) {
+        Ok(DispatchOutcome::Media(content)) => {
+            result_response(id, media_result_object(content))
+        }
+        Ok(DispatchOutcome::Json(result_json)) => {
+            result_response(id, tool_result_object(&result_json, returns_object))
         }
         Err(message) => {
             // Execution failure (pool error, @throw, recovering, internal):
@@ -473,13 +487,25 @@ struct DispatchCtx {
     shm: CString,
 }
 
+/// A successful dispatch's payload: either the JSON-serialized return value, or
+/// -- when `want_media` was requested for a media-typed (`@mime`) return -- the
+/// finished MCP content block built from the raw bytes (skips both the JSON
+/// int-array round-trip and an owning copy of the payload).
+enum DispatchOutcome {
+    Json(String),
+    Media(Value),
+}
+
 impl DispatchCtx {
     /// Marshal a call-request JSON through `daemon_parse_request` +
-    /// `daemon_dispatch` and read the response: `Ok(result_json)` on success,
-    /// `Err(message)` on failure. On an INTERNAL failure a pool may have died,
-    /// so probe liveness and run crash recovery (a fast no-op when all pools are
-    /// alive) before returning, so a subsequent call can succeed.
-    fn dispatch(&self, request_json: &Value) -> Result<String, String> {
+    /// `daemon_dispatch` and read the response: `Ok(outcome)` on success,
+    /// `Err(message)` on failure. `want_media` asks the backend for the raw
+    /// content bytes of a media-typed return (set only when the selected
+    /// projection has a `@mime`); otherwise the JSON form is returned. On an
+    /// INTERNAL failure a pool may have died, so probe liveness and run crash
+    /// recovery (a fast no-op when all pools are alive) before returning, so a
+    /// subsequent call can succeed.
+    fn dispatch(&self, request_json: &Value, want_media: bool) -> Result<DispatchOutcome, String> {
         let request_str = request_json.to_string();
         let req_c = CString::new(request_str.as_str()).unwrap();
 
@@ -492,8 +518,18 @@ impl DispatchCtx {
             return Err(format!("failed to build call request: {}", msg));
         }
 
+        // Request the raw-media response form for this one dispatch (same thread,
+        // so the backend's thread-local sees it), then restore.
+        let prev = if want_media {
+            unsafe { daemon_set_output_media_bytes(true) }
+        } else {
+            false
+        };
         let resp =
             unsafe { daemon_dispatch(self.manifest_c, req, self.sockets_ptr, self.shm.as_ptr()) };
+        if want_media {
+            unsafe { daemon_set_output_media_bytes(prev) };
+        }
         unsafe { daemon_free_request(req) };
 
         if resp.is_null() {
@@ -502,7 +538,20 @@ impl DispatchCtx {
 
         let outcome = unsafe {
             if (*resp).success {
-                Ok(cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()))
+                // Prefer the raw-media bytes when the backend produced them;
+                // fall back to JSON otherwise (untyped return, or want_media off).
+                // Build the content block from the borrowed bytes here, before
+                // the response is freed below -- no owning copy of the payload.
+                if want_media && !(*resp).result_bytes.is_null() {
+                    let bytes =
+                        std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len);
+                    let mime = cstr_to_string((*resp).mime).unwrap_or_default();
+                    Ok(DispatchOutcome::Media(media_content_block(bytes, &mime)))
+                } else {
+                    Ok(DispatchOutcome::Json(
+                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
+                    ))
+                }
             } else {
                 let kind = (*resp).error_kind;
                 let msg = cstr_to_string((*resp).error)
@@ -518,26 +567,12 @@ impl DispatchCtx {
     }
 }
 
-/// Build the MCP `result` object for a successful call. `result_json` is the
-/// serialized return value; `structured` is true only for object returns.
-fn tool_result_object(result_json: &str, structured: bool, mime: Option<&str>) -> Value {
-    // Parse so we can (a) emit compact single-line text, (b) mirror an object
-    // return into structuredContent, and (c) convert a media-typed binary
-    // return into base64. Fall back to the raw string.
+/// Build the MCP `result` object for a successful non-media call. `result_json`
+/// is the serialized return value; `structured` is true only for object returns.
+fn tool_result_object(result_json: &str, structured: bool) -> Value {
+    // Parse so we can (a) emit compact single-line text and (b) mirror an object
+    // return into structuredContent. Fall back to the raw string.
     let parsed: Option<Value> = serde_json::from_str(result_json).ok();
-
-    // A media-typed return (from a `@mime` type) becomes the matching MCP
-    // content block: MCP carries binary only as base64 (an `image`/`audio`
-    // block, or an embedded resource `blob` for other binary); a `text/*` media
-    // type stays a text block. An untyped return falls through to the default.
-    if let Some(mt) = mime {
-        if let Some(content) = mime_content_block(mt, parsed.as_ref(), result_json) {
-            let mut result = Map::new();
-            result.insert("content".into(), json!([content]));
-            result.insert("isError".into(), Value::Bool(false));
-            return Value::Object(result);
-        }
-    }
 
     let text = parsed
         .as_ref()
@@ -558,61 +593,38 @@ fn tool_result_object(result_json: &str, structured: bool, mime: Option<&str>) -
     Value::Object(result)
 }
 
-/// Build the MCP content block for a media-typed return, or `None` to fall back
-/// to default text/structured handling. `parsed` is the return value from
-/// `result_json` (an array of byte-valued ints for `Vector U8`, a JSON string
-/// for `Str`).
-fn mime_content_block(mime: &str, parsed: Option<&Value>, result_json: &str) -> Option<Value> {
-    let family = mime.split('/').next().unwrap_or("");
-    match family {
-        "image" | "audio" => {
-            let bytes = value_to_bytes(parsed?)?;
-            Some(json!({
-                "type": family,
-                "data": base64_encode(&bytes),
-                "mimeType": mime,
-            }))
-        }
-        "text" => {
-            // A text/* renderer returns `Str`; surface the string unquoted.
-            let text = match parsed {
-                Some(Value::String(s)) => s.clone(),
-                Some(v) => v.to_string(),
-                None => result_json.to_string(),
-            };
-            Some(json!({ "type": "text", "text": text }))
-        }
-        _ => {
-            // Any other binary: an embedded resource carrying a base64 blob.
-            let bytes = value_to_bytes(parsed?)?;
-            Some(json!({
-                "type": "resource",
-                "resource": {
-                    "uri": "morloc://return",
-                    "mimeType": mime,
-                    "blob": base64_encode(&bytes),
-                },
-            }))
-        }
-    }
+/// Build the MCP `result` object wrapping a media content block (from
+/// `DispatchOutcome::Media`, built by `media_content_block`).
+fn media_result_object(content: Value) -> Value {
+    let mut result = Map::new();
+    result.insert("content".into(), json!([content]));
+    result.insert("isError".into(), Value::Bool(false));
+    Value::Object(result)
 }
 
-/// Extract raw bytes from a `Vector U8` return, which serializes to JSON as an
-/// array of byte-valued integers. `None` if the value is not such an array.
-fn value_to_bytes(v: &Value) -> Option<Vec<u8>> {
-    match v {
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for it in items {
-                let n = it.as_u64()?;
-                if n > u8::MAX as u64 {
-                    return None;
-                }
-                out.push(n as u8);
-            }
-            Some(out)
-        }
-        _ => None,
+/// The MCP content block for `bytes` labeled `mime`. MCP carries binary only as
+/// base64: `image/*` and `audio/*` become their content block, `text/*` a text
+/// block (UTF-8), and any other binary an embedded resource `blob`.
+fn media_content_block(bytes: &[u8], mime: &str) -> Value {
+    let family = mime.split('/').next().unwrap_or("");
+    match family {
+        "image" | "audio" => json!({
+            "type": family,
+            "data": base64_encode(bytes),
+            "mimeType": mime,
+        }),
+        "text" => json!({
+            "type": "text",
+            "text": String::from_utf8_lossy(bytes).into_owned(),
+        }),
+        _ => json!({
+            "type": "resource",
+            "resource": {
+                "uri": "morloc://return",
+                "mimeType": mime,
+                "blob": base64_encode(bytes),
+            },
+        }),
     }
 }
 
@@ -921,7 +933,7 @@ mod tests {
 
     #[test]
     fn scalar_result_has_text_only() {
-        let r = tool_result_object("42", false, None);
+        let r = tool_result_object("42", false);
         assert_eq!(r["isError"], json!(false));
         assert_eq!(r["content"][0]["type"], "text");
         assert_eq!(r["content"][0]["text"], "42");
@@ -930,7 +942,7 @@ mod tests {
 
     #[test]
     fn object_result_has_structured_content() {
-        let r = tool_result_object("{\"a\":1}", true, None);
+        let r = tool_result_object("{\"a\":1}", true);
         assert_eq!(r["structuredContent"], json!({ "a": 1 }));
         assert_eq!(r["content"][0]["text"], "{\"a\":1}");
     }
@@ -939,17 +951,17 @@ mod tests {
     fn structured_flag_ignored_for_non_object_result() {
         // Even when the return type is declared object, an array/scalar body
         // must not be placed in structuredContent (it must be a JSON object).
-        let r = tool_result_object("[1,2]", true, None);
+        let r = tool_result_object("[1,2]", true);
         assert!(r.get("structuredContent").is_none());
         assert_eq!(r["content"][0]["text"], "[1,2]");
     }
 
     #[test]
     fn image_mime_produces_base64_image_block() {
-        // A `Vector U8` return serializes to a JSON array of byte ints; an
-        // image/* media type (from a `@mime` type) turns it into an MCP image
-        // block with base64 data -- not a giant JSON number array.
-        let r = tool_result_object("[137,80,78,71]", false, Some("image/png"));
+        // A media-typed return arrives as raw bytes (from the backend's raw-media
+        // path); an image/* media type turns them into an MCP image block with
+        // base64 data -- not a giant JSON number array.
+        let r = media_result_object(media_content_block(&[137, 80, 78, 71], "image/png"));
         assert_eq!(r["isError"], json!(false));
         assert_eq!(r["content"][0]["type"], "image");
         assert_eq!(r["content"][0]["mimeType"], "image/png");
@@ -959,15 +971,15 @@ mod tests {
 
     #[test]
     fn text_mime_produces_unquoted_text_block() {
-        // A text/* renderer returns `Str`; the block carries the unquoted string.
-        let r = tool_result_object("\"hi there\"", false, Some("text/plain"));
+        // A text/* renderer returns `Str`; the raw bytes are surfaced as text.
+        let r = media_result_object(media_content_block(b"hi there", "text/plain"));
         assert_eq!(r["content"][0]["type"], "text");
         assert_eq!(r["content"][0]["text"], "hi there");
     }
 
     #[test]
     fn other_binary_mime_produces_resource_blob() {
-        let r = tool_result_object("[1,2,3]", false, Some("application/octet-stream"));
+        let r = media_result_object(media_content_block(&[1, 2, 3], "application/octet-stream"));
         assert_eq!(r["content"][0]["type"], "resource");
         assert_eq!(
             r["content"][0]["resource"]["mimeType"],
@@ -977,14 +989,6 @@ mod tests {
             r["content"][0]["resource"]["blob"],
             base64_encode(&[1, 2, 3])
         );
-    }
-
-    #[test]
-    fn non_array_body_with_image_mime_falls_back_to_text() {
-        // Defensive: if a media-typed return is not the expected byte array,
-        // don't crash -- fall back to the default text block.
-        let r = tool_result_object("\"not-bytes\"", false, Some("image/png"));
-        assert_eq!(r["content"][0]["type"], "text");
     }
 
     // -- handshake / dispatch of non-FFI methods -----------------------------

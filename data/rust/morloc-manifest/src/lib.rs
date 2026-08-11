@@ -368,6 +368,29 @@ impl Command {
     }
 }
 
+impl Manifest {
+    /// Look up a command by name (linear scan; manifests are small).
+    pub fn command_by_name(&self, name: &str) -> Option<&Command> {
+        self.commands.iter().find(|c| c.name == name)
+    }
+
+    /// Index of a command by name, for callers that need the position rather
+    /// than the reference.
+    pub fn command_index(&self, name: &str) -> Option<usize> {
+        self.commands.iter().position(|c| c.name == name)
+    }
+}
+
+impl Terminal {
+    /// The synthesized internal command that carries out this terminal action
+    /// (`@render`/`@with`), resolved against the manifest. Single source for the
+    /// terminal -> entry-command lookup shared by CLI help / dispatch and the
+    /// MCP tool surface.
+    pub fn resolve_entry<'a>(&self, m: &'a Manifest) -> Option<&'a Command> {
+        m.command_by_name(&self.entry)
+    }
+}
+
 /// Return-value descriptor. Structurally similar to a typed [`Arg`]
 /// minus the CLI-specific fields (kind, metavar, quoted, short/long,
 /// default). Always present on every command.

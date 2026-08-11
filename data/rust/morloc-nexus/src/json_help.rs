@@ -881,11 +881,13 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     }
 
     // Output-projection selection. A command with `@render`/`@with` terminals
-    // exposes each projection through a synthetic `render` enum on the parent
+    // exposes each projection through a synthetic `_render` enum on the parent
     // tool; `"raw"` (the default) returns the command's own typed value. The
     // per-target media type is filled from the manifest in `build_tool_shapes`.
-    // `render` is a routing property, not a pool argument, so it gets NO
-    // `ArgSlot` and is never part of the inverted positional array.
+    // `_render` is a routing property, not a pool argument, so it gets NO
+    // `ArgSlot` and is never part of the inverted positional array. The leading
+    // `_` uses the same reserved namespace as positional keys (`_1`, ...), which
+    // an argument flag can never produce -- so it cannot collide with a real arg.
     let mut renders: Vec<RenderTarget> = Vec::new();
     if !cmd.terminals.is_empty() {
         let mut enum_vals: Vec<Value> = vec![Value::String("raw".into())];
@@ -910,7 +912,7 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                 "Output projection: 'raw' returns the underlying typed value; a \
                  renderer name returns that projection (e.g. an image)."
         });
-        insert_prop(&mut props, "render", prop)?;
+        insert_prop(&mut props, "_render", prop)?;
     }
 
     let prop_names: std::collections::HashSet<String> = props.keys().cloned().collect();
@@ -960,7 +962,7 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
 /// one command) so the shape builder stays manifest-free and unit-testable.
 fn fill_render_targets(shape: &mut McpToolShape, m: &Manifest) {
     for rt in &mut shape.renders {
-        if let Some(entry) = m.commands.iter().find(|c| c.name == rt.command) {
+        if let Some(entry) = m.command_by_name(&rt.command) {
             rt.mime = entry.ret.mime.clone();
             rt.returns_object = parse_schema(&entry.ret.schema)
                 .ok()
