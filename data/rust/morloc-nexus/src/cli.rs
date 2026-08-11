@@ -55,6 +55,8 @@ pub enum Mode {
     Run(RunArgs),
     /// Serve a compiled morloc program as a long-lived daemon.
     Daemon(DaemonArgs),
+    /// Serve a compiled program as a native MCP server over stdio.
+    Mcp(McpArgs),
     /// Multi-program router across installed modules.
     Router(RouterArgs),
     /// Classify morloc-compatible data files (UNIX file(1) style).
@@ -91,6 +93,16 @@ pub struct DispatchOptions {
     /// Suppress morloc-emitted log lines on stderr.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Print a machine-readable JSON description of every command
+    /// (arguments, types, CLI shape, return) and exit.
+    #[arg(long = "json-help")]
+    pub json_help: bool,
+
+    /// Print an MCP tools/list definition for every command (name,
+    /// description, JSON Schema inputSchema/outputSchema) and exit.
+    #[arg(long = "mcp-tools")]
+    pub mcp_tools: bool,
 
     /// Per-run output dir (logs, summary.json, debug dumps).
     #[arg(long = "log-dir", value_name = "DIR")]
@@ -142,18 +154,48 @@ pub struct RunArgs {
 
 /// Serve a compiled morloc program as a long-lived daemon.
 ///
-/// The `--debug-*` flags inherited via `common: DispatchOptions`
-/// only take effect when the target binary advertises the
-/// `"debug_trace"` capability in its manifest. Passing one against
-/// a binary built without `morloc make --debug` raises a clear
-/// error after manifest load (see [`validate_capabilities`]).
+/// The daemon surface carries only the options the RPC server honors:
+/// the listener flags, the served-eval policy, run-scope logging, and
+/// the `-f`/`-z` result-format pair (see [`DaemonOutputForm`]). Options
+/// that only make sense for the one-shot CLI (`-p`/`-o`/`--keep-null`)
+/// and the nexus-introspection flags (`--json-help`/`--mcp-tools`) are
+/// intentionally absent -- they had no effect on a served program.
+///
+/// The `--debug-*` capability flags are injected at parse time when the
+/// target binary advertises the `"debug_trace"` capability in its
+/// manifest (see [`augment_with_capability_flags`]).
 #[derive(Args, Debug)]
+#[command(next_help_heading = "Daemon Options")]
 pub struct DaemonArgs {
     /// Path to the program's wrapper script or .manifest file.
     pub target: String,
 
-    #[command(flatten)]
-    pub common: DispatchOptions,
+    /// Result form for `call` methods over the Unix socket / TCP
+    /// transports. `json` (default) returns the `{status,result}`
+    /// envelope; `packet` returns a raw morloc data packet (see `-z`).
+    /// Control methods (discover/health/...) always return JSON, and the
+    /// HTTP transport always returns JSON regardless of this flag.
+    #[arg(short = 'f', long = "output-form", value_name = "FORM", value_enum)]
+    pub output_form: Option<DaemonOutputForm>,
+
+    /// zstd compression preset (0..=9) for `-f packet` output. 0 = none
+    /// (default). Ignored for `-f json`.
+    #[arg(short = 'z', long = "compression-level",
+          default_value_t = 0, value_name = "N")]
+    pub compression_level: u8,
+
+    /// Suppress morloc-emitted log lines on stderr.
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Per-run output dir (logs, summary.json, debug dumps). Scoped to
+    /// the whole daemon lifetime.
+    #[arg(long = "log-dir", value_name = "DIR")]
+    pub log_dir: Option<String>,
+
+    /// Override the summary.json location.
+    #[arg(long, value_name = "PATH")]
+    pub summary: Option<String>,
 
     /// Listen on a Unix domain socket at PATH.
     #[arg(long, value_name = "PATH")]
@@ -174,15 +216,38 @@ pub struct DaemonArgs {
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
     pub eval_timeout: u32,
+
+    /// Comma-separated modules a served eval expression may import at top
+    /// level. Served eval is ALWAYS sandboxed (directly-written IO intrinsics
+    /// banned); an empty list grants no module imports, leaving only pure
+    /// module-free expressions. Trusted unrestricted eval is the local
+    /// `morloc eval` CLI, not a served endpoint.
+    #[arg(long = "eval-allowed-modules", value_name = "M,...", default_value = "")]
+    pub eval_allowed_modules: String,
 }
 
-/// Multi-program router across installed modules. Doesn't take a
-/// single program target -- it serves every manifest it finds under
-/// the fdb directory.
+/// Serve a compiled morloc program as a native MCP (Model Context
+/// Protocol) server over stdio: its exported functions become MCP tools.
+///
+/// Deliberately minimal -- no `-o`/`-f`/`-z`/`--print`: the transport is
+/// JSON-RPC on stdout, so those output-shaping options are meaningless
+/// (and `-o` would fight the fd re-homing the server relies on). Reads
+/// JSON-RPC requests on stdin and writes responses on stdout; all pool
+/// and diagnostic output is routed to stderr.
+#[derive(Args, Debug)]
+#[command(next_help_heading = "MCP Options")]
+pub struct McpArgs {
+    /// Path to the program's wrapper script or .manifest file.
+    pub target: String,
+}
+
+/// Multi-program router across installed programs. Doesn't take a
+/// single program target -- it serves every `exe/<name>/manifest.json`
+/// it finds under the exe directory.
 #[derive(Args, Debug)]
 pub struct RouterArgs {
-    /// Path to the fdb manifest directory. Defaults to
-    /// `$MORLOC_HOME/fdb`.
+    /// Path to the exe directory (one `<name>/manifest.json` per installed
+    /// program). Defaults to `$MORLOC_HOME/exe`.
     #[arg(long, value_name = "PATH")]
     pub fdb: Option<String>,
 
@@ -205,6 +270,14 @@ pub struct RouterArgs {
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
     pub eval_timeout: u32,
+
+    /// Comma-separated modules a served eval expression may import at top
+    /// level. Served eval is ALWAYS sandboxed (directly-written IO intrinsics
+    /// banned); an empty list grants no module imports, leaving only pure
+    /// module-free expressions. Trusted unrestricted eval is the local
+    /// `morloc eval` CLI, not a served endpoint.
+    #[arg(long = "eval-allowed-modules", value_name = "M,...", default_value = "")]
+    pub eval_allowed_modules: String,
 }
 
 /// Classify morloc-compatible data files. Reads only header bytes
@@ -372,6 +445,28 @@ impl OutputForm {
             OutputForm::Arrow => OutputFormat::Arrow,
             OutputForm::Parquet => OutputFormat::Parquet,
             OutputForm::Csv => OutputFormat::Csv,
+        }
+    }
+}
+
+/// Result-form choices for the `daemon` transport. Deliberately a
+/// narrower set than [`OutputForm`]: the served RPC path only
+/// materializes `json` (the envelope) and `packet` (a raw morloc data
+/// packet). Restricting the value-enum here makes clap reject
+/// `arrow`/`csv`/... with a clear "possible values" error instead of a
+/// flag that silently no-ops. Other formats are a future extension of
+/// the daemon dispatch serializer.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonOutputForm {
+    Json,
+    Packet,
+}
+
+impl DaemonOutputForm {
+    pub fn to_internal(self) -> OutputFormat {
+        match self {
+            DaemonOutputForm::Json => OutputFormat::Json,
+            DaemonOutputForm::Packet => OutputFormat::Packet,
         }
     }
 }
@@ -608,6 +703,25 @@ pub fn parse_byte_size(flag: &str, raw: &str) -> u64 {
     }
 }
 
+/// Apply the eval sandbox policy to a serve config. Served eval is ALWAYS
+/// sandboxed: directly-written IO intrinsics are banned and imports are limited
+/// to `allowed` (an empty list grants no imports, leaving only pure module-free
+/// expressions). There is no unsandboxed served-eval mode -- trusted,
+/// unrestricted eval is the local `morloc eval` CLI, not a served endpoint.
+fn apply_eval_policy(cfg: &mut NexusConfig, allowed: &str) {
+    cfg.eval_sandbox = true;
+    let modules: Vec<&str> = allowed
+        .split(',')
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .collect();
+    cfg.eval_allowed_modules = if modules.is_empty() {
+        None
+    } else {
+        Some(modules.join(","))
+    };
+}
+
 /// Translate a parsed [`RunArgs`] block into a [`NexusConfig`]. The
 /// `target` field is returned separately so the caller can resolve
 /// it to a manifest path.
@@ -623,13 +737,31 @@ pub fn run_args_to_config(args: &RunArgs) -> (NexusConfig, String) {
 /// Returns the resolved config and the target path.
 pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     let mut cfg = NexusConfig::default();
-    apply_dispatch_options(&mut cfg, &args.common);
+    // The daemon honors only a subset of the CLI dispatch options; apply
+    // them directly rather than through `apply_dispatch_options`.
+    cfg.quiet = args.quiet;
+    cfg.log_dir = args.log_dir.clone();
+    cfg.summary_path = args.summary.clone();
+    cfg.compression_level = args.compression_level;
+    if let Some(form) = args.output_form {
+        cfg.output_format = form.to_internal();
+    }
     cfg.daemon_flag = true;
     cfg.unix_socket_path = args.socket.clone();
     cfg.tcp_port = args.port.map(|p| p as i32);
     cfg.http_port = args.http_port.map(|p| p as i32);
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
+    (cfg, args.target.clone())
+}
+
+/// Translate a parsed [`McpArgs`] block into a [`NexusConfig`]. The MCP
+/// server needs none of the dispatch/output options; only the target and
+/// the `mcp_flag` gate matter.
+pub fn mcp_args_to_config(args: &McpArgs) -> (NexusConfig, String) {
+    let mut cfg = NexusConfig::default();
+    cfg.mcp_flag = true;
     (cfg, args.target.clone())
 }
 
@@ -643,66 +775,93 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     cfg.http_port = args.http_port.map(|p| p as i32);
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     cfg
 }
 
-/// Sentinel comment the compiler emits on line 2 of every generated
-/// wrapper script (see `Morloc.CodeGenerator.Nexus.makeWrapperScript`).
-/// Used by [`resolve_daemon_target`] to confirm a non-`.manifest`
-/// daemon target is actually a morloc wrapper before trusting its
-/// embedded JSON payload.
-pub const WRAPPER_SENTINEL: &str = "# morloc-program v";
+/// The program name to show in Usage/help lines. Prefers `MORLOC_PROG_NAME`
+/// -- the launcher's own `$0` (e.g. `./main`), exported by the generated
+/// wrapper script -- so help reflects how the user actually invoked the
+/// program. Falls back to `fallback` (the module name) for a direct
+/// `morloc-nexus <mode> <manifest>` invocation with no wrapper.
+pub fn program_display_name(fallback: &str) -> String {
+    std::env::var("MORLOC_PROG_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
 
-/// Resolve a daemon target argument to a path that
-/// [`crate::manifest::read_manifest_payload`] can ingest. The
-/// wrapper format embeds the manifest JSON after a `### MANIFEST ###`
-/// marker, so a wrapper script and a freestanding `.manifest` file
-/// both yield the manifest from the same extraction code path. This
-/// resolver gates which paths reach that extractor:
+/// True when the argv slice requests help. Lets the daemon/mcp help
+/// decoration skip building the exported-commands block -- which parses every
+/// command's arg schemas -- on a normal serve boot, where clap never renders
+/// it. Matches `--help` and any short-flag cluster containing `h` (`-h`,
+/// `-hq`, `-qh`), mirroring how clap fires the help action; over-matching a
+/// stray `h` only builds a block that is never shown, so a permissive test is
+/// safe.
+fn wants_help(tokens: &[String]) -> bool {
+    tokens.iter().any(|t| {
+        t == "--help"
+            || (t.starts_with('-')
+                && !t.starts_with("--")
+                && t[1..].contains('h'))
+    })
+}
+
+/// Resolve a manifest target argument to a path that
+/// [`crate::manifest::read_manifest_payload`] can ingest. A generated
+/// program is a standalone `manifest.json` plus one or more thin shell
+/// launchers that exec `morloc-nexus <mode> <manifest.json>`. This
+/// resolver accepts either shape:
 ///
-/// 1. A `.manifest` extension is trusted (the JSON parser fails
-///    fast if it's malformed).
-/// 2. Other files are accepted iff their head contains the
-///    [`WRAPPER_SENTINEL`] comment that the compiler stamps onto
-///    every generated wrapper. This guards against a user passing a
-///    random shell script and seeing a confusing "no marker" error
-///    from deep inside the manifest extractor.
-/// 3. Anything else is rejected with a clear "not a morloc wrapper
-///    or manifest file" diagnostic.
+/// 1. A thin wrapper (a `#!` shell script mentioning `morloc-nexus`):
+///    the manifest path is extracted from its exec line, so
+///    `morloc-nexus daemon ./mycli` keeps working.
+/// 2. Anything else is returned as-is and treated as a `manifest.json`
+///    file; [`crate::manifest::parse_manifest`] fails cleanly if it is
+///    not valid manifest JSON.
 ///
-/// Returns the path that should be fed to `read_manifest_payload`
-/// (the same path that was passed in -- the embedded-payload
-/// extractor handles both wrapper and freestanding shapes
-/// uniformly). Errors are caller-friendly strings ready to print.
-pub fn resolve_daemon_target(target: &str) -> Result<String, String> {
+/// Errors are caller-friendly strings ready to print.
+pub fn resolve_manifest_target(target: &str) -> Result<String, String> {
     use std::io::Read;
 
-    if target.ends_with(".manifest") {
-        // Trust the extension; the manifest parser will fail cleanly
-        // if the file is missing or unreadable.
-        return Ok(target.to_string());
-    }
+    let mut buf = [0u8; 8192];
+    let n = match std::fs::File::open(target).and_then(|mut f| f.read(&mut buf)) {
+        // Let read_manifest_payload report a clean open error.
+        Err(_) => return Ok(target.to_string()),
+        Ok(n) => n,
+    };
+    let head = match std::str::from_utf8(&buf[..n]) {
+        Ok(s) => s,
+        // Not UTF-8: not a wrapper; hand it to the manifest reader as-is.
+        Err(_) => return Ok(target.to_string()),
+    };
 
-    let mut buf = [0u8; 4096];
-    let n = std::fs::File::open(target)
-        .and_then(|mut f| f.read(&mut buf))
-        .map_err(|e| format!("cannot open '{}': {}", target, e))?;
-
-    let head = std::str::from_utf8(&buf[..n]).map_err(|_| {
-        format!(
-            "'{}' is not a morloc wrapper or manifest file (binary content)",
-            target
-        )
-    })?;
-    if head.contains(WRAPPER_SENTINEL) {
-        Ok(target.to_string())
+    if head.starts_with("#!") && head.contains("morloc-nexus") {
+        match extract_manifest_from_wrapper(head) {
+            Some(p) => Ok(p),
+            None => Err(format!(
+                "'{}' looks like a morloc wrapper but no manifest path was found on its exec line",
+                target
+            )),
+        }
     } else {
-        Err(format!(
-            "'{}' is not a morloc wrapper or manifest file \
-             (missing sentinel comment and not a *.manifest)",
-            target
-        ))
+        Ok(target.to_string())
     }
+}
+
+/// Extract the single-quoted manifest path from a wrapper's
+/// `exec morloc-nexus <mode> '<path>' "$@"` line, reversing the POSIX
+/// single-quote escaping the compiler applies (see
+/// `Morloc.CodeGenerator.Nexus.shellQuote`).
+fn extract_manifest_from_wrapper(content: &str) -> Option<String> {
+    let line = content.lines().find(|l| {
+        let t = l.trim_start();
+        t.starts_with("exec morloc-nexus") || t.starts_with("morloc-nexus")
+    })?;
+    let first = line.find('\'')?;
+    let rest = &line[first + 1..];
+    let last = rest.rfind('\'')?;
+    Some(rest[..last].replace("'\\''", "'"))
 }
 
 // ============================================================
@@ -1111,6 +1270,7 @@ pub fn parse_invocation() -> ParsedInvocation {
     match mode_str {
         Some("run") => parse_run_or_daemon(&argv, true),
         Some("daemon") => parse_run_or_daemon(&argv, false),
+        Some("mcp") => parse_mcp(&argv),
         _ => {
             use clap::{CommandFactory, FromArgMatches};
             let cmd = crate::help::strip_styles_recursively(Nexus::command());
@@ -1125,6 +1285,90 @@ pub fn parse_invocation() -> ParsedInvocation {
                 capability_values: CapabilityValues::default(),
             }
         }
+    }
+}
+
+/// Parse an `mcp` invocation. The manifest is loaded from the wrapper
+/// target BEFORE the clap parse so `-h`/`--help` can render manifest-aware
+/// help (headline, Usage, exported commands) via [`crate::serve_help`],
+/// the same shape the daemon help uses. Kept off [`parse_run_or_daemon`]
+/// so the MCP surface inherits none of the dispatch/output options.
+fn parse_mcp(argv: &[String]) -> ParsedInvocation {
+    use clap::{CommandFactory, FromArgMatches};
+
+    // Resolve target -> Manifest, exiting with a clean message on failure.
+    // A nested `fn` (not a closure) so it can be reused for both the
+    // pre-scan load and the post-parse fallback.
+    fn load_manifest(target: &str) -> (morloc_manifest::Manifest, String) {
+        let resolved = match resolve_manifest_target(target) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let payload = match crate::manifest::read_manifest_payload(&resolved) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to load manifest '{}': {}", resolved, e);
+                std::process::exit(1);
+            }
+        };
+        match crate::manifest::parse_manifest(&payload) {
+            Ok(m) => (m, resolved),
+            Err(e) => {
+                eprintln!("Failed to parse manifest '{}': {}", resolved, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Pre-resolve the target from raw argv (mcp has no value-taking flags,
+    // so the first non-flag positional is the target) and load its
+    // manifest up front, so the help decoration below has it. A target-less
+    // help invocation (`mcp -h`) yields None and keeps the generic help.
+    let flags = ValueTakingFlags::from_nexus();
+    let pre_target = find_wrapper_target(&argv[2..], &flags);
+    let loaded: Option<(morloc_manifest::Manifest, String)> =
+        pre_target.map(load_manifest);
+
+    let mut nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
+    if let Some((m, _)) = loaded.as_ref() {
+        let sub = nexus_cmd
+            .find_subcommand_mut("mcp")
+            .expect("Nexus declares an 'mcp' subcommand");
+        let prog = program_display_name(&m.name);
+        let about =
+            format!("Serve module \"{}\" as a native MCP server over stdio.", m.name);
+        // Only parse command schemas for the block when help is requested.
+        let block = if wants_help(argv) {
+            crate::serve_help::commands_block(m)
+        } else {
+            String::new()
+        };
+        let decorated =
+            crate::serve_help::decorate(sub.clone(), &prog, &about, "MCP Options", block);
+        *sub = decorated;
+    }
+
+    let matches = nexus_cmd.try_get_matches_from(argv).unwrap_or_else(|e| e.exit());
+    let nexus = Nexus::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    let target = match &nexus.cmd {
+        Mode::Mcp(m) => m.target.clone(),
+        _ => unreachable!("parse_mcp only reached for the mcp subcommand"),
+    };
+
+    // Reuse the pre-loaded manifest; fall back to loading from the
+    // clap-bound target for any argv shape the pre-scan missed.
+    let (manifest, manifest_path) = loaded.unwrap_or_else(|| load_manifest(&target));
+
+    ParsedInvocation {
+        nexus,
+        manifest: Some(manifest),
+        manifest_path,
+        user_zone: Vec::new(),
+        capability_values: CapabilityValues::default(),
     }
 }
 
@@ -1145,16 +1389,16 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
     let target_str = find_wrapper_target(raw_tail, &flags);
     let (manifest, manifest_path) = match target_str {
         Some(target) => {
-            let resolved = if !is_run {
-                match resolve_daemon_target(target) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
+            // Both run and daemon accept either a manifest.json path or a
+            // thin wrapper; the wrapper's own exec line passes manifest.json
+            // to `run`, so this is a no-op there but lets an explicit
+            // `morloc-nexus run ./mycli` work too.
+            let resolved = match resolve_manifest_target(target) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
                 }
-            } else {
-                target.to_string()
             };
             let payload = match crate::manifest::read_manifest_payload(&resolved) {
                 Ok(p) => p,
@@ -1208,7 +1452,28 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
         let sub = nexus_cmd
             .find_subcommand_mut(mode_token)
             .expect("Nexus declares this subcommand");
-        let augmented = augment_with_capability_flags(sub.clone(), caps_for_augment);
+        let mut augmented = augment_with_capability_flags(sub.clone(), caps_for_augment);
+        // Daemon mode: decorate `-h`/`--help` with the manifest's own
+        // identity and exported-command surface (the run path gets its
+        // manifest-aware help from phase2 instead). Requires a loaded
+        // manifest; a target-less help invocation keeps the generic help.
+        if !is_run {
+            if let Some(m) = manifest.as_ref() {
+                let prog = program_display_name(&m.name);
+                let about =
+                    format!("Serve module \"{}\" as a long-lived daemon.", m.name);
+                // Only parse command schemas for the block when help is
+                // actually being requested; a plain serve boot never shows it.
+                let block = if wants_help(&nexus_tail) {
+                    crate::serve_help::commands_block(m)
+                } else {
+                    String::new()
+                };
+                augmented = crate::serve_help::decorate(
+                    augmented, &prog, &about, "Daemon Options", block,
+                );
+            }
+        }
         *sub = augmented;
     }
 
@@ -1847,6 +2112,106 @@ mod tests {
     }
 
     #[test]
+    fn daemon_output_form_packet() {
+        // `-f packet` on the daemon selects raw-packet output; `-z`
+        // carries the compression preset.
+        let n = parse(&[
+            "morloc-nexus",
+            "daemon",
+            "-f",
+            "packet",
+            "-z",
+            "3",
+            "main.manifest",
+        ])
+        .unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert_eq!(cfg.output_format, OutputFormat::Packet);
+                assert_eq!(cfg.compression_level, 3);
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn daemon_output_form_defaults_json() {
+        let n = parse(&["morloc-nexus", "daemon", "main.manifest"]).unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert_eq!(cfg.output_format, OutputFormat::Json);
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn daemon_rejects_unsupported_output_form() {
+        // The daemon `-f` value-enum only accepts json/packet; other CLI
+        // formats are rejected up front rather than silently no-oping.
+        assert!(parse(&[
+            "morloc-nexus", "daemon", "-f", "arrow", "main.manifest",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn daemon_rejects_removed_dispatch_flags() {
+        // The CLI-only output-shaping flags are gone from the daemon
+        // surface; clap rejects them as unknown. Boolean flags use a single
+        // positional so the ONLY error source is the removed flag -- a
+        // re-added boolean would parse `main.manifest` as the sole target and
+        // the assert would (correctly) fail.
+        for flag in ["-p", "--keep-null", "--json-help", "--mcp-tools"] {
+            let argv = vec!["morloc-nexus", "daemon", flag, "main.manifest"];
+            assert!(parse(&argv).is_err(), "expected error for {}", flag);
+        }
+        // `-o` takes a value: were it re-added it would consume `out.txt`,
+        // leaving `main.manifest` as the sole target and parsing cleanly, so
+        // this value+positional form still isolates the removal.
+        assert!(parse(&["morloc-nexus", "daemon", "-o", "out.txt", "main.manifest"]).is_err());
+    }
+
+    #[test]
+    fn eval_allowed_modules_sets_list() {
+        // The allow-list is normalized (trimmed, empty entries dropped);
+        // served eval is sandboxed regardless.
+        let n = parse(&[
+            "morloc-nexus",
+            "daemon",
+            "--eval-allowed-modules",
+            "root-py, bits ,",
+            "main.manifest",
+        ])
+        .unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert!(cfg.eval_sandbox);
+                assert_eq!(cfg.eval_allowed_modules.as_deref(), Some("root-py,bits"));
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
+    fn eval_always_sandboxed() {
+        // Served eval is always sandboxed; no flags => empty allow-list
+        // (no module imports, IO intrinsics banned).
+        let n = parse(&["morloc-nexus", "daemon", "main.manifest"]).unwrap();
+        match n.cmd {
+            Mode::Daemon(d) => {
+                let (cfg, _) = daemon_args_to_config(&d);
+                assert!(cfg.eval_sandbox);
+                assert_eq!(cfg.eval_allowed_modules, None);
+            }
+            _ => panic!("expected Daemon mode"),
+        }
+    }
+
+    #[test]
     fn router_default_eval_timeout() {
         let n = parse(&["morloc-nexus", "router", "--fdb", "/tmp/fdb"]).unwrap();
         match n.cmd {
@@ -1919,60 +2284,59 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
-    /// Build a synthetic wrapper that starts with `#!/bin/sh` plus
-    /// the sentinel comment plus the manifest marker. The exact
-    /// payload after `### MANIFEST ###` doesn't matter for the
-    /// resolver -- it only inspects the head.
-    fn wrapper_head() -> Vec<u8> {
+    /// Build a synthetic thin wrapper of the shape the compiler emits:
+    /// a pure-shell launcher that execs `morloc-nexus <mode> '<path>'`.
+    fn wrapper_for(manifest_path: &str) -> Vec<u8> {
         format!(
-            "#!/bin/sh\n{}{}\nexec morloc-nexus run \"$0\" \"$@\"\n### MANIFEST ###\n{{}}\n",
-            WRAPPER_SENTINEL, "0.0.0"
+            "#!/bin/sh\nexec morloc-nexus run '{}' \"$@\"\n",
+            manifest_path
         )
         .into_bytes()
     }
 
     #[test]
-    fn resolves_dot_manifest_unconditionally() {
-        // A `.manifest` extension is trusted without reading the
-        // file -- the parser later in main() catches any I/O or
-        // shape problems.
-        let result = resolve_daemon_target("/nonexistent/path/to/file.manifest");
-        assert_eq!(result.as_deref(), Ok("/nonexistent/path/to/file.manifest"));
-    }
-
-    #[test]
-    fn resolves_wrapper_via_sentinel() {
+    fn resolves_wrapper_to_manifest_path() {
         let tmp = std::env::temp_dir().join(format!(
             "morloc-nexus-resolve-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
-        let path = write_tmp(&tmp, "morloc-prog", &wrapper_head());
-        let result = resolve_daemon_target(&path).unwrap();
+        let manifest = "/abs/path/foo-build/manifest.json";
+        let path = write_tmp(&tmp, "morloc-prog", &wrapper_for(manifest));
+        let result = resolve_manifest_target(&path).unwrap();
+        assert_eq!(result, manifest);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolves_bare_manifest_to_itself() {
+        // A non-wrapper file (a manifest.json, or anything else) is
+        // returned unchanged; parse_manifest later reports any shape
+        // problem cleanly.
+        let tmp = std::env::temp_dir().join(format!(
+            "morloc-nexus-bare-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_tmp(&tmp, "manifest.json", b"{\"name\":\"x\"}\n");
+        let result = resolve_manifest_target(&path).unwrap();
         assert_eq!(result, path);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn rejects_random_shell_script() {
-        let tmp = std::env::temp_dir().join(format!(
-            "morloc-nexus-reject-shell-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let path = write_tmp(&tmp, "not-morloc", b"#!/bin/sh\necho hi\n");
-        let err = resolve_daemon_target(&path).unwrap_err();
-        assert!(
-            err.contains("not a morloc wrapper or manifest file"),
-            "unexpected error: {}",
-            err
-        );
-        std::fs::remove_dir_all(&tmp).ok();
+    fn missing_file_deferred_to_reader() {
+        // An unreadable target is returned as-is so the manifest reader
+        // reports a single clean "cannot open" error.
+        let result = resolve_manifest_target("/definitely/does/not/exist");
+        assert_eq!(result.as_deref(), Ok("/definitely/does/not/exist"));
     }
 
     #[test]
-    fn rejects_missing_file() {
-        let err = resolve_daemon_target("/definitely/does/not/exist").unwrap_err();
-        assert!(err.contains("cannot open"), "unexpected error: {}", err);
+    fn unquotes_escaped_single_quote_in_path() {
+        let extracted = extract_manifest_from_wrapper(
+            "#!/bin/sh\nexec morloc-nexus daemon 'a'\\''b/manifest.json' \"$@\"\n",
+        );
+        assert_eq!(extracted.as_deref(), Some("a'b/manifest.json"));
     }
 }

@@ -388,6 +388,10 @@ pub struct ManifestReturn {
     pub constraints: *mut ManifestConstraint,
     pub n_constraints: usize,
     pub metadata_json: *mut c_char,
+    /// Media type of the return value (RFC 6838, e.g. `image/png`), from a
+    /// `@mime` return type; null when untyped. Lets the daemon set an HTTP
+    /// `Content-Type` and return raw bytes instead of JSON.
+    pub mime: *mut c_char,
 }
 
 #[repr(C)]
@@ -396,6 +400,23 @@ pub struct ManifestCmdGroup {
     pub desc: *mut *mut c_char,
     pub n_desc: usize,
     pub metadata_json: *mut c_char,
+}
+
+/// One terminal-action flag (`@render`/`@with`) on a parent command. Threaded
+/// through so the daemon can resolve `?render=<flag>` (and the `@default`
+/// terminal) to the synthesized entry command, and advertise the options in
+/// `/discover`.
+#[repr(C)]
+pub struct ManifestTerminal {
+    /// Short flag char, or `0` when there is none.
+    pub short: c_char,
+    /// Long flag name (e.g. `"png"`).
+    pub long: *mut c_char,
+    /// Name of the synthesized internal command carrying out this action.
+    pub entry: *mut c_char,
+    pub description: *mut c_char,
+    pub render: bool,
+    pub default: bool,
 }
 
 #[repr(C)]
@@ -418,6 +439,13 @@ pub struct ManifestCommand {
     pub expr: *mut MorlocExpression,
     pub group: *mut c_char,
     pub metadata_json: *mut c_char,
+    /// Terminal-action flags on this command. Empty for internal / synthesized
+    /// entries and commands with no `@render`/`@with` atoms.
+    pub terminals: *mut ManifestTerminal,
+    pub n_terminals: usize,
+    /// True for synthesized internal commands (e.g. `@render` entries): hidden
+    /// from `/discover` but still callable by name.
+    pub internal: bool,
 }
 
 #[repr(C)]
@@ -444,6 +472,21 @@ pub struct Manifest {
     /// When true, skip the runtime NUL-in-Str scan at cross-pool
     /// boundaries. Set by `morloc make --unsafe-skip-null-check`.
     pub unsafe_skip_null_check: bool,
+}
+
+impl Manifest {
+    /// Find a command by name (linear scan; manifests are small). Skips
+    /// null-named entries defensively. Single source for the by-name lookups
+    /// the daemon dispatch, render resolution, and discovery all need.
+    pub unsafe fn command_by_name(&self, name: &CStr) -> Option<&ManifestCommand> {
+        for i in 0..self.n_commands {
+            let c = &*self.commands.add(i);
+            if !c.name.is_null() && CStr::from_ptr(c.name) == name {
+                return Some(c);
+            }
+        }
+        None
+    }
 }
 
 impl ManifestCommand {
@@ -1554,11 +1597,28 @@ unsafe fn populate_return(dst: *mut ManifestReturn, src: &morloc_manifest::Retur
     (*dst).constraints = cs;
     (*dst).n_constraints = nc;
     (*dst).metadata_json = populate_metadata(&src.metadata);
+    (*dst).mime = match &src.mime {
+        Some(m) => c_strdup(m),
+        None => ptr::null_mut(),
+    };
+}
+
+unsafe fn populate_terminal(dst: *mut ManifestTerminal, src: &morloc_manifest::Terminal) {
+    (*dst).short = match src.short {
+        Some(c) => c as c_char,
+        None => 0,
+    };
+    (*dst).long = c_strdup(&src.long);
+    (*dst).entry = c_strdup(&src.entry);
+    (*dst).description = c_strdup(&src.description);
+    (*dst).render = src.render;
+    (*dst).default = src.default;
 }
 
 unsafe fn populate_command(dst: *mut ManifestCommand, src: &morloc_manifest::Command) -> Result<(), MorlocError> {
     (*dst).name = c_strdup(&src.name);
     (*dst).is_pure = src.is_pure();
+    (*dst).internal = src.internal;
     (*dst).mid = src.mid;
     (*dst).pool_index = src.pool_index;
     if !src.needed_pools.is_empty() {
@@ -1607,6 +1667,17 @@ unsafe fn populate_command(dst: *mut ManifestCommand, src: &morloc_manifest::Com
         Some(g) => c_strdup(g),
         None => ptr::null_mut(),
     };
+
+    if !src.terminals.is_empty() {
+        (*dst).n_terminals = src.terminals.len();
+        (*dst).terminals = libc::calloc(
+            src.terminals.len(),
+            std::mem::size_of::<ManifestTerminal>(),
+        ) as *mut ManifestTerminal;
+        for (i, t) in src.terminals.iter().enumerate() {
+            populate_terminal((*dst).terminals.add(i), t);
+        }
+    }
 
     Ok(())
 }
@@ -1736,7 +1807,13 @@ pub unsafe extern "C" fn read_manifest(
     let path_str = CStr::from_ptr(path).to_string_lossy();
     match std::fs::read_to_string(path_str.as_ref()) {
         Ok(text) => {
-            let c_text = CString::new(text).unwrap_or_default();
+            // Pool exec paths are relative to the manifest's own directory.
+            // The router spawns pools straight from this parsed C manifest,
+            // so resolve them to absolute here (dirname of the manifest
+            // file). The single-program daemon spawns pools from the Rust
+            // manifest and does not depend on this.
+            let resolved = resolve_pool_paths(&text, path_str.as_ref());
+            let c_text = CString::new(resolved).unwrap_or_default();
             parse_manifest(c_text.as_ptr(), errmsg)
         }
         Err(e) => {
@@ -1744,6 +1821,40 @@ pub unsafe extern "C" fn read_manifest(
             ptr::null_mut()
         }
     }
+}
+
+/// Rewrite each pool's executable path (the last `exec` element) to an
+/// absolute path resolved against the manifest file's directory, leaving
+/// the interpreter token and any already-absolute path untouched. Returns
+/// the original text unchanged if it cannot be parsed as JSON.
+fn resolve_pool_paths(text: &str, manifest_path: &str) -> String {
+    let dir = match std::path::Path::new(manifest_path)
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        Some(d) => d,
+        None => return text.to_string(),
+    };
+    let mut v: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return text.to_string(),
+    };
+    if let Some(pools) = v.get_mut("pools").and_then(|p| p.as_array_mut()) {
+        for pool in pools {
+            if let Some(exec) = pool.get_mut("exec").and_then(|e| e.as_array_mut()) {
+                if let Some(last) = exec.last_mut() {
+                    if let Some(s) = last.as_str() {
+                        if std::path::Path::new(s).is_relative() {
+                            let abs = dir.join(s).to_string_lossy().into_owned();
+                            *last = serde_json::Value::String(abs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| text.to_string())
 }
 
 // -- free_manifest ------------------------------------------------------------
@@ -1833,6 +1944,21 @@ unsafe fn free_return(ret: &ManifestReturn) {
     if !ret.metadata_json.is_null() {
         libc::free(ret.metadata_json as *mut c_void);
     }
+    if !ret.mime.is_null() {
+        libc::free(ret.mime as *mut c_void);
+    }
+}
+
+unsafe fn free_terminal(t: &ManifestTerminal) {
+    if !t.long.is_null() {
+        libc::free(t.long as *mut c_void);
+    }
+    if !t.entry.is_null() {
+        libc::free(t.entry as *mut c_void);
+    }
+    if !t.description.is_null() {
+        libc::free(t.description as *mut c_void);
+    }
 }
 
 #[no_mangle]
@@ -1891,6 +2017,12 @@ pub unsafe extern "C" fn free_manifest(manifest: *mut Manifest) {
         }
         if !cmd.metadata_json.is_null() {
             libc::free(cmd.metadata_json as *mut c_void);
+        }
+        for j in 0..cmd.n_terminals {
+            free_terminal(&*cmd.terminals.add(j));
+        }
+        if !cmd.terminals.is_null() {
+            libc::free(cmd.terminals as *mut c_void);
         }
         // Note: cmd.expr is owned by the C side and freed by its own
         // free function in eval_ffi.rs (not in scope here).
@@ -1957,6 +2089,7 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
         fn json_write_arr_end(jb: *mut c_void);
         fn json_write_key(jb: *mut c_void, key: *const c_char);
         fn json_write_string(jb: *mut c_void, val: *const c_char);
+        fn json_write_bool(jb: *mut c_void, val: bool);
     }
 
     let jb = json_buf_new();
@@ -1990,6 +2123,12 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
 
     for i in 0..m.n_commands {
         let cmd = &*m.commands.add(i);
+        // Internal (synthesized) commands -- e.g. `@render` entries -- are hidden
+        // from discovery; a client selects them via `?render=<flag>` on the
+        // parent (see the `renders` metadata below).
+        if cmd.internal {
+            continue;
+        }
         json_write_obj_start(jb);
 
         json_write_key(jb, name_key);
@@ -2075,6 +2214,40 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
             json_write_obj_end(jb);
         }
         json_write_arr_end(jb);
+
+        // Render/format projections: the `?render=<flag>` options, each flag's
+        // media type (from the entry command's `@mime`), and whether it is the
+        // `@default` (fired when `?render` is omitted). `?render=raw` always
+        // yields the command's own typed value.
+        if cmd.n_terminals > 0 {
+            let renders_key = b"renders\0".as_ptr() as *const c_char;
+            let flag_key = b"flag\0".as_ptr() as *const c_char;
+            let default_flag_key = b"default\0".as_ptr() as *const c_char;
+            let mime_key = b"mime\0".as_ptr() as *const c_char;
+            json_write_key(jb, renders_key);
+            json_write_arr_start(jb);
+            for j in 0..cmd.n_terminals {
+                let t = &*cmd.terminals.add(j);
+                json_write_obj_start(jb);
+                if !t.long.is_null() {
+                    json_write_key(jb, flag_key);
+                    json_write_string(jb, t.long);
+                }
+                json_write_key(jb, default_flag_key);
+                json_write_bool(jb, t.default);
+                // The entry command's media type, if any.
+                if !t.entry.is_null() {
+                    if let Some(ec) = m.command_by_name(CStr::from_ptr(t.entry)) {
+                        if !ec.ret.mime.is_null() {
+                            json_write_key(jb, mime_key);
+                            json_write_string(jb, ec.ret.mime);
+                        }
+                    }
+                }
+                json_write_obj_end(jb);
+            }
+            json_write_arr_end(jb);
+        }
 
         if cmd.n_desc > 0 && !cmd.desc.is_null() && !(*cmd.desc).is_null() {
             let first = *cmd.desc;

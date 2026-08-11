@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Realize
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
@@ -60,12 +61,24 @@ realityCheck es = do
 
   return (gASTs, rASTs)
 
+-- | The realize objective: @(accumulated cost, number of language switches)@,
+-- compared lexicographically. Cost dominates; switch-count is a PURE tiebreaker
+-- that only resolves genuine cost-ties (it never overrides a real cost
+-- difference), keeping language-agnostic terms in the parent's language to avoid
+-- gratuitous boundaries. The same objective is used in both scoring and collapse
+-- (replacing the old backward-only @+1@ biasedCost).
+type Score = (Int, Int)
+
+-- | Component-wise addition of two scores.
+addScore :: Score -> Score -> Score
+addScore (a, b) (c, d) = (a + c, b + d)
+
 -- State for the realize scoring algorithm
 data RState = RState
   { rLangs :: [Lang]
   , rApplied :: [AnnoS (Indexed Type) Many Int]
   , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
-  , rLetVars :: Map EVar [(Lang, Int)] -- ^ let-bound variable -> RHS scores
+  , rLetVars :: Map EVar [(Lang, Score)] -- ^ let-bound variable -> RHS scores
   }
 
 emptyRState =
@@ -75,6 +88,83 @@ emptyRState =
     , rBndVars = Map.empty
     , rLetVars = Map.empty
     }
+
+
+-- | Beta-reduce literal-lambda-head applications, @(\\v -> body) arg@, on the
+-- ambiguous @Many@ tree BEFORE scoring. Only applications whose head is a literal
+-- 'LamS' are reduced (never a @VarS (Many ..)@ head, which may mix a reducible
+-- lambda and an irreducible source call and so must wait for the Many->One
+-- collapse, cf. 'Morloc.CodeGenerator.LambdaEval'). Reduction is restricted to
+-- parameters used AT MOST ONCE, making substitution a pure move (no cloning, no
+-- reindexing): this cannot bloat and needs no fresh indices. Multiply-used
+-- redexes are left for the post-collapse 'applyLambdas'.
+--
+-- The point is tractability, not tidiness: a point-free composition chain
+-- @id . id . ..@ desugars to nested singly-used literal-lambda redexes that
+-- collapse here to a single @\\x -> x@. Removing them removes the input on which
+-- the scorer re-scores function-typed bound variables, the source of the
+-- exponential blow-up on composition depth.
+normalizePop1 ::
+  AnnoS (Indexed Type) Many Int ->
+  MorlocMonad (AnnoS (Indexed Type) Many Int)
+-- empty lambda, no args left: unwrap, moving the discarded head's label up
+normalizePop1 (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
+  _ <- propagateManifoldLabel g1Idx lamIdx
+  normalizePop1 (AnnoS g1 c2 e)
+-- empty lambda with remaining args (over-application): unwrap the spent layer
+normalizePop1 (AnnoS g1@(Idx g1Idx _) c1 (AppS (AnnoS (Idx lamIdx _) _ (LamS [] body)) es@(_ : _))) = do
+  _ <- propagateManifoldLabel g1Idx lamIdx
+  normalizePop1 (AnnoS g1 c1 (AppS body es))
+-- beta-reduce one singly-used parameter (pure move); recurse on the residual
+normalizePop1
+  ( AnnoS
+      i1
+      tb1
+      ( AppS
+          (AnnoS (Idx i2 (FunT (_tv : tas) tb2)) c (LamS (v : vs) e2))
+          (e1 : es)
+        )
+    )
+    | countRefsMany v e2 <= 1 =
+        normalizePop1 $
+          AnnoS i1 tb1 $
+            AppS
+              (AnnoS (Idx i2 (FunT tas tb2)) c (LamS vs (substFreeBnd v e1 e2)))
+              es
+-- application to no args: unwrap, moving the discarded head's label up
+normalizePop1 (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
+  _ <- propagateManifoldLabel g1Idx headIdx
+  normalizePop1 (AnnoS g1 c2 e)
+-- every other node (incl. multiply-used or Many-headed applications): recurse
+normalizePop1 (AnnoS g c e) = AnnoS g c <$> mapExprSM normalizePop1 e
+
+-- | Count free @BndS@/@LetBndS@ references to @v@, stopping at any binder that
+-- shadows @v@. Mirrors 'Morloc.CodeGenerator.LambdaEval.countRefs' for the @Many@
+-- tree so counting and 'substFreeBnd' agree on exactly which sites they touch.
+countRefsMany :: EVar -> AnnoS (Indexed Type) Many Int -> Int
+countRefsMany v = go
+  where
+    go (AnnoS _ _ (BndS v')) | v == v' = 1
+    go (AnnoS _ _ (LetBndS v')) | v == v' = 1
+    go (AnnoS _ _ (LamS vs _)) | v `elem` vs = 0
+    go (AnnoS _ _ (LetS v' _ _)) | v == v' = 0
+    go (AnnoS _ _ e) = getSum (foldExprS (Sum . go) e)
+
+-- | Replace every free reference to @v@ with @r@, stopping at shadowing binders.
+-- Callers guarantee at most one free occurrence, so this is a pure move (the
+-- reference is replaced in place; nothing is cloned or reindexed).
+substFreeBnd ::
+  EVar ->
+  AnnoS (Indexed Type) Many Int ->
+  AnnoS (Indexed Type) Many Int ->
+  AnnoS (Indexed Type) Many Int
+substFreeBnd v r = go
+  where
+    go (AnnoS _ _ (BndS v')) | v == v' = r
+    go (AnnoS _ _ (LetBndS v')) | v == v' = r
+    go e0@(AnnoS _ _ (LamS vs _)) | v `elem` vs = e0
+    go e0@(AnnoS _ _ (LetS v' _ _)) | v == v' = e0
+    go (AnnoS g c e) = AnnoS g c (mapExprS go e)
 
 {- | Choose a single concrete implementation. In the future, this component
 may be one of the more complex components of the morloc compiler. It will
@@ -102,7 +192,10 @@ realizeWithRegistry ::
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
 realizeWithRegistry registry s0 = do
-  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0 >>= collapseAnnoS Nothing
+  -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
+  -- the scorer is not fed composition chains it would re-score exponentially.
+  s0' <- normalizePop1 s0
+  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0' >>= collapseAnnoS Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> propagateDown e |>> Right
@@ -126,7 +219,7 @@ realizeWithRegistry registry s0 = do
     scoreAnnoS ::
       RState ->
       AnnoS (Indexed Type) Many Int ->
-      MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Int)]))
+      MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))
     scoreAnnoS rstat (AnnoS gi ci e) = do
       (e', ci') <- scoreExpr rstat (e, ci)
       return $ AnnoS gi ci' e'
@@ -136,7 +229,7 @@ realizeWithRegistry registry s0 = do
     scoreExpr ::
       RState ->
       (ExprS (Indexed Type) Many Int, Int) ->
-      MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
+      MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)])
     scoreExpr rstat (LstS xs, i) = do
       (xs', best) <- scoreMany rstat xs
       return (LstS xs', Idx i best)
@@ -163,7 +256,6 @@ realizeWithRegistry registry s0 = do
 
       xs' <- mapM (scoreAnnoS rstat'') xs
 
-      -- [[(Lang, Int)]] : where Lang is unique within each list and Int is minimized
       let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
       let best = scoreApp scores pairss
 
@@ -180,7 +272,7 @@ realizeWithRegistry registry s0 = do
           scores <- scoreAnnoS rstat e |>> scoresOf
           return (BndS v, Idx i scores)
         _ -> return (BndS v, zipLang i rstat)
-    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callCost src)])
+    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, (callCost src, 0))])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
     scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
@@ -209,7 +301,17 @@ realizeWithRegistry registry s0 = do
       c' <- scoreAnnoS rstat c
       t' <- scoreAnnoS rstat t
       e' <- scoreAnnoS rstat e
-      let best = minPairs (scoresOf c' ++ scoresOf t' ++ scoresOf e')
+      -- Combine the condition and both branches like an application (each
+      -- sub-result must be produced in the chosen language, with cross-language
+      -- penalties), NOT a per-language min across all three concatenated: a bare
+      -- 'minPairs' lets a language-agnostic branch (e.g. a base case that just
+      -- returns a parameter, score 0 in every language) mask the real cost of a
+      -- heavy branch (e.g. a cross-pool recursive loop body), collapsing the
+      -- manifold's language choice to an arbitrary tiebreak. Mirrors 'LetS'.
+      let best = scoreApp [] [ minPairs (scoresOf c')
+                             , minPairs (scoresOf t')
+                             , minPairs (scoresOf e')
+                             ]
       return (IfS c' t' e', Idx i best)
     scoreExpr rstat (DoBlockS x, i) = do
       x' <- scoreAnnoS rstat x
@@ -232,15 +334,15 @@ realizeWithRegistry registry s0 = do
     -- and the scores of the arguments
     scoreApp ::
       [ ( Lang -- the language of the ith calling function implementation
-        , Int -- the score of the ith implementation
+        , Score -- the score of the ith implementation
         )
       ] ->
       [ [ ( Lang -- the language of the jth implementation of the kth argument
-          , Int -- the score of the jth implementation of the kth argument
+          , Score -- the score of the jth implementation of the kth argument
           )
         ]
       ] ->
-      [(Lang, Int)]
+      [(Lang, Score)]
     -- if nothing is known, nothing is returned
     scoreApp [] (concat -> []) = []
     -- if none of the arguments are language-specific, the scores are based only
@@ -249,17 +351,18 @@ realizeWithRegistry registry s0 = do
     -- if the function is not language-specific, calculate the cost of calling
     -- all arguments from each possible language context
     scoreApp [] pairss =
-      let score = [(lang, 0) | lang <- unique $ map fst (concat pairss)]
+      let score = [(lang, (0, 0)) | lang <- unique $ map fst (concat pairss)]
        in scoreApp score pairss
     -- if arguments and function have implementations, calculate cost relative to
     -- each function implementation
     scoreApp scores pairss =
       [ ( l1
-        , s1
-            + sum
-              [ minimumDef 999999999 [s2 + pairwiseCost l1 l2 | (l2, s2) <- pairs]
-              | pairs <- pairss
-              ]
+        , foldl
+            addScore
+            s1
+            [ minimumDef noScore [addScore s2 (transScore l1 l2) | (l2, s2) <- pairs]
+            | pairs <- pairss
+            ]
         )
       | (l1, s1) <- scores
       ]
@@ -271,31 +374,32 @@ realizeWithRegistry registry s0 = do
       updateRState vs $
         rstat {rApplied = ps, rBndVars = Map.insert v p bound}
 
-    zipLang :: Int -> RState -> Indexed [(Lang, Int)]
-    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat 0))
+    zipLang :: Int -> RState -> Indexed [(Lang, Score)]
+    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat (0, 0)))
 
-    scoresOf :: AnnoS a Many (Indexed [(Lang, Int)]) -> [(Lang, Int)]
+    scoresOf :: AnnoS a Many (Indexed [(Lang, Score)]) -> [(Lang, Score)]
     scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
 
     -- find the scores of all implementations from all possible language contexts
     scoreMany ::
       RState ->
       [AnnoS (Indexed Type) Many Int] ->
-      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
+      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
     scoreMany rstat xs0 = do
       xs1 <- mapM (scoreAnnoS rstat) xs0
       return (xs1, scoreMany' xs1)
       where
-        scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
+        scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] -> [(Lang, Score)]
         scoreMany' xs =
           let pairss = [(minPairs . concat) [xs' | (AnnoS _ (Idx _ xs') _) <- xs]]
               langs' = unique (rLangs rstat <> concatMap (map fst) pairss)
-           in -- Got 10 billion nodes in your AST? I didn't think so, so don't say my sentinal's ugly.
-              [ ( l1
-                , sum
+           in [ ( l1
+                , foldl
+                    addScore
+                    (0, 0)
                     [ minimumDef
-                      999999999
-                      [ score + pairwiseCost l1 l2
+                      noScore
+                      [ addScore score (transScore l1 l2)
                       | (l2, score) <- pairs
                       ]
                     | pairs <- pairss
@@ -306,27 +410,39 @@ realizeWithRegistry registry s0 = do
 
     collapseAnnoS ::
       Maybe Lang ->
-      AnnoS (Indexed Type) Many (Indexed [(Lang, Int)]) ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
     collapseAnnoS l1 (AnnoS gi@(Idx _ gt) ci e) = do
       (e', ci') <- collapseExpr gt l1 (e, ci)
+      -- Explainability: at high verbosity, record each node's language decision
+      -- (its index, the parent/incoming language, and the language chosen). The
+      -- exact tree-DP makes this a faithful, per-node account of "why this pool".
+      let Idx idx mlang = ci'
+      MM.sayVVV $
+        "realize: node" <+> pretty idx
+          <+> ("parent=" <> maybe "general" pretty l1)
+          <+> ("chose=" <> maybe "general" pretty mlang)
       return (AnnoS gi ci' e')
 
-    -- The biased cost adds a slight penalty to changing language.
-    -- This penalty is unrelated to the often large penalty of foreign calls.
-    -- Rather, the purpose is just to distinguish VarS terms. It is totally
-    -- kludgy, a better recursion scheme is needed here.
-    biasedCost :: Maybe Lang -> (Lang, Int) -> Int
-    biasedCost l1 (l2, s)
-      | l1 == Just l2 = cost l1 l2 s
-      | otherwise = 1 + cost l1 l2 s
+    -- Sentinel "no realization" score. Cost dominates, so the switch component
+    -- is irrelevant. Got 10 billion nodes in your AST? I didn't think so.
+    noScore :: Score
+    noScore = (999999999, 999999999)
+
+    -- Cost of moving a value from parent language l1 to l2: the pairwise
+    -- (transition/self) cost, plus one language switch when the languages differ.
+    -- The switch component is the pure lexicographic tiebreaker (see 'Score'):
+    -- among languages of equal cost it keeps the value in the parent's language,
+    -- the boundary-minimizing choice the old backward-only +1 biasedCost made.
+    transScore :: Lang -> Lang -> Score
+    transScore l1 l2 = (pairwiseCost l1 l2, if l1 == l2 then 0 else 1)
 
     cost ::
       Maybe Lang -> -- parent language (if given)
       Lang -> -- child lang (should always be given if we are working from scored pairs)
-      Int -> -- score
-      Int
-    cost (Just l1) l2 score = score + pairwiseCost l1 l2
+      Score -> -- score
+      Score
+    cost (Just l1) l2 score = addScore score (transScore l1 l2)
     cost _ _ score = score
 
     -- FIXME: in the future, this function should be replaced by an estimate of
@@ -337,7 +453,7 @@ realizeWithRegistry registry s0 = do
     collapseExpr ::
       Type ->
       Maybe Lang -> -- the language of the parent expression (if Nothing, then this is a GAST)
-      (ExprS (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)]) ->
+      (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
     collapseExpr _ _ (VarS v (Many []), Idx i _) =
@@ -352,13 +468,13 @@ realizeWithRegistry registry s0 = do
       return (VarS v (One x), Idx i lang)
       where
         handleOne ::
-          AnnoS (Indexed Type) Many (Indexed [(Lang, Int)]) ->
+          AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
         handleOne x@(AnnoS _ (Idx _ ss) e) = do
           let newLang =
                 if isFunctionalData e
                   then l1
-                  else fmap fst (minBy (biasedCost l1) ss)
+                  else fmap fst (minBy (\(l2, s) -> cost l1 l2 s) ss)
           x' <- collapseAnnoS newLang x
           return (x', newLang)
 
@@ -437,25 +553,25 @@ realizeWithRegistry registry s0 = do
 
     -- Propagate downwards
     collapseExpr _ l1 (LamS vs x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (LamS vs x', Idx i lang)
     collapseExpr _ l1 (AppS f xs, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec (f : xs)) ss
       f' <- collapseAnnoS lang f
       xs' <- mapM (collapseAnnoS lang) xs
       return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
       xs' <- mapM (collapseAnnoS lang) xs
       return (LstS xs', Idx i lang)
     collapseExpr _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
       xs' <- mapM (collapseAnnoS lang) xs
       return (TupS xs', Idx i lang)
     collapseExpr _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 ss
+      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
       xs' <- mapM (collapseAnnoS lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
@@ -469,38 +585,75 @@ realizeWithRegistry registry s0 = do
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
     collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
     collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [e1, e2]) ss
       e1' <- collapseAnnoS lang e1
       e2' <- collapseAnnoS lang e2
       return (LetS v e1' e2', Idx i lang)
     collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
     collapseExpr _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
     collapseExpr _ l1 (IfS c t e, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [c, t, e]) ss
       c' <- collapseAnnoS lang c
       t' <- collapseAnnoS lang t
       e' <- collapseAnnoS lang e
       return (IfS c' t' e', Idx i lang)
     collapseExpr _ l1 (DoBlockS x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (DoBlockS x', Idx i lang)
     collapseExpr _ l1 (EvalS x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (EvalS x', Idx i lang)
     collapseExpr _ l1 (CoerceS c x, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (CoerceS c x', Idx i lang)
     collapseExpr _ l1 (IntrinsicS intr xs, Idx i ss) = do
-      lang <- chooseLanguage l1 ss
+      lang <- chooseLanguage l1 (subtreeHasRec xs) ss
       xs' <- mapM (collapseAnnoS lang) xs
       return (IntrinsicS intr xs', Idx i lang)
 
-    chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
-    chooseLanguage l1 ss = do
-      case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+    -- True if the subtree carries a self-recursive back-edge. During realize
+    -- every 'CallS' is such a back-edge; they are introduced before this pass
+    -- and only renamed/lifted afterward by 'extractRecursiveHelpers'.
+    hasRecCall :: (Foldable f) => AnnoS g f c -> Bool
+    hasRecCall = anyCallS (const True)
+
+    -- Whether this whole rAST is recursive at all (computed once). Non-recursive
+    -- trees -- the common case -- then short-circuit 'subtreeHasRec' without any
+    -- per-node subtree walk (so they stay O(n)); only actually-recursive rASTs,
+    -- which are small extracted helpers, pay the per-node walk. Computed from the
+    -- pre-scoring tree 's0'; 'normalizePop1' only beta-reduces literal-lambda
+    -- redexes and never adds or removes a 'CallS', so this agrees with the scored
+    -- tree the collapse actually walks.
+    treeHasCall :: Bool
+    treeHasCall = hasRecCall s0
+
+    -- 'recSpine' for a container: only meaningful in a recursive rAST, so gate
+    -- the (short-circuiting) per-child walk on 'treeHasCall'.
+    subtreeHasRec :: (Foldable f) => [AnnoS g f c] -> Bool
+    subtreeHasRec xs = treeHasCall && any hasRecCall xs
+
+    -- 'recSpine' is True when the subtree being placed contains a recursive
+    -- back-edge. The back-edge must return to the enclosing recursive
+    -- manifold's language (the head); on the un-crossed recursive spine that
+    -- head language is the incoming parent 'l1'. Realizing the subtree in any
+    -- other language 'l2' therefore forces the back-edge to cross 'l2 -> head'
+    -- every iteration. That crossing is invisible to the scorer (a recursive
+    -- 'CallS' scores (0,0) in every language, via 'zipLang'), so without this
+    -- correction the scorer splits a mixed-language recursive body onto its
+    -- heavy leaf's pool, putting the back-edge across a pool boundary and
+    -- blocking native-loop lowering. Adding the back-edge crossing here keeps a
+    -- recursive body co-located with its head whenever that is cost-competitive,
+    -- WITHOUT hard-pinning: a genuinely cheaper cross-pool body (e.g. cross-pool
+    -- mutual recursion whose partner is another language entirely) still wins.
+    chooseLanguage :: Maybe Lang -> Bool -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
+    chooseLanguage l1 recSpine ss = do
+      let recPenalty l2 = case l1 of
+            Just h | recSpine && l2 /= h -> transScore l2 h
+            _ -> (0, 0)
+      case minBy snd [(l2, cost l1 l2 s2 `addScore` recPenalty l2) | (l2, s2) <- ss] of
         Nothing -> return Nothing
         (Just (l3, _)) -> return (Just l3)
 
@@ -913,11 +1066,15 @@ freshLamVar = do
   return (EV (MT.pack ("$eta_" <> show i)))
 
 -- | Does the tree contain a @CallS target@ anywhere?
-containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
-containsCallS target = getAny . foldAnnoS check
+-- | True if any 'CallS' back-edge in the tree names a variable satisfying @p@.
+anyCallS :: (Foldable f) => (EVar -> Bool) -> AnnoS g f c -> Bool
+anyCallS p = getAny . foldAnnoS check
   where
-    check (AnnoS _ _ (CallS v)) = Any (v == target)
+    check (AnnoS _ _ (CallS v)) = Any (p v)
     check _                     = Any False
+
+containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
+containsCallS target = anyCallS (== target)
 
 -- | Rewrite every @CallS old@ target to @CallS new@.
 renameCallS ::

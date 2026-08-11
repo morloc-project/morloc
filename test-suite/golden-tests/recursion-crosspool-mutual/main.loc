@@ -1,0 +1,47 @@
+module main
+  ( isEven
+  , isOdd
+  , ping
+  , pong
+  )
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_is_zero" as isZeroP
+  , "py_dec"     as decP
+  , "py_add"     as addP
+  )
+isZeroP :: Int -> Bool
+decP    :: Int -> Int
+addP    :: Int -> Int -> Int
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_is_zero" as isZeroC
+  , "cpp_dec"     as decC
+  , "cpp_add"     as addC
+  )
+isZeroC :: Int -> Bool
+decC    :: Int -> Int
+addC    :: Int -> Int -> Int
+
+isEven :: Int -> Bool
+isEven n
+  ? isZeroP n = True
+  : isOdd (decP n)
+
+isOdd :: Int -> Bool
+isOdd n
+  ? isZeroC n = False
+  : isEven (decC n)
+
+ping :: Int -> Int -> Int
+ping n acc
+  ? isZeroP n = acc
+  : pong (decP n) (addP acc n)
+
+pong :: Int -> Int -> Int
+pong n acc
+  ? isZeroC n = acc
+  : ping (decC n) (addC acc n)

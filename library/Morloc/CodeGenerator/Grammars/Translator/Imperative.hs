@@ -489,8 +489,12 @@ data LowerConfig m = LowerConfig
   -- lcDebugWrap closes over its own manifold @(name, srcloc)@ lookup
   -- (from 'makeManifoldDebugInfoLookup') and bakes the strings into the
   -- codegen'd call so the runtime can render them next to @mid=@.
-  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> m PoolDocs
-  -- ^ Let binding assembly at the PoolDocs level
+  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ Let binding assembly at the PoolDocs level. The 'Bool' marks a
+  -- borrow-safe RHS: a field/index projection rooted at a live variable
+  -- (see 'isBorrowableProjection'). A statically typed member may bind such
+  -- a RHS by reference to avoid copying the projected sub-value; members for
+  -- which this is meaningless ignore it.
   , lcReleaseStmt :: Text -> MDoc
   -- ^ Produce a statement releasing the SHM owned by a serialize-let-bound
   -- packet variable. Called at the end of a serialize let's body so the
@@ -502,6 +506,15 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
+  , lcMakeLoop :: [Int] -> LoopBody PoolDocs PoolDocs -> m PoolDocs
+  -- ^ Native tail-loop assembly. Args: loop-carried native local ids, and the
+  -- loop body as a 'LoopBody' tree whose leaves are already lowered to
+  -- 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else, lets ->
+  -- assignments, LoopBase -> result = base; break, LoopContinue -> reassign the
+  -- loop-locals via temps> }@. The result 'PoolDocs' carries the loop as prior
+  -- lines with the return flag set (a base value is the manifold's return).
+  -- Loop-carried locals are the manifold's native param vars (@nvarNamer id@),
+  -- deserialized once by the manifold prologue and reassigned each iteration.
   , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
   -- ^ type -> prior statements -> return expression -> (hoisted lines,
   -- suspended-thunk expression). Monadic so a language whose thunk form
@@ -744,19 +757,24 @@ lowerSerialExpr ::
   SerialExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 lowerSerialExpr _ _ (ManS_ f) = return f
-lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) ForeignCall args) _) =
+lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) ForeignCall args) _) =
   return $ defaultValue {poolExpr = lcForeignCall cfg socketFile mid (map argNamer args)}
-lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ _ socketFile) (RemoteCall res) args) _) =
+lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
 lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
-lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = do
+lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
 lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
   lcCacheBody cfg resSa lbl mid args body
 lowerSerialExpr cfg _ (DebugWrapS_ _ mid args body) =
   lcDebugWrap cfg mid args body
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
+lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
+  body' <- adaptLoopBodyOwned cfg origBody body
+  lcMakeLoop cfg ids body'
+lowerSerialExpr cfg _ (LoopS_ _ ids body) =
+  lcMakeLoop cfg ids body
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value
   -- tracker entry. Wrap the body to bind its result to a temp helper var,
@@ -764,7 +782,7 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- temp as the new pool expression. This makes the SHM ref's lifetime
   -- end exactly at the body's last use of the bound variable rather than
   -- carrying it to the outer dispatch boundary.
-  letResult <- lcMakeLet cfg svarNamer i Nothing e1 e2
+  letResult <- lcMakeLet cfg svarNamer i Nothing False e1 e2
   tmpIdx <- lcNewIndex cfg
   let releaseLine = lcReleaseStmt cfg (render (svarNamer i))
       releaseBody =
@@ -772,18 +790,57 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
           { poolExpr = helperNamer tmpIdx
           , poolPriorLines = [releaseLine]
           }
-  lcMakeLet cfg helperNamer tmpIdx Nothing letResult releaseBody
+  lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
-  lcMakeLet cfg svarNamer i Nothing e1 e2
-lowerSerialExpr cfg (NativeLetS _ (typeFof -> t) _) (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i (Just t) e1 e2
+  lcMakeLet cfg svarNamer i Nothing False e1 e2
+lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) =
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1 e2
 lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i Nothing e1 e2
+  lcMakeLet cfg nvarNamer i Nothing False e1 e2
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
+lowerSerialExpr cfg (SerializeS _ origE) (SerializeS_ s e) = do
+  -- The serialized value crosses the wire (an owned sink), so own-adapt it: a
+  -- borrowed non-Copy Rust value (e.g. a '&Vec' parameter) must be cloned to an
+  -- owned value before serialization -- 'put_value' takes '&T', so a borrowed
+  -- '&Vec' would otherwise be double-referenced ('&&Vec', not 'ToVoidstar'). A
+  -- no-op where 'lcOwnArg' is identity (C++/py/r).
+  e' <- adaptOwnedElem cfg origE e
+  se <- lcSerialize cfg (poolExpr e') s
+  return $ e' {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e' <> poolPriorLines se}
 lowerSerialExpr cfg _ (SerializeS_ s e) = do
   se <- lcSerialize cfg (poolExpr e) s
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
+
+-- | True when a native expression lowers to a reference into a live variable:
+-- a bracket-free, single-path field/index projection (@.field@ / @.N@ chains)
+-- ultimately rooted at a bound variable. Binding such a RHS by const-reference
+-- (in a statically typed member that does no last-use moves) avoids copying the
+-- projected sub-value out of its container; the reference stays valid because
+-- the root variable is single-assignment and never moved.
+--
+-- Bracket steps (@.[i]@ / slices) build new values (they call @morloc_at@ /
+-- @morloc_slice@, which return by value), so a selector containing one is
+-- excluded. Multi-sibling selectors materialise a fresh tuple, so only a
+-- single-leaf selector qualifies. A receiver that is a call result (a
+-- temporary) is excluded -- a reference into it would dangle.
+--
+-- NOTE for zero-copy Vector work: when the root variable is a zero-copy view
+-- into incoming-packet SHM, the const& alias holds a reference into that SHM.
+-- Safe today because the packet's SHM is released only at the dispatch
+-- boundary, after the manifold body (put_value-tracked serialize-lets pass
+-- @borrowSafe = False@). If a future path frees a value's backing SHM mid-body,
+-- revisit whether that value's fields may be borrowed.
+isBorrowableProjection :: NativeExpr -> Bool
+isBorrowableProjection (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr arg]) =
+  not (selectorHasBracket sel)
+    && length (ungroup sel) == 1
+    && borrowableRoot arg
+  where
+    borrowableRoot (LetVarN _ _) = True
+    borrowableRoot (BndVarN _ _) = True
+    borrowableRoot e = isBorrowableProjection e
+isBorrowableProjection _ = False
 
 -- | The ownership of each argument of an @AppExeN@, taken from the original IR
 -- (a manifold-valued argument is always an owned call result).
@@ -809,6 +866,28 @@ adaptOwnedElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m
 adaptOwnedElems cfg origEs xs
   | length origEs == length xs = zipWithM (adaptOwnedElem cfg) origEs xs
   | otherwise = return xs
+
+-- | Own-adapt a native loop body's owned sinks, pairing the lowered body with
+-- the original IR. A 'LoopContinue' argument feeds a loop-carried reassignment
+-- and an intermediate 'LoopNLet' RHS feeds a fresh local -- both owned sinks, so
+-- a borrowed value must be cloned to survive (Rust); a no-op where ownership is
+-- trivial (C++/py/r 'lcOwnArg' is identity). Guards, serial lets, and the
+-- already-serialized base pass through. Shape mismatch falls back to the lowered
+-- body unchanged, mirroring 'adaptOwnedElems'.
+adaptLoopBodyOwned ::
+  (Monad m) =>
+  LowerConfig m ->
+  LoopBody NativeExpr SerialExpr ->
+  LoopBody PoolDocs PoolDocs ->
+  m (LoopBody PoolDocs PoolDocs)
+adaptLoopBodyOwned cfg = go
+  where
+    go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
+    go (LoopNLet _ orhs ob) (LoopNLet i rhs b) =
+      LoopNLet i <$> adaptOwnedElem cfg orhs rhs <*> go ob b
+    go (LoopSLet _ _ ob) (LoopSLet i rhs b) = LoopSLet i rhs <$> go ob b
+    go (LoopContinue ones) (LoopContinue pds) = LoopContinue <$> adaptOwnedElems cfg ones pds
+    go _ lowered = return lowered
 
 -- | Adapt each aggregate element/field to its stored representation via
 -- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
@@ -886,7 +965,7 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
   -- via SerialLetN -- e.g., the m1417-style wrapper around a foreign call.
   -- The body is a NativeExpr, so the temp's declared type must match it
   -- (rather than falling back to the serial type used for SerialLetS).
-  letResult <- lcMakeLet cfg svarNamer i Nothing x1 x2
+  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
   tmpIdx <- lcNewIndex cfg
   let bodyT = typeFof body
       releaseLine = lcReleaseStmt cfg (render (svarNamer i))
@@ -895,15 +974,15 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
           { poolExpr = helperNamer tmpIdx
           , poolPriorLines = [releaseLine]
           }
-  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) letResult releaseBody
-lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing x1 x2
+  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
+lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExpr cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
   x1' <- adaptOwnedElem cfg rhsE x1
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) x1' x2
-lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing x1 x2
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
+lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
 lowerNativeExpr _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExpr _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExpr cfg _ (DeserializeN_ t s x) = do
@@ -986,38 +1065,47 @@ lowerNativeExpr cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs els
   lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
+lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
+  -- The hashed value crosses into a 'ToVoidstar' (&T) sink; own-adapt it so a
+  -- borrowed non-Copy Rust value is cloned rather than double-borrowed
+  -- ('&(&Vec)'). No-op where 'lcOwnArg' is identity (C++/py/r).
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE, _]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
+  -- The saved value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- @hash above). level and path are scalar/Str, not value sinks.
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "voidstar"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr (render (poolExpr levelDocs)))
-                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs, pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs', pathDocs]
 -- @savem/@savej take source args in (path, value) order for
 -- partial-application ergonomics (`@savem path` is a reusable sink).
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
 -- They are not packet formats; codegen always passes a zero level
 -- expression so the printed call shape is uniform with @save.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "msgpack"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
-                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "json"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
-                   (IRawExpr (render (poolExpr dataDocs)))
+                   (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- Post effect-migration, @load returns bare `T` (no OptionalF wrap).
@@ -1027,9 +1115,12 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) =
   -- resolved type unconditionally.
   innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad sid innerType (IRawExpr (render (poolExpr pathDocs))))}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
+lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs))))}
+  -- The shown value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- @hash above) so a borrowed non-Copy Rust value is cloned, not double-borrowed.
+  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs'))))}
 lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- Same rationale as IntrLoad above: @read returns bare `T` now,
@@ -1134,14 +1225,17 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
 -- (level, value, handle) to match the C ABI `mlc_write(level, handle,
 -- voidstar)` and the pool's `_mlc_write(schema, level, value, handle)`
 -- helper.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrWrite (Just schema)
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, valueE]) (IntrinsicN_ _ IntrWrite (Just schema)
                                   [levelDocs, handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  let allDocs = [levelDocs, handleDocs, valueDocs]
+  -- The written value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- @hash above). level and handle are not value sinks.
+  valueDocs' <- adaptOwnedElem cfg valueE valueDocs
+  let allDocs = [levelDocs, handleDocs, valueDocs']
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
-        (IIntrinsicWrite sid (raw levelDocs) (raw valueDocs) (raw handleDocs))
+        (IIntrinsicWrite sid (raw levelDocs) (raw valueDocs') (raw handleDocs))
     , poolPriorExprs = concatMap poolPriorExprs allDocs
     , poolPriorLines = concatMap poolPriorLines allDocs
     , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs

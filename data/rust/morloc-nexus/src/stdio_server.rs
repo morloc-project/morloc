@@ -30,7 +30,7 @@ use std::sync::Mutex;
 use morloc_runtime_types::packet::PacketHeader;
 use morloc_runtime_types::stdio_proto::{
     OP_NEXT_STDIO, OP_WRITE_STDIO,
-    STATUS_OK, STATUS_ERR, STATUS_EOF,
+    STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
     STDIO_KIND_STDOUT, STDIO_KIND_STDERR,
 };
 
@@ -62,6 +62,13 @@ static STDERR_SLOT: Mutex<StdioSlot> =
 
 static NEXUS_PID: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(0);
+
+/// True when the nexus is a persistent daemon serving many client calls.
+/// A downstream pipe close then fails only the current call (the daemon
+/// must keep serving); in one-shot CLI mode it instead exits 141 like any
+/// Unix producer in a `... | head` pipeline. Set once at server start.
+static DAEMON_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Render configuration for streamed stdout, captured from the nexus
 /// `NexusConfig` at server start. Streamed `@stdout` output is
@@ -114,7 +121,7 @@ fn format_name(f: OutputFormat) -> &'static str {
 /// thread. Idempotent: subsequent calls no-op. SIGPIPE is set to
 /// `SIG_IGN` here so a downstream consumer closing the pipe surfaces
 /// as `EPIPE` on `write(2)` instead of a nexus signal death.
-pub fn start(tmpdir: &str, output_format: OutputFormat, compression_level: u8) {
+pub fn start(tmpdir: &str, output_format: OutputFormat, compression_level: u8, daemon: bool) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -122,6 +129,7 @@ pub fn start(tmpdir: &str, output_format: OutputFormat, compression_level: u8) {
             *g = RenderCfg { format: output_format, level: compression_level };
         }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
+        DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
 
         // SIGPIPE ignore. One-liner but easy to miss; without it a
         // `write(1)` to a closed downstream pipe kills the nexus.
@@ -214,6 +222,32 @@ enum Resp {
     Ack,           // WRITE_STDIO success
     Eof,
     Err(String),
+    PipeClosed,    // downstream consumer closed the pipe (EPIPE)
+}
+
+/// Map a stdio-write result to a response, distinguishing a broken pipe
+/// (an `<IO>` condition the pool must not swallow with @catch) from a
+/// generic write error.
+fn write_resp(r: Result<(), crate::stdio_bridge::WriteError>) -> Resp {
+    use crate::stdio_bridge::WriteError;
+    match r {
+        Ok(()) => Resp::Ack,
+        Err(WriteError::BrokenPipe) => pipe_closed_resp(),
+        Err(WriteError::Other(e)) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
+    }
+}
+
+/// Response to a downstream pipe close. In one-shot CLI mode the consumer
+/// (e.g. `| head`) is gone and there is nothing left to do, so exit fast
+/// with the conventional SIGPIPE status (141) after a full teardown --
+/// this never returns. In daemon mode the nexus serves other clients, so
+/// it returns `PipeClosed` to fail just the current call instead.
+fn pipe_closed_resp() -> Resp {
+    if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
+        Resp::PipeClosed
+    } else {
+        crate::process::exit_broken_pipe()
+    }
 }
 
 fn write_response(stream: &mut UnixStream, resp: Resp) -> std::io::Result<()> {
@@ -235,6 +269,9 @@ fn write_response(stream: &mut UnixStream, resp: Resp) -> std::io::Result<()> {
             let len = bytes.len().min(u32::MAX as usize) as u32;
             stream.write_all(&len.to_le_bytes())?;
             stream.write_all(&bytes[..len as usize])?;
+        }
+        Resp::PipeClosed => {
+            stream.write_all(&[STATUS_PIPE_CLOSED])?;
         }
     }
     Ok(())
@@ -415,13 +452,11 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
         if !slot.header_done {
             match unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) } {
                 Ok(()) => { slot.header_done = true; }
-                Err(e) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
+                Err(br::WriteError::BrokenPipe) => return pipe_closed_resp(),
+                Err(br::WriteError::Other(e)) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
             }
         }
-        return match unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) } {
-            Ok(()) => Resp::Ack,
-            Err(e) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
-        };
+        return write_resp(unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) });
     }
 
     // stdout: transcode per -f. Classify from the 32-byte header only;
@@ -446,7 +481,7 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
     let is_footer = header.is_footer();
     let is_data = header.is_data();
 
-    let result: Result<(), String> = (|| -> Result<(), String> {
+    let result: Result<(), br::WriteError> = (|| -> Result<(), br::WriteError> {
         match cfg.format {
             OutputFormat::Packet | OutputFormat::VoidStar => {
                 if !slot.header_done {
@@ -513,18 +548,15 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             OutputFormat::MessagePack
             | OutputFormat::Arrow
             | OutputFormat::Parquet
-            | OutputFormat::Csv => Err(format!(
+            | OutputFormat::Csv => Err(br::WriteError::Other(format!(
                 "streamed stdout output does not support -f {}; \
                  use -f json, -f jsonl, or -f packet",
                 format_name(cfg.format),
-            )),
+            ))),
         }
     })();
 
-    match result {
-        Ok(()) => Resp::Ack,
-        Err(e) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
-    }
+    write_resp(result)
 }
 
 /// Read one full `MORLOC_DATA_PACKET` sub-packet into a fresh SHM block.

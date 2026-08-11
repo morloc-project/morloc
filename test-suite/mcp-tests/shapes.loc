@@ -1,0 +1,184 @@
+--' MCP tool-shape coverage program.
+--'
+--' Every export maps a distinct docstring / type feature to its MCP tool
+--' shape. run-tests.sh asserts the forward mapping via `tools/list` and
+--' exercises the inverse (named -> positional) mapping via `tools/call`.
+--'
+--' Mapping cheat-sheet (see README.md for the full matrix):
+--'   metavar:      -> the property NAME (lowercased); else "arg0", "arg1", ...
+--'   many: true    -> the property is an array (variadic)
+--'   ?T positional -> nullable + not required
+--'   record unroll -> flat per-field properties, keyed by field name
+--'   record arg:   -> the whole record as ONE object property (group_opt)
+--'   record return -> structuredContent + object outputSchema
+--'   name:         -> overrides the tool name
+--'   command doc   -> the tool description
+--'   pure command  -> served in-process (no pool); remote command -> pool
+module main
+  ( addOne
+  , sumMany
+  , scale
+  , maybeDouble
+  , greet
+  , configFlat
+  , configWhole
+  , mkResult
+  , pureAnswer
+  , mustFail
+  , noisyAdd
+  )
+
+import root-py
+
+source Py from "shapes.py"
+  ( "add_one"      as addOnePy
+  , "sum_ints"     as sumIntsPy
+  , "mul2"         as mulPy
+  , "maybe_double" as maybeDoublePy
+  , "greet_py"     as greetPy
+  , "config_str"   as configStrFlat
+  , "config_str2"  as configStrWhole
+  , "mk_result"    as mkResultPy
+  , "noisy"        as noisyPy
+  )
+
+addOnePy      :: Int -> Int
+sumIntsPy     :: [Int] -> Int
+mulPy         :: Int -> Int -> Int
+maybeDoublePy :: ?Int -> ?Int
+greetPy       :: Str -> Str
+mkResultPy    :: Int -> Result
+noisyPy       :: Int -> Int
+
+-- A record used only as an ARGUMENT, unrolled into flat per-field CLI
+-- options (no record-level `arg:`), so MCP renders one property per field.
+--' unroll: true
+record ConfigFlat where
+  --' Scratch directory
+  --' arg: --tmp-dir
+  --' metavar: DIR
+  --' default: "/tmp"
+  tmpDir :: Str
+
+  --' Worker thread count
+  --' arg: -t/--threads
+  --' metavar: INT
+  --' default: 1
+  numThreads :: Int
+
+  --' Purge caches on exit
+  --' true:  --clean
+  --' false: --no-clean
+  --' default: false
+  removeCaches :: Bool
+
+record Py => ConfigFlat = "dict"
+
+configStrFlat :: ConfigFlat -> Str
+
+-- The same fields, but a record-level `arg:` makes the whole record one CLI
+-- option, so MCP renders ONE object property named for the record type.
+--' unroll: true
+--' arg: --config
+record ConfigWhole where
+  --' Scratch directory
+  --' arg: --tmp-dir
+  --' metavar: DIR
+  --' default: "/tmp"
+  tmpDir :: Str
+
+  --' Worker thread count
+  --' arg: -t/--threads
+  --' metavar: INT
+  --' default: 1
+  numThreads :: Int
+
+  --' Purge caches on exit
+  --' true:  --clean
+  --' false: --no-clean
+  --' default: false
+  removeCaches :: Bool
+
+record Py => ConfigWhole = "dict"
+
+configStrWhole :: ConfigWhole -> Str
+
+-- A plain record used only as a RETURN type.
+record Result where
+  status :: Str
+  value :: Int
+
+record Py => Result = "dict"
+
+--' Add one to an integer
+addOne ::
+  --' metavar: N
+  Int ->
+  Int
+addOne x = addOnePy x
+
+--' Sum a variadic list of integers
+sumMany ::
+  --' many: true
+  [Int] ->
+  Int
+sumMany xs = sumIntsPy xs
+
+--' Scale an integer by an optional factor. The second argument is a
+--' top-level OPTION (arg: + default:), a distinct manifest shape from the
+--' record-derived options above: MCP renders it as a non-required property.
+scale ::
+  --' metavar: N
+  Int ->
+  --' arg: --factor
+  --' metavar: FACTOR
+  --' default: 2
+  Int ->
+  Int
+scale x f = mulPy x f
+
+--' Double an optional integer, or pass nothing through
+maybeDouble :: ?Int -> ?Int
+maybeDouble x = maybeDoublePy x
+
+--' Greet a person by name
+--' name: hello
+greet ::
+  --' metavar: NAME
+  Str ->
+  Str
+greet name = greetPy name
+
+--' Summarize a config supplied as flat per-field options
+configFlat :: ConfigFlat -> Str
+configFlat c = configStrFlat c
+
+--' Summarize a config supplied as one whole-object option
+configWhole :: ConfigWhole -> Str
+configWhole c = configStrWhole c
+
+--' Build a result record (record return -> structuredContent)
+mkResult ::
+  --' metavar: N
+  Int ->
+  Result
+mkResult n = mkResultPy n
+
+--' The answer, computed in-process with no pool (pure command)
+pureAnswer :: Int
+pureAnswer = 42
+
+--' Always fails, for error-path coverage (@throw -> isError result)
+mustFail ::
+  --' metavar: X
+  Int ->
+  <Err> Int
+mustFail _ = @throw "intentional failure: boom"
+
+--' Add one; the pool implementation also prints to stdout. The stray
+--' output must not corrupt the JSON-RPC stream (fd-discipline coverage).
+noisyAdd ::
+  --' metavar: N
+  Int ->
+  Int
+noisyAdd n = noisyPy n

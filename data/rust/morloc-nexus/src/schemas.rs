@@ -41,7 +41,7 @@ struct TypeLayout<'a> {
 /// constructor name (`Container`). Parens are added when the
 /// parameterized name contains a space so the surrounding context
 /// (e.g. an `?` wrapper) binds correctly.
-fn render_schema_type(
+pub(crate) fn render_schema_type(
     s: &morloc_runtime_types::schema::Schema,
     self_ref: Option<(&str, &str)>,
 ) -> String {

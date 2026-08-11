@@ -1,0 +1,39 @@
+module main (baseEffect, perIter)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Bool = "bool"
+
+source Rust from "arith.rs"
+  ( "add_i"  as add
+  , "sub_i"  as sub
+  , "eq_i"   as eq
+  , "emit_i" as emit
+  )
+
+add  :: Int -> Int -> Int
+sub  :: Int -> Int -> Int
+eq   :: Int -> Int -> Bool
+emit :: Int -> <IO> Int
+
+-- <IO> same-pool tail loop in a RUST pool, effect ONLY in the base case: the
+-- loop iterates effect-free and forces the base emit at the end. Exercises the
+-- Rust native-loop lowering under an <IO> return (the loop force path in Rust,
+-- which the py <IO> goldens cover but no Rust golden did).
+sumEmit :: Int -> Int -> <IO> Int
+sumEmit acc n
+  ? eq n 0 = emit acc
+  : sumEmit (add acc n) (sub n 1)
+
+baseEffect :: Int -> <IO> Int
+baseEffect n = sumEmit 0 n
+
+-- <IO> Rust loop with a PER-ITERATION effect: emit fires each iteration then at
+-- the base, in order.
+perIter :: Int -> <IO> Int
+perIter n
+  ? eq n 0 = emit 0
+  : do
+      _ <- emit n
+      perIter (sub n 1)

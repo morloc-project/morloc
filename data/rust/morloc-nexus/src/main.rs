@@ -1,20 +1,23 @@
 //! Morloc Nexus: CLI dispatcher for multi-language pool orchestration.
 //!
 //! Replaces data/nexus.c. Entry point for all morloc programs.
-//! Reads a .manifest JSON, spawns language pool daemons, and routes
-//! function calls to them over Unix sockets.
+//! Reads a program's manifest.json, spawns language pool daemons, and
+//! routes function calls to them over Unix sockets.
 
 mod cli;
 mod convert;
 mod dispatch;
 mod file;
 mod help;
+mod json_help;
 mod loader;
 mod manifest;
+mod mcp;
 mod phase2;
 mod process;
 mod runlog;
 mod schemas;
+mod serve_help;
 mod stdio_bridge;
 mod stdio_server;
 mod view;
@@ -75,6 +78,44 @@ fn main() {
         _ => {}
     }
 
+    // Machine-readable help: `--json-help` / `--mcp-tools` describe the whole
+    // program and short-circuit before any pool/SHM/signal setup, reading the
+    // loaded manifest only. They are nexus-global, not per-command: there is
+    // deliberately no `./prog cmd --json-help` -- callers dump the full JSON
+    // and extract the command they want.
+    //
+    // The flag is honored in the nexus zone (`morloc-nexus run --json-help
+    // ./prog`, or `./prog --json-help @`) or as the *leading* command-zone
+    // token (`./prog --json-help`, which the argv splitter routes into the
+    // command zone the same way it routes `-h`). A flag written *after* a
+    // subcommand (`./prog cmd --json-help`) is not leading, so it falls
+    // through to clap and is rejected as an unexpected argument -- keeping the
+    // "no per-command form" rule consistent rather than silently ignoring the
+    // subcommand.
+    if let cli::Mode::Run(ref rargs) = invocation.nexus.cmd {
+        let leading = invocation.user_zone.first().map(|s| s.as_str());
+        let want_json = rargs.common.json_help || leading == Some("--json-help");
+        let want_mcp = rargs.common.mcp_tools || leading == Some("--mcp-tools");
+        if want_json || want_mcp {
+            match invocation.manifest.as_ref() {
+                Some(m) => {
+                    if want_json {
+                        json_help::print_json_help(m);
+                    } else {
+                        json_help::print_mcp_tools(m);
+                    }
+                    std::process::exit(0);
+                }
+                None => {
+                    eprintln!(
+                        "Error: --json-help/--mcp-tools require a program target"
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+
     let mut manifest = match invocation.manifest {
         Some(m) => m,
         None => {
@@ -126,22 +167,50 @@ fn main() {
             manifest_path = invocation.manifest_path.clone();
             user_zone = Vec::new();
         }
+        cli::Mode::Mcp(margs) => {
+            let (cfg, _target) = cli::mcp_args_to_config(&margs);
+            config = cfg;
+            manifest_path = invocation.manifest_path.clone();
+            user_zone = Vec::new();
+        }
         cli::Mode::File(_) | cli::Mode::View(_) => unreachable!(
             "File/View dispatched before manifest setup"
         ),
     }
 
-    let prog_name = std::path::Path::new(&manifest_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&manifest_path)
-        .to_string();
+    // MCP mode owns the stdout stream for JSON-RPC. Re-home fd 1 NOW, before
+    // any pool is forked or any in-process command is evaluated: pools inherit
+    // fd 0/1/2 unchanged, and a pure command's in-process `morloc_eval` can
+    // write to the nexus's own fd 1. Saving the real stdout to a private fd and
+    // aliasing fd 1 -> fd 2 guarantees every stray write lands on stderr, never
+    // the protocol stream. See `mcp::rehome_stdout_for_protocol`.
+    let mcp_protocol_fd: Option<i32> = if config.mcp_flag {
+        Some(mcp::rehome_stdout_for_protocol())
+    } else {
+        None
+    };
+
+    // The name to show in Usage lines: the launcher's own `$0` (via
+    // MORLOC_PROG_NAME) when invoked through the generated wrapper, else the
+    // module name (the manifest filename is always "manifest.json", so it
+    // cannot serve as the program identity).
+    let prog_name = cli::program_display_name(&manifest.name);
 
     // Re-read the raw manifest payload string from disk. The
     // structured manifest was already loaded and validated inside
     // parse_invocation; the payload is used downstream by
     // `daemon_run` (which parses the JSON via libmorloc.so for its
     // C-layout Manifest type).
+    //
+    // INVARIANT: this payload carries pool exec paths RELATIVE to the
+    // manifest directory (they are absolutized below only on the Rust
+    // `manifest` struct, not on this text). Pools are therefore always
+    // spawned Rust-side (`process::start_daemons` from `sockets`, with
+    // crash recovery via `install_recovery_context`). `daemon_run`'s
+    // C-layout manifest must be used for command dispatch only, never to
+    // (re)spawn a pool -- doing so would exec a build-dir-relative path
+    // against the daemon's CWD. If that ever changes, resolve this payload
+    // (see `morloc_runtime`'s `resolve_pool_paths`) before passing it in.
     let payload = match manifest::read_manifest_payload(&manifest_path) {
         Ok(p) => p,
         Err(e) => {
@@ -149,9 +218,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Touch `manifest` to keep the binding live for the rest of
-    // main.
-    let _ = &mut manifest;
 
     // Forward the per-program inline-vs-shm routing knobs to libmorloc.
     // Env vars are inherited by every pool process the nexus later
@@ -178,10 +244,11 @@ fn main() {
     if let Ok(exe) = std::env::current_exe() {
         std::env::set_var("MORLOC_NEXUS_PATH", &exe);
     }
-    if let Ok(abs_manifest) = std::fs::canonicalize(&manifest_path) {
-        std::env::set_var("MORLOC_MANIFEST_PATH", &abs_manifest);
-    } else {
-        std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path);
+    // Canonicalize once; reused below to resolve relative pool exec paths.
+    let abs_manifest = std::fs::canonicalize(&manifest_path).ok();
+    match &abs_manifest {
+        Some(p) => std::env::set_var("MORLOC_MANIFEST_PATH", p),
+        None => std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path),
     }
 
     // Publish the run-scope activation env vars NOW (after both option
@@ -234,10 +301,27 @@ fn main() {
     // before morloc_run_finalize writes summary.json.
     runlog::install(manifest.run_log.clone());
 
-    // Pool paths in the manifest are absolute, so no chdir is needed.
-    // This lets user programs resolve file paths relative to the caller's CWD.
-    // Source imports in pools resolve via __file__-relative paths (Python sys.path)
-    // or script-relative paths (R .morloc.source) rather than depending on CWD.
+    // Pool exec paths in the manifest are relative to the manifest's own
+    // directory (the build dir). Resolve the pool executable (the last exec
+    // element) to an absolute path here so pools spawn correctly regardless
+    // of the caller's CWD, and so the build directory stays relocatable. The
+    // interpreter token (e.g. "python3") is left untouched. No chdir is done,
+    // so user programs still resolve their own file arguments relative to the
+    // caller's CWD; source imports in pools resolve via __file__-relative
+    // paths (Python sys.path) or script-relative paths (R .morloc.source).
+    {
+        let manifest_dir = abs_manifest
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        for pool in manifest.pools.iter_mut() {
+            if let Some(last) = pool.exec.last_mut() {
+                if std::path::Path::new(last).is_relative() {
+                    *last = manifest_dir.join(&*last).to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
 
     // Validate pool executables exist
     if let Err(e) = process::validate_pools(&manifest.pools) {
@@ -257,7 +341,7 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
-    stdio_server::start(&tmpdir, config.output_format, config.compression_level);
+    stdio_server::start(&tmpdir, config.output_format, config.compression_level, config.daemon_flag);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -267,6 +351,35 @@ fn main() {
 
     // Setup sockets
     let mut sockets = process::setup_sockets(&manifest.pools, &tmpdir, &shm_basename);
+
+    // MCP mode: spawn every pool eagerly (paid once, before the JSON-RPC loop
+    // starts, so `initialize` stays prompt), install the recovery context so a
+    // pool crash mid-call can be recovered, then run the stdio JSON-RPC loop.
+    // fd 1 was already re-homed above, so pools respawned by recovery also
+    // inherit the safe (stderr-aliased) fd 1.
+    if config.mcp_flag {
+        let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
+        if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
+            eprintln!("Error: {}", e);
+            process::clean_exit(1);
+        }
+        process::install_recovery_context(
+            sockets.clone(),
+            manifest.pools.clone(),
+            tmpdir.clone(),
+            shm_basename.clone(),
+        );
+        let protocol_fd = mcp_protocol_fd
+            .expect("mcp mode always re-homes stdout and sets the protocol fd");
+        mcp::serve(
+            &mut sockets,
+            &shm_basename,
+            &payload,
+            &manifest,
+            protocol_fd,
+        );
+        // mcp::serve never returns.
+    }
 
     // Daemon mode
     if config.daemon_flag {
@@ -356,6 +469,24 @@ fn main() {
     process::clean_exit(0);
 }
 
+/// C `daemon_config_t` mirror (matches `daemon_ffi::DaemonConfig` layout).
+/// Shared by the daemon (`run_daemon`) and router (`run_router`) paths so the
+/// two ABI mirrors can never drift. Port sentinel: -1 = listener not
+/// configured; 0..=65535 = configured (0 means bind ephemeral).
+#[repr(C)]
+struct CDaemonConfig {
+    unix_socket_path: *const std::ffi::c_char,
+    tcp_port: i32,
+    http_port: i32,
+    port_file_path: *const std::ffi::c_char,
+    pool_check_fn: *const std::ffi::c_void,   // Option<fn> as null
+    pool_alive_fn: *const std::ffi::c_void,   // Option<fn> as null
+    n_pools: usize,
+    eval_timeout: i32,
+    output_packet: bool,
+    compression_level: u8,
+}
+
 /// Run the daemon event loop by calling daemon_run in libmorloc.so.
 fn run_daemon(
     config: &dispatch::NexusConfig,
@@ -376,6 +507,7 @@ fn run_daemon(
             shm_basename: *const c_char,
         );
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
+        fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
     }
 
     // Build C MorlocSocket array (matches daemon_ffi::MorlocSocket layout)
@@ -418,23 +550,6 @@ fn run_daemon(
         _keepalive.push(vec![lang_c, socket_c]);
     }
 
-    // Build C DaemonConfig (matches daemon_ffi::DaemonConfig layout).
-    // Port sentinel: -1 = listener not configured; 0..=65535 = configured
-    // (0 means bind ephemeral). The pre-ephemeral code used 0 as "not
-    // configured", which conflicts with the standard "0 = OS picks port"
-    // idiom.
-    #[repr(C)]
-    struct CDaemonConfig {
-        unix_socket_path: *const c_char,
-        tcp_port: i32,
-        http_port: i32,
-        port_file_path: *const c_char,
-        pool_check_fn: *const c_void,   // Option<fn> as null
-        pool_alive_fn: *const c_void,   // Option<fn> as null
-        n_pools: usize,
-        eval_timeout: i32,
-    }
-
     let unix_socket_cstr = config.unix_socket_path.as_ref()
         .map(|p| CString::new(p.as_str()).unwrap());
     let port_file_cstr = config.port_file_path.as_ref()
@@ -451,6 +566,10 @@ fn run_daemon(
         pool_alive_fn: process::pool_is_alive_ptr(),
         n_pools,
         eval_timeout: config.eval_timeout,
+        // `-f packet` result form over the Unix socket / TCP transports,
+        // with the zstd preset from `-z`. HTTP results stay JSON.
+        output_packet: config.output_format == dispatch::OutputFormat::Packet,
+        compression_level: config.compression_level,
     };
 
     // Parse manifest via the C FFI (so daemon_run gets the C-layout manifest).
@@ -472,6 +591,17 @@ fn run_daemon(
 
     let shm_c = CString::new(shm_basename).unwrap();
 
+    // Set the eval sandbox policy before serving so every forked `morloc eval`
+    // /`--save` inherits it (the runtime global is process-wide).
+    let eval_allowed_cstr = config.eval_allowed_modules.as_ref()
+        .map(|s| CString::new(s.as_str()).unwrap());
+    unsafe {
+        daemon_set_eval_policy(
+            config.eval_sandbox,
+            eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        );
+    }
+
     unsafe {
         daemon_run(
             &mut daemon_config as *mut CDaemonConfig as *mut c_void,
@@ -484,21 +614,23 @@ fn run_daemon(
 }
 
 /// Run the multi-program router daemon.
-/// Scans the fdb directory for .manifest files and serves them all via HTTP/TCP/Unix.
+/// Scans the exe directory (one exe/<name>/manifest.json per installed
+/// program) and serves them all via HTTP/TCP/Unix.
 fn run_router(config: &dispatch::NexusConfig) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
 
     extern "C" {
-        fn router_init(fdb_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
+        fn router_init(exe_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn router_run(config: *mut c_void, router: *mut c_void);
         fn router_free(router: *mut c_void);
+        fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
     }
 
-    let fdb_path = config.fdb_path.clone().unwrap_or_else(|| {
-        format!("{}/fdb", morloc_home())
+    let exe_path = config.fdb_path.clone().unwrap_or_else(|| {
+        format!("{}/exe", morloc_home())
     });
-    let fdb_c = CString::new(fdb_path.as_str()).unwrap();
+    let fdb_c = CString::new(exe_path.as_str()).unwrap();
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let router = unsafe { router_init(fdb_c.as_ptr(), &mut errmsg) };
@@ -512,20 +644,6 @@ fn run_router(config: &dispatch::NexusConfig) {
         };
         eprintln!("Error: failed to initialize router: {}", msg);
         std::process::exit(1);
-    }
-
-    // Build DaemonConfig for the router. Port sentinel: -1 = not
-    // configured; 0..=65535 = configured (0 means ephemeral).
-    #[repr(C)]
-    struct CDaemonConfig {
-        unix_socket_path: *const c_char,
-        tcp_port: i32,
-        http_port: i32,
-        port_file_path: *const c_char,
-        pool_check_fn: *const c_void,
-        pool_alive_fn: *const c_void,
-        n_pools: usize,
-        eval_timeout: i32,
     }
 
     let unix_cstr = config.unix_socket_path.as_ref()
@@ -543,7 +661,22 @@ fn run_router(config: &dispatch::NexusConfig) {
         pool_alive_fn: ptr::null(),
         n_pools: 0,
         eval_timeout: if config.eval_timeout > 0 { config.eval_timeout } else { 30 },
+        // Router does not offer per-program packet output; keep the ABI
+        // layout in sync with `daemon_config_t` and default to JSON.
+        output_packet: false,
+        compression_level: 0,
     };
+
+    // Set the eval sandbox policy before serving (process-wide global read by
+    // every forked `morloc eval`/`--save`).
+    let eval_allowed_cstr = config.eval_allowed_modules.as_ref()
+        .map(|s| CString::new(s.as_str()).unwrap());
+    unsafe {
+        daemon_set_eval_policy(
+            config.eval_sandbox,
+            eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        );
+    }
 
     unsafe {
         router_run(&mut dc as *mut CDaemonConfig as *mut c_void, router);

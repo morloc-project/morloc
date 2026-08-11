@@ -158,13 +158,13 @@ pub unsafe fn stdio_slot_schema(handle: i64) -> Result<String, String> {
 
 /// Emit the `MORLOC_STREAM_PACKET` prefix for the given stdio slot to
 /// `fd`. Used lazily on the first `WRITE_STDIO` per slot.
-pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<(), String> {
+pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<(), WriteError> {
     let mut buf: *mut u8 = std::ptr::null_mut();
     let mut len: usize = 0;
     let mut err: *mut c_char = std::ptr::null_mut();
     let rc = mlc_stdio_build_stream_header(handle, &mut buf, &mut len, &mut err);
     if rc != 0 || buf.is_null() {
-        return Err(take_err(err));
+        return Err(WriteError::Other(take_err(err)));
     }
     let slice = std::slice::from_raw_parts(buf, len);
     let r = write_all_fd(fd, slice);
@@ -175,11 +175,11 @@ pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<(), S
 /// Read `size` bytes from the SHM block at `relptr` and write them to
 /// `fd`. Used by `WRITE_STDIO`. The bytes are the raw sub-packet
 /// (header + metadata + payload) the pool assembled in SHM.
-pub unsafe fn write_shm_bytes_to_fd(fd: i32, relptr: i64, size: u64) -> Result<(), String> {
+pub unsafe fn write_shm_bytes_to_fd(fd: i32, relptr: i64, size: u64) -> Result<(), WriteError> {
     let mut err: *mut c_char = std::ptr::null_mut();
     let abs = rel2abs(relptr as isize, &mut err);
     if abs.is_null() {
-        return Err(take_err(err));
+        return Err(WriteError::Other(take_err(err)));
     }
     let slice = std::slice::from_raw_parts(abs as *const u8, size as usize);
     write_all_fd(fd, slice)
@@ -201,7 +201,23 @@ pub unsafe fn copy_into_shm(bytes: &[u8]) -> Result<(i64, u64), String> {
     Ok((rel as i64, bytes.len() as u64))
 }
 
-fn write_all_fd(fd: i32, bytes: &[u8]) -> Result<(), String> {
+/// Error from a stdout/stderr write. `BrokenPipe` is the `<IO>` condition
+/// the downstream consumer closing the pipe (`EPIPE`); the nexus must not
+/// let `@catch` swallow it. `Other` carries every non-pipe failure. A
+/// `String` converts to `Other` so the transcoding helpers (whose schema
+/// / render steps produce `String` errors) compose with `?` into a
+/// `Result<_, WriteError>` without per-call mapping.
+#[derive(Debug)]
+pub(crate) enum WriteError {
+    BrokenPipe,
+    Other(String),
+}
+
+impl From<String> for WriteError {
+    fn from(s: String) -> Self { WriteError::Other(s) }
+}
+
+fn write_all_fd(fd: i32, bytes: &[u8]) -> Result<(), WriteError> {
     let mut off = 0usize;
     while off < bytes.len() {
         let n = unsafe {
@@ -214,10 +230,13 @@ fn write_all_fd(fd: i32, bytes: &[u8]) -> Result<(), String> {
         if n < 0 {
             let e = std::io::Error::last_os_error();
             if e.raw_os_error() == Some(libc::EINTR) { continue; }
-            return Err(format!("write(fd {}): {}", fd, e));
+            if e.raw_os_error() == Some(libc::EPIPE) {
+                return Err(WriteError::BrokenPipe);
+            }
+            return Err(WriteError::Other(format!("write(fd {}): {}", fd, e)));
         }
         if n == 0 {
-            return Err(format!("write(fd {}) returned 0", fd));
+            return Err(WriteError::Other(format!("write(fd {}) returned 0", fd)));
         }
         off += n as usize;
     }
@@ -226,7 +245,7 @@ fn write_all_fd(fd: i32, bytes: &[u8]) -> Result<(), String> {
 
 /// Write raw bytes to `fd`. Public wrapper over the internal writer for
 /// the transcoding paths (JSON brackets, footer pass-through).
-pub unsafe fn write_bytes_to_fd(fd: i32, bytes: &[u8]) -> Result<(), String> {
+pub unsafe fn write_bytes_to_fd(fd: i32, bytes: &[u8]) -> Result<(), WriteError> {
     write_all_fd(fd, bytes)
 }
 
@@ -336,26 +355,32 @@ unsafe fn emit_subpacket_with(
     value_schema_str: &str,
     what: &str,
     render: unsafe extern "C" fn(*const c_void, *const CSchema, *mut *mut c_char) -> i32,
-) -> Result<(), String> {
+) -> Result<(), WriteError> {
     let (vs, value_c, elem_c) = materialize(bytes, value_schema_str)?;
     let mut err: *mut c_char = std::ptr::null_mut();
     let rc = render(vs.0, value_c, &mut err);
     free_cschemas(value_c, elem_c);
     drop(vs);
+    // The print_voidstar_* renderers return PRINT_RESULT_PIPE_CLOSED on a
+    // broken pipe (json_ffi), which must surface as BrokenPipe rather than
+    // a generic error so @catch cannot swallow it.
+    if rc == morloc_runtime_types::PRINT_RESULT_PIPE_CLOSED {
+        return Err(WriteError::BrokenPipe);
+    }
     if rc != 0 {
-        return Err(format!("{}: {}", what, take_err(err)));
+        return Err(WriteError::Other(format!("{}: {}", what, take_err(err))));
     }
     Ok(())
 }
 
 /// Emit one sub-packet as JSON lines to fd 1 (constant memory).
-pub unsafe fn emit_subpacket_jsonl(bytes: &[u8], value_schema_str: &str) -> Result<(), String> {
+pub unsafe fn emit_subpacket_jsonl(bytes: &[u8], value_schema_str: &str) -> Result<(), WriteError> {
     emit_subpacket_with(bytes, value_schema_str, "jsonl emit", print_voidstar_jsonl)
 }
 
 /// Emit one sub-packet's `[Str]` bodies verbatim to fd 1 (the `-f raw`
 /// format for `render` handlers).
-pub unsafe fn emit_subpacket_raw(bytes: &[u8], value_schema_str: &str) -> Result<(), String> {
+pub unsafe fn emit_subpacket_raw(bytes: &[u8], value_schema_str: &str) -> Result<(), WriteError> {
     emit_subpacket_with(bytes, value_schema_str, "raw emit", print_voidstar_raw)
 }
 
@@ -387,7 +412,7 @@ pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Resu
 /// Re-emit one sub-packet's `MORLOC_DATA_PACKET` bytes to `fd`,
 /// recompressing at `level`. Used by `-f packet` / `-f voidstar` so the
 /// nexus `-z` governs the on-wire stream (the pool ships uncompressed).
-pub unsafe fn emit_subpacket_as_packet(fd: i32, bytes: &[u8], level: u8) -> Result<(), String> {
+pub unsafe fn emit_subpacket_as_packet(fd: i32, bytes: &[u8], level: u8) -> Result<(), WriteError> {
     let mut err: *mut c_char = std::ptr::null_mut();
     let n = normalize_data_packet_to_fd(
         bytes.as_ptr(),
@@ -396,8 +421,13 @@ pub unsafe fn emit_subpacket_as_packet(fd: i32, bytes: &[u8], level: u8) -> Resu
         fd as libc::c_int,
         &mut err,
     );
+    // The writer returns PACKET_TO_FD_PIPE_CLOSED (no errmsg) on a broken
+    // pipe; surface it as BrokenPipe rather than a generic error.
+    if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+        return Err(WriteError::BrokenPipe);
+    }
     if n < 0 {
-        return Err(format!("packet re-emit: {}", take_err(err)));
+        return Err(WriteError::Other(format!("packet re-emit: {}", take_err(err))));
     }
     Ok(())
 }

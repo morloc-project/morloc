@@ -26,6 +26,9 @@ pub struct HttpRequest {
     pub path: [c_char; 256],
     pub body: *mut c_char,
     pub body_len: usize,
+    /// Query string (the part after `?`), empty when absent. Kept separate from
+    /// `path` so path matching stays exact.
+    pub query: [c_char; 256],
 }
 
 #[repr(C)]
@@ -49,6 +52,10 @@ pub struct DaemonRequest {
     pub args_json: *mut c_char,
     pub expr: *mut c_char,
     pub name: *mut c_char,
+    /// Output projection selected by `?render=<flag>` on a `/call` (HTTP only);
+    /// null when absent. `daemon_dispatch` resolves it to the projection's entry
+    /// command; `raw` means the command's own typed value.
+    pub render: *mut c_char,
 }
 
 // ── http_parse_request ───────────────────────────────────────────────────────
@@ -117,12 +124,18 @@ pub unsafe extern "C" fn http_parse_request(
     // Parse path
     let first_space = header_str.find(' ').unwrap_or(0) + 1;
     let path_end = header_str[first_space..].find(' ').map(|p| first_space + p).unwrap_or(first_space);
-    let path = &header_str[first_space..path_end];
-    // Strip query string
-    let path = path.split('?').next().unwrap_or(path);
+    let raw_path = &header_str[first_space..path_end];
+    // Split off the query string (`?...`), keeping `path` exact for matching.
+    let (path, query) = match raw_path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (raw_path, ""),
+    };
     let path_len = path.len().min(255);
     ptr::copy_nonoverlapping(path.as_ptr(), (*req).path.as_mut_ptr() as *mut u8, path_len);
     (*req).path[path_len] = 0;
+    let query_len = query.len().min(255);
+    ptr::copy_nonoverlapping(query.as_ptr(), (*req).query.as_mut_ptr() as *mut u8, query_len);
+    (*req).query[query_len] = 0;
 
     // Find Content-Length
     let mut content_length: usize = 0;
@@ -298,6 +311,16 @@ fn extract_json_string(body: &str, key: &str) -> Option<String> {
 /// classification (DAEMON_ERROR_BAD_REQUEST for malformed body / missing
 /// fields, DAEMON_ERROR_NOT_FOUND for an unrecognized route). `error_kind`
 /// may be NULL if the caller doesn't care.
+/// Extract a query-string parameter value (`key=value`) from a raw query, or
+/// None. First occurrence wins; values are used verbatim (render flags are
+/// simple identifiers, so no percent-decoding is needed).
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| match pair.split_once('=') {
+        Some((k, v)) if k == key => Some(v),
+        _ => None,
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn http_to_daemon_request(
     req: *mut HttpRequest,
@@ -411,7 +434,7 @@ pub unsafe extern "C" fn http_to_daemon_request(
         return dreq;
     }
 
-    // POST /call/<command>
+    // POST /call/<command>[?render=<flag>]
     if method == HttpMethod::Post && path.starts_with("/call/") {
         let cmd_name = &path[6..];
         if cmd_name.is_empty() {
@@ -422,6 +445,15 @@ pub unsafe extern "C" fn http_to_daemon_request(
         (*dreq).method = DaemonMethod::Call;
         let c = std::ffi::CString::new(cmd_name).unwrap_or_default();
         (*dreq).command = libc::strdup(c.as_ptr());
+        // `?render=<flag>` selects an output projection; resolved in
+        // daemon_dispatch against the command's terminals.
+        let query = std::ffi::CStr::from_ptr((*req).query.as_ptr())
+            .to_str()
+            .unwrap_or("");
+        if let Some(render) = query_param(query, "render") {
+            let rc = std::ffi::CString::new(render).unwrap_or_default();
+            (*dreq).render = libc::strdup(rc.as_ptr());
+        }
 
         // Parse body. Accepts either a bare JSON array (`[arg1, arg2]`)
         // or an object with an `args` array (`{"args": [...]}`).

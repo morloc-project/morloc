@@ -1,20 +1,3 @@
--- Regression test for a latent bug in the SerialAST builder.
---
--- @newtype Deque a = List a@ in the stdlib (with a per-language form
--- @std::deque<$1>@ on the C++ side and a @Packable (List a) (Deque a)@
--- instance) combines with specialized integer aliases (e.g. @type
--- I32 = Int@). A previous bug fully evaluated the type when looking
--- up the outer alias, collapsing the element type from @I32@ to
--- @Int@ and emitting BigInt schema (16-byte width) instead of @i4@
--- (4-byte width). The mismatch surfaced only cross-language with
--- specialized element types -- the older tests used the now-removed
--- @Array@ type with only @Int@/@Real@/@Bool@, all of which are
--- terminal serialization base types.
---
--- This test forces the previously-latent code path: a parameterized
--- newtype-of-list (@Deque@) with element types that themselves alias
--- (@I32 -> Int@, @F32 -> Real@, etc.), passed across language
--- boundaries.
 module main
   ( testDequeI32Cp
   , testDequeI32Pc

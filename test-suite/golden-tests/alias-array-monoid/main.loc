@@ -1,9 +1,3 @@
--- Test that Deque has Semigroup and Monoid instances and that list
--- literals can construct Deque values via the @Packable (List a)
--- (Deque a)@ instance declared in root. (Replaces the earlier
--- @Array@-based form; @Array@ has been removed in favor of @Vector@
--- and @Deque@.)
-
 module main (testDequeMonoidPy, testDequeMonoidCpp, testDequeMonoidR)
 
 import root-py

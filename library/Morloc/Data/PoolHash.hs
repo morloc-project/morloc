@@ -21,6 +21,8 @@ module uses @xxhash-ffi@; the runtime uses @twox-hash@.
 module Morloc.Data.PoolHash
   ( poolHash
   , poolHashHex
+  , hashText
+  , hashFiles
   , computePoolHashes
   , patchManifestPoolHashes
   ) where
@@ -47,19 +49,29 @@ import Morloc.Namespace.State (Script (..))
 -- result order-sensitive and avoids materializing every file in memory
 -- at once.
 poolHash :: T.Text -> [FilePath] -> IO Word64
-poolHash poolSrc includes = do
-  let h0 = XXH.xxh64 (TE.encodeUtf8 poolSrc) 0
-  foldFiles h0 includes
-  where
-    foldFiles h [] = return h
-    foldFiles h (fp : rest) = do
-      -- Strict read so xxh64 (which takes a strict ByteString) can
-      -- consume the file in one shot. Hash-include files are
-      -- user-curated and typically modest; if very large files become
-      -- common, swap to a streaming approach.
-      contents <- BS.readFile fp
-      let h' = XXH.xxh64 contents h
-      foldFiles h' rest
+poolHash poolSrc = foldFilesFrom (XXH.xxh64 (TE.encodeUtf8 poolSrc) 0)
+
+-- | Content-hash a list of files, chaining seeds so the result is
+-- order-sensitive. Used to fold build inputs (e.g. compiled guest objects)
+-- into a cache key exactly once.
+hashFiles :: [FilePath] -> IO Word64
+hashFiles = foldFilesFrom 0
+
+-- Fold file contents into a running hash, seeded by @h@.
+foldFilesFrom :: Word64 -> [FilePath] -> IO Word64
+foldFilesFrom h [] = return h
+foldFilesFrom h (fp : rest) = do
+  -- Strict read so xxh64 (which takes a strict ByteString) can consume the
+  -- file in one shot. Hashed files are typically modest; if very large files
+  -- become common, swap to a streaming approach.
+  contents <- BS.readFile fp
+  foldFilesFrom (XXH.xxh64 contents h) rest
+
+-- | XXH64 of a text, hex-encoded (16 lowercase chars). For deriving a stable,
+-- collision-resistant identifier from emitted source (e.g. a per-program pool
+-- crate name).
+hashText :: T.Text -> T.Text
+hashText t = poolHashHex (XXH.xxh64 (TE.encodeUtf8 t) 0)
 
 -- | Hex-encode a 64-bit pool hash as a 16-character lowercase string.
 -- This is the form embedded into each pool's manifest entry and later
@@ -67,15 +79,19 @@ poolHash poolSrc includes = do
 poolHashHex :: Word64 -> T.Text
 poolHashHex = T.pack . printf "%016x"
 
--- | Hash every script in @pools@, returning a per-language map. The
--- supplied @hash-include@ paths are folded into every pool's hash
--- (a single, program-wide list shared across pools).
-computePoolHashes :: [FilePath] -> [Script] -> IO (Map Lang Word64)
-computePoolHashes includes pools =
+-- | Hash every script in @pools@, returning a per-language map. The @salt@
+-- (a fingerprint of the resolved build parameters) and the supplied
+-- @hash-include@ paths are folded into every pool's hash. The salt makes a
+-- build-parameter change (e.g. a different Futhark backend or extra compiler
+-- flags) invalidate the cache even when the emitted pool source is unchanged,
+-- so a pool built one way never serves results cached from a build built
+-- another way.
+computePoolHashes :: T.Text -> [FilePath] -> [Script] -> IO (Map Lang Word64)
+computePoolHashes salt includes pools =
   Map.fromList <$> mapM go pools
   where
     go p = do
-      h <- poolHash (extractSource p) includes
+      h <- poolHash (salt <> extractSource p) includes
       return (scriptLang p, h)
 
     -- A 'Script' may emit a directory tree with files at any depth.

@@ -25,6 +25,8 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Morloc (generatePools)
 import qualified Morloc as M
+import Morloc.Build.Params (LangParams)
+import qualified Morloc.Build.Params as BP
 import Morloc.CodeGenerator.Emit (TranslateFn)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
@@ -45,6 +47,7 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 import qualified Morloc.ProgramBuilder.Install as Install
+import Morloc.ProgramBuilder.Paths (installedManifestPath, buildDirName)
 import Morloc.Typecheck.Internal (prettyTypeU)
 import System.Directory
   ( createDirectoryIfMissing
@@ -57,7 +60,7 @@ import System.Directory
   , setCurrentDirectory
   )
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath (dropExtension, takeDirectory, takeFileName)
+import System.FilePath (dropExtension, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Temp (createTempDirectory)
 import qualified System.Process as SP
@@ -86,6 +89,7 @@ runMorloc args = do
     (CmdUninstall g) -> cmdUninstall g config
     (CmdNew g) -> cmdNew g
     (CmdEval g) -> cmdEval g verbose config buildConfig
+    (CmdConfig g) -> cmdConfig g config buildConfig
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -100,6 +104,7 @@ getConfig (CmdInit g) = getConfig' (initConfig g) (initVanilla g)
 getConfig (CmdList g) = getConfig' (listConfig g) (listVanilla g)
 getConfig (CmdUninstall g) = getConfig' (uninstallConfig g) (uninstallVanilla g)
 getConfig (CmdEval g) = getConfig' (evalConfig g) (evalVanilla g)
+getConfig (CmdConfig g) = getConfig' (configCmdConfig g) (configCmdVanilla g)
 getConfig (CmdNew _) = getConfig' "" False
 
 getConfig' :: String -> Bool -> IO Config.Config
@@ -117,6 +122,7 @@ getVerbosity (CmdList g) = listVerbose g
 getVerbosity (CmdEval g) = evalVerbose g
 getVerbosity (CmdUninstall _) = 0
 getVerbosity (CmdNew _) = 0
+getVerbosity (CmdConfig _) = 0
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -207,27 +213,85 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
               `finally` setCurrentDirectory origDir
           return buildResult
 
-    buildModuleExecutable locFile _name verbosity' config buildConfig' forceOverwrite = do
+    buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite = do
       code <- MT.readFile locFile
       -- `morloc install --build` re-enters the make pipeline. The
-      -- --unsafe-skip-null-check, --inline-size, --no-shm, and
-      -- --tmpdir flags are `morloc make` opt-ins only, so default
-      -- them here (safer).
-      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite False Nothing False Nothing
+      -- --unsafe-skip-null-check, --inline-size, --no-shm, --tmpdir, and
+      -- --debug flags are `morloc make` opt-ins only, so default them here
+      -- (safer). Build parameters, however, still flow from the build
+      -- config's `lang-params` (this path has no `-X` command line). The
+      -- program identity is the module name (the source is always main.loc,
+      -- so its basename is unhelpful).
+      let mopts =
+            defaultMakeOptions
+              { moLangParams = fromMaybe Map.empty (buildConfigLangParams buildConfig')
+              , moProgramKey = Just name
+              }
+      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite mopts
+
+-- | The per-invocation @morloc make@ options that flow into 'MorlocState'.
+-- Grouped into a record so the many-argument 'makeAndInstall' does not grow a
+-- long, transposition-prone positional tail.
+data MakeOptions = MakeOptions
+  { moUnsafeSkipNullCheck :: Bool
+  , moInlineSize :: Maybe Int64
+  , moNoShm :: Bool
+  , moTmpdir :: Maybe Path
+  , moDebugTrace :: Bool
+  , moLangParams :: LangParams
+  , moProgramKey :: Maybe String
+  , moWrapperSpecs :: Maybe [WrapperSpec]
+  , moBuildParentDir :: Maybe Path
+  }
+
+-- | Safe defaults for paths that re-enter the make pipeline without the full
+-- set of @morloc make@ flags (e.g. @morloc install --build@).
+defaultMakeOptions :: MakeOptions
+defaultMakeOptions =
+  MakeOptions
+    { moUnsafeSkipNullCheck = False
+    , moInlineSize = Nothing
+    , moNoShm = False
+    , moTmpdir = Nothing
+    , moDebugTrace = False
+    , moLangParams = Map.empty
+    , moProgramKey = Nothing
+    , moWrapperSpecs = Nothing
+    , moBuildParentDir = Nothing
+    }
+
+-- | Resolve build parameters: parse each @-X LANG:KEY=VALUE@ and overlay them on
+-- the build config's @lang-params@ (command line wins). Returns 'Left' with a
+-- user-facing message on a malformed argument.
+resolveLangParams :: BuildConfig -> [String] -> Either T.Text LangParams
+resolveLangParams buildConfig rawArgs = do
+  triples <- mapM BP.parseLangParam rawArgs
+  let cli = BP.foldLangParams triples
+      base = fromMaybe Map.empty (buildConfigLangParams buildConfig)
+  return (BP.mergeLangParams base cli)
+
+-- | Apply 'MakeOptions' to the compiler state.
+applyMakeOptions :: MakeOptions -> MorlocState -> MorlocState
+applyMakeOptions mopts s =
+  s { stateUnsafeSkipNullCheck = moUnsafeSkipNullCheck mopts
+    , stateInlineSize = moInlineSize mopts
+    , stateNoShm = moNoShm mopts
+    , stateTmpdir = moTmpdir mopts
+    , stateDebugTrace = moDebugTrace mopts
+    , stateLangParams = moLangParams mopts
+    , stateProgramKey = moProgramKey mopts
+    , stateWrapperSpecs = moWrapperSpecs mopts
+    , stateBuildParentDir = moBuildParentDir mopts
+    }
 
 -- | Compile a morloc program and optionally install it.
 -- Shared by `morloc make --install` and `morloc install --build`.
 makeAndInstall ::
   Maybe Path -> Maybe String -> Code -> [T.Text] -> Int ->
-  Config.Config -> BuildConfig -> Bool -> Bool -> Maybe Int64 -> Bool -> Maybe Path -> IO Bool
-makeAndInstall path outfile code extraIncludes verbosity config buildConfig force unsafeSkipNullCheck inlineSize noShm tmpdir = do
+  Config.Config -> BuildConfig -> Bool -> MakeOptions -> IO Bool
+makeAndInstall path outfile code extraIncludes verbosity config buildConfig force mopts = do
   let action = do
-        MM.modify (\s -> s {stateInstall = True
-                          , stateInstallForce = force
-                          , stateUnsafeSkipNullCheck = unsafeSkipNullCheck
-                          , stateInlineSize = inlineSize
-                          , stateNoShm = noShm
-                          , stateTmpdir = tmpdir})
+        MM.modify $ \s -> (applyMakeOptions mopts s) {stateInstall = True, stateInstallForce = force}
         M.writeProgram translator path code
   result <- MM.runMorlocMonad outfile verbosity config buildConfig action
   passed <- MM.writeMorlocReturn result
@@ -246,7 +310,9 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
             | otherwise = Just (concatMap (fromMaybe []) pkgIncludes)
           allSources = concat (GMap.elems (stateSources finalState))
           directSourcePaths = [ p | Source{srcPath = Just p} <- allSources ]
-      case stateInstallDir finalState of
+      -- The install ROOT (exe/<key>): its basename is the program name, and
+      -- installProgram mirrors sources + registers the launcher from here.
+      case stateBuildRoot finalState of
         Nothing -> do
           putStrLn "Error: install directory was not set during compilation"
           return False
@@ -283,27 +349,89 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
 cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdMake args verbosity config buildConfig = do
   (path, code) <- readScript (makeExpression args) (makeScript args)
-  outfile <- case makeOutfile args of
-    "" -> return Nothing
-    x -> return . Just $ x
-  if makeInstall args
-    then
-      makeAndInstall path outfile code
-        (map T.pack (makeInclude args)) verbosity config buildConfig
-        (makeForce args) (makeUnsafeSkipNullCheck args)
-        (makeInlineSize args) (makeNoShm args) (makeTmpdir args)
-    else do
-      let action = do
-            MM.modify (\s -> s {stateInstall = False
-                              , stateUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
-                              , stateInlineSize = makeInlineSize args
-                              , stateNoShm = makeNoShm args
-                              , stateTmpdir = makeTmpdir args
-                              , stateDebugTrace = makeDebugTrace args})
-            M.writeProgram translator path code
-      result <- MM.runMorlocMonad outfile verbosity config buildConfig action
-      passed <- MM.writeMorlocReturn result
-      return passed
+  -- Program identity for the build directory. Precedence: --name, then the
+  -- explicit -o/--cli-out name (so the same source built twice with
+  -- different output names gets its own build dir), then the source-file
+  -- basename. Expression builds (-e) have no source file, so one of --name
+  -- or -o is required there.
+  let mProgKey = case (makeName args, makeCliOut args) of
+        (Just n, _) -> Just n
+        (Nothing, o) | not (null o) -> Just o
+        (Nothing, _) -> takeBaseName <$> path
+  case mProgKey of
+    Nothing -> do
+      hPutStrLn stderr "Error: expression builds (-e) require --name or -o to name the program"
+      return False
+    Just progKey -> cmdMakeWith args verbosity config buildConfig path code progKey
+
+cmdMakeWith :: MakeCommand -> Int -> Config.Config -> BuildConfig -> Maybe Path -> Code -> String -> IO Bool
+cmdMakeWith args verbosity config buildConfig path code progKey = do
+  let cliName = case makeCliOut args of
+        "" -> progKey
+        x -> x
+      wrapperSpecs =
+        [WrapperSpec WCli cliName | not (makeNoCli args)]
+          ++ [WrapperSpec WMcp (makeMcpOut args) | not (null (makeMcpOut args))]
+          ++ [WrapperSpec WDaemon (makeDaemonOut args) | not (null (makeDaemonOut args))]
+      outfile = case makeCliOut args of
+        "" -> Nothing
+        x -> Just x
+  case resolveLangParams buildConfig (makeLangParams args) of
+    Left err -> do
+      hPutStrLn stderr (T.unpack err)
+      return False
+    Right langParams -> do
+      let mopts =
+            MakeOptions
+              { moUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
+              , moInlineSize = makeInlineSize args
+              , moNoShm = makeNoShm args
+              , moTmpdir = makeTmpdir args
+              , moDebugTrace = makeDebugTrace args
+              , moLangParams = langParams
+              , moProgramKey = Just progKey
+              , moWrapperSpecs = Just wrapperSpecs
+              , moBuildParentDir = makeBuildDir args
+              }
+      if makeInstall args
+        then
+          makeAndInstall path outfile code
+            (map T.pack (makeInclude args)) verbosity config buildConfig
+            (makeForce args) mopts
+        else do
+          let action = do
+                MM.modify $ \s -> (applyMakeOptions mopts s) {stateInstall = False}
+                M.writeProgram translator path code
+          result <- MM.runMorlocMonad outfile verbosity config buildConfig action
+          MM.writeMorlocReturn result
+
+-- | Manage the per-machine build config's @lang-params@ table. A lightweight
+-- read-modify-write of the build config file that, unlike @morloc init@, does
+-- not rebuild the toolchain.
+cmdConfig :: ConfigCommand -> Config.Config -> BuildConfig -> IO Bool
+cmdConfig args config buildConfig =
+  case configCmdAction args of
+    ConfigList -> do
+      if Map.null current
+        then putStrLn "No build parameters set."
+        else mapM_ (putStrLn . renderEntry) (BP.paramEntries current)
+      return True
+    ConfigSet rawArgs ->
+      withParams BP.parseLangParam (\b ts -> BP.mergeLangParams b (BP.foldLangParams ts)) rawArgs
+    ConfigUnset rawArgs ->
+      withParams BP.parseLangKey (foldl (\b (lang, key) -> BP.unsetParam lang key b)) rawArgs
+  where
+    current = fromMaybe Map.empty (buildConfigLangParams buildConfig)
+    nonEmpty m = if Map.null m then Nothing else Just m
+    renderEntry (lang, key, val) = T.unpack lang <> ":" <> T.unpack key <> "=" <> T.unpack val
+    -- Parse each argument, then write the transformed lang-params back. Shared
+    -- by set and unset; only the (parse, transform) pair differs.
+    withParams parse transform rawArgs =
+      case mapM parse rawArgs of
+        Left err -> hPutStrLn stderr (T.unpack err) >> return False
+        Right xs -> do
+          Config.writeBuildConfig config buildConfig {buildConfigLangParams = nonEmpty (transform current xs)}
+          return True
 
 -- | Evaluate a morloc expression
 cmdEval :: EvalCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
@@ -319,7 +447,19 @@ cmdEval args verbosity config buildConfig = do
       extraArgs = evalArgs args
       isSave = not (null saveName)
       exeName = if isSave then saveName else "eval"
-      allowLocal = evalAllowLocalModules args
+      -- --eval-allowed-modules implies --eval-sandbox, so an operator who
+      -- supplies an allow-list can never accidentally leave the gates off.
+      sandboxOn = evalSandbox args || not (null (evalAllowedModules args))
+      allowedModules = Set.fromList
+        [ MV m'
+        | m <- MT.splitOn "," (MT.pack (evalAllowedModules args))
+        , let m' = MT.strip m
+        , not (MT.null m') ]
+      evalSandboxState
+        | sandboxOn = Just allowedModules
+        | otherwise = Nothing
+      -- Sandbox hard-pins local imports off, overriding --allow-local-modules.
+      allowLocal = evalAllowLocalModules args && not sandboxOn
   createDirectoryIfMissing True tmpBase
   bracket
     (do
@@ -332,7 +472,7 @@ cmdEval args verbosity config buildConfig = do
       cleanupTmpDir tmpDir)
     (\(_origDir, tmpDir) -> do
       let action = do
-            MM.modify (\s -> s {stateEvalMode = True, stateAllowLocalModules = allowLocal})
+            MM.modify (\s -> s {stateEvalMode = True, stateAllowLocalModules = allowLocal, stateEvalSandbox = evalSandboxState})
             if isSave then MM.modify (\s -> s {stateInstall = True}) else return ()
             M.writeProgram translator Nothing (Code code)
       result <- MM.runMorlocMonad (Just exeName) verbosity config buildConfig action
@@ -347,7 +487,7 @@ cmdEval args verbosity config buildConfig = do
                   mergedIncludes
                     | all (== Nothing) pkgIncludes = Nothing
                     | otherwise = Just (concatMap (fromMaybe []) pkgIncludes)
-              case stateInstallDir finalState of
+              case stateBuildRoot finalState of
                 Nothing -> do
                   putStrLn "Error: install directory was not set during compilation"
                   return False
@@ -368,8 +508,12 @@ cmdEval args verbosity config buildConfig = do
                       hPutStrLn stderr $ show e
                       return False
             else do
-              let exe = tmpDir </> exeName
-              subcommand <- getFirstSubcommand exe
+              let (_, finalState) = result
+                  exe = tmpDir </> exeName
+                  manifestPath = case stateInstallDir finalState of
+                    Just d -> d </> "manifest.json"
+                    Nothing -> tmpDir </> buildDirName exeName </> "manifest.json"
+              subcommand <- getFirstSubcommand manifestPath
               let cmdArgs = subcommand : extraArgs
               runResult <- try (SP.callProcess exe cmdArgs) :: IO (Either SomeException ())
               case runResult of
@@ -382,22 +526,18 @@ cmdEval args verbosity config buildConfig = do
       exists <- doesDirectoryExist dir
       if exists then removeDirectoryRecursive dir else return ()
 
--- | Extract the first subcommand name from the manifest embedded in a wrapper script.
--- Falls back to "__expr__" if the manifest cannot be parsed.
+-- | Extract the first subcommand name from a program's @manifest.json@.
+-- Falls back to "__expr__" if the manifest cannot be read or parsed.
 getFirstSubcommand :: FilePath -> IO String
-getFirstSubcommand wrapperPath = do
-  result <- try (readFile wrapperPath) :: IO (Either SomeException String)
+getFirstSubcommand manifestPath = do
+  result <- try (BL.readFile manifestPath) :: IO (Either SomeException BL.ByteString)
   case result of
     Left _ -> return "__expr__"
-    Right contents -> do
-      let marker = "### MANIFEST ###"
-          afterMarker = drop 1 $ dropWhile (/= marker) (lines contents)
-          manifestStr = unlines afterMarker
-      case JSON.eitherDecode (BL.fromStrict (MT.encodeUtf8 (MT.pack manifestStr))) of
-        Right pm -> case pmCommands pm of
-          (cmd : _) -> return (T.unpack (pcName cmd))
-          [] -> return "__expr__"
-        Left _ -> return "__expr__"
+    Right bs -> case JSON.eitherDecode bs of
+      Right pm -> case pmCommands pm of
+        (cmd : _) -> return (T.unpack (pcName cmd))
+        [] -> return "__expr__"
+      Left _ -> return "__expr__"
 
 -- | Write metadata about the saved eval expression
 writeEvalMeta :: FilePath -> String -> String -> IO ()
@@ -625,6 +765,7 @@ subsequenceMatch (p : ps) (t : ts)
 cmdList :: ListCommand -> Config.Config -> IO Bool
 cmdList args config = do
   let fdbDir = Config.configHome config </> "fdb"
+      exeDir = Config.configHome config </> "exe"
       libDir = Config.configLibrary config </> Config.configPlane config
       verbose = listVerbose args
       kind = listKind args
@@ -642,7 +783,7 @@ cmdList args config = do
   -- Load program manifests
   allPrograms <-
     if kind /= Just ListModules
-      then loadProgramManifests fdbDir
+      then loadProgramManifests exeDir
       else return []
 
   -- Filter by pattern
@@ -741,29 +882,30 @@ loadModuleManifests fdbDir = do
           )
           moduleFiles
 
+-- | Load program manifests by scanning the exe directory. Each installed
+-- program lives in @exe/<name>/@ with a @manifest.json@ written in place by
+-- the build; the program's identity for listing is the subdirectory name.
 loadProgramManifests :: FilePath -> IO [ProgramManifest]
-loadProgramManifests fdbDir = do
-  result <- try (listDirectory fdbDir) :: IO (Either SomeException [FilePath])
+loadProgramManifests exeDir = do
+  result <- try (listDirectory exeDir) :: IO (Either SomeException [FilePath])
   case result of
     Left _ -> return []
-    Right entries -> do
-      let manifestFiles = filter (".manifest" `isSuffixOf`) entries
-      catMaybes
-        <$> mapM
-          ( \f -> do
-              r <- try (BL.readFile (fdbDir </> f)) :: IO (Either SomeException BL.ByteString)
-              case r of
-                Left _ -> return Nothing
-                Right bs -> case JSON.eitherDecode bs of
-                  Right m ->
-                    let m' =
-                          if T.null (pmName m)
-                            then m {pmName = T.pack (dropExtension (takeFileName f))}
-                            else m
-                     in return (Just m')
-                  Left _ -> return Nothing
-          )
-          manifestFiles
+    Right entries -> catMaybes <$> mapM loadOne entries
+  where
+    loadOne name = do
+      let dir = exeDir </> name
+          manifestPath = installedManifestPath dir
+      isDir <- doesDirectoryExist dir
+      hasManifest <- doesFileExist manifestPath
+      if not (isDir && hasManifest)
+        then return Nothing
+        else do
+          r <- try (BL.readFile manifestPath) :: IO (Either SomeException BL.ByteString)
+          case r of
+            Left _ -> return Nothing
+            Right bs -> case JSON.eitherDecode bs of
+              Right m -> return (Just m {pmName = T.pack name})
+              Left _ -> return Nothing
 
 -- | Discover modules in the library that lack manifests
 discoverModules :: FilePath -> FilePath -> IO [ModuleManifest]
@@ -885,12 +1027,14 @@ uninstallOne ::
   Config.Config -> FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Bool -> Maybe ListKind -> String -> IO Bool
 uninstallOne config fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
   let moduleManifest = fdbDir </> name ++ ".module"
-      programManifest = fdbDir </> name ++ ".manifest"
       moduleDir = libDir </> name
 
   hasModule <- doesFileExist moduleManifest
   hasModuleDir <- doesDirectoryExist moduleDir
-  hasProgram <- doesFileExist programManifest
+  -- A program is identified by its exe/<name>/ build directory (which
+  -- holds manifest.json), not an fdb entry.
+  exeDirPath <- findExeDir exeDir name
+  let hasProgram = maybe False (const True) exeDirPath
 
   let removeModule = (hasModule || hasModuleDir) && kind /= Just ListPrograms
       removeProgram = hasProgram && kind /= Just ListModules
@@ -930,19 +1074,14 @@ uninstallOne config fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = 
             then do
               putStrLn $ "Would uninstall program '" <> name <> "'"
               if binExists then putStrLn $ "  Remove: " <> binPath else return ()
-              -- Check for exe dir
-              exeDirPath <- findExeDir exeDir name
               case exeDirPath of
                 Just d -> putStrLn $ "  Remove: " <> d
                 Nothing -> return ()
-              putStrLn $ "  Remove: " <> programManifest
             else do
               if binExists then removeFile binPath else return ()
-              exeDirPath <- findExeDir exeDir name
               case exeDirPath of
                 Just d -> removeDirectoryRecursive d
                 Nothing -> return ()
-              removeFile programManifest
               hPutStrLn stderr $ "Uninstalled program '" <> name <> "'"
         else return ()
 

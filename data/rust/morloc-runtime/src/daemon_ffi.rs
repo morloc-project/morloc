@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::cschema::CSchema;
@@ -22,6 +22,175 @@ const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
+
+// Daemon result-form policy (set in `daemon_run` from `DaemonConfig`).
+// `G_DAEMON_OUTPUT_PACKET` selects raw-packet output for `call` results over
+// the length-prefixed (Unix socket / TCP) transports; `G_DAEMON_COMPRESSION`
+// is the zstd preset applied to those packets. HTTP and control methods are
+// unaffected -- see `CURRENT_OUTPUT_PACKET` below.
+static G_DAEMON_OUTPUT_PACKET: AtomicBool = AtomicBool::new(false);
+static G_DAEMON_COMPRESSION: AtomicU8 = AtomicU8::new(0);
+
+thread_local! {
+    /// Per-thread flag: when set, `daemon_dispatch`'s `call` path returns a
+    /// raw morloc data packet on `resp.result_bytes` instead of a JSON string
+    /// on `resp.result_json`. Set by `handle_lp_connection` (the only caller
+    /// that speaks the raw-packet wire) for the duration of one dispatch, and
+    /// restored afterward; the HTTP handler and MCP/router callers never set
+    /// it, so their dispatches stay JSON even on a packet-configured daemon.
+    static CURRENT_OUTPUT_PACKET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Read the current thread's packet-output flag.
+fn current_output_packet() -> bool {
+    CURRENT_OUTPUT_PACKET.with(|c| c.get())
+}
+
+/// Set the current thread's packet-output flag, returning the previous value
+/// so the caller can restore it after the dispatch completes.
+fn set_current_output_packet(new: bool) -> bool {
+    CURRENT_OUTPUT_PACKET.with(|c| {
+        let old = c.get();
+        c.set(new);
+        old
+    })
+}
+
+thread_local! {
+    /// Per-thread flag: when set, `daemon_dispatch` does `?render=` output-
+    /// projection resolution against the command's terminals (the `@default`
+    /// terminal when no render is given). HTTP-only -- LP/MCP callers select
+    /// their projection before dispatch, so this stays false for them. See also
+    /// `CURRENT_OUTPUT_MEDIA_BYTES`, which governs the raw-bytes response form
+    /// and is shared with the in-process MCP server.
+    static CURRENT_OUTPUT_HTTP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Per-thread flag: when set, `daemon_dispatch`'s `call` path returns the
+    /// raw content bytes of a media-typed (`@mime`) return on
+    /// `resp.result_bytes` plus the media type on `resp.mime`, instead of a JSON
+    /// string. Set for one dispatch and restored afterward by the two callers
+    /// that can consume raw media -- `handle_http_connection` (emits a
+    /// `Content-Type`) and the in-process MCP server (base64s the bytes into a
+    /// content block, via `daemon_set_output_media_bytes`). Off for everyone
+    /// else, so their dispatches stay JSON.
+    static CURRENT_OUTPUT_MEDIA_BYTES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Read the current thread's HTTP-output flag.
+fn current_output_http() -> bool {
+    CURRENT_OUTPUT_HTTP.with(|c| c.get())
+}
+
+/// Read the current thread's raw-media-output flag.
+fn current_output_media_bytes() -> bool {
+    CURRENT_OUTPUT_MEDIA_BYTES.with(|c| c.get())
+}
+
+/// Set the current thread's raw-media-output flag, returning the previous value.
+fn set_current_output_media_bytes(new: bool) -> bool {
+    CURRENT_OUTPUT_MEDIA_BYTES.with(|c| {
+        let old = c.get();
+        c.set(new);
+        old
+    })
+}
+
+/// C-ABI entry point for the in-process MCP server to request the raw-media
+/// response form for its next `daemon_dispatch` on this thread (a media-typed
+/// `@mime` return comes back as raw content bytes + media type instead of a
+/// JSON int array). Returns the previous value so the caller can restore it.
+/// The HTTP handler sets the same flag directly. Off by default.
+#[no_mangle]
+pub extern "C" fn daemon_set_output_media_bytes(on: bool) -> bool {
+    set_current_output_media_bytes(on)
+}
+
+/// Set the current thread's HTTP-output flag, returning the previous value.
+fn set_current_output_http(new: bool) -> bool {
+    CURRENT_OUTPUT_HTTP.with(|c| {
+        let old = c.get();
+        c.set(new);
+        old
+    })
+}
+
+/// Resolve the HTTP output projection for a `/call`: the command to actually
+/// dispatch given `?render=<flag>`. Null render = fire the `@default` terminal
+/// (matching the CLI's no-flag behavior); `"raw"` = the command's own typed
+/// value (the `-f json` analog); a flag = that terminal's entry command. `Err`
+/// for an unknown render flag.
+unsafe fn resolve_render_target<'a>(
+    mv: *const crate::manifest_ffi::Manifest,
+    cmd: &'a crate::manifest_ffi::ManifestCommand,
+    render: *const c_char,
+) -> Result<&'a crate::manifest_ffi::ManifestCommand, String> {
+    // The entry-command name to redirect to (borrowed from the manifest, which
+    // outlives this dispatch), or None for the command's own typed value
+    // (`raw` / no default).
+    let entry: Option<*const c_char> = if render.is_null() {
+        terminal_entry(cmd, None) // fire the @default terminal, if any
+    } else {
+        let r = CStr::from_ptr(render).to_str().unwrap_or("");
+        if r == "raw" {
+            None
+        } else {
+            match terminal_entry(cmd, Some(r)) {
+                Some(e) => Some(e),
+                None => {
+                    return Err(format!(
+                        "unknown render '{}' for command '{}'",
+                        r,
+                        CStr::from_ptr(cmd.name).to_string_lossy()
+                    ))
+                }
+            }
+        }
+    };
+    match entry {
+        None => Ok(cmd),
+        Some(name) => {
+            let m: &'a crate::manifest_ffi::Manifest = &*mv;
+            m.command_by_name(CStr::from_ptr(name)).ok_or_else(|| {
+                format!(
+                    "render entry '{}' not found",
+                    CStr::from_ptr(name).to_string_lossy()
+                )
+            })
+        }
+    }
+}
+
+/// The entry-command name (`t.entry`, borrowed from the manifest) of the first
+/// matching terminal, or None. `match_long = Some(l)` picks the terminal whose
+/// long flag is `l`; `None` picks the `@default` terminal.
+unsafe fn terminal_entry(
+    cmd: &crate::manifest_ffi::ManifestCommand,
+    match_long: Option<&str>,
+) -> Option<*const c_char> {
+    for i in 0..cmd.n_terminals {
+        let t = &*cmd.terminals.add(i);
+        if t.entry.is_null() {
+            continue;
+        }
+        let matched = match match_long {
+            Some(l) => {
+                !t.long.is_null() && CStr::from_ptr(t.long).to_str().map_or(false, |x| x == l)
+            }
+            None => t.default,
+        };
+        if matched {
+            return Some(t.entry);
+        }
+    }
+    None
+}
+// Eval sandbox policy for served eval/bind. When G_EVAL_SANDBOX is set, the
+// forked `morloc eval` runs with `--eval-sandbox` (+ the allow-list), so it
+// refuses directly-written IO intrinsics and imports outside the list. Read
+// once in the PARENT before fork (never locked in the async-signal-unsafe
+// post-fork child).
+static G_EVAL_SANDBOX: AtomicBool = AtomicBool::new(false);
+static G_EVAL_ALLOWED: Mutex<Option<String>> = Mutex::new(None);
 
 /// Set true while the daemon is performing pool-crash recovery: SIGTERM/KILL
 /// pools, drop SHM, respawn, etc. Workers must bail out of any incoming or
@@ -121,6 +290,11 @@ pub struct DaemonConfig {
     pub pool_alive_fn: Option<unsafe extern "C" fn(usize) -> bool>,
     pub n_pools: usize,
     pub eval_timeout: i32,
+    /// When true, `call` results over the Unix socket / TCP transports are
+    /// returned as a raw morloc data packet instead of a JSON envelope.
+    pub output_packet: bool,
+    /// zstd preset (0..=9) for `output_packet` results; 0 = no compression.
+    pub compression_level: u8,
 }
 
 /// Error classification for a daemon dispatch failure.
@@ -161,6 +335,19 @@ pub struct DaemonResponse {
     pub error_kind: i32,
     pub result_json: *mut c_char,
     pub error: *mut c_char,
+    /// Raw morloc data-packet bytes for the `-f packet` daemon wire. Null in
+    /// JSON mode (the default); non-null is the tag that
+    /// `handle_lp_connection` writes these bytes verbatim instead of the JSON
+    /// envelope. `libc::malloc`'d by the packet normalizer; freed in
+    /// `daemon_free_response`. Appended after the original fields so the C ABI
+    /// offsets of `id..error` (mirrored by nexus-side readers) are unchanged.
+    pub result_bytes: *mut u8,
+    pub result_len: usize,
+    /// Media type (`@mime`) of a media-typed return, set alongside
+    /// `result_bytes` when serving an HTTP request; the HTTP handler emits it as
+    /// the `Content-Type`. Null in JSON/packet modes. `libc::strdup`'d; freed in
+    /// `daemon_free_response`. Appended last so earlier C-ABI offsets are stable.
+    pub mime: *mut c_char,
 }
 
 // -- Binding store (replaces linear-probe hash table with HashMap) ------------
@@ -232,6 +419,41 @@ impl BindingStore {
                 return None;
             }
 
+            // Build argv in the PARENT (the policy read locks a mutex, which
+            // is unsafe in the post-fork child). These outlive the fork.
+            let cmd = CString::new("morloc").unwrap();
+            let arg_eval = CString::new("eval").unwrap();
+            let arg_save = CString::new("--save").unwrap();
+            let arg_hex = CString::new(hash_hex.as_str()).unwrap();
+            // `morloc eval` takes a script file by default; the binding store
+            // supplies an inline expression.
+            let arg_dash_e = CString::new("-e").unwrap();
+            // `expr` is client-supplied; an interior NUL cannot be exec'd.
+            // Fail this bind cleanly rather than panicking the worker thread.
+            let arg_expr = match CString::new(expr) {
+                Ok(c) => c,
+                Err(_) => {
+                    libc::close(stdout_pipe[0]);
+                    libc::close(stdout_pipe[1]);
+                    libc::close(stderr_pipe[0]);
+                    libc::close(stderr_pipe[1]);
+                    return None;
+                }
+            };
+            let policy = eval_policy_args();
+            // argv: morloc eval --save <hex> -e <policy...> <expr> NULL.
+            let mut argv: Vec<*const c_char> = Vec::with_capacity(7 + policy.len());
+            argv.push(cmd.as_ptr());
+            argv.push(arg_eval.as_ptr());
+            argv.push(arg_save.as_ptr());
+            argv.push(arg_hex.as_ptr());
+            argv.push(arg_dash_e.as_ptr());
+            for p in &policy {
+                argv.push(p.as_ptr());
+            }
+            argv.push(arg_expr.as_ptr());
+            argv.push(ptr::null());
+
             let pid = libc::fork();
             if pid < 0 {
                 libc::close(stdout_pipe[0]);
@@ -263,24 +485,7 @@ impl BindingStore {
                     libc::setrlimit(libc::RLIMIT_AS, &as_limit);
                 }
 
-                let cmd = CString::new("morloc").unwrap();
-                let arg_eval = CString::new("eval").unwrap();
-                let arg_save = CString::new("--save").unwrap();
-                let arg_hex = CString::new(hash_hex.as_str()).unwrap();
-                // `morloc eval` takes a script file by default; the
-                // binding store supplies an inline expression.
-                let arg_dash_e = CString::new("-e").unwrap();
-                let arg_expr = CString::new(expr).unwrap();
-                libc::execlp(
-                    cmd.as_ptr(),
-                    cmd.as_ptr(),
-                    arg_eval.as_ptr(),
-                    arg_save.as_ptr(),
-                    arg_hex.as_ptr(),
-                    arg_dash_e.as_ptr(),
-                    arg_expr.as_ptr(),
-                    ptr::null::<c_char>(),
-                );
+                libc::execvp(cmd.as_ptr(), argv.as_ptr());
                 libc::_exit(127);
             }
 
@@ -586,6 +791,9 @@ pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
     if !(*req).name.is_null() {
         libc::free((*req).name as *mut c_void);
     }
+    if !(*req).render.is_null() {
+        libc::free((*req).render as *mut c_void);
+    }
     libc::free(req as *mut c_void);
 }
 
@@ -602,6 +810,12 @@ pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
     }
     if !(*resp).error.is_null() {
         libc::free((*resp).error as *mut c_void);
+    }
+    if !(*resp).result_bytes.is_null() {
+        libc::free((*resp).result_bytes as *mut c_void);
+    }
+    if !(*resp).mime.is_null() {
+        libc::free((*resp).mime as *mut c_void);
     }
     libc::free(resp as *mut c_void);
 }
@@ -671,6 +885,44 @@ pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
     G_EVAL_TIMEOUT.store(t, Ordering::Relaxed);
 }
 
+/// Set the eval sandbox policy applied to forked `morloc eval`/`--save`.
+/// `sandbox` enables the sandbox; `allowed` is a NUL-terminated, comma-
+/// separated module allow-list (may be null/empty). The nexus calls this
+/// once before serving; the global is process-wide, so every serve path
+/// (daemon, router, future MCP eval) is covered.
+#[no_mangle]
+pub extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
+    G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
+    let list = if allowed.is_null() {
+        None
+    } else {
+        // Safe: `allowed` is a caller-owned C string valid for this call.
+        unsafe { CStr::from_ptr(allowed) }
+            .to_str()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    *G_EVAL_ALLOWED.lock().unwrap() = list;
+}
+
+/// Build the sandbox policy argv tail (`--eval-sandbox [--eval-allowed-modules
+/// <list>]`) for a forked `morloc eval`. MUST be called in the PARENT before
+/// fork: it locks G_EVAL_ALLOWED, which is not async-signal-safe to touch in
+/// the post-fork child. The returned CStrings outlive the fork (the child
+/// shares the parent's address space until exec).
+fn eval_policy_args() -> Vec<CString> {
+    let mut out = Vec::new();
+    if G_EVAL_SANDBOX.load(Ordering::Relaxed) {
+        out.push(CString::new("--eval-sandbox").unwrap());
+        if let Some(list) = G_EVAL_ALLOWED.lock().unwrap().as_deref() {
+            out.push(CString::new("--eval-allowed-modules").unwrap());
+            out.push(CString::new(list).unwrap());
+        }
+    }
+    out
+}
+
 // -- Fork-based eval/typecheck ------------------------------------------------
 
 /// Fork `morloc <subcmd> <expr>`, capture stdout/stderr, return a DaemonResponse.
@@ -686,6 +938,27 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
     }
+
+    // Build the exec argv in the PARENT (before fork): the sandbox policy
+    // read locks a mutex, which is not async-signal-safe in the child. The
+    // child shares this address space until exec, so these outlive the fork.
+    let cmd = CString::new("morloc").unwrap();
+    let arg_subcmd = CString::new(subcmd).unwrap();
+    // `morloc eval`/`typecheck` take a script file by default; the daemon
+    // always supplies an inline expression, so pass `-e`.
+    let dash_e = CString::new("-e").unwrap();
+    let policy = eval_policy_args();
+    // argv: morloc <subcmd> -e <policy...> <expr> NULL. Policy flags precede
+    // the expr positional so the positional is never read as a flag value.
+    let mut argv: Vec<*const c_char> = Vec::with_capacity(5 + policy.len());
+    argv.push(cmd.as_ptr());
+    argv.push(arg_subcmd.as_ptr());
+    argv.push(dash_e.as_ptr());
+    for p in &policy {
+        argv.push(p.as_ptr());
+    }
+    argv.push(expr);
+    argv.push(ptr::null());
 
     let pid = libc::fork();
     if pid < 0 {
@@ -723,19 +996,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
             libc::setrlimit(libc::RLIMIT_AS, &as_limit);
         }
 
-        let cmd = CString::new("morloc").unwrap();
-        let arg_subcmd = CString::new(subcmd).unwrap();
-        // `morloc eval`/`typecheck` take a script file by default; the
-        // daemon always supplies an inline expression, so pass `-e`.
-        let dash_e = CString::new("-e").unwrap();
-        libc::execlp(
-            cmd.as_ptr(),
-            cmd.as_ptr(),
-            arg_subcmd.as_ptr(),
-            dash_e.as_ptr(),
-            expr,
-            ptr::null::<c_char>(),
-        );
+        libc::execvp(cmd.as_ptr(), argv.as_ptr());
         libc::_exit(127);
     }
 
@@ -829,6 +1090,102 @@ unsafe fn read_fd_to_vec(fd: i32) -> Vec<u8> {
         buf.extend_from_slice(&tmp[..n as usize]);
     }
     buf
+}
+
+// -- Packet-mode result serialization -----------------------------------------
+
+/// Mark `resp` as a failed INTERNAL error. If `*err` carries a message it is
+/// moved onto `resp.error` and `*err` reset to null (so callers' later
+/// null-checks stay correct); otherwise `default_msg` is used.
+unsafe fn set_packet_error(
+    resp: *mut DaemonResponse,
+    err: *mut *mut c_char,
+    default_msg: &str,
+) {
+    (*resp).success = false;
+    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+    if (*err).is_null() {
+        let c = CString::new(default_msg).unwrap_or_default();
+        (*resp).error = libc::strdup(c.as_ptr());
+    } else {
+        (*resp).error = *err;
+        *err = ptr::null_mut();
+    }
+}
+
+/// Flatten an existing morloc data packet to self-contained bytes (reading SHM
+/// for RPTR sources and applying zstd `compression`), storing them on
+/// `resp.result_bytes`/`result_len` and marking success. On failure the error
+/// fields on `resp` are set instead. The caller owns `packet` and frees it.
+unsafe fn packetize_data_packet(
+    resp: *mut DaemonResponse,
+    packet: *const u8,
+    compression: u8,
+    err: *mut *mut c_char,
+) {
+    let sz = crate::packet_ffi::morloc_packet_size(packet, err);
+    if !(*err).is_null() {
+        set_packet_error(resp, err, "failed to read result packet header");
+        return;
+    }
+    let mut out: *mut u8 = ptr::null_mut();
+    let mut outlen: usize = 0;
+    let rc = crate::packet_ffi::normalize_data_packet_for_output(
+        packet, sz, compression, &mut out, &mut outlen, err,
+    );
+    if rc != 0 || !(*err).is_null() {
+        set_packet_error(resp, err, "failed to serialize result packet");
+        return;
+    }
+    (*resp).success = true;
+    (*resp).result_bytes = out;
+    (*resp).result_len = outlen;
+}
+
+/// Wrap a result voidstar in a morloc data packet and flatten it to bytes via
+/// [`packetize_data_packet`]. MUST run while the eval arena is still alive (the
+/// voidstar and the RPTR packet reference SHM the arena owns).
+unsafe fn packetize_result_voidstar(
+    resp: *mut DaemonResponse,
+    voidstar: *mut c_void,
+    schema: *const CSchema,
+    compression: u8,
+    err: *mut *mut c_char,
+) {
+    let pkt = crate::cli::wrap_voidstar_as_packet(voidstar, schema, err);
+    if pkt.is_null() || !(*err).is_null() {
+        set_packet_error(resp, err, "failed to build result packet");
+        if !pkt.is_null() {
+            libc::free(pkt as *mut c_void);
+        }
+        return;
+    }
+    packetize_data_packet(resp, pkt, compression, err);
+    libc::free(pkt as *mut c_void);
+}
+
+/// Fill `resp` with the raw content bytes of a media-typed (`@mime`) return:
+/// serialize `voidstar` to its `-f raw` bytes and, on success, set
+/// `result_bytes`/`result_len` + strdup the media type onto `mime`; on failure
+/// set the error fields. `voidstar` is the result value (pure eval) or the
+/// pool packet's value (remote). Mirrors the `packetize_*` result helpers.
+unsafe fn emit_raw_media(
+    resp: *mut DaemonResponse,
+    voidstar: *mut c_void,
+    schema: *const CSchema,
+    mime: *const c_char,
+) {
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut raw_len: usize = 0;
+    let raw = crate::json_ffi::voidstar_to_raw_bytes(voidstar, schema, &mut raw_len, &mut err);
+    if raw.is_null() || !err.is_null() {
+        set_packet_error(resp, &mut err, "failed to serialize media return");
+        return;
+    }
+    (*resp).success = true;
+    (*resp).result_bytes = raw;
+    (*resp).result_len = raw_len;
+    (*resp).mime = libc::strdup(mime);
 }
 
 // -- Dispatch -----------------------------------------------------------------
@@ -1092,33 +1449,57 @@ pub unsafe extern "C" fn daemon_dispatch(
 
     // The manifest is the canonical v2 C struct from manifest_ffi.rs.
     // No local mirror needed -- import the real type and walk it.
-    use crate::manifest_ffi::{Manifest as ManifestC, ManifestArgKind, ManifestCommand};
+    use crate::manifest_ffi::{Manifest as ManifestC, ManifestArgKind};
 
     let mv = manifest as *const ManifestC;
     let command_name = CStr::from_ptr((*request).command);
-    let mut cmd: *const ManifestCommand = ptr::null();
-    for i in 0..(*mv).n_commands {
-        let c = &*(*mv).commands.add(i);
-        if CStr::from_ptr(c.name) == command_name {
-            cmd = c;
-            break;
+    let cmd = match (*mv).command_by_name(command_name) {
+        Some(c) => c,
+        None => {
+            (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_NOT_FOUND;
+            let msg = format!("Unknown command: {}", command_name.to_string_lossy());
+            let c = CString::new(msg).unwrap_or_default();
+            (*resp).error = libc::strdup(c.as_ptr());
+            return resp;
         }
-    }
-
-    if cmd.is_null() {
-        (*resp).success = false;
-        (*resp).error_kind = DAEMON_ERROR_NOT_FOUND;
-        let msg = format!(
-            "Unknown command: {}",
-            command_name.to_string_lossy()
-        );
-        let c = CString::new(msg).unwrap_or_default();
-        (*resp).error = libc::strdup(c.as_ptr());
-        return resp;
-    }
-
-    let cmd = &*cmd;
+    };
+    // HTTP output selection: `?render=<flag>` (or the command's `@default`
+    // terminal when absent) re-points dispatch to that projection's entry
+    // command -- same argument shape by construction, so parsing below is
+    // unchanged. Gated on the HTTP transport so LP / MCP callers are unaffected:
+    // a bare LP `/call` runs the command's own typed value, never the @default
+    // projection (LP framing carries no render selector and its clients decode
+    // the typed value directly). The @default asymmetry is intentional.
+    let cmd = if current_output_http() {
+        match resolve_render_target(mv, cmd, (*request).render) {
+            Ok(c) => c,
+            Err(msg) => {
+                (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+                let ce = CString::new(msg).unwrap_or_default();
+                (*resp).error = libc::strdup(ce.as_ptr());
+                return resp;
+            }
+        }
+    } else {
+        cmd
+    };
     let expected_nargs = cmd.n_args;
+
+    // Result-form policy for this dispatch. `want_packet` is a per-thread flag
+    // set only by the raw-packet (Unix socket / TCP) wire; the HTTP handler and
+    // MCP/router callers leave it false, so they always take the JSON path
+    // below. When set, both the pure-eval and remote sub-cases emit a morloc
+    // data packet (compressed per `compression`) on `resp.result_bytes`.
+    let want_packet = current_output_packet();
+    // Raw-media output: when a raw-media consumer (the HTTP handler or the
+    // in-process MCP server) is active AND the command's return type carries a
+    // `@mime`, emit the raw content bytes + media type instead of JSON. The HTTP
+    // handler turns this into a `Content-Type` body; MCP base64s it into a
+    // content block. Both skip the wasteful JSON int-array round-trip.
+    let want_media_bytes = current_output_media_bytes() && !cmd.ret.mime.is_null();
+    let compression = G_DAEMON_COMPRESSION.load(Ordering::Relaxed);
 
     // Parse JSON args into argument_t** array
     let mut err: *mut c_char = ptr::null_mut();
@@ -1301,6 +1682,27 @@ pub unsafe extern "C" fn daemon_dispatch(
                     (*resp).success = false;
                     (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
+                } else if want_media_bytes {
+                    // Raw-media return: raw content bytes + media type, so the
+                    // consumer (HTTP `Content-Type` body / MCP content block)
+                    // skips the JSON int array.
+                    emit_raw_media(
+                        resp,
+                        result_abs as *mut c_void,
+                        return_schema as *const CSchema,
+                        cmd.ret.mime,
+                    );
+                } else if want_packet {
+                    // Packet mode: wrap the result voidstar in a data packet
+                    // and flatten it to self-contained bytes (reading SHM,
+                    // applying zstd) BEFORE the arena guard drops below.
+                    packetize_result_voidstar(
+                        resp,
+                        result_abs as *mut c_void,
+                        return_schema as *const CSchema,
+                        compression,
+                        &mut err,
+                    );
                 } else {
                     let json = voidstar_to_json_string(
                         result_abs as *const c_void,
@@ -1453,6 +1855,13 @@ pub unsafe extern "C" fn daemon_dispatch(
                     (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                     libc::free(result_packet as *mut c_void);
+                } else if want_packet {
+                    // Packet mode: forward the pool's result packet as
+                    // self-contained bytes -- no JSON round-trip, no schema
+                    // parse. A pool FAIL packet was already turned into
+                    // `resp.error` by the `packet_error` check above.
+                    packetize_data_packet(resp, result_packet, compression, &mut err);
+                    libc::free(result_packet as *mut c_void);
                 } else {
                     let return_schema = parse_schema(cmd.ret.schema, &mut err);
                     if !err.is_null() {
@@ -1470,6 +1879,15 @@ pub unsafe extern "C" fn daemon_dispatch(
                             (*resp).success = false;
                             (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                             (*resp).error = err;
+                        } else if want_media_bytes {
+                            // Raw-media return: raw content bytes + media type
+                            // from the pool's result value.
+                            emit_raw_media(
+                                resp,
+                                packet_value as *mut c_void,
+                                return_schema as *const CSchema,
+                                cmd.ret.mime,
+                            );
                         } else {
                             let json = voidstar_to_json_string(
                                 packet_value as *const c_void,
@@ -1680,20 +2098,51 @@ unsafe fn handle_lp_connection(
         return;
     }
 
+    // Packet output applies only to `call` results on this raw-packet (Unix
+    // socket / TCP) wire. Scoped per-thread around the dispatch so the shared
+    // `daemon_dispatch` stays JSON for HTTP and control methods.
+    let want_packet = G_DAEMON_OUTPUT_PACKET.load(Ordering::Relaxed)
+        && (*req).method == DaemonMethod::Call;
+    let prev = set_current_output_packet(want_packet);
     let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
-
-    let mut resp_len: usize = 0;
-    let resp_json = daemon_serialize_response(resp, &mut resp_len);
+    set_current_output_packet(prev);
 
     let mut write_err: *mut c_char = ptr::null_mut();
-    write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+    if want_packet && !(*resp).result_bytes.is_null() {
+        // Success (or a forwarded FAIL packet): raw bytes, no JSON envelope.
+        write_lp_message(
+            client_fd,
+            (*resp).result_bytes as *const c_char,
+            (*resp).result_len,
+            &mut write_err,
+        );
+    } else if want_packet {
+        // An error was raised before packet construction; synthesize a FAIL
+        // packet so a packet-mode client always reads exactly one packet.
+        let msg = if !(*resp).error.is_null() {
+            CStr::from_ptr((*resp).error).to_string_lossy().into_owned()
+        } else {
+            "unknown daemon error".to_string()
+        };
+        let fail = morloc_runtime_types::packet::make_fail_packet_bytes(&msg);
+        write_lp_message(
+            client_fd,
+            fail.as_ptr() as *const c_char,
+            fail.len(),
+            &mut write_err,
+        );
+    } else {
+        let mut resp_len: usize = 0;
+        let resp_json = daemon_serialize_response(resp, &mut resp_len);
+        write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+        libc::free(resp_json as *mut c_void);
+    }
     if !write_err.is_null() {
         let err_str = CStr::from_ptr(write_err).to_string_lossy();
         eprintln!("morloc-daemon: write error: {}", err_str);
         libc::free(write_err as *mut c_void);
     }
 
-    libc::free(resp_json as *mut c_void);
     daemon_free_request(req);
     daemon_free_response(resp);
     libc::close(client_fd);
@@ -1794,46 +2243,69 @@ unsafe fn handle_http_connection(
     }
     http_free_request(http_req);
 
+    // For the duration of this dispatch, enable HTTP `?render=` resolution and
+    // the raw-media response form: a return whose type carries a `@mime` comes
+    // back as raw bytes + media type rather than JSON, so we can set
+    // `Content-Type` below.
+    let prev_http = set_current_output_http(true);
+    let prev_media = set_current_output_media_bytes(true);
     let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
-
-    let mut resp_len: usize = 0;
-    let resp_json = daemon_serialize_response(resp, &mut resp_len);
-
-    // Append newline for terminal-friendly output
-    let resp_body = libc::malloc(resp_len + 2) as *mut u8;
-    ptr::copy_nonoverlapping(resp_json as *const u8, resp_body, resp_len);
-    *resp_body.add(resp_len) = b'\n';
-    *resp_body.add(resp_len + 1) = 0;
+    set_current_output_media_bytes(prev_media);
+    set_current_output_http(prev_http);
 
     let status = daemon_error_kind_to_http_status(
         (*resp).error_kind, (*resp).success,
     );
-    let ct = b"application/json\0";
-    // 503 carries Retry-After: 1 so HTTP clients with automatic-retry
-    // middleware (curl --retry, axios-retry, etc.) back off appropriately
-    // during the brief pool-crash recovery window.
-    if status == 503 {
-        let extra = b"Retry-After: 1\r\n\0";
-        http_write_response_ex(
-            client_fd,
-            status,
-            ct.as_ptr() as *const c_char,
-            resp_body as *const c_char,
-            resp_len + 1,
-            extra.as_ptr() as *const c_char,
-        );
-    } else {
+
+    if (*resp).success && !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
+        // Media-typed return (`@mime`): send the raw content bytes with the
+        // declared Content-Type instead of the JSON envelope, so an HTTP client
+        // gets a real image/PDF/... it can save. Errors still go out as JSON.
         http_write_response(
             client_fd,
             status,
-            ct.as_ptr() as *const c_char,
-            resp_body as *const c_char,
-            resp_len + 1,
+            (*resp).mime,
+            (*resp).result_bytes as *const c_char,
+            (*resp).result_len,
         );
+    } else {
+        let mut resp_len: usize = 0;
+        let resp_json = daemon_serialize_response(resp, &mut resp_len);
+
+        // Append newline for terminal-friendly output
+        let resp_body = libc::malloc(resp_len + 2) as *mut u8;
+        ptr::copy_nonoverlapping(resp_json as *const u8, resp_body, resp_len);
+        *resp_body.add(resp_len) = b'\n';
+        *resp_body.add(resp_len + 1) = 0;
+
+        let ct = b"application/json\0";
+        // 503 carries Retry-After: 1 so HTTP clients with automatic-retry
+        // middleware (curl --retry, axios-retry, etc.) back off appropriately
+        // during the brief pool-crash recovery window.
+        if status == 503 {
+            let extra = b"Retry-After: 1\r\n\0";
+            http_write_response_ex(
+                client_fd,
+                status,
+                ct.as_ptr() as *const c_char,
+                resp_body as *const c_char,
+                resp_len + 1,
+                extra.as_ptr() as *const c_char,
+            );
+        } else {
+            http_write_response(
+                client_fd,
+                status,
+                ct.as_ptr() as *const c_char,
+                resp_body as *const c_char,
+                resp_len + 1,
+            );
+        }
+
+        libc::free(resp_body as *mut c_void);
+        libc::free(resp_json as *mut c_void);
     }
 
-    libc::free(resp_body as *mut c_void);
-    libc::free(resp_json as *mut c_void);
     daemon_free_request(req);
     daemon_free_response(resp);
     libc::close(client_fd);
@@ -1985,6 +2457,11 @@ pub unsafe extern "C" fn daemon_run(
     n_pools: usize,
     shm_basename: *const c_char,
 ) {
+    // Widen the open-file ceiling: this process accepts and fans out to every
+    // pool, so it can hold the most fds. poll() tolerates fds >= 1024 but only
+    // if the soft limit permits them to exist.
+    crate::utility::raise_nofile_limit();
+
     // Set globals
     G_POOL_ALIVE_FN = (*config).pool_alive_fn;
     G_N_POOLS = n_pools;
@@ -1994,6 +2471,8 @@ pub unsafe extern "C" fn daemon_run(
         30
     };
     G_EVAL_TIMEOUT.store(timeout, Ordering::Relaxed);
+    G_DAEMON_OUTPUT_PACKET.store((*config).output_packet, Ordering::Relaxed);
+    G_DAEMON_COMPRESSION.store((*config).compression_level, Ordering::Relaxed);
 
     // Initialize binding store
     if G_BINDING_STORE.is_null() {
@@ -2050,7 +2529,7 @@ pub unsafe extern "C" fn daemon_run(
             libc::close(sock_fd);
             return;
         }
-        libc::listen(sock_fd, 64);
+        libc::listen(sock_fd, libc::SOMAXCONN);
         fds[nfds].fd = sock_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 0;
@@ -2094,7 +2573,7 @@ pub unsafe extern "C" fn daemon_run(
             return;
         }
         let actual = getsockname_port(tcp_fd).unwrap_or(requested);
-        libc::listen(tcp_fd, 64);
+        libc::listen(tcp_fd, libc::SOMAXCONN);
         fds[nfds].fd = tcp_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 1;
@@ -2136,7 +2615,7 @@ pub unsafe extern "C" fn daemon_run(
             return;
         }
         let actual = getsockname_port(http_fd).unwrap_or(requested);
-        libc::listen(http_fd, 64);
+        libc::listen(http_fd, libc::SOMAXCONN);
         fds[nfds].fd = http_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 2;

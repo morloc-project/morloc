@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   , rustLang
   ) where
 
+import Control.Monad (foldM)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import qualified Control.Monad.State.Strict as CMS
@@ -52,6 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
 import Morloc.CodeGenerator.Serial (serialAstToMsgpackSchema, serialAstToType, shallowType, wireSerialAstToType)
 import Morloc.Typecheck.Internal (unqualify)
@@ -63,6 +65,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Morloc.Version as MV
 import Morloc.Quasi
+import System.Directory (findExecutable)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -126,10 +129,16 @@ data OwnEnv = OwnEnv
   -- names a caller variable, so a SHARED non-'Copy' capture must be cloned into
   -- the @move||@ closure (the move happens at closure formation, so the clone is
   -- hoisted before it) to leave the original live for the caller's other uses.
+  , oeLoopCarried :: Set.Set Int
+  -- ^ The loop-carried variable indices of a native-loop manifold. Each is an
+  -- owned native local deserialized once at entry (the carried slot is forced
+  -- 'NativeContent' so 'letWrap' emits a deserialize let) and reassigned by the
+  -- loop's continue, so its entry let is emitted @let mut@ ('rustMakeLet') and it
+  -- is unioned into 'oeShared' so the body borrows/clones but never moves it.
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -532,14 +541,18 @@ rustCacheBody resSa lbl midx args bodyPool = do
 -- @put_value@; an already-serial arg passes through by name. Returns the
 -- packet-pointer expression, the arg's msgpack schema, and any setup lines.
 prepareRustCacheArg :: Int -> (Int, (Arg TypeM, SerialAST)) -> RustM (MDoc, Text, [MDoc])
-prepareRustCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
+prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
   let schemaStr = render (serialAstToMsgpackSchema sa)
   case tm of
-    Native _ -> do
+    Native tf -> do
       sid <- rustRegisterSchema schemaStr
+      -- The cache-key value crosses into a 'ToVoidstar' (&T) 'put_value' sink;
+      -- own-adapt so a borrowed non-Copy native arg is cloned rather than
+      -- double-borrowed ('&(&Vec)').
+      own <- rustOwnership (BndVarN tf i)
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
           decl = "let" <+> argVar <> ": *const u8 = rustmorloc::put_value(&("
-                   <> argNamer a <> "), " <> sch sid <> ");"
+                   <> rustOwn own tf (argNamer a) <> "), " <> sch sid <> ");"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 
@@ -904,14 +917,37 @@ translate srcs es = do
   let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask}
       code = CMS.evalState (runReaderT (makeRustCode includeDocs closureTable es) emptyOwnEnv) st0
 
-  maker <- makeTheMaker
-  poolSubdir <- MM.getModuleName
+  home <- MM.asks configHome
+  deps <- rustDepsUnion
+  installDir <- MM.gets stateInstallDir
+  -- The pool crate/bin name is derived from the build LOCATION (unique per
+  -- program/build-dir, stable across edits of one program). With a shared cargo
+  -- --target-dir (used to cache rustmorloc/deps across builds), this keeps one
+  -- `morloc make`'s pool binary from colliding with another's, while repeated
+  -- builds of the same program overwrite in place rather than accumulating a new
+  -- crate per edit. Falls back to a source hash if the build dir is unset.
+  let poolSrc = subVersion (render code)
+      crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
+      (cargoToml, buildRs) = makeCargoDocs crateName deps home
+  maker <- makeTheMaker crateName
+  let poolSubdir = ML.poolDirKey rustLang
 
+  -- The Rust pool is a real Cargo project: `src/main.rs` is the rendered pool
+  -- code, `Cargo.toml` pulls in rustmorloc (path dep) + any declared rust-deps,
+  -- and `build.rs` supplies the libmorloc.so link + rpath. `cargo build`
+  -- (makeTheMaker) does dependency resolution and linking.
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = rustLang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File "pool.rs" (Code (subVersion (render code)))]]
+      , scriptCode =
+          "." :/ Dir "pools"
+            [ Dir poolSubdir
+                [ File "Cargo.toml" (Code (render cargoToml))
+                , File "build.rs" (Code (render buildRs))
+                , Dir "src" [File "main.rs" (Code poolSrc)]
+                ]
+            ]
       , scriptMake = maker
       }
 
@@ -1195,25 +1231,45 @@ borrowedIndicesOfForm form =
 -- mutating state, the scope is purely lexical -- sibling and nested manifolds
 -- cannot corrupt each other's view, and the answer does not depend on the fold's
 -- evaluation order.
-withManifoldScope :: Set.Set Int -> Set.Set Int -> RustM a -> RustM a
-withManifoldScope borrowed shared =
-  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e})
+withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> RustM a -> RustM a
+withManifoldScope borrowed shared carried =
+  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
--- are named by index-aliasing after the caller's variables.
+-- are named by index-aliasing after the caller's variables. The loop-carried set
+-- does not cross into a callee's argument rendering, so it resets to empty.
 rustWithCallerScope :: RustM a -> RustM a
-rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e})
+rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e, oeLoopCarried = Set.empty})
+
+-- | The loop-carried variable indices of a manifold body, or empty if the body
+-- is not a native loop. 'addLoopWraps' makes the loop the whole body (possibly
+-- under structural wrappers and the entry deserialize lets), so walk that spine.
+-- The wrapper set must stay in sync with 'Serialize.loopCarriedTypes', which
+-- walks the identical spine to resolve the carried slots' types.
+loopCarriedIdsSM :: SerialManifold -> Set.Set Int
+loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
+  where
+    go (LoopS _ ids _) = Set.fromList ids
+    go (ReturnS x) = go x
+    go (SerialLetS _ _ x) = go x
+    go (NativeLetS _ _ x) = go x
+    go (CacheBodyS _ _ _ _ _ x) = go x
+    go (DebugWrapS _ _ _ x) = go x
+    go _ = Set.empty
 
 -- | Track each manifold's borrowed parameters as the body is folded, so
--- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value.
+-- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value. For a
+-- native-loop manifold the loop-carried locals are additionally recorded (for
+-- the @let mut@ / never-move handling) and unioned into the shared set.
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
 rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm) (recurse sm)
+        let carried = loopCarriedIdsSM sm
+         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
     , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) (recurse nm)
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -1223,26 +1279,110 @@ translateSegment m0 = do
   e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
   return $ renderPoolDocs e
 
--- | The single bare-@rustc@ build command (no cargo): compile pool.rs against
--- the prebuilt @rustmorloc@/@morloc_runtime_types@ rlibs (+ transitive deps in
--- @rust-deps@) and link @libmorloc.so@ with an embedded rpath.
-makeTheMaker :: MorlocMonad [SysCommand]
-makeTheMaker = do
+-- | DAG-wide union of every imported module's @rust-deps@ (crate -> semver),
+-- written into the generated pool @Cargo.toml@. Two modules declaring the same
+-- crate at different versions is a hard error (cargo cannot list a crate twice
+-- and silent unification would be surprising).
+rustDepsUnion :: MorlocMonad (Map.Map Text Text)
+rustDepsUnion = do
+  metas <- MM.gets statePackageMeta
+  foldM
+    ( \acc (crate, ver) -> case Map.lookup crate acc of
+        Just v
+          | v /= ver ->
+              MM.throwSystemError $
+                "conflicting rust-deps versions for crate "
+                  <> squotes (pretty crate)
+                  <> ": "
+                  <> squotes (pretty v)
+                  <> " vs "
+                  <> squotes (pretty ver)
+        _ -> return (Map.insert crate ver acc)
+    )
+    Map.empty
+    (concatMap (Map.toList . packageRustDeps) metas)
+
+-- | Render the generated pool crate's @Cargo.toml@ and @build.rs@. rustmorloc
+-- is a path dependency on the source persisted at @$MORLOC_HOME/rust@ (by
+-- @morloc init@); external crates come from the DAG-wide rust-deps union.
+-- @build.rs@ carries the libmorloc.so link + rpath (parameterised by
+-- @$MORLOC_HOME/lib@). The release profile must set @panic = "unwind"@ to match
+-- rustmorloc/morloc-runtime (the SHM arena relies on Drop-on-unwind cleanup).
+-- @crateName@ is unique per program (a source hash) so a shared target-dir
+-- never collides one program's pool binary with another's.
+makeCargoDocs :: Text -> Map.Map Text Text -> FilePath -> (MDoc, MDoc)
+makeCargoDocs crateName deps home =
+  let rustmorlocPath = home </> "rust" </> "rustmorloc"
+      libDir = home </> "lib"
+      nameLit = dquotes (pretty crateName)
+      depLines = [pretty crate <> " = " <> dquotes (pretty ver) | (crate, ver) <- Map.toList deps]
+      cargoToml =
+        vsep
+          [ "[package]"
+          , "name = " <> nameLit
+          , [idoc|version = "0.0.0"|]
+          , [idoc|edition = "2021"|]
+          , ""
+          , "[[bin]]"
+          , "name = " <> nameLit
+          , [idoc|path = "src/main.rs"|]
+          , ""
+          , "[dependencies]"
+          , "rustmorloc = { path = " <> dquotes (pretty rustmorlocPath) <> " }"
+          , vsep depLines
+          , ""
+          , "[profile.release]"
+          , "opt-level = 2"
+          -- lto matches the data/rust workspace profile so the rustmorloc built
+          -- by `morloc init`'s warm-up (workspace profile) is reused here rather
+          -- than recompiled under a differing (no-lto) fingerprint.
+          , [idoc|lto = "thin"|]
+          , [idoc|panic = "unwind"|]
+          ]
+      buildRs =
+        vsep
+          [ "fn main() {"
+          , [idoc|    println!("cargo:rustc-link-search=native=#{pretty libDir}");|]
+          , [idoc|    println!("cargo:rustc-link-lib=dylib=morloc");|]
+          , [idoc|    println!("cargo:rustc-link-arg=-Wl,-rpath,#{pretty libDir}");|]
+          , "}"
+          ]
+  in (cargoToml, buildRs)
+
+-- | Build the Rust pool with @cargo build@ (one unified dependency resolution
+-- over rustmorloc + any external crates), then copy the produced binary to the
+-- @pool-rust.out@ path the manifest/nexus expect. @MORLOC_HOME@ is set on the
+-- command so rustmorloc's build.rs locates libmorloc.so. The @--target-dir@ is
+-- shared across programs so rustmorloc + deps compile once and cache (cargo's
+-- own lock serialises concurrent builds; the per-program @crateName@ keeps each
+-- program's output binary distinct within that shared dir).
+makeTheMaker :: Text -> MorlocMonad [SysCommand]
+makeTheMaker crateName = do
+  -- cargo is required at make time (a Rust pool is a Cargo project). Fail fast
+  -- with a clear message rather than a raw shell "command not found".
+  cargoAvail <- liftIO (findExecutable "cargo")
+  case cargoAvail of
+    Just _ -> return ()
+    Nothing ->
+      MM.throwSystemError
+        "building a Rust pool requires `cargo` on PATH (install Rust: https://rustup.rs)"
   home <- MM.asks configHome
-  poolSubdir <- MM.getModuleName
-  let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
-      src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName rustLang
-      libDir = pretty (home </> "lib")
-      rustRelease = home </> "lib" </> "rust-build" </> "release"
-      depDir = pretty (rustRelease </> "deps")
-      rustmorlocRlib = pretty (rustRelease </> "librustmorloc.rlib")
-      -- pool.rs has exactly one direct rlib dep (rustmorloc, pinned by path);
-      -- morloc_runtime_types and every other transitive dep resolve by exact
-      -- metadata hash from the isolated rust-build/release/deps dir.
-      cmd =
+  let poolSubdir = ML.poolDirKey rustLang
+      outRel = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
+      manifestPath = pretty $ "pools" </> poolSubdir </> "Cargo.toml"
+      targetDir = home </> "lib" </> "rust-build"
+      targetD = pretty targetDir
+      binPath = pretty $ targetDir </> "release" </> T.unpack crateName
+      homeD = pretty home
+      -- Paths are single-quoted: they are interpolated into a shell string and
+      -- $MORLOC_HOME (hence targetDir/binPath) may contain spaces.
+      buildCmd =
         SysRun . Code . render $
-          [idoc|rustc -O --edition 2021 -L dependency=#{depDir} --extern rustmorloc=#{rustmorlocRlib} -L native=#{libDir} -l dylib=morloc -C link-arg=-Wl,-rpath,#{libDir} -o #{outfile} #{src}|]
-  return [cmd]
+          [idoc|MORLOC_HOME='#{homeD}' cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
+      copyCmd =
+        SysRun . Code . render $
+          [idoc|cp '#{binPath}' '#{outRel}'|]
+  return [buildCmd, copyCmd]
 
 -- | The lowering configuration. The core fields are real; the fields for
 -- closures/partial application, remote calls, caching, and pattern evaluation
@@ -1363,6 +1503,7 @@ rustLowerConfig mask =
     , lcReleaseStmt = \_ -> ""
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcMakeIf = rustMakeIf
+    , lcMakeLoop = rustMakeLoop
     , lcMakeDoBlock = \_ stmts expr ->
         return
           ( []
@@ -1419,13 +1560,19 @@ isFunctionTypeF t = case stripEffectF t of
   FunF _ _ -> True
   _ -> False
 
-rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> PoolDocs -> PoolDocs -> RustM PoolDocs
-rustMakeLet namer letIndex mt p1 p2 = do
+-- The borrow-safe flag ('isBorrowableProjection') is unused: Rust binds owned
+-- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
+rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> RustM PoolDocs
+rustMakeLet namer letIndex mt _ p1 p2 = do
   ann <- case mt of
     Just t | isFunctionTypeF t -> return ""
     Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
     Nothing -> return (":" <+> "*mut u8")
-  let letLine = "let" <+> namer letIndex <> ann <+> "=" <+> poolExpr p1 <> ";"
+  -- A loop-carried local's entry deserialize let is reassigned each iteration by
+  -- the loop's continue, so it must bind mutably.
+  carried <- asks oeLoopCarried
+  let letKw = if Set.member letIndex carried then "let mut" else "let"
+      letLine = letKw <+> namer letIndex <> ann <+> "=" <+> poolExpr p1 <> ";"
       rs = poolPriorLines p1 <> [letLine] <> poolPriorLines p2
   return $
     PoolDocs
@@ -1435,6 +1582,59 @@ rustMakeLet namer letIndex mt p1 p2 = do
       , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
       , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
       }
+
+-- | Native tail-loop assembly. Walks the 'LoopBody' decision tree into a Rust
+-- @loop { ... }@ expression bound to the serial result: guards render to
+-- @if/else@, native/serial lets to @let@ locals, a base leaf to @break <base>;@
+-- (the loop expression's value), and a continue leaf to @let@ temps for each new
+-- value followed by reassignment of the loop-carried locals. The loop-carried
+-- vars are the manifold's own owned native locals (deserialized once at entry and
+-- bound @let mut@ by 'rustMakeLet'); every continue value was already owned by
+-- 'adaptLoopBodyOwned' (a passthrough carried var cloned, a fresh value moved), so
+-- computing all temps before any reassignment is safe against the
+-- parallel-assignment hazard (a temp reads a carried var by borrow/clone, never
+-- moving it out from under a later temp).
+rustMakeLoop :: [Int] -> LoopBody PoolDocs PoolDocs -> RustM PoolDocs
+rustMakeLoop ids body = do
+  resultIdx <- getCounter
+  let resultVar = helperNamer resultIdx
+  bodyLines <- walk body
+  let loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
+      resultDecl = "let" <+> resultVar <> ": *mut u8 =" <+> loopExpr <> ";"
+      leaves = loopBodyLeaves body
+  return $ PoolDocs
+    { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
+    , poolExpr = resultVar
+    , poolPriorLines = [resultDecl]
+    , poolPriorExprs = concatMap poolPriorExprs leaves
+    , poolReturnFlag = True
+    }
+  where
+    walk (LoopBase seDocs) =
+      return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
+    walk (LoopContinue contDocs) = do
+      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
+      let priors = concatMap poolPriorLines contDocs
+          tmpAssigns = zipWith (\tv cd -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
+          reassigns = zipWith (\i tv -> nvarNamer i <+> "=" <+> tv <> ";") ids tmpVars
+      return $ priors <> tmpAssigns <> reassigns
+    walk (LoopNLet i neDocs b) = do
+      rest <- walk b
+      return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+    walk (LoopSLet i seDocs b) = do
+      rest <- walk b
+      return $ poolPriorLines seDocs <> ["let" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
+    walk (LoopIf guardDocs t e) = do
+      tLines <- walk t
+      eLines <- walk e
+      let ifBlock = vsep
+            [ "if" <+> poolExpr guardDocs <+> "{"
+            , indent 4 (vsep tLines)
+            , "} else {"
+            , indent 4 (vsep eLines)
+            , "}"
+            ]
+      return $ poolPriorLines guardDocs <> [ifBlock]
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
 -- The arms are already adapted to the owned result type by the shared 'IfN_'

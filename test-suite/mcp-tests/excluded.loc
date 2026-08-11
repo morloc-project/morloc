@@ -1,0 +1,30 @@
+--' MCP tool-surface EXCLUSION coverage (no special dependencies).
+--'
+--' A command that reads from @stdin cannot be served over MCP (fd 0 is the
+--' JSON-RPC input stream), so it must be dropped from `tools/list`. `plainAdd`
+--' is the control: a normal command that MUST appear. run-tests.sh asserts
+--' that `tools/list` contains `plainAdd` and does NOT contain `readStdin`.
+module main
+  ( plainAdd
+  , readStdin
+  )
+
+import root-py
+
+source Py from "excluded.py" ("add2")
+
+add2 :: Int -> Int -> Int
+
+--' A normal command (control: MUST appear in tools/list)
+plainAdd :: Int -> Int -> Int
+plainAdd x y = add2 x y
+
+--' Reads integers from a file OR stdin (EXCLUDED from the MCP tool surface)
+readStdin ::
+  --' stdin: true
+  --' metavar: FILE
+  Str ->
+  <IO, Err> [Int]
+readStdin f = do
+  fi <- @open f :: <IO, Err> (IStream Int)
+  @next fi

@@ -8,8 +8,6 @@ use crate::environment;
 use crate::error::Result;
 use crate::types::*;
 
-const MANIFEST_MARKER: &str = "### MANIFEST ###";
-
 #[derive(serde::Serialize)]
 pub struct CheckResult {
     pub category: String,
@@ -386,34 +384,38 @@ fn check_manifests(
     data_dir: &Path,
     expected_version: Option<&Version>,
 ) {
-    let fdb_dir = data_dir.join("fdb");
-    if !fdb_dir.is_dir() {
-        c.warn("No fdb/ directory found");
+    let exe_dir = data_dir.join("exe");
+    if !exe_dir.is_dir() {
+        c.warn("No exe/ directory found");
         return;
     }
 
-    let entries = match fs::read_dir(&fdb_dir) {
+    let entries = match fs::read_dir(&exe_dir) {
         Ok(e) => e,
         Err(e) => {
-            c.fail(&format!("Cannot read fdb/: {e}"));
+            c.fail(&format!("Cannot read exe/: {e}"));
             return;
         }
     };
 
     let mut found_any = false;
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.ends_with(".manifest") {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let prog_name = entry.file_name().to_string_lossy().into_owned();
+        // Installed layout: exe/<name>/<name>-build/manifest.json.
+        let manifest_path = dir.join(format!("{}-build", prog_name)).join("manifest.json");
+        if !manifest_path.is_file() {
             continue;
         }
         found_any = true;
-        let prog_name = &name_str[..name_str.len() - ".manifest".len()];
-        check_one_manifest(c, &entry.path(), prog_name, data_dir, expected_version);
+        check_one_manifest(c, &manifest_path, &prog_name, expected_version);
     }
 
     if !found_any {
-        c.warn("No program manifests found in fdb/");
+        c.warn("No program manifests found in exe/");
     }
 }
 
@@ -421,7 +423,6 @@ fn check_one_manifest(
     c: &mut Counts,
     path: &Path,
     prog_name: &str,
-    data_dir: &Path,
     expected_version: Option<&Version>,
 ) {
     let content = match fs::read_to_string(path) {
@@ -432,23 +433,7 @@ fn check_one_manifest(
         }
     };
 
-    let json_str = if content.starts_with("#!") {
-        if let Some(marker_pos) = content.find(MANIFEST_MARKER) {
-            let after_marker = &content[marker_pos..];
-            let json_start = after_marker
-                .find('\n')
-                .map(|i| marker_pos + i + 1)
-                .unwrap_or(content.len());
-            &content[json_start..]
-        } else {
-            c.fail(&format!("{prog_name} -- manifest missing ### MANIFEST ### marker"));
-            return;
-        }
-    } else {
-        content.as_str()
-    };
-
-    let manifest: serde_json::Value = match serde_json::from_str(json_str) {
+    let manifest: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
             c.fail(&format!("{prog_name} -- invalid manifest JSON: {e}"));
@@ -473,21 +458,11 @@ fn check_one_manifest(
         }
     }
 
-    // Check build.path exists
-    let build_path = manifest
-        .get("build")
-        .and_then(|b| b.get("path"))
-        .and_then(|v| v.as_str());
-
-    if let Some(bp) = build_path {
-        // Build paths inside containers are /opt/morloc/exe/..., on host they're
-        // under data_dir/exe/... Try the host path first.
-        let host_path = data_dir.join("exe").join(prog_name);
-        if !host_path.is_dir() && !Path::new(bp).is_dir() {
-            issues.push("build directory missing".to_string());
-        }
-    } else {
-        issues.push("no build.path in manifest".to_string());
+    // The manifest is self-describing: its pools live in a sibling pools/
+    // directory (pool exec paths are relative to the manifest's own dir).
+    let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    if !manifest_dir.join("pools").is_dir() {
+        issues.push("pools/ directory missing".to_string());
     }
 
     // Check pool files exist
@@ -554,10 +529,10 @@ fn check_programs_deep(
         ("MORLOC_HOME".to_string(), mh.to_string()),
     ];
 
-    // Scan programs from fdb/ to get program names
-    let fdb_dir = format!("{mh}/fdb");
+    // Scan programs from exe/ (one exe/<name>/ subdir per program).
+    let exe_dir = format!("{mh}/exe");
     let cfg = RunConfig {
-        command: Some(vec!["ls".to_string(), fdb_dir.clone()]),
+        command: Some(vec!["ls".to_string(), exe_dir.clone()]),
         bind_mounts: bind_mounts.clone(),
         env: env.clone(),
         ..RunConfig::new(image)
@@ -570,13 +545,11 @@ fn check_programs_deep(
 
     let programs: Vec<ProgramEntry> = stdout
         .lines()
-        .filter(|l| l.ends_with(".manifest"))
-        .map(|l| {
-            let name = l.strip_suffix(".manifest").unwrap_or(l);
-            ProgramEntry {
-                name: name.to_string(),
-                commands: Vec::new(),
-            }
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| ProgramEntry {
+            name: l.to_string(),
+            commands: Vec::new(),
         })
         .collect();
 

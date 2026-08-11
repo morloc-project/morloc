@@ -22,6 +22,9 @@ module Morloc.Namespace.State
   , MorlocMonad
   , MorlocReturn
   , MorlocState (..)
+  , WrapperSpec (..)
+  , WrapperMode (..)
+  , WrapperFile (..)
   , SignatureSet (..)
   , Instance (..)
   , TermTypes (..)
@@ -92,6 +95,25 @@ type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 ---- State
 
+-- | The morloc-nexus run mode a generated launcher wrapper selects.
+data WrapperMode = WCli | WDaemon | WMcp
+  deriving (Show, Eq, Ord)
+
+-- | A launcher wrapper to emit: which nexus mode and the executable name.
+data WrapperSpec = WrapperSpec
+  { wsMode :: WrapperMode
+  , wsName :: String
+  }
+  deriving (Show, Eq, Ord)
+
+-- | A launcher wrapper file ready to write to disk: the absolute target
+-- path and the shell-script body.
+data WrapperFile = WrapperFile
+  { wfPath :: FilePath
+  , wfBody :: Text
+  }
+  deriving (Show, Eq)
+
 {- | Mutable compiler state threaded through the entire pipeline.
 Accumulates type signatures, source bindings, typedefs, and metadata
 as modules are parsed, linked, and typechecked.
@@ -133,10 +155,34 @@ data MorlocState = MorlocState
   , stateSourceMap :: Map Int SrcLoc
   , stateSourceText :: Map Path Text
   , stateBuildConfig :: BuildConfig
+  , stateLangParams :: Map Text (Map Text Text)
+  -- ^ Resolved per-language build parameters, keyed lang -> key -> value,
+  -- from @-X lang:key=value@ overlaid on the build config's @lang-params@.
+  -- The morloc UI does not interpret keys/values; each language's builder
+  -- reads the entries it understands. See "Morloc.Build.Params".
   , stateModuleName :: Maybe MVar
   , stateInstall :: Bool
   , stateInstallForce :: Bool
   , stateInstallDir :: Maybe Path
+  -- ^ The build dir @<root>/<key>-build@ (where manifest.json + pools land),
+  -- for both make and install. See 'stateBuildRoot' for the root.
+  , stateBuildRoot :: Maybe Path
+  -- ^ The source/install ROOT: the working directory for make, or
+  -- @exe/<key>@ (a mirror of the working directory) for install. Sources
+  -- live here and a pool resolves them at @../../..@. For install this is
+  -- the atomically-swapped, marker-owned unit; @stateInstallDir@ nests
+  -- inside it. @buildDir = root </> (key <> "-build")@.
+  , stateProgramKey :: Maybe String
+  -- ^ Program identity for the build directory (@<key>-build@ / @exe/<key>@).
+  -- Set to @--name@ if given, else the source-file basename. @Nothing@ falls
+  -- back to the outfile/module name (this is how eval reuses its @--save@ name).
+  , stateWrapperSpecs :: Maybe [WrapperSpec]
+  -- ^ Exact set of launcher wrappers to emit. @Nothing@ = default (a single
+  -- CLI wrapper named after the program); @Just []@ = emit none (@--no-cli@
+  -- with no other output flags).
+  , stateBuildParentDir :: Maybe Path
+  -- ^ Parent directory for the @<key>-build@ folder (@--build-dir@).
+  -- @Nothing@ = current working directory.
   , stateClassDefs :: Map ClassName [Constraint]
   , stateEffects :: Map.Map EffectLabel Bool
   -- ^ Declared effects: label -> isEscapable (True = escapable). The
@@ -157,6 +203,13 @@ data MorlocState = MorlocState
   -- ^ When False, import resolution ignores local/project-relative
   -- modules and resolves only installed (system) modules. False in
   -- eval mode (the API sandbox boundary) unless --allow-local-modules.
+  , stateEvalSandbox :: Maybe (Set.Set MVar)
+  -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
+  -- sandboxed eval (served): only these modules may be imported at the
+  -- top level of the eval expression, and IO intrinsics may not be
+  -- written directly. Set only at the single arbitrary-source entry
+  -- (cmdEval) from an explicit value -- never a defaulted flag a new
+  -- eval call site could silently skip.
   , stateUnsafeSkipNullCheck :: Bool
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
@@ -268,6 +321,10 @@ data PackageMeta
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
   -- -march=native, -DXYZ). Propagates transitively through dependencies.
   , packageCxxFlags :: [Text]
+  -- | External Rust crates (crate name -> semver requirement) a module needs
+  -- available to the Rust pool. The DAG-wide union is written into the
+  -- generated pool @Cargo.toml@ dependencies. Propagates transitively.
+  , packageRustDeps :: Map Text Text
   , packageInclude :: Maybe [Text]
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
@@ -414,7 +471,6 @@ data NexusSource = NexusSource
 
 data Socket = Socket
   { socketLang :: Lang
-  , socketServerInit :: [MDoc]
   , socketPath :: MDoc
   }
   deriving (Show)
@@ -464,10 +520,15 @@ instance Defaultable MorlocState where
       , stateSourceMap = Map.empty
       , stateSourceText = Map.empty
       , stateBuildConfig = defaultValue
+      , stateLangParams = Map.empty
       , stateModuleName = Nothing
       , stateInstall = False
       , stateInstallForce = False
       , stateInstallDir = Nothing
+      , stateBuildRoot = Nothing
+      , stateProgramKey = Nothing
+      , stateWrapperSpecs = Nothing
+      , stateBuildParentDir = Nothing
       , stateClassDefs = Map.empty
       , stateEffects = Map.empty
       , stateLangRegistry = LR.emptyRegistry
@@ -477,6 +538,7 @@ instance Defaultable MorlocState where
       , stateProjectRoot = Nothing
       , stateEvalMode = False
       , stateAllowLocalModules = True
+      , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
       , stateInlineSize = Nothing
       , stateNoShm = False
@@ -504,6 +566,7 @@ instance Defaultable PackageMeta where
       , packageCppVersion = 20
       , packageDependencies = []
       , packageCxxFlags = []
+      , packageRustDeps = Map.empty
       , packageInclude = Nothing
       , packageMorlocDependencies = []
       , packageSetup = Nothing
@@ -554,6 +617,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "cpp-version" .!= 0
       <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
+      <*> o .:? "rust-deps" .!= Map.empty
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
       <*> o .:? "setup"

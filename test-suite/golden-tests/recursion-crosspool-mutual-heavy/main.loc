@@ -1,0 +1,31 @@
+module main (run)
+
+import root-py
+import root-cpp
+
+source Py  from "helpers.py"  ("py_a" as pa, "py_b" as pb, "py_c" as pc)
+source Cpp from "helpers.hpp" ("cpp_a" as ca, "cpp_b" as cb, "cpp_c" as cc)
+
+pa :: Int -> Int   -- py-only
+pb :: Int -> Int   -- py-only
+pc :: Int -> Int   -- py-only
+ca :: Int -> Int   -- cpp-only
+cb :: Int -> Int   -- cpp-only
+cc :: Int -> Int   -- cpp-only
+
+pingH :: Int -> (Int, Int) -> (Int, Int)
+pingH n st
+  ? n == 0 = st
+  : let (a, b) = st
+    in pongH (n - 1) (pc (pb (pa a)), b)
+
+pongH :: Int -> (Int, Int) -> (Int, Int)
+pongH n st
+  ? n == 0 = st
+  : let (a, b) = st
+    in pingH (n - 1) (a, cc (cb (ca b)))
+
+run :: Int -> Int
+run n =
+  let (a, b) = pingH n (0, 0)
+  in a + b

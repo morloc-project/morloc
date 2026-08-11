@@ -1,0 +1,23 @@
+-- Regression guard for the Rust ToVoidstar double-borrow bug: a value-in
+-- intrinsic (@show) applied to a BORROWED non-Copy value.
+--
+-- `showList` is called twice by `demo`, so the realizer keeps it a nested
+-- manifold (not inlined into the owned dispatch entry); its non-Copy `[Int]`
+-- parameter therefore arrives BORROWED (`&Vec<i64>`, the Rust asymmetric
+-- convention). `@show xs` then serializes a borrowed non-Copy value. Before the
+-- fix this emitted `rustmorloc::show(&(n_xs), ..)` = `show(&(&Vec))` -> the trait
+-- `ToVoidstar` is not implemented for `&Vec<i64>` (E0277). The serialize sink now
+-- own-adapts (clones) the borrowed value, so `&(clone)` is a valid `&Vec`.
+
+module main (demo)
+
+import root-rust
+
+source Rust from "helpers.rs" ("cat_str" as catStr)
+catStr :: Str -> Str -> Str
+
+showList :: [Int] -> Str
+showList xs = @show xs
+
+demo :: [Int] -> [Int] -> Str
+demo xs ys = catStr (showList xs) (showList ys)

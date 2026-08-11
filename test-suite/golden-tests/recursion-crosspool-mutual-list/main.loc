@@ -1,0 +1,39 @@
+module main
+  ( drainP
+  , drainC
+  )
+
+import root-py
+import root-cpp
+
+source Py from "py_ops.py"
+  ( "py_is_empty" as isEmptyP
+  , "py_head"     as headP
+  , "py_tail"     as tailP
+  , "py_add"      as addP
+  )
+isEmptyP :: [Int] -> Bool
+headP    :: [Int] -> Int
+tailP    :: [Int] -> [Int]
+addP     :: Int -> Int -> Int
+
+source Cpp from "cpp_ops.hpp"
+  ( "cpp_is_empty" as isEmptyC
+  , "cpp_head"     as headC
+  , "cpp_tail"     as tailC
+  , "cpp_add"      as addC
+  )
+isEmptyC :: [Int] -> Bool
+headC    :: [Int] -> Int
+tailC    :: [Int] -> [Int]
+addC     :: Int -> Int -> Int
+
+drainP :: [Int] -> Int -> Int
+drainP xs acc
+  ? isEmptyP xs = acc
+  : drainC (tailP xs) (addP acc (headP xs))
+
+drainC :: [Int] -> Int -> Int
+drainC xs acc
+  ? isEmptyC xs = acc
+  : drainP (tailC xs) (addC acc (headC xs))

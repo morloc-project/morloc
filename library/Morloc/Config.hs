@@ -17,6 +17,7 @@ module Morloc.Config
   , loadModuleConfig
   , loadDefaultMorlocConfig
   , loadBuildConfig
+  , writeBuildConfig
   , setupServerAndSocket
   , getDefaultConfigFilepath
   , getDefaultMorlocLibrary
@@ -133,30 +134,23 @@ loadBuildConfig config = do
     else
       return defaultValue
 
+-- | Serialize the build config to its file. This writes the whole value, so to
+-- preserve existing fields a caller must start from a loaded config and modify
+-- it (a read-modify-write). Nothing-valued fields are omitted by the ToJSON
+-- instance, keeping the file minimal.
+writeBuildConfig :: Config -> BuildConfig -> IO ()
+writeBuildConfig config = Y.encodeFile (configBuildConfig config)
+
 setupServerAndSocket ::
-  Config ->
   LangRegistry ->
   Lang ->
   Socket
-setupServerAndSocket c reg lang0 = Socket lang args socket
+setupServerAndSocket reg lang0 = Socket lang socket
   where
-    -- A guest member (e.g. futhark) has no pool of its own; its socket/exec
-    -- resolve to its host pool (cpp). Centralised here so no caller can emit a
-    -- phantom guest socket by forgetting to map. Identity for non-members.
+    -- A guest member (e.g. futhark) has no pool of its own; its socket
+    -- resolves to its host pool (cpp). Centralised here so no caller can emit
+    -- a phantom guest socket by forgetting to map. Identity for non-members.
     lang = LR.poolOf reg lang0
-    name = ML.langName lang
-    -- Look up run command: config overrides take precedence over registry defaults
-    runCmd = case Map.lookup name (configLangOverrides c) of
-      Just cmd -> cmd
-      Nothing -> LR.registryRunCommand reg name
-    isCompiled = LR.registryIsCompiled reg name
-    poolExe = ML.makeExecutablePoolName lang
-
-    args
-      | isCompiled = ["./" <> pretty poolExe]
-      | null runCmd = [pretty name, pretty poolExe]
-      | otherwise = map pretty runCmd ++ [pretty poolExe]
-
     socket = "pipe-" <> pretty (ML.showLangName lang)
 
 -- This is where the default file organization of morloc is set

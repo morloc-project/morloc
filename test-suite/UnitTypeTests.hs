@@ -51,6 +51,7 @@ module UnitTypeTests
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , evalSandboxTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
@@ -98,6 +99,58 @@ runFrontRaw code = do
       defaultValue
       (typecheckFrontend Nothing (Code code))
   return x
+
+-- | Run the frontend with a 'MorlocState' seed applied first, sharing the
+-- monad scaffold. Backs the eval-sandbox runners below.
+runFrontWith :: (MorlocState -> MorlocState) -> MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runFrontWith seed code = do
+  config <- emptyConfig
+  ((x, _), _) <-
+    MM.runMorlocMonad Nothing 0 config defaultValue $ do
+      MM.modify seed
+      typecheckFrontend Nothing (Code code)
+  return x
+
+-- | Run the frontend under a sandboxed eval (as `morloc eval --eval-sandbox`
+-- does): seed eval mode + the module allow-list and pin local modules off,
+-- then run the same checkEvalRestrictions -> typecheck path.
+runEvalSandbox :: [MT.Text] -> MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runEvalSandbox allow =
+  runFrontWith $ \s -> s
+    { stateEvalMode = True
+    , stateAllowLocalModules = False
+    , stateEvalSandbox = Just (Set.fromList (map MV allow))
+    }
+
+-- | Run the frontend under trusted (non-sandboxed) eval (as the dev CLI
+-- `morloc eval`): eval mode on, but the sandbox gates are inert.
+runEvalTrusted :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
+runEvalTrusted = runFrontWith (\s -> s {stateEvalMode = True})
+
+-- | Gate 1 of the eval sandbox: a directly-written IO intrinsic is refused,
+-- while pure intrinsics and trusted (dev) eval are unaffected. The check runs
+-- before typecheck, so these probes need no valid types or imports. Gate 2 (the
+-- module allow-list) needs installed modules and is covered by the
+-- `eval-sandbox` golden.
+evalSandboxTests :: TestTree
+evalSandboxTests =
+  testGroup "eval sandbox IO-intrinsic gate"
+    [ testCase "direct IO intrinsic (@tell) rejected under sandbox" $
+        runEvalSandbox [] "module main (x)\nx = @tell" >>= assertLeft
+    , testCase "IO intrinsic nested in a tuple rejected under sandbox" $
+        runEvalSandbox [] "module main (x)\nx = (@tell, 0)" >>= assertLeft
+    , testCase "non-IO intrinsic (@lang) allowed under sandbox" $
+        runEvalSandbox [] "module main (x)\nx = @lang" >>= assertRight
+    , testCase "IO intrinsic (@tell) allowed under trusted dev eval" $
+        runEvalTrusted "module main (x)\nx = @tell" >>= assertRight
+    ]
+  where
+    assertLeft r = case r of
+      Left _ -> return ()
+      Right _ -> assertFailure "expected the sandbox to reject this eval expression"
+    assertRight r = case r of
+      Right _ -> return ()
+      Left e -> assertFailure ("expected acceptance, got error: " <> show e)
 
 runMiddle ::
   MT.Text ->
@@ -8364,6 +8417,22 @@ withDocstringTests =
         mlcp_foo_lines n = n
         --' with: -l/--lines=fmt
         foo :: Int -> <IO> Int
+        foo x = x
+          |]
+
+        -- A leading-underscore long flag name is rejected: those names are
+        -- reserved for compiler-generated argument identifiers (the MCP
+        -- backend names positionals `_1`, `_2`, ...), so a flag must not be
+        -- able to produce one.
+      , expectError
+          "arg: long flag may not begin with an underscore"
+          [r|
+        module main (foo)
+        foo ::
+          --' arg: --_hidden
+          --' default: 0
+          Int ->
+          Int
         foo x = x
           |]
       ]

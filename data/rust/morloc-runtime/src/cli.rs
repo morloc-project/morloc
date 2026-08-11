@@ -3476,8 +3476,9 @@ unsafe fn read_argv_bytes(
 }
 
 /// Wrap a freshly-decoded voidstar in a morloc data packet. Mirrors the
-/// tail of `parse_cli_data_argument`.
-unsafe fn wrap_voidstar_as_packet(
+/// tail of `parse_cli_data_argument`. Also used by `daemon_ffi` to
+/// packetize an in-process eval result for `-f packet` output.
+pub(crate) unsafe fn wrap_voidstar_as_packet(
     voidstar: *mut c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,

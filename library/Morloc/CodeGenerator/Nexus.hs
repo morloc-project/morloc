@@ -4,14 +4,15 @@
 
 {- |
 Module      : Morloc.CodeGenerator.Nexus
-Description : Generate the @.manifest@ JSON file consumed by the pre-compiled nexus
+Description : Generate the @manifest.json@ file consumed by the pre-compiled nexus
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-Produces the JSON manifest that the static nexus binary reads at startup.
-The manifest describes all exported subcommands, their argument types,
-help text, and which pool executables to dispatch to.
+Produces the standalone @manifest.json@ that the shared nexus binary reads
+at startup, plus the thin shell launcher wrappers that point at it. The
+manifest describes all exported subcommands, their argument types, help
+text, and which (build-dir-relative) pool executables to dispatch to.
 -}
 module Morloc.CodeGenerator.Nexus
   ( generate
@@ -31,6 +32,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
+import qualified Morloc.Build.Params as BP
 import qualified Data.Text.Encoding as TE
 import qualified Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as Time
@@ -52,6 +54,7 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
 import qualified System.Directory as Dir
+import Morloc.ProgramBuilder.Paths (buildDirName, resolveDatafileAgainstRoot)
 
 -- ======================================================================
 -- Data types
@@ -248,14 +251,46 @@ makeFData (e@(AnnoS (Idx i t) (Idx _ lang) _), d) = do
 
 findSockets :: AnnoS e One (Indexed Lang) -> MorlocMonad [Socket]
 findSockets rAST = do
-  config <- MM.ask
   registry <- MM.gets stateLangRegistry
   -- Collapse guest members onto their pool host (futhark -> cpp) so a
   -- co-located member never enumerates its own socket/pool in the manifest.
-  return . map (MC.setupServerAndSocket config registry) . unique . map (LR.poolOf registry) $ findAllLangsSAnno rAST
+  return . map (MC.setupServerAndSocket registry) . unique . map (LR.poolOf registry) $ findAllLangsSAnno rAST
 
 findAllLangsSAnno :: (Foldable f) => AnnoS e f (Indexed Lang) -> [Lang]
 findAllLangsSAnno = foldAnnoS (\(AnnoS _ (Idx _ lang) _) -> [lang])
+
+-- | A `@mime` return must serialize as raw bytes or text -- the shapes the
+-- daemon's HTTP body and the CLI `-f raw` path emit verbatim: `Str`, `[Str]`,
+-- `Vector U8`, `[Vector U8]`. Classified on the SerialAST (post-alias and
+-- packer-transparent) so it can't drift from the alias name; mirrors the accepted
+-- shapes of @json.rs::write_voidstar_raw@.
+mediaSerialValid :: SerialAST -> Bool
+mediaSerialValid ast = case unwrapPack ast of
+  SerialString _ -> True
+  SerialList _ _ inner -> case unwrapPack inner of
+    SerialUInt8 _ -> True   -- Vector U8
+    SerialString _ -> True  -- [Str]
+    SerialList _ _ inner2 -> case unwrapPack inner2 of
+      SerialUInt8 _ -> True -- [Vector U8]
+      _ -> False
+    _ -> False
+  _ -> False
+  where
+    unwrapPack (SerialPack _ (_, inner)) = unwrapPack inner
+    unwrapPack x = x
+
+-- | Reject a `@mime` on a return that is not raw-serializable (see
+-- 'mediaSerialValid'). A media type means "these bytes/text are format X"; if the
+-- value is not a byte/text sequence the daemon's raw HTTP path would fail at
+-- runtime, so it is caught here at compile time instead.
+validateReturnMime :: Int -> Maybe Text -> SerialAST -> MorlocMonad ()
+validateReturnMime _ Nothing _ = return ()
+validateReturnMime i (Just mime) ast
+  | mediaSerialValid ast = return ()
+  | otherwise = MM.throwSourcedError i $
+      "The @mime type (" <> pretty mime <> ") is on a return that does not"
+      <> " serialize as raw bytes or text; @mime requires the type to reduce to"
+      <> " Str or Vector U8 (or a list thereof)."
 
 getFData :: (Type, Int, Lang, CmdDocSet, [Socket]) -> MorlocMonad FData
 getFData (t, i, lang, doc, sockets) = do
@@ -274,9 +309,9 @@ getFData (t, i, lang, doc, sockets) = do
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
   validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
-  config <- MM.ask
+  validateReturnMime i (cmdDocRetMime doc) returnAst
   registry <- MM.gets stateLangRegistry
-  let socket = MC.setupServerAndSocket config registry lang
+  let socket = MC.setupServerAndSocket registry lang
   return $
     FData
       { fdataSocket = socket
@@ -543,6 +578,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
       argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
   validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
+  validateReturnMime i (cmdDocRetMime docs) retAst
   expr <- toNexusExpr x0
 
   return $
@@ -889,14 +925,14 @@ resolveCompileTimeIntrinsic intr =
 
 -- Resolve a @datafile path expression in the nexus. Mirrors
 -- Reduce.hs::reduceNativeExpr IntrDatafile: a literal Str argument is
--- joined with stateInstallDir; anything else gets the same sentinel
--- string the pool side emits.
+-- joined with the source root (stateBuildRoot); anything else gets the
+-- same sentinel string the pool side emits.
 resolveDatafilePath :: AnnoS (Indexed Type) One () -> MorlocMonad Text
 resolveDatafilePath (AnnoS _ _ (StrS rel)) = do
-  mInstallDir <- MM.gets stateInstallDir
-  return $ case mInstallDir of
-    Just dir -> MT.pack (dir </> MT.unpack rel)
-    Nothing -> rel
+  -- Data files are mirrored beside sources at the ROOT, not inside the
+  -- nested build dir, so resolve against the source root.
+  mRoot <- MM.gets stateBuildRoot
+  return (resolveDatafileAgainstRoot mRoot rel)
 resolveDatafilePath _ = return "<datafile: could not resolve path>"
 
 -- ======================================================================
@@ -2213,7 +2249,6 @@ data ManifestInputs = ManifestInputs
   { miConfig              :: !Config
   , miRegistry            :: !LangRegistry
   , miProgramName         :: !String
-  , miBuildDir            :: !String
   , miBuildTime           :: !Int
   , miDaemonSets          :: ![(Lang, Socket)]
   , miFData               :: ![FData]
@@ -2227,6 +2262,10 @@ data ManifestInputs = ManifestInputs
   , miInlineSize          :: !(Maybe Int64)
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
+  , miBuildParams         :: !Text
+    -- ^ Fingerprint of the resolved build parameters (@-X lang:key=value@),
+    -- recorded so a built program carries a record of how it was compiled.
+    -- Empty when no build parameters were given.
   , miRunLog              :: !(Maybe RenderedRunLog)
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
@@ -2261,9 +2300,10 @@ buildManifest ManifestInputs{..} =
     buildJson :: Text
     buildJson =
       jsonObj
-        [ ("path", jsonStr (MT.pack miBuildDir))
+        [ ("path", jsonStr ".")
         , ("time", jsonInt miBuildTime)
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
+        , ("build_params", jsonStr miBuildParams)
         ]
 
     poolJson :: (Lang, Socket) -> Text
@@ -2291,7 +2331,10 @@ buildManifest ManifestInputs{..} =
           runCmd = case Map.lookup name (MC.configLangOverrides miConfig) of
             Just cmd -> map MT.unpack cmd
             Nothing -> map MT.unpack (LR.registryRunCommand miRegistry name)
-          poolExe = miBuildDir </> "pools" </> miProgramName </> ML.makeExecutablePoolName lang
+          -- Relative to the manifest's own directory (the build dir). The
+          -- runtime nexus resolves this against dirname(manifest.json), so
+          -- the build directory is position-independent and relocatable.
+          poolExe = "pools" </> ML.poolDirKey lang </> ML.makeExecutablePoolName lang
        in if isCompiled
             then [poolExe]
             else
@@ -2342,7 +2385,7 @@ buildManifest ManifestInputs{..} =
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
-        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))))
+        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
         -- Terminals array must use the ORIGINAL term name so the
@@ -2362,7 +2405,7 @@ buildManifest ManifestInputs{..} =
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
-        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))))
+        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
@@ -2435,16 +2478,17 @@ buildManifest ManifestInputs{..} =
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
     -- @metadata@ for symmetry with args.
-    returnJson :: Text -> Type -> [Text] -> Text
-    returnJson schema t desc =
+    returnJson :: Text -> Type -> [Text] -> Maybe Text -> Text
+    returnJson schema t desc mmime =
       let retT = stripThunks (returnTypeOnly t)
-      in jsonObj
+      in jsonObj $
         [ ("schema", jsonStr schema)
         , ("type", jsonStr (render (pretty retT)))
         , ("desc", jsonStrArr desc)
         , ("constraints", constraintsJsonFor retT)
         , ("metadata", metadataEmpty)
         ]
+        <> maybe [] (\m -> [("mime", jsonStr m)]) mmime
 
     -- Extract the return type from a function type; pass other types
     -- through unchanged.
@@ -2464,7 +2508,7 @@ generate ::
   [(AnnoS (Indexed Type) One (), CmdDocSet)] ->
   [(AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet)] ->
   [AnnoS (Indexed Type) One (Indexed Lang)] ->
-  MorlocMonad Script
+  MorlocMonad (Script, [WrapperFile])
 generate cs rASTs helperRASTs = do
   config <- MM.ask
   st <- CMS.get
@@ -2494,21 +2538,24 @@ generate cs rASTs helperRASTs = do
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
-  -- In eval mode the source module is always synthesized as `main`, so a
-  -- shared `exe/main` directory would collide across distinct `--save NAME`
-  -- invocations. Use the outfile name (which carries --save NAME) to give
-  -- each saved eval program its own install directory.
-  installName <-
-    if stateEvalMode st
-      then MM.getOutfileName
-      else return programName
-  buildDir <-
+  -- Program identity for the build directory. --name or the source
+  -- basename for @morloc make@; the --save name for eval; the module name
+  -- as a last resort. One shared key for both plain make and install so
+  -- the two layouts can never diverge.
+  programKey <- MM.getProgramKey
+  buildParent <- MM.gets stateBuildParentDir
+  -- The source/install ROOT: exe/<key> for install (a mirror of the working
+  -- directory), the working directory (or --build-dir) for make. The build
+  -- artifacts nest at <root>/<key>-build, so a pool's sources are always at
+  -- ../../.. for both modes.
+  buildRoot <-
     if stateInstall st
-      then do
-        let installDir = configHome config </> "exe" </> installName
-        CMS.modify (\s -> s {stateInstallDir = Just installDir})
-        return installDir
-      else liftIO Dir.getCurrentDirectory
+      then return (configHome config </> "exe" </> programKey)
+      else do
+        cwd <- liftIO Dir.getCurrentDirectory
+        liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
+  let buildDir = buildRoot </> buildDirName programKey
+  CMS.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just buildRoot})
 
   poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
@@ -2522,8 +2569,7 @@ generate cs rASTs helperRASTs = do
           Just idx -> idx
           Nothing -> error $ "Pool not found for language: " <> show lang
 
-  -- Build manifest JSON with relative pool paths
-  outfileName <- MM.getOutfileName
+  -- Build manifest JSON with pool paths relative to the manifest's dir
   registry <- MM.gets stateLangRegistry
 
   -- Build group info for manifest
@@ -2546,6 +2592,7 @@ generate cs rASTs helperRASTs = do
   inlineSize <- MM.gets stateInlineSize
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
+  buildParams <- MM.gets (BP.renderSalt . stateLangParams)
   runLog <- renderRunLogTemplate
   debugTrace <- MM.gets stateDebugTrace
   -- Capability strings advertise optional codegen features baked into
@@ -2564,7 +2611,6 @@ generate cs rASTs helperRASTs = do
             { miConfig              = config
             , miRegistry            = registry
             , miProgramName         = programName
-            , miBuildDir            = buildDir
             , miBuildTime           = buildTime
             , miDaemonSets          = daemonSets
             , miFData               = fdata
@@ -2578,34 +2624,66 @@ generate cs rASTs helperRASTs = do
             , miInlineSize          = inlineSize
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
+            , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
             }
-      wrapperScript = makeWrapperScript manifestJson
 
-  return $
-    Script
-      { scriptBase = outfileName
-      , scriptLang = cLang
-      , scriptCode = "." :/ File outfileName (Code wrapperScript)
-      , scriptMake = [SysExe outfileName]
-      }
+  -- Launcher wrappers. Each is a pure-shell script that execs
+  -- @morloc-nexus <mode> <abs-manifest-path>@. They land in CWD (plain
+  -- make) or the install dir (install, whence they are copied to bin/).
+  wrapperSpecs <- MM.gets stateWrapperSpecs
+  let specs = fromMaybe [WrapperSpec WCli programKey] wrapperSpecs
+      absManifest = buildDir </> "manifest.json"
+      -- Launcher(s) land at the root (<root>/<key>), beside the nested
+      -- <key>-build; for install this is exe/<key>, whence installProgram
+      -- copies the CLI wrapper to bin/.
+      wrapperDir = buildRoot
+      wrappers =
+        [ WrapperFile
+            (wrapperDir </> wsName s)
+            (makeWrapperScript (wsMode s) absManifest)
+        | s <- specs
+        ]
 
--- Build a self-contained wrapper script with embedded manifest.
---
--- The `# morloc-program v<version>` sentinel comment is the marker
--- `morloc-nexus daemon` uses to confirm a target path is a morloc
--- wrapper before resolving the sibling `<target>.manifest`. The
--- exec line hardcodes the `run` subcommand so the wrapper artifact
--- can never be (mis)used to start a daemon directly -- daemons are
--- launched through an explicit `morloc-nexus daemon <target>`.
-makeWrapperScript :: Text -> Text
-makeWrapperScript manifestJson =
-  "#!/bin/sh\n# morloc-program v"
-    <> MT.pack Morloc.Version.versionStr
-    <> "\nexec morloc-nexus run \"$0\" \"$@\"\n### MANIFEST ###\n"
-    <> manifestJson
+  return
+    ( Script
+        { scriptBase = "manifest"
+        , scriptLang = cLang
+        , scriptCode = "." :/ File "manifest.json" (Code manifestJson)
+        , scriptMake = []
+        }
+    , wrappers
+    )
+
+-- | A pure-shell launcher that execs the shared @morloc-nexus@ binary in
+-- the requested mode against an absolute path to the program's
+-- @manifest.json@. The manifest is a standalone file (no embedded
+-- payload), so the wrapper carries no JSON and can be freely moved; only
+-- the build directory it points at is fixed.
+makeWrapperScript :: WrapperMode -> FilePath -> Text
+makeWrapperScript mode absManifestPath =
+  -- Export the launcher's own invocation name ($0, e.g. ./main) so the
+  -- nexus can print it in Usage/help lines instead of the module name.
+  "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus "
+    <> modeToken mode
+    <> " "
+    <> MT.pack (shellQuote absManifestPath)
+    <> " \"$@\"\n"
+  where
+    modeToken WCli = "run"
+    modeToken WDaemon = "daemon"
+    modeToken WMcp = "mcp"
+
+-- | POSIX single-quote a path so spaces and shell metacharacters in the
+-- absolute manifest path survive. Embedded single quotes are escaped with
+-- the standard @'\\''@ idiom.
+shellQuote :: FilePath -> String
+shellQuote p = "'" <> concatMap esc p <> "'"
+  where
+    esc '\'' = "'\\''"
+    esc c = [c]
 
 -- ======================================================================
 -- Utilities

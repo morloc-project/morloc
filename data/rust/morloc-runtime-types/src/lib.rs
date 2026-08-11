@@ -32,4 +32,19 @@ pub use cschema::is_top_null;
 /// so libmorloc.so and morloc-nexus can't drift.
 pub const PRINT_RESULT_OK: i32 = 0;
 pub const PRINT_RESULT_ERR: i32 = 1;
-pub const PRINT_RESULT_PIPE_CLOSED: i32 = 2;
+
+/// Shared i32 C-ABI result code (0=OK, 1=ERR, 2=PIPE_CLOSED) for the stdio
+/// intrinsics that report a broken pipe by return code with no errmsg:
+/// the print path AND mlc_write / mlc_flush / mlc_close. Named neutrally
+/// (not PRINT_*) since @write/@flush/@close do not print; the C++ pool
+/// mirrors it as MLC_RESULT_PIPE_CLOSED.
+pub const MLC_RESULT_PIPE_CLOSED: i32 = 2;
+
+/// Back-compat alias for the print path.
+pub const PRINT_RESULT_PIPE_CLOSED: i32 = MLC_RESULT_PIPE_CLOSED;
+
+/// Sentinel returned by `normalize_data_packet_to_fd` (an i64 byte count,
+/// negative on error) when the destination fd's downstream closed the pipe
+/// (EPIPE). Distinct from the generic `-1` error so the nexus stdout
+/// bridge can classify it as a broken pipe rather than a generic failure.
+pub const PACKET_TO_FD_PIPE_CLOSED: i64 = -2;

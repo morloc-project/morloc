@@ -15,6 +15,12 @@ pub const STATUS_OK:  u8 = 0;
 pub const STATUS_ERR: u8 = 1;
 pub const STATUS_EOF: u8 = 2;
 
+/// The downstream consumer closed the pipe (a stdout/stderr write hit
+/// `EPIPE`). Distinct from `STATUS_ERR` so the pool surfaces it as an
+/// `<IO>` condition (`MorlocError::PipeClosed`) that `@catch` must not
+/// swallow, rather than a generic recoverable error.
+pub const STATUS_PIPE_CLOSED: u8 = 3;
+
 /// Stdio kind byte carried in the SHM registry slot and in RPC
 /// dispatch. Immutable after `@open`.
 pub const STDIO_KIND_STDIN:  u8 = 0;

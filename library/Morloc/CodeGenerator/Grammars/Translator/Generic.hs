@@ -122,7 +122,7 @@ translateBuiltin lang desc srcs es = do
   let exefile = ML.makeExecutablePoolName lang
   let rendered = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (render code)
 
-  poolSubdir <- getPoolSubdir
+  let poolSubdir = getPoolSubdir lang
 
   return $
     Script
@@ -213,7 +213,7 @@ translateExternal cmd lang desc srcs es = do
           let exefile = ML.makeExecutablePoolName lang
               poolContent = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (cgmPoolCode m)
               buildCmds = map (SysRun . Code) (cgmBuildCommands m)
-          poolSubdir <- getPoolSubdir
+              poolSubdir = getPoolSubdir lang
           return $
             Script
               { scriptBase = "pool"
@@ -296,11 +296,11 @@ loadDescriptorForLang lang = do
     lookupEmbeddedPool "cpp" = Just $ DF.embededFileText (DF.poolTemplate "cpp")
     lookupEmbeddedPool _ = Nothing
 
-{- | Get the pool subdirectory name from the module name.
-This ensures each program gets its own pool directory (e.g., pools/foo/).
+{- | Per-language pool subdirectory name (e.g. pools/py/, pools/cpp/).
+One pool directory per pool language within a program's build directory.
 -}
-getPoolSubdir :: MorlocMonad String
-getPoolSubdir = MM.getModuleName
+getPoolSubdir :: Lang -> String
+getPoolSubdir = ML.poolDirKey
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
@@ -317,7 +317,10 @@ translateSource desc p = do
   unless exists . MM.throwSystemError $
     "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
-      p'' = if ldIncludeRelToFile desc then "../" <> p' else p'
+      -- For languages whose import is resolved relative to the pool FILE
+      -- (Julia's `include`), reach the source root: the pool sits at
+      -- <root>/<key>-build/pools/<lang>/, so sources are three levels up.
+      p'' = if ldIncludeRelToFile desc then "../../../" <> p' else p'
   if ldQualifiedImports desc
     then do
       lib <- MT.pack <$> asks MC.configLibrary
@@ -462,7 +465,8 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcCacheBody = genericCacheBody desc cfg
         , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
-        , lcMakeLet = \namer i _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
+        , lcMakeLoop = genericMakeLoop desc cfg
+        , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
@@ -874,6 +878,74 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
       }
+
+-- Native tail-loop assembly. Walks the 'LoopBody' decision tree, emitting
+-- @<result> = null; while(true){ <body> }@ where the body renders guards to
+-- if/else, lets to assignments, a base leaf to @result = base; break@, and a
+-- continue leaf to @<compute each new value into a temp>; <reassign the
+-- loop-carried native locals>@. Loop-carried locals are the manifold's native
+-- param vars (@nvarNamer id@), reassigned each iteration; computing continue
+-- values into temps before any reassignment avoids the parallel-assignment
+-- hazard when one continue value reads another loop var. The pre-declared
+-- result local carries the base value out through @break@.
+genericMakeLoop ::
+  LangDescriptor ->
+  LowerConfig IndexM ->
+  [Int] ->
+  LoopBody PoolDocs PoolDocs ->
+  IndexM PoolDocs
+genericMakeLoop desc cfg ids body = do
+  resultIdx <- lcNewIndex cfg
+  let resultVar = helperNamer resultIdx
+  bodyLines <- walkLB resultVar body
+  let resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
+      whileDoc = renderWhile bodyLines
+      leaves = loopBodyLeaves body
+  return $
+    PoolDocs
+      { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
+      , poolExpr = resultVar
+      , poolPriorLines = [resultDecl, whileDoc]
+      , poolPriorExprs = concatMap poolPriorExprs leaves
+      , poolReturnFlag = True
+      }
+  where
+    assign = pretty (ldAssignOp desc)
+    trueLit = pretty (ldBoolTrue desc)
+    -- Emit the statements for one loop-body subtree.
+    walkLB resultVar = go
+      where
+        go (LoopBase seDocs) =
+          return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]
+        go (LoopContinue contDocs) = do
+          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) contDocs
+          let priors = concatMap poolPriorLines contDocs
+              tmpAssigns = zipWith (\tv cd -> tv <+> assign <+> poolExpr cd) tmpVars contDocs
+              reassigns = zipWith (\i tv -> nvarNamer i <+> assign <+> tv) ids tmpVars
+          return $ priors <> tmpAssigns <> reassigns
+        go (LoopNLet i neDocs b) = do
+          rest <- go b
+          return $ poolPriorLines neDocs <> [nvarNamer i <+> assign <+> poolExpr neDocs] <> rest
+        go (LoopSLet i seDocs b) = do
+          rest <- go b
+          return $ poolPriorLines seDocs <> [svarNamer i <+> assign <+> poolExpr seDocs] <> rest
+        go (LoopIf guardDocs t e) = do
+          tLines <- go t
+          eLines <- go e
+          return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
+    -- Block-style rendering (IndentBlock=py, BraceBlock=r, EndKeywordBlock=julia
+    -- kept for consistency with sibling emitters though gated out today).
+    renderIf g tLines eLines = case ldBlockStyle desc of
+      IndentBlock ->
+        vsep [nest 4 (vsep (("if" <+> g <> ":") : tLines)), nest 4 (vsep ("else:" : eLines))]
+      BraceBlock ->
+        vsep ["if" <+> parens g <+> "{", indent 4 (vsep tLines), "} else {", indent 4 (vsep eLines), "}"]
+      EndKeywordBlock ->
+        vsep ["if" <+> g, indent 4 (vsep tLines), "else", indent 4 (vsep eLines), pretty (ldBlockEnd desc)]
+    renderWhile bodyLines = case ldBlockStyle desc of
+      IndentBlock -> nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
+      BraceBlock -> vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
+      EndKeywordBlock -> vsep ["while" <+> trueLit, indent 4 (vsep bodyLines), pretty (ldBlockEnd desc)]
 
 -- Build a suspended do-block thunk. When the thunk form can hold
 -- statements (non-empty ldDoBlockBlock, e.g. an R closure body) the

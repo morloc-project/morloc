@@ -120,6 +120,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   (ts', argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
+  mapM_ (rejectAuthoredMime loc) (cmddoc : retdoc : argdocs)
   cmdargs <-
     sequence
       [ makeCmdArg (loc <> "argument #" <> pretty n) t' a'
@@ -135,11 +136,13 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
       , cmdDocName = docName cmddoc
       , cmdDocArgs = cmdargs
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
+      , cmdDocRetMime = getReturnMime retdoc'
       , cmdDocTerminals = docWith cmddoc
       }
 processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
+  mapM_ (rejectAuthoredMime loc) [cmddoc, retdoc]
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
     CmdDocSet
@@ -147,17 +150,24 @@ processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
       , cmdDocName = docName cmddoc
       , cmdDocArgs = []
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
+      , cmdDocRetMime = getReturnMime retdoc'
       , cmdDocTerminals = docWith cmddoc
       }
 processArgDoc i t (ArgDocAlias r) = do
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc r
+  rejectAuthoredMime loc r
+  -- A nullary command's return type is still an alias chain that may carry a
+  -- `@mime` (e.g. `logo :: PNG`). Reduce it to inherit the media type; the
+  -- displayed return type/desc are left as-is.
+  (_, r') <- reduceArgDoc i t (ArgDocAlias r)
   return $
     CmdDocSet
       { cmdDocDesc = docLines r
       , cmdDocName = docName r
       , cmdDocArgs = []
       , cmdDocRet = (t, [])
+      , cmdDocRetMime = getReturnMime r'
       , cmdDocTerminals = []
       }
 processArgDoc i t r = do
@@ -177,6 +187,7 @@ processArgDoc i t r = do
           , cmdDocName = docName args
           , cmdDocArgs = cmdargs
           , cmdDocRet = (t, [])
+          , cmdDocRetMime = Nothing
           , cmdDocTerminals = []
           }
     _ -> MM.throwSystemError "Expected a record type with docstrings but found a non-record type"
@@ -214,11 +225,30 @@ validateCommandLevelDirectives loc r =
         <> " must appear inside the signature."
     check (_, False) = return ()
 
+-- | `@mime` attaches a media type to a TYPE; it is meaningless on a function,
+-- argument, or return signature (where it is silently ignored -- only a return
+-- type's `@mime` is consumed, via 'reduceArgDoc'). Reject the misplacement so it
+-- is a clear error rather than a no-op.
+rejectAuthoredMime :: MDoc -> ArgDocVars -> MorlocMonad ()
+rejectAuthoredMime loc r = case docMime r of
+  Just _ -> MM.throwSystemError $
+    loc <> "docstring directive '@mime' can only be attached to a type"
+      <> " definition, not to a function, argument, or return."
+  Nothing -> return ()
+
 getReturnDesc :: ArgDoc -> Maybe Text -> [Text]
 getReturnDesc _ (Just ret) = [ret]
 getReturnDesc (ArgDocRec r _) _ = docLines r
 getReturnDesc (ArgDocSig r _ _) _ = docLines r
 getReturnDesc (ArgDocAlias r) _ = docLines r
+
+-- | The media type of a return value, inherited from a `@mime`-annotated
+-- return type alias by 'reduceArgDoc'. Nothing when the return type carries
+-- no media type.
+getReturnMime :: ArgDoc -> Maybe Text
+getReturnMime (ArgDocRec r _) = docMime r
+getReturnMime (ArgDocSig r _ _) = docMime r
+getReturnMime (ArgDocAlias r) = docMime r
 
 reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
 reduceArgDoc i t@(VarT v) arg = do
@@ -251,9 +281,25 @@ reduceArgDoc i t@(VarT v) arg = do
     Nothing -> return (t, arg)
   where
     inheritArgDoc :: ArgDoc -> ArgDoc -> MorlocMonad ArgDoc
-    inheritArgDoc (ArgDocAlias r1) (ArgDocAlias r2) = return $ ArgDocAlias (inheritArgDocVars r1 r2)
-    inheritArgDoc (ArgDocAlias r1) (ArgDocRec r2 rs) = return $ ArgDocRec (inheritArgDocVars r1 r2) rs
+    inheritArgDoc (ArgDocAlias r1) (ArgDocAlias r2) = do
+      checkMimeConflict r1 r2
+      return $ ArgDocAlias (inheritArgDocVars r1 r2)
+    inheritArgDoc (ArgDocAlias r1) (ArgDocRec r2 rs) = do
+      checkMimeConflict r1 r2
+      return $ ArgDocRec (inheritArgDocVars r1 r2) rs
     inheritArgDoc _ _ = MM.throwSystemError $ "Cannot inherit docstrings for type alias '" <> pretty (unTVar v) <> "'"
+
+    -- A media type is authoritative: a single value cannot be labeled two
+    -- ways. If the use site (accumulated across an alias chain) and the alias
+    -- definition both declare a media type and they DIFFER, that is a
+    -- contradiction and must fail, not be resolved first-wins.
+    checkMimeConflict :: ArgDocVars -> ArgDocVars -> MorlocMonad ()
+    checkMimeConflict r1 r2 = case (docMime r1, docMime r2) of
+      (Just a, Just b)
+        | a /= b -> MM.throwSystemError $
+            "Conflicting media types for type alias '" <> pretty (unTVar v)
+              <> "': '" <> pretty a <> "' and '" <> pretty b <> "'"
+      _ -> return ()
 
     inheritArgDocVars :: ArgDocVars -> ArgDocVars -> ArgDocVars
     inheritArgDocVars r1 r2 =
@@ -277,6 +323,7 @@ reduceArgDoc i t@(VarT v) arg = do
         , docListForm = docListForm r1 <|> docListForm r2
         , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
         , docWith = if null (docWith r1) then docWith r2 else docWith r1
+        , docMime = docMime r1 <|> docMime r2
         }
 reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs

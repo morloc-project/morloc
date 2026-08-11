@@ -1,0 +1,44 @@
+-- A streamed @stdout truncated by a downstream `| head` must finish
+-- cleanly.
+--
+-- The original bug: a broken pipe mid-stream was swallowed by @catch and
+-- misrouted (in mosm it surfaced as a confusing "@read: parse failed"),
+-- and the orphaned @stdout claim wedged the shared-memory registry so
+-- every later run failed "@stdout already open in this nexus".
+--
+-- Fixed behaviour: a broken pipe is an <IO> condition, not a recoverable
+-- <Err>, so @catch does not swallow it. In one-shot CLI mode the nexus
+-- detects the closed downstream pipe and exits with the conventional
+-- SIGPIPE status (141) after a full teardown -- silently, like any Unix
+-- producer in a `... | head` pipeline.
+--
+-- produceBig streams `range 0 N` to @stdout. N is chosen so the jsonl
+-- output far exceeds the OS pipe buffer, which makes the broken pipe
+-- deterministic when the consumer is `head -n 5`: the nexus is still
+-- writing when head closes the read end. produceInCatch wraps the same
+-- stream in @catch to confirm the pipe is NOT routed into the fallback.
+--
+-- Coverage note: the cross-call *wedge* (a stale @stdout claim reused by
+-- a later call) and the @catch-not-swallowed path proper only manifest in
+-- daemon mode, where the nexus keeps serving after one client's pipe
+-- closes. This one-shot golden covers the clean-exit, correct-truncation,
+-- no-hang, and still-usable-afterwards behaviour.
+
+module main (produceBig, produceInCatch)
+
+import root-py
+
+produceBig :: <IO, Err> ()
+produceBig = do
+  o <- @stdout :: <IO, Err> OStream Int
+  @write 0 o (range 0 100000)
+  @close o
+
+produceInCatch :: <IO> ()
+produceInCatch =
+  @catch
+    ( do o <- @stdout :: <IO, Err> OStream Int
+         @write 0 o (range 0 100000)
+         @close o
+    )
+    ()

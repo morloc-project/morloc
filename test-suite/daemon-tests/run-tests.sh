@@ -123,55 +123,65 @@ assert_http_status() {
     fi
 }
 
-# Send a length-prefixed JSON message over a socket and read the response.
+# Send a length-prefixed JSON message over a socket and read the response as
+# text (the JSON-envelope wire). Thin wrapper over lp_request_raw so the socket
+# transport lives in one place.
 # Usage: lp_request <socket_or_host:port> <json>
 # Output: the response JSON string
 lp_request() {
+    local out
+    out=$(mktemp)
+    lp_request_raw "$1" "$2" "$out"
+    cat "$out"
+    rm -f "$out"
+}
+
+# Send a length-prefixed JSON message and write the RAW response bytes to a
+# file. Used to capture a `-f packet` daemon reply (binary morloc packet), which
+# cannot survive `$(...)` command substitution.
+# Usage: lp_request_raw <socket_or_host:port> <json> <out_file>
+lp_request_raw() {
     local target="$1"
     local json="$2"
+    local out_file="$3"
 
     python3 -c "
-import socket, struct, sys, json
+import socket, struct, sys
 
 target = sys.argv[1]
 msg = sys.argv[2].encode('utf-8')
+out_path = sys.argv[3]
 
 if target.startswith('/'):
-    # Unix socket
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(target)
 else:
-    # TCP host:port
     host, port = target.rsplit(':', 1)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((host, int(port)))
 
 s.settimeout(10)
-
-# Send length-prefixed message
 s.sendall(struct.pack('>I', len(msg)) + msg)
 
-# Read response length
 resp_len_bytes = b''
 while len(resp_len_bytes) < 4:
     chunk = s.recv(4 - len(resp_len_bytes))
     if not chunk:
         break
     resp_len_bytes += chunk
-
 resp_len = struct.unpack('>I', resp_len_bytes)[0]
 
-# Read response body
 resp = b''
 while len(resp) < resp_len:
     chunk = s.recv(resp_len - len(resp))
     if not chunk:
         break
     resp += chunk
-
 s.close()
-print(resp.decode('utf-8'))
-" "$target" "$json"
+
+with open(out_path, 'wb') as f:
+    f.write(resp)
+" "$target" "$json" "$out_file"
 }
 
 # Extract a JSON field value (simple string/number/bool/object extraction)
@@ -268,8 +278,8 @@ compile_program() {
 #
 # Daemon-mode argv shape: `morloc-nexus daemon <target> [opts...]`.
 # The wrapper script that `morloc make` produced sits at
-# `<work_dir>/nexus`; daemon mode treats it the same as a freestanding
-# `.manifest` file via cli::resolve_daemon_target.
+# `<work_dir>/nexus`; the resolver extracts the manifest.json path from
+# the wrapper's exec line (cli::resolve_manifest_target).
 start_daemon() {
     local work_dir="$1"
     shift
@@ -348,12 +358,14 @@ echo ""
 ARITH_DIR=$(mktemp -d)
 STRINGS_DIR=$(mktemp -d)
 PURE_DIR=$(mktemp -d)
-WORK_DIRS+=("$ARITH_DIR" "$STRINGS_DIR" "$PURE_DIR")
+RENDER_DIR=$(mktemp -d)
+WORK_DIRS+=("$ARITH_DIR" "$STRINGS_DIR" "$PURE_DIR" "$RENDER_DIR")
 
 echo "Compiling test programs..."
 compile_program "arithmetic.loc" "$ARITH_DIR"
 compile_program "strings.loc" "$STRINGS_DIR"
 compile_program "pure.loc" "$PURE_DIR"
+compile_program "render.loc" "$RENDER_DIR"
 echo "Done."
 echo ""
 
@@ -430,6 +442,61 @@ if should_run "http"; then
 
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
+fi
+
+# ======================================================================
+# Test Group: render selection (?render=<flag>)
+#
+# `?render=<flag>` selects an output projection; absent, the command's
+# `@default` renderer fires (CLI-consistent). A media-typed (`@mime`)
+# projection is served as raw bytes + `Content-Type`; `?render=raw`
+# recovers the underlying typed value. `/discover` advertises them.
+# ======================================================================
+
+if should_run "render"; then
+    echo "${BOLD}[render] Output projection selection (?render=)${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$RENDER_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+
+    # /discover advertises the render projections and their media types.
+    disco=$(curl -s "http://127.0.0.1:${HTTP_PORT}/discover")
+    assert_contains "discover lists render flag 'shout'" "shout" "$disco"
+    assert_contains "discover lists render mime text/plain" "text/plain" "$disco"
+    # Internal per-flag command is hidden from discovery.
+    if echo "$disco" | grep -q "mlcp_echo_shout"; then
+        assert_test "internal render entry hidden from discover" "hidden" "shown"
+    else
+        assert_test "internal render entry hidden from discover" "hidden" "hidden"
+    fi
+
+    # ?render=raw -> the underlying typed Str value, JSON-wrapped.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/echo?render=raw" \
+        -H "Content-Type: application/json" -d '["hi"]')
+    val=$(json_field "$result" "result")
+    assert_test "?render=raw returns typed value" "hi" "$val"
+
+    # ?render=shout -> raw text/plain body + Content-Type (media-typed return).
+    curl -s -D "$RENDER_DIR/s.hdr" -o "$RENDER_DIR/s.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout" \
+        -H "Content-Type: application/json" -d '["hi"]'
+    ct=$(grep -i '^content-type:' "$RENDER_DIR/s.hdr" | tr -d '\r' | awk '{print $2}')
+    assert_test "?render=shout Content-Type text/plain" "text/plain" "$ct"
+    assert_test "?render=shout raw body" "HI" "$(cat "$RENDER_DIR/s.body")"
+
+    # Bare call fires the @default (shout) renderer -> raw text/plain.
+    curl -s -D "$RENDER_DIR/d.hdr" -o "$RENDER_DIR/d.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo" \
+        -H "Content-Type: application/json" -d '["hey"]'
+    dct=$(grep -i '^content-type:' "$RENDER_DIR/d.hdr" | tr -d '\r' | awk '{print $2}')
+    assert_test "@default renderer Content-Type text/plain" "text/plain" "$dct"
+    assert_test "@default renderer raw body" "HEY" "$(cat "$RENDER_DIR/d.body")"
+
+    # Unknown render flag -> 400.
+    assert_http_status "POST /call/echo?render=nope -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=nope" \
+        -X POST -H "Content-Type: application/json" -d '["hi"]'
 fi
 
 # ======================================================================
@@ -859,6 +926,69 @@ if should_run "socket"; then
 fi
 
 # ======================================================================
+# Test Group 4b: -f packet result form over the Unix socket
+#
+# With `-f packet -z 3`, a `call` result is returned as a raw (zstd-
+# compressed) morloc data packet instead of the JSON envelope; control
+# methods (health/discover) stay JSON. The captured packet is decoded with
+# the shared `morloc-nexus` binary's `file` (classify) and `view` (re-emit)
+# subcommands, so the daemon and the reader agree on the wire format.
+# ======================================================================
+
+if should_run "packet"; then
+    echo "${BOLD}[packet] Daemon -f packet result form (socket)${RESET}"
+
+    PKT_SOCK="/tmp/morloc-test-pkt-$$.sock"
+    SOCKET_FILES+=("$PKT_SOCK")
+    start_daemon "$ARITH_DIR" --socket "$PKT_SOCK" -f packet -z 3
+    wait_for_daemon "$LAST_DAEMON_LOG" 15
+
+    PKT_OUT="$ARITH_DIR/pkt-resp.bin"
+
+    # A `call` result is a raw morloc data packet, not the JSON envelope.
+    lp_request_raw "$PKT_SOCK" '{"method":"call","command":"add","args":[10,20]}' "$PKT_OUT"
+    kind=$(morloc-nexus file -FD "$PKT_OUT" 2>/dev/null || echo "classify-failed")
+    assert_contains "packet call add returns a morloc packet" "packet" "$kind"
+
+    # The packet decodes back to the numeric result -- proving the schema
+    # block survived and the `-z 3` payload decompresses cleanly.
+    decoded=$(morloc-nexus view "$PKT_OUT" 2>/dev/null || echo "decode-failed")
+    assert_contains "packet call add [10,20] decodes to 30" "30" "$decoded"
+
+    # An error result is a (FAIL) packet too, not a JSON error envelope, so a
+    # packet-mode client always reads exactly one packet.
+    lp_request_raw "$PKT_SOCK" '{"method":"call","command":"bogus","args":[1]}' "$PKT_OUT"
+    ekind=$(morloc-nexus file -FD "$PKT_OUT" 2>/dev/null || echo "classify-failed")
+    assert_contains "packet unknown command returns a packet (not JSON)" "packet" "$ekind"
+
+    # Control methods stay JSON even on a packet-configured daemon.
+    result=$(lp_request "$PKT_SOCK" '{"method":"health"}')
+    status=$(json_field "$result" "status")
+    assert_test "packet-mode health stays JSON status=ok" "ok" "$status"
+
+    result=$(lp_request "$PKT_SOCK" '{"method":"discover"}')
+    assert_contains "packet-mode discover stays JSON, lists add" "add" "$result"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # A pure (in-nexus eval) command in packet mode exercises the eval-path
+    # packetizer, which is a distinct code path from the remote-pool call above.
+    PKT_PURE_SOCK="/tmp/morloc-test-pkt-pure-$$.sock"
+    SOCKET_FILES+=("$PKT_PURE_SOCK")
+    start_daemon "$PURE_DIR" --socket "$PKT_PURE_SOCK" -f packet
+    wait_for_daemon "$LAST_DAEMON_LOG" 15
+
+    lp_request_raw "$PKT_PURE_SOCK" '{"method":"call","command":"checkInt","args":[]}' "$PKT_OUT"
+    pkind=$(morloc-nexus file -FD "$PKT_OUT" 2>/dev/null || echo "classify-failed")
+    assert_contains "packet pure checkInt returns a morloc packet" "packet" "$pkind"
+    pdecoded=$(morloc-nexus view "$PKT_OUT" 2>/dev/null || echo "decode-failed")
+    assert_contains "packet pure checkInt decodes to 42" "42" "$pdecoded"
+
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 5: TCP (length-prefixed JSON)
 # ======================================================================
 
@@ -1250,35 +1380,27 @@ fi
 if should_run "router"; then
     echo "${BOLD}[router] Multi-program router${RESET}"
 
-    # Set up a temporary fdb directory with manifests
+    # Set up a temporary exe/ directory: one <name>/manifest.json per
+    # program, exactly the shape the router scans ($MORLOC_HOME/exe). The
+    # build already produced a self-describing nexus-build/ dir (keyed on
+    # the -o name; manifest.json + pools/ with relative pool paths), so
+    # symlink it in under the program name -- no extraction or patching.
     FDB_DIR=$(mktemp -d)
     WORK_DIRS+=("$FDB_DIR")
 
-    # Extract manifest JSON from the nexus wrapper script
-    # Format is: #!/bin/sh\nexec morloc-nexus ...\n### MANIFEST ###\n<json>
-    if [ -f "$ARITH_DIR/nexus" ]; then
-        sed -n '/^### MANIFEST ###$/,$ { /^### MANIFEST ###$/d; p; }' \
-            "$ARITH_DIR/nexus" > "$FDB_DIR/arithmetic.manifest"
-        # Patch build_dir in manifest to point to the work dir
-        python3 -c "
-import json, sys
-with open(sys.argv[1]) as f:
-    m = json.load(f)
-m['build_dir'] = sys.argv[2]
-with open(sys.argv[1], 'w') as f:
-    json.dump(m, f)
-" "$FDB_DIR/arithmetic.manifest" "$ARITH_DIR"
+    if [ -f "$ARITH_DIR/nexus-build/manifest.json" ]; then
+        ln -s "$ARITH_DIR/nexus-build" "$FDB_DIR/arithmetic"
     fi
 
-    if [ ! -s "$FDB_DIR/arithmetic.manifest" ]; then
-        echo "  ${RED}SKIP: could not extract manifest${RESET}"
+    if [ ! -f "$FDB_DIR/arithmetic/manifest.json" ]; then
+        echo "  ${RED}SKIP: could not locate arithmetic build directory${RESET}"
         echo ""
         TOTAL=$((TOTAL + 1))
         FAILED=$((FAILED + 1))
-        FAILURES+=("router: could not extract manifest")
+        FAILURES+=("router: could not locate build directory")
     fi
 
-    if [ -s "$FDB_DIR/arithmetic.manifest" ]; then
+    if [ -f "$FDB_DIR/arithmetic/manifest.json" ]; then
         ROUTER_PORT=$(pick_port)
 
         # Start router (use the morloc-nexus binary)

@@ -34,6 +34,9 @@ module Morloc.CodeGenerator.Guest.Futhark
   , FutharkEntry
   , hostSigTypes
   , decomposeSig
+  , resolveFutharkBuild
+  , backendLinkFlags
+  , futharkBackends
   ) where
 
 import Data.Aeson (FromJSON (..), eitherDecodeFileStrict', withObject, (.!=), (.:), (.:?))
@@ -45,6 +48,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.FilePath (takeBaseName, takeFileName, (<.>))
 
+import Morloc.Build.Params (LangParams)
+import qualified Morloc.Build.Params as BP
 import Morloc.CodeGenerator.Guest
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
@@ -162,11 +167,11 @@ instance FromJSON RawType where
     mops <- v .:? "ops"
     rec' <- v .:? "record"
     mra <- v .:? "record_array"
-    let free = case mops of
+    let freeName = case mops of
           Just (OpsFree f) -> f
           Nothing -> Nothing
         hasRA = maybe False (\(Present _) -> True) mra
-    pure (RawType kind ct free rec' hasRA)
+    pure (RawType kind ct freeName rec' hasRA)
 
 instance FromJSON Manifest where
   parseJSON = withObject "manifest" $ \v ->
@@ -233,6 +238,7 @@ futharkBuild srcs opts = do
       , bpIncludeDirs = [outDir]
       , bpLinkFlags = backendLinkFlags backend
       , bpManifests = jsons
+      , bpDevice = boDevice opts
       }
 
 -- returns (object, header, manifest) paths
@@ -251,9 +257,49 @@ buildOne backend outDir gs = do
   MM.runCommand "Futhark.build" gccCmd
   pure (oFile, hFile, jsonFile)
 
+-- Link flags for each backend's runtime. The GPU cases are best-effort: the
+-- exact libraries and their locations vary by CUDA/ROCm install layout and
+-- Futhark version, so a user targeting an unusual layout supplements these via
+-- @-X cpp:flags=-L/path@ etc.
 backendLinkFlags :: Text -> [Text]
 backendLinkFlags "multicore" = ["-lpthread", "-lm"]
+backendLinkFlags "opencl" = ["-lOpenCL", "-lm"]
+backendLinkFlags "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
+backendLinkFlags "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]
 backendLinkFlags _ = ["-lm"]
+
+-- | The Futhark compiler backends morloc knows how to build and link.
+futharkBackends :: [Text]
+futharkBackends = ["c", "multicore", "opencl", "cuda", "hip", "ispc"]
+
+-- | Backends that target a GPU and accept a device selector.
+isGpuBackend :: Text -> Bool
+isGpuBackend b = b `elem` ["opencl", "cuda", "hip"]
+
+-- | Resolve the futhark backend and device selector from build parameters,
+-- validating the values. This is where Futhark's own vocabulary is checked --
+-- the morloc UI passes @-X futhark:...@ through untouched. Returns 'Left' with a
+-- user-facing message on invalid input.
+resolveFutharkBuild :: LangParams -> Either Text (Maybe Text, Maybe Text)
+resolveFutharkBuild lp =
+  let backend = BP.lookupParam "futhark" "backend" lp
+      device = BP.lookupParam "futhark" "device" lp
+      resolved = fromMaybe "c" backend
+   in if resolved `notElem` futharkBackends
+        then
+          Left $
+            "unknown futhark backend '"
+              <> resolved
+              <> "'; expected one of "
+              <> T.intercalate ", " futharkBackends
+        else case device of
+          Just _
+            | not (isGpuBackend resolved) ->
+                Left $
+                  "futhark:device requires a GPU backend (opencl, cuda, or hip), but backend is '"
+                    <> resolved
+                    <> "'"
+          _ -> Right (backend, device)
 
 -- ---------------------------------------------------------------------------
 -- Check: parse the manifest and validate each morloc signature
@@ -526,7 +572,10 @@ preludeText needsTensor products =
          , "    static futhark_context* c = nullptr;"
          , "    if (c == nullptr) {"
          , "        futhark_context_config* cfg = futhark_context_config_new();"
-         , "        c = futhark_context_new(cfg);"
+         ]
+      -- Select a specific device (GPU backends only); validated upstream.
+      ++ ["        futhark_context_config_set_device(cfg, \"" <> dev <> "\");" | Just dev <- [bpDevice products]]
+      ++ [ "        c = futhark_context_new(cfg);"
          , "        if (c == nullptr) throw std::runtime_error(\"futhark: failed to create context\");"
          , "    }"
          , "    return c;"
@@ -593,16 +642,16 @@ marshalIn nm hostExpr frees ft@(FTNum e r) =
   let decl =
         arrayCType ft <> "* " <> nm <> " = futhark_new_" <> e <> "_" <> tshow r
           <> "d(ctx, " <> hostExpr <> ".data(), " <> dimsOf hostExpr r <> ");"
-      guard = nullGuard nm frees
+      guardLines = nullGuard nm frees
       freeThis = "futhark_free_" <> e <> "_" <> tshow r <> "d(ctx, " <> nm <> ");"
-   in (decl : guard, nm, freeThis : frees)
+   in (decl : guardLines, nm, freeThis : frees)
 marshalIn nm hostExpr frees (FTTuple (Just ti) fields) =
   let (fieldLines, fieldToks, freesAfter) = goFields 0 frees fields
       decl = tiCtype ti <> " " <> nm <> " = nullptr;"
       call = tiNew ti <> "(ctx, &" <> nm <> ", " <> T.intercalate ", " fieldToks <> ")"
-      guard = opaqueGuard nm call freesAfter
+      guardLines = opaqueGuard nm call freesAfter
       freeThis = tiFree ti <> "(ctx, " <> nm <> ");"
-   in (fieldLines ++ [decl] ++ guard, nm, freeThis : freesAfter)
+   in (fieldLines ++ [decl] ++ guardLines, nm, freeThis : freesAfter)
   where
     goFields _ fr [] = ([], [], fr)
     goFields k fr (f : fs) =
@@ -649,7 +698,7 @@ renderReturn (FTTuple mti fields) =
       reads_ = concatMap pfRead pf
       succFrees = concatMap pfSuccFree pf
       values = map pfValue pf
-      guard =
+      guardLines =
         ["if (_pc != 0 || futhark_context_sync(ctx) != 0) {"]
           ++ map ("    " <>) (errFrees ++ [tiFree ti <> "(ctx, r);", readThrow])
           ++ ["}"]
@@ -657,7 +706,7 @@ renderReturn (FTTuple mti fields) =
         ["int _pc = 0;"]
           ++ decls
           ++ projs
-          ++ guard
+          ++ guardLines
           ++ reads_
           ++ ["futhark_context_sync(ctx);"]
           ++ succFrees

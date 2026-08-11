@@ -44,6 +44,7 @@ module Morloc.Namespace.Expr
   , Intrinsic (..)
   , intrinsicName
   , intrinsicArity
+  , intrinsicIsIO
   , parseIntrinsic
   , Expr (..)
   , ExprI (..)
@@ -87,7 +88,7 @@ module Morloc.Namespace.Expr
   ) where
 
 import Control.Monad.Identity (runIdentity)
-import Data.Aeson (FromJSON (..), (.!=), (.:?))
+import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Foldable (toList)
@@ -220,6 +221,10 @@ data ModuleConfig = ModuleConfig
 data BuildConfig = BuildConfig
   { buildConfigSlurmSupport :: Maybe Bool
   , buildConfigSanitize :: Maybe Bool
+  , buildConfigLangParams :: Maybe (Map.Map Text (Map.Map Text Text))
+  -- ^ Per-machine default build parameters, keyed lang -> key -> value.
+  -- Written under the @lang-params@ key of the build config. Serves as the
+  -- layer below the @-X lang:key=value@ command-line overrides.
   }
   deriving (Show, Generic)
 
@@ -497,6 +502,52 @@ intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
 intrinsicName IntrTmpfile = "tmpfile"
 intrinsicName IntrIFileWalk = "ifile_walk"
+
+-- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
+-- (see 'Morloc.Frontend.Typecheck.intrinsicType'/'intrinsicTypeG'). Used by the
+-- eval sandbox to forbid directly-written IO intrinsics while leaving pure ones
+-- (`@lang`, `@show`, `IntrMap`, ...) usable. Kept exhaustive on purpose: a new
+-- 'Intrinsic' constructor triggers a non-exhaustive warning, forcing an explicit
+-- IO/pure classification rather than silently defaulting to allowed.
+intrinsicIsIO :: Intrinsic -> Bool
+intrinsicIsIO IntrSave = True
+intrinsicIsIO IntrSaveM = True
+intrinsicIsIO IntrSaveJ = True
+intrinsicIsIO IntrLoad = True
+intrinsicIsIO IntrOpen = True
+intrinsicIsIO IntrClose = True
+intrinsicIsIO IntrFSchema = True
+intrinsicIsIO IntrFLength = True
+intrinsicIsIO IntrStreamLayout = True
+intrinsicIsIO IntrNext = True
+intrinsicIsIO IntrStream = True
+intrinsicIsIO IntrWrite = True
+intrinsicIsIO IntrAppend = True
+intrinsicIsIO IntrConcat = True
+intrinsicIsIO IntrFlush = True
+intrinsicIsIO IntrStdin = True
+intrinsicIsIO IntrStdout = True
+intrinsicIsIO IntrStderr = True
+intrinsicIsIO IntrTell = True
+intrinsicIsIO IntrTmpfile = True
+-- @collect desugar-expands to @stdout/@write/@close (all IO); classify IO so a
+-- stray @collect that reached this check is still refused.
+intrinsicIsIO IntrCollect = True
+-- Synthesized post-typecheck (never user-written); IO by nature.
+intrinsicIsIO IntrIFileWalk = True
+-- Pure or Err-only (no IO): safe to write directly in a sandboxed eval.
+intrinsicIsIO IntrHash = False
+intrinsicIsIO IntrVersion = False
+intrinsicIsIO IntrCompiled = False
+intrinsicIsIO IntrLang = False
+intrinsicIsIO IntrSchema = False
+intrinsicIsIO IntrTypeof = False
+intrinsicIsIO IntrShow = False
+intrinsicIsIO IntrRead = False
+intrinsicIsIO IntrDatafile = False
+intrinsicIsIO IntrMap = False
+intrinsicIsIO IntrThrow = False
+intrinsicIsIO IntrCatch = False
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -804,6 +855,7 @@ instance Defaultable BuildConfig where
     BuildConfig
       { buildConfigSlurmSupport = Nothing
       , buildConfigSanitize = Nothing
+      , buildConfigLangParams = Nothing
       }
 
 instance Defaultable RemoteResources where
@@ -864,6 +916,16 @@ instance FromJSON BuildConfig where
   parseJSON =
     Aeson.genericParseJSON $
       defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "buildConfig"}
+
+-- | Serialize the build config back to YAML/JSON. Nothing-valued fields are
+-- omitted so a round-trip write only records fields that are actually set.
+instance ToJSON BuildConfig where
+  toJSON =
+    Aeson.genericToJSON $
+      defaultOptions
+        { fieldLabelModifier = stripPrefixAndKebabCase "buildConfig"
+        , omitNothingFields = True
+        }
 
 ---- JSON helpers
 

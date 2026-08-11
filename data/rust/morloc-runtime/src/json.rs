@@ -591,20 +591,22 @@ fn write_u8_array_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), Mor
     Ok(())
 }
 
-/// Verbatim output for the `-f raw` format -- the output path for `render`
-/// terminal handlers (which produce the final bytes). Supported shapes:
+/// Write a `-f raw` value's content bytes to `w`. Supported shapes:
 ///   * `Str`         -- the body, unquoted (whole-list textual render)
 ///   * `[Str]`       -- concatenated bodies (streaming textual render)
 ///   * `Vector U8`   -- the raw bytes (whole-list binary render)
 ///   * `[Vector U8]` -- concatenated byte blocks (streaming binary render)
-/// Any other shape is a clear error.
-pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
-    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+/// Any other shape is a clear error. Does NOT flush -- the caller flushes
+/// (stdout) or owns the buffer (`Vec`).
+fn write_voidstar_raw<W: io::Write>(
+    w: &mut W,
+    ptr: AbsPtr,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
     match schema.serial_type {
         SerialType::String => {
             let r = unsafe { ShmReader::new(ptr) };
-            write_str_body(&r, &mut w)?;
-            map_io(w.flush())
+            write_str_body(&r, w)
         }
         SerialType::Array => {
             let es = schema.parameters.first().ok_or_else(|| {
@@ -613,12 +615,11 @@ pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocErro
             let r = unsafe { ShmReader::new(ptr) };
             let arr = r.read_array(0);
             if arr.size == 0 || arr.data == RELNULL {
-                return map_io(w.flush());
+                return Ok(());
             }
             // `Vector U8` / `[U8]`: the array data IS the byte body.
             if es.serial_type == SerialType::Uint8 {
-                write_u8_array_body(&r, &mut w)?;
-                return map_io(w.flush());
+                return write_u8_array_body(&r, w);
             }
             // `[Str]` / `[Vector U8]`: emit each element's body in turn.
             let elem_is_u8_vec = es.serial_type == SerialType::Array
@@ -633,18 +634,34 @@ pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocErro
             for i in 0..arr.size {
                 let er = unsafe { ShmReader::new(data.add(i * es.width)) };
                 if elem_is_u8_vec {
-                    write_u8_array_body(&er, &mut w)?;
+                    write_u8_array_body(&er, w)?;
                 } else {
-                    write_str_body(&er, &mut w)?;
+                    write_str_body(&er, w)?;
                 }
             }
-            map_io(w.flush())
+            Ok(())
         }
         _ => Err(err(
             "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
              (a `render` handler's bytes)",
         )),
     }
+}
+
+/// Verbatim `-f raw` output to stdout -- the output path for `render` terminal
+/// handlers (which produce the final bytes).
+pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+    write_voidstar_raw(&mut w, ptr, schema)?;
+    map_io(w.flush())
+}
+
+/// The same `-f raw` content bytes as an owned buffer -- for a media-typed
+/// daemon HTTP response body (`Content-Type: <@mime>`).
+pub fn voidstar_raw_to_bytes(ptr: AbsPtr, schema: &Schema) -> Result<Vec<u8>, MorlocError> {
+    let mut buf: Vec<u8> = Vec::new();
+    write_voidstar_raw(&mut buf, ptr, schema)?;
+    Ok(buf)
 }
 
 pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {

@@ -1,0 +1,15 @@
+module main (countdown)
+
+import root-r
+
+-- Tail-recursive same-pool helper, lowered to a native `while` loop (no
+-- per-iteration serialize round-trip, no interpreter/C stack growth). A large
+-- call depth that would be costly/overflow as recursion runs in O(1) stack.
+-- Values stay under 2^31 (r integers are 32-bit).
+sumTo :: Int -> Int -> Int
+sumTo acc n
+  ? n == 0 = acc
+  : sumTo (acc + n) (n - 1)
+
+countdown :: Int -> Int
+countdown n = sumTo 0 n

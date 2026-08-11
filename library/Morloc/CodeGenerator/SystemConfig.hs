@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.SystemConfig
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Completion as Completion
+import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
 import Morloc.Module (OverwriteProtocol (..))
 
@@ -26,7 +27,7 @@ import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, catch, displayException, fromException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
 import System.Environment (lookupEnv)
 import System.FilePath (takeDirectory)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
@@ -84,10 +85,15 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   sayInfo verbose $ "Sanitize ... " <> show sanitize
 
   sayInfo verbose "Writing build config file"
-  let sanitizeLine = if sanitize then "\nsanitize: true" else "\nsanitize: false"
-  TIO.writeFile
-    (configBuildConfig config)
-    ((if slurmSupport then "slurm-support: true" else "slurm-support: false") <> sanitizeLine)
+  -- Read-modify-write: preserve any existing fields (e.g. `lang-params` set via
+  -- `morloc config`) and only override the two flags `morloc init` owns.
+  existingBuildConfig <- Config.loadBuildConfig config
+  Config.writeBuildConfig
+    config
+    existingBuildConfig
+      { buildConfigSlurmSupport = Just slurmSupport
+      , buildConfigSanitize = Just sanitize
+      }
 
   -- Clean and create build directory
   let buildDir = tmpDir </> "libmorloc-build"
@@ -131,6 +137,13 @@ configureAllSteps verbose force slurmSupport sanitize config = do
     Nothing -> do
       morlocBin <- findExecutable "morloc"
       let bundleCandidate = case rustBinEnv of Just b -> [b </> "rust"]; Nothing -> []
+          -- Order: an explicit MORLOC_RUST_DIR (handled above) wins; then a
+          -- prebuilt bundle; then the persisted copy at $MORLOC_HOME/rust; then
+          -- locations relative to the morloc binary. The persisted copy is kept
+          -- AHEAD of the binary-relative candidates so a custom $MORLOC_HOME is
+          -- not shadowed by a stale default-home ($HOME/.local/share/morloc/rust)
+          -- workspace. Staleness of the persisted copy is surfaced by a warning
+          -- below (set MORLOC_RUST_DIR to rebuild from fresh source).
           homeCandidate = [homeDir </> "rust"]
           binCandidates = case morlocBin of
             Just binPath ->
@@ -228,37 +241,50 @@ configureAllSteps verbose force slurmSupport sanitize config = do
 
       return ()
 
-  -- Build the rustmorloc pool marshaller (an rlib) into a DEDICATED target dir
-  -- under $MORLOC_HOME/lib. This runs in EVERY init path (prebuilt or
-  -- from-source libmorloc): unlike the C-ABI libmorloc.so, rustmorloc is an
-  -- rlib locked to the LOCAL rustc that `morloc make` uses, so it can never be
-  -- a prebuilt bundle artifact -- it must be compiled here with the local
-  -- toolchain. The isolated target dir keeps the dependency closure unambiguous
-  -- for the bare-rustc pool build (Members/Rust.hs::makeTheMaker):
-  --   --extern rustmorloc=<rust-build>/release/librustmorloc.rlib
-  --   -L dependency=<rust-build>/release/deps
-  -- so rustmorloc's transitive deps (morloc_runtime_types, ...) resolve by
-  -- exact hash. Mirrors cpp/init.sh's libcppmorloc.a install.
+  -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
+  -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)
+  -- that path-depends on rustmorloc, so its source (and its sibling
+  -- morloc-runtime-types + the workspace Cargo.toml/Cargo.lock) must be present
+  -- at `morloc make` time -- unlike the C-ABI libmorloc.so, rustmorloc is
+  -- locked to the LOCAL rustc and is compiled per-pool by cargo. We pre-build
+  -- rustmorloc into the shared pool target-dir so the first `morloc make`
+  -- doesn't pay that compile.
   case (null rustDir, hasCargo) of
     (False, Just _) -> do
-      sayInfo verbose "Compiling rustmorloc (Rust pool marshaller)"
-      let rustBuildDir = libDir </> "rust-build"
+      let persistedRustDir = homeDir </> "rust"
+          poolTargetDir = libDir </> "rust-build"
+      -- If the resolved source IS the persisted copy (no fresher workspace
+      -- found), warn instead of silently reusing possibly-stale source; a dev
+      -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise refresh
+      -- the persisted copy from the resolved source.
+      srcAbs <- canonicalizePath rustDir
+      destExists <- doesDirectoryExist persistedRustDir
+      destAbs <- if destExists then canonicalizePath persistedRustDir else return persistedRustDir
+      if srcAbs == destAbs
+        then sayWarning $
+          "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
+            <> "workspace found). If you changed the compiler's data/rust, set "
+            <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
+        else do
+          sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
+          persistRustSource verbose srcAbs persistedRustDir destExists
+      sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
       run verbose "cargo"
         [ "build", "--release"
-        , "--manifest-path", rustDir </> "Cargo.toml"
+        , "--manifest-path", persistedRustDir </> "Cargo.toml"
         , "-p", "rustmorloc"
-        , "--target-dir", rustBuildDir
+        , "--target-dir", poolTargetDir
         ]
     (True, _) ->
       sayWarning $
-        "rustmorloc not built (Rust pools will not compile): the Rust workspace "
-          <> "was not found. Set MORLOC_RUST_DIR to the compiler's data/rust/ "
-          <> "directory (or symlink it to $MORLOC_HOME/rust), then re-run `morloc init -f`."
+        "Rust workspace not persisted (Rust pools will not compile): the Rust "
+          <> "workspace was not found. Set MORLOC_RUST_DIR to the compiler's "
+          <> "data/rust/ directory, then re-run `morloc init -f`."
     (_, Nothing) ->
       sayWarning $
-        "rustmorloc not built (Rust pools will not compile): `cargo` was not found "
-          <> "on PATH. Install Rust (https://rustup.rs) or add cargo to PATH, then "
-          <> "re-run `morloc init -f`."
+        "Rust workspace not persisted (Rust pools will not compile): `cargo` was "
+          <> "not found on PATH. Install Rust (https://rustup.rs) or add cargo to "
+          <> "PATH, then re-run `morloc init -f`."
 
   -- Symlink the newly installed binaries into a "user bin" directory so
   -- they end up on PATH. The directory is selected by the
@@ -370,6 +396,21 @@ run verbose cmd args = do
   case exitCode of
     ExitSuccess -> return ()
     ExitFailure code -> ioError . userError $ cmd <> " exited with code " <> show code
+
+-- | Copy a Rust workspace source tree (already resolved to an absolute path) to
+-- a stable location under $MORLOC_HOME so generated pool Cargo projects can
+-- path-depend on rustmorloc at make time. Build artifacts (any @target@ dir)
+-- are excluded. The caller decides whether to persist (it owns the
+-- source-vs-destination comparison), so there is no guard here.
+persistRustSource :: Bool -> FilePath -> FilePath -> Bool -> IO ()
+persistRustSource verbose srcAbs destDir destExists = do
+  when destExists $ removeDirectoryRecursive destDir
+  createDirectoryIfMissing True destDir
+  -- tar-pipe excluding build/VCS dirs; portable across dev machines with cargo.
+  run verbose "sh"
+    [ "-c"
+    , "tar cf - -C '" <> srcAbs <> "' --exclude=target --exclude=.git . | tar xf - -C '" <> destDir <> "'"
+    ]
 
 ensureDirectory :: Bool -> String -> FilePath -> IO ()
 ensureDirectory verbose description path = do

@@ -319,6 +319,19 @@ extern "C" fn pool_check_and_recover(
     unsafe { morloc_daemon_end_recovery() };
 }
 
+/// Synchronous pool-crash check + recovery for the MCP server loop.
+///
+/// The MCP loop has no periodic poll cycle (unlike `daemon_run`), so it calls
+/// this after a dispatch fails with an INTERNAL error: if the failure was a
+/// pool process dying, [`pool_check_and_recover`] tears down and respawns every
+/// pool (a fast per-pool `pool_is_alive` no-op when nothing died). Requires
+/// [`install_recovery_context`] to have run. The `sockets` argument is unused
+/// by the recovery routine (it walks the global PID tables), so a null pointer
+/// is passed.
+pub fn mcp_recover_pools(n_pools: usize) {
+    pool_check_and_recover(std::ptr::null_mut(), n_pools);
+}
+
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RETRY_MULTIPLIER: f64 = 1.25;
@@ -464,6 +477,25 @@ extern "C" fn signal_exit_handler(sig: libc::c_int) {
     unsafe { libc::_exit(128 + sig) };
 }
 
+/// Crash handler for fatal program-error signals (SIGSEGV / SIGABRT /
+/// SIGBUS / SIGFPE). Unlinks the SHM segments this nexus owns, then
+/// re-raises so the default disposition (core dump / termination)
+/// still fires and the exit status is preserved. Registered with
+/// `SA_RESETHAND`, so the handler runs once and the signal's default
+/// takes over on the re-raise.
+///
+/// Must stay async-signal-safe: it calls only `sweep_shm_segments`
+/// (shm_unlink loop over a fixed buffer, no locks/alloc) and
+/// `raise`. It deliberately does NOT run `clean_exit` or the
+/// pool-kill loop -- those are not async-signal-safe. Orphaned pools
+/// are reaped by the nexus poll's dead-pool sweep on the next run.
+extern "C" fn crash_cleanup_handler(sig: libc::c_int) {
+    unsafe {
+        sweep_shm_segments();
+        libc::raise(sig);
+    }
+}
+
 /// Sweep every `<basename>_<idx>` segment via `shm_unlink`. Called
 /// from `signal_exit_handler`; must stay async-signal-safe (no
 /// allocation, no locks). The full 0..MAX_VOLUME_NUMBER walk is
@@ -552,6 +584,20 @@ pub fn install_signal_handlers() {
         sa_exit.sa_flags = 0;
         libc::sigaction(libc::SIGTERM, &sa_exit, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa_exit, std::ptr::null_mut());
+
+        // Fatal program-error signals: unlink SHM segments, then
+        // re-raise for the default disposition. SA_RESETHAND ensures
+        // the re-raise hits the default handler (core dump / kill)
+        // rather than recursing. SIGKILL is intentionally absent --
+        // it cannot be caught.
+        let mut sa_crash: libc::sigaction = std::mem::zeroed();
+        sa_crash.sa_sigaction = crash_cleanup_handler as *const () as usize;
+        libc::sigemptyset(&mut sa_crash.sa_mask);
+        sa_crash.sa_flags = libc::SA_RESETHAND;
+        libc::sigaction(libc::SIGSEGV, &sa_crash, std::ptr::null_mut());
+        libc::sigaction(libc::SIGABRT, &sa_crash, std::ptr::null_mut());
+        libc::sigaction(libc::SIGBUS, &sa_crash, std::ptr::null_mut());
+        libc::sigaction(libc::SIGFPE, &sa_crash, std::ptr::null_mut());
     }
 }
 

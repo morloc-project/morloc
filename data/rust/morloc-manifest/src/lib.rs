@@ -1,6 +1,6 @@
 //! Morloc manifest schema (v2) -- canonical Rust types.
 //!
-//! The morloc compiler emits a `.manifest` JSON blob describing every
+//! The morloc compiler emits a standalone `manifest.json` describing every
 //! exported command's interface. This crate is the **single source of
 //! truth** for that schema's Rust representation. Both the CLI nexus
 //! (`morloc-nexus`) and the C-FFI runtime (`morloc-runtime`) depend on
@@ -60,8 +60,8 @@ pub type Metadata = BTreeMap<String, serde_json::Value>;
 
 // -- Top-level manifest -------------------------------------------------------
 
-/// The top-level manifest object. Embedded in every built nexus binary
-/// as a JSON blob after the `### MANIFEST ###` marker.
+/// The top-level manifest object. Written as a standalone `manifest.json`
+/// in each program's build directory; the launcher wrappers point at it.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Manifest {
@@ -162,9 +162,9 @@ fn default_capabilities() -> Vec<String> {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Build {
-    /// Absolute path to the build directory containing this program's
-    /// pool executables and generated source files. The nexus chdirs
-    /// here at startup so relative pool exec paths resolve.
+    /// Build directory marker. Emitted as "." (the manifest's own
+    /// directory): pool exec paths are relative to the manifest file, so
+    /// no absolute build path is recorded and the directory is relocatable.
     pub path: String,
     /// Unix timestamp at which the manifest was generated.
     pub time: i64,
@@ -368,6 +368,29 @@ impl Command {
     }
 }
 
+impl Manifest {
+    /// Look up a command by name (linear scan; manifests are small).
+    pub fn command_by_name(&self, name: &str) -> Option<&Command> {
+        self.commands.iter().find(|c| c.name == name)
+    }
+
+    /// Index of a command by name, for callers that need the position rather
+    /// than the reference.
+    pub fn command_index(&self, name: &str) -> Option<usize> {
+        self.commands.iter().position(|c| c.name == name)
+    }
+}
+
+impl Terminal {
+    /// The synthesized internal command that carries out this terminal action
+    /// (`@render`/`@with`), resolved against the manifest. Single source for the
+    /// terminal -> entry-command lookup shared by CLI help / dispatch and the
+    /// MCP tool surface.
+    pub fn resolve_entry<'a>(&self, m: &'a Manifest) -> Option<&'a Command> {
+        m.command_by_name(&self.entry)
+    }
+}
+
 /// Return-value descriptor. Structurally similar to a typed [`Arg`]
 /// minus the CLI-specific fields (kind, metavar, quoted, short/long,
 /// default). Always present on every command.
@@ -398,6 +421,13 @@ pub struct Return {
     /// rationale as the per-arg slot.
     #[serde(default)]
     pub metadata: Metadata,
+    /// Media type of the return value (RFC 6838 `type/subtype`, e.g.
+    /// `image/png`), inherited from a `@mime`-annotated return type alias.
+    /// Drives how the value's bytes are labeled downstream: an MCP `image`
+    /// content block, an HTTP `Content-Type` header. `None` when the return
+    /// type carries no media type.
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 // -- Constraints --------------------------------------------------------------
@@ -792,28 +822,12 @@ pub struct Service {
 
 // -- I/O ----------------------------------------------------------------------
 
-/// Read the manifest payload from a built-nexus wrapper script. The
-/// nexus binary is wrapped in a shell script that contains a
-/// `### MANIFEST ###` marker followed by the JSON blob. Plain JSON
-/// files (no shebang) are returned as-is.
+/// Read a standalone `manifest.json` file. Thin shell launchers point at
+/// this file directly (they carry no embedded payload), so the whole file
+/// is the JSON manifest.
 pub fn read_manifest_payload(path: &str) -> Result<String, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot open manifest file '{}': {}", path, e))?;
-
-    if content.starts_with("#!") {
-        if let Some(pos) = content.find("### MANIFEST ###") {
-            let after_marker = &content[pos..];
-            let payload_start = after_marker
-                .find('\n')
-                .map(|i| pos + i + 1)
-                .unwrap_or(content.len());
-            Ok(content[payload_start..].to_string())
-        } else {
-            Err("No ### MANIFEST ### marker found in wrapper script".into())
-        }
-    } else {
-        Ok(content)
-    }
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot open manifest file '{}': {}", path, e))
 }
 
 /// Parse a manifest JSON payload into a [`Manifest`]. Performs a

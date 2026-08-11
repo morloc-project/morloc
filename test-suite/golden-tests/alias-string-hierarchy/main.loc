@@ -1,18 +1,3 @@
--- Test the string type hierarchy from the types-hierarchies tutorial.
---
--- Hierarchy:
---   Str                 (root)
---   +-- Bytes           (concrete override: Py => "bytes")
---   +-- Filename        (transparent alias, no override)
---
--- Tests:
---   1. toBytes/fromBytes conversion between Str and Bytes
---   2. Filename as transparent alias (usable wherever Str is)
---   3. Filelike typeclass: Filename has it, Str does not
---   4. Stringlike typeclass: Str and Bytes each have instances
---   5. Filename inherits Stringlike from Str
---   6. Bytes specialization uses its own Stringlike, not Str's
-
 module main (test_result)
 
 import root-py

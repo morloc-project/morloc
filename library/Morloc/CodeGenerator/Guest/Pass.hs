@@ -30,9 +30,9 @@ import qualified Data.Text as T
 import System.Directory (canonicalizePath, createDirectoryIfMissing, getCurrentDirectory)
 
 import Morloc.CodeGenerator.Guest
-import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes)
+import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes, resolveFutharkBuild)
 import Morloc.CodeGenerator.Namespace
-import Morloc.Data.Doc (render)
+import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 
@@ -60,7 +60,11 @@ lowerFuthark ::
 lowerFuthark asts futSrcs = do
   outDir <- setupBuildDir (langName (guestLang futharkGuest))
   guestSources <- dedupSources futSrcs
-  products <- guestBuild futharkGuest guestSources (BuildOpts Nothing outDir)
+  langParams <- MM.gets stateLangParams
+  (backend, device) <- case resolveFutharkBuild langParams of
+    Left msg -> MM.throwSystemError (pretty msg)
+    Right bd -> return bd
+  products <- guestBuild futharkGuest guestSources (BuildOpts backend device outDir)
   let sigs = [SourcedSig src t | (src, t) <- futSrcs]
   checked <- guestCheck futharkGuest sigs products
   let glueEntries = map toGlueEntry checked
@@ -132,14 +136,15 @@ rewriteSrc bindings = runIdentity . go
 -- ---------------------------------------------------------------------------
 
 -- Guest artifacts live alongside the host pool, under
--- pools/<module>/<host>-guests/<guest>/ -- one directory per guest language so
--- multiple guests never collide. `MM.getModuleName` is the host pool's subdir.
--- Absolute paths are used downstream so the source-rewrite and link resolve
--- regardless of build cwd.
+-- pools/<host>/<host>-guests/<guest>/ -- one directory per guest language so
+-- multiple guests never collide. Guests always attach to the C++ host pool,
+-- whose subdir is the "cpp" language key. Absolute paths are used downstream
+-- so the source-rewrite and link resolve regardless of build cwd.
 setupBuildDir :: Text -> MorlocMonad Path
 setupBuildDir guestName = do
   cwd <- MM.liftIO getCurrentDirectory
-  poolSubdir <- MM.getModuleName
+  -- The host is always the C++ pool, whose subdir key is "cpp".
+  let poolSubdir = "cpp"
   let dir = cwd </> "pools" </> poolSubdir </> "cpp-guests" </> T.unpack guestName
   MM.liftIO (createDirectoryIfMissing True dir)
   return dir

@@ -135,6 +135,14 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         // temps are already gone via @close(path).
         crate::intrinsics::sweep_call_temps();
 
+        // Reclaim any stdio singleton (@stdout/@stderr/@stdin) this dispatch
+        // left open -- e.g. an exception unwound past @close on a broken
+        // pipe. Without this, the claim persists in the nexus-scoped SHM
+        // registry and every later invocation fails "@stdout already open"
+        // while the (daemon-mode) pool stays alive. Cheap on the common
+        // no-stdio path: a single thread-local read (see the fn's gate).
+        crate::stream::pool_reclaim_stdio_after_dispatch();
+
         if result.is_null() {
             return make_fail_packet(b"dispatch callback returned NULL\0".as_ptr() as *const c_char);
         }
@@ -174,6 +182,14 @@ struct JobQueue {
     cond: Condvar,
 }
 
+// Outcome of a bounded wait for work: a job to run, an idle timeout (the caller
+// decides whether to keep waiting or reap the worker), or shutdown.
+enum PopResult {
+    Job(i32),
+    Timeout,
+    Shutdown,
+}
+
 impl JobQueue {
     fn new() -> Self {
         JobQueue { jobs: Mutex::new(Vec::new()), cond: Condvar::new() }
@@ -185,16 +201,24 @@ impl JobQueue {
         self.cond.notify_one();
     }
 
-    fn pop(&self) -> Option<i32> {
+    // Wait up to `wait` for a job. Unlike an unbounded pop, a `Timeout` return
+    // lets the worker loop check its idle deadline and exit if it is a surplus
+    // (dynamically-spawned) worker.
+    fn pop_timeout(&self, wait: std::time::Duration) -> PopResult {
         let mut jobs = self.jobs.lock().unwrap();
-        loop {
-            if SHUTTING_DOWN.load(Ordering::Relaxed) { return None; }
-            if let Some(fd) = jobs.pop() { return Some(fd); }
-            let result = self.cond.wait_timeout(jobs, std::time::Duration::from_millis(100)).unwrap();
-            jobs = result.0;
-        }
+        if SHUTTING_DOWN.load(Ordering::Relaxed) { return PopResult::Shutdown; }
+        if let Some(fd) = jobs.pop() { return PopResult::Job(fd); }
+        let (mut jobs, _) = self.cond.wait_timeout(jobs, wait).unwrap();
+        if SHUTTING_DOWN.load(Ordering::Relaxed) { return PopResult::Shutdown; }
+        if let Some(fd) = jobs.pop() { return PopResult::Job(fd); }
+        PopResult::Timeout
     }
 }
+
+// Seconds a surplus worker stays idle before exiting. Mirrors the Python pool's
+// WORKER_IDLE_TIMEOUT so a burst of concurrency does not leave threads (and the
+// fds/stacks they hold) alive for the rest of the run.
+const WORKER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 // ── Worker thread ────────────────────────────────────────────────────────────
 
@@ -205,10 +229,33 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
         fn close_socket(fd: i32);
     }
 
+    let min_workers = config.initial_workers.max(1);
+    let mut last_activity = std::time::Instant::now();
+
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let client_fd = match queue.pop() {
-            Some(fd) => fd,
-            None => break,
+        let client_fd = match queue.pop_timeout(std::time::Duration::from_millis(100)) {
+            PopResult::Job(fd) => fd,
+            PopResult::Shutdown => break,
+            PopResult::Timeout => {
+                // Reap this worker if it is surplus (beyond the initial core
+                // pool) and has been idle past the timeout. The floor check and
+                // the decrement are a single atomic CAS (fetch_update), so
+                // concurrent idle workers cannot race past min_workers down to
+                // zero; only the worker whose CAS succeeds exits. Keeping at
+                // least min_workers alive avoids churn under steady load, and the
+                // decrement lets the accept loop spawn again on the next burst.
+                if config.dynamic_scaling && last_activity.elapsed() > WORKER_IDLE_TIMEOUT {
+                    let reaped = TOTAL_WORKERS
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| {
+                            if t > min_workers { Some(t - 1) } else { None }
+                        })
+                        .is_ok();
+                    if reaped {
+                        return;
+                    }
+                }
+                continue;
+            }
         };
 
         let mut errmsg: *mut c_char = ptr::null_mut();
@@ -237,6 +284,7 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
 
         libc::fflush(ptr::null_mut()); // flush stdout
         close_socket(client_fd);
+        last_activity = std::time::Instant::now();
     }
 }
 
@@ -291,6 +339,10 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
                 TOTAL_WORKERS.fetch_add(1, Ordering::Relaxed);
             }
         }
+
+        // Drop join handles of workers that exited on idle timeout so the Vec
+        // does not grow without bound over a long-running, bursty program.
+        handles.retain(|h| !h.is_finished());
     }
 
     SHUTTING_DOWN.store(true, Ordering::Relaxed);

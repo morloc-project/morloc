@@ -1,0 +1,32 @@
+-- Exercises the daemon's `?render=<flag>` output selection and media-typed
+-- (`@mime`) raw HTTP responses.
+--
+--   POST /call/echo                -> the @default (shout) renderer fires, so
+--                                     the body is raw text/plain (like the CLI's
+--                                     no-flag behavior)
+--   POST /call/echo?render=raw     -> the underlying typed value (the -f json
+--                                     analog), JSON-wrapped
+--   POST /call/echo?render=shout   -> the shout projection: raw text/plain bytes
+--                                     + `Content-Type: text/plain`
+--   POST /call/echo?render=nope    -> 400 (unknown render)
+--
+-- `PlainText = Str` carries `@mime text/plain`, so a value of that type is served
+-- as raw bytes with the media type rather than the JSON envelope. Str keeps this
+-- test free of numpy/Pillow.
+module main (echo)
+
+import root-py
+
+--' @mime text/plain
+type PlainText = Str
+
+source Py from "render.py"
+  ( "identity" as echo
+  , "shout"    as shout
+  )
+
+shout :: Str -> PlainText
+
+--' Echo a string; the shouting renderer is the default projection.
+--' @render -s/--shout=shout @default
+echo :: Str -> Str

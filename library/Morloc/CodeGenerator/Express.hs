@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Express
   ( express
   , addCacheWraps
   , addDebugWraps
+  , addLoopWraps
   ) where
 
 import qualified Data.Set as Set
@@ -186,6 +187,191 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
+
+-- | Whether a driver language can host a native tail-loop. Python/R lower via
+-- 'genericMakeLoop'; C++ via the member's 'lcMakeLoop' (non-const native locals
+-- reassigned in place). Rust is excluded: its borrow checker + single-assignment
+-- last-use pass reject in-place reassignment of a loop-carried local (its
+-- 'lcMakeLoop' is a matching fail-loud stub). Single source of truth for the
+-- gate.
+langSupportsNativeLoop :: Lang -> Bool
+langSupportsNativeLoop lang = langName lang `elem` ["py", "r", "cpp", "rust"]
+
+-- | Lower an eligible tail-recursive manifold to a native 'PolyLoop'. Runs after
+-- 'express'/'addCacheWraps'/'addDebugWraps' and before 'insertEffectBoundaries'
+-- and 'segment', so the loop node propagates through the rest of the pipeline.
+-- Applies to any self-recursive 'PolyHead' -- an extracted helper OR an exported
+-- directly-recursive function (both carry a @RecCallP@ back to their own midx).
+--
+-- Tail-ness is decided structurally at THIS stage rather than from a frontend
+-- flag: 'rewriteLoopTail' turns every TAIL-position self back-edge into a
+-- 'PolyLoopContinue', so any @RecCallP@ still remaining in @loopBody@ is a
+-- non-tail back-edge. Eligibility (first cut): at least one self back-edge, none
+-- remaining after the rewrite (all tail), not @--debug@ (recursion preserves the
+-- nested trace), same-pool (@crossLang == Nothing@), a driver language that can
+-- host a loop, and the single-guard canonical shape. Cross-pool loops and the
+-- type-based crossing gates come later; anything ineligible falls back to the
+-- existing round-trip recursion.
+addLoopWraps :: PolyHead -> MorlocMonad PolyHead
+addLoopWraps ph@(PolyHead lang midx args body) = do
+  debugOn <- MM.gets stateDebugTrace
+  let backEdges = collectRecCalls midx body
+      loopBody = rewriteLoopTail midx body
+  -- Ordered cheapest-first: the O(1) flag/language gates short-circuit before
+  -- the body traversals ('backEdges'), which in turn precede forcing 'loopBody'
+  -- (the 'rewriteLoopTail' rebuild) in the last two conjuncts.
+  if not debugOn
+       && langSupportsNativeLoop lang
+       && not (null backEdges)
+       && all (isNothing . fst) backEdges
+       -- An effectful loop is only sound to lower when its result is consumed
+       -- EAGERLY (the body's return is forced, a 'PolyEval'). A deferred/
+       -- suspended <IO> result would have its base effect fire at loop-run time
+       -- instead of force time; gate those to recursion. Pure loops are always ok.
+       && (not (effectfulLoop backEdges) || returnEager body)
+       -- Every self back-edge is in tail position: 'rewriteLoopTail' converted
+       -- each tail one to a 'PolyLoopContinue', so a non-empty result here means
+       -- a back-edge survived in a non-tail position -- fall back to recursion.
+       && null (collectRecCalls midx loopBody)
+       -- Well-formed loop body: a guard/let tree whose every continue is in a
+       -- descendable tail position (see 'isLoopableBody'). Anything else (a
+       -- continue stranded in a base leaf, or under a do-block) falls back to the
+       -- existing round-trip recursion below.
+       && isLoopableBody loopBody
+    then do
+      let ityp = snd (head backEdges)
+          ids = map ann args
+      -- Loud-fail two invariants the emitters (genericMakeLoop / lcMakeLoop /
+      -- rustMakeLoop) silently assume, now that co-location routes more programs
+      -- through this path. (1) Every continue carries exactly one value per
+      -- loop-carried id; otherwise the emitters' `zipWith` over (ids, values)
+      -- drops reassignments and the loop never advances its state. (2) The
+      -- rewrite introduced no new free variable (beyond the ids the continue
+      -- carries): dropping a recursion wrapper (rewriteLoopTail) must not strand
+      -- a reference to one of that wrapper's own bound params.
+      mapM_
+        (\n ->
+          if n == length ids
+            then return ()
+            else MM.throwSourcedError midx $
+              "Compiler-internal error: loop continue carries" <+> pretty n <+>
+              "values but the loop has" <+> pretty (length ids) <+> "carried variables")
+        (loopContinueArities loopBody)
+      let stranded = polyFreeVars loopBody
+            `Set.difference` (polyFreeVars body `Set.union` Set.fromList ids)
+      if Set.null stranded
+        then return ()
+        else MM.throwSourcedError midx $
+          "Compiler-internal error: loop lowering stranded variable reference(s)"
+          <+> list (map pretty (Set.toList stranded))
+      MM.sayVVV $ "addLoopWraps: lowering midx" <+> pretty midx <+> "to a native loop over" <+> list (map pretty ids)
+      return $ PolyHead lang midx args (PolyLoop ityp ids loopBody)
+    else return ph
+  where
+    -- Every self back-edge in the body, as (crossLang, result type). The
+    -- 'RecCallP' 'PolyExe' carries @Idx i (FunT inputs out)@; the loop's result
+    -- type is @Idx i out@.
+    -- The loop's result type (the recursion's return) carries an outer effect.
+    effectfulLoop bs = case bs of
+      ((_, Idx _ (EffectT _ _)) : _) -> True
+      _ -> False
+
+    -- Whether the manifold body's return position is eagerly forced (a
+    -- 'PolyEval'), as opposed to suspended (a 'PolyDoBlock', i.e. deferred).
+    returnEager (PolyManifold _ _ _ _ e) = returnEager e
+    returnEager (PolyReturn e) = returnEager e
+    returnEager (PolyLet _ _ e) = returnEager e
+    returnEager (PolyEval _ _) = True
+    returnEager _ = False
+
+    collectRecCalls :: Int -> PolyExpr -> [(Maybe Lang, Indexed Type)]
+    collectRecCalls mid = go
+      where
+        go (PolyExe (Idx i t) (RecCallP mid' cl))
+          | mid' == mid = [(cl, Idx i (resultType t))]
+        go e = concatMap go (polySubExprs e)
+        resultType (FunT _ out) = out
+        resultType t = t
+
+    -- The arity (count of carried values) of every 'PolyLoopContinue' in a
+    -- rewritten loop body, used by 'addLoopWraps' to check that each continue
+    -- supplies exactly one value per loop-carried id.
+    loopContinueArities :: PolyExpr -> [Int]
+    loopContinueArities e =
+      (case e of PolyLoopContinue xs -> [length xs]; _ -> [])
+        ++ concatMap loopContinueArities (polySubExprs e)
+
+    -- A well-formed loop body that 'serialExpr'\'s 'buildLoopBody' can extract:
+    -- a decision tree of guards ('PolyIf') and lets over base leaves and
+    -- 'PolyLoopContinue' leaves. The load-bearing check is that every
+    -- 'PolyLoopContinue' sits in a position 'buildLoopBody' descends into (an
+    -- 'if' branch, a let body, or under 'PolyReturn') -- NEVER buried in a base
+    -- leaf, a guard condition, or a let RHS (which lower as plain values and
+    -- would reject the continue). A continue stranded in a base (e.g. under a
+    -- kept 'PolyManifold' wrapper) fails this and falls back to recursion. Guard
+    -- conditions and let RHSs cannot themselves hold a continue ('rewriteLoopTail'
+    -- never rewrites those positions) but are checked for safety. Do-blocks
+    -- (effects) are treated as base leaves for now, so an @<IO>@ loop whose
+    -- continue sits under a do-block falls back -- A3 handles those.
+    isLoopableBody :: PolyExpr -> Bool
+    isLoopableBody = ok
+      where
+        ok (PolyIf c t e) = not (hasContinue c) && ok t && ok e
+        ok (PolyLet _ rhs b) = not (hasContinue rhs) && ok b
+        ok (PolyReturn e) = ok e
+        -- A do-block is descended: an effectful continue path lowers its
+        -- effects/binds as loop-body lets before the continue reassignment.
+        ok (PolyDoBlock _ e) = ok e
+        ok (PolyLoopContinue _) = True
+        ok leaf = not (hasContinue leaf)
+
+    hasContinue (PolyLoopContinue _) = True
+    hasContinue e = any hasContinue (polySubExprs e)
+
+    -- Rewrite the manifold's return position into a loop body: base leaves
+    -- become 'PolyReturn'; each tail back-edge becomes a 'PolyLoopContinue'
+    -- carrying the new loop-carried values, dropping the per-branch
+    -- 'PolyManifold' wrapper so the continue is not stranded in a value
+    -- position. Control/effect wrappers (If/Let/DoBlock) are preserved.
+    rewriteLoopTail :: Int -> PolyExpr -> PolyExpr
+    rewriteLoopTail mid body = fst (goT body)
+      where
+        -- 'goT' returns the rewritten expression paired with a flag: True when
+        -- the rewrite produced a 'PolyLoopContinue' anywhere inside. The flag is
+        -- threaded up so effect wrappers can decide whether to keep themselves
+        -- without re-walking the subtree.
+        goT :: PolyExpr -> (PolyExpr, Bool)
+        goT (PolyReturn x) = goT x
+        goT (PolyIf c t e) =
+          let (t', ct) = goT t
+              (e', ce) = goT e
+           in (PolyIf c t' e', ct || ce)
+        -- A do-block or sub-manifold wrapping a CONTINUE is the effect-thunk
+        -- suspension of the recursive tail call: drop it so the continue is BARE
+        -- (a wrapped continue carries an <IO> type that 'checkEffectBoundaries'
+        -- rejects, and the continue is control flow, not a value). Its context
+        -- args are the enclosing loop-carried vars, so the inlined body still
+        -- references them by the same ids. Any per-iteration effect inside
+        -- desugars to a 'PolyLet' RHS that survives. A wrapper around a BASE (its
+        -- own effect thunk) has no continue -- keep it whole and force it
+        -- downstream.
+        goT (PolyDoBlock ti x) = dropIfContinue (PolyDoBlock ti) x
+        goT (PolyManifold l m form k inner) = dropIfContinue (PolyManifold l m form k) inner
+        -- A 'PolyEval' at the return position forces the (effectful) result; it
+        -- is tail-transparent for loop purposes -- descend through it so an <IO>
+        -- tail recursion under a force becomes a continue. Base leaves are
+        -- re-forced by 'insertEffectBoundaries' (forceReturnPosition over the
+        -- loop) so dropping the eval here does not lose the base's force.
+        goT (PolyEval _ x) = goT x
+        goT (PolyLet i a b) = let (b', cb) = goT b in (PolyLet i a b', cb)
+        goT (PolyApp (PolyExe _ (RecCallP mid' _)) xs) | mid' == mid = (PolyLoopContinue xs, True)
+        goT (PolyExe _ (RecCallP mid' _)) | mid' == mid = (PolyLoopContinue [], True)
+        goT leaf = (PolyReturn leaf, False)
+
+        -- Rebuild the wrapper only when its rewritten inner has no continue.
+        dropIfContinue rebuild inner =
+          let (inner', c) = goT inner
+           in (if c then inner' else rebuild inner', c)
 
 cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
 cacheWrapExpr (PolyManifold l m form k inner) = do
@@ -2038,6 +2224,10 @@ polyFreeVars = go
     go (PolyEval _ e) = go e
     go (PolyCoerce _ _ e) = go e
     go (PolyIntrinsic _ _ es) = Set.unions (map go es)
+    -- The loop-carried ids are re-bound each iteration, so they are local to the
+    -- loop; a continue's values are ordinary sub-expressions in the loop scope.
+    go (PolyLoop _ ids e) = Set.difference (go e) (Set.fromList ids)
+    go (PolyLoopContinue xs) = Set.unions (map go xs)
     go _ = Set.empty
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.

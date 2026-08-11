@@ -21,9 +21,9 @@ preamble:
   # printing, coercion) needs the bit64 S3 methods on PATH.
   - 'suppressPackageStartupMessages(library(bit64))'
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
-  - '.morloc.srcdir <- normalizePath(file.path(dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1])), "..", ".."), mustWork=FALSE)'
+  - '.morloc.pooldir <- dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1]))'
   - '.morloc.libdir <- "{{home}}/lib/R"'
-  - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { local <- file.path(.morloc.srcdir, p); if (file.exists(local)) local else file.path(.morloc.libdir, p) }, chdir=TRUE)'
+  - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { src <- normalizePath(file.path(.morloc.pooldir, "..", "..", "..", p), mustWork=FALSE); cwd <- file.path(".", p); if (file.exists(src)) src else if (file.exists(cwd)) cwd else file.path(.morloc.libdir, p) }, chdir=TRUE)'
 
 # Literals
 ldBoolTrue: "TRUE"

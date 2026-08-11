@@ -4,6 +4,7 @@
 import qualified System.Directory as SD
 import Test.Tasty
 
+import BuildParamsTests (buildParamsTests)
 import EffectBoundaryTests (effectBoundaryTests)
 import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (goldenMakefileTest)
@@ -24,6 +25,7 @@ main = do
     testGroup
       "Morloc tests"
       [ unitTypeTests
+      , buildParamsTests
       , futharkTupleTests
       , unitValuecheckTests
       , typeOrderTests
@@ -67,6 +69,7 @@ main = do
       , postArgPropagationTests
       , tuplePatternLambdaTests
       , withDocstringTests
+      , evalSandboxTests
       , morlocDepsTests
       , sizeParseTests
       , patternChainTests
@@ -78,7 +81,7 @@ main = do
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
       -- -- with no STDERR output on github. I have no idea why. But for now I'm
-      -- -- just going to comment them out. Rememver uncomment them on dev cycles
+      -- -- just going to comment them out. Remember uncomment them on dev cycles
       -- -- so that they are tested somewhere, at least.
       -- , golden "specialization-1-c" "specialization-1-c"
       -- , golden "specialization-2-c" "specialization-2-c"
@@ -87,6 +90,7 @@ main = do
       -- , golden "specialization-1-r" "specialization-1-r"
 
       , golden "lambda-reindex" "lambda-reindex"
+      , golden "deep-compose" "deep-compose"
       , golden "collect-formatters" "collect-formatters"
       , golden "detect-imported-handler" "detect-imported-handler"
       , golden "collect-cross-module" "collect-cross-module"
@@ -97,6 +101,7 @@ main = do
       , golden "stdin-input" "stdin-input"
       , golden "docstring-alias-import" "docstring-alias-import"
       , golden "stdout-stream-format" "stdout-stream-format"
+      , golden "stdio-pipe-closed" "stdio-pipe-closed"
 
       , golden "vector-gradual-desugar-py" "vector-gradual-desugar-py"
       , golden "vector-gradual-desugar-c" "vector-gradual-desugar-c"
@@ -108,14 +113,18 @@ main = do
       , golden "intrinsic-throw-cpp" "intrinsic-throw-cpp"
       , golden "intrinsic-throw-py" "intrinsic-throw-py"
       , golden "intrinsic-throw-r" "intrinsic-throw-r"
+      , golden "intrinsic-throw-pure" "intrinsic-throw-pure"
       , golden "conditional-value-codegen" "conditional-value-codegen"
       , golden "futhark-basic" "futhark-basic"
+      , golden "futhark-backend-multicore" "futhark-backend-multicore"
       , golden "futhark-tuple" "futhark-tuple"
       , golden "futhark-sig-mismatch" "futhark-sig-mismatch"
       , golden "futhark-py-crosspool" "futhark-py-crosspool"
       , golden "futhark-fractal" "futhark-fractal"
       , golden "futhark-matrix-io" "futhark-matrix-io"
       , golden "rust-basic" "rust-basic"
+      , golden "rust-ndarray" "rust-ndarray"
+      , golden "rust-intrinsic-borrowed" "rust-intrinsic-borrowed"
       , golden "rust-py-crosspool" "rust-py-crosspool"
       , golden "rust-error" "rust-error"
       , golden "rust-record" "rust-record"
@@ -208,6 +217,7 @@ main = do
       , golden "cli-docstring-negatives" "cli-docstring-negatives"
       , golden "cli-docstring-shapes" "cli-docstring-shapes"
       , golden "cli-docstring-map-table" "cli-docstring-map-table"
+      , golden "json-help" "json-help"
 
       , golden "intrinsic-save-load-compressed" "intrinsic-save-load-compressed"
       , golden "nexus-packet-output-zstd" "nexus-packet-output-zstd"
@@ -733,9 +743,32 @@ main = do
       , golden "recursion-cross-py-cpp" "recursion-cross-py-cpp"
       , golden "recursion-cross-r-cpp" "recursion-cross-r-cpp"
       , golden "recursion-helper-py" "recursion-helper-py"
+      , golden "recursion-loop-deep-py" "recursion-loop-deep-py"
+      , golden "recursion-loop-deep-cpp" "recursion-loop-deep-cpp"
+      , golden "recursion-loop-deep-r" "recursion-loop-deep-r"
+      , golden "recursion-loop-deep-rust" "recursion-loop-deep-rust"
+      , golden "recursion-loop-exported-py" "recursion-loop-exported-py"
+      , golden "recursion-loop-shapes-py" "recursion-loop-shapes-py"
+      , golden "recursion-loop-shapes-rust" "recursion-loop-shapes-rust"
+      , golden "recursion-loop-tuple-crosspool" "recursion-loop-tuple-crosspool"
+      , golden "recursion-loop-io-py" "recursion-loop-io-py"
+      , golden "recursion-loop-io-multiguard-py" "recursion-loop-io-multiguard-py"
+      , golden "recursion-loop-io-rust" "recursion-loop-io-rust"
       , golden "recursion-helper-cpp" "recursion-helper-cpp"
       , golden "recursion-thunk-py" "recursion-thunk-py"
       , golden "recursion-thunk-helper-cpp" "recursion-thunk-helper-cpp"
+      , golden "recursion-crosspool-io-tuple" "recursion-crosspool-io-tuple"
+      , golden "recursion-crosspool-mutual" "recursion-crosspool-mutual"
+      , golden "recursion-crosspool-loop-shapes" "recursion-crosspool-loop-shapes"
+      , golden "recursion-crosspool-mutual-list" "recursion-crosspool-mutual-list"
+      , golden "recursion-crosspool-mutual-tuple" "recursion-crosspool-mutual-tuple"
+      , golden "recursion-crosspool-mutual-heavy" "recursion-crosspool-mutual-heavy"
+      , golden "recursion-crosspool-nontail-tuple" "recursion-crosspool-nontail-tuple"
+      , golden "recursion-crosspool-features" "recursion-crosspool-features"
+      , golden "recursion-crosspool-closure-io" "recursion-crosspool-closure-io"
+      , golden "recursion-crosspool-pointfree" "recursion-crosspool-pointfree"
+      , golden "recursion-crosspool-coloc-nested" "recursion-crosspool-coloc-nested"
+      , golden "recursion-crosspool-io-tuple-helper" "recursion-crosspool-io-tuple-helper"
       , -- optional type tests
         golden "optional-py" "optional-py"
       , golden "optional-cpp" "optional-cpp"
@@ -812,6 +845,10 @@ main = do
         golden "source-old-op-py" "source-old-op-py"
       , -- eval mode restriction tests
         golden "eval-restrict-source" "eval-restrict-source"
+      , -- eval sandbox gates (Gate 1 IO-intrinsic ban + Gate 2 module
+        -- allow-list) end-to-end via `morloc eval --eval-sandbox`/
+        -- `--eval-allowed-modules`
+        golden "eval-sandbox" "eval-sandbox"
       , -- memory alignment tests (document misalignment bugs in voidstar format)
         golden "memory-optional-double-cpp" "memory-optional-double-cpp"
       , golden "memory-optional-double-py" "memory-optional-double-py"

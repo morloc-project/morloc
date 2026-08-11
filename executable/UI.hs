@@ -22,6 +22,8 @@ module UI
   , UninstallCommand (..)
   , NewCommand (..)
   , EvalCommand (..)
+  , ConfigCommand (..)
+  , ConfigAction (..)
   ) where
 
 import Data.Int (Int64)
@@ -51,6 +53,7 @@ data CliCommand
   | CmdInit InitCommand
   | CmdNew NewCommand
   | CmdEval EvalCommand
+  | CmdConfig ConfigCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -64,6 +67,7 @@ cliParser =
         <> initSubcommand
         <> newSubcommand
         <> evalSubcommand
+        <> configSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -71,7 +75,12 @@ data MakeCommand = MakeCommand
   , makeConfig :: String
   , makeVerbose :: Int
   , makeVanilla :: Bool
-  , makeOutfile :: String
+  , makeCliOut :: String
+  , makeMcpOut :: String
+  , makeDaemonOut :: String
+  , makeNoCli :: Bool
+  , makeBuildDir :: Maybe String
+  , makeName :: Maybe String
   , makeInstall :: Bool
   , makeForce :: Bool
   , makeInclude :: [String]
@@ -80,6 +89,7 @@ data MakeCommand = MakeCommand
   , makeNoShm :: Bool
   , makeTmpdir :: Maybe String
   , makeDebugTrace :: Bool
+  , makeLangParams :: [String]
   , makeScript :: String
   }
 
@@ -90,7 +100,12 @@ makeCommandParser =
     <*> optConfig
     <*> optVerbose
     <*> optVanilla
-    <*> optOutfile
+    <*> optCliOut
+    <*> optMcpOut
+    <*> optDaemonOut
+    <*> optNoCli
+    <*> optBuildDir
+    <*> optName
     <*> optMakeInstall
     <*> optMakeForce
     <*> optMakeInclude
@@ -99,6 +114,7 @@ makeCommandParser =
     <*> optNoShm
     <*> optTmpdir
     <*> optDebugTrace
+    <*> optLangParams
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -125,6 +141,51 @@ initCommandParser =
 
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))
+
+data ConfigCommand = ConfigCommand
+  { configCmdConfig :: String
+  , configCmdVanilla :: Bool
+  , configCmdAction :: ConfigAction
+  }
+
+-- | An action over the per-machine build config's @lang-params@ table.
+data ConfigAction
+  = ConfigSet [String] -- ^ LANG:KEY=VALUE entries to set
+  | ConfigUnset [String] -- ^ LANG:KEY entries to remove
+  | ConfigList -- ^ print the current lang-params
+
+configCommandParser :: Parser ConfigCommand
+configCommandParser =
+  ConfigCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> configActionParser
+
+configActionParser :: Parser ConfigAction
+configActionParser =
+  hsubparser
+    ( command
+        "set"
+        ( info
+            (ConfigSet <$> some (strArgument (metavar "LANG:KEY=VALUE")))
+            (progDesc "Set per-machine build parameter defaults")
+        )
+        <> command
+          "unset"
+          ( info
+              (ConfigUnset <$> some (strArgument (metavar "LANG:KEY")))
+              (progDesc "Remove per-machine build parameter defaults")
+          )
+        <> command
+          "list"
+          ( info
+              (pure ConfigList)
+              (progDesc "List per-machine build parameter defaults")
+          )
+    )
+
+configSubcommand :: Mod CommandFields CliCommand
+configSubcommand = command "config" (info (CmdConfig <$> configCommandParser) (progDesc "Manage the per-machine build configuration"))
 
 data NewCommand = NewCommand
   { newName :: String
@@ -307,6 +368,22 @@ optAllowLocalModules =
         <> help "Permit eval to import local-filesystem modules (development only; insecure for server use -- prefer 'morloc make')"
     )
 
+optEvalSandbox :: Parser Bool
+optEvalSandbox =
+  switch
+    ( long "eval-sandbox"
+        <> help "Sandbox eval: forbid directly-written IO intrinsics and restrict imports to --eval-allowed-modules (implied when that flag is given)"
+    )
+
+optEvalAllowedModules :: Parser String
+optEvalAllowedModules =
+  strOption
+    ( long "eval-allowed-modules"
+        <> metavar "M,..."
+        <> value ""
+        <> help "Comma-separated modules an eval expression may import at top level (implies --eval-sandbox; an empty allow-list permits none)"
+    )
+
 optVanilla :: Parser Bool
 optVanilla =
   switch
@@ -405,15 +482,60 @@ optConfig =
         <> help "Use this config rather than the one in morloc home"
     )
 
-optOutfile :: Parser String
-optOutfile =
+optCliOut :: Parser String
+optCliOut =
   strOption
-    ( long "outfile"
+    ( long "cli-out"
         <> short 'o'
         <> metavar "OUT"
         <> value ""
         <> showDefault
-        <> help "The name of the generated executable"
+        <> help "The name of the generated CLI executable (default: program name)"
+    )
+
+optMcpOut :: Parser String
+optMcpOut =
+  strOption
+    ( long "mcp-out"
+        <> metavar "OUT"
+        <> value ""
+        <> help "Also emit a wrapper that serves the program as an MCP server"
+    )
+
+optDaemonOut :: Parser String
+optDaemonOut =
+  strOption
+    ( long "daemon-out"
+        <> metavar "OUT"
+        <> value ""
+        <> help "Also emit a wrapper that runs the program as a daemon"
+    )
+
+optNoCli :: Parser Bool
+optNoCli =
+  switch
+    ( long "no-cli"
+        <> help "Suppress the default CLI executable"
+    )
+
+optBuildDir :: Parser (Maybe String)
+optBuildDir =
+  optional
+    ( strOption
+        ( long "build-dir"
+            <> metavar "DIR"
+            <> help "Parent directory in which the <name>-build/ folder is created (default: CWD)"
+        )
+    )
+
+optName :: Parser (Maybe String)
+optName =
+  optional
+    ( strOption
+        ( long "name"
+            <> metavar "NAME"
+            <> help "Program identity for the build directory (required for -e expression builds)"
+        )
     )
 
 optMakeInstall :: Parser Bool
@@ -438,6 +560,23 @@ optMakeInclude =
         ( long "include"
             <> metavar "PATTERN"
             <> help "File pattern to include in install"
+        )
+    )
+
+optLangParams :: Parser [String]
+optLangParams =
+  many
+    ( strOption
+        ( short 'X'
+            <> long "lang-param"
+            <> metavar "LANG:KEY=VALUE"
+            <> help
+                ( "Pass a build parameter to a language's builder, e.g. "
+                    ++ "-X futhark:backend=cuda or -X cpp:flags=-march=native. "
+                    ++ "Repeatable. The value is taken verbatim; morloc does not "
+                    ++ "interpret it -- the language's builder does. The reserved "
+                    ++ "key 'flags' accumulates in order as raw compiler flags."
+                )
         )
     )
 
@@ -565,6 +704,8 @@ data EvalCommand = EvalCommand
   , evalSave :: String
   , evalExpression :: Bool
   , evalAllowLocalModules :: Bool
+  , evalSandbox :: Bool
+  , evalAllowedModules :: String
   , evalScript :: String
   , evalArgs :: [String]
   }
@@ -578,6 +719,8 @@ evalCommandParser =
     <*> optSave
     <*> optExpression
     <*> optAllowLocalModules
+    <*> optEvalSandbox
+    <*> optEvalAllowedModules
     <*> optScript
     <*> many (strArgument (metavar "ARGS..." <> help "Extra arguments passed to the compiled program"))
 

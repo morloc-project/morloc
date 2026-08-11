@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.96.0
+version:          0.97.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -92,9 +92,12 @@ ghc-options:
   - -Wall
   - -Wcompat
   - -fwarn-unused-binds
-  - -fwarn-unused-imports 
+  - -fwarn-unused-imports
   - -fwarn-tabs
   - -fwarn-incomplete-uni-patterns
+  - -Wincomplete-patterns
+  - -Werror=incomplete-patterns
+  - -Werror=missing-fields
   - -fwarn-incomplete-record-updates
   - -fwarn-redundant-constraints
   - -fno-warn-missing-signatures
@@ -165,6 +168,7 @@ tests:
       - -rtsopts
       - -with-rtsopts=-N
     dependencies:
+      - morloc
       - base
       - async
       - directory

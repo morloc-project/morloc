@@ -1,0 +1,81 @@
+-- Tail-recursive functions that thread state destructured from a FOREIGN
+-- (cross-pool) call across the recursive boundary. These lower to native
+-- while-loops (addLoopWraps), and the loop-carried state includes a value
+-- produced by a Python `step` and destructured by an irrefutable tuple
+-- pattern. This is the galaxy-demo shape (`let (poss,vels) = step ..; recurse
+-- poss vels ..`) reduced to plain py+cpp.
+--
+-- Three things must hold for correct codegen:
+--   1. The serial result of the foreign `step` (a LoopSLet) must be naturalized
+--      before it is destructured natively (`.0`/`.1`).
+--   2. A loop-carried variable that is BOTH reassigned each iteration AND passed
+--      to a foreign call must be re-serialized from its CURRENT value each
+--      iteration, never reuse the stale entry packet.
+--   3. An <IO> loop's accumulator must be carried as a plain value, not a
+--      suspended effect thunk.
+--
+-- `runTuple` (tuple pattern) and `runProj` (inline .0/.1 projections) must give
+-- identical results. `runIO` adds a per-iteration Python side effect (to stderr,
+-- so it does not perturb stdout).
+
+module main
+  ( runTuple
+  , runProj
+  , runTriple
+  , runIO
+  )
+
+import root-py
+import root-cpp
+
+effect IO
+
+source Py from "py_helpers.py"
+  ( "py_step"  as step
+  , "py_step3" as step3
+  , "py_log"   as logIt
+  )
+step  :: [Int] -> ([Int], Int)
+step3 :: [Int] -> ([Int], Int, Int)
+logIt :: [Int] -> <IO> ()
+
+source Cpp from "cpp_helpers.hpp"
+  ( "cpp_dec"  as dec
+  , "cpp_step" as stepC
+  )
+dec   :: Int -> Int
+stepC :: [Int] -> ([Int], Int)
+
+-- 2-tuple pattern destructure of a foreign call, carried across a same-pool
+-- tail loop. `dec` (cpp) forces the driver into the cpp pool; `step` (py) is a
+-- foreign call whose serial tuple result is destructured.
+runTuple :: Int -> [Int] -> Int -> Int
+runTuple n xs acc
+  ? n == 0 = acc
+  : let (xs', c) = step xs in runTuple (dec n) xs' (acc + c)
+
+-- Same computation, inline projections instead of a tuple pattern. Must equal
+-- runTuple for every input.
+runProj :: Int -> [Int] -> Int -> Int
+runProj n xs acc
+  ? n == 0 = acc
+  : let p = step xs in runProj (dec n) (.0 p) (acc + (.1 p))
+
+-- 3-tuple pattern, to exercise generality beyond the 2-tuple.
+runTriple :: Int -> [Int] -> Int -> Int
+runTriple n xs acc
+  ? n == 0 = acc
+  : let (xs', a, b) = step3 xs in runTriple (dec n) xs' (acc + a + b)
+
+-- <IO> do-block loop (same-pool, like the galaxy timestep): a Python side
+-- effect each iteration (which serially uses the carried list `xs`), a
+-- native-pool tuple destructure, and a tail recurse. Exercises the effectful
+-- loop's accumulator carry (must be a plain value, not a suspended thunk) AND
+-- the serial re-use of the carried list across the foreign side effect.
+runIO :: Int -> [Int] -> Int -> <IO> Int
+runIO n xs acc
+  ? n == 0 = acc
+  : do
+      logIt xs
+      let (xs', c) = stepC xs
+      runIO (dec n) xs' (acc + c)

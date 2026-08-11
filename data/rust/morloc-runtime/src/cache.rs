@@ -740,11 +740,26 @@ fn hash_voidstar_inner(
                 } else {
                     schema.parameters[0].width
                 };
+                // Empty collection: arr.data is RELNULL, so there is no data
+                // region to resolve; hash the size-mixed seed with no bytes.
+                // Mirrors the arr.size == 0 early-return in calc_voidstar_size.
+                if arr.size == 0 {
+                    return Ok(hash::xxh64_with_seed(&[], seed));
+                }
                 let elem_data = shm::rel2abs(arr.data)?;
 
-                if schema.is_fixed_width()
-                    || matches!(schema.serial_type, SerialType::String)
-                {
+                // Bulk-hash the flat data region (String bytes, or an Array of
+                // fixed-width elements), else recurse per element. To preserve
+                // the structural-hash invariant (line 679), the bulk path still
+                // folds the element's SerialType tag -- the per-element walk it
+                // replaces mixed each element's tag, so without this `[U8]` and
+                // `[I8]` with identical bytes would collide. (Changes the hash
+                // VALUE for fixed-width-element arrays vs the old per-element form.)
+                if schema.array_data_is_flat() {
+                    let seed = schema
+                        .parameters
+                        .first()
+                        .map_or(seed, |e| mix(seed, e.serial_type as u64));
                     let total = elem_width * arr.size;
                     let bytes = std::slice::from_raw_parts(elem_data, total);
                     Ok(hash::xxh64_with_seed(bytes, seed))

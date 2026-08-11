@@ -46,6 +46,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import qualified Morloc.BaseTypes as BT
+import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
@@ -420,7 +421,7 @@ translate srcs es = do
 
   maker <- makeTheMaker srcs'
 
-  poolSubdir <- MM.getModuleName
+  let poolSubdir = ML.poolDirKey cppLang
 
   return $
     Script
@@ -616,7 +617,7 @@ collectNamedRecordTVars e0 =
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker srcs = do
-  poolSubdir <- MM.getModuleName
+  let poolSubdir = ML.poolDirKey cppLang
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
   -- The member-agnostic host translation unit (owns main()/pool_main); the C++
@@ -672,6 +673,39 @@ tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
+
+-- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
+-- Guards -> if/else; native/serial lets -> @auto@ locals; a base leaf ->
+-- @resultVar = <base>; break;@; a continue leaf -> compute each new value into
+-- an @auto@ temp, then move it into the loop-carried local.
+cppWalkLoopBody :: MDoc -> [Int] -> LoopBody PoolDocs PoolDocs -> CppTranslatorM [MDoc]
+cppWalkLoopBody resultVar ids = go
+  where
+    go (LoopBase seDocs) =
+      return $ poolPriorLines seDocs <> [resultVar <+> "=" <+> poolExpr seDocs <> ";", "break;"]
+    go (LoopContinue contDocs) = do
+      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
+      let priors = concatMap poolPriorLines contDocs
+          tmpAssigns = zipWith (\tv cd -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
+          reassigns = zipWith (\i tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") ids tmpVars
+      return $ priors <> tmpAssigns <> reassigns
+    go (LoopNLet i neDocs b) = do
+      rest <- go b
+      return $ poolPriorLines neDocs <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+    go (LoopSLet i seDocs b) = do
+      rest <- go b
+      return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
+    go (LoopIf guardDocs t e) = do
+      tLines <- go t
+      eLines <- go e
+      let ifBlock = vsep
+            [ "if" <+> parens (poolExpr guardDocs) <+> "{"
+            , indent 4 (vsep tLines)
+            , "} else {"
+            , indent 4 (vsep eLines)
+            , "}"
+            ]
+      return $ poolPriorLines guardDocs <> [ifBlock]
 
 cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
 cppLowerConfig reifyThunks =
@@ -771,13 +805,34 @@ char* errmsg = NULL;|]
 );
 PROPAGATE_ERROR(errmsg)|]
         return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
-    , lcMakeLet = \namer letIndex mt e1 e2 -> do
+    , lcMakeLet = \namer letIndex mt borrowSafe e1 e2 -> do
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) e1 e2
+        return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
     , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
     , lcReturn = \e -> "return(" <> e <> ");"
+    , lcMakeLoop = \ids body -> do
+        -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
+        -- loop-carried vars are the manifold's deserialized native locals
+        -- ('nvarNamer id'), non-const, reassigned in place; each continue value
+        -- goes into an 'auto' temp before any loop-local is reassigned (parallel-
+        -- assignment hazard), then MOVED in to avoid a per-iteration deep copy.
+        -- 'resultVar' inits to nullptr so a control path reaching the trailing
+        -- return without a break is defined (and to silence -Wmaybe-uninitialized).
+        resultIdx <- getCounter
+        let resultVar = helperNamer resultIdx
+        bodyLines <- cppWalkLoopBody resultVar ids body
+        let resultDecl = "uint8_t*" <+> resultVar <+> "= nullptr;"
+            whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
+            leaves = loopBodyLeaves body
+        return $ PoolDocs
+          { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
+          , poolExpr = resultVar
+          , poolPriorLines = [resultDecl, whileDoc]
+          , poolPriorExprs = concatMap poolPriorExprs leaves
+          , poolReturnFlag = True
+          }
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
         let v = helperNamer idx
@@ -1006,12 +1061,26 @@ PROPAGATE_ERROR(errmsg)|]
     -- 'mlc::Unit{}' whenever the let-var's type is 'Unit' -- the effect
     -- fires, the caller's 'Unit' variable is present, and any subsequent
     -- reference to @ni@ still type-checks.
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr isUnit p1 p2 =
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer letIndex typestr isUnit borrowSafe p1 p2 =
       let letAssignment
             | isUnit =
                 [idoc|#{poolExpr p1};|]
                   <+> [idoc|#{typestr} #{namer letIndex}{};|]
+            -- A field/index projection rooted at a live variable: bind by
+            -- const-reference so the projected sub-value is not copied out of
+            -- its container (see 'isBorrowableProjection'). The referent (the
+            -- root variable) outlives the alias because lets flatten in scope
+            -- order and codegen never moves a bound local. INVARIANT: anything
+            -- that escapes the frame must COPY this alias's referent, not hold a
+            -- reference to it -- today std::bind decay-copies bound args, '[=]'
+            -- captures copy the referent, and the sole '[&]' is an immediately
+            -- invoked IIFE. A future by-reference capture would dangle.
+            -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
+            -- saves nothing and a 'const T&' can't bind a 'source Cpp' non-const
+            -- 'T&' parameter, so keep the cheap by-value copy for them.
+            | borrowSafe && not (isScalarCppType typestr) =
+                [idoc|const #{typestr}& #{namer letIndex} = #{poolExpr p1};|]
             | otherwise =
                 [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
           rs = poolPriorLines p1 <> [letAssignment] <> poolPriorLines p2
@@ -1022,6 +1091,18 @@ PROPAGATE_ERROR(errmsg)|]
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             }
+
+    -- Cheap-to-copy scalar C++ types. Borrowing one by const-reference saves
+    -- nothing (the copy is a register move) and would newly break a 'source
+    -- Cpp' function taking a non-const 'T&' (a 'const T&' cannot bind there);
+    -- so the borrow optimization is restricted to the container/aggregate
+    -- types (Str, Vector, Tuple, records) where copying the projected
+    -- sub-value actually costs.
+    isScalarCppType :: MDoc -> Bool
+    isScalarCppType t = render t `elem`
+      [ "int8_t", "int16_t", "int32_t", "int64_t"
+      , "uint8_t", "uint16_t", "uint32_t", "uint64_t"
+      , "float", "double", "bool" ]
 
     -- Match only bare 'Unit' -- a thunk-of-Unit ('EffectF _ Unit') is
     -- 'std::function<mlc::Unit()>', an assignable function value, not a
@@ -1662,6 +1743,10 @@ handleFlagsAndPaths srcs = do
   let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
   let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
   let userCxxFlags = unique . concatMap packageCxxFlags $ statePackageMeta state
+  -- Raw `-X cpp:flags=...` (and the build-config default) passthrough: ordered,
+  -- verbatim, never deduplicated, appended after the package flags. Kept out of
+  -- `unique` because flag order and adjacency are load-bearing.
+  let cliCxxFlags = BP.lookupFlags "cpp" (stateLangParams state)
   -- Collect sources belonging to this pool: cpp sources and any guest member
   -- whose pool host is cpp (e.g. futhark glue headers, srcLang=futhark). Their
   -- includes/-I flags must reach the cpp pool build.
@@ -1678,7 +1763,7 @@ handleFlagsAndPaths srcs = do
 
   return
     ( filter (isJust . srcPath) srcs'
-    , [gccversion] <> explicitLibs <> userCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
+    , [gccversion] <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
     , unique (catMaybes paths)
     )
 

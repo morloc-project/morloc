@@ -188,8 +188,8 @@ withDaemon workDir extraArgs action = bracket startD stopD action
   where
     -- Daemon-mode argv shape: `morloc-nexus daemon <target> [opts...]`.
     -- The wrapper script `morloc make` produced sits at
-    -- `<workDir>/nexus`; daemon mode treats it the same as a
-    -- freestanding `.manifest` file via `cli::resolve_daemon_target`.
+    -- `<workDir>/nexus`; the resolver extracts the manifest.json path
+    -- from the wrapper's exec line (`cli::resolve_manifest_target`).
     startD = do
       devNull <- openFile "/dev/null" WriteMode
       let cp =

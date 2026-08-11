@@ -49,7 +49,7 @@ prettyFoldManifold =
     makeSerialExpr ::
       (Monad m) => SerialExpr -> SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
     makeSerialExpr _ (ManS_ m) = return m
-    makeSerialExpr _ (AppPoolS_ t (PoolCall mid (Socket _ _ socketFile) remote _) args) = return $ mergePoolDocs makePoolCall args
+    makeSerialExpr _ (AppPoolS_ t (PoolCall mid (Socket _ socketFile) remote _) args) = return $ mergePoolDocs makePoolCall args
       where
         makePoolCall xs' = case remote of
           ForeignCall ->
@@ -57,7 +57,7 @@ prettyFoldManifold =
               <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
           (RemoteCall _) -> "REMOTE_CALL"
     makeSerialExpr _ (AppRecS_ _ mid es) = return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
-    makeSerialExpr _ (AppForeignRecS_ _ mid (Socket _ _ socketFile) es) = return $ mergePoolDocs makeForeignRecCall es
+    makeSerialExpr _ (AppForeignRecS_ _ mid (Socket _ socketFile) es) = return $ mergePoolDocs makeForeignRecCall es
       where
         makeForeignRecCall xs' =
           "__foreign_rec_call__" <> tupled [dquotes socketFile, dquotes (pretty mid), list xs']
@@ -71,6 +71,17 @@ prettyFoldManifold =
     makeSerialExpr _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = letNamerS i}
     makeSerialExpr _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = bndNamerS i}
     makeSerialExpr _ (SerializeS_ _ e) = return $ e {poolExpr = "SerializeS" <> parens (poolExpr e)}
+    makeSerialExpr _ (LoopS_ _ ids body) =
+      return $ mergePoolDocs
+        (const ("loop" <> list (map pretty ids) <+> braces (prettyLB body)))
+        (loopBodyLeaves body)
+      where
+        prettyLB (LoopIf g t e) =
+          "if" <+> poolExpr g <+> braces (prettyLB t) <+> "else" <+> braces (prettyLB e)
+        prettyLB (LoopNLet i ne b) = "n" <> pretty i <+> "=" <+> poolExpr ne <> ";" <+> prettyLB b
+        prettyLB (LoopSLet i se b) = "s" <> pretty i <+> "=" <+> poolExpr se <> ";" <+> prettyLB b
+        prettyLB (LoopBase se) = "return" <+> poolExpr se
+        prettyLB (LoopContinue nes) = "__continue__" <> list (map poolExpr nes)
 
     makeNativeExpr ::
       (Monad m) => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs

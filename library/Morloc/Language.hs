@@ -17,9 +17,10 @@ module Morloc.Language
   , makeExecutablePoolName
   , makeSourcePoolName
   , makeLang
+  , poolDirKey
   ) where
 
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Morloc.Data.Doc
 
 {- | A programming language in the Morloc ecosystem.
@@ -67,3 +68,8 @@ makeExecutablePoolName lang = makeExecutableName lang "pool"
 
 makeSourcePoolName :: Lang -> String
 makeSourcePoolName lang = makeSourceName lang "pool"
+
+-- | Per-language subdirectory name inside a build's @pools/@ directory,
+-- e.g. @cpp@, @py@, @rust@. One pool directory per pool language.
+poolDirKey :: Lang -> String
+poolDirKey = unpack . showLangName

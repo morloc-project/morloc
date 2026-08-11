@@ -1,0 +1,18 @@
+module deepcompose (foo)
+
+-- Non-exponential guard for realization. A deep point-free composition chain:
+-- before literal-lambda-head normalization ran before scoring, the realize
+-- scorer re-scored function-typed bound variables and took time exponential in
+-- the chain depth (2^N). This test drives a FULL build (which runs realize) under
+-- a timeout; a regression to exponential scoring times out and fails the test
+-- rather than hanging. The chain is deep enough that even a partially-reduced
+-- exponential (e.g. 2^(N/2)) blows past the timeout, while the linear scorer
+-- finishes in well under a second.
+
+import root ((.))
+
+id_ :: Int -> Int
+id_ x = x
+
+foo :: Int -> Int
+foo = id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_ . id_

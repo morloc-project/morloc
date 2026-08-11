@@ -1435,6 +1435,13 @@ unsafe fn write_all_fd(
             if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
+            // A broken pipe is an <IO> condition the nexus surfaces as
+            // MorlocError::PipeClosed (so @catch does not swallow it);
+            // return the distinct sentinel, no errmsg, so the caller can
+            // classify it apart from a generic write failure.
+            if err.raw_os_error() == Some(libc::EPIPE) {
+                return morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED;
+            }
             set_errmsg(errmsg, &MorlocError::Io(err));
             return -1;
         }

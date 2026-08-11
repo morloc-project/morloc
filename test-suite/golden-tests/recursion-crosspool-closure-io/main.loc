@@ -1,0 +1,23 @@
+module main (effRec)
+
+import root-py
+import root-cpp
+
+source Py from "helpers.py" ("noisy_add" as noisyAddP)
+noisyAddP :: Int -> <IO> Int
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_dec"     as decC
+  , "cpp_is_zero" as isZeroC
+  )
+decC    :: Int -> Int
+isZeroC :: Int -> Bool
+
+effRec :: Int -> Int -> <IO> Int
+effRec k n = go n where
+  go m ? isZeroC m = noisyAddP k
+       : step m
+  step :: Int -> <IO> Int
+  step m = do
+    noisyAddP k
+    go (decC m)

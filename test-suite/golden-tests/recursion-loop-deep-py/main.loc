@@ -1,0 +1,16 @@
+module main (countdown)
+
+import root-py
+
+-- Tail-recursive same-pool helper. It is lowered to a native `while` loop
+-- (no per-iteration serialize round-trip, no interpreter stack growth), so a
+-- large call depth that would overflow the recursive form completes in O(1)
+-- stack. `sumTo acc n = acc + n + (n-1) + ... + 1`.
+sumTo :: Int -> Int -> Int
+sumTo acc n
+  ? n == 0 = acc
+  : sumTo (acc + n) (n - 1)
+
+-- Exported wrapper; delegates to the non-exported tail-recursive helper.
+countdown :: Int -> Int
+countdown n = sumTo 0 n

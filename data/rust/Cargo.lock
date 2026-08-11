@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-manifest"
-version = "0.95.0"
+version = "0.96.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -824,8 +824,9 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.95.0"
+version = "0.96.0"
 dependencies = [
+ "base64",
  "chrono",
  "clap",
  "libc",
@@ -841,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.95.0"
+version = "0.96.0"
 dependencies = [
  "anstream",
  "arrow-array",

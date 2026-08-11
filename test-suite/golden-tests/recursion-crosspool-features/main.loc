@@ -1,0 +1,24 @@
+module main (ack)
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_inc"     as inc
+  , "py_is_zero" as isZeroP
+  )
+inc     :: Int -> Int
+isZeroP :: Int -> Bool
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_dec"     as dec
+  , "cpp_is_zero" as isZeroC
+  )
+dec     :: Int -> Int
+isZeroC :: Int -> Bool
+
+ack :: Int -> Int -> Int
+ack m n
+  ? isZeroP m = inc n
+  ? isZeroC n = ack (dec m) 1
+  : ack (dec m) (ack m (dec n))

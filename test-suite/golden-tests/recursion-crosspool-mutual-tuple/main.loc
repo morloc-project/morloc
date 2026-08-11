@@ -1,0 +1,41 @@
+-- Cross-pool mutual recursion carrying a TUPLE state. With realize co-location
+-- ("B1"), this co-locates into a single same-pool loop with the other language's
+-- primitive (bumpP) as a foreign LEAF -- Category L, not the cross-pool back-edge
+-- (Category B) once predicted. It exercises the loop-body native->serial
+-- reconciliation: a destructured tuple component (`.0`/`.1` of the carried tuple)
+-- passed to the foreign leaf must be serialized at its branch-local binding site
+-- (Serialize.hs wireLoopBody LoopNLet). Before that fix it emitted an undeclared
+-- serial var (`s6`) and failed to compile.
+module main (run)
+
+import root-py
+import root-cpp
+
+source Py  from "helpers.py"  ("py_bump"  as bumpP)
+source Cpp from "helpers.hpp" ("cpp_bump" as bumpC)
+
+bumpP :: Int -> Int -> Int   -- py-only: forces pingP onto the py pool
+bumpC :: Int -> Int -> Int   -- cpp-only: forces pongC onto the cpp pool
+
+-- Cross-pool MUTUAL recursion carrying a TUPLE state across the back-edge.
+-- pingP realizes to py (it uses the py-only bumpP), pongC to cpp (cpp-only
+-- bumpC); they call each other, so the recursive back-edge crosses a pool
+-- boundary (Category B). This exercises a tuple carried across a cross-pool
+-- back-edge -- the tuple-split arity path that scalar (recursion-crosspool-mutual)
+-- and list (recursion-crosspool-mutual-list) state do not cover.
+pingP :: Int -> (Int, Int) -> (Int, Int)
+pingP n st
+  ? n == 0 = st
+  : let (a, b) = st
+    in pongC (n - 1) (bumpP a n, b)
+
+pongC :: Int -> (Int, Int) -> (Int, Int)
+pongC n st
+  ? n == 0 = st
+  : let (a, b) = st
+    in pingP (n - 1) (a, bumpC b n)
+
+run :: Int -> Int
+run n =
+  let (a, b) = pingP n (0, 0)
+  in a + b

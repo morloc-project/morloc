@@ -1,0 +1,8 @@
+-- `@mime` attaches a media type to a TYPE, not a function. Placing it on a
+-- function/argument/return signature is rejected (it would otherwise be a
+-- silent no-op) -- see Docstrings.rejectAuthoredMime.
+module main (foo)
+
+--' @mime image/png
+foo :: Str -> Str
+foo x = x

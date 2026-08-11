@@ -21,7 +21,7 @@
 use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
 use crate::dispatch::{preprocess_cli_value, ArgValue};
-use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Terminal};
+use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Return, Terminal};
 
 /// Leak a string into a `&'static str` for clap's static-only
 /// builder API. The nexus is a short-lived dispatcher (one
@@ -189,9 +189,7 @@ fn redirect_via_terminal(
     // Resolve a terminal to its synthesized entry command's (index, render).
     let resolve = |t: &Terminal| {
         manifest
-            .commands
-            .iter()
-            .position(|c| c.name == t.entry)
+            .command_index(&t.entry)
             .map(|idx| (idx, t.render))
     };
     // An explicit terminal flag always wins.
@@ -323,12 +321,20 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
 /// per formatter -- `default:` for the bare command plus one aligned
 /// row per flag. Each terminal's return type is read from its
 /// synthesized `entry` command (resolved by name against the manifest).
+/// The return descriptor shown in help. A media-typed return (a `@mime` type,
+/// e.g. a `--png` renderer) shows its media type -- the informative fact for a
+/// byte-emitting formatter, where the morloc type is just `Vector U8` -- and
+/// otherwise the morloc type name.
+fn ret_display(ret: &Return) -> String {
+    ret.mime.clone().unwrap_or_else(|| ret.type_desc.clone())
+}
+
 fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     if mcmd.terminals.is_empty() {
         if mcmd.ret.type_desc.is_empty() {
             return String::new();
         }
-        let mut block = format!("Return: {}", mcmd.ret.type_desc);
+        let mut block = format!("Return: {}", ret_display(&mcmd.ret));
         for line in &mcmd.ret.desc {
             block.push_str(&format!("\n  {}", line));
         }
@@ -340,17 +346,15 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     // malformed manifest) contributes an empty type rather than being
     // dropped, so the row still documents the flag.
     let mut rows: Vec<(String, String)> = Vec::with_capacity(mcmd.terminals.len() + 1);
-    rows.push(("default".to_string(), mcmd.ret.type_desc.clone()));
+    rows.push(("default".to_string(), ret_display(&mcmd.ret)));
     for t in &mcmd.terminals {
         let label = match t.short {
             Some(c) => format!("-{}/--{}", c, t.long),
             None => format!("--{}", t.long),
         };
-        let ret = manifest
-            .commands
-            .iter()
-            .find(|c| c.name == t.entry)
-            .map(|c| c.ret.type_desc.clone())
+        let ret = t
+            .resolve_entry(manifest)
+            .map(|c| ret_display(&c.ret))
             .unwrap_or_default();
         rows.push((label, ret));
     }
@@ -879,7 +883,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
 }
 
 /// First non-empty description line (used as clap's `about` text).
-fn first_desc(desc: &[String]) -> &str {
+pub(crate) fn first_desc(desc: &[String]) -> &str {
     desc.iter()
         .find(|d| !d.trim().is_empty())
         .map(|s| s.as_str())

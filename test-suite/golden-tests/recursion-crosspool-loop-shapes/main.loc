@@ -1,0 +1,40 @@
+module main
+  ( collatzX
+  , fibCross
+  )
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_half"    as half
+  , "py_triple1" as triple1
+  , "py_add"     as add
+  )
+half    :: Int -> Int
+triple1 :: Int -> Int
+add     :: Int -> Int -> Int
+
+source Cpp from "cpp_prim.hpp"
+  ( "cpp_is_one"  as isOne
+  , "cpp_is_even" as isEven
+  , "cpp_is_zero" as isZero
+  , "cpp_dec"     as dec
+  , "cpp_inc"     as inc
+  )
+isOne  :: Int -> Bool
+isEven :: Int -> Bool
+isZero :: Int -> Bool
+dec    :: Int -> Int
+inc    :: Int -> Int
+
+collatzX :: Int -> Int -> Int
+collatzX n steps
+  ? isOne n = steps
+  ? isEven n = collatzX (half n) (inc steps)
+  : collatzX (triple1 n) (inc steps)
+
+fibCross :: Int -> Int -> Int -> Int
+fibCross a b n
+  ? isZero n = a
+  : fibCross b (add a b) (dec n)

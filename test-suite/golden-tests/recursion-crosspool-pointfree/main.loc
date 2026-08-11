@@ -1,0 +1,24 @@
+module main (countdownSum)
+
+import root-py
+import root-cpp
+
+source Py from "py_prim.py"
+  ( "py_is_zero" as isZeroP
+  , "py_dec"     as decP
+  )
+isZeroP :: Int -> Bool
+decP    :: Int -> Int
+
+source Cpp from "cpp_prim.hpp" ("cpp_add" as addC)
+addC :: Int -> Int -> Int
+
+-- tail-recursive worker: sum n + (n-1) + ... + 1 into acc, crossing pools
+go :: Int -> Int -> Int
+go n acc
+  ? isZeroP n = acc
+  : go (decP n) (addC acc n)
+
+-- point-free export alias of the recursive worker
+countdownSum :: Int -> Int -> Int
+countdownSum = go

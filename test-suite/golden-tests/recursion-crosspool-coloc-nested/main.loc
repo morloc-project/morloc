@@ -1,0 +1,25 @@
+module main (run)
+
+import root-py
+import root-cpp
+
+source Py from "py_helpers.py"
+  ( "py_log" as logIt )
+source Cpp from "cpp_helpers.hpp"
+  ( "cpp_mix"  as mix
+  , "cpp_bump" as bump
+  )
+
+logIt :: Int -> <IO> ()      -- py-only effect: forces the head onto py
+mix   :: Int -> Int -> Int   -- cpp-only
+bump  :: Int -> Int          -- cpp-only
+
+run :: Int -> Int -> <IO> Int
+run n acc
+  ? n <= 0 = acc
+  : do
+      logIt acc
+      let a = mix acc n
+      let b = bump a
+      let c = bump b
+      run (n - 1) c

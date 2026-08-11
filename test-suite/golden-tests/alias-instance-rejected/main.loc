@@ -1,8 +1,3 @@
--- Negative test for R1: declaring an @instance@ on a transparent
--- @type@ alias is rejected. To opt the leaf out of the root's
--- instances, the user must convert @type Foo = Bar@ to
--- @newtype Foo = Bar@.
-
 module main (shouldFail)
 
 import root-py

@@ -7,7 +7,6 @@ nexus
 obs.err
 obs.txt
 paths.txt
-pools
 __pycache__
 strs.txt
 text.txt

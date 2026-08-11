@@ -1,0 +1,71 @@
+module main (sumTimes, fib, swapSum, collatzSteps)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Bool = "bool"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "arith.rs"
+  ( "vsum" as vecSum
+  , "add_i" as add
+  , "sub_i" as sub
+  , "eq_i" as eq
+  , "is_even" as isEven
+  , "half" as half
+  , "triple1" as triple1
+  )
+
+vecSum :: [Int] -> Int
+add :: Int -> Int -> Int
+sub :: Int -> Int -> Int
+eq :: Int -> Int -> Bool
+isEven :: Int -> Bool
+half :: Int -> Int
+triple1 :: Int -> Int
+
+-- Non-Copy pass-through carry. `xs` (a Vec, non-Copy) is forwarded UNCHANGED
+-- every iteration while the accumulator and counter turn over. The bare
+-- passthrough `xs` in the continue must be CLONED into its temp (not moved),
+-- and in the same iteration `vecSum xs` BORROWS it -- so the loop-carried Vec is
+-- both cloned and borrowed per iteration and must survive to the next.
+repeatSum :: [Int] -> Int -> Int -> Int
+repeatSum xs acc n
+  ? eq n 0 = acc
+  : repeatSum xs (add acc (vecSum xs)) (sub n 1)
+
+sumTimes :: [Int] -> Int -> Int
+sumTimes xs k = repeatSum xs 0 k
+
+-- Copy swap carry (i64): each iteration puts `b` into `a`'s slot while `a + b`
+-- still reads the OLD `a`. Correct only if both continue values are computed
+-- into temps before either loop-local is reassigned.
+fibLoop :: Int -> Int -> Int -> Int
+fibLoop a b n
+  ? eq n 0 = a
+  : fibLoop b (add a b) (sub n 1)
+
+fib :: Int -> Int
+fib n = fibLoop 0 1 n
+
+-- Non-Copy swap carry: two Vecs exchanged each iteration. Both are passthrough
+-- non-Copy carries, so both must be cloned into temps BEFORE either loop-local
+-- is overwritten -- a slot-by-slot reassignment would corrupt the swap.
+swapPick :: [Int] -> [Int] -> Int -> [Int]
+swapPick xs ys n
+  ? eq n 0 = xs
+  : swapPick ys xs (sub n 1)
+
+swapSum :: [Int] -> [Int] -> Int -> Int
+swapSum xs ys n = vecSum (swapPick xs ys n)
+
+-- Multi-guard / nested-if loop body: two guarded tail continues (even/odd) plus
+-- the base, lowered to nested if/else in the Rust `loop`. Collatz step count.
+collatzHelp :: Int -> Int -> Int
+collatzHelp steps n
+  ? eq n 1 = steps
+  ? isEven n = collatzHelp (add steps 1) (half n)
+  : collatzHelp (add steps 1) (triple1 n)
+
+collatzSteps :: Int -> Int
+collatzSteps n = collatzHelp 0 n

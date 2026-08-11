@@ -1,0 +1,27 @@
+module main (run)
+
+import root-py
+import root-cpp
+
+source Py  from "helpers.py"  ("py_a" as pa)
+source Cpp from "helpers.hpp" ("cpp_a" as ca)
+
+pa :: Int -> Int   -- py-only
+ca :: Int -> Int   -- cpp-only
+
+sumP :: Int -> (Int, Int)
+sumP n
+  ? n == 0 = (0, 0)
+  : let (a, b) = sumC (n - 1)
+    in ((pa a) + n, b)
+
+sumC :: Int -> (Int, Int)
+sumC n
+  ? n == 0 = (0, 0)
+  : let (a, b) = sumP (n - 1)
+    in (a, (ca b) + n)
+
+run :: Int -> Int
+run n =
+  let (a, b) = sumP n
+  in a + b

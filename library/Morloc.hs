@@ -24,14 +24,16 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 
-import Morloc.Data.Doc (pretty)
+import Morloc.Data.Doc (pretty, (<+>), squotes)
 import qualified Data.Map as Map
+import qualified Data.Text as T
+import qualified Morloc.Build.Params as BP
 import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
-import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps)
+import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
 import Morloc.CodeGenerator.Namespace (SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
@@ -156,7 +158,7 @@ writeProgram translateFn path code = do
             isExported (AnnoS (Idx midx _) _ _, _) = Set.member midx exportSet
             exportedRASTs = filter isExported concreteRASTs
             helperRASTs = map fst (filter (not . isExported) concreteRASTs)
-        nexus <- Nexus.generate concreteGASTs exportedRASTs helperRASTs
+        (nexus, wrappers) <- Nexus.generate concreteGASTs exportedRASTs helperRASTs
         MM.startCounter
         paramRASTs <- mapM parameterize (map fst concreteRASTs)
         let langMap = Map.fromList
@@ -170,6 +172,8 @@ writeProgram translateFn path code = do
             -- When 'stateDebugTrace' (--debug), wrap every foreign-call
             -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
             >>= mapM addDebugWraps
+            -- Lower eligible tail-recursive helpers to native 'PolyLoop's.
+            >>= mapM addLoopWraps
             -- Boundary reconciliation + invariant check; see 'generatePools'.
             >>= mapM (\ph -> do
                          ph' <- insertEffectBoundaries ph
@@ -188,34 +192,77 @@ writeProgram translateFn path code = do
         -- disk. @hash-include@ files from the program YAML fold into
         -- every pool's hash so they invalidate the cache too.
         hashIncludes <- MM.gets stateHashIncludePaths
-        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes hashIncludes pools
+        -- Build parameters and guest object files are inputs that change the
+        -- emitted binary without changing the emitted pool source, so they must
+        -- enter the cache key too (see 'PoolHash.computePoolHashes'). The guest
+        -- objects are hashed once here (not re-read per pool) and their
+        -- fingerprint folded into the salt.
+        params <- MM.gets stateLangParams
+        guestObjects <-
+          MM.gets $ \s ->
+            [ T.unpack f
+            | f <- concatMap packageCxxFlags (statePackageMeta s)
+            , ".o" `T.isSuffixOf` f
+            ]
+        objHash <- MM.liftIO $ PoolHash.hashFiles guestObjects
+        let buildSalt
+              | null guestObjects = BP.renderSalt params
+              | otherwise = BP.renderSalt params <> "|obj:" <> PoolHash.poolHashHex objHash
+        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes buildSalt hashIncludes pools
         let nexusPatched = PoolHash.patchManifestPoolHashes poolHashes nexus
-        buildProgram (nexusPatched, pools)
+        buildProgram (nexusPatched, wrappers, pools)
 
 -- | An eval input is a single expression, not a module: it may import
 -- installed modules and use let/where/do, but may not define types,
 -- typeclasses, instances, or source foreign code. The check is fully
 -- recursive so a forbidden construct cannot hide inside a nested
 -- let/where/do block (the only grammatical path is a forced
--- expression). Imported modules are not checked: eval mode also
--- disables local-module resolution, so every import is genuinely
--- pre-existing installed code.
+-- expression). It walks only the root DAG node -- the user-written code
+-- -- so imported modules (separate nodes) are never inspected.
+--
+-- In sandbox mode ('stateEvalSandbox' = Just), two further gates apply
+-- to the untrusted expression: no directly-written IO intrinsic (Gate 1)
+-- and no top-level import outside the allow-list (Gate 2). Both are
+-- inert for trusted dev eval (Nothing), where local IO and any installed
+-- module remain available.
 checkEvalRestrictions :: DAG MVar Import ExprI -> MorlocMonad ()
-checkEvalRestrictions dag =
+checkEvalRestrictions dag = do
+  sandbox <- MM.gets stateEvalSandbox
   case DAG.roots dag of
     [] -> return ()
     (root : _) -> case Map.lookup root dag of
       Nothing -> return ()
-      Just (ExprI _ (ModE _ body), _) -> mapM_ (AST.checkExprI checkExpr) body
+      Just (ExprI _ (ModE _ body), edges) -> do
+        mapM_ (AST.checkExprI (checkExpr sandbox)) body
+        -- Gate 2: match on the resolved target MVar (the DAG child key),
+        -- so `import M as N` is still checked against M. A vetted facade's
+        -- own imports are edges from its node, never reached here, so the
+        -- facade may re-export terms drawn from non-listed modules. Inert
+        -- (Maybe is Foldable) when not sandboxed.
+        mapM_ (\allowed -> mapM_ (checkImport allowed) edges) sandbox
       Just _ -> return ()
   where
-    checkExpr :: ExprI -> MorlocMonad ()
-    checkExpr (ExprI i (SrcE _)) =
+    checkExpr :: Maybe (Set.Set MVar) -> ExprI -> MorlocMonad ()
+    checkExpr _ (ExprI i (SrcE _)) =
       MM.throwSourcedError i "source statements are not allowed in eval mode"
-    checkExpr (ExprI i (ClsE _)) =
+    checkExpr _ (ExprI i (ClsE _)) =
       MM.throwSourcedError i "class declarations are not allowed in eval mode"
-    checkExpr (ExprI i (IstE _ _ _)) =
+    checkExpr _ (ExprI i (IstE _ _ _)) =
       MM.throwSourcedError i "instance declarations are not allowed in eval mode"
-    checkExpr (ExprI i (TypE _)) =
+    checkExpr _ (ExprI i (TypE _)) =
       MM.throwSourcedError i "type declarations are not allowed in eval mode"
-    checkExpr _ = return ()
+    -- Gate 1: a directly-written IO intrinsic is refused in sandbox mode.
+    -- Calling an exported function that uses one internally is still fine:
+    -- that intrinsic lives in another DAG node this walk never visits.
+    checkExpr (Just _) (ExprI i (IntrinsicE intr _))
+      | intrinsicIsIO intr =
+          MM.throwSourcedError i
+            "IO intrinsics may not be used directly in a sandboxed eval expression; \
+            \wrap the intrinsic in an exported function of an allow-listed module instead"
+    checkExpr _ _ = return ()
+
+    checkImport :: Set.Set MVar -> (MVar, Import) -> MorlocMonad ()
+    checkImport allowed (childMV, _)
+      | Set.member childMV allowed = return ()
+      | otherwise = MM.throwSystemError $
+          "module" <+> squotes (pretty childMV) <+> "is not in the eval allow-list"

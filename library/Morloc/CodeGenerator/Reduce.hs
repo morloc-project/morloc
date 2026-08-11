@@ -20,6 +20,7 @@ import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import Control.Monad.State (gets)
 import Morloc.CodeGenerator.Namespace
+import Morloc.ProgramBuilder.Paths (resolveDatafileAgainstRoot)
 import qualified Morloc.Version as V
 
 reduce :: SerialManifold -> MorlocMonad SerialManifold
@@ -53,6 +54,11 @@ reduceSerialExpr ver ts lang (CacheBodyS t resSa lbl mid args body) =
   CacheBodyS t resSa lbl mid args <$> reduceSerialExpr ver ts lang body
 reduceSerialExpr ver ts lang (DebugWrapS t mid args body) =
   DebugWrapS t mid args <$> reduceSerialExpr ver ts lang body
+-- Reduce descends INTO each loop-body leaf (peepholes on the per-iteration
+-- guard/let/base/continue work) but the loop is a scope barrier.
+reduceSerialExpr ver ts lang (LoopS t ids body) =
+  LoopS t ids
+    <$> bimapM (reduceNativeExpr ver ts lang) (reduceSerialExpr ver ts lang) body
 reduceSerialExpr _ _ _ e = return e
 
 reduceSerialArg :: Text -> Text -> Lang -> SerialArg -> MorlocMonad SerialArg
@@ -73,11 +79,10 @@ reduceNativeExpr ver ts lang (IntrinsicN t IntrDatafile _ [pathArg]) = do
   pathArg' <- reduceNativeExpr ver ts lang pathArg
   case extractStr pathArg' of
     Just relPath -> do
-      mInstallDir <- gets stateInstallDir
-      let resolved = case mInstallDir of
-            Just dir -> T.pack (dir </> T.unpack relPath)
-            Nothing -> relPath
-      return $ makeStr t resolved
+      -- Data files are mirrored beside sources at the ROOT; resolve against
+      -- the source root (shared with the nexus side via Paths).
+      mRoot <- gets stateBuildRoot
+      return $ makeStr t (resolveDatafileAgainstRoot mRoot relPath)
     Nothing ->
       return $ makeStr t "<datafile: could not resolve path>"
 -- runtime intrinsics: recurse into children but keep the intrinsic node

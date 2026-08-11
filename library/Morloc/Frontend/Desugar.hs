@@ -297,6 +297,12 @@ parseCliOpt txt = case T.unpack (T.strip txt) of
     | otherwise -> CliOptShortCharInvalid c
   _ -> CliOptShapeUnknown
 
+-- | The long name of a CLI option, if it has one.
+cliOptLongName :: CliOpt -> Maybe Text
+cliOptLongName (CliOptLong l)   = Just l
+cliOptLongName (CliOptBoth _ l) = Just l
+cliOptLongName (CliOptShort _)  = Nothing
+
 -- Known directive keys recognized inside argument / signature docstrings.
 -- Includes the dotted families (`source`, `form`, `check.<kind>`,
 -- `list.source`, `list.form`, `list.check.<kind>`) used by the new
@@ -308,8 +314,22 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with"
+  , "with", "mime"
   ]
+
+-- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
+-- `image/png`). The media type is authoritative metadata -- it drives how a
+-- value's bytes are labeled downstream (MCP content blocks, HTTP
+-- Content-Type) -- so a malformed value is rejected rather than silently
+-- accepted as prose.
+parseMediaType :: Text -> Either Text Text
+parseMediaType raw =
+  let v = T.strip raw
+   in if T.null v
+        then Left "empty media type"
+        else case T.splitOn "/" v of
+          [a, b] | not (T.null a) && not (T.null b) -> Right v
+          _ -> Left "expected a media type of the form `type/subtype` (e.g. image/png)"
 
 -- | Parse the value of a `source:` field. OR-chains (`a|b`) are
 -- rejected with a targeted error so the user can find the redundant
@@ -511,7 +531,14 @@ applyCliOptDirective ::
   Text -> -- raw value text
   ([Text], Maybe CliOpt)
 applyCliOptDirective k v = case parseCliOpt v of
-  CliOptOk o -> ([], Just o)
+  CliOptOk o
+    | Just l <- cliOptLongName o, "_" `T.isPrefixOf` l ->
+        let msg =
+              "invalid long flag name in '" <> k <> ": " <> v <> "': `--" <> l
+              <> "` may not begin with an underscore; leading-underscore names "
+              <> "are reserved for compiler-generated argument identifiers."
+         in ([msg], Nothing)
+    | otherwise -> ([], Just o)
   CliOptShapeUnknown -> ([], Nothing)
   CliOptShortCharInvalid c ->
     let msg =
@@ -580,6 +607,9 @@ processArgDocLines = foldl step ([], [], defaultValue)
         ["render"] -> withCase errs ws d True "render" v
         ["with", "buffer"] -> (errs <> [retiredBufferMsg "with"], ws, d)
         ["render", "buffer"] -> (errs <> [retiredBufferMsg "render"], ws, d)
+        ["mime"] -> case parseMediaType v of
+          Right mt -> (errs, ws, d {docMime = Just mt})
+          Left e   -> (errs <> ["in `mime: " <> v <> "`: " <> e], ws, d)
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k
               desc = k <> ": " <> v

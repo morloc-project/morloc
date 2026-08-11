@@ -1,0 +1,26 @@
+module main (baseEffect, perIter)
+
+import root-py
+
+source Py from "foo.py" ("emit")
+
+emit :: Int -> <IO> Int
+
+-- <IO> same-pool tail loop with the effect ONLY in the base case: emit fires
+-- once (at n==0), the loop iterates effect-free.
+sumEmit :: Int -> Int -> <IO> Int
+sumEmit acc n
+  ? n == 0 = emit acc
+  : sumEmit (acc + n) (n - 1)
+
+baseEffect :: Int -> <IO> Int
+baseEffect n = sumEmit 0 n
+
+-- <IO> same-pool tail loop with a PER-ITERATION effect: emit fires each
+-- iteration (n, n-1, ..., 1) in order, then emit 0 at the base.
+perIter :: Int -> <IO> Int
+perIter n
+  ? n == 0 = emit 0
+  : do
+      _ <- emit n
+      perIter (n - 1)

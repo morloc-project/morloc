@@ -37,7 +37,6 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>      // FILE* for read_binary_fd
-#include <sys/select.h> // fd_set
 #include <sys/socket.h>
 #include <sys/types.h>  // pid_t, ssize_t
 #include <sys/un.h>     // struct sockaddr_un
@@ -724,7 +723,6 @@ typedef struct language_daemon_s {
     shm_t* shm;
     size_t shm_default_size;
     int server_fd;
-    fd_set read_fds;
     client_list_t* client_fds;
 } language_daemon_t;
 
@@ -782,6 +780,11 @@ typedef struct daemon_config_s {
     pool_alive_fn_t pool_alive_fn;
     size_t n_pools;
     int eval_timeout;
+    // When true, `call` results over the Unix socket / TCP transports are
+    // returned as a raw morloc data packet instead of a JSON envelope.
+    bool output_packet;
+    // zstd preset (0..=9) for `output_packet` results; 0 = no compression.
+    unsigned char compression_level;
 } daemon_config_t;
 
 typedef enum {
@@ -823,6 +826,11 @@ typedef struct daemon_response_s {
     int error_kind;
     char* result_json;
     char* error;
+    // Raw morloc data-packet bytes for the `-f packet` daemon wire (Unix
+    // socket / TCP). NULL in JSON mode; when non-NULL the length-prefixed
+    // handler writes these bytes verbatim instead of the JSON envelope.
+    unsigned char* result_bytes;
+    size_t result_len;
 } daemon_response_t;
 
 // -- HTTP types --
@@ -1151,11 +1159,11 @@ void close_daemon(language_daemon_t** daemon_ptr);
 language_daemon_t* start_daemon(
     const char* socket_path, const char* tmpdir,
     const char* shm_basename, size_t shm_default_size, ERRMSG);
-uint8_t* stream_from_client_wait(int client_fd, int pselect_timeout_us, int recv_timeout_us, ERRMSG);
+uint8_t* stream_from_client_wait(int client_fd, int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* stream_from_client(int client_fd, ERRMSG);
 uint8_t* send_and_receive_over_socket_wait(
     const char* socket_path, const uint8_t* packet,
-    int pselect_timeout_us, int recv_timeout_us, ERRMSG);
+    int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
@@ -1534,6 +1542,11 @@ int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
 int64_t mlc_open_stdin (const char* schema_str, ERRMSG);
 int64_t mlc_open_stdout(const char* schema_str, ERRMSG);
 int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
+// Reclaim any stdio singleton claim this pool dispatch left open (e.g. an
+// exception unwound past @close). Each pool language calls this after a
+// dispatch returns so a leaked claim does not wedge the next open. Cheap
+// on the no-stdio path (a single thread-local read).
+void mlc_reclaim_stdio_after_dispatch(void);
 int32_t mlc_write(uint8_t level, int64_t handle,
                   const void* payload_voidstar, ERRMSG);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);
