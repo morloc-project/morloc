@@ -1172,6 +1172,7 @@ argToJson mEmit mShape _ (CmdArgPos r) =
     [ ("kind", jsonStr "pos") ]
     ++ schemaField mEmit
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
+       , ("name", jsonMaybeStr (argPosDocName r))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
        , ("many", jsonBool (argPosDocMany r))
@@ -2538,23 +2539,29 @@ generate cs rASTs helperRASTs = do
   -- Get build time and compute build directory
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
-  -- Program identity for the build directory. --name or the source
-  -- basename for @morloc make@; the --save name for eval; the module name
-  -- as a last resort. One shared key for both plain make and install so
-  -- the two layouts can never diverge.
+  -- The build key (--name / -o / source basename; the --save name for eval).
   programKey <- MM.getProgramKey
   buildParent <- MM.gets stateBuildParentDir
-  -- The source/install ROOT: exe/<key> for install (a mirror of the working
-  -- directory), the working directory (or --build-dir) for make. The build
-  -- artifacts nest at <root>/<key>-build, so a pool's sources are always at
-  -- ../../.. for both modes.
+  -- Directory identity. For @make@ it is the build key (--name / -o / source
+  -- basename), so several sources built in one working directory get distinct
+  -- <key>-build dirs. For a real install it is the MODULE name: the source file
+  -- (conventionally main.loc) is not the program's identity, so exe/<module>,
+  -- its nested <module>-build, and the bin launcher share that one name. Eval is
+  -- the exception: its module is a synthetic "main" (an anonymous expression has
+  -- no declaration), so its identity is the build key -- the --save name, else
+  -- the ephemeral "eval" -- NOT the module, or every --save would collide on
+  -- exe/main. Both modes nest the build dir one level below its root, so a
+  -- pool's sources are always at ../../.. .
+  let dirKey = if stateInstall st && not (stateEvalMode st) then programName else programKey
+  -- The source/install ROOT: exe/<module> for install (a mirror of the working
+  -- directory), the working directory (or --build-dir) for make.
   buildRoot <-
     if stateInstall st
-      then return (configHome config </> "exe" </> programKey)
+      then return (configHome config </> "exe" </> dirKey)
       else do
         cwd <- liftIO Dir.getCurrentDirectory
         liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
-  let buildDir = buildRoot </> buildDirName programKey
+  let buildDir = buildRoot </> buildDirName dirKey
   CMS.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just buildRoot})
 
   poolRegistry <- MM.gets stateLangRegistry
@@ -2634,7 +2641,17 @@ generate cs rASTs helperRASTs = do
   -- @morloc-nexus <mode> <abs-manifest-path>@. They land in CWD (plain
   -- make) or the install dir (install, whence they are copied to bin/).
   wrapperSpecs <- MM.gets stateWrapperSpecs
-  let specs = fromMaybe [WrapperSpec WCli programKey] wrapperSpecs
+  let rawSpecs = fromMaybe [WrapperSpec WCli dirKey] wrapperSpecs
+      -- On install the on-PATH command is the module name, so the CLI launcher
+      -- must be named for the module: installProgram copies exe/<module>/<module>
+      -- to bin/<module>. -o / the source basename name only the local `make`
+      -- launcher. Non-CLI (daemon) wrappers keep their given name.
+      renameCliForInstall s = case wsMode s of
+        WCli -> s {wsName = dirKey}
+        _ -> s
+      specs
+        | stateInstall st = map renameCliForInstall rawSpecs
+        | otherwise = rawSpecs
       absManifest = buildDir </> "manifest.json"
       -- Launcher(s) land at the root (<root>/<key>), beside the nested
       -- <key>-build; for install this is exe/<key>, whence installProgram
@@ -2674,7 +2691,6 @@ makeWrapperScript mode absManifestPath =
   where
     modeToken WCli = "run"
     modeToken WDaemon = "daemon"
-    modeToken WMcp = "mcp"
 
 -- | POSIX single-quote a path so spaces and shell metacharacters in the
 -- absolute manifest path survive. Embedded single quotes are escaped with

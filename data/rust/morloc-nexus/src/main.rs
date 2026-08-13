@@ -96,19 +96,31 @@ fn main() {
         let leading = invocation.user_zone.first().map(|s| s.as_str());
         let want_json = rargs.common.json_help || leading == Some("--json-help");
         let want_mcp = rargs.common.mcp_tools || leading == Some("--mcp-tools");
-        if want_json || want_mcp {
+        let want_config = rargs.common.mcp_config || leading == Some("--mcp-config");
+        if want_json || want_mcp || want_config {
             match invocation.manifest.as_ref() {
                 Some(m) => {
                     if want_json {
                         json_help::print_json_help(m);
-                    } else {
+                    } else if want_mcp {
                         json_help::print_mcp_tools(m);
+                    } else {
+                        // stdio client config: the nexus's own absolute path
+                        // (current_exe) as `command`, the canonical manifest
+                        // path as its `mcp` argument. Pure JSON on stdout.
+                        let nexus = std::env::current_exe()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| "morloc-nexus".to_string());
+                        let manifest_abs = std::fs::canonicalize(&invocation.manifest_path)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| invocation.manifest_path.clone());
+                        json_help::print_mcp_config(m, &nexus, &manifest_abs);
                     }
                     std::process::exit(0);
                 }
                 None => {
                     eprintln!(
-                        "Error: --json-help/--mcp-tools require a program target"
+                        "Error: --json-help/--mcp-tools/--mcp-config require a program target"
                     );
                     std::process::exit(2);
                 }
@@ -369,6 +381,26 @@ fn main() {
             tmpdir.clone(),
             shm_basename.clone(),
         );
+        // `--http-port` selects the Streamable-HTTP transport (remote/shared
+        // serving); otherwise the stdio JSON-RPC loop. Both wrap the same
+        // message core, tool shapes, and daemon_dispatch backend.
+        if let Some(port) = config.http_port {
+            let host = config
+                .mcp_http_host
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string());
+            mcp::serve_http(
+                &mut sockets,
+                &shm_basename,
+                &payload,
+                &manifest,
+                &host,
+                config.mcp_auth_token.clone(),
+                config.mcp_allow_no_auth,
+                port as u16,
+            );
+            // serve_http never returns.
+        }
         let protocol_fd = mcp_protocol_fd
             .expect("mcp mode always re-homes stdout and sets the protocol fd");
         mcp::serve(

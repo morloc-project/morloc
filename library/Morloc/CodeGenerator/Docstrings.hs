@@ -128,6 +128,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
       ]
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
+  validatePositionalNames loc cmdargs
   validateStdinArg loc cmdargs
   (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   return $
@@ -475,6 +476,7 @@ resolveFlag loc r = do
       return . Left $
         ArgPosDocSet
           { argPosDocType = VarT MBT.bool
+          , argPosDocName = docName r
           , argPosDocDesc = docLines r
           , argPosDocMetavar = docMetavar r <|> Just "BOOL"
           , argPosDocLiteral = docLiteral r
@@ -594,9 +596,13 @@ resolvePos t r = do
       checks
         | stdin && not hasPathCheck = docChecks r <> [CheckPath (PathPerm "r")]
         | otherwise = docChecks r
+  -- The @name validity/uniqueness check runs centrally in
+  -- `validatePositionalNames` (over the whole arg list), so every positional
+  -- construction path is covered, not just this one.
   return $
     ArgPosDocSet
       { argPosDocType = t
+      , argPosDocName = docName r
       , argPosDocDesc = docLines r
       , argPosDocMetavar = docMetavar r
       , argPosDocLiteral = docLiteral r
@@ -657,6 +663,32 @@ validateStdinArg loc cmdargs = do
               <> " the stdin argument must be the last positional."
       | otherwise = go (argPosDocStdin r) rest
     go seenStdin (_ : rest) = go seenStdin rest
+
+-- Reject positional `@name`s that are invalid or collide within a subcommand.
+-- A `@name` becomes the positional's property in the MCP tool schema, so a
+-- leading `_` (the reserved namespace of the default `_1`/`_2` keys and the
+-- MCP `_render` selector) or a duplicate would collide downstream. Runs on the
+-- assembled arg list, so it covers every positional construction path.
+validatePositionalNames :: MDoc -> [CmdArg] -> MorlocMonad ()
+validatePositionalNames loc cmdargs = do
+  let names = [nm | CmdArgPos r <- cmdargs, Just nm <- [argPosDocName r]]
+  case filter (MT.isPrefixOf "_") names of
+    (nm : _) ->
+      MM.throwSystemError $
+        loc <> ": positional @name '" <> pretty nm <> "' may not start with '_' "
+          <> "(reserved for the default _1/_2 argument keys and the MCP render selector)"
+    [] -> return ()
+  let dups =
+        [ nm
+        | (nm, cnt) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- names])
+        , cnt > 1
+        ]
+  case dups of
+    (nm : _) ->
+      MM.throwSystemError $
+        loc <> ": positional @name '" <> pretty nm
+          <> "' is declared more than once; names must be unique within a subcommand."
+    [] -> return ()
 
 -- Reject collisions between option / flag long-form names within a
 -- single subcommand. Without this check, two flags that happen to

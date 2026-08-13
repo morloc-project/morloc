@@ -96,7 +96,9 @@ type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 ---- State
 
 -- | The morloc-nexus run mode a generated launcher wrapper selects.
-data WrapperMode = WCli | WDaemon | WMcp
+-- (MCP is served from the compiled program directly via `morloc-nexus mcp
+-- <manifest>` and needs no dedicated launcher; see `morloc mcp`.)
+data WrapperMode = WCli | WDaemon
   deriving (Show, Eq, Ord)
 
 -- | A launcher wrapper to emit: which nexus mode and the executable name.

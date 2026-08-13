@@ -104,6 +104,12 @@ pub struct DispatchOptions {
     #[arg(long = "mcp-tools")]
     pub mcp_tools: bool,
 
+    /// Print a client MCP server config for this program (a `mcpServers`
+    /// JSON entry, stdio transport) and exit. Pure JSON on stdout, so it
+    /// pipes/redirects cleanly into a client config.
+    #[arg(long = "mcp-config")]
+    pub mcp_config: bool,
+
     /// Per-run output dir (logs, summary.json, debug dumps).
     #[arg(long = "log-dir", value_name = "DIR")]
     pub log_dir: Option<String>,
@@ -239,6 +245,28 @@ pub struct DaemonArgs {
 pub struct McpArgs {
     /// Path to the program's wrapper script or .manifest file.
     pub target: String,
+
+    /// Serve MCP over HTTP (Streamable HTTP transport) on PORT instead of
+    /// stdio. 0 binds an OS-assigned port (printed to stderr).
+    #[arg(long = "http-port", value_name = "PORT")]
+    pub http_port: Option<u16>,
+
+    /// Bind address for --http-port (default 127.0.0.1). Use 0.0.0.0 to
+    /// accept connections from other hosts or containers.
+    #[arg(long = "http-host", value_name = "ADDR")]
+    pub http_host: Option<String>,
+
+    /// Require this bearer token on every HTTP request (Authorization:
+    /// Bearer <token>). Falls back to the MORLOC_MCP_TOKEN environment
+    /// variable; if neither is set the endpoint is unauthenticated.
+    #[arg(long = "auth-token", value_name = "TOKEN")]
+    pub auth_token: Option<String>,
+
+    /// Permit serving on a non-loopback address with no token. Without this,
+    /// a non-loopback bind and no token is refused (it would be an open,
+    /// unauthenticated network endpoint).
+    #[arg(long = "allow-no-auth")]
+    pub allow_no_auth: bool,
 }
 
 /// Multi-program router across installed programs. Doesn't take a
@@ -762,6 +790,14 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
 pub fn mcp_args_to_config(args: &McpArgs) -> (NexusConfig, String) {
     let mut cfg = NexusConfig::default();
     cfg.mcp_flag = true;
+    cfg.http_port = args.http_port.map(|p| p as i32);
+    cfg.mcp_http_host = args.http_host.clone();
+    // Explicit --auth-token wins; else the environment variable, which keeps
+    // the token off the process argv (invisible to `ps`).
+    cfg.mcp_auth_token = args.auth_token.clone().or_else(|| {
+        std::env::var("MORLOC_MCP_TOKEN").ok().filter(|s| !s.is_empty())
+    });
+    cfg.mcp_allow_no_auth = args.allow_no_auth;
     (cfg, args.target.clone())
 }
 
@@ -901,24 +937,44 @@ fn value_taking_run_flags() -> ValueTakingFlags {
     let run_cmd = nexus_cmd
         .find_subcommand("run")
         .expect("Nexus declares a 'run' subcommand");
-    let mut longs: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut shorts: std::collections::HashSet<char> =
-        std::collections::HashSet::new();
-    for arg in run_cmd.get_arguments() {
+    let mut flags = collect_value_taking(run_cmd);
+    // Capability flags are advertised per-manifest, but a flag's
+    // value-taking-ness is manifest-independent, so fold them all in here.
+    for spec in CAPABILITY_FLAGS {
+        if spec.takes_value() {
+            flags.longs.insert(format!("--{}", spec.long));
+            if let Some(c) = spec.short {
+                flags.shorts.insert(c);
+            }
+        }
+    }
+    flags
+}
+
+/// Value-taking flags declared directly on a named subcommand (e.g. `mcp`).
+/// Unlike [`value_taking_run_flags`], this consults the subcommand's own
+/// arguments and adds no capability flags -- used by the `mcp` pre-scan so
+/// `--http-port N` (and friends) don't get mistaken for the manifest target.
+fn value_taking_flags_of(sub: &str) -> ValueTakingFlags {
+    use clap::CommandFactory;
+    let nexus_cmd = crate::help::strip_styles_recursively(Nexus::command());
+    let cmd = nexus_cmd
+        .find_subcommand(sub)
+        .expect("named subcommand declared on Nexus");
+    collect_value_taking(cmd)
+}
+
+/// Scan a clap command's own arguments for those that consume the next argv
+/// token as their value (`--long`/`-x`), rendered into a [`ValueTakingFlags`].
+fn collect_value_taking(cmd: &clap::Command) -> ValueTakingFlags {
+    let mut longs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut shorts: std::collections::HashSet<char> = std::collections::HashSet::new();
+    for arg in cmd.get_arguments() {
         if arg.get_action().takes_values() {
             if let Some(l) = arg.get_long() {
                 longs.insert(format!("--{}", l));
             }
             if let Some(c) = arg.get_short() {
-                shorts.insert(c);
-            }
-        }
-    }
-    for spec in CAPABILITY_FLAGS {
-        if spec.takes_value() {
-            longs.insert(format!("--{}", spec.long));
-            if let Some(c) = spec.short {
                 shorts.insert(c);
             }
         }
@@ -1327,7 +1383,7 @@ fn parse_mcp(argv: &[String]) -> ParsedInvocation {
     // so the first non-flag positional is the target) and load its
     // manifest up front, so the help decoration below has it. A target-less
     // help invocation (`mcp -h`) yields None and keeps the generic help.
-    let flags = ValueTakingFlags::from_nexus();
+    let flags = value_taking_flags_of("mcp");
     let pre_target = find_wrapper_target(&argv[2..], &flags);
     let loaded: Option<(morloc_manifest::Manifest, String)> =
         pre_target.map(load_manifest);
@@ -2164,7 +2220,7 @@ mod tests {
         // positional so the ONLY error source is the removed flag -- a
         // re-added boolean would parse `main.manifest` as the sole target and
         // the assert would (correctly) fail.
-        for flag in ["-p", "--keep-null", "--json-help", "--mcp-tools"] {
+        for flag in ["-p", "--keep-null", "--json-help", "--mcp-tools", "--mcp-config"] {
             let argv = vec!["morloc-nexus", "daemon", flag, "main.manifest"];
             assert!(parse(&argv).is_err(), "expected error for {}", flag);
         }

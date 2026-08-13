@@ -1,6 +1,5 @@
 all:
-	rm -f *.err got.txt gotc.txt
-	: > obs.txt
+	rm -f *.err got.txt gotc.txt obs.txt
 	morloc make -o nexus main.loc 2> build.err
 	./nexus -f jsonl @ produceBig 2> obs.err | head -n 5 > got.txt
 	printf 'head count: ' >> obs.txt ; wc -l < got.txt | tr -d ' ' >> obs.txt

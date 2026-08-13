@@ -15,6 +15,15 @@ pub struct RunConfig {
     pub image: String,
     pub bind_mounts: Vec<(String, String)>,
     pub ports: Vec<(u16, u16)>,
+    /// Host interface to publish ports on (`docker -p <host>:H:C`). `None`
+    /// binds all interfaces (0.0.0.0); `Some("127.0.0.1")` restricts to
+    /// loopback so the service is not reachable off the host.
+    pub publish_host: Option<String>,
+    /// Container network mode (`docker --network <net>`). `Some("host")` shares
+    /// the host network namespace so a `--http-host 127.0.0.1` bind lands on the
+    /// host's loopback, unreachable by sibling containers; `-p` is then invalid
+    /// and suppressed. `None` uses the engine default (bridge).
+    pub network: Option<String>,
     pub env: Vec<(String, String)>,
     pub read_only: bool,
     pub interactive: bool,
@@ -33,6 +42,8 @@ impl RunConfig {
             image: image.to_string(),
             bind_mounts: Vec::new(),
             ports: Vec::new(),
+            publish_host: None,
+            network: None,
             env: Vec::new(),
             read_only: false,
             interactive: false,
@@ -522,9 +533,21 @@ fn build_oci_run_args(
         args.push("-v".to_string());
         args.push(format!("{host}:{container}{}", cfg.selinux_suffix));
     }
-    for (host_port, container_port) in &cfg.ports {
-        args.push("-p".to_string());
-        args.push(format!("{host_port}:{container_port}"));
+    if let Some(ref net) = cfg.network {
+        args.push("--network".to_string());
+        args.push(net.clone());
+    }
+    // Under host networking the container shares the host netns and the nexus
+    // binds host ports directly, so `-p` is invalid (docker rejects it) and
+    // unnecessary. Skip publishing in that mode.
+    if cfg.network.as_deref() != Some("host") {
+        for (host_port, container_port) in &cfg.ports {
+            args.push("-p".to_string());
+            match &cfg.publish_host {
+                Some(ip) => args.push(format!("{ip}:{host_port}:{container_port}")),
+                None => args.push(format!("{host_port}:{container_port}")),
+            }
+        }
     }
     for (key, val) in &cfg.env {
         args.push("-e".to_string());

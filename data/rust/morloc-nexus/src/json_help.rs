@@ -43,6 +43,24 @@ pub fn print_mcp_tools(m: &Manifest) {
     println!("{}", serde_json::to_string_pretty(&v).unwrap());
 }
 
+/// Print a client `mcpServers` config entry (stdio transport) to stdout as
+/// pure JSON. `nexus` is the absolute `morloc-nexus` path (the client's
+/// `command`); `manifest` is the absolute manifest path passed to `mcp`. The
+/// server is keyed by the program (module) name.
+pub fn print_mcp_config(m: &Manifest, nexus: &str, manifest: &str) {
+    let v = build_mcp_config(m, nexus, manifest);
+    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+}
+
+fn build_mcp_config(m: &Manifest, nexus: &str, manifest: &str) -> Value {
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        m.name.clone(),
+        json!({ "command": nexus, "args": ["mcp", manifest] }),
+    );
+    json!({ "mcpServers": Value::Object(servers) })
+}
+
 // ---------------------------------------------------------------------------
 // Wire schema -> JSON Schema
 // ---------------------------------------------------------------------------
@@ -749,27 +767,32 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
         match arg {
             Arg::Positional {
                 schema,
+                name,
                 many,
                 stdin,
                 desc,
                 ..
             } => {
-                // Positionals get a reserved, collision-proof key `_<1-based
-                // index>`. A metavar (FILE/INT/...) is a generic display
-                // placeholder that gets reused across positionals and would
-                // collide; the flag parser reserves the leading `_` so an
-                // option can never produce this name. The positional's type and
-                // `--' desc:` still ride in the property's schema + description.
-                let name = format!("_{}", pos_index + 1);
+                // A positional's MCP property is its explicit `@name` when set,
+                // else the reserved, collision-proof key `_<1-based index>`. A
+                // metavar (FILE/INT/...) is a reused display placeholder and is
+                // never used as the key; the leading `_` of the default is
+                // reserved (a `@name` is validated at compile time not to start
+                // with `_`), so a name and an option can never collide with it.
+                let prop_name = name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("_{}", pos_index + 1));
                 let mut prop = mcp_type(schema.as_deref(), *many);
                 set_description(&mut prop, desc, None);
                 let is_req = !schema_is_optional(schema.as_deref()) && !*stdin;
                 if is_req {
-                    required.push(Value::String(name.clone()));
+                    required.push(Value::String(prop_name.clone()));
                 }
-                insert_prop(&mut props, &name, prop)?;
+                insert_prop(&mut props, &prop_name, prop)?;
                 slots.push(ArgSlot::Value {
-                    key: name,
+                    key: prop_name,
                     missing: Value::Null,
                 });
                 pos_index += 1;
@@ -1165,6 +1188,25 @@ mod tests {
                 assert_eq!(key, "_1");
                 assert_eq!(missing, &Value::Null);
             }
+            other => panic!("expected a Value slot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn named_positional_uses_at_name_not_index() {
+        // A positional carrying an explicit `@name` uses it as the property,
+        // the required-key, and the inverse slot key -- not the `_1` fallback.
+        let cmd = cmd_from_json(json!({
+            "name": "revcomp", "type": "pure",
+            "return": { "schema": "j" },
+            "args": [ { "kind": "pos", "schema": "j", "name": "records" } ],
+        }));
+        let shape = command_to_tool_shape(&cmd).expect("servable");
+        assert!(shape.prop_names.contains("records"));
+        assert!(!shape.prop_names.contains("_1"));
+        assert_eq!(shape.required, vec!["records".to_string()]);
+        match &shape.slots[0] {
+            ArgSlot::Value { key, .. } => assert_eq!(key, "records"),
             other => panic!("expected a Value slot, got {:?}", other),
         }
     }

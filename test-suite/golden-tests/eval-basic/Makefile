@@ -46,7 +46,6 @@ all:
 
 clean:
 	rm -f obs.err case5.err
-	@for n in eval-basic-foo eval-basic-bar; do \
-	  rm -f $(MHOME)/bin/$$n $(MHOME)/fdb/$$n.manifest $(MHOME)/fdb/$$n.eval-meta; \
-	  rm -rf $(MHOME)/exe/$$n; \
+	morloc uninstall eval-basic-foo
+	morloc uninstall eval-basic-bar
 	done

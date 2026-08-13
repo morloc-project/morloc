@@ -1,0 +1,12 @@
+-- Two positionals may not share a `@name`; the names must be unique within a
+-- subcommand or they collide in the MCP tool schema. Rejected in
+-- Docstrings.validatePositionalNames.
+module main (foo)
+
+foo ::
+  --' @name dup
+  Str ->
+  --' @name dup
+  Str ->
+  Str
+foo x y = x

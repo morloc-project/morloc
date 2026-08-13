@@ -301,11 +301,20 @@ pub fn serve_environment(
     data_dir: &str,
     container_name: &str,
     ports: &[(u16, u16)],
+    publish_host: Option<&str>,
+    network: Option<&str>,
     extra_flags: &[String],
     shm_size: &Option<String>,
     user_env: &[(String, String)],
+    command: &[String],
 ) -> Result<()> {
     if matches!(engine, ContainerEngine::Apptainer) {
+        // Apptainer already runs in the host netns; `network`/`publish_host`
+        // don't apply -- the nexus `--http-host` in `command` is the bind.
+        let _ = network;
+        // Apptainer shares the host network namespace (no `-p` mapping), so
+        // host exposure is decided by the nexus `--http-host` in `command`,
+        // not by `publish_host`.
         return serve_apptainer_instance(
             verbose,
             image,
@@ -314,26 +323,35 @@ pub fn serve_environment(
             ports,
             extra_flags,
             user_env,
+            command,
         );
     }
 
     // Clean up any existing dead container with this name (silently)
     let _ = crate::container::container_remove_quiet(engine, container_name);
 
-    let port_str: Vec<String> = ports
-        .iter()
-        .map(|(h, c)| format!("{h}:{c}"))
-        .collect();
-    eprintln!(
-        "Starting serve container {container_name} on ports {}...",
-        port_str.join(", ")
-    );
+    if network == Some("host") {
+        eprintln!(
+            "Starting serve container {container_name} on the host network..."
+        );
+    } else {
+        let port_str: Vec<String> = ports
+            .iter()
+            .map(|(h, c)| format!("{h}:{c}"))
+            .collect();
+        eprintln!(
+            "Starting serve container {container_name} on ports {}...",
+            port_str.join(", ")
+        );
+    }
 
     let mut cfg = RunConfig::new(image);
     cfg.read_only = true;
     cfg.remove_after = false;
     cfg.name = Some(container_name.to_string());
     cfg.ports = ports.to_vec();
+    cfg.publish_host = publish_host.map(str::to_string);
+    cfg.network = network.map(str::to_string);
     let mh = CONTAINER_MORLOC_HOME;
     cfg.bind_mounts = vec![(data_dir.to_string(), mh.to_string())];
     cfg.env = vec![
@@ -341,12 +359,7 @@ pub fn serve_environment(
         ("MORLOC_HOME".to_string(), mh.to_string()),
     ];
     cfg.env.extend(user_env.iter().cloned());
-    cfg.command = Some(vec![
-        "morloc-nexus".to_string(),
-        "--router".to_string(),
-        "--fdb".to_string(), format!("{mh}/exe"),
-        "--http-port".to_string(), "8080".to_string(),
-    ]);
+    cfg.command = Some(command.to_vec());
     cfg.shm_size = shm_size.clone();
     cfg.extra_flags = vec!["-d".to_string()];
     cfg.extra_flags.extend(extra_flags.iter().cloned());
@@ -471,6 +484,17 @@ pub fn stop_serve_container(engine: ContainerEngine, verbose: bool, name: &str) 
 
 /// Build the serve container name for an environment.
 /// Format: morloc-serve-<username>-<envname>
+/// The kernel-exported hostname (trimmed), falling back to `localhost`. Read
+/// from `/proc/sys/kernel/hostname` -- cheaper than spawning `/bin/hostname`
+/// and avoids dragging in a new `nix` feature.
+pub fn system_hostname() -> String {
+    fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
 pub fn serve_container_name(env_name: &str) -> String {
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
@@ -643,7 +667,7 @@ pub fn validate_programs(
 // Container constants
 // ======================================================================
 
-const CONTAINER_MORLOC_HOME: &str = "/opt/morloc";
+pub const CONTAINER_MORLOC_HOME: &str = "/opt/morloc";
 
 // ======================================================================
 // Manifest and image resolution
@@ -761,6 +785,7 @@ fn serve_apptainer_instance(
     ports: &[(u16, u16)],
     extra_flags: &[String],
     user_env: &[(String, String)],
+    command: &[String],
 ) -> Result<()> {
     // Stop any leftover instance with this name from a previous run.
     let _ = apptainer_instance_stop(instance_name);
@@ -810,16 +835,10 @@ fn serve_apptainer_instance(
     }
     argv.push(image.to_string());
     argv.push(instance_name.to_string());
-    // After the instance name, args are forwarded to the image's startscript.
-    // The morloc image's startscript can dispatch to `morloc-nexus --router`
-    // by reading these args, or the user supplies a custom %startscript in
-    // their .def. For the MVP we pass the standard router args.
-    argv.push("morloc-nexus".to_string());
-    argv.push("--router".to_string());
-    argv.push("--fdb".to_string());
-    argv.push(format!("{mh}/exe"));
-    argv.push("--http-port".to_string());
-    argv.push(ports.first().map(|(_, c)| c.to_string()).unwrap_or_else(|| "8080".to_string()));
+    // After the instance name, args are forwarded to the image's startscript,
+    // which dispatches on them (a router serve, an `mcp --http-port` serve, or
+    // a user's custom %startscript). The caller supplies the full command.
+    argv.extend(command.iter().cloned());
 
     if verbose {
         let quoted: Vec<String> = argv
@@ -916,11 +935,7 @@ pub fn apptainer_list_serve_instances() -> Vec<ServeContainerInfo> {
 /// `follow` is honored on a best-effort basis: if true, we tail -f the .out
 /// file (mirroring the OCI path which interleaves stdout/stderr to stdout).
 pub fn apptainer_logs(instance_name: &str, follow: bool) -> Result<()> {
-    // Read the kernel-exported hostname directly. Cheaper than spawning
-    // /bin/hostname and avoids dragging in a new nix feature.
-    let host = fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "localhost".to_string());
+    let host = system_hostname();
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "unknown".to_string());

@@ -1864,7 +1864,10 @@ data ArgFlagDocSet = ArgFlagDocSet
 
 data ArgPosDocSet = ArgPosDocSet
   { argPosDocType :: Type
-  , argPosDocDesc :: [Text]
+  , argPosDocName :: Maybe Text
+  , -- an explicit @\@name@ for the positional; becomes its MCP tool-schema
+    -- property name (falls back to @_1@, @_2@, ... when absent)
+    argPosDocDesc :: [Text]
   , -- free description
     argPosDocMetavar :: Maybe Text
   , -- a variable used in the interface to refer to this argument term

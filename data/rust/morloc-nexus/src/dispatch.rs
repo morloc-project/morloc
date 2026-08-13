@@ -57,6 +57,16 @@ pub struct NexusConfig {
     pub unix_socket_path: Option<String>,
     pub tcp_port: Option<i32>,
     pub http_port: Option<i32>,
+    /// Bind address for MCP-over-HTTP (`mcp --http-port`). `None` => 127.0.0.1
+    /// (loopback). Set to `0.0.0.0` to accept remote/other-container clients.
+    pub mcp_http_host: Option<String>,
+    /// Bearer token required on every MCP-over-HTTP request. `None` => the
+    /// endpoint is unauthenticated.
+    pub mcp_auth_token: Option<String>,
+    /// Permit a non-loopback MCP-over-HTTP bind with no token (the manager
+    /// sets this for a loopback-only publish). Otherwise such a bind is
+    /// refused.
+    pub mcp_allow_no_auth: bool,
     pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
@@ -110,6 +120,9 @@ impl Default for NexusConfig {
             unix_socket_path: None,
             tcp_port: None,
             http_port: None,
+            mcp_http_host: None,
+            mcp_auth_token: None,
+            mcp_allow_no_auth: false,
             port_file_path: None,
             fdb_path: None,
             eval_timeout: 30,
