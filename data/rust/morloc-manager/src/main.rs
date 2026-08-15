@@ -465,12 +465,16 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     #[command(after_help = "\
 Examples:
   morloc-manager install main.loc              # installs under the module name
+  morloc-manager install ./mypkg               # installs a package directory
 
-Sugar for: morloc-manager run -- morloc make --install <src>")]
+Sugar for: morloc-manager run -- morloc make --install <file>
+       (or: morloc-manager run -- morloc install --build <dir> for a directory)")]
     Install {
-        /// Morloc source file (.loc) to build and install. The installed program
-        /// is named after its module (the `module <name>` declaration), not the
-        /// source file, so it is exposed/served by that module name.
+        /// Morloc source file (.loc) or package directory to build and install.
+        /// A directory is treated as a package (main.loc + package.yaml). The
+        /// installed program is named after its module (the `module <name>`
+        /// declaration), not the source file, so it is exposed/served by that
+        /// module name.
         src: String,
         /// One-shot engine flag, appended to env.flags.yaml `run.<engine>`
         /// for this invocation only (repeatable; not persisted)
@@ -2407,13 +2411,23 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
         // ---- install ----
         Cmd::Install { src, engine_arg } => {
-            // Sugar for `morloc make --install <src>`. The installed program is
-            // named after its module, not the source file (or any -o), so it is
+            // A directory is a package (main.loc + package.yaml): route it
+            // through `morloc install --build <dir>`, which reads the package
+            // metadata and builds by module name. A bare source file goes
+            // through `morloc make --install <src>`. Either way the installed
+            // program is named after its module, not the source file, so it is
             // NOT conflated with `main.loc`.
-            let args = vec![
-                "morloc".to_string(), "make".to_string(),
-                "--install".to_string(), src,
-            ];
+            let args = if std::path::Path::new(&src).is_dir() {
+                vec![
+                    "morloc".to_string(), "install".to_string(),
+                    "--build".to_string(), src,
+                ]
+            } else {
+                vec![
+                    "morloc".to_string(), "make".to_string(),
+                    "--install".to_string(), src,
+                ]
+            };
             run_in_container(verbose, false, &args, &[], &engine_arg, false)
         }
 
