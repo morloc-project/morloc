@@ -61,13 +61,16 @@ loadDefaultMorlocConfig = do
 default configuration will be used.
 -}
 loadMorlocConfig :: Maybe Path -> IO Config
-loadMorlocConfig Nothing = do
+loadMorlocConfig mfile = loadMorlocConfig' mfile >>= applyMorlocHomeOverride
+
+loadMorlocConfig' :: Maybe Path -> IO Config
+loadMorlocConfig' Nothing = do
   defaults <- defaultFields
   MS.loadYamlConfig
     Nothing
     (YC.useCustomEnv defaults)
     loadDefaultMorlocConfig
-loadMorlocConfig (Just configFile) = do
+loadMorlocConfig' (Just configFile) = do
   configExists <- MS.doesFileExist configFile
   defaults <- defaultFields
   if configExists
@@ -77,7 +80,28 @@ loadMorlocConfig (Just configFile) = do
         (YC.useCustomEnv defaults)
         loadDefaultMorlocConfig
     else
-      loadMorlocConfig Nothing
+      loadMorlocConfig' Nothing
+
+{- | When MORLOC_HOME is set, it is authoritative for the home-rooted layout,
+overriding any @home@ (and its derived paths) baked into a loaded config file.
+Without this, an absolute @home@ persisted by @morloc init@ -- e.g. a config
+initialized on a host and later bind-mounted into a container under a different
+MORLOC_HOME -- would shadow the environment variable, so installs land outside
+the mounted tree. The re-rooted subpaths mirror the getDefaultMorloc* helpers.
+-}
+applyMorlocHomeOverride :: Config -> IO Config
+applyMorlocHomeOverride config = do
+  envHome <- lookupEnv "MORLOC_HOME"
+  case envHome of
+    Just h | not (null h) ->
+      return
+        config
+          { configHome = h
+          , configLibrary = MS.combine h "src/morloc/plane"
+          , configTmpDir = MS.combine h "tmp"
+          , configBuildConfig = MS.combine h ".build-config.yaml"
+          }
+    _ -> return config
 
 loadModuleConfig :: Maybe Path -> MorlocMonad ModuleConfig
 loadModuleConfig Nothing = return defaultValue
