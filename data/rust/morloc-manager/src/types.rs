@@ -385,3 +385,232 @@ pub struct ProgramEntry {
     pub name: String,
     pub commands: Vec<String>,
 }
+
+// ======================================================================
+// Module exposure (which installed modules are served, and how)
+// ======================================================================
+
+/// A served view of a module. CLI is the LOCAL view (`morloc run`), not a
+/// network protocol, so it is not part of exposure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Protocol {
+    /// Model Context Protocol (tools for an AI assistant).
+    Mcp,
+    /// HTTP JSON API (`/call/<module>/<command>`).
+    Api,
+}
+
+impl Protocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Protocol::Mcp => "mcp",
+            Protocol::Api => "api",
+        }
+    }
+}
+
+/// The eval capability on a served environment. Present only when eval is
+/// exposed; always sandboxed. Its allow-list is INDEPENDENT of the exposed
+/// module sets (eval composes generic code a fixed tool surface cannot express,
+/// and may need to import modules that are not themselves exposed as tools).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvalExposure {
+    /// Modules eval may import (sandbox allow-list). Empty = eval can import
+    /// nothing (harmless but useless).
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+/// Declarative record of what an environment exposes and how. Lives at
+/// `<config>/environments/<name>/expose.yaml`, edited by `expose` and realized
+/// by `start`. Separate from `EnvironmentConfig` (build/image config): install
+/// makes a module importable; expose declares which modules are served, over
+/// which protocol.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExposureConfig {
+    /// Modules exposed over MCP (each contributes `<module>__<command>` tools).
+    #[serde(default)]
+    pub mcp: Vec<String>,
+    /// Modules exposed over the HTTP JSON API.
+    #[serde(default)]
+    pub api: Vec<String>,
+    /// The eval capability. `None` = off (the default).
+    #[serde(default)]
+    pub eval: Option<EvalExposure>,
+}
+
+impl ExposureConfig {
+    pub fn is_empty(&self) -> bool {
+        self.mcp.is_empty() && self.api.is_empty() && self.eval.is_none()
+    }
+
+    fn set_mut(&mut self, p: Protocol) -> &mut Vec<String> {
+        match p {
+            Protocol::Mcp => &mut self.mcp,
+            Protocol::Api => &mut self.api,
+        }
+    }
+
+    /// Add `module` to each given protocol set (idempotent; kept sorted-unique).
+    pub fn add(&mut self, module: &str, protocols: &[Protocol]) {
+        for &p in protocols {
+            let set = self.set_mut(p);
+            if !set.iter().any(|m| m == module) {
+                set.push(module.to_string());
+                set.sort();
+            }
+        }
+    }
+
+    /// Remove `module` from all protocol sets. Returns true if anything changed.
+    pub fn remove(&mut self, module: &str) -> bool {
+        let before = self.mcp.len() + self.api.len();
+        self.mcp.retain(|m| m != module);
+        self.api.retain(|m| m != module);
+        before != self.mcp.len() + self.api.len()
+    }
+
+    /// The protocols a given module is exposed over (for display).
+    pub fn protocols_of(&self, module: &str) -> Vec<Protocol> {
+        let mut ps = Vec::new();
+        if self.mcp.iter().any(|m| m == module) {
+            ps.push(Protocol::Mcp);
+        }
+        if self.api.iter().any(|m| m == module) {
+            ps.push(Protocol::Api);
+        }
+        ps
+    }
+
+    /// Every module exposed over any protocol (deduped, sorted).
+    pub fn exposed_modules(&self) -> Vec<String> {
+        sorted_union(&self.mcp, &self.api)
+    }
+}
+
+/// Sorted, deduped union of two module lists. Shared by `ExposureConfig` and
+/// `ServeRuntime` so "the set of modules across both adapters" has one spelling.
+fn sorted_union(a: &[String], b: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = a.iter().chain(b.iter()).cloned().collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// Runtime record of what a serve container is ACTUALLY serving, written by
+/// `start` and read by `status`. Distinct from `ExposureConfig` (declared
+/// intent): this reflects the live invocation, including the resolved host/port
+/// and whether a token is required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServeRuntime {
+    #[serde(default)]
+    pub mcp: Vec<String>,
+    #[serde(default)]
+    pub api: Vec<String>,
+    #[serde(default)]
+    pub eval: bool,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub token_required: bool,
+}
+
+impl ServeRuntime {
+    /// Short adapter/mode label for display, e.g. "mcp+api", "mcp", "mcp+eval".
+    pub fn mode(&self) -> String {
+        let base = match (!self.mcp.is_empty(), !self.api.is_empty()) {
+            (true, true) => "mcp+api",
+            (true, false) => "mcp",
+            (false, true) => "api",
+            (false, false) => "-",
+        };
+        if self.eval { format!("{base}+eval") } else { base.to_string() }
+    }
+
+    /// Short module summary for display (sorted, deduped).
+    pub fn modules_summary(&self) -> String {
+        let mods = sorted_union(&self.mcp, &self.api);
+        if mods.is_empty() { "-".to_string() } else { mods.join(",") }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
+}
+
+#[cfg(test)]
+mod exposure_tests {
+    use super::*;
+
+    #[test]
+    fn add_is_idempotent_and_per_protocol() {
+        let mut ex = ExposureConfig::default();
+        ex.add("dna", &[Protocol::Mcp]);
+        ex.add("dna", &[Protocol::Mcp]); // idempotent
+        ex.add("align", &[Protocol::Api]);
+        ex.add("util", &[Protocol::Mcp, Protocol::Api]);
+        assert_eq!(ex.mcp, vec!["dna".to_string(), "util".to_string()]);
+        assert_eq!(ex.api, vec!["align".to_string(), "util".to_string()]);
+    }
+
+    #[test]
+    fn remove_clears_all_sets() {
+        let mut ex = ExposureConfig::default();
+        ex.add("util", &[Protocol::Mcp, Protocol::Api]);
+        assert!(ex.remove("util"));
+        assert!(ex.mcp.is_empty() && ex.api.is_empty());
+        assert!(!ex.remove("util")); // no-op second time
+    }
+
+    #[test]
+    fn protocols_of_reports_both() {
+        let mut ex = ExposureConfig::default();
+        ex.add("util", &[Protocol::Mcp, Protocol::Api]);
+        ex.add("dna", &[Protocol::Mcp]);
+        assert_eq!(ex.protocols_of("util"), vec![Protocol::Mcp, Protocol::Api]);
+        assert_eq!(ex.protocols_of("dna"), vec![Protocol::Mcp]);
+        assert!(ex.protocols_of("missing").is_empty());
+    }
+
+    #[test]
+    fn eval_is_independent_of_exposed_sets() {
+        let mut ex = ExposureConfig::default();
+        ex.add("dna", &[Protocol::Mcp]);
+        ex.eval = Some(EvalExposure { allow: vec!["dna".into(), "stats".into()] });
+        // eval may allow a module (stats) that is NOT in any exposed set.
+        assert!(!ex.exposed_modules().contains(&"stats".to_string()));
+        assert_eq!(ex.eval.as_ref().unwrap().allow, vec!["dna".to_string(), "stats".to_string()]);
+    }
+
+    #[test]
+    fn serve_runtime_mode_and_modules() {
+        let r = ServeRuntime {
+            mcp: vec!["dna".into()],
+            api: vec!["align".into(), "dna".into()],
+            eval: true,
+            host: "127.0.0.1".into(),
+            port: 9000,
+            token_required: false,
+        };
+        assert_eq!(r.mode(), "mcp+api+eval");
+        assert_eq!(r.modules_summary(), "align,dna");
+        assert_eq!(r.url(), "http://127.0.0.1:9000");
+        let empty = ServeRuntime {
+            mcp: vec![], api: vec![], eval: false,
+            host: "h".into(), port: 8080, token_required: true,
+        };
+        assert_eq!(empty.mode(), "-");
+        assert_eq!(empty.modules_summary(), "-");
+    }
+
+    #[test]
+    fn yaml_round_trip() {
+        let mut ex = ExposureConfig::default();
+        ex.add("dna", &[Protocol::Mcp]);
+        ex.add("align", &[Protocol::Api]);
+        ex.eval = Some(EvalExposure { allow: vec!["dna".into()] });
+        let yaml = serde_yaml::to_string(&ex).unwrap();
+        let back: ExposureConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(ex, back);
+    }
+}

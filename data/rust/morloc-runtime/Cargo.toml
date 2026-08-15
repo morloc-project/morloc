@@ -29,6 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true }
 rmp = "0.8"
+base64 = "0.22"
 twox-hash = { workspace = true }
 nix = { workspace = true }
 thiserror = { workspace = true }

@@ -958,7 +958,9 @@ pub fn serve_http(
             Ok(stream) => {
                 let st = Arc::clone(&state);
                 let tk = Arc::clone(&token);
-                std::thread::spawn(move || handle_http_conn(stream, st, tk));
+                std::thread::spawn(move || {
+                    serve_conn(stream, |req, ka| build_response(req, &st, tk.as_ref().as_deref(), ka))
+                });
             }
             Err(e) => eprintln!("morloc mcp: accept error: {}", e),
         }
@@ -969,7 +971,14 @@ pub fn serve_http(
 /// One HTTP connection: read requests (keep-alive) and reply. Socket reads run
 /// off the mutex; only `build_response`'s dispatch section locks it, so a slow
 /// client never blocks others from executing.
-fn handle_http_conn(stream: TcpStream, state: Arc<Mutex<HttpState>>, token: Arc<Option<String>>) {
+/// One keep-alive HTTP connection: read requests until EOF/timeout/`close` and
+/// reply, delegating each request to `respond`. Shared by the single-program
+/// MCP server and the multi-module front-end, which differ only in how they
+/// build the response.
+fn serve_conn<F>(stream: TcpStream, mut respond: F)
+where
+    F: FnMut(&HttpRequest, bool) -> Vec<u8>,
+{
     // Drop a connection that stalls mid-request or sits idle past the timeout,
     // so a slow/silent client cannot pin this thread indefinitely.
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
@@ -986,7 +995,7 @@ fn handle_http_conn(stream: TcpStream, state: Arc<Mutex<HttpState>>, token: Arc<
         let keep_alive = header_get(&req.headers, "connection")
             .map(|v| !v.eq_ignore_ascii_case("close"))
             .unwrap_or(true);
-        let resp = build_response(&req, &state, token.as_ref().as_deref(), keep_alive);
+        let resp = respond(&req, keep_alive);
         if writer.write_all(&resp).is_err() {
             break;
         }
@@ -1112,15 +1121,7 @@ fn build_response(
     match req.method.as_str() {
         "POST" => handle_http_post(req, state, keep_alive),
         "DELETE" => handle_http_delete(req, state, keep_alive),
-        _ => {
-            let allow = vec![("Allow".to_string(), "POST, DELETE".to_string())];
-            http_response(
-                405,
-                br#"{"error":"method not allowed"}"#,
-                keep_alive,
-                &allow,
-            )
-        }
+        _ => method_not_allowed("POST, DELETE", keep_alive),
     }
 }
 
@@ -1325,32 +1326,39 @@ fn prune_sessions(sessions: &mut HashMap<String, SessionInfo>, now: Instant) {
 
 /// Assemble a complete HTTP/1.1 response. The body is always JSON (the only
 /// content type this transport emits).
-fn http_response(
+/// A permissive CORS origin header, emitted on every response so browser-based
+/// clients can read the API/MCP endpoints cross-origin. The bearer token (not
+/// the origin) is the access gate.
+const CORS_ALLOW_ORIGIN: &str = "Access-Control-Allow-Origin: *\r\n";
+
+/// Assemble the HTTP response head (status line + standard headers + CORS +
+/// any extras + the blank separator line). Shared by the JSON and binary
+/// response builders so the header format lives in one place.
+fn http_head(
     status: u16,
-    body: &[u8],
+    content_type: &str,
+    content_length: usize,
     keep_alive: bool,
     extra_headers: &[(String, String)],
-) -> Vec<u8> {
+) -> String {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
+        204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "OK",
     };
-    // A trailing newline is appended to non-empty bodies. HTTP frames by
-    // Content-Length, so it is optional for clients (serde ignores trailing
-    // whitespace), but it keeps interactive `curl` output off the next shell
-    // prompt and mirrors the newline-terminated stdio transport.
-    let trailing: usize = if body.is_empty() { 0 } else { 1 };
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n{}",
         status,
         reason,
-        body.len() + trailing,
+        content_type,
+        content_length,
         if keep_alive { "keep-alive" } else { "close" },
+        CORS_ALLOW_ORIGIN,
     );
     for (k, v) in extra_headers {
         head.push_str(k);
@@ -1359,6 +1367,21 @@ fn http_response(
         head.push_str("\r\n");
     }
     head.push_str("\r\n");
+    head
+}
+
+fn http_response(
+    status: u16,
+    body: &[u8],
+    keep_alive: bool,
+    extra_headers: &[(String, String)],
+) -> Vec<u8> {
+    // A trailing newline is appended to non-empty bodies. HTTP frames by
+    // Content-Length, so it is optional for clients (serde ignores trailing
+    // whitespace), but it keeps interactive `curl` output off the next shell
+    // prompt and mirrors the newline-terminated stdio transport.
+    let trailing: usize = if body.is_empty() { 0 } else { 1 };
+    let head = http_head(status, "application/json", body.len() + trailing, keep_alive, extra_headers);
     let mut out = head.into_bytes();
     out.extend_from_slice(body);
     if trailing == 1 {
@@ -1370,6 +1393,829 @@ fn http_response(
 /// A JSON response with no extra headers -- the common case.
 fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
     http_response(status, body, keep_alive, &[])
+}
+
+/// A 405 with the `Allow` header naming the accepted method(s).
+fn method_not_allowed(allow: &str, keep_alive: bool) -> Vec<u8> {
+    let extra = vec![("Allow".to_string(), allow.to_string())];
+    http_response(405, br#"{"error":"method not allowed"}"#, keep_alive, &extra)
+}
+
+// ===========================================================================
+// Unified serving front-end (multi-module; forwards to per-module children)
+// ===========================================================================
+//
+// The front-end runs NO morloc computation: it authenticates, tracks MCP
+// sessions, resolves a call to (module, command), FORWARDS it to that module's
+// child daemon via `router_forward`, and renders the reply. Because it never
+// runs a pool/eval itself, a crashing call kills only that module's child (the
+// supervisor restarts it), never the front-end. Two adapters share one listener
+// and one set of children: `POST /mcp` (MCP) and `/call/<module>/<command>`
+// (JSON API).
+
+extern "C" {
+    // Forward a parsed daemon request to `program`'s child daemon and return its
+    // response; restarts a dead child transparently. See router_ffi::router_forward.
+    fn router_forward(
+        router: *mut c_void,
+        program: *const c_char,
+        request: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> *mut CDaemonResponse;
+}
+
+/// Raw supervisor handle shared across connection threads. Mutations to a given
+/// program's child are serialized by `Frontend.locks[program]`; distinct
+/// programs are distinct memory; the program array is fixed after init.
+struct RouterHandle(*mut c_void);
+unsafe impl Send for RouterHandle {}
+unsafe impl Sync for RouterHandle {}
+
+/// Shared front-end state. Runs no morloc compute; every call is forwarded.
+struct Frontend {
+    router: RouterHandle,
+    /// Per-module forward lock: `router_forward` mutates the child's
+    /// RouterProgram on crash-restart, so same-module forwards serialize while
+    /// different modules run in parallel. Keys fixed at construction.
+    locks: HashMap<String, Mutex<()>>,
+    /// MCP tools/list (union across MCP modules; names `<module>__<command>`).
+    mcp_tools: Vec<Value>,
+    /// Namespaced tool name -> (module, shape). The shape keeps its bare command
+    /// name for dispatch/argument resolution.
+    mcp_by_name: HashMap<String, (String, McpToolShape)>,
+    /// Modules answering the `/call` JSON API.
+    api_modules: std::collections::HashSet<String>,
+    /// Per-API-module machine-readable help (`GET /discover/<module>`), keyed by
+    /// module. Describes positional-argument commands for the `/call` contract.
+    api_help: HashMap<String, Value>,
+    /// Whether the sandboxed eval capability is exposed (an `eval` MCP tool +
+    /// `/eval` route). Off unless the operator exposed it.
+    eval_enabled: bool,
+    /// eval's sandbox allow-list (`None` => no imports). Passed to the forked
+    /// `morloc eval`; independent of the served module sets.
+    eval_allow: Option<String>,
+    /// CPU-time budget (seconds) for a forked `morloc eval`; <=0 disables it.
+    /// Mirrors the daemon's RLIMIT_CPU so a runaway expression can't burn a
+    /// front-end thread's CPU indefinitely.
+    eval_timeout: i32,
+    server_name: String,
+    server_version: String,
+    sessions: Mutex<HashMap<String, SessionInfo>>,
+}
+unsafe impl Send for Frontend {}
+unsafe impl Sync for Frontend {}
+
+/// A successful forward's payload (owned so the C response is freed at once).
+enum ForwardOk {
+    Json(String),
+    /// A media-typed (`@mime`) return: raw content bytes + media type.
+    Media(Vec<u8>, String),
+}
+
+impl Frontend {
+    /// Forward `request_json` to `module`'s child daemon. Holds the per-module
+    /// lock across `router_forward` (whose crash-detect mutates the child's
+    /// RouterProgram).
+    fn forward(&self, module: &str, request_json: &Value) -> Result<ForwardOk, String> {
+        // Fail closed: every served module must have a per-module lock, since
+        // router_forward mutates the child's RouterProgram (waitpid + restart).
+        // Forwarding without the lock would be a silent unserialized race, so a
+        // missing entry is a bug -- error rather than skip the guard.
+        let lock = self.locks.get(module).ok_or_else(|| {
+            format!("internal error: no forward lock for module '{}'", module)
+        })?;
+        let request_str = request_json.to_string();
+        let req_c = CString::new(request_str.as_str())
+            .map_err(|_| "request contains a NUL byte".to_string())?;
+        let mut errmsg: *mut c_char = ptr::null_mut();
+        let req =
+            unsafe { daemon_parse_request(req_c.as_ptr(), request_str.len(), &mut errmsg) };
+        if req.is_null() {
+            let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "bad request".into());
+            return Err(format!("failed to build request: {}", msg));
+        }
+        let module_c = CString::new(module).unwrap_or_default();
+        // Keep the guard alive across the forward (named binding, not `_`).
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ferr: *mut c_char = ptr::null_mut();
+        let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
+        unsafe { daemon_free_request(req) };
+        if resp.is_null() {
+            let msg = process::take_c_errmsg(ferr).unwrap_or_else(|| "forward failed".into());
+            return Err(msg);
+        }
+        let out = unsafe {
+            if (*resp).success {
+                // A media (`@mime`) return arrives as raw bytes + mime (conveyed
+                // as base64 over the socket wire); otherwise a JSON value.
+                if !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
+                    let bytes =
+                        std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len).to_vec();
+                    let mime = cstr_to_string((*resp).mime).unwrap_or_default();
+                    Ok(ForwardOk::Media(bytes, mime))
+                } else {
+                    Ok(ForwardOk::Json(
+                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
+                    ))
+                }
+            } else {
+                Err(cstr_to_string((*resp).error)
+                    .unwrap_or_else(|| "dispatch failed".to_string()))
+            }
+        };
+        unsafe { daemon_free_response(resp as *mut c_void) };
+        out
+    }
+}
+
+/// Serve a set of modules over one HTTP listener with MCP + API adapters,
+/// forwarding to the supervisor's per-module children. Never returns.
+pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::NexusConfig) -> ! {
+    // Load and parse each served program's manifest once (union of adapters);
+    // both the MCP tool surface and the API discovery view derive from it.
+    let mut manifests: HashMap<String, Manifest> = HashMap::new();
+    for m in &config.programs {
+        let manifest_path = format!("{}/{}/{}-build/manifest.json", fdb, m, m);
+        let payload = match crate::manifest::read_manifest_payload(&manifest_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("morloc serve: skipping module '{}': {}", m, e);
+                continue;
+            }
+        };
+        match crate::manifest::parse_manifest(&payload) {
+            Ok(mf) => {
+                manifests.insert(m.clone(), mf);
+            }
+            Err(e) => eprintln!("morloc serve: skipping module '{}': {}", m, e),
+        }
+    }
+
+    // Build MCP tool shapes from each MCP module's manifest, namespaced.
+    let mut mcp_tools: Vec<Value> = Vec::new();
+    let mut mcp_by_name: HashMap<String, (String, McpToolShape)> = HashMap::new();
+    let mut server_version = String::new();
+    for m in &config.mcp_programs {
+        let manifest = match manifests.get(m) {
+            Some(mf) => mf,
+            None => continue,
+        };
+        if server_version.is_empty() {
+            server_version = manifest.build.morloc_version.clone();
+        }
+        for s in build_tool_shapes(manifest) {
+            let nsname = format!("{}__{}", m, s.name);
+            // `__` is the namespace separator, so distinct (module, command)
+            // pairs can only collide when a module or command name itself
+            // contains `__`. Fail closed: a silent overwrite would make one
+            // tool unreachable or route a call to the wrong module.
+            if let Some((prev_m, prev_s)) = mcp_by_name.get(&nsname) {
+                eprintln!(
+                    "morloc serve: MCP tool name collision on '{}': {}::{} vs {}::{}. \
+                     Rename a module or command to disambiguate.",
+                    nsname, prev_m, prev_s.name, m, s.name
+                );
+                process::clean_exit(1);
+            }
+            let mut tool = s.tool.clone();
+            tool["name"] = Value::String(nsname.clone());
+            mcp_tools.push(tool);
+            mcp_by_name.insert(nsname, (m.clone(), s));
+        }
+    }
+
+    // The eval capability (sandboxed) is a single synthetic MCP tool, exposed
+    // only when enabled. It is NOT a module; it forks `morloc eval` per call, so
+    // the `morloc` compiler must be on PATH in the serving environment -- warn
+    // loudly at startup if it is not, since eval would otherwise fail per call.
+    if config.eval_enabled {
+        if !morloc_on_path() {
+            eprintln!(
+                "morloc serve: WARNING: eval is exposed but the `morloc` compiler is \
+                 not on PATH; eval calls will fail. Ensure the serving image includes it."
+            );
+        }
+        let allow_desc = config
+            .eval_allowed_modules
+            .clone()
+            .unwrap_or_else(|| "(none)".to_string());
+        mcp_tools.push(json!({
+            "name": "eval",
+            "description": format!(
+                "Evaluate an arbitrary morloc expression (sandboxed; IO intrinsics \
+                 forbidden; may import: {}).",
+                allow_desc
+            ),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "A morloc expression, optionally with leading `import` lines."
+                    }
+                },
+                "required": ["expression"]
+            }
+        }));
+    }
+
+    let mut locks: HashMap<String, Mutex<()>> = HashMap::new();
+    for m in &config.programs {
+        locks.insert(m.clone(), Mutex::new(()));
+    }
+    let api_modules: std::collections::HashSet<String> =
+        config.api_programs.iter().cloned().collect();
+
+    // API discovery: per-module machine-readable help (the lossless `--json-help`
+    // view). It describes each command's POSITIONAL arguments, matching the
+    // `/call/<module>/<command>` positional-array contract. MCP clients discover
+    // via the protocol-native `tools/list` (named-argument inputSchema) instead.
+    let mut api_help: HashMap<String, Value> = HashMap::new();
+    for m in &config.api_programs {
+        if let Some(manifest) = manifests.get(m) {
+            api_help.insert(m.clone(), crate::json_help::build_json_help(manifest));
+        }
+    }
+    // The parsed manifests have been distilled into `mcp_tools`/`api_help`;
+    // `serve_frontend` never returns, so drop them rather than pin every
+    // module's full manifest in memory for the process lifetime.
+    drop(manifests);
+
+    let bind_host = config
+        .mcp_http_host
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = config.http_port.unwrap_or(-1);
+    if port < 0 {
+        eprintln!("morloc serve: --http-port is required for the serving front-end");
+        process::clean_exit(1);
+    }
+    let addr = format!("{}:{}", bind_host, port);
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("morloc serve: failed to bind {}: {}", addr, e);
+            process::clean_exit(1);
+        }
+    };
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| addr.clone());
+    // Fail closed: a non-loopback bind with no token would be an open,
+    // unauthenticated endpoint (see the manager's loopback/expose logic).
+    let is_loopback = matches!(bind_host.as_str(), "127.0.0.1" | "localhost" | "::1");
+    let auth_token = config.mcp_auth_token.clone();
+    if auth_token.is_none() && !is_loopback && !config.mcp_allow_no_auth {
+        eprintln!(
+            "morloc serve: refusing to serve on {} with no auth token (bind is not loopback). \
+             Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth to override.",
+            bound
+        );
+        process::clean_exit(1);
+    }
+    eprintln!(
+        "morloc serve: MCP at http://{}/mcp ({} tools) | API at http://{}/call/<module>/<command> \
+         | discovery at http://{}/discover",
+        bound,
+        mcp_tools.len(),
+        bound,
+        bound
+    );
+
+    let fe = Arc::new(Frontend {
+        router: RouterHandle(router),
+        locks,
+        mcp_tools,
+        mcp_by_name,
+        api_modules,
+        api_help,
+        eval_enabled: config.eval_enabled,
+        eval_allow: config.eval_allowed_modules.clone(),
+        eval_timeout: config.eval_timeout,
+        server_name: "morloc".to_string(),
+        server_version: if server_version.is_empty() {
+            "unknown".to_string()
+        } else {
+            server_version
+        },
+        sessions: Mutex::new(HashMap::new()),
+    });
+    let token = Arc::new(auth_token);
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let fe = Arc::clone(&fe);
+                let tk = Arc::clone(&token);
+                std::thread::spawn(move || {
+                    serve_conn(stream, |req, ka| {
+                        frontend_build_response(req, &fe, tk.as_ref().as_deref(), ka)
+                    })
+                });
+            }
+            Err(e) => eprintln!("morloc serve: accept error: {}", e),
+        }
+    }
+    process::clean_exit(0);
+}
+
+/// One front-end connection: read requests (keep-alive) and reply. Dispatch runs
+/// off any shared lock, so requests to different modules execute in parallel.
+/// Auth (both adapters), then route on path: `/mcp` -> MCP, `/call/...` -> API.
+fn frontend_build_response(
+    req: &HttpRequest,
+    fe: &Arc<Frontend>,
+    token: Option<&str>,
+    keep_alive: bool,
+) -> Vec<u8> {
+    // A CORS preflight (OPTIONS) carries no Authorization header, so it must be
+    // answered before the auth gate; the browser sends the real, authenticated
+    // request only if this 204 grants the method/headers.
+    if req.method == "OPTIONS" {
+        let extra = vec![
+            ("Access-Control-Allow-Methods".to_string(), "GET, POST, DELETE, OPTIONS".to_string()),
+            (
+                "Access-Control-Allow-Headers".to_string(),
+                "Authorization, Content-Type, Mcp-Session-Id".to_string(),
+            ),
+            ("Access-Control-Max-Age".to_string(), "86400".to_string()),
+        ];
+        return http_response(204, b"", keep_alive, &extra);
+    }
+    let path = req.path.split('?').next().unwrap_or("");
+    // Liveness probe for container orchestrators (the deploy image's
+    // HEALTHCHECK). Answered BEFORE the auth gate: it reveals nothing and a
+    // token-protected serve must not 401 its own healthcheck (which curls with
+    // no token). The front-end is up if it can answer; child health is per-call.
+    if path == "/health" && (req.method == "GET" || req.method == "HEAD") {
+        return http_json(200, br#"{"status":"ok"}"#, keep_alive);
+    }
+    if let Some(tok) = token {
+        if !authorized(&req.headers, tok) {
+            let extra = vec![("WWW-Authenticate".to_string(), "Bearer".to_string())];
+            return http_response(401, br#"{"error":"unauthorized"}"#, keep_alive, &extra);
+        }
+    }
+    if path == "/mcp" {
+        match req.method.as_str() {
+            "POST" => frontend_mcp_post(req, fe, keep_alive),
+            "DELETE" => frontend_mcp_delete(req, fe, keep_alive),
+            _ => method_not_allowed("POST, DELETE", keep_alive),
+        }
+    } else if let Some(rest) = path.strip_prefix("/call/") {
+        match req.method.as_str() {
+            "POST" => frontend_call_api(rest, req, fe, keep_alive),
+            _ => method_not_allowed("POST", keep_alive),
+        }
+    } else if path == "/eval" {
+        match req.method.as_str() {
+            "POST" => frontend_eval_api(req, fe, keep_alive),
+            _ => method_not_allowed("POST", keep_alive),
+        }
+    } else if path == "/discover" {
+        match req.method.as_str() {
+            "GET" | "HEAD" => frontend_discover(fe, keep_alive),
+            _ => method_not_allowed("GET", keep_alive),
+        }
+    } else if let Some(module) = path.strip_prefix("/discover/") {
+        match req.method.as_str() {
+            "GET" | "HEAD" => frontend_discover_module(module, fe, keep_alive),
+            _ => method_not_allowed("GET", keep_alive),
+        }
+    } else {
+        http_json(404, br#"{"error":"not found"}"#, keep_alive)
+    }
+}
+
+/// `GET /discover`: the API index. Lists the JSON-API-exposed modules (with the
+/// `/call` URL shape and a link to each module's positional-argument help) and
+/// points MCP clients at the protocol-native `tools/list`. This is the API-side
+/// counterpart to MCP discovery -- the two adapters branch here because `/call`
+/// takes positional args while MCP tools take a named-argument object.
+fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    let mut modules: Vec<&String> = fe.api_help.keys().collect();
+    modules.sort();
+    let api_modules: Vec<Value> = modules
+        .iter()
+        .map(|m| {
+            json!({
+                "module": m,
+                "call": format!("/call/{}/<command>", m),
+                "help": format!("/discover/{}", m),
+            })
+        })
+        .collect();
+    let doc = json!({
+        "api": {
+            "modules": api_modules,
+            "call": "/call/<module>/<command>",
+            "note": "POST positional args as a JSON array (or {\"args\":[...]}). \
+                     GET /discover/<module> for each command's ordered arguments.",
+        },
+        "mcp": {
+            "endpoint": "/mcp",
+            "tools": fe.mcp_tools.len(),
+            "note": "Use the JSON-RPC `tools/list` method for the MCP tool catalog \
+                     (tools are named <module>__<command> and take named arguments).",
+        },
+        "eval": {
+            "enabled": fe.eval_enabled,
+            "endpoints": ["/eval", "mcp tool 'eval'"],
+        },
+    });
+    http_json(200, doc.to_string().as_bytes(), keep_alive)
+}
+
+/// `GET /discover/<module>`: the machine-readable help for one API module (its
+/// commands and their positional arguments). 404 unless the module is exposed on
+/// the JSON API.
+fn frontend_discover_module(module: &str, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    match fe.api_help.get(module) {
+        Some(help) => http_json(200, help.to_string().as_bytes(), keep_alive),
+        None => http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive),
+    }
+}
+
+/// True if the `morloc` compiler is on PATH (the eval capability forks it).
+fn morloc_on_path() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| std::fs::metadata(dir.join("morloc")).map(|m| m.is_file()).unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
+/// Run a sandboxed `morloc eval` as a child process (isolated: a crash or hang
+/// in eval cannot take down the front-end). `--eval-sandbox` bans IO intrinsics;
+/// `--eval-allowed-modules` bounds imports (empty => none). Returns eval's stdout
+/// on success, else its stderr.
+fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
+    let allow = fe.eval_allow.clone().unwrap_or_default();
+    let mut cmd = std::process::Command::new("morloc");
+    cmd.arg("eval")
+        .arg("--eval-sandbox")
+        .arg("--eval-allowed-modules")
+        .arg(&allow)
+        .arg("-e")
+        .arg(expr);
+    // Bound the child's CPU time and address space so a runaway expression
+    // (eval-sandbox bans IO, so a hang can only be a compute or memory loop) is
+    // killed rather than pinning/exhausting the host. Mirrors the daemon's eval
+    // fork (RLIMIT_CPU + a 2 GiB RLIMIT_AS).
+    let cpu_secs = fe.eval_timeout;
+    if cpu_secs > 0 {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(move || {
+                let cpu = libc::rlimit {
+                    rlim_cur: cpu_secs as libc::rlim_t,
+                    rlim_max: (cpu_secs + 5) as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let as_lim = libc::rlimit {
+                    rlim_cur: 2 * 1024 * 1024 * 1024,
+                    rlim_max: 2 * 1024 * 1024 * 1024,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| {
+            format!(
+                "failed to run eval: {} (the eval capability requires the `morloc` \
+                 compiler on PATH in the serving environment)",
+                e
+            )
+        })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        Err(if err.is_empty() { "eval failed".to_string() } else { err.to_string() })
+    }
+}
+
+/// `POST /eval`: the API-side eval capability. Body is `{"expr":"..."}` (or
+/// `{"expression":"..."}`, or a bare JSON string). 404 when eval is not exposed.
+fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<u8> {
+    if !fe.eval_enabled {
+        return http_json(404, br#"{"error":"eval is not exposed"}"#, keep_alive);
+    }
+    let expr: Option<String> = match serde_json::from_slice::<Value>(&req.body) {
+        Ok(Value::Object(o)) => o
+            .get("expr")
+            .or_else(|| o.get("expression"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        Ok(Value::String(s)) => Some(s),
+        _ => None,
+    };
+    let expr = match expr {
+        Some(e) => e,
+        None => return http_json(400, br#"{"error":"expected {\"expr\":\"...\"}"}"#, keep_alive),
+    };
+    match frontend_eval(&expr, fe) {
+        Ok(out) => {
+            let body = json!({ "status": "ok", "result": out }).to_string();
+            http_json(200, body.as_bytes(), keep_alive)
+        }
+        Err(message) => {
+            let body = json!({ "status": "error", "error": message }).to_string();
+            http_json(500, body.as_bytes(), keep_alive)
+        }
+    }
+}
+
+/// `POST /mcp`: one JSON-RPC message. Session resolution locks briefly; the
+/// forward (dispatch) runs lock-free so modules execute in parallel.
+fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    let msg: Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(_) => {
+            let body = error_response(Value::Null, JSONRPC_PARSE_ERROR, "invalid JSON")
+                .to_string()
+                .into_bytes();
+            return http_json(200, &body, keep_alive);
+        }
+    };
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
+    let now = Instant::now();
+
+    let (session_id, prior_init) = {
+        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        if method == "initialize" {
+            prune_sessions(&mut sessions, now);
+            let id = new_session_id();
+            sessions.insert(id.clone(), SessionInfo { initialized: false, last_seen: now });
+            (id, false)
+        } else {
+            match sid_hdr {
+                None => {
+                    return http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive)
+                }
+                Some(id) => match sessions.get(&id) {
+                    Some(s) => (id, s.initialized),
+                    None => {
+                        return http_json(
+                            404,
+                            br#"{"error":"unknown or expired session; re-initialize"}"#,
+                            keep_alive,
+                        )
+                    }
+                },
+            }
+        }
+    };
+
+    let mut session = Session { initialized: prior_init };
+    let resp_opt = frontend_handle_message(&msg, &mut session, fe);
+    {
+        // Update in place only if the session still exists. A DELETE or prune
+        // that ran while the forward was in flight (lock-free) must not be
+        // undone by resurrecting the entry, and re-inserting would bypass the
+        // MAX_SESSIONS cap enforced at initialize.
+        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.initialized = session.initialized;
+            s.last_seen = now;
+        }
+    }
+    let extra: Vec<(String, String)> = if method == "initialize" {
+        vec![("Mcp-Session-Id".to_string(), session_id)]
+    } else {
+        Vec::new()
+    };
+    match resp_opt {
+        Some(response) => {
+            http_response(200, &response.to_string().into_bytes(), keep_alive, &extra)
+        }
+        None => http_response(202, b"", keep_alive, &extra),
+    }
+}
+
+/// `DELETE /mcp`: end the named session.
+fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    match header_get(&req.headers, "mcp-session-id") {
+        Some(id) => {
+            let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            sessions.remove(id);
+            http_json(200, br#"{"ok":true}"#, keep_alive)
+        }
+        None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
+    }
+}
+
+/// MCP message core for the front-end (mirrors `handle_message`, but tools/call
+/// forwards to a per-module child instead of dispatching in-process).
+fn frontend_handle_message(msg: &Value, session: &mut Session, fe: &Frontend) -> Option<Value> {
+    let method = msg.get("method").and_then(|m| m.as_str());
+    let id = msg.get("id").cloned();
+    let is_request = id.is_some();
+    let method = match method {
+        Some(m) => m,
+        None => {
+            return id.map(|id| error_response(id, JSONRPC_INVALID_REQUEST, "missing 'method'"))
+        }
+    };
+    match method {
+        "initialize" => {
+            let Some(id) = id else { return None };
+            let requested = msg
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str());
+            let version = match requested {
+                Some(v) if v == SERVER_PROTOCOL_VERSION => v.to_string(),
+                _ => SERVER_PROTOCOL_VERSION.to_string(),
+            };
+            Some(result_response(
+                id,
+                json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": fe.server_name, "version": fe.server_version },
+                }),
+            ))
+        }
+        "notifications/initialized" => {
+            session.initialized = true;
+            None
+        }
+        "ping" => id.map(|id| result_response(id, json!({}))),
+        "tools/list" => {
+            let Some(id) = id else { return None };
+            if !session.initialized {
+                return Some(error_response(
+                    id,
+                    JSONRPC_INVALID_REQUEST,
+                    "received tools/list before initialization completed",
+                ));
+            }
+            Some(result_response(id, json!({ "tools": fe.mcp_tools })))
+        }
+        "tools/call" => {
+            let Some(id) = id else { return None };
+            if !session.initialized {
+                return Some(error_response(
+                    id,
+                    JSONRPC_INVALID_REQUEST,
+                    "received tools/call before initialization completed",
+                ));
+            }
+            Some(frontend_tools_call(id, msg, fe))
+        }
+        other => {
+            if is_request {
+                Some(error_response(
+                    id.unwrap_or(Value::Null),
+                    JSONRPC_METHOD_NOT_FOUND,
+                    &format!("unknown method '{}'", other),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// A front-end `tools/call`: resolve the namespaced tool to (module, command),
+/// validate + invert arguments, forward to the module's child, render the reply.
+fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
+    let params = match msg.get("params") {
+        Some(p) => p,
+        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing params"),
+    };
+    let name = match params.get("name").and_then(|n| n.as_str()) {
+        Some(n) => n,
+        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing tool 'name'"),
+    };
+    let empty = Map::new();
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => &empty,
+        Some(Value::Object(m)) => m,
+        Some(_) => return error_response(id, JSONRPC_INVALID_PARAMS, "'arguments' must be an object"),
+    };
+    // The synthetic eval capability (not a module): forks a sandboxed
+    // `morloc eval`, keeping the front-end's no-in-process-compute invariant.
+    if name == "eval" {
+        if !fe.eval_enabled {
+            return error_response(id, JSONRPC_INVALID_PARAMS, "unknown tool 'eval'");
+        }
+        let expr = match arguments.get("expression").and_then(|v| v.as_str()) {
+            Some(e) => e,
+            None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
+        };
+        return match frontend_eval(expr, fe) {
+            Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
+            Err(message) => result_response(
+                id,
+                json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
+            ),
+        };
+    }
+    let (module, shape) = match fe.mcp_by_name.get(name) {
+        Some(t) => t,
+        None => {
+            return error_response(id, JSONRPC_INVALID_PARAMS, &format!("unknown tool '{}'", name))
+        }
+    };
+    let positional = match resolve_arguments(shape, arguments) {
+        Ok(p) => p,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    };
+    let render_sel = arguments.get("_render").and_then(|v| v.as_str()).unwrap_or("raw");
+    // A media (`@mime`) projection comes back from the child as raw bytes+mime
+    // (base64 over the wire) and is rendered as an MCP media block below; the
+    // JSON projection becomes a text/structured result.
+    let (dispatch_command, _ret_mime, returns_object) = match shape.dispatch_for(render_sel) {
+        Ok(t) => t,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    };
+    let request_json = json!({
+        "method": "call",
+        "command": dispatch_command,
+        "args": Value::Array(positional),
+    });
+    match fe.forward(module, &request_json) {
+        Ok(ForwardOk::Json(result_json)) => {
+            result_response(id, tool_result_object(&result_json, returns_object))
+        }
+        Ok(ForwardOk::Media(bytes, mime)) => {
+            result_response(id, media_result_object(media_content_block(&bytes, &mime)))
+        }
+        Err(message) => result_response(
+            id,
+            json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
+        ),
+    }
+}
+
+/// `POST /call/<module>/<command>`: JSON API adapter. Body is a positional-args
+/// JSON array or `{"args":[...]}`. Stateless (no session).
+fn frontend_call_api(
+    rest: &str,
+    req: &HttpRequest,
+    fe: &Frontend,
+    keep_alive: bool,
+) -> Vec<u8> {
+    let mut it = rest.splitn(2, '/');
+    let module = it.next().unwrap_or("");
+    let command = it.next().unwrap_or("");
+    if module.is_empty() || command.is_empty() {
+        return http_json(400, br#"{"error":"expected /call/<module>/<command>"}"#, keep_alive);
+    }
+    if !fe.api_modules.contains(module) {
+        return http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive);
+    }
+    let args: Value = if req.body.is_empty() {
+        Value::Array(Vec::new())
+    } else {
+        match serde_json::from_slice::<Value>(&req.body) {
+            Ok(Value::Array(a)) => Value::Array(a),
+            Ok(Value::Object(o)) => o.get("args").cloned().unwrap_or(Value::Array(Vec::new())),
+            Ok(_) => {
+                return http_json(
+                    400,
+                    br#"{"error":"body must be a JSON array or {\"args\":[...]}"}"#,
+                    keep_alive,
+                )
+            }
+            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
+        }
+    };
+    let request_json = json!({ "method": "call", "command": command, "args": args });
+    match fe.forward(module, &request_json) {
+        Ok(ForwardOk::Json(result_json)) => {
+            let body = format!("{{\"status\":\"ok\",\"result\":{}}}", result_json);
+            http_json(200, body.as_bytes(), keep_alive)
+        }
+        // A media (`@mime`) return goes out as the raw content bytes with the
+        // declared Content-Type (a real image/PDF/...), not a JSON envelope.
+        Ok(ForwardOk::Media(bytes, mime)) => http_binary_response(200, &mime, &bytes, keep_alive),
+        Err(message) => {
+            let body = json!({ "status": "error", "error": message }).to_string();
+            http_json(500, body.as_bytes(), keep_alive)
+        }
+    }
+}
+
+/// An HTTP response carrying raw bytes with an explicit Content-Type and no
+/// trailing newline (for `@mime` media returns on the API adapter).
+fn http_binary_response(status: u16, content_type: &str, body: &[u8], keep_alive: bool) -> Vec<u8> {
+    let mut out = http_head(status, content_type, body.len(), keep_alive, &[]).into_bytes();
+    out.extend_from_slice(body);
+    out
 }
 
 // ---------------------------------------------------------------------------

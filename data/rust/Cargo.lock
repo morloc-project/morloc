@@ -853,6 +853,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
+ "base64",
  "bytes",
  "cbindgen",
  "chrono",

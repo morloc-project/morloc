@@ -1,0 +1,38 @@
+--' morloc-manager serving integration test module.
+--'
+--' Two small exports exercise the whole serve path end to end:
+--'   greet :: Str -> Str            -- single-argument string round trip
+--'   add   :: Real -> Real -> Real  -- two-argument numeric call
+--'
+--' The install identity is the MODULE name (`demo`), independent of the file
+--' name or any `-o`, so the serve adapters address it as `demo` and MCP tools
+--' are named `demo__greet` / `demo__add`. Metavars pin the MCP property names
+--' (`name`, `x`, `y`) so tools/call assertions are deterministic. Kept tiny so
+--' `morloc-manager install` + `start` stay fast in an integration run.
+module demo (greet, add)
+
+import root-py
+
+source Py from "demo.py"
+  ( "greet_py" as greetPy
+  , "add_py"   as addPy
+  )
+
+greetPy :: Str -> Str
+addPy :: Real -> Real -> Real
+
+--' Greet a person by name
+greet ::
+  --' metavar: NAME
+  Str ->
+  Str
+greet name = greetPy name
+
+--' Add two numbers
+add ::
+  --' metavar: X
+  Real ->
+  --' metavar: Y
+  Real ->
+  Real
+add x y = addPy x y

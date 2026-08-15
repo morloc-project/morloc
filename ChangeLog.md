@@ -1,3 +1,10 @@
+0.97.0 [2026-08-xx]
+-------------------
+
+ [ ] MCP servers through morloc-manager
+
+ [ ] Move morloc-manager out of the morloc repo  
+
 0.97.0 [2026-08-10]
 -------------------
 

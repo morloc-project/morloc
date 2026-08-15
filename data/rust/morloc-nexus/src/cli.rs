@@ -279,21 +279,9 @@ pub struct RouterArgs {
     #[arg(long, value_name = "PATH")]
     pub fdb: Option<String>,
 
-    /// Listen on a Unix domain socket at PATH.
-    #[arg(long, value_name = "PATH")]
-    pub socket: Option<String>,
-
-    /// Listen on a TCP port (0 = ephemeral).
-    #[arg(long, value_name = "PORT")]
-    pub port: Option<u16>,
-
     /// Listen on an HTTP port.
     #[arg(long = "http-port", value_name = "PORT")]
     pub http_port: Option<u16>,
-
-    /// Write bound ports to PATH as JSON.
-    #[arg(long = "port-file", value_name = "PATH")]
-    pub port_file: Option<String>,
 
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
@@ -306,6 +294,42 @@ pub struct RouterArgs {
     /// `morloc eval` CLI, not a served endpoint.
     #[arg(long = "eval-allowed-modules", value_name = "M,...", default_value = "")]
     pub eval_allowed_modules: String,
+
+    /// Expose the sandboxed eval CAPABILITY (an `eval` MCP tool + `/eval` route).
+    /// Off by default; the allow-list comes from --eval-allowed-modules.
+    #[arg(long = "eval")]
+    pub eval: bool,
+
+    /// Serve exactly this program (repeatable) over BOTH adapters (MCP + API).
+    /// Which modules are served is an explicit decision; a named program that is
+    /// not installed is an error. For adapter-specific membership use
+    /// --mcp/--api.
+    #[arg(long = "program", value_name = "NAME")]
+    pub programs: Vec<String>,
+
+    /// Serve this module over the MCP adapter (POST /mcp) only. Repeatable.
+    #[arg(long = "mcp", value_name = "NAME")]
+    pub mcp_programs: Vec<String>,
+
+    /// Serve this module over the JSON API adapter (/call/<module>/<command>)
+    /// only. Repeatable.
+    #[arg(long = "api", value_name = "NAME")]
+    pub api_programs: Vec<String>,
+
+    /// Bind address for --http-port (default 127.0.0.1). Use 0.0.0.0 to accept
+    /// connections from other hosts/containers.
+    #[arg(long = "http-host", value_name = "ADDR")]
+    pub http_host: Option<String>,
+
+    /// Require this bearer token on every HTTP request (both adapters). Falls
+    /// back to MORLOC_MCP_TOKEN; if neither is set the endpoint is unauthenticated.
+    #[arg(long = "auth-token", value_name = "TOKEN")]
+    pub auth_token: Option<String>,
+
+    /// Permit serving on a non-loopback address with no token. Without this, a
+    /// non-loopback bind and no token is refused.
+    #[arg(long = "allow-no-auth")]
+    pub allow_no_auth: bool,
 }
 
 /// Classify morloc-compatible data files. Reads only header bytes
@@ -806,12 +830,35 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     let mut cfg = NexusConfig::default();
     cfg.router_flag = true;
     cfg.fdb_path = args.fdb.clone();
-    cfg.unix_socket_path = args.socket.clone();
-    cfg.tcp_port = args.port.map(|p| p as i32);
+    // The serving front-end is HTTP-only; the unix-socket / raw-TCP / port-file
+    // transports of the other nexus modes do not apply here.
     cfg.http_port = args.http_port.map(|p| p as i32);
-    cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    // Adapter membership: --program means "both adapters"; --mcp/--api are
+    // adapter-specific. The supervisor's set (`programs`) is the union.
+    let mut mcp = args.mcp_programs.clone();
+    let mut api = args.api_programs.clone();
+    for p in &args.programs {
+        if !mcp.contains(p) { mcp.push(p.clone()); }
+        if !api.contains(p) { api.push(p.clone()); }
+    }
+    let mut union = mcp.clone();
+    for p in &api {
+        if !union.contains(p) { union.push(p.clone()); }
+    }
+    cfg.mcp_programs = mcp;
+    cfg.api_programs = api;
+    cfg.programs = union;
+    // Serving auth/host (reused NexusConfig fields; the front-end applies them
+    // to BOTH adapters). Explicit --auth-token wins; else MORLOC_MCP_TOKEN
+    // (keeps the token off argv, matching the mcp mode).
+    cfg.mcp_http_host = args.http_host.clone();
+    cfg.mcp_auth_token = args.auth_token.clone().or_else(|| {
+        std::env::var("MORLOC_MCP_TOKEN").ok().filter(|s| !s.is_empty())
+    });
+    cfg.mcp_allow_no_auth = args.allow_no_auth;
     apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
+    cfg.eval_enabled = args.eval;
     cfg
 }
 
@@ -2276,6 +2323,43 @@ mod tests {
                 assert!(cfg.router_flag);
                 assert_eq!(cfg.fdb_path.as_deref(), Some("/tmp/fdb"));
                 assert_eq!(cfg.eval_timeout, 30);
+            }
+            _ => panic!("expected Router mode"),
+        }
+    }
+
+    #[test]
+    fn router_explicit_program_list() {
+        let n = parse(&[
+            "morloc-nexus", "router", "--program", "dna", "--program", "align",
+        ]).unwrap();
+        match n.cmd {
+            Mode::Router(r) => {
+                let cfg = router_args_to_config(&r);
+                assert_eq!(cfg.programs, vec!["dna".to_string(), "align".to_string()]);
+            }
+            _ => panic!("expected Router mode"),
+        }
+    }
+
+    #[test]
+    fn router_adapter_membership() {
+        // --mcp X, --api Y, --program Z: Z on both adapters, X mcp-only, Y api-only;
+        // the supervisor union has all three.
+        let n = parse(&[
+            "morloc-nexus", "router",
+            "--mcp", "dna", "--api", "align", "--program", "util",
+        ]).unwrap();
+        match n.cmd {
+            Mode::Router(r) => {
+                let cfg = router_args_to_config(&r);
+                assert!(cfg.mcp_programs.contains(&"dna".to_string()));
+                assert!(cfg.mcp_programs.contains(&"util".to_string()));
+                assert!(!cfg.mcp_programs.contains(&"align".to_string()));
+                assert!(cfg.api_programs.contains(&"align".to_string()));
+                assert!(cfg.api_programs.contains(&"util".to_string()));
+                assert!(!cfg.api_programs.contains(&"dna".to_string()));
+                assert_eq!(cfg.programs.len(), 3); // union
             }
             _ => panic!("expected Router mode"),
         }

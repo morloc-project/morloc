@@ -186,7 +186,7 @@ fn schema_is_optional(schema: Option<&str>) -> bool {
 // --json-help: lossless morloc-native view
 // ---------------------------------------------------------------------------
 
-fn build_json_help(m: &Manifest) -> Value {
+pub fn build_json_help(m: &Manifest) -> Value {
     let commands: Vec<Value> = m
         .commands
         .iter()

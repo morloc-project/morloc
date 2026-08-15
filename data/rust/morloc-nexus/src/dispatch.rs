@@ -78,6 +78,10 @@ pub struct NexusConfig {
     /// only pure module-free expressions). Passed to the forked `morloc eval`
     /// as `--eval-allowed-modules`.
     pub eval_allowed_modules: Option<String>,
+    /// Front-end: whether the eval CAPABILITY is exposed (an `eval` MCP tool +
+    /// `/eval` route). Off by default; enabled only when the operator exposes it.
+    /// Distinct from `eval_sandbox` (which is always on for served eval).
+    pub eval_enabled: bool,
     /// Base directory under which a per-run subdir (named by run_id)
     /// is materialized. Activates rundir creation, log tee, and
     /// `summary.json`. Falls back to the `MORLOC_LOG_DIR` env var.
@@ -103,6 +107,14 @@ pub struct NexusConfig {
     /// zstd compression preset for packets written to --output-file
     /// (output-form packet). 0 = no compression.
     pub compression_level: u8,
+    /// Front-end serving: the UNION of all served modules (the supervisor spawns
+    /// one child per entry). Empty + `serve_all` = serve everything under fdb;
+    /// empty + !serve_all = error (which modules to serve is a decision).
+    pub programs: Vec<String>,
+    /// Modules exposed over the MCP adapter (/mcp). Subset of `programs`.
+    pub mcp_programs: Vec<String>,
+    /// Modules exposed over the JSON API adapter (/call). Subset of `programs`.
+    pub api_programs: Vec<String>,
 }
 
 impl Default for NexusConfig {
@@ -128,6 +140,7 @@ impl Default for NexusConfig {
             eval_timeout: 30,
             eval_sandbox: false,
             eval_allowed_modules: None,
+            eval_enabled: false,
             log_dir: None,
             summary_path: None,
             quiet: false,
@@ -135,6 +148,9 @@ impl Default for NexusConfig {
             debug_cache_max: None,
             debug_recursion_cap: None,
             compression_level: 0,
+            programs: Vec::new(),
+            mcp_programs: Vec::new(),
+            api_programs: Vec::new(),
         }
     }
 }

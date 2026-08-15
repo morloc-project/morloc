@@ -68,6 +68,13 @@ pub fn env_data_dir(scope: Scope, name: &str) -> PathBuf {
     data_dir(scope).join("environments").join(name)
 }
 
+/// Path to an environment's exposure config (which modules are served, and how).
+/// Lives beside env.yaml; declarative intent, edited by `expose`, realized by
+/// `start`. Not mounted into the container.
+pub fn env_expose_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("expose.yaml")
+}
+
 /// Directory holding the .sif files for an Apptainer environment.
 pub fn env_sif_dir(scope: Scope, name: &str) -> PathBuf {
     env_data_dir(scope, name).join("sif")
@@ -207,6 +214,48 @@ fn write_yaml_config<T: serde::Serialize>(path: &Path, val: &T) -> Result<()> {
 /// prefer the YAML.
 pub fn write_env_config(scope: Scope, name: &str, ec: &EnvironmentConfig) -> Result<()> {
     write_yaml_config(&env_config_path(scope, name), ec)
+}
+
+/// Path to an environment's runtime serve-record (what `start` actually
+/// launched). Host-side, beside the config; read by `status`, removed by `stop`.
+pub fn env_serve_runtime_path(scope: Scope, name: &str) -> PathBuf {
+    env_config_dir(scope, name).join("serve-runtime.json")
+}
+
+/// Read the runtime serve-record, or `None` if absent/unreadable.
+pub fn read_serve_runtime(scope: Scope, name: &str) -> Option<ServeRuntime> {
+    let p = env_serve_runtime_path(scope, name);
+    if p.is_file() {
+        read_config(&p).ok()
+    } else {
+        None
+    }
+}
+
+/// Write the runtime serve-record (JSON).
+pub fn write_serve_runtime(scope: Scope, name: &str, r: &ServeRuntime) -> Result<()> {
+    write_config(&env_serve_runtime_path(scope, name), r)
+}
+
+/// Remove the runtime serve-record (best effort; a missing file is fine).
+pub fn remove_serve_runtime(scope: Scope, name: &str) {
+    let _ = fs::remove_file(env_serve_runtime_path(scope, name));
+}
+
+/// Read an environment's exposure config. An absent file means nothing is
+/// exposed yet (the default), not an error.
+pub fn read_exposure(scope: Scope, name: &str) -> Result<ExposureConfig> {
+    let path = env_expose_path(scope, name);
+    if path.is_file() {
+        read_yaml_config(&path)
+    } else {
+        Ok(ExposureConfig::default())
+    }
+}
+
+/// Write an environment's exposure config to expose.yaml (atomic, locked).
+pub fn write_exposure(scope: Scope, name: &str, ex: &ExposureConfig) -> Result<()> {
+    write_yaml_config(&env_expose_path(scope, name), ex)
 }
 
 // ======================================================================

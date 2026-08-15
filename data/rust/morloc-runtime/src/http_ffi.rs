@@ -56,6 +56,10 @@ pub struct DaemonRequest {
     /// null when absent. `daemon_dispatch` resolves it to the projection's entry
     /// command; `raw` means the command's own typed value.
     pub render: *mut c_char,
+    /// Set by the serving front-end's forward: request the raw-media form so an
+    /// `@mime` return comes back as result_bytes+mime (base64 over the wire).
+    /// Direct length-prefixed clients leave it false and keep the JSON `result`.
+    pub media: bool,
 }
 
 // ── http_parse_request ───────────────────────────────────────────────────────
