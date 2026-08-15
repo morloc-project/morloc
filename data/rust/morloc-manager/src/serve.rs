@@ -579,14 +579,29 @@ pub fn query_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         });
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_ps_serve_lines(&text))
+}
+
+/// Parse the tab-separated `Names\tStatus\tPorts` output of `docker/podman ps`
+/// into serve-container records.
+///
+/// Ports is optional: host-network containers have no port mapping, so podman
+/// emits an empty final field, and trimming the whole blob strips the last
+/// line's trailing tab. Requiring only Names+Status keeps such containers (any
+/// line's, not just the first) from being silently dropped.
+fn parse_ps_serve_lines(text: &str) -> Vec<ServeContainerInfo> {
     let mut result = Vec::new();
     for line in text.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            continue;
+        }
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3 {
+        if parts.len() >= 2 {
             let name = parts[0];
             let status = parts[1];
-            let ports = parts[2];
+            let ports = parts.get(2).copied().unwrap_or("");
             let env = env_name_from_container(name);
             result.push(ServeContainerInfo {
                 name: name.to_string(),
@@ -599,7 +614,7 @@ pub fn query_serve_containers(engine: ContainerEngine, verbose: bool) -> Result<
             });
         }
     }
-    Ok(result)
+    result
 }
 
 /// Find running serve container names for the current user.
@@ -1021,4 +1036,36 @@ pub fn apptainer_logs(instance_name: &str, follow: bool) -> Result<()> {
         let _ = lock.write_all(&buf);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A previous whole-output `.trim()` stripped the trailing tab from the last
+    // `ps` line, so the last host-network container (empty Ports) split into two
+    // fields and was dropped by a `parts.len() >= 3` guard. Both containers here
+    // have empty Ports; both must survive regardless of position.
+    #[test]
+    fn empty_ports_container_not_dropped_by_trailing_tab() {
+        // Exactly what `podman ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'`
+        // emits for two host-network serve containers (trailing tab per line).
+        let raw = "morloc-serve-z-dev\tUp 36 hours\t\nmorloc-serve-z-latest\tUp 22 minutes\t\n";
+        let got = parse_ps_serve_lines(raw);
+        let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["morloc-serve-z-dev", "morloc-serve-z-latest"]);
+        assert_eq!(got[1].status, "Up 22 minutes");
+        assert_eq!(got[1].ports, "-"); // empty Ports rendered as "-"
+    }
+
+    #[test]
+    fn populated_ports_and_blank_lines() {
+        let raw = "morloc-serve-z-a\tUp 2 hours\t0.0.0.0:9000->8080/tcp\n\nmorloc-serve-z-b\tUp 1 minute\n";
+        let got = parse_ps_serve_lines(raw);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].ports, "0.0.0.0:9000->8080/tcp");
+        assert_eq!(got[0].env, "a");
+        assert_eq!(got[1].ports, "-");
+        assert_eq!(got[1].env, "b");
+    }
 }
