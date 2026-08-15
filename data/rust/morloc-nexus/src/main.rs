@@ -96,19 +96,31 @@ fn main() {
         let leading = invocation.user_zone.first().map(|s| s.as_str());
         let want_json = rargs.common.json_help || leading == Some("--json-help");
         let want_mcp = rargs.common.mcp_tools || leading == Some("--mcp-tools");
-        if want_json || want_mcp {
+        let want_config = rargs.common.mcp_config || leading == Some("--mcp-config");
+        if want_json || want_mcp || want_config {
             match invocation.manifest.as_ref() {
                 Some(m) => {
                     if want_json {
                         json_help::print_json_help(m);
-                    } else {
+                    } else if want_mcp {
                         json_help::print_mcp_tools(m);
+                    } else {
+                        // stdio client config: the nexus's own absolute path
+                        // (current_exe) as `command`, the canonical manifest
+                        // path as its `mcp` argument. Pure JSON on stdout.
+                        let nexus = std::env::current_exe()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| "morloc-nexus".to_string());
+                        let manifest_abs = std::fs::canonicalize(&invocation.manifest_path)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| invocation.manifest_path.clone());
+                        json_help::print_mcp_config(m, &nexus, &manifest_abs);
                     }
                     std::process::exit(0);
                 }
                 None => {
                     eprintln!(
-                        "Error: --json-help/--mcp-tools require a program target"
+                        "Error: --json-help/--mcp-tools/--mcp-config require a program target"
                     );
                     std::process::exit(2);
                 }
@@ -369,6 +381,26 @@ fn main() {
             tmpdir.clone(),
             shm_basename.clone(),
         );
+        // `--http-port` selects the Streamable-HTTP transport (remote/shared
+        // serving); otherwise the stdio JSON-RPC loop. Both wrap the same
+        // message core, tool shapes, and daemon_dispatch backend.
+        if let Some(port) = config.http_port {
+            let host = config
+                .mcp_http_host
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string());
+            mcp::serve_http(
+                &mut sockets,
+                &shm_basename,
+                &payload,
+                &manifest,
+                &host,
+                config.mcp_auth_token.clone(),
+                config.mcp_allow_no_auth,
+                port as u16,
+            );
+            // serve_http never returns.
+        }
         let protocol_fd = mcp_protocol_fd
             .expect("mcp mode always re-homes stdout and sets the protocol fd");
         mcp::serve(
@@ -621,10 +653,12 @@ fn run_router(config: &dispatch::NexusConfig) {
     use std::ptr;
 
     extern "C" {
-        fn router_init(exe_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
-        fn router_run(config: *mut c_void, router: *mut c_void);
-        fn router_free(router: *mut c_void);
-        fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
+        fn router_init_explicit(
+            exe_path: *const c_char,
+            names: *const *const c_char,
+            n_names: usize,
+            errmsg: *mut *mut c_char,
+        ) -> *mut c_void;
     }
 
     let exe_path = config.fdb_path.clone().unwrap_or_else(|| {
@@ -632,8 +666,29 @@ fn run_router(config: &dispatch::NexusConfig) {
     });
     let fdb_c = CString::new(exe_path.as_str()).unwrap();
 
+    // What to serve is always an EXPLICIT decision -- named modules and/or the
+    // eval capability. Serving nothing is an error (there is no serve-everything
+    // mode, so an accidental serve never publishes whatever happens to be
+    // installed). The supervisor still spawns a child per named module even when
+    // only eval is exposed (its program list may be empty then).
+    if config.programs.is_empty() && !config.eval_enabled {
+        eprintln!(
+            "Error: nothing to serve. Expose modules (--mcp/--api/--program) \
+             and/or the eval capability (--eval)."
+        );
+        std::process::exit(1);
+    }
+
     let mut errmsg: *mut c_char = ptr::null_mut();
-    let router = unsafe { router_init(fdb_c.as_ptr(), &mut errmsg) };
+    let name_cstrs: Vec<CString> = config
+        .programs
+        .iter()
+        .map(|s| CString::new(s.as_str()).unwrap())
+        .collect();
+    let name_ptrs: Vec<*const c_char> = name_cstrs.iter().map(|c| c.as_ptr()).collect();
+    let router = unsafe {
+        router_init_explicit(fdb_c.as_ptr(), name_ptrs.as_ptr(), name_ptrs.len(), &mut errmsg)
+    };
     if router.is_null() {
         let msg = if !errmsg.is_null() {
             let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();
@@ -646,41 +701,40 @@ fn run_router(config: &dispatch::NexusConfig) {
         std::process::exit(1);
     }
 
-    let unix_cstr = config.unix_socket_path.as_ref()
-        .map(|p| CString::new(p.as_str()).unwrap());
-    let port_file_cstr = config.port_file_path.as_ref()
-        .map(|p| CString::new(p.as_str()).unwrap());
-
-    let mut dc = CDaemonConfig {
-        unix_socket_path: unix_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
-        tcp_port: config.tcp_port.unwrap_or(-1),
-        http_port: config.http_port.unwrap_or(-1),
-        port_file_path: port_file_cstr.as_ref()
-            .map_or(ptr::null(), |c| c.as_ptr()),
-        pool_check_fn: ptr::null(),
-        pool_alive_fn: ptr::null(),
-        n_pools: 0,
-        eval_timeout: if config.eval_timeout > 0 { config.eval_timeout } else { 30 },
-        // Router does not offer per-program packet output; keep the ABI
-        // layout in sync with `daemon_config_t` and default to JSON.
-        output_packet: false,
-        compression_level: 0,
-    };
-
-    // Set the eval sandbox policy before serving (process-wide global read by
-    // every forked `morloc eval`/`--save`).
-    let eval_allowed_cstr = config.eval_allowed_modules.as_ref()
-        .map(|s| CString::new(s.as_str()).unwrap());
+    // The front-end's serve loop never returns, so shutdown is signal-driven:
+    // on SIGTERM/SIGINT, propagate SIGTERM to the per-module child daemons (so
+    // each cleans up its own pools + SHM) and exit promptly, instead of ignoring
+    // the signal as PID 1 and being SIGKILLed after the grace period (which would
+    // orphan the children and leak /dev/shm/morloc-*).
+    FRONTEND_ROUTER.store(router, std::sync::atomic::Ordering::Relaxed);
     unsafe {
-        daemon_set_eval_policy(
-            config.eval_sandbox,
-            eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
-        );
+        libc::signal(libc::SIGTERM, frontend_shutdown_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, frontend_shutdown_handler as *const () as libc::sighandler_t);
     }
 
+    // The unified front-end owns the supervisor for the process lifetime and
+    // serves both adapters (MCP + API) over one HTTP listener, forwarding each
+    // call to the module's child daemon. The eval capability (when exposed) is a
+    // forked, sandboxed `morloc eval` inside the front-end, so no process-global
+    // eval policy is set here. Never returns.
+    crate::mcp::serve_frontend(router, &exe_path, config);
+}
+
+/// The live router, published for `frontend_shutdown_handler` to reach from the
+/// signal context (the serve loop never returns, so there is no other handle).
+static FRONTEND_ROUTER: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// SIGTERM/SIGINT handler for the serving front-end: async-signal-safe. Tells
+/// each child daemon to shut down (SIGTERM, so it sweeps its own SHM) and exits.
+extern "C" fn frontend_shutdown_handler(_sig: libc::c_int) {
+    extern "C" {
+        fn router_terminate_children(router: *mut std::ffi::c_void);
+    }
+    let r = FRONTEND_ROUTER.load(std::sync::atomic::Ordering::Relaxed);
     unsafe {
-        router_run(&mut dc as *mut CDaemonConfig as *mut c_void, router);
-        router_free(router);
+        router_terminate_children(r);
+        libc::_exit(0);
     }
 }
 

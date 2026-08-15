@@ -525,6 +525,45 @@ if should_run "testr3"; then
     echo ""
 fi
 
+# --- modulename: the installed name follows the MODULE, not -o / the file ---
+# Regression guard: `morloc make --install` names the installed program after
+# its `module <name>` declaration, decoupled from the build key (-o / source
+# basename), which names only the local build dir. Reuses the testpy1 module
+# (declares `module testpy1`) but builds with a deliberately mismatched -o.
+if should_run "modulename"; then
+    echo "${BOLD}[modulename] install name follows the module, not -o/filename${RESET}"
+
+    TEST_DIR="$SCRIPT_DIR/testpy1"
+    WORK_DIR=$(mktemp -d)
+    cp -r "$TEST_DIR"/. "$WORK_DIR"/
+
+    BUILD_ERR=$(cd "$WORK_DIR" && morloc make --install --force -o zzz_wrong main.loc 2>&1) || {
+        TOTAL=$((TOTAL + 1))
+        printf "  %-55s " "modulename: build"
+        printf "%sFAIL%s\n" "$RED" "$RESET"
+        FAILED=$((FAILED + 1))
+        FAILURES+=("modulename: build")
+        echo "$BUILD_ERR" | tail -5 | sed 's/^/      /'
+        rm -rf "$WORK_DIR"
+    }
+
+    if [[ -d "$WORK_DIR" ]]; then
+        assert_file_exists "modulename: installed under module name" "$BIN_DIR/testpy1"
+        assert_dir_exists  "modulename: exe dir uses module name" "$EXE_DIR/testpy1"
+        assert_not_exists  "modulename: NOT installed under -o name" "$BIN_DIR/zzz_wrong"
+        assert_not_exists  "modulename: no exe dir under -o name" "$EXE_DIR/zzz_wrong"
+
+        ACTUAL=$("$BIN_DIR/testpy1" pygreet "world" 2>&1) || ACTUAL="ERROR: rc=$?"
+        assert_test "modulename: output correct" "hello world" "$ACTUAL"
+
+        morloc uninstall --program testpy1 >/dev/null 2>&1 || true
+        assert_not_exists "modulename: cleaned up after uninstall" "$BIN_DIR/testpy1"
+
+        rm -rf "$WORK_DIR"
+    fi
+    echo ""
+fi
+
 # ======================================================================
 # Results
 # ======================================================================

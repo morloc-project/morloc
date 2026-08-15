@@ -76,7 +76,6 @@ data MakeCommand = MakeCommand
   , makeVerbose :: Int
   , makeVanilla :: Bool
   , makeCliOut :: String
-  , makeMcpOut :: String
   , makeDaemonOut :: String
   , makeNoCli :: Bool
   , makeBuildDir :: Maybe String
@@ -101,7 +100,6 @@ makeCommandParser =
     <*> optVerbose
     <*> optVanilla
     <*> optCliOut
-    <*> optMcpOut
     <*> optDaemonOut
     <*> optNoCli
     <*> optBuildDir
@@ -231,13 +229,11 @@ installSubcommand =
   command "install" $
     info
       (CmdInstall <$> makeInstallParser)
-      (progDescDoc (Just installDescDoc))
+      (progDesc "Install one or more morloc modules" <> footerDoc (Just installExamplesDoc))
 
-installDescDoc :: Doc
-installDescDoc = vcat $ map pretty
-  [ "Install one or more morloc modules"
-  , ""
-  , "Examples:"
+installExamplesDoc :: Doc
+installExamplesDoc = vcat $ map pretty
+  [ "Examples:"
   , "  # Remote install"
   , "  morloc install root root-py math   # one or more stdlib modules"
   , "  morloc install weena/calendar      # owner/repo on github"
@@ -491,15 +487,6 @@ optCliOut =
         <> value ""
         <> showDefault
         <> help "The name of the generated CLI executable (default: program name)"
-    )
-
-optMcpOut :: Parser String
-optMcpOut =
-  strOption
-    ( long "mcp-out"
-        <> metavar "OUT"
-        <> value ""
-        <> help "Also emit a wrapper that serves the program as an MCP server"
     )
 
 optDaemonOut :: Parser String

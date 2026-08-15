@@ -599,6 +599,8 @@ struct JsonRequest {
     args: Option<serde_json::Value>,
     expr: Option<String>,
     name: Option<String>,
+    #[serde(default)]
+    media: Option<bool>,
 }
 
 #[no_mangle]
@@ -685,6 +687,8 @@ pub unsafe extern "C" fn daemon_parse_request(
         (*req).name = libc::strdup(c.as_ptr());
     }
 
+    (*req).media = parsed.media.unwrap_or(false);
+
     req
 }
 
@@ -696,6 +700,10 @@ struct JsonResponse {
     status: Option<String>,
     result: Option<serde_json::Value>,
     error: Option<String>,
+    /// Media (`@mime`) return: base64 content + media type (see
+    /// daemon_serialize_response). Reconstructed onto result_bytes/mime.
+    result_b64: Option<String>,
+    mime: Option<String>,
 }
 
 #[no_mangle]
@@ -755,7 +763,38 @@ pub unsafe extern "C" fn daemon_parse_response(
         DAEMON_ERROR_INTERNAL
     };
 
-    if let Some(result) = &parsed.result {
+    // Media (`@mime`) return: decode base64 back to raw bytes + mime, mirroring
+    // the in-process dispatch response so downstream renders identically.
+    if let (Some(b64), Some(mime)) = (&parsed.result_b64, &parsed.mime) {
+        use base64::Engine;
+        // Fail closed: a decode or allocation error must not leave a "success"
+        // response with a null payload (which downstream would render as a bare
+        // JSON `null`). Convert it into a real error instead.
+        let media_err: Option<String> =
+            match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(bytes) => {
+                    let len = bytes.len();
+                    let buf = libc::malloc(len.max(1)) as *mut u8;
+                    if buf.is_null() {
+                        Some("Failed to allocate media result buffer".to_string())
+                    } else {
+                        ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+                        (*resp).result_bytes = buf;
+                        (*resp).result_len = len;
+                        let c = CString::new(mime.as_str()).unwrap_or_default();
+                        (*resp).mime = libc::strdup(c.as_ptr());
+                        None
+                    }
+                }
+                Err(e) => Some(format!("Failed to decode media result: {}", e)),
+            };
+        if let Some(msg) = media_err {
+            (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            let c = CString::new(msg).unwrap_or_default();
+            (*resp).error = libc::strdup(c.as_ptr());
+        }
+    } else if let Some(result) = &parsed.result {
         let s = serde_json::to_string(result).unwrap_or_default();
         let c = CString::new(s).unwrap_or_default();
         (*resp).result_json = libc::strdup(c.as_ptr());
@@ -841,7 +880,20 @@ pub unsafe extern "C" fn daemon_serialize_response(
         ),
     );
 
-    if (*response).success && !(*response).result_json.is_null() {
+    // A media-typed (`@mime`) return carries raw bytes + a media type instead of
+    // a JSON value. Convey them across the socket wire as base64 + mime so the
+    // JSON envelope stays valid (the receiver reconstructs result_bytes/mime);
+    // reuse this for the front-end forward, which renders the media itself.
+    if (*response).success && !(*response).mime.is_null() && !(*response).result_bytes.is_null() {
+        use base64::Engine;
+        let bytes = std::slice::from_raw_parts((*response).result_bytes, (*response).result_len);
+        let mime = CStr::from_ptr((*response).mime).to_string_lossy();
+        map.insert(
+            "result_b64".into(),
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        );
+        map.insert("mime".into(), serde_json::Value::String(mime.into_owned()));
+    } else if (*response).success && !(*response).result_json.is_null() {
         let raw = CStr::from_ptr((*response).result_json).to_string_lossy();
         // Try to parse as JSON value; if it fails, store as raw string
         match serde_json::from_str::<serde_json::Value>(&raw) {
@@ -2104,7 +2156,14 @@ unsafe fn handle_lp_connection(
     let want_packet = G_DAEMON_OUTPUT_PACKET.load(Ordering::Relaxed)
         && (*req).method == DaemonMethod::Call;
     let prev = set_current_output_packet(want_packet);
+    // The raw-media form (an `@mime` return as result_bytes+mime, conveyed as
+    // base64 in the JSON envelope) is requested per-request by the serving
+    // front-end's forward (`media:true`). Direct length-prefixed clients leave
+    // it off and keep the JSON `result`. Packet mode already returns raw bytes.
+    let want_media = (*req).media && !want_packet;
+    let prev_media = set_current_output_media_bytes(want_media);
     let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+    set_current_output_media_bytes(prev_media);
     set_current_output_packet(prev);
 
     let mut write_err: *mut c_char = ptr::null_mut();
@@ -2362,21 +2421,6 @@ fn set_socket_timeouts(fd: i32, timeout_sec: i32) {
 // -- Main daemon event loop ---------------------------------------------------
 
 const MAX_LISTENERS: usize = 3;
-
-/// Crate-public alias of `getsockname_port` for use by router_ffi.
-pub(crate) unsafe fn getsockname_port_pub(fd: i32) -> Option<u16> {
-    getsockname_port(fd)
-}
-
-/// Crate-public alias of `write_port_file_atomic` for use by router_ffi.
-pub(crate) fn write_port_file_atomic_pub(
-    path: &str,
-    http_port: Option<u16>,
-    tcp_port: Option<u16>,
-    unix_path: Option<&str>,
-) -> std::io::Result<()> {
-    write_port_file_atomic(path, http_port, tcp_port, unix_path)
-}
 
 /// Read the port a TCP socket was bound to. Necessary when the caller
 /// passed port 0 (bind ephemeral; OS picks the port). Returns None on
@@ -2791,4 +2835,48 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
 // Signal handler (must be async-signal-safe)
 extern "C" fn daemon_signal_handler_fn(_sig: i32) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod media_wire_tests {
+    use super::*;
+
+    // A media (@mime) return must survive the daemon response wire: serialize
+    // sets result_b64+mime; parse reconstructs the raw bytes + mime byte-for-byte.
+    // This is what carries @mime across the front-end forward.
+    #[test]
+    fn media_response_round_trips() {
+        unsafe {
+            let mut resp: DaemonResponse = std::mem::zeroed();
+            resp.success = true;
+            let bytes: &[u8] = b"\x89PNG\r\n\x1a\n\x00\xff\x01binary";
+            resp.result_bytes = libc::malloc(bytes.len()) as *mut u8;
+            ptr::copy_nonoverlapping(bytes.as_ptr(), resp.result_bytes, bytes.len());
+            resp.result_len = bytes.len();
+            let mime_c = CString::new("image/png").unwrap();
+            resp.mime = libc::strdup(mime_c.as_ptr());
+
+            let mut len: usize = 0;
+            let json = daemon_serialize_response(&mut resp, &mut len);
+            assert!(!json.is_null());
+
+            let mut err: *mut c_char = ptr::null_mut();
+            let parsed = daemon_parse_response(json, len, &mut err);
+            assert!(err.is_null());
+            assert!(!parsed.is_null());
+            assert!((*parsed).success);
+            assert!(!(*parsed).mime.is_null());
+            assert!(!(*parsed).result_bytes.is_null());
+            assert_eq!((*parsed).result_len, bytes.len());
+            let out = std::slice::from_raw_parts((*parsed).result_bytes, (*parsed).result_len);
+            assert_eq!(out, bytes);
+            let mime = CStr::from_ptr((*parsed).mime).to_string_lossy();
+            assert_eq!(mime, "image/png");
+
+            libc::free(json as *mut c_void);
+            libc::free(resp.result_bytes as *mut c_void);
+            libc::free(resp.mime as *mut c_void);
+            daemon_free_response(parsed);
+        }
+    }
 }

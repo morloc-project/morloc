@@ -62,13 +62,18 @@ fn build_help_template() -> String {
   {b}update{r}     Rebuild an environment
   {b}nuke{r}       Remove all morloc environments
 
-{bu}Deployment{r}
+{bu}Serving{r}
+  {b}install{r}    Build and install a module into the active environment
+  {b}expose{r}     Choose which installed modules are served (MCP/API/eval)
   {b}start{r}      Serve an environment over the network
+  {b}eval{r}       Evaluate a morloc expression against a serve container
+  {b}status{r}     List running serve containers
   {b}stop{r}       Stop a running serve container
   {b}logs{r}       Stream logs from a running serve container
+
+{bu}Deployment{r}
   {b}freeze{r}     Export installed state as a frozen artifact
   {b}unfreeze{r}   Build a portable serve image from frozen state
-  {b}status{r}     List running serve containers
   {b}doctor{r}     Check environment health and diagnose issues
 
 {bu}Options{r}
@@ -344,11 +349,38 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     // -- Deployment --
     /// Serve an environment over the network
     #[command(display_order = 20)]
-    #[command(after_help = "Examples:\n  morloc-manager start              # serve active environment\n  morloc-manager start myenv -p 9090:8080")]
+    #[command(after_help = "Examples:\n  morloc-manager start                       # serve the environment's exposed set\n  morloc-manager start myenv -p 9090:8080\n  morloc-manager start --mcp mymodule -p 9000:9000   # serve one module as MCP/HTTP")]
     Start {
         /// Environment name (default: active environment)
         name: Option<String>,
-        /// Port mapping HOST:CONTAINER (default: 8080:8080)
+        /// Ad-hoc: serve just this one installed module over MCP, ignoring the
+        /// exposed set. Default (no --mcp) serves the environment's exposed
+        /// set (managed with `morloc-manager expose`).
+        #[arg(long, value_name = "PROGRAM")]
+        mcp: Option<String>,
+        /// Bearer token required on HTTP requests. Falls back to the
+        /// MORLOC_MCP_TOKEN environment variable.
+        #[arg(long = "auth-token", value_name = "TOKEN")]
+        auth_token: Option<String>,
+        /// Expose the MCP server off-loopback (publish on 0.0.0.0 instead of
+        /// the default 127.0.0.1). Requires a token and --allow-plaintext.
+        #[arg(long)]
+        expose: bool,
+        /// Acknowledge that an exposed (--expose) MCP endpoint sends its bearer
+        /// token and traffic in cleartext (no TLS). Required to expose off-box.
+        #[arg(long = "allow-plaintext")]
+        allow_plaintext: bool,
+        /// Permit an exposed MCP endpoint with no token (an open, unauthenticated
+        /// server on the network). Strongly discouraged.
+        #[arg(long = "allow-no-auth")]
+        allow_no_auth: bool,
+        /// DANGEROUS. Serve the loopback MCP endpoint unauthenticated even where
+        /// it cannot be confined to the host's loopback (Docker Desktop / podman
+        /// machine), leaving it reachable by any container co-resident on the
+        /// engine's network. Only use on a host you fully trust.
+        #[arg(long = "unsafe")]
+        unsafe_serve: bool,
+        /// Port mapping HOST:CONTAINER (default: 8080:8080, or 9000:9000 with --mcp)
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
         /// Pass environment variable to the container (KEY=VALUE)
@@ -428,8 +460,34 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(short, long, default_value = "8080")]
         port: u16,
     },
+    /// Build and install a module into the active environment
+    #[command(display_order = 4)]
+    #[command(after_help = "\
+Examples:
+  morloc-manager install main.loc              # installs under the module name
+
+Sugar for: morloc-manager run -- morloc make --install <src>")]
+    Install {
+        /// Morloc source file (.loc) to build and install. The installed program
+        /// is named after its module (the `module <name>` declaration), not the
+        /// source file, so it is exposed/served by that module name.
+        src: String,
+        /// One-shot engine flag, appended to env.flags.yaml `run.<engine>`
+        /// for this invocation only (repeatable; not persisted)
+        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
+        engine_arg: Vec<String>,
+    },
+    /// Declare which installed modules are served, and how (edits state only;
+    /// run `start` to realize it). Covers the network views (MCP, API) and the
+    /// eval capability; the CLI view is local (`morloc-manager run`).
+    #[command(display_order = 23)]
+    #[command(after_help = "Examples:\n  morloc-manager expose add dna --as mcp\n  morloc-manager expose add util --as mcp,api\n  morloc-manager expose eval --allow dna,stats\n  morloc-manager expose list\n  morloc-manager expose rm dna")]
+    Expose {
+        #[command(subcommand)]
+        action: ExposeAction,
+    },
     /// List running serve containers
-    #[command(display_order = 26)]
+    #[command(display_order = 27)]
     #[command(after_help = "Examples:\n  morloc-manager status")]
     Status,
     /// Check environment health and diagnose issues
@@ -454,6 +512,48 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// a new cluster.
         #[arg(long)]
         slurm: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExposeAction {
+    /// Add a module to the exposure set over one or more protocols
+    Add {
+        /// Installed module name
+        module: String,
+        /// Protocols to expose over (comma-separated: mcp, api)
+        #[arg(long = "as", value_enum, value_delimiter = ',', required = true)]
+        protocols: Vec<Protocol>,
+        /// Environment (default: active)
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Remove a module from all exposure sets
+    Rm {
+        /// Module name
+        module: String,
+        /// Environment (default: active)
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Show what is exposed
+    List {
+        /// Environment (default: active)
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Enable (or update) the eval capability with a sandbox allow-list
+    Eval {
+        /// Modules eval may import (comma-separated). Independent of the exposed
+        /// sets. Omit for an empty allow-list; use --off to disable eval.
+        #[arg(long, value_delimiter = ',')]
+        allow: Vec<String>,
+        /// Disable the eval capability
+        #[arg(long)]
+        off: bool,
+        /// Environment (default: active)
+        #[arg(long)]
+        env: Option<String>,
     },
 }
 
@@ -2062,7 +2162,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- start ----
-        Cmd::Start { name, port, env_vars, env_file, engine_arg, force } => {
+        Cmd::Start { name, mcp, auth_token, expose, allow_plaintext, allow_no_auth, unsafe_serve, port, env_vars, env_file, engine_arg, force } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let image = ec.active_image().to_string();
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -2081,29 +2181,125 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 }
                 eprintln!("Warning: replacing existing serve container '{container_name}'");
             }
-            let port_mappings = if port.is_empty() {
-                vec![(8080, 8080)]
+            // Resolve WHAT to serve: a --mcp <program> one-off, or the
+            // environment's exposed set (expose.yaml). There is no
+            // serve-everything mode -- exposure is always an explicit decision.
+            let spec = if let Some(ref program) = mcp {
+                ensure_program_installed(env_scope, &env_name, program)?;
+                ServeSpec { mcp: vec![program.clone()], api: Vec::new(), eval_allow: None }
             } else {
-                port
+                let ex = cfg::read_exposure(env_scope, &env_name)?;
+                if ex.is_empty() {
+                    return Err(ManagerError::EnvError(format!(
+                        "Nothing is exposed in '{env_name}'. Expose a module first:\n    \
+                         morloc-manager expose add <module> --as mcp\n  \
+                         (or 'start --mcp <module>' for a one-off)."
+                    )));
+                }
+                for m in ex.exposed_modules() {
+                    ensure_program_installed(env_scope, &env_name, &m)?;
+                }
+                let eval_allow = ex.eval.as_ref().map(|e| e.allow.join(","));
+                ServeSpec { mcp: ex.mcp.clone(), api: ex.api.clone(), eval_allow }
             };
+            // The eval capability is reachable over both adapters (the `eval`
+            // MCP tool and the `/eval` route), so it keeps both live even with
+            // no module in either set.
+            let eval_on = spec.eval_allow.is_some();
+            let serves_mcp = !spec.mcp.is_empty() || eval_on;
+            let serves_api = !spec.api.is_empty() || eval_on;
+
+            // MCP defaults to 9000, an API-only serve to 8080. One listener
+            // serves both adapters (/mcp and /call) on the same port. With no
+            // explicit -p, auto-pick a free host port so concurrent serves in
+            // different environments just work; an explicit -p is respected.
+            let default_port: u16 = if serves_mcp { 9000 } else { 8080 };
+            let (host_port, container_port) = if port.is_empty() {
+                let p = find_free_host_port(default_port, 100);
+                if p != default_port {
+                    eprintln!("Port {default_port} is in use; serving on {p} instead (override with -p).");
+                }
+                (p, p)
+            } else {
+                port.first().copied().unwrap_or((default_port, default_port))
+            };
+            let port_mappings = vec![(host_port, container_port)];
             let mut extra_flags = cfg::read_flag_config(env_scope, &env_name)?
                 .materialize(Phase::Start, ec.engine);
             extra_flags.extend(engine_arg.iter().cloned());
-            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
+            let mut user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
+
+            let mh = serve::CONTAINER_MORLOC_HOME;
+            let token = resolve_mcp_token(auth_token);
+            let plan = serve_plan(
+                ec.engine, &spec, mh, container_port, host_port,
+                expose, allow_plaintext, allow_no_auth, unsafe_serve,
+                cfg!(target_os = "linux"), token,
+            )?;
+            let publish_host = plan.publish_host;
+            let network = plan.network;
+            let unsafe_unconfined = plan.unsafe_unconfined;
+            let mut mcp_token: Option<String> = None;
+            if let Some(t) = plan.token {
+                mcp_token = Some(t.clone());
+                user_env.push(("MORLOC_MCP_TOKEN".to_string(), t));
+            }
+
             serve::serve_environment(
                 ec.engine, verbose, &image,
                 &data_dir.to_string_lossy(), &container_name,
-                &port_mappings, &extra_flags, &Some(ec.shm_size.clone()),
-                &user_env,
-            )
+                &port_mappings, publish_host.as_deref(), network.as_deref(), &extra_flags,
+                &Some(ec.shm_size.clone()), &user_env, &plan.command,
+            )?;
+
+            // Human-facing status on stderr; the client MCP config as pure JSON
+            // on stdout (so `> file` / `| jq` capture clean config).
+            let url_host = if expose {
+                eprintln!("Serving '{env_name}' on 0.0.0.0:{host_port} (EXPOSED, plaintext).");
+                eprintln!("  A bearer token over plaintext stops scanners, not eavesdroppers.");
+                eprintln!("  Do not commit the printed token into a project-scoped .mcp.json.");
+                serve::system_hostname()
+            } else if unsafe_unconfined {
+                eprintln!("DANGER: serving '{env_name}' on 127.0.0.1:{host_port} UNAUTHENTICATED (--unsafe).");
+                eprintln!("  Reachable by any container co-resident on the engine's network. Trusted hosts only.");
+                "127.0.0.1".to_string()
+            } else if mcp_token.is_some() {
+                eprintln!("Serving '{env_name}' on 127.0.0.1:{host_port} (loopback; token required on this engine).");
+                "127.0.0.1".to_string()
+            } else {
+                eprintln!("Serving '{env_name}' on 127.0.0.1:{host_port} (host-local; no token needed).");
+                "127.0.0.1".to_string()
+            };
+            if serves_mcp {
+                eprintln!("  MCP:  http://{url_host}:{host_port}/mcp");
+            }
+            if serves_api {
+                eprintln!("  API:  http://{url_host}:{host_port}/call/<module>/<command>");
+            }
+            // Record what we actually launched so `status` can report it.
+            let _ = cfg::write_serve_runtime(env_scope, &env_name, &ServeRuntime {
+                mcp: spec.mcp.clone(),
+                api: spec.api.clone(),
+                eval: spec.eval_allow.is_some(),
+                host: url_host.clone(),
+                port: host_port,
+                token_required: mcp_token.is_some(),
+            });
+            if serves_mcp {
+                // The mcpServers entry name: the one-off program, else the env.
+                let cfg_name = mcp.clone().unwrap_or_else(|| env_name.clone());
+                print_http_mcp_config(&cfg_name, &url_host, host_port, mcp_token.as_deref());
+            }
+            Ok(())
         }
 
         // ---- stop ----
         Cmd::Stop { name } => {
-            let (env_name, _, ec) = resolve_env_or_active(name)?;
+            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let container_name = serve::serve_container_name(&env_name);
             if crate::container::container_exists(ec.engine, &container_name) {
                 serve::stop_serve_container(ec.engine, verbose, &container_name)?;
+                cfg::remove_serve_runtime(env_scope, &env_name);
                 eprintln!("Stopped serving environment: {env_name}");
             } else {
                 return Err(ManagerError::EnvError(
@@ -2209,6 +2405,78 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
 
+        // ---- install ----
+        Cmd::Install { src, engine_arg } => {
+            // Sugar for `morloc make --install <src>`. The installed program is
+            // named after its module, not the source file (or any -o), so it is
+            // NOT conflated with `main.loc`.
+            let args = vec![
+                "morloc".to_string(), "make".to_string(),
+                "--install".to_string(), src,
+            ];
+            run_in_container(verbose, false, &args, &[], &engine_arg, false)
+        }
+
+        // ---- expose ----
+        Cmd::Expose { action } => match action {
+            ExposeAction::Add { module, protocols, env } => {
+                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                // Exposure is a view of an INSTALLED program; catch typos early.
+                let launcher = cfg::env_data_dir(scope, &env_name).join("bin").join(&module);
+                if !launcher.exists() {
+                    return Err(ManagerError::EnvError(format!(
+                        "Module '{module}' is not installed in environment '{env_name}' \
+                         (no bin/{module}).\n  Install it first: morloc-manager install <src>.loc"
+                    )));
+                }
+                let mut ex = cfg::read_exposure(scope, &env_name)?;
+                ex.add(&module, &protocols);
+                cfg::write_exposure(scope, &env_name, &ex)?;
+                let protos: Vec<&str> = protocols.iter().map(|p| p.as_str()).collect();
+                eprintln!(
+                    "Exposed '{module}' over {} in '{env_name}'. Run 'morloc-manager start' to serve.",
+                    protos.join(", ")
+                );
+                Ok(())
+            }
+            ExposeAction::Rm { module, env } => {
+                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let mut ex = cfg::read_exposure(scope, &env_name)?;
+                if ex.remove(&module) {
+                    cfg::write_exposure(scope, &env_name, &ex)?;
+                    eprintln!("Unexposed '{module}' in '{env_name}'. Run 'morloc-manager start' to apply.");
+                } else {
+                    eprintln!("'{module}' was not exposed in '{env_name}'.");
+                }
+                Ok(())
+            }
+            ExposeAction::List { env } => {
+                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let ex = cfg::read_exposure(scope, &env_name)?;
+                print_exposure(&env_name, &ex, json);
+                Ok(())
+            }
+            ExposeAction::Eval { allow, off, env } => {
+                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let mut ex = cfg::read_exposure(scope, &env_name)?;
+                if off {
+                    ex.eval = None;
+                    eprintln!("Disabled eval in '{env_name}'.");
+                } else if allow.is_empty() {
+                    ex.eval = Some(EvalExposure { allow: Vec::new() });
+                    eprintln!(
+                        "Enabled eval in '{env_name}' with an EMPTY allow-list \
+                         (eval can import nothing; add modules with --allow)."
+                    );
+                } else {
+                    ex.eval = Some(EvalExposure { allow: allow.clone() });
+                    eprintln!("Enabled eval in '{env_name}', allow-list: {}.", allow.join(", "));
+                }
+                cfg::write_exposure(scope, &env_name, &ex)?;
+                Ok(())
+            }
+        },
+
         // ---- status ----
         Cmd::Status => {
             let mut all_containers: Vec<serve::ServeContainerInfo> = Vec::new();
@@ -2243,6 +2511,19 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             if !any_engine {
                 return Err(ManagerError::EngineNotFound);
             }
+            // Enrich each running container with its runtime serve-record
+            // (mode / modules / url) -- authoritative even under host-networking
+            // where `docker ps` shows no port.
+            for c in all_containers.iter_mut() {
+                let rt = cfg::find_env_scope(&c.env)
+                    .ok()
+                    .and_then(|scope| cfg::read_serve_runtime(scope, &c.env));
+                if let Some(rt) = rt {
+                    c.mode = rt.mode();
+                    c.modules = rt.modules_summary();
+                    c.url = if rt.token_required { format!("{} (token)", rt.url()) } else { rt.url() };
+                }
+            }
             if json {
                 #[derive(serde::Serialize)]
                 struct StatusOutput { containers: Vec<serve::ServeContainerInfo> }
@@ -2252,8 +2533,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 println!("No morloc serve containers running.");
             } else {
                 println!("Running servers:");
+                println!("  {:<16} {:<12} {:<20} {:<32} STATUS", "ENV", "MODE", "MODULES", "URL");
                 for c in &all_containers {
-                    println!("  {}  {}  ({})  [{}]", c.name, c.ports, c.env, c.status);
+                    println!(
+                        "  {:<16} {:<12} {:<20} {:<32} {}",
+                        c.env, c.mode, c.modules, c.url, c.status
+                    );
                 }
             }
             Ok(())
@@ -2653,6 +2938,245 @@ fn run_with_config(
     }
 }
 
+/// Confirm an MCP-servable program is installed in the environment. `morloc
+/// make -o <program> --install` installs the CLI launcher at `bin/<program>`
+/// (the `-o` name); the launcher's exec line carries the real manifest path,
+/// so the nexus resolves it. (The build dir under exe/ is keyed on the source
+/// basename, not the program name, so it is not a reliable lookup key.)
+fn ensure_program_installed(env_scope: Scope, env_name: &str, program: &str) -> Result<()> {
+    let host_launcher = cfg::env_data_dir(env_scope, env_name)
+        .join("bin")
+        .join(program);
+    if !host_launcher.exists() {
+        return Err(ManagerError::EnvError(format!(
+            "Program '{program}' is not installed in environment '{env_name}' \
+             (looked for bin/{program}).\n  Install it with: \
+             morloc-manager install <file>.loc  (the program is named after its \
+             module, so serve it as '{program}' only if that is the module name)."
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve the MCP bearer token: an explicit `--auth-token` wins, else the
+/// `MORLOC_MCP_TOKEN` environment variable (which keeps the token off argv).
+fn resolve_mcp_token(explicit: Option<String>) -> Option<String> {
+    explicit.or_else(|| std::env::var("MORLOC_MCP_TOKEN").ok().filter(|s| !s.is_empty()))
+}
+
+/// Pick a free host port for a serve: try `preferred`, then scan up to `range`
+/// ports above it, returning the first that binds on 127.0.0.1. Falls back to
+/// `preferred` if none is free (the engine then reports the real conflict). This
+/// is a best-effort predictor -- both host-networking (nexus binds the host
+/// port) and bridge publishing (`-p`) contend for the same host port.
+fn find_free_host_port(preferred: u16, range: u16) -> u16 {
+    for p in preferred..=preferred.saturating_add(range) {
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return p;
+        }
+    }
+    preferred
+}
+
+/// A resolved plan for serving one program as MCP over HTTP: the container
+/// command, the host publish binding (docker `-p <ip>:H:C`; `None` for
+/// apptainer, which has no `-p`), and the token to inject (if any).
+struct ServePlan {
+    command: Vec<String>,
+    /// `Some("host")` => run in the host netns (docker/podman `--network host`)
+    /// so a loopback bind lands on the host's loopback. `None` => engine default.
+    network: Option<String>,
+    publish_host: Option<String>,
+    token: Option<String>,
+    /// True when serving unauthenticated on an endpoint that is NOT confined to
+    /// the host's loopback (the `--unsafe` fallback), so the caller warns loudly.
+    unsafe_unconfined: bool,
+}
+
+/// What to serve: per-adapter module membership + the eval capability.
+struct ServeSpec {
+    mcp: Vec<String>,
+    api: Vec<String>,
+    /// `Some(csv)` enables the sandboxed eval capability with this allow-list.
+    eval_allow: Option<String>,
+}
+
+/// Decide how to serve the exposure `spec` (MCP + API adapters) over HTTP via the
+/// front-end, enforcing the security tiers.
+///
+/// The loopback default must be reachable only by host processes. How that is
+/// achieved is engine- and platform-specific:
+///
+/// * apptainer already runs in the host netns, so binding `--http-host
+///   127.0.0.1` IS the host loopback (no `-p`).
+/// * docker/podman on Linux share the host kernel, so `--network host` +
+///   `--http-host 127.0.0.1` binds the host's loopback directly -- sibling
+///   containers have their own loopback and cannot reach it.
+/// * docker/podman on a VM-backed engine (Docker Desktop / podman machine, i.e.
+///   a non-Linux manager) cannot bind the host loopback through the VM. There we
+///   fall back to a bridge published on `127.0.0.1` and REQUIRE a token, because
+///   co-resident VM containers can reach the bridge IP.
+///
+/// `--allow-no-auth` is added exactly when the nexus binds a non-loopback
+/// address with no token (an exposed endpoint the operator explicitly waived).
+fn serve_plan(
+    engine: ContainerEngine,
+    spec: &ServeSpec,
+    mh: &str,
+    container_port: u16,
+    host_port: u16,
+    expose: bool,
+    allow_plaintext: bool,
+    allow_no_auth: bool,
+    unsafe_serve: bool,
+    // Whether docker/podman can bind the host's loopback via the shared netns
+    // (true on a Linux manager; false on a VM-backed engine). The production
+    // caller passes `cfg!(target_os = "linux")`; kept a parameter so both the
+    // native and VM-backed paths are unit-testable on any CI.
+    host_net_usable: bool,
+    token: Option<String>,
+) -> Result<ServePlan> {
+    if expose {
+        if !allow_plaintext {
+            return Err(ManagerError::EnvError(format!(
+                "Refusing to expose MCP off-loopback over plaintext HTTP without \
+                 --allow-plaintext.\n  A bearer token over plaintext protects against \
+                 scanners, not eavesdroppers. Prefer the default (loopback) and reach \
+                 it over an SSH tunnel:\n    ssh -N -L {host_port}:127.0.0.1:{host_port} <host>"
+            )));
+        }
+        if token.is_none() && !allow_no_auth {
+            return Err(ManagerError::EnvError(
+                "An exposed MCP endpoint requires a token: set MORLOC_MCP_TOKEN or \
+                 --auth-token (or --allow-no-auth to serve it unauthenticated, \
+                 strongly discouraged)."
+                    .to_string(),
+            ));
+        }
+    }
+
+    let is_apptainer = matches!(engine, ContainerEngine::Apptainer);
+
+    // (http_host bound by the nexus, publish_host for `-p`, network mode,
+    //  whether the endpoint is served unauthenticated but NOT host-confined).
+    let (http_host, publish_host, network, unsafe_unconfined) = if expose {
+        let pub_ip = if is_apptainer { None } else { Some("0.0.0.0".to_string()) };
+        ("0.0.0.0".to_string(), pub_ip, None, false)
+    } else if is_apptainer {
+        ("127.0.0.1".to_string(), None, None, false)
+    } else if host_net_usable {
+        // Bind the host's loopback directly via the shared netns.
+        ("127.0.0.1".to_string(), None, Some("host".to_string()), false)
+    } else {
+        // Docker Desktop / podman machine fallback: a bridge on 127.0.0.1 still
+        // exposes the bridge IP to co-resident VM containers, so require a token
+        // unless the operator explicitly waives it with --unsafe.
+        if token.is_none() && !unsafe_serve {
+            return Err(ManagerError::EnvError(
+                "On this container engine (Docker Desktop / podman machine) a loopback \
+                 MCP server cannot bind the host's loopback directly, so it is published \
+                 on a bridge that co-resident containers can reach.\n  Provide a token:\n    \
+                 MORLOC_MCP_TOKEN=$(openssl rand -hex 16) morloc-manager start\n  \
+                 (Or serve off-box with --expose, run on a Linux engine for tokenless loopback, \
+                 or pass --unsafe to serve it unauthenticated anyway.)"
+                    .to_string(),
+            ));
+        }
+        // Unconfined-and-unauthenticated only when there is no token (the
+        // --unsafe waiver); a token still confines access to holders of it.
+        ("0.0.0.0".to_string(), Some("127.0.0.1".to_string()), None, token.is_none())
+    };
+
+    // In a shared host netns there is no port mapping; the nexus binds the port
+    // the client reaches (host_port). On a bridge, it binds the in-container port
+    // and `-p` maps host_port -> container_port.
+    let host_netns = is_apptainer || network.as_deref() == Some("host");
+    let bind_port = if host_netns { host_port } else { container_port };
+
+    // The nexus refuses a non-loopback bind with no token unless --allow-no-auth.
+    let need_allow_no_auth = http_host == "0.0.0.0" && token.is_none();
+
+    let mut command = vec![
+        "morloc-nexus".to_string(),
+        "router".to_string(),
+        "--fdb".to_string(), format!("{mh}/exe"),
+        "--http-port".to_string(), bind_port.to_string(),
+        "--http-host".to_string(), http_host,
+    ];
+    for m in &spec.mcp {
+        command.push("--mcp".to_string());
+        command.push(m.clone());
+    }
+    for m in &spec.api {
+        command.push("--api".to_string());
+        command.push(m.clone());
+    }
+    if let Some(allow) = &spec.eval_allow {
+        command.push("--eval".to_string());
+        command.push("--eval-allowed-modules".to_string());
+        command.push(allow.clone());
+    }
+    if need_allow_no_auth {
+        command.push("--allow-no-auth".to_string());
+    }
+
+    Ok(ServePlan { command, network, publish_host, token, unsafe_unconfined })
+}
+
+/// Print an environment's exposure set (modules with their protocols, and the
+/// eval capability). Under --json, pure JSON on stdout.
+fn print_exposure(env: &str, ex: &ExposureConfig, json: bool) {
+    if json {
+        let v = serde_json::json!({
+            "environment": env,
+            "mcp": ex.mcp,
+            "api": ex.api,
+            "eval": ex.eval.as_ref().map(|e| serde_json::json!({ "allow": e.allow })),
+        });
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return;
+    }
+    if ex.is_empty() {
+        println!("Nothing exposed in '{env}'. Add with: morloc-manager expose add <module> --as mcp");
+        return;
+    }
+    println!("Exposed in '{env}':");
+    for m in ex.exposed_modules() {
+        let protos: Vec<&str> = ex.protocols_of(&m).iter().map(|p| p.as_str()).collect();
+        println!("  {m}  [{}]", protos.join(", "));
+    }
+    match &ex.eval {
+        Some(e) if e.allow.is_empty() => println!("  eval  [enabled; empty allow-list]"),
+        Some(e) => println!("  eval  [enabled; allow: {}]", e.allow.join(", ")),
+        None => {}
+    }
+    println!("\nRun 'morloc-manager start' to serve this set.");
+}
+
+/// Print a client `mcpServers` config entry (HTTP transport) as PURE JSON on
+/// stdout -- so `> file` / `| jq` capture clean config. A token, if present,
+/// adds the `Authorization` header. Any human-facing text is the caller's
+/// responsibility (stderr).
+fn print_http_mcp_config(name: &str, url_host: &str, port: u16, token: Option<&str>) {
+    let config = build_http_mcp_config(name, url_host, port, token);
+    println!("{}", serde_json::to_string_pretty(&config).unwrap_or_default());
+}
+
+fn build_http_mcp_config(
+    name: &str,
+    url_host: &str,
+    port: u16,
+    token: Option<&str>,
+) -> serde_json::Value {
+    let mut entry = serde_json::json!({ "url": format!("http://{url_host}:{port}/mcp") });
+    if let Some(t) = token {
+        entry["headers"] = serde_json::json!({ "Authorization": format!("Bearer {t}") });
+    }
+    let mut servers = serde_json::Map::new();
+    servers.insert(name.to_string(), entry);
+    serde_json::json!({ "mcpServers": serde_json::Value::Object(servers) })
+}
+
 fn run_morloc_init_for(
     target: Option<(String, Scope, EnvironmentConfig)>,
     verbose: bool,
@@ -2687,6 +3211,143 @@ fn normalize_trailing(p: &str) -> String {
 mod tests {
     use super::*;
     use crate::container::{build_build_args, build_run_args, engine_executable, engine_specific_run_flags, BuildConfig};
+
+    // ---- MCP config emission ----
+
+    #[test]
+    fn http_mcp_config_loopback_has_no_headers() {
+        let v = build_http_mcp_config("dna", "127.0.0.1", 9000, None);
+        let e = &v["mcpServers"]["dna"];
+        assert_eq!(e["url"], "http://127.0.0.1:9000/mcp");
+        assert!(e.get("headers").is_none(), "loopback config must carry no token");
+    }
+
+    #[test]
+    fn http_mcp_config_offbox_carries_bearer_header() {
+        let v = build_http_mcp_config("dna", "host.example", 9000, Some("s3cret"));
+        let e = &v["mcpServers"]["dna"];
+        assert_eq!(e["url"], "http://host.example:9000/mcp");
+        assert_eq!(e["headers"]["Authorization"], "Bearer s3cret");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan(
+        engine: ContainerEngine,
+        expose: bool,
+        plaintext: bool,
+        noauth: bool,
+        unsafe_serve: bool,
+        host_net: bool,
+        tok: Option<&str>,
+    ) -> Result<ServePlan> {
+        let spec = ServeSpec {
+            mcp: vec!["dna".to_string()],
+            api: Vec::new(),
+            eval_allow: None,
+        };
+        serve_plan(
+            engine, &spec, "/opt/morloc", 9000, 9000,
+            expose, plaintext, noauth, unsafe_serve, host_net, tok.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn mcp_plan_docker_loopback_linux_uses_host_net_no_token() {
+        // Option A: on a Linux engine the loopback default shares the host netns
+        // and binds the host's 127.0.0.1 directly -- no -p, no token, no
+        // --allow-no-auth, and unreachable by sibling containers.
+        let p = plan(ContainerEngine::Docker, false, false, false, false, true, None).unwrap();
+        assert!(p.command.windows(2).any(|w| w == ["--http-host", "127.0.0.1"]));
+        assert_eq!(p.network.as_deref(), Some("host"));
+        assert!(p.publish_host.is_none());
+        assert!(!p.command.iter().any(|a| a == "--allow-no-auth"));
+        assert!(p.token.is_none());
+        assert!(!p.unsafe_unconfined);
+    }
+
+    #[test]
+    fn mcp_plan_apptainer_loopback_binds_loopback_without_allow_no_auth() {
+        // On apptainer (no -p) a loopback default must bind 127.0.0.1 directly
+        // and NOT pass --allow-no-auth (which would open an unauthenticated
+        // 0.0.0.0 endpoint on the host). Its host netns is intrinsic, so no
+        // --network flag is emitted.
+        let p = plan(ContainerEngine::Apptainer, false, false, false, false, true, None).unwrap();
+        assert!(p.command.windows(2).any(|w| w == ["--http-host", "127.0.0.1"]));
+        assert!(p.network.is_none());
+        assert!(p.publish_host.is_none());
+        assert!(!p.command.iter().any(|a| a == "--allow-no-auth"));
+    }
+
+    #[test]
+    fn mcp_plan_desktop_fallback_requires_token() {
+        // VM-backed engine (host_net=false): loopback cannot be host-confined, so
+        // no token is refused unless --unsafe.
+        assert!(plan(ContainerEngine::Docker, false, false, false, false, false, None).is_err());
+        // With a token it serves on a bridge published to loopback, token-guarded.
+        let p = plan(ContainerEngine::Docker, false, false, false, false, false, Some("t")).unwrap();
+        assert!(p.command.windows(2).any(|w| w == ["--http-host", "0.0.0.0"]));
+        assert_eq!(p.publish_host.as_deref(), Some("127.0.0.1"));
+        assert!(p.network.is_none());
+        assert!(!p.command.iter().any(|a| a == "--allow-no-auth")); // token present
+        assert_eq!(p.token.as_deref(), Some("t"));
+        assert!(!p.unsafe_unconfined);
+    }
+
+    #[test]
+    fn mcp_plan_desktop_fallback_unsafe_serves_unauthenticated() {
+        // --unsafe waives the token on the VM-backed fallback: unauthenticated on
+        // a bridge reachable by co-resident containers -> --allow-no-auth + the
+        // unconfined warning flag.
+        let p = plan(ContainerEngine::Docker, false, false, false, true, false, None).unwrap();
+        assert!(p.command.windows(2).any(|w| w == ["--http-host", "0.0.0.0"]));
+        assert_eq!(p.publish_host.as_deref(), Some("127.0.0.1"));
+        assert!(p.command.iter().any(|a| a == "--allow-no-auth"));
+        assert!(p.token.is_none());
+        assert!(p.unsafe_unconfined);
+    }
+
+    #[test]
+    fn mcp_plan_expose_requires_plaintext_and_token() {
+        assert!(plan(ContainerEngine::Docker, true, false, false, false, true, Some("t")).is_err()); // no --allow-plaintext
+        assert!(plan(ContainerEngine::Docker, true, true, false, false, true, None).is_err());       // no token, no --allow-no-auth
+        let p = plan(ContainerEngine::Docker, true, true, false, false, true, Some("t")).unwrap();
+        assert_eq!(p.publish_host.as_deref(), Some("0.0.0.0"));
+        assert!(p.network.is_none());
+        assert!(!p.command.iter().any(|a| a == "--allow-no-auth")); // token present
+        assert_eq!(p.token.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn serve_plan_builds_router_frontend_command() {
+        let spec = ServeSpec {
+            mcp: vec!["dna".to_string()],
+            api: vec!["align".to_string()],
+            eval_allow: Some("dna,stats".to_string()),
+        };
+        let p = serve_plan(
+            ContainerEngine::Docker, &spec, "/opt/morloc", 9000, 9000,
+            false, false, false, false, true, None,
+        ).unwrap();
+        // The front-end is the `router` mode, not the single-program `mcp` mode.
+        assert_eq!(p.command.first().map(String::as_str), Some("morloc-nexus"));
+        assert_eq!(p.command.get(1).map(String::as_str), Some("router"));
+        assert!(p.command.windows(2).any(|w| w == ["--fdb", "/opt/morloc/exe"]));
+        assert!(p.command.windows(2).any(|w| w == ["--mcp", "dna"]));
+        assert!(p.command.windows(2).any(|w| w == ["--api", "align"]));
+        assert!(p.command.iter().any(|a| a == "--eval"));
+        assert!(p.command.windows(2).any(|w| w == ["--eval-allowed-modules", "dna,stats"]));
+        assert!(!p.command.iter().any(|a| a == "--all"));
+    }
+
+    #[test]
+    fn find_free_host_port_skips_taken() {
+        // Bind a port, then confirm the picker avoids it and returns a bindable one.
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = l.local_addr().unwrap().port();
+        let picked = find_free_host_port(taken, 50);
+        assert_ne!(picked, taken, "should skip the bound port");
+        assert!(std::net::TcpListener::bind(("127.0.0.1", picked)).is_ok());
+    }
 
     // ---- Type tests ----
 

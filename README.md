@@ -26,12 +26,11 @@
  * Polyglot without boilerplate: Use the best language for each task with no
    manual bindings or interop code.
 
- * Type-directed CLI generation: Write concrete function signatures once and
-   automatically generate elegant command-line interfaces with argument
-   parsing, validation, help text, and documentation.
+ * Generate APIs, CLIs, and MCPs as views of the same underlying library with no
+   extra code (or AI).
 
- * Composable CLI tools: Morloc CLI programs can be composed by simply importing
-   them into a new Morloc module and re-exporting their functions.
+ * Morloc programs (and their API/CLI/MCP views) can be composed by simply
+   importing them into a new Morloc module and re-exporting their functions.
 
  * Seamless benchmarking and testing: Swap implementations and run the same
    benchmarks/tests across languages with consistent type signatures and data

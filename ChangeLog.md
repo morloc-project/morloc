@@ -1,3 +1,20 @@
+0.98.0 [2026-08-15]
+-------------------
+
+Refactor morloc-manager around install/expose/start subcommands
+  * `morloc-manager install <src.loc>` - build and install a module
+  * `morloc-manager expose`
+    * `add <module> --as mcp,api`
+    * `rm <module>` 
+    * `eval [--allow foo,bar] [--off] [--env <e>]` 
+  * `morloc-manager start [<env>]`
+    * --mcp 
+    * --auth-token
+    * --expose
+    * --allow-plaintext
+    * --allow-no-auth
+    * --unsafe
+
 0.97.0 [2026-08-10]
 -------------------
 

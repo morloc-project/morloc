@@ -371,7 +371,6 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
         x -> x
       wrapperSpecs =
         [WrapperSpec WCli cliName | not (makeNoCli args)]
-          ++ [WrapperSpec WMcp (makeMcpOut args) | not (null (makeMcpOut args))]
           ++ [WrapperSpec WDaemon (makeDaemonOut args) | not (null (makeDaemonOut args))]
       outfile = case makeCliOut args of
         "" -> Nothing

@@ -570,6 +570,11 @@ pub enum Arg {
         /// field is `type_desc` because `type` is a reserved keyword.
         #[serde(default, rename = "type")]
         type_desc: Option<String>,
+        /// Explicit `@name` for this positional. When set it becomes the
+        /// argument's property name in the MCP tool schema; absent, the
+        /// schema falls back to the positional index (`_1`, `_2`, ...).
+        #[serde(default)]
+        name: Option<String>,
         /// Display placeholder shown in help (e.g. `"FILE"`). None
         /// falls back to a generic `ARG` placeholder.
         #[serde(default)]

@@ -805,6 +805,12 @@ typedef struct daemon_request_s {
     char* args_json;
     char* expr;
     char* name;
+    // Output projection from `?render=<flag>` on an HTTP `/call`; NULL when absent.
+    char* render;
+    // Set by the serving front-end's forward to request the raw-media form of an
+    // `@mime` return (bytes+mime, base64 on the wire). Direct length-prefixed
+    // clients leave it false and receive the JSON `result` field.
+    bool media;
 } daemon_request_t;
 
 // Error classification for daemon failures. On success, error_kind is
@@ -1212,12 +1218,13 @@ void http_free_request(http_request_t* req);
 // Section 18: Function declarations -- Router
 // ========================================================================
 
-router_t* router_init(const char* fdb_path, ERRMSG);
-void router_run(daemon_config_t* config, router_t* router);
+router_t* router_init_explicit(const char* fdb_path, const char* const* names,
+                               size_t n_names, ERRMSG);
 bool router_start_program(router_program_t* prog, ERRMSG);
 daemon_response_t* router_forward(router_t* router, const char* program,
                                   daemon_request_t* request, ERRMSG);
 char* router_build_discovery(router_t* router);
+void router_terminate_children(router_t* router);
 void router_free(router_t* router);
 
 // ========================================================================

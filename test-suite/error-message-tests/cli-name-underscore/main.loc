@@ -1,0 +1,11 @@
+-- A positional `@name` may not start with `_`: that namespace is reserved for
+-- the default `_1`/`_2` argument keys and the MCP `_render` selector. Rejected
+-- centrally in Docstrings.validatePositionalNames (covers every positional
+-- construction path, so this must fail even on the boolean-positional path).
+module main (foo)
+
+foo ::
+  --' @name _bad
+  Str ->
+  Str
+foo x = x

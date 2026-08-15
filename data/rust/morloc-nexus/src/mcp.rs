@@ -24,9 +24,13 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::io::BufRead;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::RawFd;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -141,8 +145,8 @@ pub fn serve(
     // argument mapping). Excluded commands are dropped with a stderr note.
     let shapes: Vec<McpToolShape> = build_tool_shapes(manifest);
     let tools_list: Vec<Value> = shapes.iter().map(|s| s.tool.clone()).collect();
-    let by_name: HashMap<String, &McpToolShape> =
-        shapes.iter().map(|s| (s.name.clone(), s)).collect();
+    let by_name: HashMap<&str, &McpToolShape> =
+        shapes.iter().map(|s| (s.name.as_str(), s)).collect();
 
     let server_name = manifest.name.clone();
     let server_version = manifest.build.morloc_version.clone();
@@ -222,7 +226,7 @@ fn handle_message(
     msg: &Value,
     session: &mut Session,
     tools_list: &[Value],
-    by_name: &HashMap<String, &McpToolShape>,
+    by_name: &HashMap<&str, &McpToolShape>,
     ctx: &DispatchCtx,
     server_name: &str,
     server_version: &str,
@@ -322,7 +326,7 @@ fn handle_message(
 fn handle_tools_call(
     id: Value,
     msg: &Value,
-    by_name: &HashMap<String, &McpToolShape>,
+    by_name: &HashMap<&str, &McpToolShape>,
     ctx: &DispatchCtx,
 ) -> Value {
     let params = match msg.get("params") {
@@ -804,6 +808,1416 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
     })
 }
 
+// ===========================================================================
+// Streamable-HTTP transport (`mcp --http-port N`)
+// ===========================================================================
+//
+// A second loop around the exact same message core (`handle_message`), tool
+// shapes, argument inversion, `_render`/`@mime` media blocks, and
+// `daemon_dispatch` backend the stdio server uses -- only the wire framing
+// differs. Implements the MCP "Streamable HTTP" transport in its simplest
+// spec-compliant form:
+//
+//   POST /mcp   -> JSON-RPC request in the body; single `application/json`
+//                  response (200), or 202 for a notification (no reply).
+//   GET  /mcp   -> 405 (this server offers no server-initiated SSE stream,
+//                  which the spec explicitly permits).
+//   DELETE /mcp -> terminate the session.
+//
+// Concurrency: connections and request reads run per-thread; a single global
+// mutex serializes execution because the language pools are shared,
+// single-socket, mutable processes -- two dispatches must never interleave on
+// a pool socket. Clients are isolated by `Mcp-Session-Id`. Parallel execution
+// (a pool-replication / worker model) is deliberately out of scope here.
+//
+// Because the endpoint is network-reachable, request reads are bounded (header
+// and body size caps + a per-read socket timeout) and the session table is
+// bounded (idle TTL + a hard cap), so a slow or abusive client cannot exhaust
+// memory or threads.
+
+/// Per-read socket timeout: a connection that sends nothing for this long is
+/// dropped, defusing idle/slowloris connections and freeing the thread. Also
+/// bounds keep-alive idle time between requests.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cap on a single request-line / header line. Longer -> the request is
+/// rejected and the connection closed.
+const MAX_HEADER_LINE_BYTES: u64 = 16 * 1024;
+
+/// Cap on the number of header lines in one request.
+const MAX_HEADERS: usize = 128;
+
+/// Idle time after which a session is evicted (bounds the session table when
+/// clients disconnect without sending `DELETE /mcp`).
+const SESSION_TTL: Duration = Duration::from_secs(3600);
+
+/// Hard cap on live sessions (backstop against initialize floods).
+const MAX_SESSIONS: usize = 10_000;
+
+/// One session's state: the handshake flag plus a last-seen stamp for TTL
+/// eviction.
+struct SessionInfo {
+    initialized: bool,
+    last_seen: Instant,
+}
+
+/// Shared server state guarded by one mutex. The raw C pointers address the
+/// leaked (process-lifetime) manifest and socket array; they are only ever
+/// dereferenced while the mutex is held, so no dispatch interleaves with
+/// another (see `unsafe impl Send`).
+struct HttpState {
+    manifest_c: *mut c_void,
+    sockets_ptr: *mut c_void,
+    n_pools: usize,
+    shm: CString,
+    shapes: Vec<McpToolShape>,
+    tools_list: Vec<Value>,
+    server_name: String,
+    server_version: String,
+    /// Session id -> handshake + last-seen state. Bounded by TTL + MAX_SESSIONS.
+    sessions: HashMap<String, SessionInfo>,
+}
+
+// Safe because every access to the raw pointers happens under the mutex, and
+// the pointed-to allocations live for the whole process (leaked in serve_http).
+unsafe impl Send for HttpState {}
+
+/// Serve the program's MCP tool surface over HTTP. Never returns.
+pub fn serve_http(
+    sockets: &mut [PoolSocket],
+    shm_basename: &str,
+    manifest_payload: &str,
+    manifest: &Manifest,
+    bind_host: &str,
+    auth_token: Option<String>,
+    allow_no_auth: bool,
+    port: u16,
+) -> ! {
+    let manifest_c = parse_c_manifest(manifest_payload);
+
+    // The C socket array and its backing CStrings must have stable,
+    // process-lifetime addresses: `daemon_dispatch` reads them on every call,
+    // from any connection thread. serve_http never returns, so leak both.
+    let (c_sockets, keepalive) = build_c_sockets(sockets);
+    let mut boxed = c_sockets.into_boxed_slice();
+    let n_pools = boxed.len();
+    let sockets_ptr = boxed.as_mut_ptr() as *mut c_void;
+    std::mem::forget(boxed);
+    std::mem::forget(keepalive);
+
+    let shapes: Vec<McpToolShape> = build_tool_shapes(manifest);
+    let tools_list: Vec<Value> = shapes.iter().map(|s| s.tool.clone()).collect();
+
+    let state = Arc::new(Mutex::new(HttpState {
+        manifest_c,
+        sockets_ptr,
+        n_pools,
+        shm: CString::new(shm_basename).unwrap(),
+        shapes,
+        tools_list,
+        server_name: manifest.name.clone(),
+        server_version: manifest.build.morloc_version.clone(),
+        sessions: HashMap::new(),
+    }));
+
+    let addr = format!("{}:{}", bind_host, port);
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("morloc mcp: failed to bind {}: {}", addr, e);
+            process::clean_exit(1);
+        }
+    };
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| addr.clone());
+    // Fail closed: a non-loopback bind with no token would be an open,
+    // unauthenticated endpoint on the network. Refuse unless explicitly
+    // overridden (the manager passes --allow-no-auth for a loopback-only
+    // publish, where the container nexus binds 0.0.0.0 but only loopback
+    // reaches it).
+    let is_loopback = matches!(bind_host, "127.0.0.1" | "localhost" | "::1");
+    if auth_token.is_none() && !is_loopback && !allow_no_auth {
+        eprintln!(
+            "morloc mcp: refusing to serve on {} with no auth token (bind is not \
+             loopback). Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth \
+             to override.",
+            bound
+        );
+        process::clean_exit(1);
+    }
+    eprintln!(
+        "morloc mcp: serving \"{}\" over HTTP at http://{}/mcp",
+        manifest.name, bound
+    );
+
+    let token = Arc::new(auth_token);
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let st = Arc::clone(&state);
+                let tk = Arc::clone(&token);
+                std::thread::spawn(move || {
+                    serve_conn(stream, |req, ka| build_response(req, &st, tk.as_ref().as_deref(), ka))
+                });
+            }
+            Err(e) => eprintln!("morloc mcp: accept error: {}", e),
+        }
+    }
+    process::clean_exit(0);
+}
+
+/// One HTTP connection: read requests (keep-alive) and reply. Socket reads run
+/// off the mutex; only `build_response`'s dispatch section locks it, so a slow
+/// client never blocks others from executing.
+/// One keep-alive HTTP connection: read requests until EOF/timeout/`close` and
+/// reply, delegating each request to `respond`. Shared by the single-program
+/// MCP server and the multi-module front-end, which differ only in how they
+/// build the response.
+fn serve_conn<F>(stream: TcpStream, mut respond: F)
+where
+    F: FnMut(&HttpRequest, bool) -> Vec<u8>,
+{
+    // Drop a connection that stalls mid-request or sits idle past the timeout,
+    // so a slow/silent client cannot pin this thread indefinitely.
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let mut writer = match stream.try_clone() {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let mut reader = BufReader::new(stream);
+    loop {
+        let req = match read_http_request(&mut reader) {
+            Ok(Some(r)) => r,
+            _ => break, // EOF, malformed, or IO error -> close
+        };
+        let keep_alive = header_get(&req.headers, "connection")
+            .map(|v| !v.eq_ignore_ascii_case("close"))
+            .unwrap_or(true);
+        let resp = respond(&req, keep_alive);
+        if writer.write_all(&resp).is_err() {
+            break;
+        }
+        let _ = writer.flush();
+        if !keep_alive {
+            break;
+        }
+    }
+}
+
+/// A parsed HTTP request. Header names are lowercased for case-insensitive
+/// lookup; the body is the exact Content-Length bytes.
+struct HttpRequest {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+/// Read one request from the buffered connection. `Ok(None)` on a clean EOF, an
+/// over-long line/body, or too many headers (the connection is then closed by
+/// the caller). Every line is size-capped and the body is read incrementally up
+/// to Content-Length, so a hostile Content-Length or header flood cannot force
+/// a large up-front allocation.
+fn read_http_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<HttpRequest>> {
+    let mut line = String::new();
+    match read_capped_line(reader, &mut line)? {
+        LineRead::Eof | LineRead::TooLong => return Ok(None),
+        LineRead::Ok => {}
+    }
+    let mut it = line.trim_end().split_whitespace();
+    let method = it.next().unwrap_or("").to_string();
+    let path = it.next().unwrap_or("").to_string();
+    if method.is_empty() {
+        return Ok(None);
+    }
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut content_length: usize = 0;
+    loop {
+        if headers.len() >= MAX_HEADERS {
+            return Ok(None); // header flood
+        }
+        let mut h = String::new();
+        match read_capped_line(reader, &mut h)? {
+            LineRead::Eof | LineRead::TooLong => return Ok(None),
+            LineRead::Ok => {}
+        }
+        let t = h.trim_end_matches(['\r', '\n']);
+        if t.is_empty() {
+            break; // end of headers
+        }
+        if let Some(i) = t.find(':') {
+            let name = t[..i].trim().to_ascii_lowercase();
+            let val = t[i + 1..].trim().to_string();
+            if name == "content-length" {
+                content_length = val.parse().unwrap_or(0);
+            }
+            headers.push((name, val));
+        }
+    }
+
+    // Reject an absurd Content-Length rather than allocate it (same backstop the
+    // stdio line cap provides). Read the body incrementally so the buffer grows
+    // with the bytes actually received, not the client-declared length.
+    if content_length > MAX_LINE_BYTES {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    if content_length > 0 {
+        reader.take(content_length as u64).read_to_end(&mut body)?;
+    }
+    Ok(Some(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    }))
+}
+
+/// Outcome of a size-capped line read.
+enum LineRead {
+    Ok,
+    Eof,
+    TooLong,
+}
+
+/// Read one line into `buf`, capping the bytes consumed at MAX_HEADER_LINE_BYTES.
+/// A line that reaches the cap without a newline yields `TooLong` (the caller
+/// closes the connection); this bounds both request-line and header allocation.
+fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Result<LineRead> {
+    let n = reader.take(MAX_HEADER_LINE_BYTES).read_line(buf)?;
+    if n == 0 {
+        return Ok(LineRead::Eof);
+    }
+    // Hit the cap without terminating the line -> reject.
+    if !buf.ends_with('\n') && n as u64 >= MAX_HEADER_LINE_BYTES {
+        return Ok(LineRead::TooLong);
+    }
+    Ok(LineRead::Ok)
+}
+
+/// Auth-check, route on method+path, and produce the full HTTP response bytes.
+fn build_response(
+    req: &HttpRequest,
+    state: &Arc<Mutex<HttpState>>,
+    token: Option<&str>,
+    keep_alive: bool,
+) -> Vec<u8> {
+    if let Some(tok) = token {
+        if !authorized(&req.headers, tok) {
+            let extra = vec![("WWW-Authenticate".to_string(), "Bearer".to_string())];
+            return http_response(401, br#"{"error":"unauthorized"}"#, keep_alive, &extra);
+        }
+    }
+
+    // Route on the path only (ignore any query string).
+    let path = req.path.split('?').next().unwrap_or("");
+    if path != "/mcp" {
+        return http_json(404, br#"{"error":"not found"}"#, keep_alive);
+    }
+
+    match req.method.as_str() {
+        "POST" => handle_http_post(req, state, keep_alive),
+        "DELETE" => handle_http_delete(req, state, keep_alive),
+        _ => method_not_allowed("POST, DELETE", keep_alive),
+    }
+}
+
+/// A `POST /mcp`: one JSON-RPC message in, one response out (or 202 for a
+/// notification). Session created on `initialize`, required on everything else.
+fn handle_http_post(
+    req: &HttpRequest,
+    state: &Arc<Mutex<HttpState>>,
+    keep_alive: bool,
+) -> Vec<u8> {
+    let msg: Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(_) => {
+            let body = error_response(Value::Null, JSONRPC_PARSE_ERROR, "invalid JSON")
+                .to_string()
+                .into_bytes();
+            return http_json(200, &body, keep_alive);
+        }
+    };
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
+
+    // Recover a poisoned lock so one panicking request cannot wedge the server.
+    let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
+
+    // Resolve (or, on initialize, create) the session.
+    let now = Instant::now();
+    let (session_id, prior_init) = if method == "initialize" {
+        // Evict idle/overflow sessions before minting a new one so the table
+        // stays bounded even when clients never send DELETE.
+        prune_sessions(&mut guard.sessions, now);
+        let id = new_session_id();
+        guard.sessions.insert(
+            id.clone(),
+            SessionInfo { initialized: false, last_seen: now },
+        );
+        (id, false)
+    } else {
+        match sid_hdr {
+            None => {
+                return http_json(
+                    400,
+                    br#"{"error":"missing Mcp-Session-Id header"}"#,
+                    keep_alive,
+                );
+            }
+            Some(id) => match guard.sessions.get(&id) {
+                Some(s) => (id, s.initialized),
+                None => {
+                    return http_json(
+                        404,
+                        br#"{"error":"unknown or expired session; re-initialize"}"#,
+                        keep_alive,
+                    );
+                }
+            },
+        }
+    };
+
+    // Run the shared message core under the lock (serializes dispatch). The
+    // per-request name->shape map borrows the shared shapes (no name copies) and
+    // keeps the shapes owned by the state.
+    let (resp_opt, new_init) = {
+        let ctx = DispatchCtx {
+            manifest_c: guard.manifest_c,
+            sockets_ptr: guard.sockets_ptr,
+            n_pools: guard.n_pools,
+            shm: guard.shm.clone(),
+        };
+        let by_name: HashMap<&str, &McpToolShape> =
+            guard.shapes.iter().map(|s| (s.name.as_str(), s)).collect();
+        let mut sess = Session {
+            initialized: prior_init,
+        };
+        let r = handle_message(
+            &msg,
+            &mut sess,
+            &guard.tools_list,
+            &by_name,
+            &ctx,
+            &guard.server_name,
+            &guard.server_version,
+        );
+        (r, sess.initialized)
+    };
+    // Touch the session (refresh last_seen and persist the handshake flag).
+    guard.sessions.insert(
+        session_id.clone(),
+        SessionInfo { initialized: new_init, last_seen: now },
+    );
+    drop(guard);
+
+    // A newly created session (only `initialize` mints one) is announced via the
+    // Mcp-Session-Id header so the client echoes it on subsequent requests.
+    let extra: Vec<(String, String)> = if method == "initialize" {
+        vec![("Mcp-Session-Id".to_string(), session_id)]
+    } else {
+        Vec::new()
+    };
+    match resp_opt {
+        Some(response) => http_response(200, &response.to_string().into_bytes(), keep_alive, &extra),
+        // Notification (e.g. notifications/initialized): accepted, no JSON-RPC reply.
+        None => http_response(202, b"", keep_alive, &extra),
+    }
+}
+
+/// A `DELETE /mcp`: end the named session.
+fn handle_http_delete(
+    req: &HttpRequest,
+    state: &Arc<Mutex<HttpState>>,
+    keep_alive: bool,
+) -> Vec<u8> {
+    match header_get(&req.headers, "mcp-session-id") {
+        Some(id) => {
+            let mut g = state.lock().unwrap_or_else(|p| p.into_inner());
+            g.sessions.remove(id);
+            http_json(200, br#"{"ok":true}"#, keep_alive)
+        }
+        None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
+    }
+}
+
+/// Case-insensitive header lookup (names were lowercased on parse).
+fn header_get<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// True when the request carries `Authorization: Bearer <token>` matching.
+/// The token comparison is constant-time so a network attacker cannot recover
+/// the token byte-by-byte from response timing.
+fn authorized(headers: &[(String, String)], token: &str) -> bool {
+    match header_get(headers, "authorization") {
+        Some(v) => match v.trim().strip_prefix("Bearer ") {
+            Some(t) => ct_eq(t.trim().as_bytes(), token.as_bytes()),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Constant-time byte-slice equality. Length is compared first (the token's
+/// length is not the secret); equal-length inputs are compared without an
+/// early exit, so timing does not depend on the position of the first
+/// mismatch.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// A fresh, unguessable session id: 16 random bytes hex-encoded (from
+/// /dev/urandom), falling back to pid + counter + wall-clock nanos if the
+/// random source is unavailable.
+fn new_session_id() -> String {
+    use std::fmt::Write as _;
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            let mut s = String::with_capacity(32);
+            for b in &buf {
+                let _ = write!(s, "{:02x}", b);
+            }
+            return s;
+        }
+    }
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let n = CTR.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}-{}", std::process::id(), n, nanos)
+}
+
+/// Bound the session table: drop sessions idle past `SESSION_TTL`, then evict
+/// the oldest until there is room for one more below `MAX_SESSIONS`. Called on
+/// `initialize` (before minting a new id), so a client that never sends
+/// `DELETE /mcp` cannot grow the table without limit.
+fn prune_sessions(sessions: &mut HashMap<String, SessionInfo>, now: Instant) {
+    sessions.retain(|_, s| now.duration_since(s.last_seen) < SESSION_TTL);
+    while sessions.len() >= MAX_SESSIONS {
+        let oldest = sessions
+            .iter()
+            .min_by_key(|(_, s)| s.last_seen)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                sessions.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
+/// Assemble a complete HTTP/1.1 response. The body is always JSON (the only
+/// content type this transport emits).
+/// A permissive CORS origin header, emitted on every response so browser-based
+/// clients can read the API/MCP endpoints cross-origin. The bearer token (not
+/// the origin) is the access gate.
+const CORS_ALLOW_ORIGIN: &str = "Access-Control-Allow-Origin: *\r\n";
+
+/// Assemble the HTTP response head (status line + standard headers + CORS +
+/// any extras + the blank separator line). Shared by the JSON and binary
+/// response builders so the header format lives in one place.
+fn http_head(
+    status: u16,
+    content_type: &str,
+    content_length: usize,
+    keep_alive: bool,
+    extra_headers: &[(String, String)],
+) -> String {
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "OK",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n{}",
+        status,
+        reason,
+        content_type,
+        content_length,
+        if keep_alive { "keep-alive" } else { "close" },
+        CORS_ALLOW_ORIGIN,
+    );
+    for (k, v) in extra_headers {
+        head.push_str(k);
+        head.push_str(": ");
+        head.push_str(v);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    head
+}
+
+fn http_response(
+    status: u16,
+    body: &[u8],
+    keep_alive: bool,
+    extra_headers: &[(String, String)],
+) -> Vec<u8> {
+    // A trailing newline is appended to non-empty bodies. HTTP frames by
+    // Content-Length, so it is optional for clients (serde ignores trailing
+    // whitespace), but it keeps interactive `curl` output off the next shell
+    // prompt and mirrors the newline-terminated stdio transport.
+    let trailing: usize = if body.is_empty() { 0 } else { 1 };
+    let head = http_head(status, "application/json", body.len() + trailing, keep_alive, extra_headers);
+    let mut out = head.into_bytes();
+    out.extend_from_slice(body);
+    if trailing == 1 {
+        out.push(b'\n');
+    }
+    out
+}
+
+/// A JSON response with no extra headers -- the common case.
+fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
+    http_response(status, body, keep_alive, &[])
+}
+
+/// A 405 with the `Allow` header naming the accepted method(s).
+fn method_not_allowed(allow: &str, keep_alive: bool) -> Vec<u8> {
+    let extra = vec![("Allow".to_string(), allow.to_string())];
+    http_response(405, br#"{"error":"method not allowed"}"#, keep_alive, &extra)
+}
+
+// ===========================================================================
+// Unified serving front-end (multi-module; forwards to per-module children)
+// ===========================================================================
+//
+// The front-end runs NO morloc computation: it authenticates, tracks MCP
+// sessions, resolves a call to (module, command), FORWARDS it to that module's
+// child daemon via `router_forward`, and renders the reply. Because it never
+// runs a pool/eval itself, a crashing call kills only that module's child (the
+// supervisor restarts it), never the front-end. Two adapters share one listener
+// and one set of children: `POST /mcp` (MCP) and `/call/<module>/<command>`
+// (JSON API).
+
+extern "C" {
+    // Forward a parsed daemon request to `program`'s child daemon and return its
+    // response; restarts a dead child transparently. See router_ffi::router_forward.
+    fn router_forward(
+        router: *mut c_void,
+        program: *const c_char,
+        request: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> *mut CDaemonResponse;
+}
+
+/// Raw supervisor handle shared across connection threads. Mutations to a given
+/// program's child are serialized by `Frontend.locks[program]`; distinct
+/// programs are distinct memory; the program array is fixed after init.
+struct RouterHandle(*mut c_void);
+unsafe impl Send for RouterHandle {}
+unsafe impl Sync for RouterHandle {}
+
+/// Shared front-end state. Runs no morloc compute; every call is forwarded.
+struct Frontend {
+    router: RouterHandle,
+    /// Per-module forward lock: `router_forward` mutates the child's
+    /// RouterProgram on crash-restart, so same-module forwards serialize while
+    /// different modules run in parallel. Keys fixed at construction.
+    locks: HashMap<String, Mutex<()>>,
+    /// MCP tools/list (union across MCP modules; names `<module>__<command>`).
+    mcp_tools: Vec<Value>,
+    /// Namespaced tool name -> (module, shape). The shape keeps its bare command
+    /// name for dispatch/argument resolution.
+    mcp_by_name: HashMap<String, (String, McpToolShape)>,
+    /// Modules answering the `/call` JSON API.
+    api_modules: std::collections::HashSet<String>,
+    /// Per-API-module machine-readable help (`GET /discover/<module>`), keyed by
+    /// module. Describes positional-argument commands for the `/call` contract.
+    api_help: HashMap<String, Value>,
+    /// Whether the sandboxed eval capability is exposed (an `eval` MCP tool +
+    /// `/eval` route). Off unless the operator exposed it.
+    eval_enabled: bool,
+    /// eval's sandbox allow-list (`None` => no imports). Passed to the forked
+    /// `morloc eval`; independent of the served module sets.
+    eval_allow: Option<String>,
+    /// CPU-time budget (seconds) for a forked `morloc eval`; <=0 disables it.
+    /// Mirrors the daemon's RLIMIT_CPU so a runaway expression can't burn a
+    /// front-end thread's CPU indefinitely.
+    eval_timeout: i32,
+    server_name: String,
+    server_version: String,
+    sessions: Mutex<HashMap<String, SessionInfo>>,
+}
+unsafe impl Send for Frontend {}
+unsafe impl Sync for Frontend {}
+
+/// A successful forward's payload (owned so the C response is freed at once).
+enum ForwardOk {
+    Json(String),
+    /// A media-typed (`@mime`) return: raw content bytes + media type.
+    Media(Vec<u8>, String),
+}
+
+impl Frontend {
+    /// Forward `request_json` to `module`'s child daemon. Holds the per-module
+    /// lock across `router_forward` (whose crash-detect mutates the child's
+    /// RouterProgram).
+    fn forward(&self, module: &str, request_json: &Value) -> Result<ForwardOk, String> {
+        // Fail closed: every served module must have a per-module lock, since
+        // router_forward mutates the child's RouterProgram (waitpid + restart).
+        // Forwarding without the lock would be a silent unserialized race, so a
+        // missing entry is a bug -- error rather than skip the guard.
+        let lock = self.locks.get(module).ok_or_else(|| {
+            format!("internal error: no forward lock for module '{}'", module)
+        })?;
+        let request_str = request_json.to_string();
+        let req_c = CString::new(request_str.as_str())
+            .map_err(|_| "request contains a NUL byte".to_string())?;
+        let mut errmsg: *mut c_char = ptr::null_mut();
+        let req =
+            unsafe { daemon_parse_request(req_c.as_ptr(), request_str.len(), &mut errmsg) };
+        if req.is_null() {
+            let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "bad request".into());
+            return Err(format!("failed to build request: {}", msg));
+        }
+        let module_c = CString::new(module).unwrap_or_default();
+        // Keep the guard alive across the forward (named binding, not `_`).
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ferr: *mut c_char = ptr::null_mut();
+        let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
+        unsafe { daemon_free_request(req) };
+        if resp.is_null() {
+            let msg = process::take_c_errmsg(ferr).unwrap_or_else(|| "forward failed".into());
+            return Err(msg);
+        }
+        let out = unsafe {
+            if (*resp).success {
+                // A media (`@mime`) return arrives as raw bytes + mime (conveyed
+                // as base64 over the socket wire); otherwise a JSON value.
+                if !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
+                    let bytes =
+                        std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len).to_vec();
+                    let mime = cstr_to_string((*resp).mime).unwrap_or_default();
+                    Ok(ForwardOk::Media(bytes, mime))
+                } else {
+                    Ok(ForwardOk::Json(
+                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
+                    ))
+                }
+            } else {
+                Err(cstr_to_string((*resp).error)
+                    .unwrap_or_else(|| "dispatch failed".to_string()))
+            }
+        };
+        unsafe { daemon_free_response(resp as *mut c_void) };
+        out
+    }
+}
+
+/// Serve a set of modules over one HTTP listener with MCP + API adapters,
+/// forwarding to the supervisor's per-module children. Never returns.
+pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::NexusConfig) -> ! {
+    // Load and parse each served program's manifest once (union of adapters);
+    // both the MCP tool surface and the API discovery view derive from it.
+    let mut manifests: HashMap<String, Manifest> = HashMap::new();
+    for m in &config.programs {
+        let manifest_path = format!("{}/{}/{}-build/manifest.json", fdb, m, m);
+        let payload = match crate::manifest::read_manifest_payload(&manifest_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("morloc serve: skipping module '{}': {}", m, e);
+                continue;
+            }
+        };
+        match crate::manifest::parse_manifest(&payload) {
+            Ok(mf) => {
+                manifests.insert(m.clone(), mf);
+            }
+            Err(e) => eprintln!("morloc serve: skipping module '{}': {}", m, e),
+        }
+    }
+
+    // Build MCP tool shapes from each MCP module's manifest, namespaced.
+    let mut mcp_tools: Vec<Value> = Vec::new();
+    let mut mcp_by_name: HashMap<String, (String, McpToolShape)> = HashMap::new();
+    let mut server_version = String::new();
+    for m in &config.mcp_programs {
+        let manifest = match manifests.get(m) {
+            Some(mf) => mf,
+            None => continue,
+        };
+        if server_version.is_empty() {
+            server_version = manifest.build.morloc_version.clone();
+        }
+        for s in build_tool_shapes(manifest) {
+            let nsname = format!("{}__{}", m, s.name);
+            // `__` is the namespace separator, so distinct (module, command)
+            // pairs can only collide when a module or command name itself
+            // contains `__`. Fail closed: a silent overwrite would make one
+            // tool unreachable or route a call to the wrong module.
+            if let Some((prev_m, prev_s)) = mcp_by_name.get(&nsname) {
+                eprintln!(
+                    "morloc serve: MCP tool name collision on '{}': {}::{} vs {}::{}. \
+                     Rename a module or command to disambiguate.",
+                    nsname, prev_m, prev_s.name, m, s.name
+                );
+                process::clean_exit(1);
+            }
+            let mut tool = s.tool.clone();
+            tool["name"] = Value::String(nsname.clone());
+            mcp_tools.push(tool);
+            mcp_by_name.insert(nsname, (m.clone(), s));
+        }
+    }
+
+    // The eval capability (sandboxed) is a single synthetic MCP tool, exposed
+    // only when enabled. It is NOT a module; it forks `morloc eval` per call, so
+    // the `morloc` compiler must be on PATH in the serving environment -- warn
+    // loudly at startup if it is not, since eval would otherwise fail per call.
+    if config.eval_enabled {
+        if !morloc_on_path() {
+            eprintln!(
+                "morloc serve: WARNING: eval is exposed but the `morloc` compiler is \
+                 not on PATH; eval calls will fail. Ensure the serving image includes it."
+            );
+        }
+        let allow_desc = config
+            .eval_allowed_modules
+            .clone()
+            .unwrap_or_else(|| "(none)".to_string());
+        mcp_tools.push(json!({
+            "name": "eval",
+            "description": format!(
+                "Evaluate an arbitrary morloc expression (sandboxed; IO intrinsics \
+                 forbidden; may import: {}).",
+                allow_desc
+            ),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "A morloc expression, optionally with leading `import` lines."
+                    }
+                },
+                "required": ["expression"]
+            }
+        }));
+    }
+
+    let mut locks: HashMap<String, Mutex<()>> = HashMap::new();
+    for m in &config.programs {
+        locks.insert(m.clone(), Mutex::new(()));
+    }
+    let api_modules: std::collections::HashSet<String> =
+        config.api_programs.iter().cloned().collect();
+
+    // API discovery: per-module machine-readable help (the lossless `--json-help`
+    // view). It describes each command's POSITIONAL arguments, matching the
+    // `/call/<module>/<command>` positional-array contract. MCP clients discover
+    // via the protocol-native `tools/list` (named-argument inputSchema) instead.
+    let mut api_help: HashMap<String, Value> = HashMap::new();
+    for m in &config.api_programs {
+        if let Some(manifest) = manifests.get(m) {
+            api_help.insert(m.clone(), crate::json_help::build_json_help(manifest));
+        }
+    }
+    // The parsed manifests have been distilled into `mcp_tools`/`api_help`;
+    // `serve_frontend` never returns, so drop them rather than pin every
+    // module's full manifest in memory for the process lifetime.
+    drop(manifests);
+
+    let bind_host = config
+        .mcp_http_host
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = config.http_port.unwrap_or(-1);
+    if port < 0 {
+        eprintln!("morloc serve: --http-port is required for the serving front-end");
+        process::clean_exit(1);
+    }
+    let addr = format!("{}:{}", bind_host, port);
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("morloc serve: failed to bind {}: {}", addr, e);
+            process::clean_exit(1);
+        }
+    };
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| addr.clone());
+    // Fail closed: a non-loopback bind with no token would be an open,
+    // unauthenticated endpoint (see the manager's loopback/expose logic).
+    let is_loopback = matches!(bind_host.as_str(), "127.0.0.1" | "localhost" | "::1");
+    let auth_token = config.mcp_auth_token.clone();
+    if auth_token.is_none() && !is_loopback && !config.mcp_allow_no_auth {
+        eprintln!(
+            "morloc serve: refusing to serve on {} with no auth token (bind is not loopback). \
+             Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth to override.",
+            bound
+        );
+        process::clean_exit(1);
+    }
+    eprintln!(
+        "morloc serve: MCP at http://{}/mcp ({} tools) | API at http://{}/call/<module>/<command> \
+         | discovery at http://{}/discover",
+        bound,
+        mcp_tools.len(),
+        bound,
+        bound
+    );
+
+    let fe = Arc::new(Frontend {
+        router: RouterHandle(router),
+        locks,
+        mcp_tools,
+        mcp_by_name,
+        api_modules,
+        api_help,
+        eval_enabled: config.eval_enabled,
+        eval_allow: config.eval_allowed_modules.clone(),
+        eval_timeout: config.eval_timeout,
+        server_name: "morloc".to_string(),
+        server_version: if server_version.is_empty() {
+            "unknown".to_string()
+        } else {
+            server_version
+        },
+        sessions: Mutex::new(HashMap::new()),
+    });
+    let token = Arc::new(auth_token);
+    for incoming in listener.incoming() {
+        match incoming {
+            Ok(stream) => {
+                let fe = Arc::clone(&fe);
+                let tk = Arc::clone(&token);
+                std::thread::spawn(move || {
+                    serve_conn(stream, |req, ka| {
+                        frontend_build_response(req, &fe, tk.as_ref().as_deref(), ka)
+                    })
+                });
+            }
+            Err(e) => eprintln!("morloc serve: accept error: {}", e),
+        }
+    }
+    process::clean_exit(0);
+}
+
+/// One front-end connection: read requests (keep-alive) and reply. Dispatch runs
+/// off any shared lock, so requests to different modules execute in parallel.
+/// Auth (both adapters), then route on path: `/mcp` -> MCP, `/call/...` -> API.
+fn frontend_build_response(
+    req: &HttpRequest,
+    fe: &Arc<Frontend>,
+    token: Option<&str>,
+    keep_alive: bool,
+) -> Vec<u8> {
+    // A CORS preflight (OPTIONS) carries no Authorization header, so it must be
+    // answered before the auth gate; the browser sends the real, authenticated
+    // request only if this 204 grants the method/headers.
+    if req.method == "OPTIONS" {
+        let extra = vec![
+            ("Access-Control-Allow-Methods".to_string(), "GET, POST, DELETE, OPTIONS".to_string()),
+            (
+                "Access-Control-Allow-Headers".to_string(),
+                "Authorization, Content-Type, Mcp-Session-Id".to_string(),
+            ),
+            ("Access-Control-Max-Age".to_string(), "86400".to_string()),
+        ];
+        return http_response(204, b"", keep_alive, &extra);
+    }
+    let path = req.path.split('?').next().unwrap_or("");
+    // Liveness probe for container orchestrators (the deploy image's
+    // HEALTHCHECK). Answered BEFORE the auth gate: it reveals nothing and a
+    // token-protected serve must not 401 its own healthcheck (which curls with
+    // no token). The front-end is up if it can answer; child health is per-call.
+    if path == "/health" && (req.method == "GET" || req.method == "HEAD") {
+        return http_json(200, br#"{"status":"ok"}"#, keep_alive);
+    }
+    if let Some(tok) = token {
+        if !authorized(&req.headers, tok) {
+            let extra = vec![("WWW-Authenticate".to_string(), "Bearer".to_string())];
+            return http_response(401, br#"{"error":"unauthorized"}"#, keep_alive, &extra);
+        }
+    }
+    if path == "/mcp" {
+        match req.method.as_str() {
+            "POST" => frontend_mcp_post(req, fe, keep_alive),
+            "DELETE" => frontend_mcp_delete(req, fe, keep_alive),
+            _ => method_not_allowed("POST, DELETE", keep_alive),
+        }
+    } else if let Some(rest) = path.strip_prefix("/call/") {
+        match req.method.as_str() {
+            "POST" => frontend_call_api(rest, req, fe, keep_alive),
+            _ => method_not_allowed("POST", keep_alive),
+        }
+    } else if path == "/eval" {
+        match req.method.as_str() {
+            "POST" => frontend_eval_api(req, fe, keep_alive),
+            _ => method_not_allowed("POST", keep_alive),
+        }
+    } else if path == "/discover" {
+        match req.method.as_str() {
+            "GET" | "HEAD" => frontend_discover(fe, keep_alive),
+            _ => method_not_allowed("GET", keep_alive),
+        }
+    } else if let Some(module) = path.strip_prefix("/discover/") {
+        match req.method.as_str() {
+            "GET" | "HEAD" => frontend_discover_module(module, fe, keep_alive),
+            _ => method_not_allowed("GET", keep_alive),
+        }
+    } else {
+        http_json(404, br#"{"error":"not found"}"#, keep_alive)
+    }
+}
+
+/// `GET /discover`: the API index. Lists the JSON-API-exposed modules (with the
+/// `/call` URL shape and a link to each module's positional-argument help) and
+/// points MCP clients at the protocol-native `tools/list`. This is the API-side
+/// counterpart to MCP discovery -- the two adapters branch here because `/call`
+/// takes positional args while MCP tools take a named-argument object.
+fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    let mut modules: Vec<&String> = fe.api_help.keys().collect();
+    modules.sort();
+    let api_modules: Vec<Value> = modules
+        .iter()
+        .map(|m| {
+            json!({
+                "module": m,
+                "call": format!("/call/{}/<command>", m),
+                "help": format!("/discover/{}", m),
+            })
+        })
+        .collect();
+    let doc = json!({
+        "api": {
+            "modules": api_modules,
+            "call": "/call/<module>/<command>",
+            "note": "POST positional args as a JSON array (or {\"args\":[...]}). \
+                     GET /discover/<module> for each command's ordered arguments.",
+        },
+        "mcp": {
+            "endpoint": "/mcp",
+            "tools": fe.mcp_tools.len(),
+            "note": "Use the JSON-RPC `tools/list` method for the MCP tool catalog \
+                     (tools are named <module>__<command> and take named arguments).",
+        },
+        "eval": {
+            "enabled": fe.eval_enabled,
+            "endpoints": ["/eval", "mcp tool 'eval'"],
+        },
+    });
+    http_json(200, doc.to_string().as_bytes(), keep_alive)
+}
+
+/// `GET /discover/<module>`: the machine-readable help for one API module (its
+/// commands and their positional arguments). 404 unless the module is exposed on
+/// the JSON API.
+fn frontend_discover_module(module: &str, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    match fe.api_help.get(module) {
+        Some(help) => http_json(200, help.to_string().as_bytes(), keep_alive),
+        None => http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive),
+    }
+}
+
+/// True if the `morloc` compiler is on PATH (the eval capability forks it).
+fn morloc_on_path() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| std::fs::metadata(dir.join("morloc")).map(|m| m.is_file()).unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
+/// Run a sandboxed `morloc eval` as a child process (isolated: a crash or hang
+/// in eval cannot take down the front-end). `--eval-sandbox` bans IO intrinsics;
+/// `--eval-allowed-modules` bounds imports (empty => none). Returns eval's stdout
+/// on success, else its stderr.
+fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
+    let allow = fe.eval_allow.clone().unwrap_or_default();
+    let mut cmd = std::process::Command::new("morloc");
+    cmd.arg("eval")
+        .arg("--eval-sandbox")
+        .arg("--eval-allowed-modules")
+        .arg(&allow)
+        .arg("-e")
+        .arg(expr);
+    // Bound the child's CPU time and address space so a runaway expression
+    // (eval-sandbox bans IO, so a hang can only be a compute or memory loop) is
+    // killed rather than pinning/exhausting the host. Mirrors the daemon's eval
+    // fork (RLIMIT_CPU + a 2 GiB RLIMIT_AS).
+    let cpu_secs = fe.eval_timeout;
+    if cpu_secs > 0 {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(move || {
+                let cpu = libc::rlimit {
+                    rlim_cur: cpu_secs as libc::rlim_t,
+                    rlim_max: (cpu_secs + 5) as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let as_lim = libc::rlimit {
+                    rlim_cur: 2 * 1024 * 1024 * 1024,
+                    rlim_max: 2 * 1024 * 1024 * 1024,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| {
+            format!(
+                "failed to run eval: {} (the eval capability requires the `morloc` \
+                 compiler on PATH in the serving environment)",
+                e
+            )
+        })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        Err(if err.is_empty() { "eval failed".to_string() } else { err.to_string() })
+    }
+}
+
+/// `POST /eval`: the API-side eval capability. Body is `{"expr":"..."}` (or
+/// `{"expression":"..."}`, or a bare JSON string). 404 when eval is not exposed.
+fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<u8> {
+    if !fe.eval_enabled {
+        return http_json(404, br#"{"error":"eval is not exposed"}"#, keep_alive);
+    }
+    let expr: Option<String> = match serde_json::from_slice::<Value>(&req.body) {
+        Ok(Value::Object(o)) => o
+            .get("expr")
+            .or_else(|| o.get("expression"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        Ok(Value::String(s)) => Some(s),
+        _ => None,
+    };
+    let expr = match expr {
+        Some(e) => e,
+        None => return http_json(400, br#"{"error":"expected {\"expr\":\"...\"}"}"#, keep_alive),
+    };
+    match frontend_eval(&expr, fe) {
+        Ok(out) => {
+            let body = json!({ "status": "ok", "result": out }).to_string();
+            http_json(200, body.as_bytes(), keep_alive)
+        }
+        Err(message) => {
+            let body = json!({ "status": "error", "error": message }).to_string();
+            http_json(500, body.as_bytes(), keep_alive)
+        }
+    }
+}
+
+/// `POST /mcp`: one JSON-RPC message. Session resolution locks briefly; the
+/// forward (dispatch) runs lock-free so modules execute in parallel.
+fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    let msg: Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(_) => {
+            let body = error_response(Value::Null, JSONRPC_PARSE_ERROR, "invalid JSON")
+                .to_string()
+                .into_bytes();
+            return http_json(200, &body, keep_alive);
+        }
+    };
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
+    let now = Instant::now();
+
+    let (session_id, prior_init) = {
+        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        if method == "initialize" {
+            prune_sessions(&mut sessions, now);
+            let id = new_session_id();
+            sessions.insert(id.clone(), SessionInfo { initialized: false, last_seen: now });
+            (id, false)
+        } else {
+            match sid_hdr {
+                None => {
+                    return http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive)
+                }
+                Some(id) => match sessions.get(&id) {
+                    Some(s) => (id, s.initialized),
+                    None => {
+                        return http_json(
+                            404,
+                            br#"{"error":"unknown or expired session; re-initialize"}"#,
+                            keep_alive,
+                        )
+                    }
+                },
+            }
+        }
+    };
+
+    let mut session = Session { initialized: prior_init };
+    let resp_opt = frontend_handle_message(&msg, &mut session, fe);
+    {
+        // Update in place only if the session still exists. A DELETE or prune
+        // that ran while the forward was in flight (lock-free) must not be
+        // undone by resurrecting the entry, and re-inserting would bypass the
+        // MAX_SESSIONS cap enforced at initialize.
+        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.initialized = session.initialized;
+            s.last_seen = now;
+        }
+    }
+    let extra: Vec<(String, String)> = if method == "initialize" {
+        vec![("Mcp-Session-Id".to_string(), session_id)]
+    } else {
+        Vec::new()
+    };
+    match resp_opt {
+        Some(response) => {
+            http_response(200, &response.to_string().into_bytes(), keep_alive, &extra)
+        }
+        None => http_response(202, b"", keep_alive, &extra),
+    }
+}
+
+/// `DELETE /mcp`: end the named session.
+fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
+    match header_get(&req.headers, "mcp-session-id") {
+        Some(id) => {
+            let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            sessions.remove(id);
+            http_json(200, br#"{"ok":true}"#, keep_alive)
+        }
+        None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
+    }
+}
+
+/// MCP message core for the front-end (mirrors `handle_message`, but tools/call
+/// forwards to a per-module child instead of dispatching in-process).
+fn frontend_handle_message(msg: &Value, session: &mut Session, fe: &Frontend) -> Option<Value> {
+    let method = msg.get("method").and_then(|m| m.as_str());
+    let id = msg.get("id").cloned();
+    let is_request = id.is_some();
+    let method = match method {
+        Some(m) => m,
+        None => {
+            return id.map(|id| error_response(id, JSONRPC_INVALID_REQUEST, "missing 'method'"))
+        }
+    };
+    match method {
+        "initialize" => {
+            let Some(id) = id else { return None };
+            let requested = msg
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str());
+            let version = match requested {
+                Some(v) if v == SERVER_PROTOCOL_VERSION => v.to_string(),
+                _ => SERVER_PROTOCOL_VERSION.to_string(),
+            };
+            Some(result_response(
+                id,
+                json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": fe.server_name, "version": fe.server_version },
+                }),
+            ))
+        }
+        "notifications/initialized" => {
+            session.initialized = true;
+            None
+        }
+        "ping" => id.map(|id| result_response(id, json!({}))),
+        "tools/list" => {
+            let Some(id) = id else { return None };
+            if !session.initialized {
+                return Some(error_response(
+                    id,
+                    JSONRPC_INVALID_REQUEST,
+                    "received tools/list before initialization completed",
+                ));
+            }
+            Some(result_response(id, json!({ "tools": fe.mcp_tools })))
+        }
+        "tools/call" => {
+            let Some(id) = id else { return None };
+            if !session.initialized {
+                return Some(error_response(
+                    id,
+                    JSONRPC_INVALID_REQUEST,
+                    "received tools/call before initialization completed",
+                ));
+            }
+            Some(frontend_tools_call(id, msg, fe))
+        }
+        other => {
+            if is_request {
+                Some(error_response(
+                    id.unwrap_or(Value::Null),
+                    JSONRPC_METHOD_NOT_FOUND,
+                    &format!("unknown method '{}'", other),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// A front-end `tools/call`: resolve the namespaced tool to (module, command),
+/// validate + invert arguments, forward to the module's child, render the reply.
+fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
+    let params = match msg.get("params") {
+        Some(p) => p,
+        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing params"),
+    };
+    let name = match params.get("name").and_then(|n| n.as_str()) {
+        Some(n) => n,
+        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing tool 'name'"),
+    };
+    let empty = Map::new();
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => &empty,
+        Some(Value::Object(m)) => m,
+        Some(_) => return error_response(id, JSONRPC_INVALID_PARAMS, "'arguments' must be an object"),
+    };
+    // The synthetic eval capability (not a module): forks a sandboxed
+    // `morloc eval`, keeping the front-end's no-in-process-compute invariant.
+    if name == "eval" {
+        if !fe.eval_enabled {
+            return error_response(id, JSONRPC_INVALID_PARAMS, "unknown tool 'eval'");
+        }
+        let expr = match arguments.get("expression").and_then(|v| v.as_str()) {
+            Some(e) => e,
+            None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
+        };
+        return match frontend_eval(expr, fe) {
+            Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
+            Err(message) => result_response(
+                id,
+                json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
+            ),
+        };
+    }
+    let (module, shape) = match fe.mcp_by_name.get(name) {
+        Some(t) => t,
+        None => {
+            return error_response(id, JSONRPC_INVALID_PARAMS, &format!("unknown tool '{}'", name))
+        }
+    };
+    let positional = match resolve_arguments(shape, arguments) {
+        Ok(p) => p,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    };
+    let render_sel = arguments.get("_render").and_then(|v| v.as_str()).unwrap_or("raw");
+    // A media (`@mime`) projection comes back from the child as raw bytes+mime
+    // (base64 over the wire) and is rendered as an MCP media block below; the
+    // JSON projection becomes a text/structured result.
+    let (dispatch_command, _ret_mime, returns_object) = match shape.dispatch_for(render_sel) {
+        Ok(t) => t,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    };
+    let request_json = json!({
+        "method": "call",
+        "command": dispatch_command,
+        "args": Value::Array(positional),
+    });
+    match fe.forward(module, &request_json) {
+        Ok(ForwardOk::Json(result_json)) => {
+            result_response(id, tool_result_object(&result_json, returns_object))
+        }
+        Ok(ForwardOk::Media(bytes, mime)) => {
+            result_response(id, media_result_object(media_content_block(&bytes, &mime)))
+        }
+        Err(message) => result_response(
+            id,
+            json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
+        ),
+    }
+}
+
+/// `POST /call/<module>/<command>`: JSON API adapter. Body is a positional-args
+/// JSON array or `{"args":[...]}`. Stateless (no session).
+fn frontend_call_api(
+    rest: &str,
+    req: &HttpRequest,
+    fe: &Frontend,
+    keep_alive: bool,
+) -> Vec<u8> {
+    let mut it = rest.splitn(2, '/');
+    let module = it.next().unwrap_or("");
+    let command = it.next().unwrap_or("");
+    if module.is_empty() || command.is_empty() {
+        return http_json(400, br#"{"error":"expected /call/<module>/<command>"}"#, keep_alive);
+    }
+    if !fe.api_modules.contains(module) {
+        return http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive);
+    }
+    let args: Value = if req.body.is_empty() {
+        Value::Array(Vec::new())
+    } else {
+        match serde_json::from_slice::<Value>(&req.body) {
+            Ok(Value::Array(a)) => Value::Array(a),
+            Ok(Value::Object(o)) => o.get("args").cloned().unwrap_or(Value::Array(Vec::new())),
+            Ok(_) => {
+                return http_json(
+                    400,
+                    br#"{"error":"body must be a JSON array or {\"args\":[...]}"}"#,
+                    keep_alive,
+                )
+            }
+            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
+        }
+    };
+    let request_json = json!({ "method": "call", "command": command, "args": args });
+    match fe.forward(module, &request_json) {
+        Ok(ForwardOk::Json(result_json)) => {
+            let body = format!("{{\"status\":\"ok\",\"result\":{}}}", result_json);
+            http_json(200, body.as_bytes(), keep_alive)
+        }
+        // A media (`@mime`) return goes out as the raw content bytes with the
+        // declared Content-Type (a real image/PDF/...), not a JSON envelope.
+        Ok(ForwardOk::Media(bytes, mime)) => http_binary_response(200, &mime, &bytes, keep_alive),
+        Err(message) => {
+            let body = json!({ "status": "error", "error": message }).to_string();
+            http_json(500, body.as_bytes(), keep_alive)
+        }
+    }
+}
+
+/// An HTTP response carrying raw bytes with an explicit Content-Type and no
+/// trailing newline (for `@mime` media returns on the API adapter).
+fn http_binary_response(status: u16, content_type: &str, body: &[u8], keep_alive: bool) -> Vec<u8> {
+    let mut out = http_head(status, content_type, body.len(), keep_alive, &[]).into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -993,7 +2407,7 @@ mod tests {
 
     // -- handshake / dispatch of non-FFI methods -----------------------------
 
-    fn empty_by_name() -> HashMap<String, &'static McpToolShape> {
+    fn empty_by_name() -> HashMap<&'static str, &'static McpToolShape> {
         HashMap::new()
     }
 
@@ -1119,5 +2533,150 @@ mod tests {
         assert_eq!(it.next().unwrap().unwrap(), ""); // blank line preserved
         assert_eq!(it.next().unwrap().unwrap(), "partial"); // unterminated tail
         assert!(matches!(it.next(), Some(Err(LineError::Eof))));
+    }
+
+    // -- HTTP transport helpers ---------------------------------------------
+
+    fn hdr(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn http_response_frames_status_headers_and_body() {
+        let extra = vec![("Mcp-Session-Id".to_string(), "abc".to_string())];
+        let bytes = http_response(200, b"{\"ok\":1}", true, &extra);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("Content-Type: application/json\r\n"));
+        // Content-Length counts the appended trailing newline (8 + 1).
+        assert!(text.contains("Content-Length: 9\r\n"));
+        assert!(text.contains("Connection: keep-alive\r\n"));
+        assert!(text.contains("Mcp-Session-Id: abc\r\n"));
+        assert!(text.ends_with("\r\n\r\n{\"ok\":1}\n"));
+    }
+
+    #[test]
+    fn http_response_close_when_not_keep_alive() {
+        let bytes = http_response(202, b"", false, &[]);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Connection: close\r\n"));
+        assert!(text.contains("Content-Length: 0\r\n"));
+    }
+
+    #[test]
+    fn authorized_requires_exact_bearer_token() {
+        assert!(authorized(&hdr(&[("authorization", "Bearer s3cret")]), "s3cret"));
+        assert!(!authorized(&hdr(&[("authorization", "Bearer nope")]), "s3cret"));
+        assert!(!authorized(&hdr(&[("authorization", "Basic s3cret")]), "s3cret"));
+        assert!(!authorized(&hdr(&[]), "s3cret"));
+    }
+
+    #[test]
+    fn header_get_is_case_insensitive_on_lowercased_names() {
+        // Parser lowercases names; lookup uses the lowercased key.
+        let h = hdr(&[("mcp-session-id", "xyz"), ("content-length", "10")]);
+        assert_eq!(header_get(&h, "mcp-session-id"), Some("xyz"));
+        assert_eq!(header_get(&h, "missing"), None);
+    }
+
+    #[test]
+    fn session_ids_are_unique_and_hex_when_random_available() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert_ne!(a, b);
+        // On a normal system /dev/urandom yields a 32-char hex id.
+        if a.len() == 32 {
+            assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn read_http_request_parses_request_line_headers_and_body() {
+        // A localhost listener lets us exercise the real BufReader<TcpStream>
+        // path without a client library.
+        use std::io::Write as _;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let req = format!(
+            "POST /mcp?x=1 HTTP/1.1\r\nHost: localhost\r\nMcp-Session-Id: sid\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let handle = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            c.write_all(req.as_bytes()).unwrap();
+            c.write_all(body).unwrap();
+            c.flush().unwrap();
+            // Keep the connection open briefly so the server-side read completes.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let parsed = read_http_request(&mut reader).unwrap().unwrap();
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.path, "/mcp?x=1");
+        assert_eq!(header_get(&parsed.headers, "mcp-session-id"), Some("sid"));
+        assert_eq!(parsed.body, body);
+        handle.join().unwrap();
+    }
+
+    // -- request-read hardening (generic over BufRead, exercised via slices) --
+
+    #[test]
+    fn read_http_request_rejects_overlong_header_line() {
+        // One header line past MAX_HEADER_LINE_BYTES -> connection closed (None).
+        let big = "a".repeat(MAX_HEADER_LINE_BYTES as usize + 1024);
+        let raw = format!("GET /mcp HTTP/1.1\r\nX: {big}\r\n\r\n");
+        let mut slice = raw.as_bytes();
+        assert!(read_http_request(&mut slice).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_http_request_rejects_header_flood() {
+        // More than MAX_HEADERS short headers -> rejected before the blank line.
+        let mut raw = String::from("GET /mcp HTTP/1.1\r\n");
+        for i in 0..(MAX_HEADERS + 2) {
+            raw.push_str(&format!("H{i}: v\r\n"));
+        }
+        raw.push_str("\r\n");
+        let mut slice = raw.as_bytes();
+        assert!(read_http_request(&mut slice).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_http_request_body_bounded_to_content_length() {
+        // Exactly Content-Length bytes are taken; trailing bytes (a pipelined
+        // next request) are left for the following read, not swallowed.
+        let raw = b"POST /mcp HTTP/1.1\r\nContent-Length: 5\r\n\r\nHELLOEXTRA";
+        let mut slice = &raw[..];
+        let parsed = read_http_request(&mut slice).unwrap().unwrap();
+        assert_eq!(parsed.body, b"HELLO");
+        assert_eq!(slice, b"EXTRA"); // remainder preserved
+    }
+
+    #[test]
+    fn prune_sessions_evicts_idle_and_enforces_cap() {
+        // Use a `now` in the future so the "old" entry is idle past the TTL
+        // without depending on wall-clock/uptime (avoids Instant underflow).
+        let base = Instant::now();
+        let future = base + SESSION_TTL + Duration::from_secs(1);
+        let mut m: HashMap<String, SessionInfo> = HashMap::new();
+        m.insert("old".into(), SessionInfo { initialized: true, last_seen: base });
+        m.insert("fresh".into(), SessionInfo { initialized: false, last_seen: future });
+        prune_sessions(&mut m, future);
+        assert!(!m.contains_key("old"), "idle session should be evicted");
+        assert!(m.contains_key("fresh"), "current session should survive");
+
+        // Hard cap: fill to MAX_SESSIONS (all current), prune makes room for one.
+        let mut full: HashMap<String, SessionInfo> = HashMap::new();
+        for i in 0..MAX_SESSIONS {
+            full.insert(format!("s{i}"), SessionInfo { initialized: false, last_seen: base });
+        }
+        prune_sessions(&mut full, base);
+        assert!(full.len() < MAX_SESSIONS, "cap backstop should evict the oldest");
     }
 }

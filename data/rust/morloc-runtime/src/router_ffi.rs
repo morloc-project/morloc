@@ -3,14 +3,10 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
-use crate::daemon_ffi::{
-    DaemonConfig, DaemonResponse, MorlocSocket,
-};
+use crate::daemon_ffi::DaemonResponse;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
-use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
+use crate::http_ffi::{DaemonMethod, DaemonRequest};
 
 // -- Constants ----------------------------------------------------------------
 
@@ -22,14 +18,6 @@ const SUN_PATH_LEN: usize = 108;
 const DAEMON_POLL_INITIAL_MS: f64 = 100.0;
 const DAEMON_POLL_MULTIPLIER: f64 = 1.25;
 const DAEMON_POLL_MAX_RETRIES: usize = 16;
-
-// -- Global state -------------------------------------------------------------
-
-static ROUTER_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn router_signal_handler_fn(_sig: i32) {
-    ROUTER_SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
-}
 
 // -- C-compatible types -------------------------------------------------------
 
@@ -49,80 +37,49 @@ pub struct Router {
     pub fdb_path: *mut c_char,
 }
 
-// -- router_init --------------------------------------------------------------
+// -- router builder + init ----------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_init(
+// Build a Router over an EXPLICIT set of program names under `exe_str`. A named
+// program that is missing or whose manifest fails to parse is an ERROR (the
+// caller asked for exactly these programs). There is no serve-everything scan:
+// which modules are served is always an explicit decision.
+unsafe fn router_build(
     fdb_path: *const c_char,
+    exe_str: &str,
+    names: &[String],
     errmsg: *mut *mut c_char,
 ) -> *mut Router {
-    clear_errmsg(errmsg);
-
     extern "C" {
         fn read_manifest(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
     }
 
-    let dir = libc::opendir(fdb_path);
-    if dir.is_null() {
-        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
-            .to_string_lossy();
-        let path_str = CStr::from_ptr(fdb_path).to_string_lossy();
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other(format!(
-                "Cannot open exe directory '{}': {}",
-                path_str, errno_msg
-            )),
-        );
-        return ptr::null_mut();
-    }
-
-    let exe_str = CStr::from_ptr(fdb_path).to_string_lossy().into_owned();
-
     let router = libc::calloc(1, std::mem::size_of::<Router>()) as *mut Router;
     (*router).fdb_path = libc::strdup(fdb_path);
-
-    let mut cap: usize = 8;
+    let cap = names.len().max(1);
     (*router).programs =
         libc::calloc(cap, std::mem::size_of::<RouterProgram>()) as *mut RouterProgram;
     (*router).n_programs = 0;
 
-    loop {
-        let entry = libc::readdir(dir);
-        if entry.is_null() {
-            break;
-        }
-
-        let name = CStr::from_ptr((*entry).d_name.as_ptr());
-        let name_str = name.to_string_lossy();
-
-        // Each installed program is a subdirectory exe/<name>/ holding a
-        // manifest.json. Skip "." / ".." and any entry without a manifest.
-        if name_str == "." || name_str == ".." {
-            continue;
-        }
+    for name_str in names {
         // Installed layout: exe/<name>/<name>-build/manifest.json
         // (see Morloc.ProgramBuilder.Paths for the shared convention).
         let full_path = format!("{}/{}/{}-build/manifest.json", exe_str, name_str, name_str);
         if !std::path::Path::new(&full_path).is_file() {
-            continue;
-        }
-
-        // Grow array if needed
-        if (*router).n_programs >= cap {
-            cap *= 2;
-            (*router).programs = libc::realloc(
-                (*router).programs as *mut c_void,
-                cap * std::mem::size_of::<RouterProgram>(),
-            ) as *mut RouterProgram;
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!(
+                    "Program '{}' is not installed (no {})",
+                    name_str, full_path
+                )),
+            );
+            router_free(router);
+            return ptr::null_mut();
         }
 
         let prog = &mut *(*router).programs.add((*router).n_programs);
         ptr::write_bytes(prog as *mut RouterProgram, 0, 1);
 
-        // Program name is the subdirectory name.
-        let prog_name = name_str.as_ref();
-        let c_prog_name = CString::new(prog_name).unwrap_or_default();
+        let c_prog_name = CString::new(name_str.as_str()).unwrap_or_default();
         prog.name = libc::strdup(c_prog_name.as_ptr());
 
         let c_path = CString::new(full_path.clone()).unwrap_or_default();
@@ -132,18 +89,21 @@ pub unsafe extern "C" fn router_init(
         let mut child_err: *mut c_char = ptr::null_mut();
         prog.manifest = read_manifest(prog.manifest_path, &mut child_err);
         if !child_err.is_null() {
-            let err_str = CStr::from_ptr(child_err).to_string_lossy();
-            let path_str = CStr::from_ptr(prog.manifest_path).to_string_lossy();
-            eprintln!("morloc-router: warning: failed to parse {}: {}", path_str, err_str);
+            let err_str = CStr::from_ptr(child_err).to_string_lossy().into_owned();
             libc::free(child_err as *mut c_void);
             libc::free(prog.name as *mut c_void);
             libc::free(prog.manifest_path as *mut c_void);
-            continue;
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!("Failed to parse {}: {}", full_path, err_str)),
+            );
+            router_free(router);
+            return ptr::null_mut();
         }
 
         prog.daemon_pid = 0;
         // Set socket path
-        let socket_path = format!("/tmp/morloc-router-{}.sock", prog_name);
+        let socket_path = format!("/tmp/morloc-router-{}.sock", name_str);
         let c_socket = CString::new(socket_path).unwrap_or_default();
         let socket_bytes = c_socket.as_bytes_with_nul();
         let copy_len = socket_bytes.len().min(SUN_PATH_LEN);
@@ -156,11 +116,46 @@ pub unsafe extern "C" fn router_init(
         (*router).n_programs += 1;
     }
 
-    libc::closedir(dir);
-
-    // Empty fdb is fine -- programs can be added while the router is running
-
     router
+}
+
+// Serve exactly the named programs under `fdb_path`. A named program that is not
+// installed is an error. The only serve path: which modules are served is an
+// explicit decision, never "whatever happens to be installed".
+#[no_mangle]
+pub unsafe extern "C" fn router_init_explicit(
+    fdb_path: *const c_char,
+    names: *const *const c_char,
+    n_names: usize,
+    errmsg: *mut *mut c_char,
+) -> *mut Router {
+    clear_errmsg(errmsg);
+    let exe_str = CStr::from_ptr(fdb_path).to_string_lossy().into_owned();
+    let mut name_vec: Vec<String> = Vec::with_capacity(n_names);
+    for i in 0..n_names {
+        let p = *names.add(i);
+        if !p.is_null() {
+            name_vec.push(CStr::from_ptr(p).to_string_lossy().into_owned());
+        }
+    }
+    router_build(fdb_path, &exe_str, &name_vec, errmsg)
+}
+
+// SIGTERM every live child daemon so each cleans up its own pools and SHM.
+// Async-signal-safe (only `libc::kill`, no allocation/free/stdio), so it is safe
+// to call from a signal handler; the serving front-end has no other shutdown
+// path (it never returns), so this is how children are told to exit gracefully.
+#[no_mangle]
+pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
+    if router.is_null() {
+        return;
+    }
+    for i in 0..(*router).n_programs {
+        let prog = &*(*router).programs.add(i);
+        if prog.daemon_pid > 0 {
+            libc::kill(prog.daemon_pid, libc::SIGTERM);
+        }
+    }
 }
 
 // -- router_free --------------------------------------------------------------
@@ -730,6 +725,11 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
         map.insert("name".into(), serde_json::Value::String(name.into_owned()));
     }
 
+    // A forward is always a serving front-end call: request the raw-media form
+    // so an `@mime` return arrives as bytes+mime. Direct length-prefixed clients
+    // (which don't go through router_forward) omit this and keep JSON `result`.
+    map.insert("media".into(), serde_json::Value::Bool(true));
+
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
 }
 
@@ -807,727 +807,3 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
     libc::strdup(c.as_ptr())
 }
 
-// -- Router HTTP request routing ----------------------------------------------
-
-/// Route HTTP requests for the router. Sets *out_program to the target program
-/// name (caller-owned) for per-program requests, or NULL for router-level requests.
-unsafe fn router_http_to_request(
-    req: *mut HttpRequest,
-    out_program: *mut *mut c_char,
-    errmsg: *mut *mut c_char,
-) -> *mut DaemonRequest {
-    clear_errmsg(errmsg);
-
-    let dreq = libc::calloc(1, std::mem::size_of::<DaemonRequest>()) as *mut DaemonRequest;
-    if dreq.is_null() {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to allocate daemon_request_t".into()),
-        );
-        return ptr::null_mut();
-    }
-
-    *out_program = ptr::null_mut();
-
-    let path = CStr::from_ptr((*req).path.as_ptr())
-        .to_str()
-        .unwrap_or("");
-    let method = (*req).method;
-
-    let body_str = if !(*req).body.is_null() && (*req).body_len > 0 {
-        std::str::from_utf8(std::slice::from_raw_parts(
-            (*req).body as *const u8,
-            (*req).body_len,
-        ))
-        .unwrap_or("")
-    } else {
-        ""
-    };
-
-    // GET /health or GET /health/<program>
-    if method == HttpMethod::Get && (path == "/health" || path.starts_with("/health/")) {
-        (*dreq).method = DaemonMethod::Health;
-        if path.starts_with("/health/") {
-            let prog_name = &path[8..];
-            if !prog_name.is_empty() {
-                let c = CString::new(prog_name).unwrap_or_default();
-                *out_program = libc::strdup(c.as_ptr());
-            }
-        }
-        return dreq;
-    }
-
-    // GET /programs or GET /discover
-    if method == HttpMethod::Get && (path == "/programs" || path == "/discover") {
-        (*dreq).method = DaemonMethod::Discover;
-        return dreq;
-    }
-
-    // GET /discover/<program>
-    if method == HttpMethod::Get && path.starts_with("/discover/") {
-        let prog_name = &path[10..];
-        if !prog_name.is_empty() {
-            let c = CString::new(prog_name).unwrap_or_default();
-            *out_program = libc::strdup(c.as_ptr());
-            (*dreq).method = DaemonMethod::Discover;
-            return dreq;
-        }
-    }
-
-    // POST /eval
-    if method == HttpMethod::Post && path == "/eval" {
-        (*dreq).method = DaemonMethod::Eval;
-        if !body_str.is_empty() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body_str) {
-                if let Some(expr) = v.get("expr").and_then(|e| e.as_str()) {
-                    let c = CString::new(expr).unwrap_or_default();
-                    (*dreq).expr = libc::strdup(c.as_ptr());
-                }
-            }
-        }
-        if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other("Missing 'expr' field in /eval request body".into()),
-            );
-            return ptr::null_mut();
-        }
-        return dreq;
-    }
-
-    // POST /call/<program>/<command>
-    if method == HttpMethod::Post && path.starts_with("/call/") {
-        let rest = &path[6..];
-        let slash = rest.find('/');
-        match slash {
-            Some(pos) if pos + 1 < rest.len() => {
-                let prog_name = &rest[..pos];
-                let cmd_name = &rest[pos + 1..];
-                let c_prog = CString::new(prog_name).unwrap_or_default();
-                *out_program = libc::strdup(c_prog.as_ptr());
-                (*dreq).method = DaemonMethod::Call;
-                let c_cmd = CString::new(cmd_name).unwrap_or_default();
-                (*dreq).command = libc::strdup(c_cmd.as_ptr());
-
-                // Parse body for args
-                let trimmed = body_str.trim();
-                if trimmed.starts_with('[') {
-                    let c = CString::new(trimmed).unwrap_or_default();
-                    (*dreq).args_json = libc::strdup(c.as_ptr());
-                } else if trimmed.starts_with('{') {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        if let Some(args) = v.get("args") {
-                            let args_str = serde_json::to_string(args).unwrap_or_default();
-                            let c = CString::new(args_str).unwrap_or_default();
-                            (*dreq).args_json = libc::strdup(c.as_ptr());
-                        }
-                    }
-                }
-                return dreq;
-            }
-            _ => {
-                libc::free(dreq as *mut c_void);
-                set_errmsg(
-                    errmsg,
-                    &MorlocError::Other("Expected /call/<program>/<command>".into()),
-                );
-                return ptr::null_mut();
-            }
-        }
-    }
-
-    // OPTIONS preflight is short-circuited to 204 No Content by the
-    // router event loop before this function is reached. If an OPTIONS
-    // request somehow falls through, treat it as an unknown endpoint.
-
-    libc::free(dreq as *mut c_void);
-    let method_str = match method {
-        HttpMethod::Get => "GET",
-        HttpMethod::Post => "POST",
-        HttpMethod::Delete => "DELETE",
-        HttpMethod::Options => "OPTIONS",
-    };
-    set_errmsg(
-        errmsg,
-        &MorlocError::Other(format!("Unknown router endpoint: {} {}", method_str, path)),
-    );
-    ptr::null_mut()
-}
-
-// -- Router event loop --------------------------------------------------------
-
-const ROUTER_MAX_LISTENERS: usize = 3;
-
-#[no_mangle]
-pub unsafe extern "C" fn router_run(config: *mut DaemonConfig, router: *mut Router) {
-    extern "C" {
-        fn http_parse_request(fd: i32, errmsg: *mut *mut c_char) -> *mut HttpRequest;
-        fn http_free_request(req: *mut HttpRequest);
-        fn http_write_response(
-            fd: i32,
-            status: i32,
-            content_type: *const c_char,
-            body: *const c_char,
-            body_len: usize,
-        ) -> bool;
-        fn http_write_response_ex(
-            fd: i32,
-            status: i32,
-            content_type: *const c_char,
-            body: *const c_char,
-            body_len: usize,
-            extra_headers: *const c_char,
-        ) -> bool;
-        fn daemon_dispatch(
-            manifest: *mut c_void,
-            request: *mut DaemonRequest,
-            sockets: *mut MorlocSocket,
-            shm_basename: *const c_char,
-        ) -> *mut DaemonResponse;
-        fn daemon_serialize_response(
-            response: *mut DaemonResponse,
-            out_len: *mut usize,
-        ) -> *mut c_char;
-        fn daemon_free_request(req: *mut DaemonRequest);
-        fn daemon_free_response(resp: *mut DaemonResponse);
-        fn daemon_set_eval_timeout(timeout_sec: i32);
-        fn manifest_to_discovery_json(manifest: *const c_void) -> *mut c_char;
-    }
-
-    daemon_set_eval_timeout((*config).eval_timeout);
-
-    // Widen the open-file ceiling: the router accepts connections and holds
-    // per-request fds; poll() tolerates fds >= 1024 only if the soft limit does.
-    crate::utility::raise_nofile_limit();
-
-    // Install signal handlers
-    ROUTER_SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
-    let handler: libc::sighandler_t =
-        std::mem::transmute::<extern "C" fn(i32), libc::sighandler_t>(router_signal_handler_fn);
-    libc::signal(libc::SIGTERM, handler);
-    libc::signal(libc::SIGINT, handler);
-
-    let mut fds = [libc::pollfd {
-        fd: -1,
-        events: 0,
-        revents: 0,
-    }; ROUTER_MAX_LISTENERS];
-    let mut nfds: usize = 0;
-
-    let ct = b"application/json\0";
-
-    let mut bound_unix_path: Option<String> = None;
-    let mut bound_http_port: Option<u16> = None;
-
-    // HTTP listener. Configured iff http_port >= 0; port 0 means bind
-    // ephemeral (OS picks the port).
-    if (*config).http_port >= 0 {
-        let requested = (*config).http_port as u16;
-        let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
-        if http_fd < 0 {
-            eprintln!("morloc-router: failed to create http socket");
-            return;
-        }
-        let opt: i32 = 1;
-        libc::setsockopt(
-            http_fd,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            &opt as *const i32 as *const c_void,
-            std::mem::size_of::<i32>() as libc::socklen_t,
-        );
-        let mut addr: libc::sockaddr_in = std::mem::zeroed();
-        addr.sin_family = libc::AF_INET as libc::sa_family_t;
-        addr.sin_addr.s_addr = libc::INADDR_ANY;
-        addr.sin_port = requested.to_be();
-        if libc::bind(
-            http_fd,
-            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        ) < 0
-        {
-            eprintln!("morloc-router: failed to bind http port {}", requested);
-            libc::close(http_fd);
-            return;
-        }
-        let actual = crate::daemon_ffi::getsockname_port_pub(http_fd).unwrap_or(requested);
-        libc::listen(http_fd, libc::SOMAXCONN);
-        eprintln!("morloc-router: listening on http://0.0.0.0:{}", actual);
-        fds[nfds].fd = http_fd;
-        fds[nfds].events = libc::POLLIN as i16;
-        nfds += 1;
-        bound_http_port = Some(actual);
-    }
-
-    // Unix socket
-    if !(*config).unix_socket_path.is_null() {
-        let sock_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-        if sock_fd < 0 {
-            eprintln!("morloc-router: failed to create unix socket");
-            return;
-        }
-        let mut addr: libc::sockaddr_un = std::mem::zeroed();
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        let path_bytes = CStr::from_ptr((*config).unix_socket_path).to_bytes();
-        let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-        ptr::copy_nonoverlapping(
-            path_bytes.as_ptr() as *const c_char,
-            addr.sun_path.as_mut_ptr(),
-            copy_len,
-        );
-        libc::unlink((*config).unix_socket_path);
-        if libc::bind(
-            sock_fd,
-            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
-        ) < 0
-        {
-            eprintln!("morloc-router: failed to bind unix socket");
-            libc::close(sock_fd);
-            return;
-        }
-        libc::listen(sock_fd, libc::SOMAXCONN);
-        let unix_path = CStr::from_ptr((*config).unix_socket_path)
-            .to_string_lossy()
-            .into_owned();
-        eprintln!("morloc-router: listening on unix://{}", unix_path);
-        fds[nfds].fd = sock_fd;
-        fds[nfds].events = libc::POLLIN as i16;
-        nfds += 1;
-        bound_unix_path = Some(unix_path);
-    }
-
-    if nfds == 0 {
-        eprintln!("morloc-router: no listeners configured");
-        return;
-    }
-
-    // Optional port-file output. The router has no TCP listener, so tcp
-    // is always null in the JSON.
-    if !(*config).port_file_path.is_null() {
-        let path = CStr::from_ptr((*config).port_file_path)
-            .to_string_lossy()
-            .into_owned();
-        if let Err(e) = crate::daemon_ffi::write_port_file_atomic_pub(
-            &path,
-            bound_http_port,
-            None,
-            bound_unix_path.as_deref(),
-        ) {
-            eprintln!("morloc-router: failed to write port file {}: {}", path, e);
-        }
-    }
-
-    // Eagerly start all program daemons so /health reports ok immediately
-    for i in 0..(*router).n_programs {
-        let prog = &mut *(*router).programs.add(i);
-        if (*prog).daemon_pid <= 0 {
-            let mut child_err: *mut c_char = ptr::null_mut();
-            if router_start_program(prog, &mut child_err) {
-                eprintln!(
-                    "morloc-router: started daemon for '{}'",
-                    CStr::from_ptr((*prog).name).to_string_lossy()
-                );
-            } else {
-                let err_msg = if !child_err.is_null() {
-                    let s = CStr::from_ptr(child_err).to_string_lossy().to_string();
-                    libc::free(child_err as *mut c_void);
-                    s
-                } else {
-                    "unknown error".to_string()
-                };
-                eprintln!(
-                    "morloc-router: warning: failed to start daemon for '{}': {}",
-                    CStr::from_ptr((*prog).name).to_string_lossy(),
-                    err_msg
-                );
-            }
-        }
-    }
-
-    while !ROUTER_SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-        let ready = libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, 1000);
-        if ready < 0 {
-            if crate::utility::errno_val() == libc::EINTR {
-                continue;
-            }
-            eprintln!("morloc-router: poll error");
-            break;
-        }
-        if ready == 0 {
-            continue;
-        }
-
-        for i in 0..nfds {
-            if fds[i].revents & libc::POLLIN as i16 == 0 {
-                continue;
-            }
-
-            let client_fd = libc::accept(fds[i].fd, ptr::null_mut(), ptr::null_mut());
-            if client_fd < 0 {
-                continue;
-            }
-            let req_start = Instant::now();
-            crate::utility::set_nosigpipe(client_fd);
-
-            let tv = libc::timeval {
-                tv_sec: 30,
-                tv_usec: 0,
-            };
-            libc::setsockopt(
-                client_fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVTIMEO,
-                &tv as *const libc::timeval as *const c_void,
-                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            );
-            libc::setsockopt(
-                client_fd,
-                libc::SOL_SOCKET,
-                libc::SO_SNDTIMEO,
-                &tv as *const libc::timeval as *const c_void,
-                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            );
-
-            let mut err: *mut c_char = ptr::null_mut();
-
-            let http_req = http_parse_request(client_fd, &mut err);
-            if !err.is_null() {
-                let body = b"{\"status\":\"error\",\"error\":\"Bad request\"}\0";
-                http_write_response(
-                    client_fd,
-                    400,
-                    ct.as_ptr() as *const c_char,
-                    body.as_ptr() as *const c_char,
-                    body.len() - 1,
-                );
-                libc::free(err as *mut c_void);
-                let elapsed = req_start.elapsed();
-                eprintln!("morloc-router: ??? ??? -> 400 ({:.1}ms)", elapsed.as_secs_f64() * 1000.0);
-                libc::close(client_fd);
-                continue;
-            }
-
-            // Extract method and path for access logging before request is consumed
-            let log_method = match (*http_req).method {
-                HttpMethod::Get => "GET",
-                HttpMethod::Post => "POST",
-                HttpMethod::Delete => "DELETE",
-                HttpMethod::Options => "OPTIONS",
-            };
-            let log_path_cstr = CStr::from_ptr((*http_req).path.as_ptr());
-            let log_path = log_path_cstr.to_str().unwrap_or("???").to_string();
-
-            // CORS preflight short-circuit: 204 No Content with the
-            // standard CORS headers, no daemon dispatch.
-            if (*http_req).method == HttpMethod::Options {
-                http_write_response(
-                    client_fd,
-                    204,
-                    ct.as_ptr() as *const c_char,
-                    ptr::null(),
-                    0,
-                );
-                http_free_request(http_req);
-                let elapsed = req_start.elapsed();
-                eprintln!(
-                    "morloc-router: OPTIONS {} -> 204 ({:.1}ms)",
-                    log_path,
-                    elapsed.as_secs_f64() * 1000.0
-                );
-                libc::close(client_fd);
-                continue;
-            }
-
-            let mut target_program: *mut c_char = ptr::null_mut();
-            let dreq = router_http_to_request(http_req, &mut target_program, &mut err);
-            http_free_request(http_req);
-
-            if !err.is_null() {
-                let err_json = make_error_json(&CStr::from_ptr(err).to_string_lossy());
-                let c = CString::new(err_json.as_str()).unwrap_or_default();
-                http_write_response(
-                    client_fd,
-                    404,
-                    ct.as_ptr() as *const c_char,
-                    c.as_ptr(),
-                    err_json.len(),
-                );
-                libc::free(err as *mut c_void);
-                let elapsed = req_start.elapsed();
-                eprintln!("morloc-router: {} {} -> 404 ({:.1}ms)", log_method, log_path, elapsed.as_secs_f64() * 1000.0);
-                libc::close(client_fd);
-                continue;
-            }
-
-            // Track response status for access log
-            let mut resp_status: i32 = 200;
-
-            // Router-level requests
-            if target_program.is_null() {
-                if (*dreq).method == DaemonMethod::Health {
-                    // Aggregate per-program health
-                    let mut all_ok = true;
-                    let mut prog_entries = Vec::new();
-                    for i in 0..(*router).n_programs {
-                        let prog = &*(*router).programs.add(i);
-                        let name = CStr::from_ptr(prog.name).to_string_lossy();
-                        let alive =
-                            prog.daemon_pid > 0 && libc::kill(prog.daemon_pid, 0) == 0;
-                        if !alive {
-                            all_ok = false;
-                        }
-                        let status_str = if alive { "ok" } else { "error" };
-                        prog_entries.push(serde_json::json!({
-                            "program": name.as_ref(),
-                            "status": status_str,
-                        }));
-                    }
-                    let overall = if all_ok { "ok" } else { "degraded" };
-                    let body = serde_json::json!({
-                        "status": overall,
-                        "programs": prog_entries,
-                    }).to_string();
-                    let status_code = if all_ok { 200 } else { 503 };
-                    resp_status = status_code;
-                    let c = CString::new(body.as_str()).unwrap_or_default();
-                    if status_code == 503 {
-                        // Some pools are down; the router is degraded.
-                        // Hint clients to retry shortly.
-                        let extra = b"Retry-After: 1\r\n\0";
-                        http_write_response_ex(
-                            client_fd,
-                            status_code,
-                            ct.as_ptr() as *const c_char,
-                            c.as_ptr(),
-                            body.len(),
-                            extra.as_ptr() as *const c_char,
-                        );
-                    } else {
-                        http_write_response(
-                            client_fd,
-                            status_code,
-                            ct.as_ptr() as *const c_char,
-                            c.as_ptr(),
-                            body.len(),
-                        );
-                    }
-                } else if (*dreq).method == DaemonMethod::Discover {
-                    let disco = router_build_discovery(router);
-                    let disco_len = libc::strlen(disco);
-                    http_write_response(
-                        client_fd,
-                        200,
-                        ct.as_ptr() as *const c_char,
-                        disco,
-                        disco_len,
-                    );
-                    libc::free(disco as *mut c_void);
-                } else if (*dreq).method == DaemonMethod::Eval {
-                    // daemon_dispatch takes manifest as first arg, NULL is fine for eval
-                    let resp = daemon_dispatch(ptr::null_mut(), dreq, ptr::null_mut(), ptr::null());
-                    let mut resp_len: usize = 0;
-                    let resp_json = daemon_serialize_response(resp, &mut resp_len);
-                    let status = crate::daemon_ffi::daemon_error_kind_to_http_status(
-                        (*resp).error_kind, (*resp).success,
-                    );
-                    resp_status = status;
-                    if status == 503 {
-                        let extra = b"Retry-After: 1\r\n\0";
-                        http_write_response_ex(
-                            client_fd,
-                            status,
-                            ct.as_ptr() as *const c_char,
-                            resp_json,
-                            resp_len,
-                            extra.as_ptr() as *const c_char,
-                        );
-                    } else {
-                        http_write_response(
-                            client_fd,
-                            status,
-                            ct.as_ptr() as *const c_char,
-                            resp_json,
-                            resp_len,
-                        );
-                    }
-                    libc::free(resp_json as *mut c_void);
-                    daemon_free_response(resp);
-                }
-                daemon_free_request(dreq);
-                let elapsed = req_start.elapsed();
-                eprintln!("morloc-router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
-                libc::close(client_fd);
-                continue;
-            }
-
-            // Per-program request
-            if (*dreq).method == DaemonMethod::Health {
-                let mut found = false;
-                for p in 0..(*router).n_programs {
-                    let rprog = &*(*router).programs.add(p);
-                    if CStr::from_ptr(rprog.name) == CStr::from_ptr(target_program) {
-                        found = true;
-                        let alive =
-                            rprog.daemon_pid > 0 && libc::kill(rprog.daemon_pid, 0) == 0;
-                        let prog_str = CStr::from_ptr(rprog.name).to_string_lossy();
-                        let body = if alive {
-                            serde_json::json!({
-                                "status": "ok",
-                                "program": prog_str.as_ref(),
-                            }).to_string()
-                        } else {
-                            resp_status = 503;
-                            serde_json::json!({
-                                "status": "error",
-                                "program": prog_str.as_ref(),
-                                "error": "daemon not running",
-                            }).to_string()
-                        };
-                        let c = CString::new(body.as_str()).unwrap_or_default();
-                        http_write_response(
-                            client_fd,
-                            resp_status,
-                            ct.as_ptr() as *const c_char,
-                            c.as_ptr(),
-                            body.len(),
-                        );
-                        break;
-                    }
-                }
-                if !found {
-                    resp_status = 404;
-                    let body = b"{\"status\":\"error\",\"error\":\"Unknown program\"}\0";
-                    http_write_response(
-                        client_fd,
-                        404,
-                        ct.as_ptr() as *const c_char,
-                        body.as_ptr() as *const c_char,
-                        body.len() - 1,
-                    );
-                }
-            } else if (*dreq).method == DaemonMethod::Discover {
-                let mut found = false;
-                for p in 0..(*router).n_programs {
-                    let rprog = &*(*router).programs.add(p);
-                    if CStr::from_ptr(rprog.name) == CStr::from_ptr(target_program) {
-                        if !rprog.manifest.is_null() {
-                            let disco = manifest_to_discovery_json(rprog.manifest);
-                            let disco_len = libc::strlen(disco);
-                            http_write_response(
-                                client_fd,
-                                200,
-                                ct.as_ptr() as *const c_char,
-                                disco,
-                                disco_len,
-                            );
-                            libc::free(disco as *mut c_void);
-                            found = true;
-                        }
-                        break;
-                    }
-                }
-                if !found {
-                    resp_status = 404;
-                    let body = b"{\"status\":\"error\",\"error\":\"Unknown program\"}\0";
-                    http_write_response(
-                        client_fd,
-                        404,
-                        ct.as_ptr() as *const c_char,
-                        body.as_ptr() as *const c_char,
-                        body.len() - 1,
-                    );
-                }
-            } else {
-                // Forward to program daemon
-                let resp = router_forward(router, target_program, dreq, &mut err);
-                if !err.is_null() {
-                    resp_status = 500;
-                    let err_json =
-                        make_error_json(&CStr::from_ptr(err).to_string_lossy());
-                    let c = CString::new(err_json.as_str()).unwrap_or_default();
-                    http_write_response(
-                        client_fd,
-                        500,
-                        ct.as_ptr() as *const c_char,
-                        c.as_ptr(),
-                        err_json.len(),
-                    );
-                    libc::free(err as *mut c_void);
-                } else {
-                    let mut resp_len: usize = 0;
-                    let resp_json = daemon_serialize_response(resp, &mut resp_len);
-                    let status = crate::daemon_ffi::daemon_error_kind_to_http_status(
-                        (*resp).error_kind, (*resp).success,
-                    );
-                    resp_status = status;
-                    if status == 503 {
-                        let extra = b"Retry-After: 1\r\n\0";
-                        http_write_response_ex(
-                            client_fd,
-                            status,
-                            ct.as_ptr() as *const c_char,
-                            resp_json,
-                            resp_len,
-                            extra.as_ptr() as *const c_char,
-                        );
-                    } else {
-                        http_write_response(
-                            client_fd,
-                            status,
-                            ct.as_ptr() as *const c_char,
-                            resp_json,
-                            resp_len,
-                        );
-                    }
-                    libc::free(resp_json as *mut c_void);
-                    daemon_free_response(resp);
-                }
-            }
-
-            libc::free(target_program as *mut c_void);
-            daemon_free_request(dreq);
-            let elapsed = req_start.elapsed();
-            eprintln!("morloc-router: {} {} -> {} ({:.1}ms)", log_method, log_path, resp_status, elapsed.as_secs_f64() * 1000.0);
-            libc::close(client_fd);
-        }
-    }
-
-    // Kill all program daemons
-    for i in 0..(*router).n_programs {
-        let prog = &*(*router).programs.add(i);
-        if prog.daemon_pid > 0 {
-            libc::kill(prog.daemon_pid, libc::SIGTERM);
-            libc::unlink(prog.daemon_socket.as_ptr());
-        }
-    }
-
-    // Wait for children
-    for i in 0..(*router).n_programs {
-        let prog = &*(*router).programs.add(i);
-        if prog.daemon_pid > 0 {
-            libc::waitpid(prog.daemon_pid, ptr::null_mut(), 0);
-        }
-    }
-
-    // Close listeners
-    for i in 0..nfds {
-        libc::close(fds[i].fd);
-    }
-
-    if !(*config).unix_socket_path.is_null() {
-        libc::unlink((*config).unix_socket_path);
-    }
-}
-
-/// Build a JSON error response string.
-fn make_error_json(error: &str) -> String {
-    let map: serde_json::Map<String, serde_json::Value> = [
-        ("status".into(), serde_json::Value::String("error".into())),
-        ("error".into(), serde_json::Value::String(error.into())),
-    ]
-    .into_iter()
-    .collect();
-    serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
-}
