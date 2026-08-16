@@ -4,8 +4,10 @@
 import qualified System.Directory as SD
 import Test.Tasty
 
+import AbiTests (abiTests)
 import BuildParamsTests (buildParamsTests)
 import EffectBoundaryTests (effectBoundaryTests)
+import EnvSpecTests (envSpecTests)
 import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (goldenMakefileTest)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
@@ -25,7 +27,9 @@ main = do
     testGroup
       "Morloc tests"
       [ unitTypeTests
+      , abiTests
       , buildParamsTests
+      , envSpecTests
       , futharkTupleTests
       , unitValuecheckTests
       , typeOrderTests

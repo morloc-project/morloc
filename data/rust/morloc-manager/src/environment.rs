@@ -482,7 +482,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
             def_content_hash: None,
             base_sif: None,
             layered_sif: None,
-            engine: opts.engine.unwrap_or(ContainerEngine::Podman),
+            backend: Backend::Container(opts.engine.unwrap_or(ContainerEngine::Podman)),
             shm_size: "512m".to_string(),
             morloc_version: None,
         }
@@ -502,7 +502,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         ec.morloc_version = Some(ver.clone());
     }
     if let Some(engine) = opts.engine {
-        ec.engine = engine;
+        ec.backend = Backend::Container(engine);
     }
     if let Some(ref shm) = opts.shm_size {
         if !is_valid_shm_size(shm) {
@@ -548,7 +548,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
     // For Apptainer: claim the cached pull .sif (from pull_tagged_image /
     // pull_custom_image) into the env's data dir. This runs once at `new`
     // and again whenever the base image changes via `update --image`.
-    let needs_base_sif_claim = matches!(ec.engine, ContainerEngine::Apptainer)
+    let needs_base_sif_claim = matches!(ec.engine()?, ContainerEngine::Apptainer)
         && (opts.is_new || opts.base_image.is_some())
         && !ec.base_image.is_empty();
     if needs_base_sif_claim {
@@ -606,7 +606,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         config::write_flag_config(scope, name, &parsed)?;
     } else if opts.is_new && !opts.engine_args.is_empty() {
         let mut fc = FlagConfig::default();
-        let target = match ec.engine {
+        let target = match ec.engine()? {
             ContainerEngine::Docker => &mut fc.run.docker,
             ContainerEngine::Podman => &mut fc.run.podman,
             ContainerEngine::Apptainer => &mut fc.run.apptainer,
@@ -654,7 +654,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
     //   unchanged rather than failing the whole operation.
     let detect_target = ec.active_image().to_string();
     if !detect_target.is_empty() {
-        if let Ok(detected) = detect_morloc_version(ec.engine, &detect_target) {
+        if let Ok(detected) = detect_morloc_version(ec.engine()?, &detect_target) {
             ec.morloc_version = Some(match ec.morloc_version.take() {
                 Some(recorded) if recorded.major == detected.major
                     && recorded.minor == detected.minor
@@ -684,15 +684,18 @@ fn run_recipe_build(
 ) -> Result<()> {
     let df_path = config::env_dockerfile_path(scope, name);
     let def_path = config::env_deffile_path(scope, name);
+    // Recipe builds are container-only; resolve the engine once (native
+    // environments never reach this function).
+    let engine = ec.engine()?;
 
     // Materialize build-phase flags: env.flags.yaml `build.<engine>` prepended
     // to `build.all`, then this invocation's --reinit-arg flags appended.
     // The engine resolves duplicates last-wins.
     let mut build_extra_flags = config::read_flag_config(scope, name)?
-        .materialize(Phase::Build, ec.engine);
+        .materialize(Phase::Build, engine);
     build_extra_flags.extend(opts.reinit_args.iter().cloned());
 
-    match ec.engine {
+    match engine {
         ContainerEngine::Docker | ContainerEngine::Podman => {
             if ec.dockerfile.is_none() {
                 // Only the .def is present; docker/podman cannot consume it.
@@ -715,7 +718,7 @@ fn run_recipe_build(
                 && ec
                     .built_image
                     .as_ref()
-                    .map(|img| image_exists_locally(ec.engine, img))
+                    .map(|img| image_exists_locally(engine, img))
                     .unwrap_or(false);
             if unchanged {
                 eprintln!("Dockerfile unchanged; skipping rebuild.");
@@ -729,17 +732,17 @@ fn run_recipe_build(
                 extra_flags: build_extra_flags.clone(),
             };
             if opts.verbose {
-                let exe = engine_executable(ec.engine);
+                let exe = engine_executable(engine);
                 eprintln!(
                     "[morloc-manager] {exe} build -f {} -t {} {} {}",
                     build_cfg.dockerfile, build_cfg.tag,
                     build_extra_flags.join(" "), build_cfg.context
                 );
             }
-            let status = container_build_visible(ec.engine, &build_cfg);
+            let status = container_build_visible(engine, &build_cfg);
             if !status.success() {
                 return Err(ManagerError::EngineError {
-                    engine: ec.engine,
+                    engine: engine,
                     code: exit_code_to_int(status),
                     stderr: "Build failed (see output above)".to_string(),
                 });
@@ -777,7 +780,7 @@ fn run_recipe_build(
                     extra_flags: build_extra_flags.clone(),
                 };
                 if opts.verbose {
-                    let exe = engine_executable(ec.engine);
+                    let exe = engine_executable(engine);
                     eprintln!(
                         "[morloc-manager] {exe} build {} --build-arg BASE_SIF={} {} {}",
                         build_extra_flags.join(" "),
@@ -789,7 +792,7 @@ fn run_recipe_build(
                 let status = apptainer_build_native(&cfg);
                 if !status.success() {
                     return Err(ManagerError::EngineError {
-                        engine: ec.engine,
+                        engine: engine,
                         code: exit_code_to_int(status),
                         stderr: "Apptainer build failed (see output above)".to_string(),
                     });
@@ -860,7 +863,7 @@ fn run_recipe_build(
             let convert_status = apptainer_build_from_oci_daemon(&convert_cfg);
             if !convert_status.success() {
                 return Err(ManagerError::EngineError {
-                    engine: ec.engine,
+                    engine: engine,
                     code: exit_code_to_int(convert_status),
                     stderr: "OCI -> .sif conversion failed (see output above)".to_string(),
                 });

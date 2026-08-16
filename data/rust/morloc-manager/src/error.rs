@@ -23,6 +23,9 @@ pub enum ManagerError {
     #[error("Environment error: {0}")]
     EnvError(String),
 
+    #[error("{0}")]
+    BackendUnsupported(String),
+
     #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH. For named tags like 'edge', use --tag instead.")]
     InvalidVersion(String),
 

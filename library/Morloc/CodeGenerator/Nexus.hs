@@ -43,6 +43,7 @@ import qualified Morloc.CodeGenerator.Docstrings as Docstrings
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.NumericLiteral as NL
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -2509,7 +2510,7 @@ generate ::
   [(AnnoS (Indexed Type) One (), CmdDocSet)] ->
   [(AnnoS (Indexed Type) One (Indexed Lang), CmdDocSet)] ->
   [AnnoS (Indexed Type) One (Indexed Lang)] ->
-  MorlocMonad (Script, [WrapperFile])
+  MorlocMonad (Script, Script, [WrapperFile])
 generate cs rASTs helperRASTs = do
   config <- MM.ask
   st <- CMS.get
@@ -2664,6 +2665,18 @@ generate cs rASTs helperRASTs = do
         | s <- specs
         ]
 
+  -- Backend-agnostic environment requirements: a pure, offline function of the
+  -- program's dependency closure (pool languages + DAG-wide package metadata).
+  -- It lands beside manifest.json and is consumed by environment backends.
+  let envspec = ES.buildEnvSpec Morloc.Version.versionStr (map fst daemonSets) (statePackageMeta st)
+      envspecScript =
+        Script
+          { scriptBase = "envspec"
+          , scriptLang = cLang
+          , scriptCode = "." :/ File "envspec.json" (Code (ES.renderEnvSpec envspec))
+          , scriptMake = []
+          }
+
   return
     ( Script
         { scriptBase = "manifest"
@@ -2671,6 +2684,7 @@ generate cs rASTs helperRASTs = do
         , scriptCode = "." :/ File "manifest.json" (Code manifestJson)
         , scriptMake = []
         }
+    , envspecScript
     , wrappers
     )
 

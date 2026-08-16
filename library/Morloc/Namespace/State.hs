@@ -327,6 +327,22 @@ data PackageMeta
   -- available to the Rust pool. The DAG-wide union is written into the
   -- generated pool @Cargo.toml@ dependencies. Propagates transitively.
   , packageRustDeps :: Map Text Text
+  -- | External Python packages (name -> version constraint) needed by the
+  -- Python pool. The DAG-wide union flows into the generated EnvSpec.
+  -- Propagates transitively.
+  , packagePyDeps :: Map Text Text
+  -- | External R packages (name -> version constraint) needed by the R pool.
+  , packageRDeps :: Map Text Text
+  -- | External C++ libraries (name -> version constraint) needed by the C++
+  -- pool; the structured, version-managed successor to 'packageDependencies'.
+  , packageCppDeps :: Map Text Text
+  -- | External Julia packages (name -> version constraint) needed by the Julia
+  -- pool (resolved by Pkg.jl).
+  , packageJuliaDeps :: Map Text Text
+  -- | Optional per-language toolchain version constraints
+  -- (lang name -> constraint, e.g. "python" -> ">=3.10"), merged into the
+  -- EnvSpec language list.
+  , packageLangVersions :: Map Text Text
   , packageInclude :: Maybe [Text]
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
@@ -569,6 +585,11 @@ instance Defaultable PackageMeta where
       , packageDependencies = []
       , packageCxxFlags = []
       , packageRustDeps = Map.empty
+      , packagePyDeps = Map.empty
+      , packageRDeps = Map.empty
+      , packageCppDeps = Map.empty
+      , packageJuliaDeps = Map.empty
+      , packageLangVersions = Map.empty
       , packageInclude = Nothing
       , packageMorlocDependencies = []
       , packageSetup = Nothing
@@ -620,6 +641,11 @@ instance FromJSON PackageMeta where
       <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
       <*> o .:? "rust-deps" .!= Map.empty
+      <*> o .:? "py-deps" .!= Map.empty
+      <*> o .:? "r-deps" .!= Map.empty
+      <*> o .:? "cpp-deps" .!= Map.empty
+      <*> o .:? "julia-deps" .!= Map.empty
+      <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
       <*> o .:? "setup"

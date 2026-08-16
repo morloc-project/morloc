@@ -35,6 +35,15 @@ fn morloc_home() -> String {
 }
 
 fn main() {
+    // `morloc-nexus --abi-version`: print the ABI/wire-format contract version
+    // and exit. Checked as the first argument (a real program runs through the
+    // `run <target>` wrapper, so arg[1] is never a bare flag) so provisioning
+    // can query a prebuilt nexus cheaply, before any setup.
+    if std::env::args().nth(1).as_deref() == Some("--abi-version") {
+        println!("{}", morloc_runtime_types::MORLOC_ABI_VERSION);
+        std::process::exit(0);
+    }
+
     // Install a panic hook so a Rust panic still runs the run-scope
     // epilogue + summary.json + tee cleanup before the process dies.
     // Without this, panic-unwound exits skip clean_exit entirely and

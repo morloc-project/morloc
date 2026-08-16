@@ -48,8 +48,24 @@
 Below is a simple example, for installation details and more examples, see the
 [Manual](https://morloc-project.github.io/docs).
 
+
+morloc-manager run -- morloc install stdlib
+morloc-manager install main.loc
+morloc-manager expose add foo --as mcp,api
+morloc-manager start
+morloc-manager status
+
+claude mcp add --transport http foo http://127.0.0.1:9000/mcp
+
+curl -s http://127.0.0.1:9000/health
+curl -s http://127.0.0.1:9000/discover/foo | jq .
+curl -s -X POST -d '[[[1,2,3],[4,5]]]' http://127.0.0.1:9001/call/foo/vsum
+
+
 A Morloc module can import functions from foreign languages, assign them general
 types, and compose new functions:
+
+
 
 
 ```morloc
@@ -60,7 +76,7 @@ import root-py
 import root-cpp
 
 source Py from "foo.py" ("pmap")
-pmap a b :: (a -> b) -> [a] -> [b] 
+pmap :: (a -> b) -> [a] -> [b] 
 
 source Cpp from "foo.hpp" ("sum")
 sum :: [Real] -> Real

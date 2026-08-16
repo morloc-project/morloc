@@ -646,11 +646,10 @@ fn check_slurm_prereqs(c: &mut Counts, engine: ContainerEngine, ec: &Environment
     }
 
     // 5. Engine softly recommended to be Apptainer.
-    let _ = engine; // silence unused if all checks short-circuit
-    if ec.engine != ContainerEngine::Apptainer {
+    if engine != ContainerEngine::Apptainer {
         c.warn(&format!(
             "engine is {:?}; non-Apptainer engines require image distribution to every compute node (registry pull or pre-populated store)",
-            ec.engine
+            engine
         ));
     } else {
         c.pass("engine is Apptainer (image is a shared-FS file)");

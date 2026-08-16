@@ -12,6 +12,14 @@ use crate::schema::{self};
 use crate::shm::{self, AbsPtr, BlockHeader, RelPtr, ShmHeader, VolPtr};
 pub use crate::cschema::CSchema;
 
+/// The ABI/wire-format version compiled into this libmorloc.so (see morloc.h's
+/// `MORLOC_ABI_VERSION`). Provisioning compares it fail-closed against the
+/// compiler's expected version so a mismatched prebuilt binary is refused.
+#[no_mangle]
+pub extern "C" fn morloc_abi_version() -> u32 {
+    morloc_runtime_types::MORLOC_ABI_VERSION
+}
+
 // ── Macro for ERRMSG-pattern FFI wrappers ──────────────────────────────────
 
 /// Wrap a Rust Result-returning expression into the C ERRMSG convention.

@@ -41,27 +41,99 @@ pub enum ContainerEngine {
     Apptainer,
 }
 
+impl ContainerEngine {
+    /// Canonical lowercase name; also the serialized form and the display name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ContainerEngine::Docker => "docker",
+            ContainerEngine::Podman => "podman",
+            ContainerEngine::Apptainer => "apptainer",
+        }
+    }
+
+    /// Parse an engine token. "singularity" is an accepted alias for apptainer.
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s {
+            "docker" => Some(ContainerEngine::Docker),
+            "podman" => Some(ContainerEngine::Podman),
+            "apptainer" | "singularity" => Some(ContainerEngine::Apptainer),
+            _ => None,
+        }
+    }
+}
+
 impl Serialize for ContainerEngine {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            ContainerEngine::Docker => serializer.serialize_str("docker"),
-            ContainerEngine::Podman => serializer.serialize_str("podman"),
-            ContainerEngine::Apptainer => serializer.serialize_str("apptainer"),
-        }
+        serializer.serialize_str(self.name())
     }
 }
 
 impl<'de> Deserialize<'de> for ContainerEngine {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "docker" => Ok(ContainerEngine::Docker),
-            "podman" => Ok(ContainerEngine::Podman),
-            "apptainer" | "singularity" => Ok(ContainerEngine::Apptainer),
-            _ => Err(serde::de::Error::custom(format!(
-                "Unknown container engine: {s}"
-            ))),
+        ContainerEngine::from_token(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("Unknown container engine: {s}")))
+    }
+}
+
+/// Execution backend for an environment: how morloc processes are run.
+///
+/// `Container(engine)` runs pools inside a container under the given engine;
+/// `Native` runs them directly on the host against a pixi-provided toolchain.
+/// `Backend` is serialized as a bare string compatible with the historical
+/// `engine:` field (a container engine name, or "native"), so existing
+/// env.yaml / config.json files load unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Container(ContainerEngine),
+    Native,
+}
+
+impl Backend {
+    /// The container engine, if this is a container backend; `None` for native.
+    pub fn container_engine(&self) -> Option<ContainerEngine> {
+        match self {
+            Backend::Container(e) => Some(*e),
+            Backend::Native => None,
         }
+    }
+
+    /// True for the native (no-container) backend.
+    // Used by the command-dispatch native branch, wired in the next P2b step.
+    #[allow(dead_code)]
+    pub fn is_native(&self) -> bool {
+        matches!(self, Backend::Native)
+    }
+
+    /// Short human-readable name for display.
+    pub fn label(&self) -> &'static str {
+        match self.container_engine() {
+            Some(e) => e.name(),
+            None => "native",
+        }
+    }
+}
+
+impl Serialize for Backend {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Backend::Container(e) => e.serialize(serializer),
+            Backend::Native => serializer.serialize_str("native"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Backend {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Accept "native" or a historical bare engine string ("docker"/"podman"/
+        // "apptainer"/"singularity"); the engine tokens delegate to ContainerEngine.
+        let s = String::deserialize(deserializer)?;
+        if s == "native" {
+            return Ok(Backend::Native);
+        }
+        ContainerEngine::from_token(&s)
+            .map(Backend::Container)
+            .ok_or_else(|| serde::de::Error::custom(format!("Unknown backend/engine: {s}")))
     }
 }
 
@@ -169,20 +241,32 @@ impl<'de> Deserialize<'de> for Version {
 pub struct Config {
     /// Name of the active environment.
     pub active_env: Option<String>,
-    /// Default container engine.
-    #[serde(default = "default_engine")]
-    pub engine: ContainerEngine,
+    /// Default execution backend (serialized under the historical `engine` key).
+    #[serde(rename = "engine", default = "default_backend")]
+    pub backend: Backend,
 }
 
-fn default_engine() -> ContainerEngine {
-    ContainerEngine::Podman
+fn default_backend() -> Backend {
+    Backend::Container(ContainerEngine::Podman)
+}
+
+impl Config {
+    /// The container engine of the default backend, or an error if it is native.
+    pub fn engine(&self) -> crate::error::Result<ContainerEngine> {
+        self.backend.container_engine().ok_or_else(|| {
+            crate::error::ManagerError::BackendUnsupported(
+                "the default backend is native; this operation requires a container engine"
+                    .to_string(),
+            )
+        })
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             active_env: None,
-            engine: ContainerEngine::Podman,
+            backend: Backend::Container(ContainerEngine::Podman),
         }
     }
 }
@@ -225,8 +309,9 @@ pub struct EnvironmentConfig {
     /// Apptainer-engine equivalent of `built_image`.
     #[serde(default)]
     pub layered_sif: Option<String>,
-    /// Container engine for this environment.
-    pub engine: ContainerEngine,
+    /// Execution backend for this environment (serialized under `engine`).
+    #[serde(rename = "engine")]
+    pub backend: Backend,
     /// Shared memory size for container runs. Honored under docker/podman;
     /// ignored under apptainer (host /dev/shm is shared transparently).
     #[serde(default = "default_shm_size")]
@@ -241,23 +326,36 @@ fn default_shm_size() -> String {
 }
 
 impl EnvironmentConfig {
+    /// The container engine of this environment's backend, or an error if the
+    /// environment is native (a caller reaching here is on a container-only
+    /// code path that does not apply to native environments).
+    pub fn engine(&self) -> crate::error::Result<ContainerEngine> {
+        self.backend.container_engine().ok_or_else(|| {
+            crate::error::ManagerError::BackendUnsupported(format!(
+                "environment '{}' uses the native backend; this operation requires a container",
+                self.name
+            ))
+        })
+    }
+
     /// Returns the image reference to use for running containers.
     ///
     /// For docker/podman this is the built layer tag (preferred) or the base
     /// OCI URI. For apptainer this is the local .sif path (layered preferred,
-    /// base as fallback). The returned string is opaque to the caller; pass
-    /// it as `RunConfig::image` and the engine dispatch will route correctly.
+    /// base as fallback). Native environments have no image; the base image is
+    /// returned as an inert default (container run paths are not taken there).
     pub fn active_image(&self) -> &str {
-        match self.engine {
-            ContainerEngine::Docker | ContainerEngine::Podman => self
+        match self.backend.container_engine() {
+            Some(ContainerEngine::Docker) | Some(ContainerEngine::Podman) => self
                 .built_image
                 .as_deref()
                 .unwrap_or(&self.base_image),
-            ContainerEngine::Apptainer => self
+            Some(ContainerEngine::Apptainer) => self
                 .layered_sif
                 .as_deref()
                 .or(self.base_sif.as_deref())
                 .unwrap_or(&self.base_image),
+            None => &self.base_image,
         }
     }
 }

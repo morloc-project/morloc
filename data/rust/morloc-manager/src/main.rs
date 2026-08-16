@@ -3,8 +3,16 @@ mod config;
 mod container;
 mod doctor;
 mod environment;
+// Foundations for the native/pixi backend; wired into the command flow in a
+// following P2b step, at which point these allow attributes come off.
+#[allow(dead_code)]
+mod envspec;
 mod error;
 mod freeze;
+#[allow(dead_code)]
+mod hostprobe;
+#[allow(dead_code)]
+mod pixi;
 mod selinux;
 mod serve;
 mod types;
@@ -740,7 +748,7 @@ fn resolve_env_or_active(name: Option<String>) -> Result<(String, Scope, Environ
 
 fn ensure_engine() -> Result<ContainerEngine> {
     if let Some(cfg) = cfg::read_active_config() {
-        return Ok(cfg.engine);
+        return cfg.engine();
     }
     Err(ManagerError::SetupNotComplete(Scope::Local))
 }
@@ -753,14 +761,6 @@ fn which(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-fn display_engine(engine: ContainerEngine) -> &'static str {
-    match engine {
-        ContainerEngine::Docker => "docker",
-        ContainerEngine::Podman => "podman",
-        ContainerEngine::Apptainer => "apptainer",
-    }
 }
 
 /// Content of the Singularity .def stub written by `--deffile-stub`. Uses
@@ -912,9 +912,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 let local = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
                 let sys = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
                 println!("Local engine:   {}",
-                    local.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                    local.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
                 println!("System engine:  {}",
-                    sys.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                    sys.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
                 println!();
                 println!("Set with: morloc-manager setup --engine <podman|docker|apptainer|singularity>");
                 return Ok(());
@@ -926,11 +926,11 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             let cfg_path = cfg::config_path(scope);
             let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
             let new_cfg = Config {
-                engine: eng,
+                backend: Backend::Container(eng),
                 ..base_cfg
             };
             cfg::write_config(&cfg_path, &new_cfg)?;
-            eprintln!("Engine set to: {}", display_engine(eng));
+            eprintln!("Engine set to: {}", eng.name());
             Ok(())
         }
 
@@ -971,7 +971,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 cfg::read_active_config()
             } {
-                cfg.engine
+                cfg.engine()?
             } else {
                 // No config — try auto-detection. Apptainer/Singularity are
                 // included so HPC-only hosts work out of the box.
@@ -1026,7 +1026,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 let cfg_path = cfg::config_path(scope);
                 let new_cfg = Config {
                     active_env: None,
-                    engine: resolved_engine,
+                    backend: Backend::Container(resolved_engine),
                 };
                 cfg::write_config(&cfg_path, &new_cfg)?;
             }
@@ -1341,7 +1341,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     }
                     let ec = cfg::read_env_config(scope, name)
                         .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
-                    environment::remove_environment(ec.engine, scope, name)?;
+                    environment::remove_environment(ec.engine()?, scope, name)?;
                     Ok(())
                 })();
                 match result {
@@ -1431,7 +1431,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                             base_images.insert(orig.clone());
                         }
                     }
-                    env_list.push((name, ec.engine));
+                    env_list.push((name, ec.engine()?));
                 }
             }
 
@@ -1644,15 +1644,18 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     // SHM size is honored only under docker/podman; Apptainer
                     // shares host /dev/shm so the field is meaningless there
                     // and is omitted from `info` output for that engine.
-                    let shm = match ec.engine {
-                        ContainerEngine::Apptainer => None,
-                        _ => Some(ec.shm_size.clone()),
+                    let shm = match ec.backend.container_engine() {
+                        Some(ContainerEngine::Docker) | Some(ContainerEngine::Podman) => {
+                            Some(ec.shm_size.clone())
+                        }
+                        // Apptainer shares host /dev/shm; native has no container.
+                        _ => None,
                     };
                     // .sif paths only apply under Apptainer. Built_image
                     // mirrors that asymmetry: it is the OCI fallback tag for
                     // Apptainer and the primary built layer for docker/podman.
-                    let (base_sif, layered_sif) = match ec.engine {
-                        ContainerEngine::Apptainer => (ec.base_sif.clone(), ec.layered_sif.clone()),
+                    let (base_sif, layered_sif) = match ec.backend.container_engine() {
+                        Some(ContainerEngine::Apptainer) => (ec.base_sif.clone(), ec.layered_sif.clone()),
                         _ => (None, None),
                     };
                     let output = InfoDetail {
@@ -1662,7 +1665,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         base_image: ec.base_image.clone(),
                         built_image: ec.built_image.clone(),
                         morloc_version: ec.morloc_version.clone(),
-                        engine: display_engine(ec.engine).to_string(),
+                        engine: ec.backend.label().to_string(),
                         shm_size: shm,
                         dockerfile: df_str,
                         deffile: def_str,
@@ -1684,14 +1687,14 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     if let Some(ref ver) = ec.morloc_version {
                         println!("Morloc version: {}", ver.show());
                     }
-                    println!("Engine:         {}", display_engine(ec.engine));
+                    println!("Engine:         {}", ec.backend.label());
                     // Engine-specific fields:
                     // * Docker/Podman: show SHM size and the Dockerfile path.
                     // * Apptainer:    show base .sif path and the .def path
                     //                 (Dockerfile, if present, is the OCI
                     //                 fallback recipe and is also surfaced).
-                    match ec.engine {
-                        ContainerEngine::Docker | ContainerEngine::Podman => {
+                    match ec.backend.container_engine() {
+                        Some(ContainerEngine::Docker) | Some(ContainerEngine::Podman) => {
                             println!("SHM size:       {}", ec.shm_size);
                             println!("Dockerfile:     {}", match ec.dockerfile {
                                 Some(_) => {
@@ -1705,7 +1708,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                                 None => "none".to_string(),
                             });
                         }
-                        ContainerEngine::Apptainer => {
+                        Some(ContainerEngine::Apptainer) => {
                             println!("Base SIF:       {}", match ec.base_sif {
                                 Some(ref p) => {
                                     if std::path::Path::new(p).is_file() {
@@ -1745,6 +1748,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                                 });
                             }
                         }
+                        // Native environments have no engine-specific fields.
+                        None => {}
                     }
                     let flags_path = cfg::env_flags_yaml_path(scope, &env_name);
                     println!("Flags:          {}", flags_path.display());
@@ -1799,8 +1804,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     }
                     let output = InfoOverview {
                         active: active_env.clone(),
-                        local_engine: local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset").to_string(),
-                        system_engine: system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset").to_string(),
+                        local_engine: local_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset").to_string(),
+                        system_engine: system_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset").to_string(),
                         selinux: se_str.to_string(),
                         directories,
                         local: environment::list_environments(Scope::Local, active_str),
@@ -1810,9 +1815,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 } else {
                     println!("Active:         {active_env}");
                     println!("Local engine:   {}",
-                        local_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                        local_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
                     println!("System engine:  {}",
-                        system_cfg.as_ref().map(|c| display_engine(c.engine)).unwrap_or("unset"));
+                        system_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
                     println!("SELinux:        {se_str}");
 
                     let dirs = [
@@ -1986,17 +1991,17 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 let ver: Version = clean.parse().map_err(|_| {
                     ManagerError::InvalidVersion(ver_str.clone())
                 })?;
-                let img = environment::pull_version_image(ec.engine, &ver)?;
+                let img = environment::pull_version_image(ec.engine()?, &ver)?;
                 (Some(img), None, Some(ver))
             } else if let Some(ref t) = tag {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
-                let (img, ver) = environment::pull_tagged_image(ec.engine, t)?;
+                let (img, ver) = environment::pull_tagged_image(ec.engine()?, t)?;
                 (Some(img), None, Some(ver))
             } else if let Some(ref img) = image {
                 let ec = cfg::read_env_config(env_scope, &env_name)?;
-                environment::pull_custom_image(ec.engine, img)?;
+                environment::pull_custom_image(ec.engine()?, img)?;
                 // Detect version from the new image so it doesn't stay stale
-                let detected_ver = environment::detect_morloc_version(ec.engine, img).ok();
+                let detected_ver = environment::detect_morloc_version(ec.engine()?, img).ok();
                 (Some(img.clone()), None, detected_ver)
             } else {
                 (None, None, None)
@@ -2042,7 +2047,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 // Check for running serve container -- reinit replaces morloc-nexus
                 // which will fail with "Text file busy" if the container has it open.
                 let serve_name = serve::serve_container_name(&env_name);
-                let running = serve::find_running_serve_containers(ec.engine);
+                let running = serve::find_running_serve_containers(ec.engine()?);
                 if running.iter().any(|n| n == &serve_name) {
                     return Err(ManagerError::EnvError(format!(
                         "Cannot reinit environment '{env_name}' while its serve container is running.\n  \
@@ -2059,7 +2064,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
             if env_scope == Scope::System && !check_podman_additional_stores(
                 cfg::read_env_config(env_scope, &env_name)
-                    .map(|ec| ec.engine)
+                    .ok()
+                    .and_then(|ec| ec.backend.container_engine())
                     .unwrap_or(ContainerEngine::Podman),
             ) {
                 eprintln!();
@@ -2082,13 +2088,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 )));
             }
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
-            let engine = ec.engine;
+            let engine = ec.engine()?;
             // Detect the version from the container binary for sanity check.
             // The morloc binary can't report prerelease tags (stack limitation),
             // so if major.minor.patch match, keep the recorded version which has
             // the full tag from the image.
             eprintln!("Detecting morloc version from image...");
-            let detected = environment::detect_morloc_version(ec.engine, ec.active_image())?;
+            let detected = environment::detect_morloc_version(ec.engine()?, ec.active_image())?;
             let ver = if let Some(ref recorded) = ec.morloc_version {
                 if recorded.major == detected.major
                     && recorded.minor == detected.minor
@@ -2157,7 +2163,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     let e = ensure_engine()?;
                     eprintln!(
                         "Note: using {} engine from global config. Override with --engine if needed.",
-                        display_engine(e)
+                        e.name()
                     );
                     e
                 }
@@ -2177,7 +2183,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
             }
             // Refuse to replace a running container unless --force is passed
-            if container::container_exists(ec.engine, &container_name) {
+            if container::container_exists(ec.engine()?, &container_name) {
                 if !force {
                     return Err(ManagerError::EnvError(format!(
                         "Serve container already running for '{env_name}'. Use --force to replace."
@@ -2229,14 +2235,14 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             };
             let port_mappings = vec![(host_port, container_port)];
             let mut extra_flags = cfg::read_flag_config(env_scope, &env_name)?
-                .materialize(Phase::Start, ec.engine);
+                .materialize(Phase::Start, ec.engine()?);
             extra_flags.extend(engine_arg.iter().cloned());
             let mut user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
 
             let mh = serve::CONTAINER_MORLOC_HOME;
             let token = resolve_mcp_token(auth_token);
             let plan = serve_plan(
-                ec.engine, &spec, mh, container_port, host_port,
+                ec.engine()?, &spec, mh, container_port, host_port,
                 expose, allow_plaintext, allow_no_auth, unsafe_serve,
                 cfg!(target_os = "linux"), token,
             )?;
@@ -2250,7 +2256,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             }
 
             serve::serve_environment(
-                ec.engine, verbose, &image,
+                ec.engine()?, verbose, &image,
                 &data_dir.to_string_lossy(), &container_name,
                 &port_mappings, publish_host.as_deref(), network.as_deref(), &extra_flags,
                 &Some(ec.shm_size.clone()), &user_env, &plan.command,
@@ -2301,8 +2307,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::Stop { name } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
             let container_name = serve::serve_container_name(&env_name);
-            if crate::container::container_exists(ec.engine, &container_name) {
-                serve::stop_serve_container(ec.engine, verbose, &container_name)?;
+            if crate::container::container_exists(ec.engine()?, &container_name) {
+                serve::stop_serve_container(ec.engine()?, verbose, &container_name)?;
                 cfg::remove_serve_runtime(env_scope, &env_name);
                 eprintln!("Stopped serving environment: {env_name}");
             } else {
@@ -2318,12 +2324,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             let (container_name, engine, logs_dir) = if let Some(ref n) = name {
                 let (env_name, scope, ec) = resolve_env_or_active(Some(n.clone()))?;
                 let cname = serve::serve_container_name(n);
-                if !container::container_exists(ec.engine, &cname) {
+                if !container::container_exists(ec.engine()?, &cname) {
                     return Err(ManagerError::EnvError(
                         format!("No serve container running for environment '{n}'")
                     ));
                 }
-                (cname, ec.engine, cfg::env_data_dir(scope, &env_name).join("logs"))
+                (cname, ec.engine()?, cfg::env_data_dir(scope, &env_name).join("logs"))
             } else {
                 let (cname, engine) = find_running_serve_container()?;
                 // Resolve the env's data dir for its captured daemon logs; fall
@@ -2385,7 +2391,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 // first is env name — validate it exists and its serve container is running
                 let (env_name, _, ec) = resolve_env_or_active(Some(first))?;
                 let container_name = serve::serve_container_name(&env_name);
-                if !container::container_exists(ec.engine, &container_name) {
+                if !container::container_exists(ec.engine()?, &container_name) {
                     return Err(ManagerError::EnvError(format!(
                         "No serve container running for '{env_name}'. Start with: morloc-manager start {env_name}"
                     )));
@@ -2581,7 +2587,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 resolve_env_or_active(None)?
             };
-            doctor::doctor(ec.engine, verbose, &env_name, env_scope, &ec, deep, strict, slurm, json)
+            doctor::doctor(ec.engine()?, verbose, &env_name, env_scope, &ec, deep, strict, slurm, json)
         }
 
     }
@@ -2668,12 +2674,12 @@ fn setup_slurm_bridge(ec: &EnvironmentConfig) -> Result<bridge::BridgeHandle> {
     // image onto every compute node (registry pull or pre-populated
     // store); warn but don't reject so users on Podman/Docker clusters
     // aren't forced to recreate envs.
-    if ec.engine != ContainerEngine::Apptainer {
+    if ec.engine()? != ContainerEngine::Apptainer {
         eprintln!(
             "warning: SLURM bridge with engine {:?}: ensure the env's image is \
              reachable from every compute node (registry or pre-populated \
              store). Apptainer is the recommended engine on HPC clusters.",
-            ec.engine,
+            ec.engine()?,
         );
     }
 
@@ -2731,7 +2737,7 @@ fn run_in_container_for(
         Some(t) => t,
         None => environment::resolve_active_environment()?,
     };
-    let engine = ec.engine;
+    let engine = ec.engine()?;
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
     let v_data_dir = data_dir.to_string_lossy().to_string();
@@ -3502,7 +3508,7 @@ mod tests {
 
     #[test]
     fn default_config_uses_podman() {
-        assert_eq!(Config::default().engine, ContainerEngine::Podman);
+        assert_eq!(Config::default().engine().unwrap(), ContainerEngine::Podman);
     }
 
     // ---- Config JSON round-trip tests ----
@@ -3513,12 +3519,52 @@ mod tests {
         let path = dir.path().join("config.json");
         let cfg = Config {
             active_env: Some("ml".to_string()),
-            engine: ContainerEngine::Docker,
+            backend: Backend::Container(ContainerEngine::Docker),
         };
         cfg::write_config(&path, &cfg).unwrap();
         let cfg2: Config = cfg::read_config(&path).unwrap();
         assert_eq!(cfg2.active_env.as_deref(), Some("ml"));
-        assert_eq!(cfg2.engine, ContainerEngine::Docker);
+        assert_eq!(cfg2.engine().unwrap(), ContainerEngine::Docker);
+    }
+
+    // The Backend abstraction must be on-disk compatible with the historical
+    // bare `engine:` field: existing config.json / env.yaml files (written
+    // before Backend existed) must still deserialize, and new writes must keep
+    // the same `engine` key so a downgrade or an older reader is unaffected.
+    #[test]
+    fn backend_reads_legacy_engine_field() {
+        let legacy = r#"{"active_env":"ml","engine":"podman"}"#;
+        let cfg: Config = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.engine().unwrap(), ContainerEngine::Podman);
+        assert!(matches!(
+            cfg.backend,
+            Backend::Container(ContainerEngine::Podman)
+        ));
+    }
+
+    #[test]
+    fn backend_serializes_under_engine_key() {
+        let cfg = Config {
+            active_env: None,
+            backend: Backend::Container(ContainerEngine::Apptainer),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""engine":"apptainer""#), "got: {json}");
+        assert!(!json.contains("backend"), "backend must not leak on disk: {json}");
+    }
+
+    #[test]
+    fn native_backend_round_trips_under_engine_key() {
+        let cfg = Config {
+            active_env: None,
+            backend: Backend::Native,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""engine":"native""#), "got: {json}");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.backend.is_native());
+        // A native backend has no container engine; engine() must be an error.
+        assert!(back.engine().is_err());
     }
 
     #[test]
@@ -3553,7 +3599,7 @@ mod tests {
             def_content_hash: None,
             base_sif: None,
             layered_sif: None,
-            engine: ContainerEngine::Podman,
+            backend: Backend::Container(ContainerEngine::Podman),
             shm_size: "1g".to_string(),
             morloc_version: Some(Version::new(0, 67, 0)),
         };
@@ -4057,7 +4103,7 @@ build:
             def_content_hash: Some("deadbeef".to_string()),
             base_sif: Some("/data/dnd/sif/base.sif".to_string()),
             layered_sif: Some("/data/dnd/sif/layered.sif".to_string()),
-            engine: ContainerEngine::Apptainer,
+            backend: Backend::Container(ContainerEngine::Apptainer),
             shm_size: "512m".to_string(),
             morloc_version: Some(Version::new(0, 85, 0)),
         };
@@ -4065,7 +4111,7 @@ build:
         std::fs::write(&path, yaml).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         let ec2: EnvironmentConfig = serde_yaml::from_str(&raw).unwrap();
-        assert_eq!(ec2.engine, ContainerEngine::Apptainer);
+        assert_eq!(ec2.engine().unwrap(), ContainerEngine::Apptainer);
         assert_eq!(ec2.singularity_def.as_deref(), Some("recipe.def"));
         assert_eq!(ec2.base_sif.as_deref(), Some("/data/dnd/sif/base.sif"));
         assert_eq!(ec2.layered_sif.as_deref(), Some("/data/dnd/sif/layered.sif"));
@@ -4086,7 +4132,7 @@ build:
         }"#;
         std::fs::write(&path, legacy).unwrap();
         let ec: EnvironmentConfig = cfg::read_config(&path).unwrap();
-        assert_eq!(ec.engine, ContainerEngine::Podman);
+        assert_eq!(ec.engine().unwrap(), ContainerEngine::Podman);
         assert!(ec.singularity_def.is_none());
         assert!(ec.base_sif.is_none());
         assert!(ec.layered_sif.is_none());
@@ -4105,7 +4151,7 @@ build:
             def_content_hash: None,
             base_sif: Some("/base.sif".to_string()),
             layered_sif: Some("/layered.sif".to_string()),
-            engine: ContainerEngine::Apptainer,
+            backend: Backend::Container(ContainerEngine::Apptainer),
             shm_size: "512m".to_string(),
             morloc_version: None,
         };
@@ -4125,7 +4171,7 @@ build:
             def_content_hash: None,
             base_sif: Some("/base.sif".to_string()),
             layered_sif: None,
-            engine: ContainerEngine::Apptainer,
+            backend: Backend::Container(ContainerEngine::Apptainer),
             shm_size: "512m".to_string(),
             morloc_version: None,
         };

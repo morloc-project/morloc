@@ -27,6 +27,37 @@ pub mod stdio_proto;
 
 pub use cschema::is_top_null;
 
+/// The ABI / wire-format contract version, distinct from the release version.
+/// The single source of truth is `#define MORLOC_ABI_VERSION` in
+/// `data/morloc/morloc.h`; this constant mirrors it (kept in lockstep by the
+/// `abi_version_matches_header` test). `libmorloc.so` exposes it as the
+/// `morloc_abi_version()` C function and `morloc-nexus` as `--abi-version`, so
+/// provisioning can refuse a prebuilt binary whose version differs from the
+/// compiler's expected value. Bump it (and the header) whenever the C ABI or
+/// wire packet format changes.
+pub const MORLOC_ABI_VERSION: u32 = 1;
+
+#[cfg(test)]
+mod abi_version_tests {
+    use super::MORLOC_ABI_VERSION;
+
+    // Keep the Rust mirror in lockstep with the canonical value in morloc.h.
+    #[test]
+    fn abi_version_matches_header() {
+        let header = include_str!("../../../morloc/morloc.h");
+        let from_header = header
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#define MORLOC_ABI_VERSION"))
+            .map(str::trim)
+            .and_then(|s| s.parse::<u32>().ok())
+            .expect("morloc.h must define MORLOC_ABI_VERSION as an integer");
+        assert_eq!(
+            from_header, MORLOC_ABI_VERSION,
+            "MORLOC_ABI_VERSION in morloc.h ({from_header}) != Rust const ({MORLOC_ABI_VERSION}); bump both together"
+        );
+    }
+}
+
 /// FFI return codes for the print_voidstar / pretty_print_voidstar
 /// C ABI: 0 ok, 1 error (see errmsg), 2 downstream pipe closed. Shared
 /// so libmorloc.so and morloc-nexus can't drift.
