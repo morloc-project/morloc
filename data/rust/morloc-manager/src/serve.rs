@@ -361,10 +361,13 @@ pub fn serve_environment(
     cfg.network = network.map(str::to_string);
     let mh = CONTAINER_MORLOC_HOME;
     cfg.bind_mounts = vec![(data_dir.to_string(), mh.to_string())];
-    cfg.env = vec![
-        ("PATH".to_string(), format!("{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")),
-        ("MORLOC_HOME".to_string(), mh.to_string()),
-    ];
+    // Docker/podman run as the host UID without mounting the host $HOME; pool
+    // daemons may touch $HOME (matplotlib config, R tempdir), so oci_base_env
+    // points it at a writable, mounted target ($MORLOC_HOME/home). Create it on
+    // the host bind-mount side so those writes do not hit ENOENT (the env-create
+    // loop does not make it, and existing environments predate it).
+    let _ = fs::create_dir_all(format!("{data_dir}/home"));
+    cfg.env = oci_base_env(mh);
     cfg.env.extend(user_env.iter().cloned());
     cfg.command = Some(command.to_vec());
     cfg.shm_size = shm_size.clone();
@@ -706,6 +709,24 @@ pub fn validate_programs(
 
 pub const CONTAINER_MORLOC_HOME: &str = "/opt/morloc";
 
+/// System PATH tail appended after `$MORLOC_HOME/bin` for every in-container
+/// invocation (run, serve, apptainer).
+pub const CONTAINER_PATH_TAIL: &str =
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Base env for a docker/podman in-container process. The container runs as the
+/// host UID without mounting the host $HOME, so HOME must point at a writable,
+/// mounted location under $MORLOC_HOME; callers extend this with any
+/// phase-specific vars (e.g. CARGO_HOME/MORLOC_BIN_LINK_DIR for build, user_env).
+/// Apptainer mounts the host $HOME and uses its own env, so it does not use this.
+pub fn oci_base_env(mh: &str) -> Vec<(String, String)> {
+    vec![
+        ("MORLOC_HOME".to_string(), mh.to_string()),
+        ("HOME".to_string(), format!("{mh}/home")),
+        ("PATH".to_string(), format!("{mh}/bin:{CONTAINER_PATH_TAIL}")),
+    ]
+}
+
 // ======================================================================
 // Manifest and image resolution
 // ======================================================================
@@ -858,9 +879,7 @@ fn serve_apptainer_instance(
     argv.push("--bind".to_string());
     argv.push(format!("{data_dir}:{mh}"));
     argv.push("--env".to_string());
-    argv.push(format!(
-        "PATH={mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    ));
+    argv.push(format!("PATH={mh}/bin:{CONTAINER_PATH_TAIL}"));
     argv.push("--env".to_string());
     argv.push(format!("MORLOC_HOME={mh}"));
     for (k, v) in user_env {
@@ -1034,6 +1053,42 @@ pub fn apptainer_logs(instance_name: &str, follow: bool) -> Result<()> {
     }
     if let Ok(buf) = fs::read(&err_path) {
         let _ = lock.write_all(&buf);
+    }
+    Ok(())
+}
+
+/// Dump the router-captured per-daemon stderr logs to stdout as a snapshot.
+/// These live at `$MORLOC_HOME/logs/*.err` in the container, which is the host
+/// path `<env_data_dir>/logs/*.err` via the bind mount. The runtime router
+/// writes them when it spawns pool daemons, so they carry startup crashes that
+/// the engine's own container logs may not surface. Best-effort and
+/// engine-independent: silently does nothing when the dir is absent or empty.
+pub fn dump_err_files(logs_dir: &Path) -> Result<()> {
+    let entries = match fs::read_dir(logs_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    let mut err_files: Vec<_> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "err").unwrap_or(false))
+        .collect();
+    err_files.sort();
+    if err_files.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    for p in &err_files {
+        // Header so multiple daemons' logs stay distinguishable.
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let _ = writeln!(lock, "==> {name} <==");
+        if let Ok(buf) = fs::read(p) {
+            let _ = lock.write_all(&buf);
+        }
     }
     Ok(())
 }

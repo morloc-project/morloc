@@ -251,30 +251,36 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- doesn't pay that compile.
   case (null rustDir, hasCargo) of
     (False, Just _) -> do
-      let persistedRustDir = homeDir </> "rust"
-          poolTargetDir = libDir </> "rust-build"
-      -- If the resolved source IS the persisted copy (no fresher workspace
-      -- found), warn instead of silently reusing possibly-stale source; a dev
-      -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise refresh
-      -- the persisted copy from the resolved source.
-      srcAbs <- canonicalizePath rustDir
-      destExists <- doesDirectoryExist persistedRustDir
-      destAbs <- if destExists then canonicalizePath persistedRustDir else return persistedRustDir
-      if srcAbs == destAbs
-        then sayWarning $
-          "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
-            <> "workspace found). If you changed the compiler's data/rust, set "
-            <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
-        else do
-          sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
-          persistRustSource verbose srcAbs persistedRustDir destExists
-      sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-      run verbose "cargo"
-        [ "build", "--release"
-        , "--manifest-path", persistedRustDir </> "Cargo.toml"
-        , "-p", "rustmorloc"
-        , "--target-dir", poolTargetDir
-        ]
+      -- Persisting the Rust workspace and warming the rustmorloc cache are Rust
+      -- capabilities, not core install steps: a failure (e.g. a cargo build
+      -- error) must leave Rust unavailable with a warning, not abort the whole
+      -- init. The per-pool build at `morloc make` still enforces cargo via
+      -- makeTheMaker, so a broken warm-up cannot silently ship a bad pool.
+      optionalStep "Rust configuration failed (Rust pools will not be available): " $ do
+        let persistedRustDir = homeDir </> "rust"
+            poolTargetDir = libDir </> "rust-build"
+        -- If the resolved source IS the persisted copy (no fresher workspace
+        -- found), warn instead of silently reusing possibly-stale source; a dev
+        -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise
+        -- refresh the persisted copy from the resolved source.
+        srcAbs <- canonicalizePath rustDir
+        destExists <- doesDirectoryExist persistedRustDir
+        destAbs <- if destExists then canonicalizePath persistedRustDir else return persistedRustDir
+        if srcAbs == destAbs
+          then sayWarning $
+            "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
+              <> "workspace found). If you changed the compiler's data/rust, set "
+              <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
+          else do
+            sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
+            persistRustSource verbose srcAbs persistedRustDir destExists
+        sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
+        run verbose "cargo"
+          [ "build", "--release"
+          , "--manifest-path", persistedRustDir </> "Cargo.toml"
+          , "-p", "rustmorloc"
+          , "--target-dir", poolTargetDir
+          ]
     (True, _) ->
       sayWarning $
         "Rust workspace not persisted (Rust pools will not compile): the Rust "
@@ -303,24 +309,29 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- $HOME/.local/share/morloc/bin so the resulting symlinks land in a
   -- non-shared location instead of clobbering files in the user's
   -- general-purpose ~/.local/bin/.
-  linkDirEnv <- lookupEnv "MORLOC_BIN_LINK_DIR"
-  mLinkDir <- case linkDirEnv of
-    Just "" -> return Nothing
-    Just dir -> do
-      createDirectoryIfMissing True dir
-      return (Just dir)
-    Nothing -> do
-      let defaultBin = userHome </> ".local" </> "bin"
-      exists <- doesDirectoryExist defaultBin
-      return $ if exists then Just defaultBin else Nothing
-  case mLinkDir of
-    Nothing -> return ()
-    Just linkDir -> do
-      symlinkBinary nexusBinPath (linkDir </> "morloc-nexus")
-      let managerSrc = nexusBinDir </> "morloc-manager"
-      managerExists <- doesFileExist managerSrc
-      when managerExists $
-        symlinkBinary managerSrc (linkDir </> "morloc-manager")
+  -- Linking binaries onto PATH is a convenience: the binaries are always
+  -- reachable under $MORLOC_HOME/bin regardless. A failure here (e.g. the link
+  -- dir is an unwritable host path under a non-root container UID) must warn,
+  -- not abort init.
+  optionalStep "Could not link morloc binaries onto PATH (they remain available under $MORLOC_HOME/bin): " $ do
+    linkDirEnv <- lookupEnv "MORLOC_BIN_LINK_DIR"
+    mLinkDir <- case linkDirEnv of
+      Just "" -> return Nothing
+      Just dir -> do
+        createDirectoryIfMissing True dir
+        return (Just dir)
+      Nothing -> do
+        let defaultBin = userHome </> ".local" </> "bin"
+        exists <- doesDirectoryExist defaultBin
+        return $ if exists then Just defaultBin else Nothing
+    case mLinkDir of
+      Nothing -> return ()
+      Just linkDir -> do
+        symlinkBinary nexusBinPath (linkDir </> "morloc-nexus")
+        let managerSrc = nexusBinDir </> "morloc-manager"
+        managerExists <- doesFileExist managerSrc
+        when managerExists $
+          symlinkBinary managerSrc (linkDir </> "morloc-manager")
 
   -- Create exe/ and fdb/ directories
   let exeDir = homeDir </> "exe"
@@ -342,10 +353,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         let initPath = buildDir </> "init.sh"
         TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
         let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
-        result <- try (run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]) :: IO (Either SomeException ())
-        case result of
-          Left e -> sayWarning $ DF.lsName ls <> " setup failed: " <> displayException e
-          Right _ -> return ()
+        optionalStep (DF.lsName ls <> " setup failed: ") $
+          run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]
         -- Clean up
         removeFileSafe initPath
         forM_ (DF.lsFiles ls) $ \ef ->
@@ -384,6 +393,17 @@ sayError :: String -> IO ()
 sayError message = do
   line <- withColor "\ESC[31m" ("[ERROR] " <> message)
   hPutStrLn stderr line
+
+-- | Run an optional configuration step: on an I/O failure (a failed `run`,
+-- mkdir, symlink, ...), warn with the given prefix and continue rather than
+-- aborting the whole `morloc init`. Catches only synchronous IOErrors, so
+-- asynchronous exceptions -- notably a user Ctrl-C during a long `cargo build`
+-- -- still propagate and abort. Core install steps must NOT use this -- only
+-- capabilities that may legitimately be unavailable (a language toolchain, a
+-- convenience symlink).
+optionalStep :: String -> IO () -> IO ()
+optionalStep prefix act =
+  act `catch` \(e :: IOError) -> sayWarning (prefix <> displayException e)
 
 run :: Bool -> String -> [String] -> IO ()
 run verbose cmd args = do

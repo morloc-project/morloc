@@ -19,6 +19,59 @@ const DAEMON_POLL_INITIAL_MS: f64 = 100.0;
 const DAEMON_POLL_MULTIPLIER: f64 = 1.25;
 const DAEMON_POLL_MAX_RETRIES: usize = 16;
 
+// -- daemon-startup diagnostics -----------------------------------------------
+
+/// Read an environment variable as an owned String (None if unset).
+unsafe fn env_str(name: &str) -> Option<String> {
+    let c_name = CString::new(name).ok()?;
+    let p = libc::getenv(c_name.as_ptr());
+    if p.is_null() {
+        return None;
+    }
+    Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+}
+
+/// Decode a `waitpid` status word into a human-readable phrase so callers see
+/// "exited with code 1" / "killed by signal 11" instead of a raw integer.
+fn describe_wait_status(status: i32) -> String {
+    if libc::WIFEXITED(status) {
+        format!("exited with code {}", libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        format!("killed by signal {}", libc::WTERMSIG(status))
+    } else {
+        format!("ended (raw status {})", status)
+    }
+}
+
+/// Read up to the last `max_bytes` of a file as trimmed, lossy-UTF8 text.
+/// Returns "" on any error or if the file is empty. Used to surface a crashed
+/// daemon's captured stderr in the router error message.
+fn read_file_tail(path: &str, max_bytes: usize) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(max_bytes);
+            String::from_utf8_lossy(&bytes[start..]).trim().to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// Build the router error for a daemon that died during startup: the decoded
+/// exit status plus, when available, a tail of its captured stderr.
+fn startup_death_msg(prog_name: &str, status: i32, stderr_log: &str) -> String {
+    let base = format!(
+        "Daemon for '{}' {} during startup",
+        prog_name,
+        describe_wait_status(status)
+    );
+    let detail = read_file_tail(stderr_log, 4096);
+    if detail.is_empty() {
+        base
+    } else {
+        format!("{base}:\n{detail}")
+    }
+}
+
 // -- C-compatible types -------------------------------------------------------
 
 #[repr(C)]
@@ -207,20 +260,10 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
         }
     }
 
-    fn getenv_str(name: &str) -> Option<String> {
-        let c_name = CString::new(name).ok()?;
-        let p = unsafe { libc::getenv(c_name.as_ptr()) };
-        if p.is_null() {
-            None
-        } else {
-            Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
-        }
-    }
-
     let mut tried: Vec<String> = Vec::new();
 
     // 1. $MORLOC_NEXUS
-    if let Some(p) = getenv_str("MORLOC_NEXUS") {
+    if let Some(p) = env_str("MORLOC_NEXUS") {
         if is_executable(&p) {
             return Ok(p);
         }
@@ -228,7 +271,7 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
     }
 
     // 2. $MORLOC_HOME/bin/morloc-nexus
-    if let Some(h) = getenv_str("MORLOC_HOME") {
+    if let Some(h) = env_str("MORLOC_HOME") {
         let p = format!("{}/bin/morloc-nexus", h);
         if is_executable(&p) {
             return Ok(p);
@@ -237,7 +280,7 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
     }
 
     // 3. Search $PATH
-    if let Some(path) = getenv_str("PATH") {
+    if let Some(path) = env_str("PATH") {
         for dir in path.split(':') {
             if dir.is_empty() {
                 continue;
@@ -251,7 +294,7 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
     }
 
     // 4. $HOME/.local/bin/morloc-nexus
-    if let Some(h) = getenv_str("HOME") {
+    if let Some(h) = env_str("HOME") {
         let p = format!("{}/.local/bin/morloc-nexus", h);
         if is_executable(&p) {
             return Ok(p);
@@ -286,6 +329,22 @@ pub unsafe extern "C" fn router_start_program(
     };
     let c_nexus = CString::new(nexus_path.as_str()).unwrap_or_default();
 
+    // Capture the daemon's startup stderr to a host-visible file so a crash
+    // surfaces the real cause (missing shared library, unreadable config, bad
+    // manifest, ...) instead of only an exit status. The file lives under
+    // MORLOC_HOME, which is a bind mount in the serve container (so it is also
+    // readable from the host); the /tmp socket dir is a per-container tmpfs and
+    // would not be. All allocation happens here in the parent -- the child does
+    // only async-signal-safe calls before exec.
+    let prog_name_str = CStr::from_ptr((*prog).name).to_string_lossy().into_owned();
+    let log_dir = format!(
+        "{}/logs",
+        env_str("MORLOC_HOME").unwrap_or_else(|| "/tmp".to_string())
+    );
+    let _ = std::fs::create_dir_all(&log_dir);
+    let stderr_log = format!("{log_dir}/{prog_name_str}.err");
+    let c_stderr_log = CString::new(stderr_log.as_str()).unwrap_or_default();
+
     let pid = libc::fork();
     if pid == 0 {
         // Child: exec `morloc-nexus daemon <manifest> --socket <path>`.
@@ -295,6 +354,23 @@ pub unsafe extern "C" fn router_start_program(
         // Unix socket at `daemon_socket` so subsequent router
         // requests can connect.
         libc::setpgid(0, 0);
+        // Redirect stderr to the startup log so the parent can read the failure
+        // reason after a crash. O_APPEND preserves the first crash across a
+        // restart loop. Best-effort: on open failure fall back to the inherited
+        // stderr rather than aborting the exec.
+        if !c_stderr_log.as_bytes().is_empty() {
+            let log_fd = libc::open(
+                c_stderr_log.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                0o644,
+            );
+            if log_fd >= 0 {
+                libc::dup2(log_fd, libc::STDERR_FILENO);
+                if log_fd > libc::STDERR_FILENO {
+                    libc::close(log_fd);
+                }
+            }
+        }
         let arg_nexus = CString::new("morloc-nexus").unwrap();
         let arg_daemon = CString::new("daemon").unwrap();
         let arg_socket = CString::new("--socket").unwrap();
@@ -336,13 +412,8 @@ pub unsafe extern "C" fn router_start_program(
             if result == pid {
                 (*prog).daemon_pid = 0;
                 let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-                set_errmsg(
-                    errmsg,
-                    &MorlocError::Other(format!(
-                        "Daemon for '{}' exited during startup (status {})",
-                        prog_name, status
-                    )),
-                );
+                let msg = startup_death_msg(&prog_name, status, &stderr_log);
+                set_errmsg(errmsg, &MorlocError::Other(msg));
                 return false;
             }
 
@@ -381,13 +452,8 @@ pub unsafe extern "C" fn router_start_program(
             if result == pid {
                 (*prog).daemon_pid = 0;
                 let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-                set_errmsg(
-                    errmsg,
-                    &MorlocError::Other(format!(
-                        "Daemon for '{}' exited during startup (status {})",
-                        prog_name, status
-                    )),
-                );
+                let msg = startup_death_msg(&prog_name, status, &stderr_log);
+                set_errmsg(errmsg, &MorlocError::Other(msg));
                 return false;
             }
             // Daemon alive but socket not yet connectable -- proceed anyway,
@@ -453,9 +519,17 @@ pub unsafe extern "C" fn router_forward(
         let result = libc::waitpid((*prog).daemon_pid, &mut status, libc::WNOHANG);
         if result == (*prog).daemon_pid || result < 0 {
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+            // result < 0 means waitpid itself failed (e.g. ECHILD: the child was
+            // already reaped elsewhere), so `status` is unset -- don't decode it
+            // as an exit code.
+            let reason = if result < 0 {
+                "is no longer waitable".to_string()
+            } else {
+                describe_wait_status(status)
+            };
             eprintln!(
-                "morloc-router: daemon for '{}' exited (status {}), will restart",
-                prog_name, status
+                "morloc-router: daemon for '{}' {}, will restart",
+                prog_name, reason
             );
             (*prog).daemon_pid = 0;
         }

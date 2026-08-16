@@ -36,12 +36,25 @@ RUN python3 -m pip install --break-system-packages --upgrade setuptools
 RUN Rscript -e 'install.packages("bit64", repos = "https://cloud.r-project.org")'
 
 # Rust toolchain. Required because (1) `morloc make` compiles Rust pools by
-# shelling out to rustc at RUNTIME, and (2) `morloc init` builds the rustmorloc
-# marshaller -- an rlib locked to this exact rustc, so unlike the prebuilt
-# C-ABI libmorloc.so it cannot be a bundle artifact -- from the crate sources
-# bundled at $MORLOC_RUST_BIN/rust.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
+# shelling out to cargo/rustc at RUNTIME, and (2) `morloc init` builds the
+# rustmorloc marshaller -- an rlib locked to this exact rustc, so unlike the
+# prebuilt C-ABI libmorloc.so it cannot be a bundle artifact -- from the crate
+# sources bundled at $MORLOC_RUST_BIN/rust.
+#
+# Installed to a world-readable system location (/opt/rust) rather than
+# /root/.cargo: morloc-manager runs `morloc init` and `morloc make` inside this
+# image as the invoking host UID (docker --user, podman --userns=keep-id), which
+# cannot traverse root's 0700 home. The cargo/rustc proxies are symlinked onto
+# /usr/local/bin so they are found even when morloc-manager sets an explicit
+# PATH. RUSTUP_HOME is a persistent ENV so the runtime shims locate the
+# toolchain; CARGO_HOME is left unset in the image so a non-root runtime user can
+# point it at a writable location (morloc-manager sets it under $MORLOC_HOME).
+ENV RUSTUP_HOME=/opt/rust/rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | env CARGO_HOME=/opt/rust/cargo sh -s -- -y --no-modify-path --default-toolchain stable \
+  && chmod -R a+rX /opt/rust \
+  && ln -s /opt/rust/cargo/bin/* /usr/local/bin/
+ENV PATH="/opt/rust/cargo/bin:${PATH}"
 
 # Setup the morloc home: installs the prebuilt libmorloc.so/nexus/manager and
 # compiles rustmorloc locally from the bundled sources.

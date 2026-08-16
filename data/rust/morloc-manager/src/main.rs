@@ -2315,18 +2315,32 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
         // ---- logs ----
         Cmd::Logs { name, follow } => {
-            let (container_name, engine) = if let Some(ref n) = name {
-                let (_, _, ec) = resolve_env_or_active(Some(n.clone()))?;
+            let (container_name, engine, logs_dir) = if let Some(ref n) = name {
+                let (env_name, scope, ec) = resolve_env_or_active(Some(n.clone()))?;
                 let cname = serve::serve_container_name(n);
                 if !container::container_exists(ec.engine, &cname) {
                     return Err(ManagerError::EnvError(
                         format!("No serve container running for environment '{n}'")
                     ));
                 }
-                (cname, ec.engine)
+                (cname, ec.engine, cfg::env_data_dir(scope, &env_name).join("logs"))
             } else {
-                find_running_serve_container()?
+                let (cname, engine) = find_running_serve_container()?;
+                // Resolve the env's data dir for its captured daemon logs; fall
+                // back to the Local scope if the env can't be resolved (display
+                // only -- worst case the per-daemon logs are simply omitted).
+                let env_name = serve::env_name_from_container(&cname).to_string();
+                let logs_dir = match resolve_env_or_active(Some(env_name.clone())) {
+                    Ok((en, sc, _)) => cfg::env_data_dir(sc, &en).join("logs"),
+                    Err(_) => cfg::env_data_dir(Scope::Local, &env_name).join("logs"),
+                };
+                (cname, engine, logs_dir)
             };
+            // Surface the router-captured per-daemon stderr first (startup
+            // crashes that the engine's own container logs may not show), then
+            // the container's own logs. Snapshot regardless of --follow so it is
+            // shown even when the engine `logs -f` below blocks.
+            serve::dump_err_files(&logs_dir)?;
             // Apptainer has no `logs` subcommand: instances write to per-name
             // log files under ~/.apptainer/instances/logs/.... Hand this off
             // to serve.rs which knows the path layout.
@@ -2880,33 +2894,59 @@ fn run_with_config(
     } else {
         cwd.to_string()
     };
-    // The Haskell-side `morloc init` (SystemConfig.hs) optionally symlinks the
-    // freshly installed nexus/manager binaries into a "user bin" directory so
-    // they end up on PATH. Its legacy default for that target was
-    // `~/.local/bin/`, but under engines that mount the host $HOME (Apptainer
-    // does so by default) that directory IS the host's general-purpose bin,
-    // and symlinking container-internal targets (`/opt/morloc/bin/...`) into
-    // it leaves dangling host symlinks that can clobber the user's own
-    // ~/.local/bin/morloc-* files.
+    // The container runs as the invoking host UID (engine_specific_run_flags_io:
+    // docker `--user`, podman `--userns=keep-id`), so the in-container
+    // environment must not assume root or a real, writable $HOME. The two
+    // engine families differ in one decisive way: Apptainer mounts the host
+    // $HOME by default, docker/podman do NOT.
     //
-    // We instead point `MORLOC_BIN_LINK_DIR` at a morloc-specific subdir of
-    // the user's data tree: `~/.local/share/morloc/bin/`. That path is
-    // morloc-owned space (no third-party binaries land there), so cross-tool
-    // clobbering is not a concern, and we add it to PATH so the resulting
-    // symlinks are actually findable. Users who want to redirect the link
-    // target can override `MORLOC_BIN_LINK_DIR` via `-x --env ...` or via
-    // their env.flags; the later --env wins under both docker/podman and
-    // apptainer.
-    let link_dir = format!("{home}/{MORLOC_BIN_LINK_REL}");
-    let mut env_vars = vec![
-        ("HOME".to_string(), home.to_string()),
-        ("MORLOC_HOME".to_string(), mh.to_string()),
-        ("MORLOC_BIN_LINK_DIR".to_string(), link_dir.clone()),
-        (
-            "PATH".to_string(),
-            format!("{link_dir}:{mh}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
-        ),
-    ];
+    // Apptainer: the host $HOME is present and writable, so `morloc init` can
+    // symlink the freshly installed nexus/manager binaries into a morloc-owned
+    // subdir of it (`~/.local/share/morloc/bin/`) -- morloc-owned space that
+    // avoids clobbering the user's general-purpose `~/.local/bin/` -- and we add
+    // that dir to PATH so the symlinks are findable.
+    //
+    // Docker/Podman: the host $HOME is NOT mounted, so anything HOME-relative
+    // (cargo's default CARGO_HOME, `morloc init`'s bin-link mkdir) would target
+    // an unwritable path and fail. Point HOME and CARGO_HOME at the mounted,
+    // writable, host-owned data dir ($MORLOC_HOME) and skip the convenience
+    // bin-link entirely (`MORLOC_BIN_LINK_DIR=""`); the binaries are already on
+    // PATH via `$MORLOC_HOME/bin`. RUSTUP_HOME is intentionally NOT set here so
+    // the image's read-only toolchain ENV (/opt/rust/rustup) stays authoritative.
+    //
+    // Either way `user_env` is appended last, so `-x --env ...` overrides win.
+    // Under docker/podman HOME is $MORLOC_HOME/home (the host $HOME is not
+    // mounted). Create it on the host bind-mount side so pool daemons/tools that
+    // touch $HOME do not hit ENOENT -- the env-create loop does not make it, and
+    // existing environments predate it. Best-effort: a failure here means the
+    // data dir is unwritable, which fails loudly downstream.
+    if matches!(engine, ContainerEngine::Docker | ContainerEngine::Podman) {
+        let _ = std::fs::create_dir_all(format!("{v_data_dir}/home"));
+    }
+    let mut env_vars = match engine {
+        ContainerEngine::Apptainer => {
+            let link_dir = format!("{home}/{MORLOC_BIN_LINK_REL}");
+            vec![
+                ("HOME".to_string(), home.to_string()),
+                ("MORLOC_HOME".to_string(), mh.to_string()),
+                ("MORLOC_BIN_LINK_DIR".to_string(), link_dir.clone()),
+                (
+                    "PATH".to_string(),
+                    format!("{link_dir}:{mh}/bin:{}", serve::CONTAINER_PATH_TAIL),
+                ),
+            ]
+        }
+        ContainerEngine::Docker | ContainerEngine::Podman => {
+            // Shared docker/podman base (HOME/MORLOC_HOME/PATH); add the
+            // build-phase-only vars this call site owns.
+            let mut v = serve::oci_base_env(mh);
+            // Explicit skip: SystemConfig.hs treats "" as "do not link".
+            v.push(("MORLOC_BIN_LINK_DIR".to_string(), String::new()));
+            // Writable, mounted, persisted cargo cache for Rust pool builds.
+            v.push(("CARGO_HOME".to_string(), format!("{mh}/.cargo")));
+            v
+        }
+    };
     if bridge_socket.is_some() {
         env_vars.push((
             "MORLOC_BRIDGE_SOCKET".to_string(),
