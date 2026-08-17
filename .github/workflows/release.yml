@@ -200,6 +200,31 @@ jobs:
         run: stack test --system-ghc --no-install-ghc morloc:morloc-test
         timeout-minutes: 10
 
+      # Stage the stack-built compiler as a release asset so morloc-manager can
+      # provision it (the native + container backends download the trio; the
+      # manifest below references morloc-linux-x86_64).
+      - name: Stage morloc compiler for release
+        run: |
+          cp "$HOME/.local/bin/morloc" morloc-linux-x86_64
+          strip morloc-linux-x86_64 || true
+      - name: Upload morloc compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-compiler-linux-x86_64
+          path: morloc-linux-x86_64
+
+      # Publish the language-support table (compiler-owned static data) as a
+      # release asset so morloc-manager can render pixi manifests WITHOUT running
+      # the compiler on the host -- essential for container builds on hosts where
+      # the glibc compiler cannot execute natively (NixOS, musl, etc.).
+      - name: Stage lang-support table for release
+        run: "$HOME/.local/bin/morloc" lang-support > morloc-lang-support.json
+      - name: Upload lang-support table
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-lang-support
+          path: morloc-lang-support.json
+
   # ---- Build and push container images ----
   containers:
     needs: test
@@ -256,6 +281,17 @@ jobs:
         with:
           pattern: 'rust-binaries-*'
           merge-multiple: true
+
+      # The stack-built compiler ships under its own truthful artifact name.
+      - name: Download the morloc compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-compiler-linux-x86_64
+
+      - name: Download the lang-support table
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-lang-support
 
       - name: List artifacts
         run: ls -lh
@@ -321,4 +357,5 @@ jobs:
             morloc-nexus-*
             morloc-rust-src.tar.gz
             morloc-release-manifest.json
+            morloc-lang-support.json
           generate_release_notes: true

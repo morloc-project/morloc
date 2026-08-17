@@ -472,6 +472,7 @@ pub fn apply_environment(opts: &ApplyOptions) -> Result<()> {
         }
         // Start with required fields from opts; the rest will be applied below
         EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: name.clone(),
             base_image: opts.base_image.clone().unwrap_or_default(),
             original_image: None,

@@ -2,21 +2,22 @@ mod bridge;
 mod config;
 mod container;
 mod doctor;
+mod dockerfile;
 mod environment;
-// Foundations for the native/pixi backend; wired into the command flow in a
-// following P2b step, at which point these allow attributes come off.
+// envspec/langsupport deserialize the compiler's JSON contracts in full; not
+// every schema field is consumed by the manager yet (e.g. module pins, cpp std,
+// default versions), so unused-field warnings on those mirror types are expected.
 #[allow(dead_code)]
 mod envspec;
 mod error;
 mod freeze;
-#[allow(dead_code)]
+mod constraint;
 mod hostprobe;
 #[allow(dead_code)]
 mod langsupport;
-#[allow(dead_code)]
 mod pixi;
-#[allow(dead_code)]
 mod provision;
+mod runner;
 mod selinux;
 mod serve;
 mod types;
@@ -165,6 +166,10 @@ enum Cmd {
         /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
+        /// Native backend: language toolchain(s) to provision, `lang` or `lang@version`
+        /// (e.g. --lang py@3.12 --lang r). Repeatable or comma-separated.
+        #[arg(long)]
+        lang: Vec<String>,
         /// Path to a file with one engine argument per line
         #[arg(long)]
         flagfile: Option<String>,
@@ -573,7 +578,7 @@ enum ExposeAction {
     },
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, PartialEq, Eq, ValueEnum)]
 enum EngineArg {
     Docker,
     Podman,
@@ -581,6 +586,8 @@ enum EngineArg {
     /// Alias for Apptainer (the older binary name). Both resolve to
     /// ContainerEngine::Apptainer; the runtime executable is detected later.
     Singularity,
+    /// The native (no-container) backend: provision a host toolchain via pixi.
+    None,
 }
 
 impl From<EngineArg> for ContainerEngine {
@@ -589,6 +596,11 @@ impl From<EngineArg> for ContainerEngine {
             EngineArg::Docker => ContainerEngine::Docker,
             EngineArg::Podman => ContainerEngine::Podman,
             EngineArg::Apptainer | EngineArg::Singularity => ContainerEngine::Apptainer,
+            // Native is always dispatched to its own flow before any command
+            // converts an engine selection to a container engine.
+            EngineArg::None => {
+                unreachable!("EngineArg::None (native) must be handled before this conversion")
+            }
         }
     }
 }
@@ -925,6 +937,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             }
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
+            if matches!(engine, Some(EngineArg::None)) {
+                let cfg_path = cfg::config_path(scope);
+                let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
+                cfg::write_config(&cfg_path, &Config { backend: Backend::Native, ..base_cfg })?;
+                eprintln!("Engine set to: native");
+                return Ok(());
+            }
             let eng: ContainerEngine = engine.unwrap().into();
             check_docker_socket(eng);
             let cfg_path = cfg::config_path(scope);
@@ -950,6 +969,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             deffile_stub,
             force,
             include,
+            lang,
             flagfile,
             engine_arg,
             engine,
@@ -961,6 +981,33 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         } => {
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
+
+            // Backend fork: the native (no-container) backend has its own flow.
+            // Choose it when explicitly requested (--engine none), when it is the
+            // configured default, or -- with no explicit or configured choice --
+            // when the host is native-capable (host-probed default).
+            let go_native = match &engine {
+                Some(EngineArg::None) => {
+                    let profile = hostprobe::probe_host();
+                    if !profile.native_capable {
+                        return Err(ManagerError::EnvError(format!(
+                            "the native backend is not available on this host: {}",
+                            profile.reason
+                        )));
+                    }
+                    true
+                }
+                Some(_) => false,
+                None => match cfg::read_active_config().map(|c| c.backend) {
+                    Some(Backend::Native) => true,
+                    Some(Backend::Container(_)) => false,
+                    None => hostprobe::probe_host().native_capable,
+                },
+            };
+            if go_native {
+                let interactive = !non_interactive && io::stdin().is_terminal();
+                return native_new(scope, name, lang, no_init, interactive, verbose);
+            }
 
             // Resolve engine: explicit flag > config default > auto-detect single > error
             // For --system, prefer system config so the env uses the system engine.
@@ -1033,6 +1080,25 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     backend: Backend::Container(resolved_engine),
                 };
                 cfg::write_config(&cfg_path, &new_cfg)?;
+            }
+
+            // Requirement-derived container build: with no legacy image source
+            // (--image/--version/--tag/--dockerfile/--deffile) the image is built
+            // from the environment's requirements via a generated Dockerfile that
+            // runs pixi inside, sharing the native backend's lowering. Legacy image
+            // sources still use the pull-based recipe path below (pending removal).
+            let no_legacy_source = image.is_none()
+                && version.is_none()
+                && tag.is_none()
+                && dockerfile.is_none()
+                && deffile.is_none()
+                && !dockerfile_stub
+                && !deffile_stub;
+            if no_legacy_source {
+                let interactive = !non_interactive && io::stdin().is_terminal();
+                return container_new_derived(
+                    scope, resolved_engine, name, lang, no_init, interactive,
+                );
             }
 
             let interactive = !non_interactive && io::stdin().is_terminal();
@@ -1306,7 +1372,19 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 return Err(ManagerError::NoCommand);
             }
             let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
-            run_in_container(verbose, shell, &command, &user_env, &engine_arg, slurm_bridge).map_err(|e| match e {
+            runner::run_in_env(
+                None,
+                runner::RunRequest {
+                    verbose,
+                    shell,
+                    args: command,
+                    user_env,
+                    engine_args: engine_arg,
+                    phase: Phase::Run,
+                    slurm_bridge,
+                },
+            )
+            .map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -1912,6 +1990,29 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 check_system_write_access()?;
             }
 
+            // Native environments re-materialize their pixi toolchain instead of
+            // rebuilding an image; the container-only update options do not apply.
+            {
+                let ec = cfg::read_env_config(env_scope, &env_name)?;
+                if ec.backend.is_native() || matches!(engine, Some(EngineArg::None)) {
+                    if image.is_some() || dockerfile.is_some() || deffile.is_some()
+                        || dockerfile_stub || deffile_stub || flagfile.is_some() || no_build
+                    {
+                        return Err(ManagerError::EnvError(
+                            "container-only options (--image/--dockerfile/--deffile/--flagfile/\
+                             --no-build) do not apply to a native environment".to_string(),
+                        ));
+                    }
+                    let specs = gather_env_specs(env_scope, &env_name);
+                    let inputs = cfg::read_env_inputs(env_scope, &env_name);
+                    materialize_native_env(
+                        env_scope, &env_name, &specs, &inputs.lang_pins, verbose,
+                    )?;
+                    eprintln!("Native environment '{env_name}' re-materialized.");
+                    return Ok(());
+                }
+            }
+
             // Handle --dockerfile-stub: generate stub if no Dockerfile exists
             let resolved_dockerfile = if dockerfile.is_some() && dockerfile_stub {
                 return Err(ManagerError::EnvError(
@@ -2161,6 +2262,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     "Cannot read freeze manifest at {}. Ensure state.tar.gz and freeze-manifest.json are in the same directory.",
                     manifest_path.display()
                 )))?;
+            if matches!(engine_override, Some(EngineArg::None)) {
+                return Err(ManagerError::UnfreezeError(
+                    "unfreezing to the native backend is not yet supported; unfreeze to a \
+                     container engine (--engine podman) or omit --engine".to_string(),
+                ));
+            }
             let engine = match engine_override {
                 Some(arg) => arg.into(),
                 None => {
@@ -2452,7 +2559,18 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     "--install".to_string(), src,
                 ]
             };
-            run_in_container(verbose, false, &args, &[], &engine_arg, false)
+            runner::run_in_env(
+                None,
+                runner::RunRequest {
+                    verbose,
+                    shell: false,
+                    args,
+                    user_env: Vec::new(),
+                    engine_args: engine_arg,
+                    phase: Phase::Run,
+                    slurm_bridge: false,
+                },
+            )
         }
 
         // ---- expose ----
@@ -2648,15 +2766,576 @@ fn find_running_serve_container() -> Result<(String, ContainerEngine)> {
 // Container run
 // ======================================================================
 
-fn run_in_container(
-    verbose: bool,
-    shell: bool,
-    args: &[String],
-    user_env: &[(String, String)],
-    cli_engine_args: &[String],
-    slurm_bridge: bool,
+/// Native-backend `run`: execute a command directly on the host against the
+/// environment's own MORLOC_HOME, reconstructing the provisioned toolchain
+/// environment from the materialization record. Invoked through the `Runner`
+/// seam (`NativeRunner`).
+pub(crate) fn native_run_env(
+    env: &runner::ResolvedEnv,
+    req: &runner::RunRequest,
 ) -> Result<()> {
-    run_in_container_for(None, verbose, shell, args, user_env, cli_engine_args, Phase::Run, slurm_bridge)
+    // Container-only inputs have no meaning on the host; reject rather than
+    // silently drop them.
+    if !req.engine_args.is_empty() {
+        return Err(ManagerError::EnvError(
+            "--engine-arg / -x is a container-only option; the native backend has no \
+             container engine to pass flags to".to_string(),
+        ));
+    }
+    if req.slurm_bridge {
+        return Err(ManagerError::EnvError(
+            "--slurm-bridge is only supported on the container backend".to_string(),
+        ));
+    }
+
+    // The toolchain env-map is captured when the environment is materialized.
+    // Its absence means the environment was never provisioned.
+    let runtime = cfg::read_native_runtime(env.scope, &env.name).map_err(|_| {
+        ManagerError::EnvError(format!(
+            "native environment '{}' has not been materialized. \
+             Run 'morloc-manager update {}' to provision its toolchain.",
+            env.name, env.name
+        ))
+    })?;
+
+    let data_dir = cfg::env_data_dir(env.scope, &env.name);
+    let mh = data_dir.to_string_lossy().to_string();
+
+    let mut cmd = if req.shell {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            eprintln!("Error: --shell requires an interactive terminal (TTY).");
+            std::process::exit(1);
+        }
+        let shell_exe = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        Command::new(shell_exe)
+    } else {
+        let (program, rest) = req
+            .args
+            .split_first()
+            .ok_or(ManagerError::NoCommand)?;
+        let mut c = Command::new(program);
+        c.args(rest);
+        c
+    };
+
+    // Inherited environ + captured toolchain activation + MORLOC_HOME, then the
+    // caller's `--env` overrides last so `-e KEY=VAL` always wins.
+    for (k, v) in &runtime.activation_env {
+        cmd.env(k, v);
+    }
+    cmd.env("MORLOC_HOME", &mh);
+    for (k, v) in &req.user_env {
+        cmd.env(k, v);
+    }
+
+    let status = cmd.status().map_err(|e| {
+        ManagerError::EnvError(format!("failed to launch command on host: {e}"))
+    })?;
+    let code = status.code().unwrap_or(1);
+    if status.success() {
+        Ok(())
+    } else {
+        std::process::exit(code);
+    }
+}
+
+// ======================================================================
+// Native backend: materialize + new
+// ======================================================================
+
+/// The pixi binary to shell out to: `$MORLOC_PIXI` if set, else the standard
+/// per-user install (`~/.pixi/bin/pixi`), else `pixi` on PATH.
+fn pixi_binary() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("MORLOC_PIXI") {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    if let Some(home_pixi) = dirs::home_dir().map(|h| h.join(".pixi/bin/pixi")) {
+        if home_pixi.exists() {
+            return home_pixi;
+        }
+    }
+    std::path::PathBuf::from("pixi")
+}
+
+/// The release tag to provision the morloc runtime from: `$MORLOC_RELEASE_TAG`
+/// if set (e.g. "dev" or "v0.98.3"), else "latest" (resolved via the releases
+/// API). morloc-manager is self-bootstrapping -- it downloads the compiler +
+/// runtime trio rather than requiring a host morloc install.
+fn resolve_release_tag() -> String {
+    std::env::var("MORLOC_RELEASE_TAG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "latest".to_string())
+}
+
+/// morloc's language-support table, in preference order: `$MORLOC_LANG_SUPPORT`
+/// (a JSON file, for pinning/dev); the table downloaded into the provisioned
+/// runtime (works on every host -- no compiler execution); else, as a fallback,
+/// running the provisioned compiler (only viable where it can execute natively).
+///
+/// The downloaded-table path is what lets container builds succeed on hosts where
+/// the glibc compiler cannot run (NixOS, musl, ...).
+fn load_lang_support(runtime_dir: &std::path::Path) -> Result<langsupport::LangSupport> {
+    if let Ok(path) = std::env::var("MORLOC_LANG_SUPPORT") {
+        if !path.is_empty() {
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                ManagerError::EnvError(format!("cannot read MORLOC_LANG_SUPPORT {path}: {e}"))
+            })?;
+            return langsupport::LangSupport::from_json(&text);
+        }
+    }
+    let table = runtime_dir.join(provision::LANG_SUPPORT_FILE);
+    if table.is_file() {
+        let text = std::fs::read_to_string(&table).map_err(|e| {
+            ManagerError::EnvError(format!("cannot read {}: {e}", table.display()))
+        })?;
+        return langsupport::LangSupport::from_json(&text);
+    }
+    let out = Command::new(runtime_dir.join("morloc"))
+        .arg("lang-support")
+        .output()
+        .map_err(|e| ManagerError::EnvError(format!("could not run morloc: {e}")))?;
+    if !out.status.success() {
+        return Err(ManagerError::EnvError(
+            "could not obtain the language-support table: this release does not publish it \
+             (morloc-lang-support.json) and the provisioned compiler could not run on this host \
+             (e.g. NixOS/musl). Use a release that includes the table, or set MORLOC_LANG_SUPPORT \
+             to a lang-support JSON file."
+                .to_string(),
+        ));
+    }
+    langsupport::LangSupport::from_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Run `morloc init` on the host to build the environment's language shims into
+/// its own MORLOC_HOME, against the pixi toolchain (on PATH via the activation
+/// env-map) and the provisioned runtime trio.
+fn run_native_morloc_init(
+    morloc_bin: &std::path::Path,
+    env_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+    activation: &[(String, String)],
+    verbose: bool,
+) -> Result<()> {
+    let mut cmd = Command::new(morloc_bin);
+    cmd.arg("init").arg("-f");
+    if !verbose {
+        cmd.arg("-q");
+    }
+    for (k, v) in activation {
+        cmd.env(k, v);
+    }
+    cmd.env("MORLOC_HOME", env_dir);
+    // init resolves the Rust workspace source from MORLOC_RUST_BIN/rust, bundled
+    // in the provisioned runtime, so MORLOC_RUST_DIR is not needed.
+    cmd.env("MORLOC_RUST_BIN", runtime_dir);
+    let status = cmd
+        .status()
+        .map_err(|e| ManagerError::EnvError(format!("could not run morloc init: {e}")))?;
+    if !status.success() {
+        return Err(ManagerError::EnvError(
+            "morloc init failed while provisioning the native environment".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Materialize a native environment: solve its pixi toolchain, capture the
+/// activation env-map, provision the morloc runtime trio, run `morloc init` on
+/// the host, and persist the native runtime record. `specs` is the union of the
+/// installed programs' requirements (empty for a bare env).
+/// Parse `--lang` values into (language, optional version pin) pairs. Accepts
+/// repeated flags and comma-separated lists; each atom is `lang` or `lang@pin`
+/// (e.g. `py`, `py@3.12`, `r@4.3`).
+fn parse_lang_pins(lang: &[String]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    for entry in lang {
+        for atom in entry.split(',') {
+            let atom = atom.trim();
+            if atom.is_empty() {
+                continue;
+            }
+            match atom.split_once('@') {
+                Some((l, p)) => out.push((l.trim().to_string(), Some(p.trim().to_string()))),
+                None => out.push((atom.to_string(), None)),
+            }
+        }
+    }
+    out
+}
+
+/// Resolve one `--lang` pin into a language requirement, intersecting the pin
+/// with morloc's supported range for that language and erroring legibly (in
+/// morloc's vocabulary) when they conflict -- before pixi is ever invoked.
+fn resolve_lang_pin(
+    lang: &str,
+    pin: Option<&str>,
+    morloc_version: &str,
+    support: &langsupport::LangSupport,
+) -> Result<envspec::LangReq> {
+    let supported = support
+        .languages
+        .get(lang)
+        .and_then(|e| e.runtime.as_ref())
+        .map(|r| r.version.as_str())
+        .unwrap_or("*");
+    let spec = constraint::resolve_lang_version(lang, morloc_version, None, pin, supported)?;
+    let constraint = (spec != "*").then_some(spec);
+    Ok(envspec::LangReq { lang: lang.to_string(), constraint, std: None })
+}
+
+/// Materialize a native environment: solve its pixi toolchain, capture the
+/// activation env-map, provision the morloc runtime trio, run `morloc init` on
+/// the host, and persist the native runtime record. The toolchain is the union
+/// of the installed programs' requirements (`program_specs`) and the user's
+/// `--lang` pins. Re-solving is skipped when the rendered manifest is unchanged
+/// from a prior materialization (avoids a redundant solve on every `update`).
+/// A provisioned runtime plus the pixi manifest for an environment's
+/// requirements. Both backends share this "requirements -> pixi.toml" step; they
+/// differ only in what they do with it (native: solve on host; container: lock +
+/// build an image).
+struct ResolvedRequirements {
+    /// The downloaded runtime store (`runtimes/<version>/`), also MORLOC_RUST_BIN.
+    runtime_dir: std::path::PathBuf,
+    /// The concrete morloc version provisioned.
+    version: String,
+    /// The provisioned morloc compiler (`runtime_dir/morloc`).
+    morloc_bin: std::path::PathBuf,
+    /// The union of `program_specs` and the `--lang` pins.
+    specs: Vec<envspec::EnvSpec>,
+    /// The rendered `pixi.toml` (identical for both backends).
+    manifest: String,
+}
+
+/// Provision the morloc runtime (download the compiler + trio; no host install),
+/// then lower the environment's requirements to a pixi manifest. `--lang` pins
+/// are validated against morloc's supported range here (a legible pin-time error
+/// before pixi runs).
+fn resolve_env_requirements(
+    scope: Scope,
+    name: &str,
+    program_specs: &[envspec::EnvSpec],
+    lang_pins: &[(String, Option<String>)],
+) -> Result<ResolvedRequirements> {
+    let tag = resolve_release_tag();
+    eprintln!("Provisioning morloc runtime ({tag})...");
+    let (runtime_dir, version) = provision::provision_runtime(scope, &tag)?;
+    let morloc_bin = runtime_dir.join("morloc");
+    let support = load_lang_support(&runtime_dir)?;
+
+    let mut specs: Vec<envspec::EnvSpec> = program_specs.to_vec();
+    if !lang_pins.is_empty() {
+        let mut langreqs = Vec::new();
+        for (lang, pin) in lang_pins {
+            langreqs.push(resolve_lang_pin(lang, pin.as_deref(), &version, &support)?);
+        }
+        specs.push(envspec::EnvSpec::from_languages(&version, langreqs));
+    }
+
+    let profile = hostprobe::probe_host();
+    let channels = vec!["conda-forge".to_string()];
+    let manifest = pixi::render_pixi_manifest(&pixi::PixiManifestInput {
+        env_name: name,
+        platform: &profile.platform,
+        channels: &channels,
+        specs: &specs,
+        lang_support: &support,
+    });
+
+    Ok(ResolvedRequirements { runtime_dir, version, morloc_bin, specs, manifest })
+}
+
+fn materialize_native_env(
+    scope: Scope,
+    name: &str,
+    program_specs: &[envspec::EnvSpec],
+    lang_pins: &[(String, Option<String>)],
+    verbose: bool,
+) -> Result<String> {
+    let req = resolve_env_requirements(scope, name, program_specs, lang_pins)?;
+
+    // Phase 1 of the impurity gate: a fast reject on host/vcpkg system deps that
+    // conda cannot provide (the pixi solve below is the accurate phase 2).
+    let blockers: Vec<String> = req.specs.iter().flat_map(|s| s.native_blockers()).collect();
+    if !blockers.is_empty() {
+        return Err(ManagerError::EnvError(format!(
+            "this environment cannot be built on the native backend:\n  {}",
+            blockers.join("\n  ")
+        )));
+    }
+
+    let env_dir = cfg::env_data_dir(scope, name);
+    let pixi_dir = env_dir.join("pixi");
+
+    // Solve cache: an unchanged manifest with an existing runtime record means the
+    // toolchain is already materialized; skip the solve + re-init.
+    let manifest_unchanged = std::fs::read_to_string(pixi_dir.join("pixi.toml"))
+        .map(|prev| prev == req.manifest)
+        .unwrap_or(false);
+    if manifest_unchanged && cfg::read_native_runtime(scope, name).is_ok() {
+        eprintln!("Native toolchain is up to date (requirements unchanged).");
+        return Ok(req.version);
+    }
+
+    pixi::write_manifest(&pixi_dir, &req.manifest)?;
+    let pixi_bin = pixi_binary();
+    eprintln!("Solving native toolchain with pixi (this may take a few minutes)...");
+    pixi::solve(&pixi_dir, &pixi_bin)?;
+    let mut activation = pixi::capture_activation(&pixi_dir, &pixi_bin)?;
+    // Expose the env's own bin (nexus + installed program launchers) and the
+    // provisioned runtime (the morloc compiler) on PATH, so `run -- <program>`
+    // and `run -- morloc ...` resolve inside the env alongside the conda toolchain.
+    prepend_to_path(&mut activation, &[env_dir.join("bin"), req.runtime_dir.clone()]);
+
+    run_native_morloc_init(&req.morloc_bin, &env_dir, &req.runtime_dir, &activation, verbose)?;
+
+    cfg::write_native_runtime(scope, name, &NativeRuntime { activation_env: activation })?;
+    Ok(req.version)
+}
+
+/// Prepend `dirs` (in order) to the `PATH` entry of an activation env-map,
+/// inserting a `PATH` entry if none exists.
+fn prepend_to_path(activation: &mut Vec<(String, String)>, dirs: &[std::path::PathBuf]) {
+    let prefix = dirs
+        .iter()
+        .map(|d| d.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    if prefix.is_empty() {
+        return;
+    }
+    for (k, v) in activation.iter_mut() {
+        if k == "PATH" {
+            *v = format!("{prefix}:{v}");
+            return;
+        }
+    }
+    activation.push(("PATH".to_string(), prefix));
+}
+
+/// Collect the requirements of every program installed into a native env by
+/// reading the `envspec.json` files morloc writes into each program's build dir
+/// under the env's MORLOC_HOME. A malformed or unreadable spec is skipped (with
+/// a warning) rather than aborting the whole re-solve.
+fn gather_env_specs(scope: Scope, name: &str) -> Vec<envspec::EnvSpec> {
+    let env_dir = cfg::env_data_dir(scope, name);
+    let mut specs = Vec::new();
+    for path in find_envspec_files(&env_dir) {
+        let build_dir = path.parent().unwrap_or(&env_dir);
+        match envspec::EnvSpec::read_from_build_dir(build_dir) {
+            Ok(spec) => specs.push(spec),
+            Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+        }
+    }
+    specs
+}
+
+/// Find `envspec.json` files under `root`, skipping large non-source subtrees
+/// (the pixi env, cargo/target dirs) so the scan stays cheap.
+fn find_envspec_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skip = matches!(
+                    path.file_name().and_then(|n| n.to_str()),
+                    Some("pixi") | Some(".pixi") | Some("target") | Some("rust") | Some(".cargo")
+                );
+                if !skip {
+                    stack.push(path);
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some("envspec.json") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Create a native (no-container) environment: record it, then materialize its
+/// pixi toolchain + morloc runtime on the host (unless `no_init`).
+/// Resolve, validate, and dedup-check a new environment's name (shared by the
+/// native and container `new` paths). Prompts interactively when no name given.
+fn resolve_new_env_name(scope: Scope, name: Option<String>, interactive: bool) -> Result<String> {
+    let env_name = match name {
+        Some(n) => n,
+        None if interactive => {
+            eprint!("Environment name: ");
+            io::stderr().flush().ok();
+            let mut buf = String::new();
+            io::stdin().read_line(&mut buf).ok();
+            buf.trim().to_string()
+        }
+        None => "morloc-env".to_string(),
+    };
+    if env_name.is_empty() {
+        return Err(ManagerError::EnvError("Environment name cannot be empty".to_string()));
+    }
+    environment::validate_env_name(&env_name)?;
+    if cfg::env_config_path(scope, &env_name).is_file() {
+        return Err(ManagerError::EnvError(format!(
+            "Environment '{env_name}' already exists"
+        )));
+    }
+    Ok(env_name)
+}
+
+/// Persist a freshly created environment: its `--lang` inputs, its config, a
+/// default active-config when none exists, and the "ready" banner. Shared by the
+/// native and container `new` paths.
+fn finalize_new_env(
+    scope: Scope,
+    ec: &EnvironmentConfig,
+    lang_pins: Vec<(String, Option<String>)>,
+) -> Result<()> {
+    cfg::write_env_inputs(scope, &ec.name, &EnvInputs { lang_pins })?;
+    cfg::write_env_config(scope, &ec.name, ec)?;
+    if cfg::read_active_config().is_none() {
+        cfg::write_config(
+            &cfg::config_path(scope),
+            &Config { active_env: None, backend: ec.backend },
+        )?;
+    }
+    let kind = if ec.backend.is_native() { "Native" } else { "Container" };
+    anstream::eprintln!("\x1b[1;32m{kind} environment '{}' is ready.\x1b[0m", ec.name);
+    eprintln!("Activate it with: morloc-manager select {}", ec.name);
+    Ok(())
+}
+
+fn native_new(
+    scope: Scope,
+    name: Option<String>,
+    lang: Vec<String>,
+    no_init: bool,
+    interactive: bool,
+    verbose: bool,
+) -> Result<()> {
+    let env_name = resolve_new_env_name(scope, name, interactive)?;
+
+    // A new env has no installed programs yet; its toolchain is morloc's core
+    // language-support table plus any `--lang` pins. Provisioning (inside
+    // materialize) yields the concrete morloc version.
+    let lang_pins = parse_lang_pins(&lang);
+    let morloc_version = if no_init {
+        None
+    } else {
+        materialize_native_env(scope, &env_name, &[], &lang_pins, verbose)?
+            .parse::<Version>()
+            .ok()
+    };
+
+    let ec = EnvironmentConfig::new_backend(
+        env_name,
+        Backend::Native,
+        String::new(),
+        None,
+        morloc_version,
+    );
+    finalize_new_env(scope, &ec, lang_pins)
+}
+
+/// pixi version pinned into generated container images (kept in step with the
+/// pixi the native backend shells out to).
+const PINNED_PIXI_VERSION: &str = "0.76.2";
+
+/// Slim base image for requirement-derived container builds.
+const CONTAINER_BASE_IMAGE: &str = "debian:bookworm-slim";
+
+/// Build a requirement-derived container image: render the env's pixi.toml
+/// (shared with the native backend), lock it, stage the morloc runtime + a
+/// generated Dockerfile into a build context, and build the image. Returns the
+/// built image tag.
+fn build_requirement_derived_image(
+    scope: Scope,
+    name: &str,
+    engine: ContainerEngine,
+    program_specs: &[envspec::EnvSpec],
+    lang_pins: &[(String, Option<String>)],
+) -> Result<(String, String)> {
+    // Unlike native, a container HAS a build layer, so host/vcpkg system deps are
+    // not a hard blocker here -- they become build-extras (a later --system-package
+    // flag). native_blockers therefore does not apply to the container path.
+    let req = resolve_env_requirements(scope, name, program_specs, lang_pins)?;
+
+    let context = cfg::env_data_dir(scope, name).join("container-build");
+    pixi::write_manifest(&context, &req.manifest)?;
+
+    let pixi_bin = pixi_binary();
+    eprintln!("Solving + locking the environment with pixi...");
+    pixi::lock(&context, &pixi_bin)?;
+
+    eprintln!("Staging the morloc runtime into the build context...");
+    provision::stage_runtime(&req.runtime_dir, &context.join("runtime"))?;
+
+    let extras = dockerfile::BuildExtras::default();
+    let df_text = dockerfile::generate_dockerfile(&dockerfile::DockerfileInput {
+        base_image: CONTAINER_BASE_IMAGE,
+        pixi_version: PINNED_PIXI_VERSION,
+        morloc_home: "/opt/morloc",
+        extras: &extras,
+    });
+    let df_path = context.join("Dockerfile");
+    std::fs::write(&df_path, df_text)
+        .map_err(|e| ManagerError::EnvError(format!("cannot write {}: {e}", df_path.display())))?;
+
+    let image_tag = format!("localhost/morloc-env:{name}");
+    eprintln!("Building the environment image ({image_tag}) with {}...", engine.name());
+    let cfg = crate::container::BuildConfig {
+        dockerfile: df_path.to_string_lossy().to_string(),
+        context: context.to_string_lossy().to_string(),
+        tag: image_tag.clone(),
+        build_args: Vec::new(),
+        extra_flags: Vec::new(),
+    };
+    let status = crate::container::container_build_visible(engine, &cfg);
+    if !status.success() {
+        return Err(ManagerError::EngineError {
+            engine,
+            code: crate::container::exit_code_to_int(status),
+            stderr: "requirement-derived image build failed".to_string(),
+        });
+    }
+    Ok((image_tag, req.version))
+}
+
+/// Create a container environment whose image is derived from its requirements
+/// (a generated Dockerfile running pixi inside), rather than a pulled/recipe
+/// image. Mirrors `native_new`; the run substrate is unchanged.
+fn container_new_derived(
+    scope: Scope,
+    engine: ContainerEngine,
+    name: Option<String>,
+    lang: Vec<String>,
+    no_init: bool,
+    interactive: bool,
+) -> Result<()> {
+    let env_name = resolve_new_env_name(scope, name, interactive)?;
+
+    let lang_pins = parse_lang_pins(&lang);
+    let (built_image, morloc_version) = if no_init {
+        (None, None)
+    } else {
+        let (image, version) =
+            build_requirement_derived_image(scope, &env_name, engine, &[], &lang_pins)?;
+        (Some(image), version.parse::<Version>().ok())
+    };
+
+    let ec = EnvironmentConfig::new_backend(
+        env_name,
+        Backend::Container(engine),
+        CONTAINER_BASE_IMAGE.to_string(),
+        built_image,
+        morloc_version,
+    );
+    finalize_new_env(scope, &ec, lang_pins)
 }
 
 /// Validate the active env can host a SLURM bridge and spawn one. The
@@ -2727,20 +3406,23 @@ fn bridge_socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(dir).join(format!("morloc-bridge-{}.sock", std::process::id()))
 }
 
-fn run_in_container_for(
-    target: Option<(String, Scope, EnvironmentConfig)>,
-    verbose: bool,
-    shell: bool,
-    args: &[String],
-    user_env: &[(String, String)],
-    cli_engine_args: &[String],
-    phase: Phase,
-    slurm_bridge: bool,
+/// Container-backend `run`: execute a command inside the environment's image.
+/// Invoked through the `Runner` seam (`ContainerRunner`); the target is already
+/// resolved by `runner::run_in_env`.
+pub(crate) fn container_run_env(
+    env: &runner::ResolvedEnv,
+    req: &runner::RunRequest,
 ) -> Result<()> {
-    let (env_name, env_scope, ec) = match target {
-        Some(t) => t,
-        None => environment::resolve_active_environment()?,
-    };
+    let env_name = env.name.clone();
+    let env_scope = env.scope;
+    let ec = &env.ec;
+    let verbose = req.verbose;
+    let shell = req.shell;
+    let args: &[String] = &req.args;
+    let user_env: &[(String, String)] = &req.user_env;
+    let cli_engine_args: &[String] = &req.engine_args;
+    let phase = req.phase;
+    let slurm_bridge = req.slurm_bridge;
     let engine = ec.engine()?;
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -2752,7 +3434,7 @@ fn run_in_container_for(
     // bridge stays alive for the lifetime of every nested remote
     // call).
     let _bridge_guard = if slurm_bridge {
-        Some(setup_slurm_bridge(&ec)?)
+        Some(setup_slurm_bridge(ec)?)
     } else {
         None
     };
@@ -3256,7 +3938,18 @@ fn run_morloc_init_for(
     // `morloc init` is a run-style invocation (it execs inside the
     // container); it picks up `run.<engine>` flags from env.flags.yaml.
     // No CLI engine-args here (the inner command is set by morloc-manager).
-    run_in_container_for(target, verbose, false, &argv, &[], &[], Phase::Run, false)
+    runner::run_in_env(
+        target,
+        runner::RunRequest {
+            verbose,
+            shell: false,
+            args: argv,
+            user_env: Vec::new(),
+            engine_args: Vec::new(),
+            phase: Phase::Run,
+            slurm_bridge: false,
+        },
+    )
 }
 
 fn normalize_trailing(p: &str) -> String {
@@ -3593,6 +4286,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("env.json");
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "test".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.67.0".to_string(),
             original_image: None,
@@ -4097,6 +4791,7 @@ build:
         // to keep the test hermetic.
         let path = dir.path().join("env.yaml");
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "dnd".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
             original_image: None,
@@ -4145,6 +4840,7 @@ build:
     #[test]
     fn active_image_apptainer_prefers_layered_sif() {
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "test".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
             original_image: None,
@@ -4165,6 +4861,7 @@ build:
     #[test]
     fn active_image_apptainer_falls_back_to_base_sif() {
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "test".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
             original_image: None,
@@ -4180,5 +4877,129 @@ build:
             morloc_version: None,
         };
         assert_eq!(ec.active_image(), "/base.sif");
+    }
+
+    // ---- native Runner seam ----
+
+    fn native_test_env(name: &str) -> runner::ResolvedEnv {
+        runner::ResolvedEnv {
+            name: name.to_string(),
+            scope: Scope::Local,
+            ec: EnvironmentConfig {
+                schema_version: crate::types::CURRENT_ENV_SCHEMA,
+                name: name.to_string(),
+                base_image: String::new(),
+                original_image: None,
+                dockerfile: None,
+                content_hash: None,
+                built_image: None,
+                singularity_def: None,
+                def_content_hash: None,
+                base_sif: None,
+                layered_sif: None,
+                backend: Backend::Native,
+                shm_size: "512m".to_string(),
+                morloc_version: None,
+            },
+        }
+    }
+
+    fn native_req(engine_args: Vec<String>, slurm_bridge: bool) -> runner::RunRequest {
+        runner::RunRequest {
+            verbose: false,
+            shell: false,
+            args: vec!["morloc".to_string(), "--version".to_string()],
+            user_env: Vec::new(),
+            engine_args,
+            phase: Phase::Run,
+            slurm_bridge,
+        }
+    }
+
+    #[test]
+    fn native_run_rejects_engine_args() {
+        let env = native_test_env("nat-engine-args");
+        let err = native_run_env(&env, &native_req(vec!["--privileged".to_string()], false))
+            .unwrap_err();
+        assert!(err.to_string().contains("container-only"), "{err}");
+    }
+
+    #[test]
+    fn native_run_rejects_slurm_bridge() {
+        let env = native_test_env("nat-slurm");
+        let err = native_run_env(&env, &native_req(Vec::new(), true)).unwrap_err();
+        assert!(err.to_string().contains("container backend"), "{err}");
+    }
+
+    #[test]
+    fn native_run_requires_materialization() {
+        // A native env with no materialization record must fail loudly rather
+        // than spawn against an unprovisioned toolchain.
+        let env = native_test_env("nat-unmaterialized-zzqx");
+        let err = native_run_env(&env, &native_req(Vec::new(), false)).unwrap_err();
+        assert!(err.to_string().contains("not been materialized"), "{err}");
+    }
+
+    // ---- --lang pins ----
+
+    #[test]
+    fn parse_lang_pins_splits_atoms_and_versions() {
+        let pins = parse_lang_pins(&["py@3.12".to_string(), "cpp, r@4.3".to_string()]);
+        assert_eq!(
+            pins,
+            vec![
+                ("py".to_string(), Some("3.12".to_string())),
+                ("cpp".to_string(), None),
+                ("r".to_string(), Some("4.3".to_string())),
+            ]
+        );
+        // Blank atoms are dropped.
+        assert!(parse_lang_pins(&[" , ".to_string()]).is_empty());
+    }
+
+    fn lang_support_fixture() -> langsupport::LangSupport {
+        const S: &str = r#"{"morloc_version":"0.0.0","toolchain":[],
+          "languages":{
+            "py":{"runtime":{"package":"python","version":">=3.10,<3.14","default":"3.12"},"requires":[]},
+            "cpp":{"runtime":null,"requires":[]}
+          }}"#;
+        langsupport::LangSupport::from_json(S).unwrap()
+    }
+
+    #[test]
+    fn resolve_lang_pin_clamps_to_supported_range() {
+        let s = lang_support_fixture();
+        // A minor pin intersects with morloc's supported range.
+        let req = resolve_lang_pin("py", Some("3.12"), "0.0.0", &s).unwrap();
+        assert_eq!(req.constraint.as_deref(), Some(">=3.12,<3.13"));
+        // No pin yields the full supported range (so conda python is used).
+        let req = resolve_lang_pin("py", None, "0.0.0", &s).unwrap();
+        assert_eq!(req.constraint.as_deref(), Some(">=3.10,<3.14"));
+        // A language with no runtime (cpp) carries no version constraint.
+        let req = resolve_lang_pin("cpp", None, "0.0.0", &s).unwrap();
+        assert!(req.constraint.is_none());
+    }
+
+    #[test]
+    fn resolve_lang_pin_rejects_out_of_range() {
+        let s = lang_support_fixture();
+        // 3.20 is outside morloc's >=3.10,<3.14 support window.
+        let err = resolve_lang_pin("py", Some("3.20"), "0.0.0", &s).unwrap_err();
+        assert!(err.to_string().contains("no py version"), "{err}");
+    }
+
+    #[test]
+    fn find_envspec_files_scans_and_skips_heavy_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A program build dir carries an envspec.json to be collected.
+        std::fs::create_dir_all(root.join("prog-build")).unwrap();
+        std::fs::write(root.join("prog-build/envspec.json"), "{}").unwrap();
+        // A decoy inside the skipped pixi subtree must NOT be collected.
+        std::fs::create_dir_all(root.join("pixi/.pixi/envs")).unwrap();
+        std::fs::write(root.join("pixi/.pixi/envs/envspec.json"), "{}").unwrap();
+        let found = find_envspec_files(root);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("prog-build/envspec.json"));
     }
 }
