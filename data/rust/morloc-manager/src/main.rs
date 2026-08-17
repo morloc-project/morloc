@@ -12,7 +12,11 @@ mod freeze;
 #[allow(dead_code)]
 mod hostprobe;
 #[allow(dead_code)]
+mod langsupport;
+#[allow(dead_code)]
 mod pixi;
+#[allow(dead_code)]
+mod provision;
 mod selinux;
 mod serve;
 mod types;

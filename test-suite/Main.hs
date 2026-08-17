@@ -11,12 +11,14 @@ import EnvSpecTests (envSpecTests)
 import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (goldenMakefileTest)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
+import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import RefutablePatternTests (refutablePatternTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
+import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
 
 main :: IO ()
@@ -81,6 +83,8 @@ main = do
       , refutablePatternTests
       , effectBoundaryTests
       , schemaHintTests
+      , systemConfigTests
+      , langSupportTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop

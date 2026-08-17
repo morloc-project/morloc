@@ -1,0 +1,11 @@
+# Core morloc build toolchain -- the conda packages required to build the morloc
+# runtime (libmorloc.so, morloc-nexus, rustmorloc) regardless of which pool
+# languages a program uses. Cross-cutting, so it lives here beside languages.yaml
+# rather than under a single language.
+#
+# Per-language requirements live in data/lang/<lang>/requirements.yaml.
+toolchain:
+  - { package: rust,        version: "*", phase: build }
+  - { package: c-compiler,  version: "*", phase: build }
+  - { package: make,        version: "*", phase: build }
+  - { package: pkg-config,  version: "*", phase: build }

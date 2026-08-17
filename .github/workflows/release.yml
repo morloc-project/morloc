@@ -5,11 +5,17 @@
 #   git push origin v0.68.0
 #
 # Produces for each platform (linux-x86_64, linux-arm64, macos-arm64):
-#   - morloc-manager  (Rust binary)
+#   - morloc-manager  (Rust binary; the static-musl bootstrap on Linux)
 #   - libmorloc.so    (Rust runtime library; .dylib on macOS)
 #   - morloc-nexus    (Rust binary)
+# and, on Linux only (dynamic glibc 2.31, built in container/static-build):
+#   - morloc          (the Haskell compiler, for native install)
+# plus a `morloc-release-manifest.json` describing the native-install trio per
+# triple + the release version.
 #
-# All three are attached to the GitHub Release.
+# All are attached to the GitHub Release, EXCEPT the macOS libmorloc.dylib /
+# morloc-nexus, which are withheld until the macOS build-layer port + a macOS
+# init/make smoke test land (they remain as workflow artifacts).
 
 name: Release
 
@@ -38,7 +44,9 @@ jobs:
             platform: macos-arm64
             method: native
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The Linux build now also stack-builds the morloc compiler (cold, no cross-run
+    # cache on ephemeral runners), which dominates the wall time.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +66,7 @@ jobs:
       - name: Rename artifacts (Linux)
         if: matrix.method == 'docker'
         run: |
+          mv out/morloc out/morloc-${{ matrix.platform }}
           mv out/libmorloc.so out/libmorloc-${{ matrix.platform }}.so
           mv out/morloc-nexus out/morloc-nexus-${{ matrix.platform }}
           mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
@@ -258,12 +267,58 @@ jobs:
       - name: Package Rust sources
         run: tar czf morloc-rust-src.tar.gz rust
 
+      # The macOS libmorloc.dylib and morloc-nexus are built for CI validation
+      # but are not yet loadable end-to-end: the macOS build-layer port (dylib
+      # install_name / @loader_path rpaths) and a macOS init+make smoke test are
+      # still pending. Withhold them from the published Release so the native
+      # download flow can never auto-select a broken binary; they remain
+      # available as this run's workflow artifacts for the macOS build-out. The
+      # macOS manager (the bootstrap CLI) stays a first-class asset.
+      - name: Withhold untested macOS runtime binaries from the Release
+        run: rm -f libmorloc-macos-arm64.dylib morloc-nexus-macos-arm64
+
+      # A version manifest for the native-install download flow: which loose
+      # artifacts make up the provisionable trio per platform triple, plus the
+      # release version so `morloc init` can enforce exact-version equality
+      # across the downloaded compiler/libmorloc/nexus (the interim coherence
+      # check while the ABI-version gate stays deferred). Only triples with a
+      # complete, tested native trio are listed; macOS is omitted until its
+      # build-layer port + smoke test land, so the flow falls through to a
+      # container there.
+      - name: Generate native-install manifest
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cat > morloc-release-manifest.json <<EOF
+          {
+            "schema": 1,
+            "version": "${version}",
+            "rust_src": "morloc-rust-src.tar.gz",
+            "triples": {
+              "linux-x86_64": {
+                "morloc": "morloc-linux-x86_64",
+                "libmorloc": "libmorloc-linux-x86_64.so",
+                "nexus": "morloc-nexus-linux-x86_64",
+                "manager": "morloc-manager-linux-x86_64"
+              },
+              "linux-arm64": {
+                "morloc": "morloc-linux-arm64",
+                "libmorloc": "libmorloc-linux-arm64.so",
+                "nexus": "morloc-nexus-linux-arm64",
+                "manager": "morloc-manager-linux-arm64"
+              }
+            }
+          }
+          EOF
+          cat morloc-release-manifest.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            morloc-linux-*
             morloc-manager-*
             libmorloc-*
             morloc-nexus-*
             morloc-rust-src.tar.gz
+            morloc-release-manifest.json
           generate_release_notes: true

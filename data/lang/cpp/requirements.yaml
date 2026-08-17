@@ -1,0 +1,4 @@
+# Conda requirements for the cppmorloc binder. C++ has no versioned runtime (the
+# standard, not a package version), so there is no `runtime:` block.
+requires:
+  - { package: cxx-compiler, version: "*", phase: build }

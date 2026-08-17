@@ -24,6 +24,8 @@ module Morloc.DataFiles
   , langSetups
   , langRegistryFiles
   , languagesYaml
+  , requirementsCore
+  , requirementsFiles
   ) where
 
 import Data.FileEmbed (embedFileRelative)
@@ -136,3 +138,18 @@ langRegistryFiles =
 -- | Shared languages.yaml with pairwise costs
 languagesYaml :: EmbededFile
 languagesYaml = EmbededFile "languages.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/languages.yaml"))
+
+-- | Core build-toolchain requirements (rust/c-compiler/make/pkg-config), shared
+-- across languages, beside languages.yaml.
+requirementsCore :: EmbededFile
+requirementsCore = EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/requirements.yaml"))
+
+-- | Per-language binder requirements (conda packages + supported runtime
+-- version), keyed by canonical name. Kept separate from lang.yaml (grammar).
+requirementsFiles :: [(Text, EmbededFile)]
+requirementsFiles =
+  [ ("py", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/py/requirements.yaml")))
+  , ("r", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/requirements.yaml")))
+  , ("cpp", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/requirements.yaml")))
+  , ("rust", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/requirements.yaml")))
+  ]

@@ -1,0 +1,19 @@
+# The C compiler that builds pymorloc.c comes from the core toolchain
+# (data/lang/requirements.yaml), so it is not repeated here.
+runtime:
+  package: python
+  version: ">=3.10,<3.14"   # 3.14 broke pymorloc.c (CPython C-API drift); 3.12 is CI-green
+  default: "3.12"
+requires:
+  # numpy: pymorloc.c is COMPILED against numpy headers (build), and uses the
+  # numpy C-API at runtime for array/tensor data -- always required. <3 guards a
+  # future numpy-3 ABI break.
+  - { package: numpy,      version: ">=1.22,<3", phase: both }
+  # py3.12 dropped distutils and bare conda python omits setuptools/pip.
+  - { package: setuptools, version: "*",         phase: build }
+  - { package: pip,        version: "*",         phase: build }
+  # pyarrow: OPTIONAL -- pymorloc imports it lazily, only for Arrow/Table-typed
+  # data ("pyarrow is required for arrow-typed data"). Not compiled in, so not
+  # needed for programs that don't use Tables. Included in a full env, omitted
+  # from a minimal one.
+  - { package: pyarrow,    version: "*",         phase: runtime, optional: true }

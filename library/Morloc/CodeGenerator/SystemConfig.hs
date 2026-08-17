@@ -15,6 +15,7 @@ per-language @init.sh@ scripts to compile language extensions.
 module Morloc.CodeGenerator.SystemConfig
   ( configure
   , configureAll
+  , pathIsWithin
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -23,6 +24,7 @@ import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
 import Morloc.Module (OverwriteProtocol (..))
 
+import qualified Data.List as DL
 import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, catch, displayException, fromException, try)
@@ -58,6 +60,15 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       tmpDir = configTmpDir config
       optDir = homeDir </> "opt"
       libDir = homeDir </> "lib"
+
+  -- The active strict-mode conda prefix, resolved once and shared by the
+  -- coherence guard and the env-aware language-setup loop below.
+  mStrictPrefix <- strictCondaPrefix
+
+  -- Admission control FIRST, before any destructive step: a failed coherence
+  -- check must abort before the force-clean below wipes opt/ + init-owned libs,
+  -- otherwise a rejected env leaves MORLOC_HOME gutted (no libmorloc, no nexus).
+  checkCondaCoherence verbose mStrictPrefix
 
   -- When force is set, clean stale init-owned artifacts. Package-installed
   -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
@@ -101,7 +112,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   when buildDirExists $ removeDirectoryRecursive buildDir
   createDirectoryIfMissing True buildDir
 
-  requireTool "gcc" "gcc is required to compile language extensions (C++ pools, Python/R bindings)"
+  requireTool "gcc" "gcc (or the compiler named by $CC) is required to compile language extensions (C++ pools, Python/R bindings)"
   -- Install morloc.h (the C ABI contract for language extensions and pool templates)
   sayInfo verbose "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
@@ -204,7 +215,10 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       -- #[no_mangle] pub extern "C" symbols, and adding a version script to
       -- override this conflicts with Rust's own version script on ARM/aarch64.
       let rustStaticLib = rustDir </> "target" </> "release" </> "libmorloc_runtime.a"
-      run verbose "gcc"
+      -- Link libmorloc.so with $CC when set (conda toolchain) so the runtime and
+      -- the shims that link it share one compiler/libc world; fall back to gcc.
+      cc <- resolveToolName "gcc"
+      run verbose cc
         [ "-shared", "-o", soPath
         , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
         , "-lpthread", "-lrt", "-ldl", "-lm"
@@ -339,10 +353,24 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   ensureDirectory verbose "morloc exe directory" exeDir
   ensureDirectory verbose "morloc fdb directory" fdbDir
 
-  -- Configure each language via its init.sh script
+  -- Configure each language via its init.sh script.
+  --
+  -- Language SELECTION is environment-aware in strict mode: a language is set up
+  -- only when its toolchain resolves INSIDE the conda prefix -- the conda env IS
+  -- the intended language set. A host tool for a language the env does not
+  -- include (e.g. a stray /usr/bin/julia on a CI runner) is NOT built, so we
+  -- never compile a shim that mixes a host toolchain with conda's libmorloc.
+  -- In non-strict mode, selection stays PATH-based (any tool on PATH), preserving
+  -- lenient system-toolchain dev installs.
+  --
+  -- Shim BUILD is fail-closed in strict mode: a compile failure ABORTS init with
+  -- the error, rather than the best-effort warn that silently leaves a half-
+  -- configured env whose failure only surfaces later as a runtime import error.
   forM_ DF.langSetups $ \ls -> do
-    missing <- checkTools (DF.lsRequiredTools ls)
-    if null missing
+    let tools = DF.lsRequiredTools ls
+    avail <- mapM (toolAvailableInEnv mStrictPrefix) tools
+    let unavailable = [t | (t, False) <- zip tools avail]
+    if null unavailable
       then do
         hPutStrLn stderr $ "Building " <> DF.lsName ls <> " extension ..."
         sayInfo verbose $ "Configuring " <> DF.lsName ls <> " language support"
@@ -353,14 +381,19 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         let initPath = buildDir </> "init.sh"
         TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
         let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
-        optionalStep (DF.lsName ls <> " setup failed: ") $
-          run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]
+        let runSetup = run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]
+        case mStrictPrefix of
+          Just _ -> runSetup
+          Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") runSetup
         -- Clean up
         removeFileSafe initPath
         forM_ (DF.lsFiles ls) $ \ef ->
           removeFileSafe (buildDir </> DF.embededFileName ef)
       else
-        sayWarning $ "Skipping " <> DF.lsName ls <> " setup (missing: " <> unwords missing <> ")"
+        let reason = case mStrictPrefix of
+              Just _ -> "not provided by the conda environment"
+              Nothing -> "missing"
+        in sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> reason <> ": " <> unwords unavailable <> ")"
 
   -- Generate shell completions
   sayInfo verbose "Generating shell completions"
@@ -495,10 +528,144 @@ initOwnedIncludePaths =
   , "nanoarrow"
   ]
 
--- | Check that a tool exists on PATH, error if not
+-- | Resolve a compiler tool name against the environment. A conda toolchain
+-- (e.g. a pixi env) exports $CC/$CXX pointing at prefixed compilers such as
+-- @x86_64-conda-linux-gnu-g++@ rather than a plain @gcc@/@g++@, so honor those
+-- for the C/C++ compiler names. All other tools are used as given.
+resolveToolName :: String -> IO String
+resolveToolName tool = do
+  mEnv <- case tool of
+    "gcc" -> lookupEnv "CC"
+    "g++" -> lookupEnv "CXX"
+    _     -> return Nothing
+  return (fromMaybe tool mEnv)
+
+-- | Native-backend admission control. When strict mode is requested
+-- (@MORLOC_STRICT_CONDA@, set by the native backend and by the native CI),
+-- every ABI-bearing build tool that resolves MUST live under @$CONDA_PREFIX@.
+-- A tool resolving outside it (e.g. a host @\/usr\/bin\/gcc@ while python is
+-- conda's) silently mixes ABIs: artifacts built by different-world toolchains
+-- share one address space at pool-load time and can crash. Fail loud at init
+-- instead of at a user segfault.
+--
+-- The guard is OPT-IN, not "any @CONDA_PREFIX@": many developers keep a conda
+-- base environment activated while building morloc with the host toolchain, and
+-- that must not become a hard error. Absent tools are ignored (their language is
+-- simply skipped by the setup loop); only found-but-outside tools are errors.
+--
+-- The tool's DIRECTORY (canonicalized) is compared, not the file: pixi may link
+-- @$CONDA_PREFIX\/bin\/<tool>@ into a shared package store, so canonicalizing the
+-- file would follow that link out of the prefix and false-positive; @bin\/@
+-- itself is a real directory under the prefix.
+checkCondaCoherence :: Bool -> Maybe FilePath -> IO ()
+checkCondaCoherence verbose mPrefix =
+  case mPrefix of
+    Nothing -> return ()
+    Just prefixAbs -> do
+      -- ABI-bearing tools only (compilers, interpreters, cargo); git/make are
+      -- not ABI-bearing and may legitimately come from the host.
+      checks <- mapM (locateTool prefixAbs) abiBearingTools
+      let incoherent = [x | Just x <- checks]
+      if null incoherent
+        then sayInfo verbose $ "Toolchain coherent with CONDA_PREFIX=" <> prefixAbs
+        else
+          ioError . userError . unlines $
+            [ "Toolchain is incoherent with the active conda environment (CONDA_PREFIX="
+                <> prefixAbs
+                <> ")."
+            , "These build tools resolve to a HOST copy that shadows the conda"
+            , "environment's, which mixes ABIs and can crash at pool-load time:"
+            ]
+              ++ ["  " <> t <> " -> " <> p | (t, p) <- incoherent]
+              ++ [ "Ensure the conda environment's tool comes first on PATH"
+                 , "(re-activate), or use a container backend."
+                 ]
+  where
+    -- Just (tool, hostPath) if the tool is INCOHERENT; Nothing if it is coherent
+    -- (resolves inside the env) or simply not part of this env. A tool resolving
+    -- OUTSIDE the prefix is only a problem when the env actually provides it and
+    -- a host copy is shadowing it -- NOT when the env never included that
+    -- language (e.g. a stray host /usr/bin/julia in an env with no julia). The
+    -- C/C++ compiler (gcc/g++, via $CC/$CXX) is the exception: it is always
+    -- required, so a host compiler is always a fatal mix.
+    locateTool :: FilePath -> String -> IO (Maybe (String, FilePath))
+    locateTool prefixAbs tool = do
+      loc <- resolveToolLocation tool
+      case loc of
+        Nothing -> return Nothing
+        Just (path, dirAbs)
+          | pathIsWithin prefixAbs dirAbs -> return Nothing
+          | otherwise -> do
+              envProvides <-
+                if tool `elem` ["gcc", "g++"]
+                  then return True
+                  else doesFileExist (prefixAbs </> "bin" </> tool)
+              return (if envProvides then Just (tool, path) else Nothing)
+
+-- | Is @child@ the same as, or nested under, @parent@? Both are expected to be
+-- absolute, normalized paths. The trailing-separator comparison avoids matching
+-- a sibling whose name merely shares a prefix (@\/opt\/env@ vs @\/opt\/env2@).
+pathIsWithin :: FilePath -> FilePath -> Bool
+pathIsWithin parent child = (parent <> "/") `DL.isPrefixOf` (child <> "/")
+
+-- | The active strict-mode conda prefix (canonicalized), or Nothing when strict
+-- mode (@MORLOC_STRICT_CONDA@) is off. Strict mode is opt-in -- set by the native
+-- backend and the native CI -- so ordinary system-toolchain installs are
+-- unaffected. Errors if strict mode is requested without an active @CONDA_PREFIX@.
+strictCondaPrefix :: IO (Maybe FilePath)
+strictCondaPrefix = do
+  strict <- lookupEnv "MORLOC_STRICT_CONDA"
+  let enabled = maybe False (`notElem` ["", "0", "false", "no"]) strict
+  if not enabled
+    then return Nothing
+    else do
+      mPrefix <- lookupEnv "CONDA_PREFIX"
+      case mPrefix of
+        Nothing ->
+          ioError . userError $
+            "MORLOC_STRICT_CONDA is set but CONDA_PREFIX is not: strict mode "
+              <> "requires an active conda/pixi environment."
+        Just prefix -> Just <$> canonicalizePath prefix
+
+-- | ABI-bearing tools: compilers and language interpreters whose provenance
+-- determines the ABI of what they build/run. In strict mode these MUST come from
+-- the conda env. Auxiliary tools (git, make, pkg-config) are not ABI-bearing and
+-- may come from the host even in strict mode.
+abiBearingTools :: [String]
+abiBearingTools = ["gcc", "g++", "python3", "R", "julia", "cargo"]
+
+-- | Is a language's tool available for THIS environment? The tool must resolve
+-- (findExecutable, honoring $CC/$CXX for gcc/g++). In strict mode an ABI-bearing
+-- tool must also resolve INSIDE the conda prefix: a host compiler/interpreter
+-- means the language is not part of the env, so its shim must not be built (that
+-- would mix a host toolchain with conda's libmorloc). Non-ABI auxiliary tools
+-- (e.g. git for cloning C++ headers) may be host-provided. In non-strict mode any
+-- tool on PATH counts.
+toolAvailableInEnv :: Maybe FilePath -> String -> IO Bool
+toolAvailableInEnv mPrefix tool = do
+  loc <- resolveToolLocation tool
+  case loc of
+    Nothing -> return False
+    Just (_, dirAbs) -> case mPrefix of
+      Nothing -> return True
+      Just prefixAbs
+        | tool `notElem` abiBearingTools -> return True
+        | otherwise -> return (pathIsWithin prefixAbs dirAbs)
+
+-- | Resolve a tool (honoring $CC/$CXX for gcc/g++), locate it on PATH, and
+-- canonicalize its directory. Nothing if the tool is absent. Shared by
+-- 'requireTool', the coherence guard, and env-aware language selection so the
+-- resolve-and-locate rule lives in one place.
+resolveToolLocation :: String -> IO (Maybe (FilePath, FilePath))
+resolveToolLocation tool = do
+  resolved <- resolveToolName tool
+  found <- findExecutable resolved
+  traverse (\p -> (,) p <$> canonicalizePath (takeDirectory p)) found
+
+-- | Check that a tool exists on PATH (honoring $CC/$CXX for gcc/g++), error if not
 requireTool :: String -> String -> IO ()
 requireTool tool msg = do
-  found <- findExecutable tool
+  found <- resolveToolLocation tool
   case found of
     Nothing -> ioError . userError $ tool <> " not found on PATH. " <> msg
     Just _ -> return ()
@@ -513,10 +680,3 @@ symlinkBinary src dst = do
   when isFile $ removeFile dst
   createFileLink src dst
 
--- | Check which tools from a list are missing. Returns list of missing tool names.
-checkTools :: [String] -> IO [String]
-checkTools tools = do
-  results <- forM tools $ \tool -> do
-    found <- findExecutable tool
-    return (tool, found)
-  return [t | (t, Nothing) <- results]

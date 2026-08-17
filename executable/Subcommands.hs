@@ -24,6 +24,8 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Morloc (generatePools)
+import qualified Morloc.DataFiles as DF
+import Morloc.LangSupport (parseRequirements, renderLangSupport)
 import qualified Morloc as M
 import Morloc.Build.Params (LangParams)
 import qualified Morloc.Build.Params as BP
@@ -90,6 +92,7 @@ runMorloc args = do
     (CmdNew g) -> cmdNew g
     (CmdEval g) -> cmdEval g verbose config buildConfig
     (CmdConfig g) -> cmdConfig g config buildConfig
+    (CmdLangSupport g) -> cmdLangSupport g
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -106,6 +109,7 @@ getConfig (CmdUninstall g) = getConfig' (uninstallConfig g) (uninstallVanilla g)
 getConfig (CmdEval g) = getConfig' (evalConfig g) (evalVanilla g)
 getConfig (CmdConfig g) = getConfig' (configCmdConfig g) (configCmdVanilla g)
 getConfig (CmdNew _) = getConfig' "" False
+getConfig (CmdLangSupport _) = getConfig' "" False
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -123,6 +127,7 @@ getVerbosity (CmdEval g) = evalVerbose g
 getVerbosity (CmdUninstall _) = 0
 getVerbosity (CmdNew _) = 0
 getVerbosity (CmdConfig _) = 0
+getVerbosity (CmdLangSupport _) = 0
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -652,6 +657,22 @@ cmdDump args _ config buildConfig = do
 
 cmdInit :: InitCommand -> Config.Config -> IO Bool
 cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
+
+-- | Print the language-support table as JSON, parsed from the embedded
+-- requirements.yaml files. Consumed by the native backend (pixi solve-clamp +
+-- package injection, bare-@new@ defaults) and the CI matrix.
+cmdLangSupport :: LangSupportCommand -> IO Bool
+cmdLangSupport _ =
+  case parseRequirements langReqs coreReq of
+    Left err -> do
+      hPutStrLn stderr ("Failed to build the language-support table: " <> err)
+      return False
+    Right table -> do
+      TIO.putStrLn (renderLangSupport table)
+      return True
+  where
+    coreReq = DF.embededFileText DF.requirementsCore
+    langReqs = [(name, DF.embededFileText ef) | (name, ef) <- DF.requirementsFiles]
 
 cmdNew :: NewCommand -> IO Bool
 cmdNew args = do

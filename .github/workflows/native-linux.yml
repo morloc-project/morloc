@@ -1,0 +1,414 @@
+# Native-Linux smoke test: prove that `morloc init` / `morloc make` / run work
+# against a PIXI (conda) provided toolchain instead of apt -- the core hypothesis
+# behind the native (no-container) backend.
+#
+# This deliberately does NOT use the release-download path (provision.rs): on a
+# branch there is no release to pull. Instead it builds the compiler with stack
+# and lets `morloc init` build libmorloc/nexus/rustmorloc + the C-ABI shims from
+# source (MORLOC_RUST_DIR) using the pixi env's cargo/gcc/python -- which is the
+# native toolchain integration we want to validate.
+#
+# Iterative: expected to surface real conda-toolchain issues (e.g. conda ships
+# prefixed `x86_64-conda-linux-gnu-gcc`, not a plain `gcc`; the proper fix is for
+# morloc's SystemConfig to honor $CC/$CXX -- worked around here with symlinks).
+name: Native Linux (pixi)
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - '.github/workflows/native-linux.yml'
+      - 'library/**'
+      - 'data/**'
+      - 'executable/**'
+
+env:
+  # A pixi project holding the native toolchain env; referenced from every step.
+  PIXI_MANIFEST: ${{ github.workspace }}/native-env/pixi.toml
+
+jobs:
+  # Read the python version range straight from the language-support table
+  # (data/lang/py/requirements.yaml) and emit the matrix: floor, blessed default,
+  # and ceiling-inclusive. This makes the table's provisional ceilings HONEST --
+  # a break at the floor or ceiling surfaces here, in morloc CI, not on a user.
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      pys: ${{ steps.compute.outputs.pys }}
+      default: ${{ steps.compute.outputs.default }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: compute
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import yaml, re, json
+          rt = yaml.safe_load(open("data/lang/py/requirements.yaml"))["runtime"]
+          spec, default = rt["version"], rt.get("default")
+          vers = set()
+          m = re.search(r">=\s*([0-9]+\.[0-9]+)", spec)   # floor
+          if m: vers.add(m.group(1))
+          if default: vers.add(default)                    # blessed default
+          m = re.search(r"<\s*([0-9]+)\.([0-9]+)", spec)  # ceiling-inclusive = <bound minus one minor
+          if m: vers.add("%d.%d" % (int(m.group(1)), int(m.group(2)) - 1))
+          out = sorted(vers, key=lambda v: tuple(map(int, v.split("."))))
+          if not out: out = [default or "3.12"]
+          print("pys=" + json.dumps(out))
+          print("default=" + (default or (out[0] if out else "3.12")))
+          PY
+          echo "matrix python versions:"; cat "$GITHUB_OUTPUT"
+
+  native-linux:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ${{ fromJson(needs.versions.outputs.pys) }}
+    env:
+      # Pin the pixi env's python to this matrix cell (the pixi.toml generator
+      # reads it). Non-python steps run only on the default cell (see `if:`s).
+      MATRIX_PY_VERSION: ${{ matrix.py }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Build the morloc compiler (stack) ----
+      # Cache stack's managed GHC (~/.stack/programs/.../ghc-*), the compiled
+      # LTS snapshot (~/.stack/snapshots), and this project's build (.stack-work).
+      # Restored BEFORE the build so the GHC bindist + dependency snapshot are
+      # NOT re-downloaded/re-compiled each run (the slow part). restore-keys
+      # gives a partial hit even after a stack.yaml/package.yaml change, so only
+      # the changed deps recompile.
+      # RESTORE only (save is a separate step below). The combined
+      # actions/cache@v4 registers its save as a post-job step with
+      # `post-if: success()`, so it NEVER saves when a later step fails -- and
+      # this workflow's whole point is iterating on the init/pixi steps that
+      # currently DO fail, so the 14-min stack build was re-run cold every time.
+      # Splitting restore/save + saving right after the build decouples the
+      # cache from the job's final outcome.
+      - name: Restore stack cache (GHC + snapshot + build)
+        id: stack-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.stack
+            .stack-work
+          key: stack-${{ runner.os }}-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: |
+            stack-${{ runner.os }}-
+
+      - name: Install stack
+        run: |
+          command -v stack >/dev/null 2>&1 || curl -fsSL https://get.haskellstack.org/ | sh
+          stack --version
+
+      - name: Build morloc
+        run: |
+          # Let stack manage GHC (installed into the cached ~/.stack/programs)
+          # rather than re-downloading it every run.
+          stack install --no-run-tests
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Save immediately after a SUCCESSFUL build (default success() condition),
+      # BEFORE the native-toolchain validation steps that are expected to fail
+      # while iterating. Skipped on an exact-key restore hit (nothing changed).
+      - name: Save stack cache (GHC + snapshot + build)
+        if: steps.stack-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.stack
+            .stack-work
+          key: ${{ steps.stack-cache.outputs.cache-primary-key }}
+
+      # ---- Provision the toolchain world with pixi (conda-forge) ----
+      - name: Install pixi
+        run: |
+          curl -fsSL https://pixi.sh/install.sh | bash
+          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+
+      - name: Create pixi toolchain env
+        run: |
+          mkdir -p native-env
+          # Generate pixi.toml [dependencies] from morloc's OWN language-support
+          # table (`morloc lang-support`) instead of hardcoding versions/packages.
+          # This DOGFOODS the table: the core toolchain plus the binder
+          # requirements for the languages this env's tests exercise (py/r/cpp).
+          # `pyarrow` is intentionally absent -- it is a program-specific Arrow
+          # dep imported lazily, not a binder requirement (unlike numpy, whose
+          # headers pymorloc.c is compiled against). MATRIX_PY_VERSION overrides
+          # the python pin for the version matrix; unset -> the table's default.
+          cat > native-env/pixi.toml <<'EOF'
+          [workspace]
+          name = "morloc-native"
+          channels = ["conda-forge"]
+          platforms = ["linux-64"]
+
+          [dependencies]
+          EOF
+          morloc lang-support > "$RUNNER_TEMP/langsupport.json"
+          echo "===== morloc lang-support (the table) ====="
+          cat "$RUNNER_TEMP/langsupport.json"; echo
+          python3 - >> native-env/pixi.toml <<'PY'
+          import json, os
+          tbl = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "langsupport.json")))
+          deps = {}
+          def add(p):   # skip OPTIONAL deps -> a minimal env (these tests use no Tables/pyarrow)
+              if not p.get("optional", False):
+                  deps[p["package"]] = p["constraint"]
+          for p in tbl["toolchain"]:
+              add(p)
+          for lang in ["py", "r", "cpp"]:   # the languages this env's tests exercise
+              e = tbl["languages"].get(lang)
+              if not e:
+                  continue
+              rt = e.get("runtime")
+              if rt:
+                  d = rt.get("default")
+                  deps[rt["package"]] = (d + ".*") if d else rt.get("version", "*")
+              for p in e.get("requires", []):
+                  add(p)
+          ov = os.environ.get("MATRIX_PY_VERSION", "").strip()
+          if ov:
+              deps["python"] = ov + ".*"
+          for name in sorted(deps):
+              print('%s = "%s"' % (name, deps[name]))
+          PY
+          echo "===== generated pixi.toml ====="
+          cat native-env/pixi.toml
+          pixi install --manifest-path "$PIXI_MANIFEST"
+
+          # Shared, deterministic conda-toolchain activation sourced by every
+          # `pixi run` step below. `pixi run` does NOT apply conda-forge's
+          # compiler activation (unlike `conda activate`), and sourcing the
+          # packaged activate.d scripts does not reliably export CC either, so
+          # we derive the prefixed conda compiler drivers straight from
+          # $CONDA_PREFIX. morloc's SystemConfig honors $CC/$CXX.
+          cat > native-env/activate.sh <<'EOF'
+          # Best-effort: run whatever the packages ship (harmless if it no-ops).
+          for f in "$CONDA_PREFIX"/etc/conda/activate.d/*.sh; do [ -r "$f" ] && . "$f"; done
+          # Deterministic fallback: the conda-forge c-/cxx-compiler packages
+          # install <triplet>-gcc / <triplet>-g++ drivers on the env prefix.
+          : "${CC:=$(ls "$CONDA_PREFIX"/bin/*-linux-gnu-gcc 2>/dev/null | head -1)}"
+          : "${CXX:=$(ls "$CONDA_PREFIX"/bin/*-linux-gnu-g++ 2>/dev/null | head -1)}"
+          : "${CONDA_BUILD_SYSROOT:=$(ls -d "$CONDA_PREFIX"/*-linux-gnu/sysroot 2>/dev/null | head -1)}"
+          export CC CXX CONDA_BUILD_SYSROOT
+          EOF
+
+      # Pure diagnostic (never fails): dump the env's compiler layout and what
+      # activate.sh actually resolves, so the log shows ground truth. Do NOT
+      # gate CC behind `"$CC" ... | head -1` -- a `${CC:?}` error in that
+      # pipeline's subshell does not fail the outer shell (no pipefail), which
+      # is why an earlier "activation OK" step passed while CC was in fact unset.
+      - name: Show conda compiler activation
+        run: |
+          pixi run --manifest-path "$PIXI_MANIFEST" bash -c '
+            echo "CONDA_PREFIX=${CONDA_PREFIX:-<unset>}"
+            echo "--- activate.d scripts ---"
+            ls -la "$CONDA_PREFIX"/etc/conda/activate.d/ 2>/dev/null || echo "(none)"
+            echo "--- $CONDA_PREFIX/bin compiler drivers ---"
+            ls "$CONDA_PREFIX"/bin/ 2>/dev/null | grep -iE "gcc|g\+\+|clang|-cc$|-c\+\+$|^cc$|^c\+\+$" || echo "(none)"
+            echo "--- before activation: CC=${CC:-<unset>} CXX=${CXX:-<unset>} ---"
+            . "'"$GITHUB_WORKSPACE"'/native-env/activate.sh"
+            echo "--- after activation ---"
+            echo "CC=${CC:-<unset>}"
+            echo "CXX=${CXX:-<unset>}"
+            echo "CFLAGS=${CFLAGS:-<unset>}"
+            echo "CONDA_BUILD_SYSROOT=${CONDA_BUILD_SYSROOT:-<unset>}"
+            if [ -n "${CC:-}" ] && [ -x "$CC" ]; then "$CC" --version | head -1; else echo "!! CC unresolved"; fi
+            if [ -n "${CXX:-}" ] && [ -x "$CXX" ]; then "$CXX" --version | head -1; else echo "!! CXX unresolved"; fi
+            cargo --version || true
+            python3 --version || true
+          '
+
+      # ---- The actual native validation ----
+      # morloc init builds libmorloc.so + nexus + rustmorloc + the C-ABI shims
+      # from source using the pixi env's cargo/gcc/python. This is the highest-
+      # value gate: does the runtime + shims compile against conda toolchains?
+      - name: morloc init against the pixi toolchain
+        env:
+          MORLOC_RUST_DIR: ${{ github.workspace }}/data/rust
+          # Turn on native-backend admission control: with every tool coming
+          # from the pixi env, the coherence guard must PASS (and print
+          # "Toolchain coherent ..."). The negative case is exercised below.
+          MORLOC_STRICT_CONDA: "1"
+        run: |
+          # activate.sh sets CC/CXX/CONDA_BUILD_SYSROOT from the pixi env;
+          # morloc's SystemConfig honors $CC/$CXX. No -q, so the optional
+          # per-language setup warnings print (the py step only WARNS on failure).
+          # Tee to a log so a later step can surface the (optional, warn-only)
+          # per-language setup errors -- e.g. why rmorloc did not build. GitHub
+          # runs `bash -eo pipefail`, so a real init failure still fails the step.
+          pixi run --manifest-path "$PIXI_MANIFEST" bash -c '
+            . "'"$GITHUB_WORKSPACE"'/native-env/activate.sh"
+            # Fail loudly if the compilers did not resolve, rather than let
+            # SystemConfig silently fall back to a system gcc (mixing zone).
+            : "${CC:?CC not resolved from the pixi env -- see the activation step}"
+            : "${CXX:?CXX not resolved from the pixi env}"
+            echo "using CC=$CC CXX=$CXX CONDA_BUILD_SYSROOT=${CONDA_BUILD_SYSROOT:-<unset>}"
+            morloc init -f
+          ' 2>&1 | tee "$RUNNER_TEMP/init.log"
+          # `| tee` swallows a non-zero morloc-init exit; assert its REAL status
+          # so a failed init (e.g. the coherence guard rejecting the env) fails
+          # this step instead of silently continuing against a gutted MORLOC_HOME.
+          test "${PIPESTATUS[0]}" -eq 0
+          # Env-aware selection (M2): the runner ships /usr/bin/julia, which is
+          # NOT in the pixi env, so strict init must SKIP julia rather than build
+          # a mixing shim against the host toolchain. Assert the skip happened.
+          if command -v julia >/dev/null 2>&1; then
+            echo "host julia present ($(command -v julia)); strict init must skip it"
+            grep -qi "Skipping Julia setup" "$RUNNER_TEMP/init.log" \
+              || { echo "FAIL: julia not skipped -- env-aware selection regressed"; exit 1; }
+            echo "OK: julia skipped (env-aware), no mixing shim built"
+          fi
+
+      # The ./nexus launcher execs `morloc-nexus` by bare name. init installs it
+      # to $MORLOC_HOME/bin (always) and *tries* to symlink it into ~/.local/bin
+      # (an optional step that only warns on failure). Put $MORLOC_HOME/bin on
+      # PATH directly so the run steps below find morloc-nexus regardless of the
+      # symlink -- the documented always-reachable location.
+      - name: Put $MORLOC_HOME/bin on PATH
+        run: echo "$HOME/.local/share/morloc/bin" >> "$GITHUB_PATH"
+
+      # Locate morloc-nexus: the ./nexus launcher execs it by bare name, so it
+      # must be BUILT ($MORLOC_HOME/bin) AND on PATH (symlinked into ~/.local/bin
+      # by init). A `morloc-nexus: not found` at run time means one of those two
+      # broke; this pinpoints which.
+      - name: Diagnose morloc-nexus install + PATH
+        if: always()
+        run: |
+          echo "===== find every morloc-nexus under \$HOME ====="
+          find "$HOME" -name 'morloc-nexus' 2>/dev/null || echo "(none found anywhere under HOME)"
+          echo "HOME=$HOME ; MORLOC_HOME env=${MORLOC_HOME:-<unset>}"
+          echo "===== $HOME/.local/share/morloc/bin (built binaries) ====="
+          ls -la "$HOME/.local/share/morloc/bin/" 2>&1 || echo "(no bin dir -> nexus not installed)"
+          echo "===== ~/.local/bin (PATH symlinks) ====="
+          ls -la "$HOME/.local/bin/" 2>&1 | grep -iE 'morloc|nexus' || echo "(no morloc symlinks)"
+          echo "===== morloc-nexus resolution ====="
+          command -v morloc-nexus || echo "NOT on PATH (plain shell)"
+          pixi run --manifest-path "$PIXI_MANIFEST" bash -c 'command -v morloc-nexus || echo "NOT on PATH under pixi run"; echo "PATH=$PATH"'
+          echo "===== where did init think MORLOC_HOME was? ====="
+          grep -iE 'morloc home|MORLOC_HOME|home directory|Installing.*nexus|bin' "$RUNNER_TEMP/init.log" | head -20 || true
+          echo "===== init.log: nexus / link / coherence lines ====="
+          grep -inE 'nexus|could not link|coherent|incoherent|cargo|libmorloc|warning' "$RUNNER_TEMP/init.log" | tail -50 || true
+
+      # Did the Python C-extension (pymorloc) actually build, and can the pixi
+      # python import it? This distinguishes "py init setup failed" from a
+      # sys.path / {{opt}} substitution problem in the generated pool.
+      - name: Diagnose the Python shim (pymorloc)
+        if: always()
+        run: |
+          echo "===== $HOME/.local/share/morloc/opt ====="
+          ls -la "$HOME/.local/share/morloc/opt/" || echo "(opt dir missing -> pymorloc did not build)"
+          echo "===== explicit pymorloc build (surfaces the compiler error if any) ====="
+          ( cd "$HOME/.local/share/morloc/opt" \
+            && pixi run --manifest-path "$PIXI_MANIFEST" bash -c '
+                 . "'"$GITHUB_WORKSPACE"'/native-env/activate.sh"
+                 python3 setup.py build_ext --inplace
+               ' ) \
+            || echo "BUILD_EXT FAILED (see errors above)"
+          ls -la "$HOME/.local/share/morloc/opt/"
+          echo "===== direct import with the pixi python ====="
+          pixi run --manifest-path "$PIXI_MANIFEST" python3 - <<'PY' || echo "DIRECT IMPORT FAILED"
+          import sys, os
+          opt = os.path.expanduser("~/.local/share/morloc/opt")
+          sys.path.insert(0, opt)
+          print("python:", sys.version.split()[0])
+          print("opt exists:", os.path.isdir(opt))
+          import pymorloc
+          print("pymorloc OK:", pymorloc.__file__)
+          PY
+
+      # A self-contained Python program (sources builtin `len`, no stdlib/network):
+      # exercises make -> Python pool build (pymorloc vs pixi numpy) -> run.
+      - name: Native make + run (Python)
+        run: |
+          cd test-suite/golden-tests/type-annotations-1
+          pixi run --manifest-path "$PIXI_MANIFEST" morloc make -o nexus main.loc
+          echo "===== generated py pool preamble (shows the substituted {{opt}} on sys.path) ====="
+          sed -n '1,30p' nexus-build/pools/py/pool.py || true
+          echo "===== run ====="
+          out=$(pixi run --manifest-path "$PIXI_MANIFEST" ./nexus foo)
+          echo "nexus foo -> '$out' (expected '0')"
+          test "$out" = "0"
+
+      # The C++ path exercises the highest ABI-mixing risk the python-only test
+      # does not: a C++ pool is COMPILED at make time (Cpp.hs makeTheMaker ->
+      # `${CXX:-g++} -O2 ...`), so the conda $CXX must be active or the pool
+      # links against system libstdc++ while libmorloc/cppmorloc were built with
+      # conda g++ at init = a silent mixing zone. Modules are needed here
+      # (defunc-cpp `import root-cpp`), unlike the self-contained python test.
+      - name: Install morloc stdlib modules (for C++ test)
+        if: ${{ matrix.py == needs.versions.outputs.default }}
+        run: morloc install stdlib
+
+      - name: Native make + run (C++)
+        if: ${{ matrix.py == needs.versions.outputs.default }}
+        run: |
+          cd test-suite/golden-tests/defunc-cpp
+          # Source the conda activation so the make-time pool compile uses the
+          # conda $CXX (coherent with the init-time libmorloc/cppmorloc build),
+          # not the runner's /usr/bin/g++.
+          pixi run --manifest-path "$PIXI_MANIFEST" bash -c '
+            . "'"$GITHUB_WORKSPACE"'/native-env/activate.sh"
+            : "${CXX:?CXX not resolved from the pixi env}"
+            echo "make with CXX=$CXX"
+            morloc make -o nexus main.loc
+          '
+          echo "===== compiled C++ pool: which libstdc++ does it resolve? ====="
+          poolbin=$(find nexus-build/pools -type f -perm -u+x | head -1)
+          echo "pool binary: ${poolbin:-<none found>}"
+          [ -n "$poolbin" ] && ldd "$poolbin" 2>&1 | grep -iE 'libstdc|libmorloc|libcppmorloc|not found' || true
+          echo "===== run ====="
+          out=$(pixi run --manifest-path "$PIXI_MANIFEST" ./nexus genPair)
+          echo "nexus genPair -> '$out' (expected '[30,40]')"
+          test "$out" = "[30,40]"
+
+      # The R path: rmorloc (an R C-extension) is built at INIT time by
+      # r/init.sh, which was hardcoded to `gcc` (now `${CC:-gcc}`) -> with the
+      # conda CC active this links rmorloc.o against conda libR coherently. The
+      # librmorloc.so ldd below shows whether libR/libmorloc resolve. Same
+      # self-contained closure test as C++ (defunc-r -> genPair -> [30,40]).
+      - name: Native make + run (R)
+        if: ${{ matrix.py == needs.versions.outputs.default }}
+        run: |
+          echo "===== librmorloc.so (built at init) ====="
+          if [ -f "$HOME/.local/share/morloc/lib/librmorloc.so" ]; then
+            ldd "$HOME/.local/share/morloc/lib/librmorloc.so" 2>&1 | grep -iE 'libR|libmorloc|not found' || true
+          else
+            echo "!! librmorloc.so MISSING -> R init setup failed (rmorloc did not build)"
+            echo "----- init-time R setup output (from the init step log) -----"
+            grep -niE 'building r extension|R setup|rmorloc|error|undefined|no such' "$RUNNER_TEMP/init.log" || cat "$RUNNER_TEMP/init.log"
+          fi
+          cd test-suite/golden-tests/defunc-r
+          pixi run --manifest-path "$PIXI_MANIFEST" bash -c '
+            . "'"$GITHUB_WORKSPACE"'/native-env/activate.sh"
+            echo "make with CC=$CC; Rscript=$(command -v Rscript)"
+            morloc make -o nexus main.loc
+          '
+          echo "===== run ====="
+          out=$(pixi run --manifest-path "$PIXI_MANIFEST" ./nexus genPair)
+          echo "nexus genPair -> '$out' (expected '[30,40]')"
+          test "$out" = "[30,40]"
+
+      # Adversarial: the coherence guard must HARD-FAIL when a host compiler is
+      # used inside the conda env. Force CC/CXX to /usr/bin while MORLOC_STRICT_CONDA
+      # is set; `morloc init` (NO -f, so nothing is cleaned) must abort at the
+      # guard -- which runs early, before any build -- with a non-zero exit. This
+      # proves the guard has teeth (catches the silent system-gcc/conda mix), not
+      # just that it stays quiet on a coherent env.
+      - name: Coherence guard rejects a mixed toolchain (negative test)
+        if: ${{ matrix.py == needs.versions.outputs.default }}
+        run: |
+          set +e
+          out=$(pixi run --manifest-path "$PIXI_MANIFEST" bash -c '
+            export MORLOC_STRICT_CONDA=1
+            export CC=/usr/bin/gcc CXX=/usr/bin/g++
+            morloc init 2>&1
+          ')
+          rc=$?
+          set -e
+          echo "$out"
+          echo "init exit code: $rc (expected non-zero)"
+          echo "$out" | grep -qi "incoherent" || { echo "guard did not report incoherence"; exit 1; }
+          test "$rc" -ne 0

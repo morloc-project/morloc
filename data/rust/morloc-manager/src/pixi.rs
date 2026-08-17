@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use crate::envspec::{DepClass, EnvSpec};
+use crate::langsupport::LangSupport;
 
 /// Inputs for rendering an environment's pixi manifest.
 pub struct PixiManifestInput<'a> {
@@ -31,15 +32,18 @@ pub struct PixiManifestInput<'a> {
     pub channels: &'a [String],
     /// The union of requirements of every program installed into this env.
     pub specs: &'a [EnvSpec],
+    /// morloc's own language-support table (`morloc lang-support`): the core
+    /// toolchain, per-language binder requirements, and supported runtime version
+    /// ranges. Injected into, and clamps, the manifest.
+    pub lang_support: &'a LangSupport,
 }
 
-/// The conda package that provides a language's toolchain, if morloc knows one.
+/// Toolchain package for a language morloc has NO requirements.yaml entry for
+/// (julia, futhark) -- the escape hatch until they gain table entries. Languages
+/// in the support table get their toolchain from `runtime.package` and `requires`
+/// instead; those are NOT duplicated here (a second copy would silently diverge).
 fn lang_toolchain(lang: &str) -> Option<&'static str> {
     match lang {
-        "py" => Some("python"),
-        "cpp" => Some("cxx-compiler"),
-        "rust" => Some("rust"),
-        "r" => Some("r-base"),
         "julia" => Some("julia"),
         "futhark" => Some("futhark"),
         _ => None,
@@ -77,20 +81,60 @@ fn insert_merged(map: &mut BTreeMap<String, String>, name: &str, constraint: &st
         .or_insert_with(|| constraint.to_string());
 }
 
-/// Aggregate all specs into (conda dependencies, pypi dependencies) maps.
-fn aggregate(specs: &[EnvSpec]) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+/// Aggregate all specs into (conda dependencies, pypi dependencies) maps,
+/// clamped and injected against morloc's language-support table.
+fn aggregate(
+    specs: &[EnvSpec],
+    support: &LangSupport,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
     let mut conda: BTreeMap<String, String> = BTreeMap::new();
     let mut pypi: BTreeMap<String, String> = BTreeMap::new();
 
+    // Core toolchain: always required (libmorloc + any shim). Non-optional only.
+    for p in &support.toolchain {
+        if !p.optional {
+            insert_merged(&mut conda, &p.package, &p.constraint);
+        }
+    }
+
+    // Merge each language's author version constraint across all programs.
+    let mut lang_author: BTreeMap<String, String> = BTreeMap::new();
     for spec in specs {
-        // Toolchains, carrying any language version constraint.
         for lang in &spec.languages {
-            if let Some(tc) = lang_toolchain(&lang.lang) {
-                let c = lang.constraint.as_deref().unwrap_or("*");
-                insert_merged(&mut conda, tc, c);
+            let c = lang.constraint.as_deref().unwrap_or("*");
+            lang_author
+                .entry(lang.lang.clone())
+                .and_modify(|e| *e = merge_constraint(e, c))
+                .or_insert_with(|| c.to_string());
+        }
+    }
+
+    // For each language a program uses: clamp its runtime version against
+    // morloc's supported range and inject morloc's binder requirements. A
+    // language morloc has no support entry for (e.g. futhark) falls back to the
+    // toolchain map with only the author's constraint.
+    for (lang, author_c) in &lang_author {
+        match support.languages.get(lang) {
+            Some(entry) => {
+                if let Some(rt) = &entry.runtime {
+                    // clamp: morloc's supported range intersected with the author's
+                    insert_merged(&mut conda, &rt.package, &merge_constraint(&rt.version, author_c));
+                }
+                for p in &entry.requires {
+                    if !p.optional {
+                        insert_merged(&mut conda, &p.package, &p.constraint);
+                    }
+                }
+            }
+            None => {
+                if let Some(tc) = lang_toolchain(lang) {
+                    insert_merged(&mut conda, tc, author_c);
+                }
             }
         }
+    }
 
+    for spec in specs {
         for (lang, reqs) in &spec.packages {
             match lang.as_str() {
                 // cargo and Pkg.jl own these; resolved in-world at pool build.
@@ -137,7 +181,7 @@ fn key(name: &str) -> String {
 
 /// Render the pixi manifest text. Deterministic (sorted dependency maps).
 pub fn render_pixi_manifest(input: &PixiManifestInput) -> String {
-    let (conda, pypi) = aggregate(input.specs);
+    let (conda, pypi) = aggregate(input.specs, input.lang_support);
 
     let channels = input
         .channels
@@ -176,17 +220,41 @@ mod tests {
         EnvSpec::from_json(SAMPLE).unwrap()
     }
 
+    fn sample_support() -> crate::langsupport::LangSupport {
+        const SUPPORT: &str = r#"{"morloc_version":"0.98.2",
+          "toolchain":[{"package":"c-compiler","constraint":"*","phase":"build","optional":false},
+                       {"package":"rust","constraint":"*","phase":"build","optional":false}],
+          "languages":{
+            "py":{"runtime":{"package":"python","version":">=3.10,<3.14","default":"3.12"},
+                  "requires":[{"package":"numpy","constraint":">=1.22,<3","phase":"both","optional":false},
+                              {"package":"setuptools","constraint":"*","phase":"build","optional":false},
+                              {"package":"pyarrow","constraint":"*","phase":"runtime","optional":true}]},
+            "cpp":{"runtime":null,"requires":[{"package":"cxx-compiler","constraint":"*","phase":"build","optional":false}]},
+            "r":{"runtime":{"package":"r-base","version":">=4.2,<4.6","default":"4.4"},
+                 "requires":[{"package":"r-bit64","constraint":"*","phase":"runtime","optional":false}]},
+            "rust":{"runtime":{"package":"rust","version":"*"},"requires":[]}
+          }}"#;
+        crate::langsupport::LangSupport::from_json(SUPPORT).unwrap()
+    }
+
     #[test]
     fn renders_expected_manifest() {
         let spec = sample_spec();
+        let support = sample_support();
         let channels = vec!["conda-forge".to_string()];
         let input = PixiManifestInput {
             env_name: "morloc-env-demo",
             platform: "linux-64",
             channels: &channels,
             specs: std::slice::from_ref(&spec),
+            lang_support: &support,
         };
         let got = render_pixi_manifest(&input);
+        // The table injects the core toolchain (c-compiler, rust); clamps python
+        // to morloc's supported range intersected with the author's >=3.10; and
+        // injects the non-optional py binder deps numpy + setuptools (pyarrow is
+        // optional -> omitted). The program's own numpy>=2,<3 merges with the
+        // injected numpy>=1.22,<3. cxx-compiler comes from the cpp entry.
         let expected = "\
 [project]
 name = \"morloc-env-demo\"
@@ -195,11 +263,13 @@ platforms = [\"linux-64\"]
 
 [dependencies]
 \"blas\" = \"*\"
+\"c-compiler\" = \"*\"
 \"cxx-compiler\" = \"*\"
-\"numpy\" = \">=2,<3\"
+\"numpy\" = \">=1.22,<3,>=2\"
 \"opencv\" = \">=4.8\"
-\"python\" = \">=3.10\"
+\"python\" = \">=3.10,<3.14\"
 \"rust\" = \"*\"
+\"setuptools\" = \"*\"
 
 [pypi-dependencies]
 \"requests\" = \"*\"
@@ -210,7 +280,8 @@ platforms = [\"linux-64\"]
     #[test]
     fn rust_and_julia_packages_are_excluded_but_toolchains_kept() {
         let spec = sample_spec();
-        let (conda, pypi) = aggregate(std::slice::from_ref(&spec));
+        let support = sample_support();
+        let (conda, pypi) = aggregate(std::slice::from_ref(&spec), &support);
         // ndarray (a rust crate) must not leak into the conda/pypi manifest...
         assert!(!conda.contains_key("ndarray"));
         assert!(!pypi.contains_key("ndarray"));
@@ -222,9 +293,30 @@ platforms = [\"linux-64\"]
     fn r_packages_get_conda_prefix() {
         const R: &str = r#"{"envspec_version":1,"morloc_version":"0","languages":[{"lang":"r"}],"packages":{"r":[{"name":"data.table","constraint":"*","class":"abi"}]}}"#;
         let spec = EnvSpec::from_json(R).unwrap();
-        let (conda, _) = aggregate(std::slice::from_ref(&spec));
+        let support = sample_support();
+        let (conda, _) = aggregate(std::slice::from_ref(&spec), &support);
         assert!(conda.contains_key("r-data.table"));
         assert!(conda.contains_key("r-base"));
+    }
+
+    #[test]
+    fn table_clamps_runtime_and_injects_binder_deps() {
+        // A python program with a permissive author floor gets morloc's supported
+        // range added (clamp) plus the non-optional binder deps; optional deps
+        // (pyarrow) are omitted; the core toolchain is always present.
+        const PY: &str = r#"{"envspec_version":1,"morloc_version":"0","languages":[{"lang":"py","constraint":">=3.11"}]}"#;
+        let spec = EnvSpec::from_json(PY).unwrap();
+        let (conda, _) = aggregate(std::slice::from_ref(&spec), &sample_support());
+        // clamp: author >=3.11 intersected with morloc's >=3.10,<3.14
+        assert_eq!(conda.get("python").map(String::as_str), Some(">=3.10,<3.14,>=3.11"));
+        // injected non-optional binder deps
+        assert_eq!(conda.get("numpy").map(String::as_str), Some(">=1.22,<3"));
+        assert!(conda.contains_key("setuptools"));
+        // optional pyarrow is NOT injected
+        assert!(!conda.contains_key("pyarrow"));
+        // core toolchain is always present
+        assert!(conda.contains_key("c-compiler"));
+        assert!(conda.contains_key("rust"));
     }
 
     #[test]

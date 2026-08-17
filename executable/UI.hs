@@ -24,6 +24,7 @@ module UI
   , EvalCommand (..)
   , ConfigCommand (..)
   , ConfigAction (..)
+  , LangSupportCommand (..)
   ) where
 
 import Data.Int (Int64)
@@ -54,6 +55,7 @@ data CliCommand
   | CmdNew NewCommand
   | CmdEval EvalCommand
   | CmdConfig ConfigCommand
+  | CmdLangSupport LangSupportCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -68,6 +70,7 @@ cliParser =
         <> newSubcommand
         <> evalSubcommand
         <> configSubcommand
+        <> langSupportSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -117,6 +120,19 @@ makeCommandParser =
 
 makeSubcommand :: Mod CommandFields CliCommand
 makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc "Build a morloc script"))
+
+-- | @lang-support@ takes no options; it prints the language-support table as
+-- JSON (the versions and packages morloc's shims build/run against).
+data LangSupportCommand = LangSupportCommand
+
+langSupportCommandParser :: Parser LangSupportCommand
+langSupportCommandParser = pure LangSupportCommand
+
+langSupportSubcommand :: Mod CommandFields CliCommand
+langSupportSubcommand =
+  command
+    "lang-support"
+    (info (CmdLangSupport <$> langSupportCommandParser) (progDesc "Print the language-support table (JSON)"))
 
 data InitCommand = InitCommand
   { initConfig :: String

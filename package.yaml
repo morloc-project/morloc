@@ -28,6 +28,12 @@ extra-source-files:
   - data/morloc/morloc.h
   # shared language config
   - data/lang/languages.yaml
+  # dependency/requirements config (core toolchain + per-language)
+  - data/lang/requirements.yaml
+  - data/lang/py/requirements.yaml
+  - data/lang/r/requirements.yaml
+  - data/lang/cpp/requirements.yaml
+  - data/lang/rust/requirements.yaml
   # per-language files
   - data/lang/c/lang.yaml
   - data/lang/cpp/lang.yaml
